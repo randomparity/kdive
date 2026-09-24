@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
+from pathlib import Path
 
 _GIT_TIMEOUT = 3.0
 
@@ -37,12 +38,15 @@ class VersionInfo:
 
 
 def _git(*args: str) -> str | None:
+    root = Path(__file__).resolve().parents[2]
+    if not (root / ".git").exists():
+        return None
     git = shutil.which("git")
     if git is None:
         return None
     try:
         result = subprocess.run(  # noqa: S603 - fixed git executable and args  # nosec B603
-            [git, *args],
+            [git, "-c", f"safe.directory={root}", "-C", str(root), *args],
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT,
