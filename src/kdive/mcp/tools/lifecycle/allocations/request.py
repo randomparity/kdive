@@ -49,7 +49,7 @@ _DISCOVERY_NEXT_ACTIONS = ["resources.list", "shapes.list"]
 _DENIAL_NEXT_ACTIONS = ["allocations.list"]
 # A host-cap denial's own recourse: ``allocations.list`` cannot show the rest of a host-wide
 # count (it is scoped to the caller's readable projects), so ``resources.availability`` is led
-# with it — it applies the same occupancy rule and reports fleet-wide headroom (#2687).
+# with it — it applies the same occupancy rule and reports fleet-wide headroom (ADR-0676).
 _HOST_CAP_NEXT_ACTIONS = ["resources.availability", "allocations.list"]
 # Admin tools that resolve a funding denial (ADR-0245). Both are registered in mcp/exposure.py.
 _QUOTA_REMEDY_TOOL = "accounting.set_quota"
@@ -281,9 +281,9 @@ def _denial_next_actions(outcome: AdmissionOutcome, *, caller_is_admin: bool) ->
     the ``unmet`` order) **only** when the caller holds ``Role.ADMIN`` on the project — the role
     ``accounting.set_quota`` / ``accounting.set_budget`` require; a non-admin caller
     (``allocations.request`` needs only ``Role.CONTRIBUTOR``) is not pointed at a tool it cannot
-    invoke. A host-capacity denial leads with ``resources.availability`` instead (not role-gated —
-    every caller may read it, #2687); affinity and generic denials carry no ``unmet`` and keep the
-    plain breadcrumb.
+    invoke. A host-capacity denial leads with ``resources.availability`` instead (not
+    role-gated — every caller may read it, ADR-0676); affinity and generic denials carry no
+    ``unmet`` and keep the plain breadcrumb.
     """
     base = _HOST_CAP_NEXT_ACTIONS if outcome.reason == "at_capacity" else _DENIAL_NEXT_ACTIONS
     if not caller_is_admin:

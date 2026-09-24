@@ -428,7 +428,7 @@ async def _host_cap_check(
 
     ``in_use`` counts every occupying allocation on the host across all projects (host-wide),
     which the caller's own ``allocations.list`` cannot show in full — so a denial carries the
-    disclosure-safe :class:`_OccupancyBreakdown` split in ``details`` (#2687): the caller's own
+    disclosure-safe :class:`_OccupancyBreakdown` split in ``details`` (ADR-0676): the caller's own
     vs every other project's count (never naming another project) and the same total split by
     occupying state.
 
@@ -465,7 +465,7 @@ def _resolve_cap(resource: Resource) -> int:
 
 @dataclass(frozen=True)
 class _OccupancyBreakdown:
-    """A host's occupancy split by project membership and by state (#2687).
+    """A host's occupancy split by project membership and by state (ADR-0676).
 
     ``in_use`` is the existing host-wide total; ``own_projects``/``other_projects`` split it by
     whether the occupying row belongs to the checked ``project`` without ever naming another
@@ -485,7 +485,7 @@ async def _count_occupying(
 
     Uses the dedicated occupancy predicate (ADR-0069): a queued ``requested`` row holds only
     a queue position and is excluded, so it never consumes the host cap it is waiting for. One
-    query groups by state and by whether the row's project matches ``project`` (#2687), so the
+    query groups by state and by whether the row's project matches ``project`` (ADR-0676), so the
     breakdown can never disagree with the plain total.
     """
     async with conn.cursor() as cur:
