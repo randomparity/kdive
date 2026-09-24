@@ -366,8 +366,8 @@ external-boot cmdline) and the local spine (`test_spine_over_the_wire`, the inst
 `test_spine_live_script_over_the_wire`, console parts) boot a guest of the host arch. They take
 the machine type from `arch_traits`, so on a POWER host they run as ppc64le guests; on a host
 arch kdive cannot provision they skip and name it. The ppc64le spine drivers in
-`test_live_stack.py` run under KVM on a POWER host. `test_local_guest_cpu_live.py` skips there,
-because it pins an x86-64-vN CPU rung. Still x86_64-only: the per-family SSH reachability spine
+`test_live_stack.py` run under KVM on a POWER host. `test_pinned_model_is_host_usable` skips
+there, because it pins an x86-64-vN CPU rung. Still x86_64-only: the per-family SSH reachability spine
 and the SUSE v7.0 kdump spine, whose preflight reads an x86 bzImage (leave their image env vars
 unset on POWER so they skip), and the gdbstub debug proofs under `tests/mcp/debug` (#2695).
 
