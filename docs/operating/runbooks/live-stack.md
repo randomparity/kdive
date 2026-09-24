@@ -507,6 +507,15 @@ KDIVE_STACK_SKEW_POLICY=strict just test-live-stack   # skip on anything but fre
 KDIVE_STACK_SKEW_POLICY=off just test-live-stack      # do not probe at all
 ```
 
+Use `strict` for any proof whose result is tied to a deployed revision; an
+unknown worker build must skip that proof. Keep the variable set for the full
+proof run. Run pytest with `-v` to retain the probed-revision header and check
+that the proof passed rather than skipped. The portable stack's absent Kubernetes-only
+`lifecycle-witness` is reported as `not deployed` and is inapplicable.
+Strict admission also checks the header probe: if the app tier changes from a
+non-fresh revision after collection starts, rerun pytest to record the fresh
+revision before treating the proof as passed.
+
 A stack whose processes predate this feature reports `unknown` and only warns, so the preflight
 never blocks an older deployment. When **no** `live_stack` test is collected yet (the marked spine driver lands
 in a later sub-issue), the recipe reports `no live_stack tests collected — skipping
