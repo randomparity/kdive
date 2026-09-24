@@ -255,7 +255,8 @@ async def _build_install_plan(
     initrd_ref = build_result.initrd_ref if build_result is not None else None
     debuginfo_ref = build_result.debuginfo_ref if build_result is not None else None
     if (
-        provider_kind is ResourceKind.LOCAL_LIBVIRT
+        not staging_only
+        and provider_kind is ResourceKind.LOCAL_LIBVIRT
         and (method in KDUMP_FAMILY or debuginfo_ref is not None)
         and run.build_ref is not None
     ):

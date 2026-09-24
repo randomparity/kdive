@@ -14,6 +14,7 @@ it. The provider's install-time bound remains a defense against old or malformed
 The upload validator already scans the exact object version and records
 `module_uncompressed_bytes` in the immutable build. The legacy install job reads that evidence
 for a local-libvirt install needing modules, using the same bound as its provider extractor.
+Authority-marked staging-only jobs bypass this check because they do not run that extractor.
 The check does not trust compressed size or caller-supplied metadata. External boot retains its
 separate 8 GiB module limit; a global finalization check would reject bundles it supports.
 
@@ -23,10 +24,10 @@ compression tuning belong to separate work.
 ## Acceptance and verification
 
 - A focused test observes `INSTALL_MOD_STRIP=1` in the spine's `modules_install` argv.
-- Install planning accepts a measured module tree exactly at the configured limit and rejects
+- Legacy install planning accepts a measured module tree exactly at the configured limit and rejects
   one byte above it with a configuration error naming the 2 GiB limit. The rejection occurs
-  before provider extraction. External boot and boot-only legacy installs retain their own
-  behavior.
+  before provider extraction. External boot, authority-marked staging-only jobs, and boot-only
+  legacy installs retain their own behavior. A missing referenced build record fails closed.
 - Both recipe copies show the flag and state the limit and its recovery: strip or reduce the
   module tree, rebuild the archive, and upload again.
 - Existing kernel-bundle tests continue to prove the worker-side cap and partial-file cleanup.

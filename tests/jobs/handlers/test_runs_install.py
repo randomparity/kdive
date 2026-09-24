@@ -45,6 +45,7 @@ def test_reusable_install_requires_every_referenced_artifact_version() -> None:
             raise AssertionError(f"incomplete versions unexpectedly accepted: {versions!r}")
 
 
+@pytest.mark.parametrize("staging_only", [False, True])
 @pytest.mark.parametrize(
     ("size", "method", "provider_kind", "build_ref", "reject"),
     [
@@ -83,15 +84,17 @@ def test_reusable_install_requires_every_referenced_artifact_version() -> None:
             None,
             False,
         ),
+        (None, CaptureMethod.KDUMP, ResourceKind.LOCAL_LIBVIRT, "ref", False),
     ],
 )
 def test_install_plan_checks_measured_modules_before_provider(
     monkeypatch: pytest.MonkeyPatch,
-    size: int,
+    size: int | None,
     method: CaptureMethod,
     provider_kind: ResourceKind,
     build_ref: str | None,
     reject: bool,
+    staging_only: bool,
 ) -> None:
     run_id, system_id = uuid4(), uuid4()
     reads: list[str] = []
@@ -109,6 +112,8 @@ def test_install_plan_checks_measured_modules_before_provider(
 
     async def resolve(*_args: object) -> object:
         reads.append("build")
+        if size is None:
+            return None
         return SimpleNamespace(
             canonical_document={
                 "external_boot_evidence": {
@@ -136,13 +141,18 @@ def test_install_plan_checks_measured_modules_before_provider(
             kernel_ref="kernel",
             root_cmdline=None,
             payload=payload,
+            staging_only=staging_only,
         )
 
-    if reject:
-        with pytest.raises(CategorizedError, match="INSTALL_MOD_STRIP=1") as exc:
+    if (reject or size is None) and not staging_only and build_ref:
+        message = "build record is missing" if size is None else "INSTALL_MOD_STRIP=1"
+        with pytest.raises(CategorizedError, match=message) as exc:
             asyncio.run(plan())
-        assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-        assert exc.value.details["max_uncompressed_bytes"] == MAX_LEGACY_INSTALL_MODULE_BYTES
+        if size is None:
+            assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        else:
+            assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert exc.value.details["max_uncompressed_bytes"] == MAX_LEGACY_INSTALL_MODULE_BYTES
     else:
         assert asyncio.run(plan()).request.kernel_ref == "kernel"
     assert reads == (
@@ -150,6 +160,7 @@ def test_install_plan_checks_measured_modules_before_provider(
         if provider_kind is ResourceKind.LOCAL_LIBVIRT
         and method is CaptureMethod.KDUMP
         and build_ref
+        and not staging_only
         else []
     )
 
