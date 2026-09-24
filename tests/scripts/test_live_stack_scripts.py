@@ -2130,9 +2130,7 @@ def test_libvirt_uri_parser_is_safe_to_source_twice() -> None:
 
 
 def test_local_libvirt_example_env_resolves_the_published_endpoint(tmp_path: Path) -> None:
-    """The example wrapper keeps working once the live-stack env owns the resolution: it must
-    still source cleanly under `set -euo pipefail` (demo-up.sh sources it first and does nothing
-    otherwise) and still reach its own values past the shared block."""
+    """The example wrapper reaches its own values after the shared endpoint resolution block."""
     _, staged = _published_contract(tmp_path)
     staged.pop("KDIVE_PROJECT", None)
     result = _sourced(
