@@ -519,7 +519,7 @@ def boot_member_source(kernel_src: Path, arch: str) -> Path:
     |-----------|-----------------------------------------------------------------|
     | ``x86_64``| the bzImage, ``arch/x86/boot/bzImage`` (validator checks ``HdrS``|
     |           | magic at offset ``0x202``; a raw ``vmlinux`` ELF is rejected)    |
-    | ``ppc64le``| the stripped ELF ``vmlinux`` (powerpc has no bzImage)          |
+    | ``ppc64le``| ``vmlinux``; tar staging strips a scratch copy of this ELF     |
 
     Args:
         kernel_src: A *built* kernel tree.
@@ -555,8 +555,8 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
     decompress-scan bound) plus ``lib/modules`` into one gzip tar, dropping the
     ``build``/``source`` back-symlinks.
 
-    The rename transform is derived from :func:`boot_member_source`, so that function stays the
-    single place the per-arch boot member is decided.
+    On ppc64le, strip the boot ELF into scratch space before archiving it. The build tree's
+    unstripped ``vmlinux`` remains available for the separate debug upload.
 
     Args:
         kernel_src: A *built* kernel tree for ``arch``.
@@ -567,6 +567,14 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
         The path to the combined ``kernel.tar.gz`` under ``dest_dir``.
     """
     member = boot_member_source(kernel_src, arch)
+    boot_root = kernel_src
+    if arch == "ppc64le":
+        subprocess.run(
+            ["strip", "-s", str(kernel_src / member), "-o", str(dest_dir / "vmlinuz")],
+            check=True,
+        )
+        boot_root = dest_dir
+        member = Path("vmlinuz")
     modstage = dest_dir / "modstage"
     subprocess.run(
         ["make", "-C", str(kernel_src), "modules_install", f"INSTALL_MOD_PATH={modstage}"],
@@ -582,7 +590,7 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
             "--exclude=*/source",
             f"--transform=s|^{member}$|boot/vmlinuz|",
             "-C",
-            str(kernel_src),
+            str(boot_root),
             str(member),
             "-C",
             str(modstage),
