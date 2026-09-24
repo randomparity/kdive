@@ -17,6 +17,9 @@ error. Each rule below names the rejection it prevents.
 which Kconfig symbols are enabled before you upload — a debug kernel is one you built with the
 debug options turned on. The validator constrains only the artifacts' **structure** (bzImage
 magic, gzip layout, a `lib/modules` member); it never rejects a build over your `.config`.
+For the native POWER live-stack spine, use the
+[spine kernel configuration](runbooks/live-testing.md#native-power-spine-kernel-configuration)
+before building the tree used as `KDIVE_KERNEL_SRC`.
 There is no allowed-config allowlist and no required-symbol gate: enable what the
 investigation needs. One non-blocking exception: if you upload an `effective_config` that does not
 carry the symbols needed to mount the root filesystem and boot (`VIRTIO_BLK` for the `/dev/vda`
