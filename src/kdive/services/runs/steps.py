@@ -310,12 +310,21 @@ async def failed_boot_attempt(
     job = await jobs.find_by_dedup_key(conn, f"{run_id}:boot")
     if job is None or job.state is not JobState.FAILED:
         return None
-    # The booter's `crash_signature` detail, persisted by the worker's `_failure_context`.
-    value = job.failure_context.get("failure_detail_crash_signature")
-    signature = value if isinstance(value, str) and is_crash_signature(value) else None
     return BootAttempt(
-        job_id=job.id, error_category=job.error_category, observed_crash_signature=signature
+        job_id=job.id,
+        error_category=job.error_category,
+        observed_crash_signature=observed_crash_signature(job.failure_context),
     )
+
+
+def observed_crash_signature(failure_context: Mapping[str, JsonValue]) -> str | None:
+    """The booter's ``crash_signature`` detail as the worker persisted it, if valid (#2691).
+
+    The worker's ``_failure_context`` stores ``CategorizedError.details["crash_signature"]`` as
+    ``failure_detail_crash_signature``; a value outside the scanner's vocabulary reads as ``None``.
+    """
+    value = failure_context.get("failure_detail_crash_signature")
+    return value if isinstance(value, str) and is_crash_signature(value) else None
 
 
 _LATEST_BOOTED_RUN_SQL: LiteralString = (

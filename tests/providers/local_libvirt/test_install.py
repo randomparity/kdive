@@ -58,6 +58,7 @@ from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLI
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.runtime_paths import read_console_log
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.runs.steps import observed_crash_signature
 from tests.live_vm import require_live_vm_provisioned
 from tests.live_vm.console_actor import claim_console_inode
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
@@ -1177,6 +1178,24 @@ def test_boot_readiness_failure_carries_crash_signature(tmp_path: Path) -> None:
     assert caught.value.details["crash_signature"] == "UBSAN:"
     context = _failure_context(caught.value, SecretRegistry())
     assert context["failure_detail_crash_signature"] == "UBSAN:"
+
+
+def test_crash_signature_survives_worker_persistence_to_the_runs_read() -> None:
+    # #2691: pins the key coupling — the booter's `crash_signature` detail, prefixed by the
+    # worker's `_failure_context`, is exactly what the `runs.get` read path looks up.
+    error = CategorizedError(
+        "System booted but a run-readiness check failed",
+        category=ErrorCategory.READINESS_FAILURE,
+        details=LocalLibvirtBooter._boot_failure_details(_SYS, None, "UBSAN:"),
+    )
+    context = _failure_context(error, SecretRegistry())
+    assert observed_crash_signature(context) == "UBSAN:"
+
+
+def test_boot_failure_details_drop_a_non_vocabulary_signature() -> None:
+    # The write side fails closed: `jobs.get` publishes failure_context without a read filter.
+    details = LocalLibvirtBooter._boot_failure_details(_SYS, None, "arbitrary console text")
+    assert "crash_signature" not in details
 
 
 def test_boot_timeout_has_no_crash_signature(tmp_path: Path) -> None:
