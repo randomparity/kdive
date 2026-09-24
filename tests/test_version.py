@@ -8,6 +8,9 @@ result never masks the next.
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from kdive import version
@@ -103,4 +106,65 @@ def test_git_uses_resolved_executable(monkeypatch):
     monkeypatch.setattr(version.subprocess, "run", _run)
 
     assert version._git("rev-parse", "--short", "HEAD") == "abc123"
-    assert seen == [["/usr/bin/git", "rev-parse", "--short", "HEAD"]]
+    assert seen == [
+        [
+            "/usr/bin/git",
+            "-c",
+            f"safe.directory={Path(version.__file__).resolve().parents[2]}",
+            "-C",
+            str(Path(version.__file__).resolve().parents[2]),
+            "rev-parse",
+            "--short",
+            "HEAD",
+        ]
+    ]
+
+
+def test_live_git_uses_imported_checkout_across_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = tmp_path / "checkout"
+    package = checkout / "src/kdive"
+    package.mkdir(parents=True)
+    (package / "version.py").write_text("# source\n")
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "test",
+        ],
+        check=True,
+    )
+    expected = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "--short", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _no_baked(monkeypatch)
+    monkeypatch.setattr(version, "__file__", str(package / "version.py"))
+    monkeypatch.chdir(tmp_path)
+    assert version_info().commit == expected
+
+
+def test_live_git_does_not_claim_parent_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    package = tmp_path / "installed/src/kdive"
+    package.mkdir(parents=True)
+    (package / "version.py").write_text("# installed\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    _no_baked(monkeypatch)
+    monkeypatch.setattr(version, "__file__", str(package / "version.py"))
+    monkeypatch.chdir(tmp_path)
+
+    assert version_info().commit is None
