@@ -456,7 +456,9 @@ def test_denial_envelope_guides_agent_to_a_grant(migrated_url: str) -> None:
 
 def test_capacity_denial_detail_is_prose_not_token(migrated_url: str) -> None:
     # #471: a host-cap denial carries human prose (not the raw `at_capacity` token) and keeps
-    # its queue/wait recourse action.
+    # its queue/wait recourse action. #2687: the prose also states the count is host-wide, and
+    # the breadcrumb leads with resources.availability (allocations.list alone cannot show a
+    # host-wide count — it is scoped to the caller's readable projects).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=1)
@@ -466,7 +468,8 @@ def test_capacity_denial_detail_is_prose_not_token(migrated_url: str) -> None:
         assert resp.detail is not None
         assert "capacity" in resp.detail.lower()
         assert resp.detail != "at_capacity"
-        assert resp.suggested_next_actions == ["allocations.list"]
+        assert "host-wide" in resp.detail
+        assert resp.suggested_next_actions == ["resources.availability", "allocations.list"]
         # #801: a host-cap denial is NOT a quota/budget funding problem — it must not name an
         # accounting remedy tool (the quota/budget branch does not leak into other categories).
         assert "accounting." not in resp.detail
@@ -474,6 +477,31 @@ def test_capacity_denial_detail_is_prose_not_token(migrated_url: str) -> None:
         assert resp.data["reason"] == "at_capacity"
 
     asyncio.run(_run())
+
+
+def test_capacity_denial_breaks_down_in_use_across_two_projects(migrated_url: str) -> None:
+    # #2687: `in_use` counts every occupying allocation on the host across all projects, which
+    # `allocations.list` cannot show for a project the caller cannot read. The denial breaks the
+    # host-wide count into the caller's own vs every other project (never naming the other
+    # project) and into counts by occupying state.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool, cap=2)
+            await _seed_alloc(pool, res_id, AllocationState.GRANTED, project="proj")
+            await _seed_alloc(pool, res_id, AllocationState.ACTIVE, project="other-team")
+            return await _request(pool, _ctx(), project="proj")
+
+    resp = asyncio.run(_run())
+    assert resp.error_category == "allocation_denied"
+    assert resp.data["reason"] == "at_capacity"
+    assert resp.data["in_use"] == "2"
+    assert resp.data["in_use_own_projects"] == 1
+    assert resp.data["in_use_other_projects"] == 1
+    assert resp.data["in_use_by_state"] == {"granted": 1, "active": 1, "releasing": 0}
+    # No other project's name/id ever appears in the caller-facing envelope.
+    assert "other-team" not in str(resp.data)
+    assert resp.detail is not None
+    assert "other-team" not in resp.detail
 
 
 def test_quota_denial_names_set_quota_remedy_for_admin(migrated_url: str) -> None:
@@ -672,6 +700,28 @@ def test_denial_next_actions_role_awareness() -> None:
     assert _denial_next_actions(budget, caller_is_admin=False) == ["allocations.list"]
     assert _denial_next_actions(quota, caller_is_admin=True)[0] == "accounting.set_quota"
     assert _denial_next_actions(quota, caller_is_admin=False) == ["allocations.list"]
+
+
+def test_denial_next_actions_host_capacity_leads_with_availability() -> None:
+    # #2687: a host-cap denial leads with resources.availability instead of the plain
+    # breadcrumb — it is not role-gated, unlike the funding remedy tools, since every caller
+    # (not just an admin) may read resources.availability.
+    at_capacity = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.ALLOCATION_DENIED,
+        reason="at_capacity",
+        cap=1,
+        in_use=1,
+    )
+    assert _denial_next_actions(at_capacity, caller_is_admin=False) == [
+        "resources.availability",
+        "allocations.list",
+    ]
+    assert _denial_next_actions(at_capacity, caller_is_admin=True) == [
+        "resources.availability",
+        "allocations.list",
+    ]
 
 
 def test_quota_denial_detail_role_awareness() -> None:
