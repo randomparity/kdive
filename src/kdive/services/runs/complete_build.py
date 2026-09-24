@@ -567,7 +567,13 @@ async def _reassemble_chunked_artifacts(
     if refreshed is None:
         # `_require_open_window` passed on this transaction's clock, and `now()` is
         # `transaction_timestamp()`, so the refresh predicate cannot have flipped on time since:
-        # a declined refresh here means the row is gone, reaped between the two reads.
+        # a declined refresh here means the row is gone. That has two causes — an ordinary reap,
+        # or a concurrent finalize for this Run that committed and deleted the manifest between
+        # `_prepare`'s read and this locked refresh (#2696) — so check for a recorded result
+        # before reporting the manifest missing, matching the reassembly-error branch below.
+        recorded = await _existing_build_result(conn, run_id)
+        if recorded is not None:
+            raise _CompleteBuildAlreadyRecorded(recorded)
         raise CompleteBuildConfigurationError({"reason": NO_UPLOAD_MANIFEST})
     if refreshed.capped:
         # The one place a spent extension budget is visible. The reassembly still runs — it holds
