@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import copy
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
@@ -22,6 +24,7 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
+from kdive.domain.platform.arch_traits import arch_traits
 from kdive.mcp.auth import RequestContext
 from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
@@ -53,6 +56,50 @@ PROFILE: dict[str, Any] = {
         }
     },
 }
+
+
+# Native gdbstub debug proofs against a real domain are proven only on x86_64; ppc64le
+# gdbstub/multiarch debug support is tracked separately by #2678 and is out of scope here (#2695).
+_GDBSTUB_PROVEN_ARCHES = frozenset({"x86_64"})
+
+
+def live_host_arch() -> str:
+    """Resolve the host architecture a live gdbstub debug guest must match.
+
+    KVM refuses to define a guest whose ``<os type arch=...>`` differs from the host, so the live
+    debug tests take their guest arch from here rather than ``PROFILE``'s fixed ``x86_64`` (#2695).
+    """
+    return os.uname().machine
+
+
+def require_live_gdbstub_arch() -> str:
+    """Resolve the host arch, skipping with a named reason where gdbstub debug is unproven.
+
+    ppc64le gdbstub/multiarch debug support is out of scope for #2695 (tracked by #2678); this
+    keeps the native live suite from failing -- rather than skipping -- on a host arch it cannot
+    yet validate.
+    """
+    arch = live_host_arch()
+    if arch not in _GDBSTUB_PROVEN_ARCHES:
+        pytest.skip(
+            f"native gdbstub debug live tests are unproven on {arch!r} guests "
+            "(ppc64le/other-arch gdbstub support tracked by #2678)"
+        )
+    return arch
+
+
+def live_profile(arch: str) -> dict[str, Any]:
+    """Build the live-only provisioning profile for ``arch`` (host-resolved, not pinned).
+
+    Unlike ``PROFILE`` -- fixed x86_64 for the unit-test consumers that never touch a real host --
+    this takes its machine type from ``arch_traits`` rather than a pinned ``q35``, so a live guest
+    matches what KVM will actually accept on this host.
+    """
+    profile = copy.deepcopy(PROFILE)
+    profile["arch"] = arch
+    machine = arch_traits(arch).machine
+    profile["provider"]["local-libvirt"]["domain_xml_params"] = {"machine": machine}
+    return profile
 
 
 def request_context(
@@ -103,8 +150,18 @@ async def granted_allocation(pool: AsyncConnectionPool) -> str:
     return str(allocation.id)
 
 
-async def seed_system(pool: AsyncConnectionPool, allocation_id: str, state: SystemState) -> str:
-    """Seed a System with the shared profile and requested state."""
+async def seed_system(
+    pool: AsyncConnectionPool,
+    allocation_id: str,
+    state: SystemState,
+    *,
+    profile: dict[str, Any] | None = None,
+) -> str:
+    """Seed a System with the shared profile (or an explicit override) and requested state.
+
+    ``profile`` defaults to the fixed x86_64 ``PROFILE``; the live gdbstub debug tests pass a
+    host-resolved profile from ``live_profile`` instead (#2695).
+    """
     async with pool.connection() as conn:
         system = await SYSTEMS.insert(
             conn,
@@ -116,7 +173,7 @@ async def seed_system(pool: AsyncConnectionPool, allocation_id: str, state: Syst
                 project="proj",
                 allocation_id=UUID(allocation_id),
                 state=state,
-                provisioning_profile=copy.deepcopy(PROFILE),
+                provisioning_profile=copy.deepcopy(profile if profile is not None else PROFILE),
                 domain_name="kdive-x",
             ),
         )
