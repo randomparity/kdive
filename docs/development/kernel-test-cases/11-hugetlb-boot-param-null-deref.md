@@ -48,4 +48,4 @@ The kernel rejects the parameter with `-EINVAL` and boots normally.
 ## Caveats
 
 The fault happens before most console output, so the case depends on the debug session. Live
-gdbstub debug is not yet proven on ppc64le guests (#2695); run it on an x86_64 host.
+gdbstub debug is not yet proven on ppc64le guests (tracked by #2678); run it on an x86_64 host.
