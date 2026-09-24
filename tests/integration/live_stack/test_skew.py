@@ -412,7 +412,8 @@ def test_probe_stack_skew_degrades_to_unknown_when_nothing_answers() -> None:
     skip, warn = partition(
         [witness, ProcessSkew("server", SkewVerdict.FRESH, "running HEAD")], SkewPolicy.STRICT
     )
-    assert skip == warn == []
+    assert skip == []
+    assert warn == [witness]
 
 
 def test_probe_grades_a_deployed_witness() -> None:
@@ -425,6 +426,22 @@ def test_probe_grades_a_deployed_witness() -> None:
     witness = next(result for result in probe.results if result.process == "lifecycle-witness")
     assert witness.verdict is SkewVerdict.FRESH
     assert witness.applicable
+
+
+def test_probe_enforces_skew_on_a_deployed_witness() -> None:
+    witness_url = readyz_urls(_STACK_URL)["lifecycle-witness"]
+    probe = probe_stack_skew(
+        _STACK_URL,
+        facts=_facts(),
+        fetch=lambda url: {
+            "commit": _OLDER if url == witness_url else _HEAD,
+            "started_at": _STARTED_AT,
+        },
+        inventory=lambda: frozenset({101}),
+    )
+    skip, warn = partition(probe.results, SkewPolicy.STRICT)
+    assert [result.process for result in skip] == ["lifecycle-witness"]
+    assert warn == []
 
 
 @pytest.mark.parametrize(
@@ -583,6 +600,27 @@ def test_require_stack_warns_but_runs_when_merely_behind(
         _fake_probe(ProcessSkew("server", SkewVerdict.BEHIND, "12 commits behind HEAD")),
     )
     with pytest.warns(UserWarning, match="12 commits behind HEAD"):
+        assert conftest.require_stack() == _STACK_URL
+
+
+def test_require_stack_explains_absent_witness_without_strict_skip(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(POLICY_ENV, "strict")
+    monkeypatch.setattr(
+        conftest,
+        "probe_stack_skew",
+        _fake_probe(
+            ProcessSkew(
+                "lifecycle-witness",
+                SkewVerdict.UNKNOWN,
+                "not deployed in the portable three-role stack (Kubernetes-only role)",
+                applicable=False,
+            ),
+            ProcessSkew("server", SkewVerdict.FRESH, "running HEAD"),
+        ),
+    )
+    with pytest.warns(UserWarning, match="lifecycle-witness: unknown — not deployed"):
         assert conftest.require_stack() == _STACK_URL
 
 

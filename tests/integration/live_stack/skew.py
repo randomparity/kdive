@@ -485,6 +485,6 @@ def partition(
     warn = [
         r
         for r in results
-        if r.applicable and r.verdict is not SkewVerdict.FRESH and r.verdict not in skipping
+        if r.verdict is not SkewVerdict.FRESH and (not r.applicable or r.verdict not in skipping)
     ]
     return skip, warn
