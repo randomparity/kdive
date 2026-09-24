@@ -17,14 +17,15 @@ provisioned, an agent cannot find the earlier Runs or Investigations from the Sy
    Investigation. It is a row column, so the list path gains no query (ADR-0180).
 2. `systems.get` carries `data.run_investigation_ids`: the distinct `investigation_id`s of the
    Runs whose `system_id` is this System, in every Run state, newest first by each
-   Investigation's newest Run `created_at`, ties broken by `investigation_id`, at most
+   Investigation's newest Run `created_at` (an Investigation with several Runs appears once),
+   ties broken by `investigation_id`, at most
    `RUN_INVESTIGATIONS_LIMIT = 20` entries.
 3. `systems.get` carries `data.run_investigation_ids_truncated`: `true` exactly when more than 20
    such Investigations exist.
-4. `systems.get` on a System that is not `failed` returns
-   `["systems.get", "runs.list", "systems.teardown"]` as next actions. The `failed` envelope's
-   next actions are unchanged (ADR-0454 orders them for recovery), and the `systems.list` items
-   keep `["systems.get", "systems.teardown"]`.
+4. `systems.get` appends `runs.list` as the last next action, on the success envelope
+   (`["systems.get", "systems.teardown", "runs.list"]`) and on the `failed` envelope (after the
+   ADR-0454 recovery actions, whose order and static lists stay unchanged). `systems.list`
+   items, which carry no history, keep their current actions.
 5. The systems toolset guide (`docs/guide/toolsets/systems.md`, and its generated MCP resource
    snapshot `src/kdive/mcp/resources/_content/toolsets-systems.md`, ADR-0151) says to call
    `runs.list(system_id=…)` for a System's full run history.
@@ -45,7 +46,8 @@ Owner: `src/kdive/mcp/tools/lifecycle/systems/view.py`, which already owns `acti
   refuse a Run whose project differs from its System's), so a violated invariant cannot leak
   another project's ids.
 - `system_envelope` takes `run_history: SystemRunHistory | None = None`. When set, it adds the
-  two keys and, on the non-failed path, the `runs.list` next action. Only `get_system` passes it.
+  two keys and appends `runs.list` to whichever action list the envelope returns (success or
+  `failed`). Only `get_system` passes it.
 
 ## Failure model
 
@@ -58,7 +60,5 @@ Owner: `src/kdive/mcp/tools/lifecycle/systems/view.py`, which already owns `acti
      already does the same scan on this path. Bounded cost; an index needs a migration, which
      the dispatch excludes.
    - The ids are a snapshot; a Run created after the read is missing until the next read.
-   - A `failed` System gets no `runs.list` action; its data still carries the ids and the guide
-     names the tool.
 4. **Covered elsewhere** — full paginated history: `runs.list` (ADR-0198). Other
    Investigations' titles and states: `investigations.get`.

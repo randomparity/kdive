@@ -15,16 +15,19 @@ Systems (#488); the reverse direction has no pointer.
 ## Decision
 
 `systems.get` returns the System's own `investigation_id`, the distinct investigation ids of
-its Runs (every Run state, newest first, capped at 20, with a `truncated` flag), and offers
-`runs.list` as a next action on a non-failed System. `runs.list(system_id=…)` stays the one
-paginated read of the Runs themselves. `investigation_id` also appears on `systems.list`
-items because it is a row column; the investigation list stays get-only.
+its Runs (every Run state, newest first, capped at 20, with a `truncated` flag), and appends
+`runs.list` to its next actions, after ADR-0454's recovery actions on a `failed` System.
+`runs.list(system_id=…)` stays the one paginated read of the Runs themselves.
+`investigation_id` also appears on `systems.list` items because it is a row column; the
+investigation list stays get-only.
 
 ## Consequences
 
 - An agent can get from a System to every Investigation that used it in one call, and to its
   Runs through `runs.list`.
 - `systems.get` makes one more query, a scan of `runs` by `system_id` like `active_run`'s.
+- The `systems.get` tool description (`systems/registrar.py`) does not yet name the new keys;
+  the toolset guide does.
 - More than 20 Investigations on one System read as `truncated: true`; the rest are reachable
   through `runs.list`.
 

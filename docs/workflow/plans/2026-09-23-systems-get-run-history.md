@@ -10,7 +10,7 @@ list path passes no history, so it stays one query. Spec:
 Tech stack: Python 3.14, psycopg 3 async, pytest against a migrated Postgres (`migrated_url`).
 
 Expected implementation size: 150–200 changed lines (M) — two tasks: ~35 lines in `view.py`,
-~120 lines of tests, ~4 lines in each guide copy.
+~140 lines of tests, ~4 lines in each guide copy.
 
 ## Global Constraints
 
@@ -57,18 +57,23 @@ Consumed, confirmed on `main`: `paginate(rows, limit) -> tuple[list, bool]`
 (`kdive.mcp.tools._common`, imported in `view.py` as `_paginate`); test helpers
 `systems_support.pool`, `granted_allocation`, `seed_system`, `ctx`, `provider_resolver`, and
 `_seed_run(pool, sys_id, state) -> str` (creates a fresh Investigation per Run, project
-`proj`, `created_at = TEST_DT`).
+`proj`, `created_at = TEST_DT`). Step 1 gives `_seed_run` a keyword
+`investigation_id: UUID | None = None` that reuses an existing Investigation when set.
 
 Verification:
 
 - Contract: `investigation_id` on the envelope. Mode: focused-test —
   `test_get_system_reports_investigation_id`; red: `KeyError: 'investigation_id'`.
-- Contract: distinct ids, all Run states, newest first, `runs.list` action. Mode: focused-test —
-  `test_get_system_lists_run_investigations_newest_first`; red: `KeyError`.
+- Contract: distinct ids, all Run states, newest first by each Investigation's newest Run,
+  `runs.list` action. Mode: focused-test —
+  `test_get_system_lists_run_investigations_newest_first` (Investigation A has Runs on days 1
+  and 3, B on day 2; expects `[A, B]`, which a query ordering by `min` or lacking `GROUP BY`
+  fails); red: `KeyError`.
 - Contract: cap and truncation flag at the 20/21 boundary. Mode: focused-test —
   `test_get_system_truncates_run_investigations`; red: `KeyError`.
-- Contract: `failed` System keeps its actions; list-path envelope carries no history. Mode:
-  focused-test — `test_failed_system_keeps_actions_and_reports_history` and
+- Contract: `failed` System keeps its ADR-0454 actions and gains `runs.list` last; list-path
+  envelope carries no history. Mode: focused-test —
+  `test_failed_system_appends_runs_list_and_reports_history` and
   `test_system_envelope_without_history_omits_run_list`; red: `KeyError` on the new keys.
 - Green command for all:
   `uv run python -m pytest tests/mcp/lifecycle/test_systems_tools.py -q -k "run_investigations or investigation_id or history"`
@@ -76,7 +81,52 @@ Verification:
 
 Steps:
 
-1. Append the tests to `tests/mcp/lifecycle/test_systems_tools.py`:
+1. In `tests/mcp/lifecycle/test_systems_tools.py`, change `_seed_run` to take
+   `*, investigation_id: UUID | None = None`; when it is set, skip the `INVESTIGATIONS.insert`
+   and use it as the Run's `investigation_id`:
+
+```python
+async def _seed_run(
+    pool: AsyncConnectionPool,
+    sys_id: str,
+    state: RunState,
+    *,
+    investigation_id: UUID | None = None,
+) -> str:
+    async with pool.connection() as conn:
+        if investigation_id is None:
+            inv = await INVESTIGATIONS.insert(
+                conn,
+                Investigation(
+                    id=uuid4(),
+                    created_at=TEST_DT,
+                    updated_at=TEST_DT,
+                    principal="user-1",
+                    project="proj",
+                    title="t",
+                    state=InvestigationState.ACTIVE,
+                ),
+            )
+            investigation_id = inv.id
+        run = await RUNS.insert(
+            conn,
+            Run(
+                id=uuid4(),
+                created_at=TEST_DT,
+                updated_at=TEST_DT,
+                principal="user-1",
+                project="proj",
+                investigation_id=investigation_id,
+                system_id=UUID(sys_id),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
+                state=state,
+                build_profile={},
+            ),
+        )
+    return str(run.id)
+```
+
+   Then append the tests:
 
 ```python
 async def _run_investigation(pool: AsyncConnectionPool, run_id: str) -> str:
@@ -118,19 +168,18 @@ def test_get_system_lists_run_investigations_newest_first(migrated_url: str) -> 
         async with systems_support.pool(migrated_url) as pool:
             alloc_id = await granted_allocation(pool)
             sys_id = await seed_system(pool, alloc_id, SystemState.READY)
-            old_run = await _seed_run(pool, sys_id, RunState.SUCCEEDED)
-            failed_run = await _seed_run(pool, sys_id, RunState.FAILED)
-            await _age_run(pool, old_run, 1)
-            await _age_run(pool, failed_run, 2)
+            a_first = await _seed_run(pool, sys_id, RunState.FAILED)
+            inv_a = await _run_investigation(pool, a_first)
+            b_run = await _seed_run(pool, sys_id, RunState.CANCELED)
+            a_last = await _seed_run(pool, sys_id, RunState.SUCCEEDED, investigation_id=UUID(inv_a))
+            await _age_run(pool, a_first, 1)
+            await _age_run(pool, b_run, 2)
+            await _age_run(pool, a_last, 3)
             resp = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
-            expected = [
-                await _run_investigation(pool, failed_run),
-                await _run_investigation(pool, old_run),
-            ]
-        assert resp.data["run_investigation_ids"] == expected
+            inv_b = await _run_investigation(pool, b_run)
+        assert resp.data["run_investigation_ids"] == [inv_a, inv_b]
         assert resp.data["run_investigation_ids_truncated"] is False
-        assert "active_run" in resp.data  # the succeeded Run still holds the System
-        assert resp.suggested_next_actions == ["systems.get", "runs.list", "systems.teardown"]
+        assert resp.suggested_next_actions == ["systems.get", "systems.teardown", "runs.list"]
 
     asyncio.run(_run())
 
@@ -153,7 +202,7 @@ def test_get_system_truncates_run_investigations(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_failed_system_keeps_actions_and_reports_history(migrated_url: str) -> None:
+def test_failed_system_appends_runs_list_and_reports_history(migrated_url: str) -> None:
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:
             alloc_id = await granted_allocation(pool)
@@ -161,7 +210,12 @@ def test_failed_system_keeps_actions_and_reports_history(migrated_url: str) -> N
             inv_id = await _run_investigation(pool, await _seed_run(pool, sys_id, RunState.FAILED))
             resp = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
         assert resp.data["run_investigation_ids"] == [inv_id]
-        assert "runs.list" not in resp.suggested_next_actions
+        assert resp.suggested_next_actions == [
+            "jobs.list",
+            "allocations.release",
+            "allocations.request",
+            "runs.list",
+        ]
 
     asyncio.run(_run())
 
@@ -207,14 +261,18 @@ class SystemRunHistory:
    the `data` literal after `"allocation_id"`, and before the `FAILED` branch:
 
 ```python
-    actions = ["systems.get", "systems.teardown"]
+    history_actions: list[str] = []
     if run_history is not None:
         data["run_investigation_ids"] = list(run_history.investigation_ids)
         data["run_investigation_ids_truncated"] = run_history.truncated
-        actions.insert(1, "runs.list")
+        history_actions.append("runs.list")
 ```
 
-   and pass `suggested_next_actions=actions` in the success return.
+   Pass `history_actions=history_actions` to `_failed_system_envelope`, and use
+   `suggested_next_actions=["systems.get", "systems.teardown", *history_actions]` in the
+   success return. In `_failed_system_envelope`, add the keyword `history_actions: list[str]`
+   and return `suggested_next_actions=[*actions, *history_actions]`; the
+   `FAILED_SYSTEM_*` constants stay unchanged.
 5. Add after `_active_run_for_system`:
 
 ```python
@@ -261,8 +319,9 @@ Steps:
 
 ```markdown
 `systems.get` reports state, connection/capability details, accelerator, and recorded CPU data.
-It also names the owning `investigation_id` and up to 20 `run_investigation_ids` that have Runs
-on the System. Read the System's full run history with `runs.list(system_id=…)`.
+It also names the owning `investigation_id` and a bounded, newest-first `run_investigation_ids`
+list of the Investigations with Runs on the System (`run_investigation_ids_truncated` marks a
+longer history). Read the System's full run history with `runs.list(system_id=…)`.
 `systems.list` provides filters and cursor pagination. Missing capability/CPU data is unknown,
 not proof of support. Check `data.supports_snapshots` before using checkpoints.
 ```
