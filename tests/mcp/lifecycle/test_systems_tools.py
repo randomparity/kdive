@@ -1862,20 +1862,28 @@ async def _seed_ready_system(pool: AsyncConnectionPool, alloc_id: str) -> str:
     return sys_id
 
 
-async def _seed_run(pool: AsyncConnectionPool, sys_id: str, state: RunState) -> str:
+async def _seed_run(
+    pool: AsyncConnectionPool,
+    sys_id: str,
+    state: RunState,
+    *,
+    investigation_id: UUID | None = None,
+) -> str:
     async with pool.connection() as conn:
-        inv = await INVESTIGATIONS.insert(
-            conn,
-            Investigation(
-                id=uuid4(),
-                created_at=TEST_DT,
-                updated_at=TEST_DT,
-                principal="user-1",
-                project="proj",
-                title="t",
-                state=InvestigationState.ACTIVE,
-            ),
-        )
+        if investigation_id is None:
+            inv = await INVESTIGATIONS.insert(
+                conn,
+                Investigation(
+                    id=uuid4(),
+                    created_at=TEST_DT,
+                    updated_at=TEST_DT,
+                    principal="user-1",
+                    project="proj",
+                    title="t",
+                    state=InvestigationState.ACTIVE,
+                ),
+            )
+            investigation_id = inv.id
         run = await RUNS.insert(
             conn,
             Run(
@@ -1884,7 +1892,7 @@ async def _seed_run(pool: AsyncConnectionPool, sys_id: str, state: RunState) -> 
                 updated_at=TEST_DT,
                 principal="user-1",
                 project="proj",
-                investigation_id=inv.id,
+                investigation_id=investigation_id,
                 system_id=UUID(sys_id),
                 target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=state,
@@ -2873,3 +2881,114 @@ def test_system_envelope_surfaces_placement_and_profile_summary() -> None:
     assert data["updated_at"] == dt.isoformat()
     assert data["active_run"] == {"id": str(run_id), "state": "running"}
     assert "secret-tree" not in str(data)
+
+
+async def _run_investigation(pool: AsyncConnectionPool, run_id: str) -> str:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT investigation_id FROM runs WHERE id = %s", (run_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+async def _age_run(pool: AsyncConnectionPool, run_id: str, day: int) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE runs SET created_at = %s WHERE id = %s",
+            (datetime(2026, 1, day, tzinfo=UTC), run_id),
+        )
+
+
+def test_get_system_reports_investigation_id(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            classic = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
+            inv_id = await _run_investigation(pool, await _seed_run(pool, sys_id, RunState.FAILED))
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE systems SET investigation_id = %s WHERE id = %s", (inv_id, sys_id)
+                )
+            owned = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
+        assert classic.data["investigation_id"] is None
+        assert owned.data["investigation_id"] == inv_id
+
+    asyncio.run(_run())
+
+
+def test_get_system_lists_run_investigations_newest_first(migrated_url: str) -> None:
+    # Investigation A has Runs on days 1 and 3, B on day 2: A's newest Run wins, and A appears once.
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            a_first = await _seed_run(pool, sys_id, RunState.FAILED)
+            inv_a = await _run_investigation(pool, a_first)
+            b_run = await _seed_run(pool, sys_id, RunState.CANCELED)
+            a_last = await _seed_run(pool, sys_id, RunState.SUCCEEDED, investigation_id=UUID(inv_a))
+            await _age_run(pool, a_first, 1)
+            await _age_run(pool, b_run, 2)
+            await _age_run(pool, a_last, 3)
+            resp = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
+            inv_b = await _run_investigation(pool, b_run)
+        assert resp.data["run_investigation_ids"] == [inv_a, inv_b]
+        assert resp.data["run_investigation_ids_truncated"] is False
+        assert resp.suggested_next_actions == ["systems.get", "systems.teardown", "runs.list"]
+
+    asyncio.run(_run())
+
+
+def test_get_system_truncates_run_investigations(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            for _ in range(20):
+                await _seed_run(pool, sys_id, RunState.CANCELED)
+            at_cap = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
+            await _seed_run(pool, sys_id, RunState.CANCELED)
+            over = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
+        assert len(cast(list[str], at_cap.data["run_investigation_ids"])) == 20
+        assert at_cap.data["run_investigation_ids_truncated"] is False
+        assert len(cast(list[str], over.data["run_investigation_ids"])) == 20
+        assert over.data["run_investigation_ids_truncated"] is True
+
+    asyncio.run(_run())
+
+
+def test_failed_system_appends_runs_list_and_reports_history(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.FAILED)
+            inv_id = await _run_investigation(pool, await _seed_run(pool, sys_id, RunState.FAILED))
+            resp = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
+        assert resp.data["run_investigation_ids"] == [inv_id]
+        assert resp.suggested_next_actions == [
+            "jobs.list",
+            "allocations.release",
+            "allocations.request",
+            "runs.list",
+        ]
+
+    asyncio.run(_run())
+
+
+def test_system_envelope_without_history_omits_run_list() -> None:
+    from kdive.mcp.tools.lifecycle.systems.view import system_envelope
+
+    system = System(
+        id=uuid4(),
+        created_at=TEST_DT,
+        updated_at=TEST_DT,
+        principal="user-1",
+        project="proj",
+        allocation_id=uuid4(),
+        state=SystemState.READY,
+        provisioning_profile={"schema_version": 1},
+    )
+    resp = system_envelope(system)
+    assert resp.data["investigation_id"] is None
+    assert "run_investigation_ids" not in resp.data
+    assert resp.suggested_next_actions == ["systems.get", "systems.teardown"]
