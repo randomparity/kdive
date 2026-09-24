@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import tarfile
 import time
+from pathlib import Path
 
 import pytest
 
@@ -15,8 +18,46 @@ from kdive.mcp.dev_harness import (
 from tests.integration.live_stack.spine import (
     assembled_console_refs,
     assert_no_live_secrets,
+    combined_kernel_tar,
     raw_vmcore_refs,
 )
+
+
+def test_ppc64le_combined_tar_strips_scratch_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    kernel_src = tmp_path / "kernel"
+    kernel_src.mkdir()
+    vmlinux = kernel_src / "vmlinux"
+    vmlinux.write_bytes(b"unstripped DWARF")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    real_run = subprocess.run
+    strip_args: list[str] = []
+
+    def run(args: list[str], *, check: bool = False) -> subprocess.CompletedProcess[bytes]:
+        if args[0] == "make":
+            modstage = scratch / "modstage" / "lib" / "modules" / "test"
+            modstage.mkdir(parents=True)
+            (modstage / "module.ko").write_bytes(b"module")
+            return subprocess.CompletedProcess(args, 0)
+        if args[0] == "strip":
+            strip_args.extend(args)
+            Path(args[-1]).write_bytes(b"stripped ELF")
+            return subprocess.CompletedProcess(args, 0)
+        return real_run(args, check=check)
+
+    monkeypatch.setattr("tests.integration.live_stack.spine.subprocess.run", run)
+    tar_path = combined_kernel_tar(kernel_src, scratch, arch="ppc64le")
+
+    assert strip_args == ["strip", "-s", str(vmlinux), "-o", str(scratch / "vmlinuz")]
+    assert vmlinux.read_bytes() == b"unstripped DWARF"
+    with tarfile.open(tar_path, "r:gz") as archive:
+        boot = archive.extractfile("boot/vmlinuz")
+        assert boot is not None and boot.read() == b"stripped ELF"
+        assert archive.getnames().index("boot/vmlinuz") < archive.getnames().index(
+            "lib/modules/test/module.ko"
+        )
 
 
 def test_build_claims_nested_roles_object() -> None:
