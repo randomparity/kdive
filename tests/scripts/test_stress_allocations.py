@@ -285,8 +285,14 @@ class FakeStack:
         shapes: list[ToolResponse] | None = None,
         hosts: bool = True,
         hang: bool = False,
+        drop_after: int | None = None,
     ) -> None:
         self.defect = defect
+        self.drop_after = drop_after
+        self.handled = 0
+        self.clients: list[FakeClient] = []
+        self.key_sessions: dict[str, set[int]] = {}
+        self.flaky = False
         self.shapes = _SHAPES if shapes is None else shapes
         self.hosts = hosts
         self.hang = hang
@@ -304,7 +310,16 @@ class FakeStack:
         self.requests: list[dict[str, Any]] = []
 
     def connect(self) -> FakeClient:
-        return FakeClient(self)
+        client = FakeClient(self)
+        self.clients.append(client)
+        return client
+
+    def count_call(self) -> None:
+        """After ``drop_after`` calls, every session open so far breaks for good."""
+        self.handled += 1
+        if self.handled == self.drop_after:
+            for client in self.clients:
+                client.broken = True
 
     def _new_id(self) -> str:
         self.counter += 1
@@ -409,6 +424,10 @@ class FakeStack:
             current = {"current_status": self.states[alloc]}
             return ToolResponse.failure(alloc, ErrorCategory.STALE_HANDLE, data=current)
         self.states[alloc] = "released"
+        if self.defect == "flaky_release":  # every other release commits, then loses its reply
+            self.flaky = not self.flaky
+            if self.flaky:
+                raise ConnectionError("reply lost")
         return ToolResponse.success(alloc, "released")
 
     def _renew(self, args: dict[str, Any]) -> ToolResponse:
@@ -460,14 +479,23 @@ class FakeStack:
 class FakeClient:
     def __init__(self, stack: FakeStack) -> None:
         self.stack = stack
+        self.broken = False
 
     async def __aenter__(self) -> FakeClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        return None
+        if self.broken:  # as LiveStackClient re-raises its session runner's error
+            raise ConnectionError("session gone")
 
     async def call_tool(self, name: str, /, **args: object) -> ToolResponse:
+        self.stack.count_call()
+        if self.broken:
+            await asyncio.sleep(0.005)
+            raise ConnectionError("session gone")
+        key = args.get("idempotency_key")
+        if name == "allocations.request" and isinstance(key, str):
+            self.stack.key_sessions.setdefault(key, set()).add(id(self))
         response = self.stack.handle(name, dict(args))
         if self.stack.stall:
             self.stack.stall = False
@@ -514,6 +542,7 @@ def test_clean_stack_exits_zero(provision: bool, tmp_path: Path) -> None:
     assert _settled(stack)
     assert all("idempotency_key" in args for args in stack.requests)
     assert all("window" in args for args in stack.requests), "a request without a lease"
+    assert any(len(ids) == 3 for ids in stack.key_sessions.values()), "no shared-key race across 3"
     if profile is not None:
         assert stack.systems, "no System was provisioned"
 
@@ -586,6 +615,25 @@ def test_cancel_during_drain_reports_leftovers(capsys: pytest.CaptureFixture[str
     assert "(interrupted)" in capsys.readouterr().out
 
 
+def test_dropped_sessions_still_drain_and_report(capsys: pytest.CaptureFixture[str]) -> None:
+    stack = FakeStack(drop_after=60)
+    code, ledger = _run(stack, _config(invalid_ratio=0.0))
+    printed = capsys.readouterr().out
+    assert code == 0, ledger.violations
+    assert ledger.valid_errors["transport"] > 0
+    assert "note: monitor session teardown failed: ConnectionError" in printed
+    assert "note: client 0 lost its session: ConnectionError" in printed
+    assert _settled(stack), "the drain's fresh session settled nothing"
+
+
+def test_double_release_without_a_reply_is_counted_not_violated() -> None:
+    stack = FakeStack(defect="flaky_release")
+    code, ledger = _run(stack, _config(invalid_ratio=0.0, race_ratio=1.0, abandon_ratio=0.0))
+    assert code == 0, ledger.violations
+    assert ledger.valid_errors["transport"] > 0
+    assert _settled(stack)
+
+
 def test_drain_stops_at_its_deadline() -> None:
     async def hang() -> ToolResponse:
         await asyncio.sleep(30)
@@ -596,7 +644,7 @@ def test_drain_stops_at_its_deadline() -> None:
     ledger.owned.update({"a1", "a2", "a3"})
     ledger.lost["k"] = ("allocations.request", {"idempotency_key": "k"}, False)
     started = time.monotonic()
-    asyncio.run(stress.Stress(cfg, ledger, [], "small").drain(_Stub(hang)))
+    asyncio.run(stress.Stress(cfg, ledger, [], "small", FakeStack().connect).drain(_Stub(hang)))
     assert time.monotonic() - started < 1.0
     assert len(ledger.leftovers()) == 4
 

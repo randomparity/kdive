@@ -406,7 +406,7 @@ recorded when:
 
 1. a schedulable host reports `in_use` above `cap`;
 2. an invalid call is accepted, or ends in a transport failure or timeout;
-3. a double release does not return `ok` both times;
+3. a double release where both calls replied does not return `ok` both times;
 4. two `ok` replies for one idempotency key carry different ids;
 5. anything the run created is still unsettled at the end: an allocation not `released`,
    `expired` or `failed`, a System not `torn_down` or `failed`, or a call whose reply never

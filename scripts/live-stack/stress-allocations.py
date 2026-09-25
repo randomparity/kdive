@@ -193,6 +193,10 @@ def _clip(text: str) -> str:
     return text if len(text) <= _DETAIL_LIMIT else text[: _DETAIL_LIMIT - 3] + "..."
 
 
+def _error(exc: BaseException) -> str:
+    return _clip(f"{type(exc).__name__}: {exc}")
+
+
 def _describe(call: Call) -> str:
     if call.response is not None and call.response.error_category:
         return call.response.error_category
@@ -508,6 +512,7 @@ class Stress:
     ledger: Ledger
     sizings: list[dict[str, object]]
     shape: str
+    connect: Connect
     draining: bool = False
     drain_deadline: float | None = None
 
@@ -570,7 +575,7 @@ class Stress:
             async with connect() as client:
                 await self.client_loop(Seat(client, rng), deadline)
         except Exception as exc:  # a lost session must not abort the other clients or the drain
-            self.ledger.notes.append(f"client {index} lost its session: {type(exc).__name__}")
+            self.ledger.notes.append(f"client {index} lost its session: {_error(exc)}")
 
     async def client_loop(self, seat: Seat, deadline: float) -> None:
         cfg = self.cfg
@@ -657,16 +662,24 @@ class Stress:
             return
         second = self.call(client, "allocations.release", {"allocation_id": alloc})
         first_call, second_call = await asyncio.gather(release, second)
-        if first_call.outcome != OK or second_call.outcome != OK:
+        replied = {first_call.outcome, second_call.outcome} <= {OK, ENVELOPE}
+        if replied and (first_call.outcome != OK or second_call.outcome != OK):
             outcomes = f"{_describe(first_call)} and {_describe(second_call)}"
             self.ledger.violate(3, f"double release of {alloc} returned {outcomes}")
 
     async def shared_key_race(self, seat: Seat) -> None:
+        """Send one key from three sessions at once: this client's and two short-lived ones."""
         args = self.request_args(seat.rng)
         key = str(args["idempotency_key"])
-        grants = await asyncio.gather(
-            *(self.call(seat.client, "allocations.request", args) for _ in range(3))
-        )
+        try:
+            async with contextlib.AsyncExitStack() as sessions:
+                others = [await sessions.enter_async_context(self.connect()) for _ in range(2)]
+                grants = await asyncio.gather(
+                    *(self.call(c, "allocations.request", args) for c in (seat.client, *others))
+                )
+        except Exception as exc:  # a failed extra session must not end this client's run
+            self.ledger.notes.append(f"shared-key race session failed: {_error(exc)}")
+            return
         for grant in grants:
             self.ledger.note_key(key, grant)
         granted = {g.response.object_id for g in grants if g.outcome == OK and g.response}
@@ -771,13 +784,14 @@ async def run_stress(cfg: Config, connect: Connect, ledger: Ledger) -> None:
     Raises:
         PreflightError: the stack is unreachable, has no shape, or has no schedulable host.
     """
-    async with contextlib.AsyncExitStack() as stack:
-        try:
-            probe = await stack.enter_async_context(connect())
-        except Exception as exc:
-            raise PreflightError(f"cannot reach the stack: {type(exc).__name__}: {exc}") from exc
+    probe_session = contextlib.AsyncExitStack()
+    try:
+        probe = await probe_session.enter_async_context(connect())
+    except Exception as exc:
+        raise PreflightError(f"cannot reach the stack: {_error(exc)}") from exc
+    try:
         sizings, shape = await _preflight(cfg, probe)
-        stress = Stress(cfg, ledger, sizings, shape)
+        stress = Stress(cfg, ledger, sizings, shape, connect)
         stop = asyncio.Event()
         monitor = asyncio.create_task(stress.monitor(probe, stop))
         deadline = time.monotonic() + cfg.duration_s
@@ -788,9 +802,23 @@ async def run_stress(cfg: Config, connect: Connect, ledger: Ledger) -> None:
         finally:
             stop.set()
             try:
-                await stress.drain(probe)
+                await _drain_on_fresh_session(stress, connect, ledger)
             finally:
                 await monitor
+    finally:
+        try:
+            await probe_session.aclose()
+        except Exception as exc:  # a broken session's teardown must not lose the report
+            ledger.notes.append(f"monitor session teardown failed: {_error(exc)}")
+
+
+async def _drain_on_fresh_session(stress: Stress, connect: Connect, ledger: Ledger) -> None:
+    """Drain on its own session, so one the load broke cannot stop the cleanup."""
+    try:
+        async with connect() as client:
+            await stress.drain(client)
+    except Exception as exc:  # what the drain could not settle stays for invariant 5
+        ledger.notes.append(f"drain session failed: {_error(exc)}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

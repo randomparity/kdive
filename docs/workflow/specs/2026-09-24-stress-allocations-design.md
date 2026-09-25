@@ -52,7 +52,8 @@ brought up by `stack-services.sh` and `onboard.sh`:
     2026-09-25. No other read steers the workload.
   - **Races.** One is picked at random: (a) a double release, where two concurrent releases hit
     one grant; (b) renew racing release; (c) one idempotency key sent from three concurrent
-    requests with identical arguments.
+    requests with identical arguments, each on its own MCP session: the client's and two
+    short-lived ones it opens for the race. A session that fails to open is a report note.
   - **Abandonment.** A request with `on_capacity` `deny` that the client never releases. Either
     the client walks away after the grant (after provisioning it, when the churn rules would
     provision), or it cancels the request in flight after a random 0–50 ms. A cancelled call is
@@ -67,7 +68,7 @@ brought up by `stack-services.sh` and `onboard.sh`:
     there is correct behavior.
   - **Seeding.** Each client draws from `random.Random(f"{seed}:{index}")`. A seed replays each
     client's action sequence. It does not replay the interleaving between clients, and keys differ
-    per run. The calls within a race share one client session, as concurrent MCP requests on it.
+    per run. Races (a) and (b) send concurrent MCP requests on the client's one session.
 - **Monitor.** A separate task calls `resources.availability` every second. It checks each host
   item whose `data.schedulable` is true against `in_use <= cap`. Items with `schedulable` false
   (cordoned, not available, or no valid cap) are skipped.
@@ -79,7 +80,9 @@ brought up by `stack-services.sh` and `onboard.sh`:
   of every keyed call that no reply confirmed: a timeout, transport failure or cancellation, and
   a `tool-error` on a valid call, since a handler can raise after admission has committed. An
   invalid call's `tool-error` is a binding rejection and confirms nothing was created. The drain
-  runs in a `finally` that also covers Ctrl-C. Its deadline starts when it starts and bounds every
+  runs in a `finally` that also covers Ctrl-C, on a session of its own, so a session the load
+  broke cannot stop it. A session whose teardown fails, or a drain session that cannot open, is
+  a report note, never a crash. Its deadline starts when it starts and bounds every
   drain call, each call's timeout included; what the deadline cuts off stays unsettled. Every
   drain call is reported under its own label.
   1. Replay each kept request once with the same key. A replayed `deny` request that is granted
@@ -125,7 +128,9 @@ valid traffic as expected. A grant such a call strands is still held to invarian
 1. a monitor sample shows `in_use > cap` on a schedulable host item;
 2. an invalid-catalog call ends in `ok`, `transport` or `timeout`. The script tracks the id an
    accepted call returns so the drain settles it;
-3. a double-release race does not end with both calls `ok`;
+3. a double-release race where both releases replied does not end with both `ok`. A release
+   that got no reply (`transport`, `timeout`, `tool-error`) is a counted valid-call error, and
+   invariant 5 still covers its allocation;
 4. an idempotency replay, sequential or concurrent, returns an `ok` whose `object_id` differs
    from another `ok` response for the same key;
 5. when the run ends, an allocation the script created is not `released`, `expired` or `failed`,
