@@ -100,6 +100,7 @@ _log = logging.getLogger(__name__)
 
 class _LibvirtDomain(Protocol):
     def create(self) -> int: ...
+    def isActive(self) -> int: ...  # noqa: N802 - mirrors the libvirt binding name
     def destroy(self) -> int: ...
     def undefine(self) -> int: ...
     def undefineFlags(self, flags: int) -> int: ...  # noqa: N802 - mirrors the binding name
@@ -298,7 +299,7 @@ class LocalLibvirtProvisioning:
         # failure reclaims exactly the artifacts whose creation was reached (never a step we never
         # got to, never a pre-existing artifact) — ADR-0435. The uploaded rootfs base is a shared,
         # investigation-owned artifact (ADR-0441) and is deliberately NOT in this per-call reclaim.
-        baseline_created = overlay_created = False
+        baseline_created = overlay_created = started = False
         try:
             gdb_port = self._selected_gdb_port(system_id, profile, selected_gdb_port)
             ssh_port = self._selected_ssh_port(system_id, selected_ssh_port)
@@ -341,9 +342,12 @@ class LocalLibvirtProvisioning:
             if overlay.created:
                 for customize in overlay_customizers:
                     customize(overlay.path)
-            self._files.prepare_console(system_id)
+            started = True
             self._define_and_start(xml, system_id)
         except CategorizedError:
+            if started:
+                # A failed System keeps no domain (ADR-0680): remove it before the file reclaim.
+                self._best_effort_teardown_domain(domain_name_for(system_id))
             self._reclaim_materialized_on_failure(
                 system_id,
                 overlay=overlay_created,
@@ -410,6 +414,17 @@ class LocalLibvirtProvisioning:
         if baseline:
             self._best_effort_reclaim(
                 self._files.remove_baseline_for_domain, domain_name, "baseline directory"
+            )
+
+    def _best_effort_teardown_domain(self, domain_name: str) -> None:
+        try:
+            self._teardown_domain(domain_name)
+        except CategorizedError:
+            _log.warning(
+                "failed to tear down domain %s after a failed provision; leaving it for the "
+                "reconciler/teardown backstop",
+                domain_name,
+                exc_info=True,
             )
 
     @staticmethod
@@ -610,6 +625,13 @@ class LocalLibvirtProvisioning:
         except libvirt.libvirtError as exc:
             raise self._provisioning_failure(system_id) from exc
         try:
+            if self._domain_active(conn, domain_name_for(system_id)):
+                # A retry after a lease reclaim: an earlier attempt of this provision truncated
+                # the console and started this boot, so its log holds the whole boot (ADR-0680).
+                conn.defineXML(xml)
+                _log.info("domain for System %s is already running; waiting on it", system_id)
+                return
+            self._files.prepare_console(system_id)  # ADR-0576: truncate before define+create
             domain = conn.defineXML(xml)
             try:
                 domain.create()
@@ -631,6 +653,15 @@ class LocalLibvirtProvisioning:
             raise self._provisioning_failure(system_id) from exc
         finally:
             _close(conn)
+
+    @staticmethod
+    def _domain_active(conn: _LibvirtConn, name: str) -> bool:
+        try:
+            return bool(conn.lookupByName(name).isActive())
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                return False
+            raise
 
     @staticmethod
     def _provisioning_failure(system_id: UUID) -> CategorizedError:

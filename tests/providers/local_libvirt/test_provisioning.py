@@ -691,6 +691,7 @@ class _ProvDomain:
     undefine_error: int | None = None
     undefine_flags: int | None = None  # flags passed to undefineFlags() at teardown
     xml_desc: str | None = None  # XMLDesc() result; gdbstub port reuse reads it back
+    active: bool = False  # already running before this provision (a lease-reclaimed retry)
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - mirrors the libvirt binding name
         return (
@@ -704,6 +705,9 @@ class _ProvDomain:
             raise libvirt_error(self.create_error)
         self.created = True
         return 0
+
+    def isActive(self) -> int:  # noqa: N802 - mirrors the libvirt binding name
+        return int(self.active or self.created)
 
     def destroy(self) -> int:
         if self.destroy_error is not None:
@@ -790,6 +794,7 @@ def _prov(
     overlay_virtual_size: Callable[[str], int] = lambda _overlay: 1 << 60,
     resize_overlay: Callable[[str, int], None] = lambda _overlay, _gb: None,
     guest_egress: bool = False,
+    prepare_console_log: Callable[[Path], None] = lambda _path: None,
 ) -> LocalLibvirtProvisioning:
     # The overlay seams default to no-ops so the libvirt-only tests never spawn qemu-img; the
     # console-log seam is also a no-op so they never depend on host /var/lib/kdive permissions.
@@ -805,7 +810,7 @@ def _prov(
             remove_baseline=remove_baseline,
             overlay_exists=overlay_exists,
             baseline_exists=baseline_exists,
-            prepare_console_log=lambda _path: None,
+            prepare_console_log=prepare_console_log,
             overlay_virtual_size=overlay_virtual_size,
             resize_overlay=resize_overlay,
         ),
@@ -1143,8 +1148,9 @@ def test_provision_real_create_failure_undefines_domain() -> None:
         _prov(conn).provision(_SYS, _profile())
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert dom.undefined is True  # the defined-but-unstarted domain was cleaned up
-    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + define/start, all closed.
-    assert conn.closed == 3
+    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + define/start + the ADR-0680
+    # domain teardown, all closed.
+    assert conn.closed == 4
 
 
 def test_provision_already_running_domain_does_not_undefine() -> None:
@@ -1155,6 +1161,58 @@ def test_provision_already_running_domain_does_not_undefine() -> None:
     conn = _ProvConn(defined={name: dom})
     _prov(conn).provision(_SYS, _profile())
     assert dom.undefined is False  # kept the running domain
+
+
+# --- retry against a running domain; failure removes the domain (ADR-0680) ------------------
+
+
+def test_provision_active_domain_skips_truncate_and_create() -> None:
+    # A lease-reclaimed retry: an earlier attempt started this boot after its own truncate, so the
+    # console must not be truncated again and the domain must not be re-created.
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, active=True)})
+    truncated: list[Path] = []
+    prov = _prov(conn, prepare_console_log=truncated.append)
+    assert prov.provision(_SYS, _profile()) == name
+    assert truncated == []
+    assert conn.defined[name].created is False
+    assert len(conn.recorded_xml) == 1  # still redefined, as before
+
+
+def test_provision_start_failure_path_tears_domain_down() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, create_error=libvirt.VIR_ERR_INTERNAL_ERROR)})
+    with pytest.raises(CategorizedError):
+        _prov(conn).provision(_SYS, _profile())
+    assert conn.defined[name].undefine_flags is not None  # the teardown's undefineFlags ran
+
+
+def test_provision_console_failure_tears_domain_down() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+
+    def fail(_path: Path) -> None:
+        raise CategorizedError("console", category=ErrorCategory.PROVISIONING_FAILURE)
+
+    with pytest.raises(CategorizedError):
+        _prov(conn, prepare_console_log=fail).provision(_SYS, _profile())
+    assert conn.defined[name].undefine_flags is not None
+
+
+def test_provision_teardown_fault_keeps_original_error() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(
+        defined={
+            name: _ProvDomain(
+                name,
+                create_error=libvirt.VIR_ERR_INTERNAL_ERROR,
+                undefine_error=libvirt.VIR_ERR_INTERNAL_ERROR,
+            )
+        }
+    )
+    with pytest.raises(CategorizedError) as caught:
+        _prov(conn).provision(_SYS, _profile())
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
 
 
 # --- gdbstub port allocation (ADR-0210 §1) -------------------------------------------------
@@ -2060,9 +2118,9 @@ def test_provision_failure_still_closes_connection() -> None:
     conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
     with pytest.raises(CategorizedError):
         _prov(conn).provision(_SYS, _profile())
-    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + the failed define, all closed
-    # even on a libvirt failure.
-    assert conn.closed == 3
+    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + the failed define + the
+    # ADR-0680 domain teardown, all closed even on a libvirt failure.
+    assert conn.closed == 4
 
 
 # --- failure-path host-artifact reclaim (ADR-0435, superseded shared-base arm by ADR-0441) ---
