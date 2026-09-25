@@ -156,6 +156,38 @@ def _job(status: str, *, category: ErrorCategory | None = None) -> ToolResponse:
     )
 
 
+@pytest.mark.parametrize(
+    ("arch", "boot_member"),
+    [("x86_64", "arch/x86/boot/bzImage"), ("ppc64le", "vmlinux")],
+)
+def test_combined_kernel_tar_strips_staged_modules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arch: str, boot_member: str
+) -> None:
+    kernel_src = tmp_path / "kernel-src"
+    boot = kernel_src / boot_member
+    boot.parent.mkdir(parents=True, exist_ok=True)
+    boot.write_bytes(b"built")
+    calls: list[list[str]] = []
+
+    def record(cmd: list[str], *, check: bool) -> None:
+        assert check
+        calls.append(cmd)
+
+    monkeypatch.setattr(spine.subprocess, "run", record)
+    spine.combined_kernel_tar(kernel_src, tmp_path, arch=arch)
+    make_calls = [cmd for cmd in calls if cmd[0] == "make"]
+    assert make_calls == [
+        [
+            "make",
+            "-C",
+            str(kernel_src),
+            "modules_install",
+            f"INSTALL_MOD_PATH={tmp_path / 'modstage'}",
+            "INSTALL_MOD_STRIP=1",
+        ]
+    ]
+
+
 def _system(status: str, *, category: ErrorCategory | None = None) -> ToolResponse:
     return ToolResponse(
         object_id="system-1",
