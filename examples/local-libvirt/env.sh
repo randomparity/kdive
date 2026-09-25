@@ -43,6 +43,20 @@ export KDIVE_MAX_SYS="${KDIVE_MAX_SYS:-4}"
 # the only path that does it. demo-up.sh still reads both: it refuses to run until the
 # lifecycle contract is installed, where the live-stack default (qemu:///system) would stand.
 
+# Where demo-up.sh installs the MCP client config (.mcp.json), kept independent of
+# KDIVE_KERNEL_SRC. The live_vm/live_stack proofs use KDIVE_KERNEL_SRC as their kernel fixture
+# tree, so a demo bring-up that wrote .mcp.json there changed that tree under a proof run
+# (#2760); this variable gives the demo its own agent workspace. Defaults to KDIVE_KERNEL_SRC so
+# unset behavior is unchanged for a developer who has no separate workspace tree. Exported only
+# when it resolves to a non-empty value, same as KDIVE_KERNEL_SRC above: an always-exported empty
+# string would still satisfy demo-up.sh's `-z` check, but would report as "set" rather than
+# unset to a caller inspecting it directly.
+if [[ -n "${KDIVE_DEMO_WORKSPACE:-}" ]]; then
+  export KDIVE_DEMO_WORKSPACE
+elif [[ -n "${KDIVE_KERNEL_SRC:-}" ]]; then
+  export KDIVE_DEMO_WORKSPACE="${KDIVE_KERNEL_SRC}"
+fi
+
 # Session-mode libvirt clients want a runtime dir; an interactive login has one, a bare ssh
 # command or nohup may not (the shape .github/workflows/live.yml uses).
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
