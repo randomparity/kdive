@@ -86,9 +86,6 @@ class Domain:
         self.active = True
         return 0
 
-    def free(self) -> None:
-        self.events.append("domain.close")
-
 
 class Conn:
     def __init__(self, events: list[str], domain: Domain) -> None:

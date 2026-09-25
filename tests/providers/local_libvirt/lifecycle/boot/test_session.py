@@ -17,6 +17,7 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.boot import session as session_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
     TargetProjectionV1,
@@ -268,7 +269,6 @@ def test_authority_teardown_rejects_a_sibling_overlay_attachment(tmp_path: Path)
         )
 
     assert "domain.list:0" in events
-    assert events.count("domain.close") == 2
     assert "connection.close" in events
 
 
@@ -1733,7 +1733,6 @@ def test_cursor_close_racing_session_close_keeps_producer_owned_until_join() -> 
     assert events.count("guest.close") == 1
     assert events.count("artifact.close") == 1
     assert events.count("overlay.close") == 1
-    assert events.count("domain.close") == 1
     assert events.count("connection.close") == 1
     assert events.count("pin.close") == 1
     assert pin_observations == [(True, 1, False)]
@@ -1791,7 +1790,6 @@ def test_guest_close_racing_session_close_keeps_producer_owned_until_join() -> N
     assert events.count("guest.close") == 1
     assert events.count("artifact.close") == 1
     assert events.count("overlay.close") == 1
-    assert events.count("domain.close") == 1
     assert events.count("connection.close") == 1
     assert events.count("pin.close") == 1
     assert pin_observations == [(True, 1, False)]
@@ -2600,11 +2598,9 @@ def test_only_one_guest_context_and_power_start_reject_while_open() -> None:
     with pytest.raises(RuntimeError, match="guest context"):
         session.restore_power("running")
     defines = events.count("domain.define")
-    closes = events.count("domain.close")
     with pytest.raises(RuntimeError, match="guest context"):
         session.define_xml(_xml())
     assert events.count("domain.define") == defines
-    assert events.count("domain.close") == closes
     assert "domain.create" not in events
     first.__exit__(None, None, None)
     with session.guest():
@@ -2619,11 +2615,10 @@ def test_close_poisons_wrappers_and_releases_pin_last() -> None:
     retained = session.guest()
     guest = retained.__enter__()
     session.close()
-    assert events[-5:] == [
+    assert events[-4:] == [
         "guest.shutdown",
         "guest.close",
         "artifact.close",
-        "domain.close",
         "connection.close",
     ]
     lease.release()
@@ -2635,18 +2630,13 @@ def test_close_poisons_wrappers_and_releases_pin_last() -> None:
 def test_close_faults_do_not_skip_cleanup_or_pin_release() -> None:
     events: list[str] = []
 
-    class FaultingDomain(Domain):
-        def free(self) -> None:
-            super().free()
-            raise OSError("domain close")
-
     class FaultingConn(Conn):
         def close(self) -> None:
             super().close()
             raise OSError("connection close")
 
     lease = _lease()
-    domain = FaultingDomain(events)
+    domain = Domain(events)
 
     def fault_overlay_close(_fd: int) -> None:
         events.append("overlay.close")
@@ -2665,13 +2655,8 @@ def test_close_faults_do_not_skip_cleanup_or_pin_release() -> None:
     session = factory.open(lease, _expected())
     with pytest.raises(ExceptionGroup) as raised:
         session.close()
-    assert len(raised.value.exceptions) == 3
-    assert events[-4:] == [
-        "artifact.close",
-        "overlay.close",
-        "domain.close",
-        "connection.close",
-    ]
+    assert len(raised.value.exceptions) == 2
+    assert events[-3:] == ["artifact.close", "overlay.close", "connection.close"]
     lease.release()
 
 
@@ -2722,7 +2707,7 @@ def test_overlay_descriptor_rejects_symlink_and_nonregular_before_guest(mode: in
     with pytest.raises(ValueError, match="regular"):
         factory.open(_lease(), _expected())
     assert "guest.open" not in events
-    assert events[-3:] == ["overlay.close", "domain.close", "connection.close"]
+    assert events[-2:] == ["overlay.close", "connection.close"]
 
 
 def test_guest_attaches_retained_overlay_fd_despite_path_replacement() -> None:
@@ -2773,7 +2758,7 @@ def test_partial_construction_closes_every_acquired_resource_and_pin_last() -> N
     lease = _lease()
     with pytest.raises(ValueError, match="overlay"):
         _factory(events, domain).open(lease, _expected())
-    assert events[-2:] == ["domain.close", "connection.close"]
+    assert events[-1] == "connection.close"
     lease.release()
 
 
@@ -2983,34 +2968,6 @@ def test_artifact_callback_type_is_pin_free_and_cannot_release_lane() -> None:
     lease.release()
 
 
-def test_define_frees_distinct_prior_domain_reference() -> None:
-    events: list[str] = []
-    prior = Domain(events)
-    replacement = Domain(events)
-
-    class ReplacingConn(Conn):
-        def defineXML(self, xml: str) -> Domain:  # noqa: N802
-            self.events.append("domain.define")
-            replacement.xml = xml
-            return replacement
-
-    factory = LocalExternalBootSessionFactory(
-        pin_lease=LANE.pin,
-        connect=lambda: ReplacingConn(events, prior),
-        open_artifact_root=lambda _lease: 41,
-        open_guest=lambda: Guest(events),
-        open_overlay=lambda _path: 40,
-        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
-        close_overlay_descriptor=lambda _fd: None,
-        close_descriptor=lambda _fd: None,
-    )
-    session = factory.open(_lease(), _expected())
-    session.define_xml(_xml())
-    assert events[-2:] == ["domain.define", "domain.close"]
-    session.close()
-    assert events.count("domain.close") == 2
-
-
 def test_guest_and_descriptor_close_faults_still_release_pin_last() -> None:
     events: list[str] = []
 
@@ -3039,7 +2996,7 @@ def test_guest_and_descriptor_close_faults_still_release_pin_last() -> None:
     with pytest.raises(ExceptionGroup) as raised:
         session.close()
     assert len(raised.value.exceptions) == 2
-    assert events[-2:] == ["domain.close", "connection.close"]
+    assert events[-1] == "connection.close"
     lease.release()
 
 
@@ -3084,3 +3041,26 @@ def test_guest_open_failures_preserve_primary_and_cleanup(fault_at: str) -> None
         lease.release()
     session.close()
     lease.release()
+
+
+@pytest.mark.parametrize(
+    ("seam", "binding"),
+    [
+        (session_module._TeardownDomain, libvirt.virDomain),
+        (session_module._Connection, libvirt.virConnect),
+    ],
+)
+def test_session_libvirt_seams_name_only_methods_the_real_binding_has(
+    seam: type, binding: type
+) -> None:
+    # The fakes implement whatever the seam declares, so a method the real binding lacks only
+    # fails on a live host (virDomain has no free(); handles are released by __del__).
+    declared = {
+        name
+        for protocol in seam.__mro__
+        if getattr(protocol, "_is_protocol", False)
+        for name in vars(protocol)
+        if not name.startswith("_")
+    }
+    assert declared
+    assert sorted(name for name in declared if not hasattr(binding, name)) == []

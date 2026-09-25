@@ -135,7 +135,6 @@ class _Domain(RunningDomain, Protocol):
     def isActive(self) -> int: ...  # noqa: N802
     def destroy(self) -> int: ...
     def create(self) -> int: ...
-    def free(self) -> object: ...
 
 
 class _TeardownDomain(_Domain, Protocol):
@@ -984,11 +983,7 @@ class _ConcreteSession:
         self.require_inactive()
         _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         assert self._connection is not None
-        prior = self._domain
-        replacement = self._connection.defineXML(xml)
-        self._domain = replacement
-        if prior is not None and prior is not replacement:
-            prior.free()
+        self._domain = self._connection.defineXML(xml)
 
     def start(self) -> None:
         self._require_no_guest_context()
@@ -1057,7 +1052,7 @@ class _ConcreteSession:
             artifact_fd, self._artifact_fd = self._artifact_fd, None
             readiness_window, self._readiness_window = self._readiness_window, None
             overlay_fd = self._overlay.descriptor
-            domain, self._domain = self._domain, None
+            self._domain = None
             connection, self._connection = self._connection, None
             pin, self._pin = self._pin, None
             for closer in (
@@ -1065,7 +1060,6 @@ class _ConcreteSession:
                 *(lambda fd=fd: self._close_descriptor(fd) for fd in projection_fds),
                 (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
                 lambda: self._close_overlay_descriptor(overlay_fd),
-                domain.free if domain is not None else None,
                 connection.close if connection is not None else None,
                 pin.close if pin is not None else None,
             ):
@@ -1369,7 +1363,6 @@ class LocalExternalBootSessionFactory:
                         else None
                     )
                 ),
-                domain.free if domain is not None else None,
                 connection.close if connection is not None else None,
                 pin.close,
             ):
@@ -1429,42 +1422,32 @@ class _ConcreteSystemTeardownSession:
 
     def inspect(self) -> LocalSystemTeardownInspection:
         domain = self._lookup_owned()
-        try:
-            return LocalSystemTeardownInspection(
-                domain_absent=domain is None,
-                domain_validated=domain is not None,
-                overlay_absent=_path_kind(self._overlay, "regular") == "absent",
-                baseline_absent=_path_kind(self._baseline, "directory") == "absent",
-            )
-        finally:
-            if domain is not None:
-                domain.free()
+        return LocalSystemTeardownInspection(
+            domain_absent=domain is None,
+            domain_validated=domain is not None,
+            overlay_absent=_path_kind(self._overlay, "regular") == "absent",
+            baseline_absent=_path_kind(self._baseline, "directory") == "absent",
+        )
 
     def owned_xml(self) -> tuple[str, str]:
         """Read both exact owned XML views after applying the normal teardown ownership check."""
         domain = self._lookup_owned()
         if domain is None:
             raise ValueError("owned domain is absent")
-        try:
-            inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
-            live = domain.XMLDesc(0)
-            _parse_owned_xml(inactive, self._system_id, self._overlay)
-            _parse_owned_xml(live, self._system_id, self._overlay)
-            return inactive, live
-        finally:
-            domain.free()
+        inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+        live = domain.XMLDesc(0)
+        _parse_owned_xml(inactive, self._system_id, self._overlay)
+        _parse_owned_xml(live, self._system_id, self._overlay)
+        return inactive, live
 
     def destroy(self) -> None:
         domain = self._lookup_owned()
         if domain is None:
             return
-        try:
-            if _active(domain):
-                domain.destroy()
-            if _active(domain):
-                raise RuntimeError("domain remained active after destroy")
-        finally:
-            domain.free()
+        if _active(domain):
+            domain.destroy()
+        if _active(domain):
+            raise RuntimeError("domain remained active after destroy")
 
     def undefine(self) -> None:
         domain = self._lookup_owned()
@@ -1477,8 +1460,6 @@ class _ConcreteSystemTeardownSession:
         except libvirt.libvirtError as exc:
             if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
                 raise
-        finally:
-            domain.free()
 
     def remove_overlay(self) -> None:
         if _path_kind(self._overlay, "regular") == "absent":
@@ -1520,14 +1501,10 @@ class _ConcreteSystemTeardownSession:
                 return None
             raise
         expected_overlay = self._overlay
-        try:
-            _parse_owned_xml(
-                domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), self._system_id, expected_overlay
-            )
-            _parse_owned_xml(domain.XMLDesc(0), self._system_id, expected_overlay)
-        except BaseException:
-            domain.free()
-            raise
+        _parse_owned_xml(
+            domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), self._system_id, expected_overlay
+        )
+        _parse_owned_xml(domain.XMLDesc(0), self._system_id, expected_overlay)
         return domain
 
 
