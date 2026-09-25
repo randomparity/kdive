@@ -12,6 +12,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "operations" / "check-local-libvirt.sh"
 BASH = shutil.which("bash")
 
@@ -557,3 +559,67 @@ def test_unlistable_boot_dir_fails_the_kernel_probe(tmp_path: Path) -> None:
 
     assert result.returncode == 1, result.stdout
     assert "is not readable by this user" in result.stderr, result.stderr
+
+
+def _selinux_env(
+    tmp_path: Path, *, mode: str, rootfs_type: str, install_type: str
+) -> dict[str, str]:
+    """A healthy host whose getenforce reports ``mode`` and whose ``stat -c %C`` reports each
+    image directory's SELinux type (ADR-0640, #2779)."""
+    bindir, py = _healthy_bin(tmp_path)
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    env["KDIVE_ROOTFS_DIR"] = str(rootfs)
+    _stub(bindir, "getenforce", f"echo {mode}")
+    _stub(
+        bindir,
+        "stat",
+        'case "$*" in\n'
+        f'  *" {rootfs}") echo system_u:object_r:{rootfs_type}:s0 ;;\n'
+        f'  *" {env["KDIVE_INSTALL_STAGING"]}") echo system_u:object_r:{install_type}:s0 ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac",
+    )
+    return env
+
+
+def test_enforcing_host_with_svirt_image_labels_passes(tmp_path: Path) -> None:
+    env = _selinux_env(
+        tmp_path, mode="Enforcing", rootfs_type="svirt_image_t", install_type="svirt_image_t"
+    )
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("is labeled svirt_image_t") == 2, result.stderr
+
+
+@pytest.mark.parametrize("mislabeled", ["rootfs", "install"])
+def test_enforcing_host_without_svirt_image_label_fails(tmp_path: Path, mislabeled: str) -> None:
+    """A host prepared without the ADR-0640 rules fails the check, naming the directory (#2779)."""
+    types = {"rootfs": "svirt_image_t", "install": "svirt_image_t", mislabeled: "var_lib_t"}
+    env = _selinux_env(
+        tmp_path, mode="Enforcing", rootfs_type=types["rootfs"], install_type=types["install"]
+    )
+    result = _run(env)
+    directory = env["KDIVE_ROOTFS_DIR" if mislabeled == "rootfs" else "KDIVE_INSTALL_STAGING"]
+    assert result.returncode == 1, result.stderr
+    assert f"FAIL  {directory} is labeled var_lib_t, not svirt_image_t" in result.stderr
+    assert "just prepare-local-libvirt-host" in result.stderr
+
+
+def test_unreadable_label_on_enforcing_host_fails(tmp_path: Path) -> None:
+    env = _selinux_env(
+        tmp_path, mode="Enforcing", rootfs_type="svirt_image_t", install_type="svirt_image_t"
+    )
+    env["KDIVE_ROOTFS_DIR"] = str(tmp_path / "absent-rootfs")
+    result = _run(env)
+    assert result.returncode == 1, result.stderr
+    assert "absent-rootfs is labeled unknown, not svirt_image_t" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["Permissive", "Disabled"])
+def test_non_enforcing_host_skips_the_label_check(tmp_path: Path, mode: str) -> None:
+    env = _selinux_env(tmp_path, mode=mode, rootfs_type="var_lib_t", install_type="var_lib_t")
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "svirt_image_t" not in result.stderr

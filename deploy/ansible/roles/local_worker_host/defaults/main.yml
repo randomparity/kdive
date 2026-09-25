@@ -93,6 +93,15 @@ local_worker_host_packages_redhat:
   - libkdumpfile-devel
   - openssl-devel       # grpcio source build on ppc64le (no wheel, no BoringSSL target, #2666)
   - zlib-devel          # grpcio source build on ppc64le (paired with openssl-devel above, #2666)
+  - policycoreutils-python-utils  # semanage + the seobject bindings sefcontext needs (ADR-0640)
+
+# The two parent image directories this role labels svirt_image_t on an SELinux-enforcing RedHat
+# host (ADR-0640, #2779). The nested /var/lib/kdive/rootfs/local rule belongs to build-image.sh
+# and must not be added here: local fcontext rules match last-wins in file_contexts.local, so a
+# second writer would change which rule wins.
+local_worker_host_svirt_image_directories:
+  - /var/lib/kdive/rootfs
+  - /var/lib/kdive/install
 
 # Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
 # testcontainers gate, split into engine and compose halves because they carry different gates.

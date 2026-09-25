@@ -80,7 +80,7 @@ examples/local-libvirt/demo-up.sh
 
 # 2. Build and register a guest image (once; re-run per extra distro you want to boot).
 #    On an SELinux-enforcing host, build-image.sh labels its resolved workspace before the
-#    customization boot; install-host.sh supplies the semanage prerequisite.
+#    customization boot; step 0's host preparation supplies the semanage prerequisite.
 #    fedora-kdive-ready-44 is the x86_64 catalog entry; on a ppc64le host build
 #    fedora-kdive-ready-44-ppc64le instead (env.sh's KDIVE_GUEST_IMAGE default follows uname -m).
 examples/local-libvirt/build-image.sh fedora-kdive-ready-44

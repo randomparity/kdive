@@ -61,6 +61,72 @@ require(
     "live_vm_host must reuse the same shared uv install task local_worker_host uses",
 )
 
+# ADR-0640: on an SELinux-enforcing RedHat host a confined domain can only write and map images
+# labeled svirt_image_t. This play owns the two parent fcontext rules since install-host.sh became
+# a wrapper around it (#2779); build-image.sh owns the nested rootfs/local rule, and a second
+# writer here would reorder the last-match-wins local rules the ADR measured.
+require(
+    "policycoreutils-python-utils" in uv_defaults["local_worker_host_packages_redhat"],
+    "local_worker_host must install semanage (policycoreutils-python-utils) on the RedHat family",
+)
+role_main = yaml.safe_load((LOCAL_WORKER_HOST / "tasks/main.yml").read_text())
+role_imports = [task.get("ansible.builtin.import_tasks") for task in role_main]
+LABELS = "selinux_image_labels.yml"
+require(
+    LABELS in role_imports
+    and role_imports.index("shared_directories.yml") < role_imports.index(LABELS),
+    "the svirt_image_t labels must be applied after the shared directories exist",
+)
+require(
+    role_main[role_imports.index(LABELS)].get("when") == "ansible_facts['os_family'] == 'RedHat'",
+    "the svirt_image_t labels must be scoped to the RedHat family",
+)
+require(
+    role_imports.index("packages_redhat.yml") < role_imports.index(LABELS),
+    "semanage's Python bindings must be installed before the fcontext rules are written",
+)
+label_tasks = yaml.safe_load((LOCAL_WORKER_HOST / "tasks" / LABELS).read_text())
+label_tasks_by_name = {task["name"]: task for task in label_tasks}
+mode_probe = label_tasks[0]
+require(
+    mode_probe.get("ansible.builtin.command", {}).get("argv") == ["getenforce"]
+    and mode_probe.get("changed_when") is False,
+    "the SELinux mode must be read from getenforce without reporting a change",
+)
+enforcing = "local_worker_host_selinux_mode.stdout | default('') == 'Enforcing'"
+rules = label_tasks_by_name["Install the kdive image svirt_image_t fcontext rules"]
+require(rules.get("when") == enforcing, "the fcontext rules must be guarded on enforcing SELinux")
+require(
+    rules["community.general.sefcontext"]
+    == {
+        "target": "{{ item }}(/.*)?",
+        "setype": "svirt_image_t",
+        "state": "present",
+    },
+    "the fcontext rules must set svirt_image_t on each directory and everything under it",
+)
+require(
+    uv_defaults["local_worker_host_svirt_image_directories"]
+    == ["/var/lib/kdive/rootfs", "/var/lib/kdive/install"],
+    "the play must own exactly the two ADR-0640 parent rules, never the nested rootfs/local rule",
+)
+relabel = label_tasks_by_name["Relabel the kdive image directories"]
+require(relabel.get("when") == enforcing, "the relabel must be guarded on enforcing SELinux")
+require(
+    relabel["ansible.builtin.command"]["argv"] == ["restorecon", "-R", "-v", "{{ item }}"],
+    "the relabel must be a recursive, verbose restorecon without -F (which would strip the MCS "
+    "categories of a running domain's images)",
+)
+require(
+    "Relabeled" in str(relabel.get("changed_when")),
+    "the relabel must report a change only when restorecon relabeled a file",
+)
+require(
+    [task["name"] for task in label_tasks].index(rules["name"])
+    < [task["name"] for task in label_tasks].index(relabel["name"]),
+    "restorecon must run after the fcontext rules are written",
+)
+
 pre_tasks = {task["name"]: task for task in play["pre_tasks"]}
 require(
     "Require the operator account to exist before host mutation" in pre_tasks,
@@ -276,6 +342,7 @@ require(
 )
 
 print(
-    "local-libvirt-host: preflight, localhost role composition, root-resolvable uv, locked live "
-    "sync, DSN stdin, guestfs ABI handling, and the play-scoped system-interpreter pin pass"
+    "local-libvirt-host: preflight, localhost role composition, root-resolvable uv, svirt_image_t "
+    "labels, locked live sync, DSN stdin, guestfs ABI handling, and the play-scoped "
+    "system-interpreter pin pass"
 )
