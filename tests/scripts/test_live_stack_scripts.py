@@ -2191,6 +2191,74 @@ def test_local_libvirt_example_guest_image_override_wins_on_ppc64le(tmp_path: Pa
     assert result.stdout == "/custom/path.qcow2"
 
 
+def test_local_libvirt_example_demo_workspace_defaults_to_kernel_src(tmp_path: Path) -> None:
+    """#2760: with no explicit override, KDIVE_DEMO_WORKSPACE (where demo-up.sh installs
+    .mcp.json) must fall back to KDIVE_KERNEL_SRC, so a developer who has no separate workspace
+    tree sees the unchanged pre-#2760 behavior."""
+    _, staged = _published_contract(tmp_path)
+    kernel_src = tmp_path / "linux"
+    kernel_src.mkdir()
+    staged["KDIVE_KERNEL_SRC"] = str(kernel_src)
+    staged.pop("KDIVE_DEMO_WORKSPACE", None)
+    result = _sourced(
+        ROOT / "examples/local-libvirt/env.sh",
+        'bash -c \'printf "%s" "${KDIVE_DEMO_WORKSPACE-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(kernel_src)
+
+
+def test_local_libvirt_example_demo_workspace_override_wins(tmp_path: Path) -> None:
+    """#2760: an explicit KDIVE_DEMO_WORKSPACE must win over KDIVE_KERNEL_SRC, which is the whole
+    point -- it lets a demo bring-up install .mcp.json somewhere other than a tree a live proof
+    is using as its kernel fixture."""
+    _, staged = _published_contract(tmp_path)
+    kernel_src = tmp_path / "linux"
+    kernel_src.mkdir()
+    workspace = tmp_path / "workspace"
+    staged["KDIVE_KERNEL_SRC"] = str(kernel_src)
+    staged["KDIVE_DEMO_WORKSPACE"] = str(workspace)
+    result = _sourced(
+        ROOT / "examples/local-libvirt/env.sh",
+        'bash -c \'printf "%s" "${KDIVE_DEMO_WORKSPACE-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(workspace)
+
+
+def test_local_libvirt_example_demo_workspace_stays_unset_with_no_kernel_src(
+    tmp_path: Path,
+) -> None:
+    """When KDIVE_KERNEL_SRC itself resolves to nothing (unset and ~/src/linux does not exist),
+    KDIVE_DEMO_WORKSPACE must also stay unset rather than defaulting to an empty string --
+    demo-up.sh's own unset check is what reports the actionable error."""
+    _, staged = _published_contract(tmp_path)
+    staged["HOME"] = str(tmp_path)
+    staged.pop("KDIVE_KERNEL_SRC", None)
+    staged.pop("KDIVE_DEMO_WORKSPACE", None)
+    result = _sourced(
+        ROOT / "examples/local-libvirt/env.sh",
+        'bash -c \'printf "%s" "${KDIVE_DEMO_WORKSPACE-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "unset"
+
+
+def test_demo_up_installs_mcp_json_into_demo_workspace_not_kernel_src() -> None:
+    """#2760: `.mcp.json` must land in KDIVE_DEMO_WORKSPACE, independent of KDIVE_KERNEL_SRC --
+    the same tree the live_vm/live_stack proofs use as their kernel fixture -- so a demo bring-up
+    can no longer add files to a tree a proof run also uses."""
+    text = (ROOT / "examples/local-libvirt/demo-up.sh").read_text()
+    assert (
+        '"${KDIVE_PYTHON}" - "${example_dir}/mcp.json" "${KDIVE_DEMO_WORKSPACE}/.mcp.json"' in text
+    )
+    assert "KDIVE_KERNEL_SRC}/.mcp.json" not in text
+    assert 'if [[ -z "${KDIVE_DEMO_WORKSPACE:-}" ]]; then' in text
+
+
 def test_demo_up_guest_image_hint_names_the_shared_catalog_entry() -> None:
     """The "no guest image yet" hint must reuse env.sh's arch-derived guest_image_name (#2669)
     rather than hardcoding the x86_64 catalog entry, so the build hint and the runtime default
