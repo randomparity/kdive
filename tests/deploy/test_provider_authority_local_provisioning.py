@@ -393,6 +393,7 @@ def test_authority_unit_projects_s3_credentials_and_only_needed_devices() -> Non
         provider_authority_host_fault_proof_enabled=False,
     )
     assert "PrivateDevices=yes" in identity_only
+    assert "ProtectKernelModules=yes" in identity_only
     assert "DeviceAllow=" not in identity_only
     assert "s3-credentials" not in identity_only
     assert "provider-authority/recovery" not in identity_only
@@ -405,6 +406,8 @@ def test_authority_unit_projects_s3_credentials_and_only_needed_devices() -> Non
         provider_authority_host_fault_proof_enabled=True,
     )
     assert "PrivateDevices=no" in mutation
+    # libguestfs builds its appliance from /lib/modules, which ProtectKernelModules hides.
+    assert "ProtectKernelModules=no" in mutation
     assert "DevicePolicy=closed" in mutation
     assert "DeviceAllow=/dev/kvm rw" in mutation
     assert "ReadWritePaths=/var/lib/kdive/provider-authority/recovery" in mutation

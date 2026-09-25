@@ -36,7 +36,8 @@ DevicePolicy=closed
 DeviceAllow=/dev/kvm rw
 {% endif %}
 ProtectControlGroups=yes
-ProtectKernelModules=yes
+# Local mutation opens libguestfs, whose supermin appliance is built from /lib/modules.
+ProtectKernelModules={{ 'no' if provider_authority_host_local_mutation_enabled else 'yes' }}
 ProtectKernelTunables=yes
 ProtectKernelLogs=yes
 RestrictSUIDSGID=yes
