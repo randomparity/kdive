@@ -192,6 +192,6 @@ Steps
 3. Release the allocation. `just lint`, `just type`; collect-only check:
    `uv run python -m pytest tests/integration/test_first_boot_host_keys_live.py --collect-only -q -m live_vm`
    → `1 test collected`. Commit `test(live): prove host keys survive the first runs.boot (#2757)`.
-4. `docs/adr/0030-install-boot-plane.md` §6: append
-   `> **Amended by [ADR-0679](0679-local-libvirt-clean-power-off.md) (#2757):** boot stops a running domain with a bounded clean shutdown; destroy is the fallback.`
-   Commit with the design docs.
+4. `docs/adr/0030-install-boot-plane.md` §6: append one `> **Amended by ADR-0679 (#2757):**`
+   blockquote, linked like the repo's other amendment banners, saying boot stops a running domain
+   with a bounded clean shutdown and `destroy` is the fallback. Committed with the design docs.
