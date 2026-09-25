@@ -2999,6 +2999,40 @@ def test_recovery_from_activation_module_phase_restores_exact_source_before_powe
         assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == "recovered"
 
 
+def _libvirt_reserialized(xml: str) -> str:
+    """libvirt stores a defined domain in its own serialization and <os> child order."""
+    kernel_start = xml.index("<kernel>")
+    kernel_end = xml.index("</kernel>") + len("</kernel>")
+    kernel = xml[kernel_start:kernel_end]
+    reordered = xml[:kernel_start] + xml[kernel_end:]
+    reordered = reordered.replace("</os>", kernel + "</os>")
+    return reordered.replace('"', "'").replace("><", ">\n  <")
+
+
+def test_activation_recognizes_the_target_libvirt_reserialized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ports, metadata, session, _guest, root = _restart_fixture(
+        tmp_path,
+        phase="module-restored",
+        source_present=True,
+    )
+    define = session.define_xml
+    monkeypatch.setattr(
+        session,
+        "define_xml",
+        lambda xml, *, projected=False: define(_libvirt_reserialized(xml), projected=projected),
+    )
+
+    ports.activate(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert session.xml != metadata.target_xml
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == (
+            "target-defined"
+        )
+
+
 def _record_phase_faults(
     monkeypatch: pytest.MonkeyPatch,
     faults: _RestartFaults,

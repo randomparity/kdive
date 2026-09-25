@@ -78,7 +78,9 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.providers.shared.external_boot_bounds import source_byte_limit as _source_byte_limit
 from kdive.providers.shared.libvirt_external_boot import (
+    boot_projection_element_identity,
     parse_projected_domain_xml,
+    preserved_element_identity,
     render_target_xml,
 )
 from kdive.store.objectstore import ObjectStore
@@ -2216,7 +2218,7 @@ class _RealLocalExternalBootOperation:
         inspection = self._session.inspect_closed(projected=True)
         if inspection.xml == metadata.source_xml.encode():
             return "source", inspection.active
-        if inspection.xml == metadata.target_xml.encode():
+        if _same_domain_definition(inspection.xml.decode(), metadata.target_xml):
             return "target", inspection.active
         raise ValueError("external-boot observed domain XML does not match recovery metadata")
 
@@ -2895,6 +2897,19 @@ def _same_authority_generation(left: OpaqueProviderRef, right: OpaqueProviderRef
     Receipts from different phases therefore agree on everything except the final segment.
     """
     return left.ref.rsplit("/", 1)[0] == right.ref.rsplit("/", 1)[0]
+
+
+def _same_domain_definition(observed_xml: str, expected_xml: str) -> bool:
+    """Whether libvirt's readback of a defined domain is the definition kdive rendered.
+
+    libvirt stores a defined domain in its own serialization and <os> child order, so the
+    target is compared by its ADR-0583 preserved and boot-projection identities, not by bytes.
+    """
+    observed = parse_projected_domain_xml(observed_xml)
+    expected = parse_projected_domain_xml(expected_xml)
+    return preserved_element_identity(observed) == preserved_element_identity(
+        expected
+    ) and boot_projection_element_identity(observed) == boot_projection_element_identity(expected)
 
 
 class LocalPreparationReceiptsV1(BaseModel):
