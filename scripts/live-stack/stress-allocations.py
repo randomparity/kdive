@@ -223,7 +223,7 @@ async def invoke(
     except LiveStackToolError as exc:
         return done(TOOL_ERROR, detail=exc.message)
     except Exception as exc:  # every failure other than a tool error is the transport class
-        return done(TRANSPORT, detail=f"{type(exc).__name__}: {exc}")
+        return done(TRANSPORT, detail=_error(exc))
     if not isinstance(result, ToolResponse):
         return done(TRANSPORT, detail="a list where one envelope was expected")
     return done(ENVELOPE if result.error_category else OK, response=result)
@@ -516,7 +516,6 @@ class Stress:
     sizings: list[dict[str, object]]
     shape: str
     connect: Connect
-    draining: bool = False
     drain_deadline: float | None = None
     transport_streak: dict[int, int] = field(default_factory=dict)
 
@@ -536,7 +535,8 @@ class Stress:
         timeout_s = self.cfg.call_timeout_s if limit_s is None else limit_s
         if self.drain_deadline is not None:
             timeout_s = min(timeout_s, self.drain_left())
-        call = await invoke(client, tool, args, timeout_s=timeout_s, drain=self.draining)
+        draining = self.drain_deadline is not None
+        call = await invoke(client, tool, args, timeout_s=timeout_s, drain=draining)
         streak = self.transport_streak.get(id(client), 0) + 1 if call.outcome == TRANSPORT else 0
         self.transport_streak[id(client)] = streak
         if limit_s is not None and call.outcome == TIMEOUT:
@@ -575,10 +575,10 @@ class Stress:
             "idempotency_key": self.key(rng),
         }
 
-    async def client_task(self, connect: Connect, index: int, deadline: float) -> None:
+    async def client_task(self, index: int, deadline: float) -> None:
         rng = random.Random(f"{self.cfg.seed}:{index}")
         try:
-            async with connect() as client:
+            async with self.connect() as client:
                 await self.client_loop(Seat(client, rng), index, deadline)
         except Exception as exc:  # a lost session must not abort the other clients or the drain
             self.ledger.notes.append(f"client {index} lost its session: {_error(exc)}")
@@ -604,8 +604,10 @@ class Stress:
                 await self.churn(seat)
 
     async def churn(self, seat: Seat) -> None:
-        replay = seat.last is not None and seat.rng.random() < 0.25
-        args = seat.last if replay and seat.last is not None else self.request_args(seat.rng)
+        if seat.last is not None and seat.rng.random() < 0.25:
+            args = seat.last  # replay the previous request: same key, same arguments
+        else:
+            args = self.request_args(seat.rng)
         seat.last = args
         grant = await self.call(seat.client, "allocations.request", args)
         self.ledger.note_key(str(args["idempotency_key"]), grant)
@@ -739,7 +741,6 @@ class Stress:
         Every call is bounded by ``--drain-timeout``; what the deadline cuts off stays in the
         ledger and ``finish`` reports it.
         """
-        self.draining = True
         self.drain_deadline = time.monotonic() + self.cfg.drain_timeout_s
         ledger = self.ledger
         lost = list(ledger.lost.values())
@@ -812,7 +813,7 @@ async def run_stress(cfg: Config, connect: Connect, ledger: Ledger) -> None:
         try:
             async with asyncio.TaskGroup() as group:
                 for index in range(cfg.clients):
-                    group.create_task(stress.client_task(connect, index, deadline))
+                    group.create_task(stress.client_task(index, deadline))
         finally:
             stop.set()
             try:
