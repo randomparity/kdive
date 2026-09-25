@@ -95,7 +95,7 @@ def pytest_report_header() -> list[str]:
     """Name the resolved kernel tree and probed app revisions in live proof output."""
     lines = []
     if kernel_src := os.environ.get("KDIVE_KERNEL_SRC"):
-        lines.append(f"live kernel tree: {Path(kernel_src).expanduser().resolve()}")
+        lines.append(f"live kernel tree: {Path(kernel_src).resolve()}")
     base_url = os.environ.get("KDIVE_STACK_BASE_URL")
     if not base_url or skew_policy() is SkewPolicy.OFF:
         return lines

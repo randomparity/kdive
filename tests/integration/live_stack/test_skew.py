@@ -507,6 +507,18 @@ def test_header_names_resolved_kernel_tree(monkeypatch: pytest.MonkeyPatch, tmp_
     assert root_conftest.pytest_report_header() == [f"live kernel tree: {kernel_tree}"]
 
 
+def test_header_keeps_literal_tilde_in_kernel_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("KDIVE_STACK_BASE_URL", raising=False)
+    monkeypatch.chdir(tmp_path)
+    kernel_tree = tmp_path / "~" / "kernel"
+    kernel_tree.mkdir(parents=True)
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "~/kernel")
+
+    assert root_conftest.pytest_report_header() == [f"live kernel tree: {kernel_tree}"]
+
+
 def test_quiet_pytest_names_kernel_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("KDIVE_STACK_BASE_URL", raising=False)
     monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
