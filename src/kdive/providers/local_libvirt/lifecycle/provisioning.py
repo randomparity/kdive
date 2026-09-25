@@ -477,8 +477,8 @@ class LocalLibvirtProvisioning:
             self._teardown_domain(domain_name)
         except CategorizedError:
             _log.warning(
-                "failed to tear down domain %s after a failed provision; leaving it for the "
-                "reconciler/teardown backstop",
+                "failed to tear down domain %s after a failed provision; the failed System's "
+                "systems.teardown or Allocation release reclaims it",
                 domain_name,
                 exc_info=True,
             )

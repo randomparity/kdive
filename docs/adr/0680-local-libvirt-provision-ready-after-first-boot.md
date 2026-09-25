@@ -67,6 +67,10 @@ gap is the job lane only.
 - A local rootfs whose image has no `kdive-ready` unit, or a profile whose guest cannot reach it
   (too little memory, a broken first boot), now fails provision after the window instead of
   reaching `ready` and failing at its first `runs.boot`. Every kdive-built image carries the unit.
+- The first boot is now scanned with the `runs.boot` crash-signature set, so a pre-marker stall or
+  soft-lockup report (plausible under TCG) fails provision. A guest that reboots during its first
+  boot (an SELinux autorelabel on an image that was not relabelled at customization) stops under
+  `<on_reboot>destroy</on_reboot>` and now fails provision instead of reaching `ready` shut off.
 - The authority lane's `boot_ready` window is not TCG-scaled; this ADR does not change it.
 - `systems.check_ssh_reachable` keeps its note that sshd may bind a moment after `ready`: the
   marker is not ordered after `sshd.service`.

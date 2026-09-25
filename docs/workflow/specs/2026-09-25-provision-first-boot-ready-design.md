@@ -100,8 +100,9 @@ interrupt it. `reprovision` calls `provision` and has the same gap.
    - A domain started between the active check and `create()` by another actor keeps a
      truncated console and can false-timeout. Not reachable in the named deployment: one job
      holds the System and ADR-0576 already refuses a foreign out-of-band start.
-   - The best-effort domain teardown can itself fail; the domain then waits for the reconciler
-     or `systems.teardown`, as an overlay does today (ADR-0435).
+   - The best-effort domain teardown can itself fail; the domain then waits for
+     `systems.teardown` or the Allocation release. The reconciler's leaked-domain sweep skips a
+     domain whose System row is `failed`, so it is not a backstop here.
    - A retry whose earlier attempt already failed readiness and destroyed the domain starts a
      fresh boot; the handler has already recorded the System `failed`, so that retry exits early.
 4. **Covered elsewhere**
