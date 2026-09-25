@@ -719,6 +719,35 @@ test-only non-libvirt implementation consumes the shared value types and returns
 it proves the boundary contains no libvirt type without claiming that the shape is sufficient for
 HTTP/iPXE.
 
+### Amendment (2026-09-25): a plan without an initrd names the provider's whole-disk root (#2785)
+
+This amendment qualifies the Decision's claim that "the sole root token equals ASCII `root=`
+concatenated with `root.root`". A live boot through the installed local authority on ppc64le showed
+that this claim holds only when an initrd is present. Stage inspection records the root as a
+filesystem `UUID=`. The kernel resolves `root=` by device name, device number, `PARTUUID=`, or
+`PARTLABEL=` only (`block/early-lookup.c`, `early_lookup_bdev`), so only initramfs userspace can
+resolve a filesystem `UUID=`. The local rootfs is a whole-disk ext4 image with no partition table
+(ADR-0030, ADR-0183), so it also has no `PARTUUID=`. As a result, a local plan with no initrd
+panicked with `VFS: Unable to mount root fs on unknown-block(0,0)`.
+
+The rule becomes:
+
+- A plan with an initrd keeps the inspected root token. The initrd resolves it.
+- A plan with no initrd, for a provider that owns a whole-disk root device
+  (`ProviderRuntime.platform_root_cmdline`), puts `root=` plus that device in place of the
+  inspected root token inside `root.arguments`. The other root arguments, such as `rootfstype=`,
+  and their order stay the same. `root` itself keeps the inspected facts, so the plan still binds
+  the provenance identity. The plan contract accepts this form only when `initrd` is null and the
+  value is a single `/dev/<name>` whole-disk device name.
+- A provider that owns no root device (remote-libvirt) keeps the inspected token in every plan.
+
+Local-libvirt accepts only its own device, `/dev/vda`. The target projection records the inspected
+filesystem UUID. Before prepare captures the recovery point, the provider examines the System disk
+with libguestfs and requires that the inspected root is the whole disk and that its filesystem UUID
+is the recorded one. Otherwise preparation fails and names the recovery action: supply an initrd
+with the build, or use a whole-disk rootfs. Catalog provenance and the root specification schema do
+not change.
+
 ## Consequences
 
 - External Run boot has one artifact-pair and command-line meaning across providers. Remote initial
