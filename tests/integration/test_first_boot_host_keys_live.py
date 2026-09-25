@@ -1,4 +1,4 @@
-"""Operator-run regression proof: a System's first-boot host keys survive `runs.boot` (#2757).
+"""Operator-run check: a System's first-boot host keys survive an immediate `runs.boot` (#2757).
 
 ``live_vm``-gated, with the same prerequisites as ``test_console_parts_live.py``: the live stack
 (KDIVE_STACK_BASE_URL, KDIVE_OIDC_ISSUER, KDIVE_DATABASE_URL), a local KVM host, a kdive-ready
@@ -10,6 +10,10 @@ those writes were still in the guest page cache: the keys survived as 0-byte fil
 survived intact, and sshd never started again. This test provisions, installs a `console`-method
 Run and boots it with no wait in between, then requires sshd to answer over the loopback forward
 and every ``/etc/ssh/ssh_host_*`` file to be non-empty.
+
+On an x86_64 KVM host this is a smoke test, not a demonstrated regression test: the same test
+passed 3 of 3 on the pre-ADR-0679 code there, because the kernel upload between `ready` and
+`runs.boot` gives the guest time to flush. The failure was reproduced on native POWER.
 """
 
 from __future__ import annotations
