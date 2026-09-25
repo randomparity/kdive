@@ -123,7 +123,7 @@ def _call(tool: str, outcome: str, response: ToolResponse | None = None, **args:
 
 def test_ledger_records_violations_and_settles_objects() -> None:
     ledger = stress.Ledger()
-    ledger.lost["k1"] = ("allocations.request", {"idempotency_key": "k1"})
+    ledger.lost["k1"] = ("allocations.request", {"idempotency_key": "k1"}, False)
     granted = ToolResponse.success("a1", "granted")
     ledger.record(_call("allocations.request", "ok", granted, idempotency_key="k1"))
     deny = {"on_capacity": "deny"}
@@ -142,8 +142,12 @@ def test_ledger_records_violations_and_settles_objects() -> None:
     provision = ToolResponse.success("j1", "running", data={"system_id": "s1"})
     ledger.record(_call("systems.provision", "ok", provision))
     ledger.record(_call("allocations.release", "timeout", allocation_id="a1"))
-    ledger.record(_call("allocations.request", "tool-error"))
-    ledger.record(_call("allocations.request", "tool-error"), invalid=True)
+    ledger.lost["k2"] = ("allocations.request", {"idempotency_key": "k2"}, False)
+    ledger.lost["k3"] = ("allocations.request", {"idempotency_key": "k3"}, True)
+    ledger.record(_call("allocations.request", "tool-error", idempotency_key="k2"))
+    ledger.record(_call("allocations.request", "tool-error", idempotency_key="k3"), invalid=True)
+    assert list(ledger.lost) == ["k2"], "only an invalid call's tool-error confirms its key"
+    del ledger.lost["k2"]
     ledger.record(_call("allocations.renew", "timeout"), invalid=True)
     assert ledger.valid_errors == {"timeout": 1, "tool-error": 1}
     assert (ledger.owned, ledger.abandoned, ledger.systems) == ({"a1"}, {"a2"}, {"s1"})
@@ -210,7 +214,8 @@ def test_parse_config_defaults(tmp_path: Path) -> None:
     profile.write_text(json.dumps(_PROFILE), encoding="utf-8")
     first = stress.parse_config(["--provision-profile", str(profile), "--seed", "7"])
     second = stress.parse_config(["--seed", "7"])
-    assert first.profile == _PROFILE
+    sizing = {"vcpu", "memory_mb", "disk_gb"}
+    assert first.profile == {k: v for k, v in _PROFILE.items() if k not in sizing}
     assert (first.project, first.clients, first.lease_h, first.seed) == ("demo", 8, 0.02, 7)
     assert first.run_id != second.run_id, "a re-run of a seed must not reuse its keys"
     assert isinstance(stress.parse_config([]).seed, int)
@@ -256,6 +261,8 @@ def test_report_counts_and_renders(capsys: pytest.CaptureFixture[str]) -> None:
     assert "warning: no allocation was granted" not in printed
     assert stress.finish(_config(), stress.Ledger(), elapsed_s=0, interrupted=True) == 130
     assert "warning: no allocation was granted" in capsys.readouterr().out
+    stress.finish(_config(profile={"x": 1}), stress.Ledger(), elapsed_s=0, interrupted=False)
+    assert "no systems.provision succeeded" in capsys.readouterr().out
 
 
 # --- Task 2: the driver against an in-memory fake stack ---------------------------------------
@@ -294,6 +301,7 @@ class FakeStack:
         self.systems: dict[str, str] = {}
         self.tearing_down: set[str] = set()
         self.counter = 0
+        self.requests: list[dict[str, Any]] = []
 
     def connect(self) -> FakeClient:
         return FakeClient(self)
@@ -358,6 +366,7 @@ class FakeStack:
         )
 
     def _request(self, args: dict[str, Any]) -> ToolResponse:
+        self.requests.append(args)
         accept = self.defect == "accept_invalid"
         binding_error = (
             "project" not in args
@@ -427,6 +436,9 @@ class FakeStack:
             return self.provisions[key]
         if self.states.get(alloc) != "granted":
             return ToolResponse.failure(alloc, ErrorCategory.STALE_HANDLE)
+        small = {"vcpu": 1, "memory_mb": 1024, "disk_gb": 10}  # every fake grant is `small`
+        if any(args["profile"].get(name, size) != size for name, size in small.items()):
+            return ToolResponse.failure(alloc, ErrorCategory.CONFIGURATION_ERROR)
         self.states[alloc] = "active"
         system = self._new_id()
         self.systems[system] = alloc
@@ -483,8 +495,13 @@ def _settled(stack: FakeStack) -> bool:
     return all(state in ("released", "expired") for state in stack.states.values())
 
 
-@pytest.mark.parametrize("profile", [None, _PROFILE])
-def test_clean_stack_exits_zero(profile: dict[str, Any] | None) -> None:
+@pytest.mark.parametrize("provision", [False, True])
+def test_clean_stack_exits_zero(provision: bool, tmp_path: Path) -> None:
+    profile = None
+    if provision:  # through parse_config, as the operator's file would go
+        path = tmp_path / "profile.json"
+        path.write_text(json.dumps(_PROFILE), encoding="utf-8")
+        profile = stress.parse_config(["--provision-profile", str(path)]).profile
     stack = FakeStack()
     code, ledger = _run(stack, _config(profile=profile))
     assert ledger.violations == []
@@ -495,6 +512,8 @@ def test_clean_stack_exits_zero(profile: dict[str, Any] | None) -> None:
     assert ledger.invalid, "the invalid catalog was never exercised"
     assert "abandoned" in outcomes or "expired" in stack.states.values(), "nothing was abandoned"
     assert _settled(stack)
+    assert all("idempotency_key" in args for args in stack.requests)
+    assert all("window" in args for args in stack.requests), "a request without a lease"
     if profile is not None:
         assert stack.systems, "no System was provisioned"
 
@@ -565,6 +584,21 @@ def test_cancel_during_drain_reports_leftovers(capsys: pytest.CaptureFixture[str
     assert stress.finish(cfg, ledger, elapsed_s=0.1, interrupted=True) == 130
     assert any("not reclaimed by lease expiry" in v for v in ledger.violations)
     assert "(interrupted)" in capsys.readouterr().out
+
+
+def test_drain_stops_at_its_deadline() -> None:
+    async def hang() -> ToolResponse:
+        await asyncio.sleep(30)
+        return ToolResponse.success("a", "released")
+
+    cfg = _config(call_timeout_s=5.0, drain_timeout_s=0.3)
+    ledger = stress.Ledger()
+    ledger.owned.update({"a1", "a2", "a3"})
+    ledger.lost["k"] = ("allocations.request", {"idempotency_key": "k"}, False)
+    started = time.monotonic()
+    asyncio.run(stress.Stress(cfg, ledger, [], "small").drain(_Stub(hang)))
+    assert time.monotonic() - started < 1.0
+    assert len(ledger.leftovers()) == 4
 
 
 @pytest.mark.parametrize(

@@ -425,8 +425,9 @@ Before you run it:
   report still lists what was left, and short-lease grants still expire. A `kill -9` skips the
   drain entirely.
 - **`--provision-profile` needs the stack with libvirt** and a provisionable profile. Start from
-  `systems.profile_examples` and replace its placeholder image. Each client keeps at most one
-  System in flight.
+  `systems.profile_examples` and replace its placeholder image. The script drops the profile's
+  `vcpu`, `memory_mb` and `disk_gb`, which the server fills from each allocation, and the report
+  warns if no provision succeeded. Each client keeps at most one System in flight.
 - **Do not change host caps mid-run.** The monitor compares `in_use` with the cap it reads at
   that moment, so a cap lowered under load reports a false violation.
 

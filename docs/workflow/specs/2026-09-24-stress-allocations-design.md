@@ -31,7 +31,8 @@ brought up by `stack-services.sh` and `onboard.sh`:
   expire and be swept within it. With `--provision-profile` the floor adds 240 s, because a
   System is torn down by a worker job the reconciler enqueues after its allocation ends.
 - **Keys and leases.** Every `allocations.request` and `systems.provision` carries an idempotency
-  key, and every request carries `window` = `--lease`. A key is
+  key, and every request carries `window` = `--lease`, invalid-catalog requests included (only
+  the entry that corrupts `window` differs), so a wrongly accepted grant is still settled. A key is
   `stress-<run id>-<uuid from the client RNG>`. The run id is a fresh random value per run,
   printed beside the seed, because the server keeps keys per principal for 7 days and a re-run
   of a seed must not replay the previous run's grants.
@@ -75,8 +76,11 @@ brought up by `stack-services.sh` and `onboard.sh`:
   script exits 2 with the reason.
 - **Drain.** The script tracks three sets: allocations it owns (granted and not yet released),
   allocations left to lease expiry (abandoned), and Systems. It also keeps the key and arguments
-  of every keyed call whose reply never arrived (timeout, transport, cancellation). The drain
-  runs in a `finally` that also covers Ctrl-C. Its deadline starts when it starts, and every
+  of every keyed call that no reply confirmed: a timeout, transport failure or cancellation, and
+  a `tool-error` on a valid call, since a handler can raise after admission has committed. An
+  invalid call's `tool-error` is a binding rejection and confirms nothing was created. The drain
+  runs in a `finally` that also covers Ctrl-C. Its deadline starts when it starts and bounds every
+  drain call, each call's timeout included; what the deadline cuts off stays unsettled. Every
   drain call is reported under its own label.
   1. Replay each kept request once with the same key. A replayed `deny` request that is granted
      joins the abandoned set, since only it carries the short lease. Every other replayed grant
@@ -102,7 +106,10 @@ brought up by `stack-services.sh` and `onboard.sh`:
 - **Invalid-call bucket.** The report adds per-entry outcome counts for the invalid catalog, so
   envelope rejections and tool-error rejections are listed apart from the valid workload.
 - **Profile.** `--provision-profile` is validated with
-  `kdive.profiles.provisioning.ProvisioningProfile` before any load; an invalid file exits 2.
+  `kdive.profiles.provisioning.ProvisioningProfile` before any load; an invalid file exits 2. The
+  script drops `vcpu`, `memory_mb` and `disk_gb` from it: the server fills sizing from each
+  allocation and rejects a restated size that differs, and the run's grants come in several
+  sizes. The report warns when the flag is set and no `systems.provision` succeeded.
 
 **Outcome classes.** Every call is exactly one of `ok` (no error category), `envelope-failure`
 (`error_category` set), `tool-error` (`LiveStackToolError`, which is an MCP `is_error` result),

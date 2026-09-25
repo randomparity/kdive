@@ -55,6 +55,7 @@ SWEEP_MARGIN_S = 60.0
 # A System is torn down by a worker job the reconciler enqueues after its allocation ends.
 TEARDOWN_ALLOWANCE_S = 240.0
 _DETAIL_LIMIT = 200
+_SIZING_FIELDS = frozenset({"vcpu", "memory_mb", "disk_gb"})
 
 
 class Caller(Protocol):
@@ -116,10 +117,11 @@ class Ledger:
     owned: set[str] = field(default_factory=set)
     abandoned: set[str] = field(default_factory=set)
     systems: set[str] = field(default_factory=set)
-    lost: dict[str, tuple[str, dict[str, object]]] = field(default_factory=dict)
+    lost: dict[str, tuple[str, dict[str, object], bool]] = field(default_factory=dict)
     key_ids: dict[str, str] = field(default_factory=dict)
     invalid: defaultdict[str, Counter[str]] = field(default_factory=lambda: defaultdict(Counter))
     granted: int = 0
+    provisioned: int = 0
     valid_errors: Counter[str] = field(default_factory=Counter)
     notes: list[str] = field(default_factory=list)
 
@@ -132,8 +134,11 @@ class Ledger:
             self.violate(2, f"invalid call to {call.tool} got {call.outcome}: {call.detail}")
         elif not invalid and call.outcome in (TRANSPORT, TIMEOUT, TOOL_ERROR):
             self.valid_errors[call.outcome] += 1  # counted; a stranded grant is invariant 5's
+        # A valid call's tool-error may follow a commit (the handler raised after admission), so
+        # its key stays for the drain to replay; an invalid call's tool-error is a binding reject.
+        confirmed = call.outcome in (OK, ENVELOPE) or (invalid and call.outcome == TOOL_ERROR)
         key = call.args.get("idempotency_key")
-        if isinstance(key, str) and call.outcome in (OK, ENVELOPE, TOOL_ERROR):
+        if isinstance(key, str) and confirmed:
             self.lost.pop(key, None)
         if call.response is not None:
             self._track(call, abandon=abandon)
@@ -152,6 +157,8 @@ class Ledger:
             system_id = call.response.data.get("system_id")
             if isinstance(system_id, str):
                 self.systems.add(system_id)
+            if not call.drain:
+                self.provisioned += 1
         elif call.tool in ("allocations.release", "allocations.wait"):
             if state in TERMINAL_ALLOCATION:
                 self.owned.discard(str(call.args.get("allocation_id")))
@@ -176,8 +183,8 @@ class Ledger:
             ),
             *(f"system {system} was not torn down" for system in sorted(self.systems)),
             *(
-                f"{tool} with key {key} got no reply, even on replay"
-                for key, (tool, _) in sorted(self.lost.items())
+                f"{tool} with key {key} was never confirmed, even on replay"
+                for key, (tool, _, _) in sorted(self.lost.items())
             ),
         ]
 
@@ -253,6 +260,8 @@ def build_report(
         "interrupted": interrupted,
         "calls": len(ledger.calls),
         "granted": ledger.granted,
+        "provisioning": cfg.profile is not None,
+        "provisioned": ledger.provisioned,
         "valid_call_errors": dict(sorted(ledger.valid_errors.items())),
         "notes": list(ledger.notes),
         "tools": tools,
@@ -276,6 +285,8 @@ def render_report(report: dict[str, Any]) -> str:
     lines = [head + ("  (interrupted)" if report["interrupted"] else "")]
     if report["granted"] == 0:
         lines.append("warning: no allocation was granted, so most invariants were not exercised")
+    if report["provisioning"] and report["provisioned"] == 0:
+        lines.append("warning: --provision-profile was set but no systems.provision succeeded")
     lines.append(f"{'tool':<36} {'p50ms':>8} {'p95ms':>8} {'maxms':>8}  outcomes")
     for label, row in report["tools"].items():
         timings = f"{row['p50_ms']:>8} {row['p95_ms']:>8} {row['max_ms']:>8}"
@@ -303,7 +314,9 @@ def _load_profile(parser: argparse.ArgumentParser, path: Path | None) -> dict[st
         ProvisioningProfile.model_validate(profile)
     except (OSError, ValueError) as exc:  # pydantic's ValidationError is a ValueError
         parser.error(f"--provision-profile {path}: {exc}")
-    return profile
+    # The server fills sizing from each allocation and rejects a restated size that differs, and
+    # the script's grants come in several sizes, so the profile never restates one.
+    return {name: value for name, value in profile.items() if name not in _SIZING_FIELDS}
 
 
 def parse_config(argv: Sequence[str] | None = None) -> Config:
@@ -496,6 +509,7 @@ class Stress:
     sizings: list[dict[str, object]]
     shape: str
     draining: bool = False
+    drain_deadline: float | None = None
 
     async def call(
         self,
@@ -508,14 +522,35 @@ class Stress:
         limit_s: float | None = None,
     ) -> Call:
         key = args.get("idempotency_key")
-        if isinstance(key, str):  # kept until a reply arrives, so the drain can replay it
-            self.ledger.lost[key] = (tool, args)
+        if isinstance(key, str):  # kept until a reply confirms it, so the drain can replay it
+            self.ledger.lost[key] = (tool, args, invalid)
         timeout_s = self.cfg.call_timeout_s if limit_s is None else limit_s
+        if self.drain_deadline is not None:
+            timeout_s = min(timeout_s, self.drain_left())
         call = await invoke(client, tool, args, timeout_s=timeout_s, drain=self.draining)
         if limit_s is not None and call.outcome == TIMEOUT:
             call = dataclasses.replace(call, outcome=ABANDONED)
         self.ledger.record(call, invalid=invalid, abandon=abandon)
         return call
+
+    def drain_left(self) -> float:
+        assert self.drain_deadline is not None
+        return max(self.drain_deadline - time.monotonic(), 0.0)
+
+    async def drain_call(
+        self,
+        client: Caller,
+        tool: str,
+        args: dict[str, object],
+        *,
+        invalid: bool = False,
+        abandon: bool = False,
+    ) -> bool:
+        """Make one drain call inside the deadline; False once the deadline has passed."""
+        if self.drain_left() <= 0:
+            return False
+        await self.call(client, tool, args, invalid=invalid, abandon=abandon)
+        return True
 
     def key(self, rng: random.Random) -> str:
         return f"stress-{self.cfg.run_id}-{uuid.UUID(int=rng.getrandbits(128))}"
@@ -647,6 +682,9 @@ class Stress:
                 return
             target = grant.response.object_id
         args = entry.args(self.cfg.project, self.shape, target)
+        if entry.tool == "allocations.request":  # so a wrongly accepted grant is still settled
+            lease = {"window": self.cfg.lease_h, "idempotency_key": self.key(seat.rng)}
+            args = {**lease, **args}
         call = await self.call(seat.client, entry.tool, args, invalid=True)
         self.ledger.invalid[entry.name][call.outcome] += 1
         if call.outcome == OK:
@@ -671,32 +709,45 @@ class Stress:
             self.ledger.violate(1, f"host {host.object_id} in_use {in_use} > cap {cap}")
 
     async def drain(self, client: Caller) -> None:
-        """Replay lost calls, release what the run owns, and wait for the rest to settle."""
+        """Replay lost calls, release what the run owns, and wait for the rest to settle.
+
+        Every call is bounded by ``--drain-timeout``; what the deadline cuts off stays in the
+        ledger and ``finish`` reports it.
+        """
         self.draining = True
+        self.drain_deadline = time.monotonic() + self.cfg.drain_timeout_s
         ledger = self.ledger
-        deadline = time.monotonic() + self.cfg.drain_timeout_s
         lost = list(ledger.lost.values())
-        for tool, args in lost:
-            if tool == "allocations.request":
-                await self.call(client, tool, args, abandon=True)
-        for alloc in sorted(ledger.owned):  # before any provision replay can mint a new System
-            await self.call(client, "allocations.release", {"allocation_id": alloc})
-        for tool, args in lost:
+        for tool, args, invalid in lost:
             if tool != "allocations.request":
-                await self.call(client, tool, args)
-        while True:
-            for alloc in sorted(ledger.owned):
-                await self.call(client, "allocations.release", {"allocation_id": alloc})
-            for alloc in sorted(ledger.abandoned):
-                wait: dict[str, object] = {"allocation_id": alloc, "timeout_s": 0}
-                await self.call(client, "allocations.wait", wait)
-            for system in sorted(ledger.systems):
-                await self.call(client, "systems.get", {"system_id": system})
-            if not (ledger.owned or ledger.abandoned or ledger.systems):
+                continue
+            if not await self.drain_call(client, tool, args, invalid=invalid, abandon=True):
                 return
-            if time.monotonic() >= deadline:
+        for alloc in sorted(ledger.owned):  # before any provision replay can mint a new System
+            if not await self.drain_call(client, "allocations.release", {"allocation_id": alloc}):
                 return
-            await asyncio.sleep(DRAIN_POLL_S)
+        for tool, args, invalid in lost:
+            if tool == "allocations.request":
+                continue
+            if not await self.drain_call(client, tool, args, invalid=invalid):
+                return
+        while await self.poll_pass(client) and self.drain_left() > 0:
+            await asyncio.sleep(min(DRAIN_POLL_S, self.drain_left()))
+
+    async def poll_pass(self, client: Caller) -> bool:
+        """Re-release, re-read and re-check once; True while something is left to settle."""
+        ledger = self.ledger
+        for alloc in sorted(ledger.owned):
+            if not await self.drain_call(client, "allocations.release", {"allocation_id": alloc}):
+                return False
+        for alloc in sorted(ledger.abandoned):
+            wait: dict[str, object] = {"allocation_id": alloc, "timeout_s": 0}
+            if not await self.drain_call(client, "allocations.wait", wait):
+                return False
+        for system in sorted(ledger.systems):
+            if not await self.drain_call(client, "systems.get", {"system_id": system}):
+                return False
+        return bool(ledger.owned or ledger.abandoned or ledger.systems)
 
 
 async def _preflight(cfg: Config, probe: Caller) -> tuple[list[dict[str, object]], str]:
