@@ -31,6 +31,7 @@ import json
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -45,7 +46,8 @@ from kdive.mcp.dev_harness import (
     OidcIssuer,
 )
 from kdive.mcp.responses import ToolResponse
-from kdive.profiles.provisioning import reconcile_profile_sizing
+from kdive.profiles.provisioning import ProvisioningProfile, reconcile_profile_sizing
+from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from tests.integration.live_stack.conftest import (
     expected_accel,
     require_guest_arch,
@@ -190,13 +192,13 @@ def _token(issuer: OidcIssuer, *, role: str, platform_roles: list[str] | None = 
     )
 
 
-def _provision_profile(arch: str) -> dict[str, object]:
+def _provision_profile(arch: str, *, gdbstub: bool = False) -> dict[str, object]:
     """A provisioning profile that opts force_crash in (the gate's profile factor, ADR-0045).
 
     ``arch`` is the native guest arch (``require_native_guest_arch``); the kernel tree and image
     are that arch's, and ``crashkernel`` is its trait default (#2694).
     """
-    return {
+    profile: dict[str, object] = {
         "schema_version": 1,
         "arch": arch,
         "vcpu": 2,
@@ -212,6 +214,26 @@ def _provision_profile(arch: str) -> dict[str, object]:
             }
         },
     }
+    if gdbstub:
+        provider = cast(dict[str, dict[str, object]], profile["provider"])
+        provider["local-libvirt"]["debug"] = {"gdbstub": True}
+    return profile
+
+
+_SPINE_PC_REGISTER = {"x86_64": "rip", "ppc64le": "nip"}
+_SPINE_GDBSTUB_GAP = "attach skipped: ppc64le gdbstub support tracked by #2736"
+
+
+@pytest.mark.parametrize("arch, register", [("x86_64", "rip"), ("ppc64le", "nip")])
+def test_spine_gdbstub_profile_and_register(
+    monkeypatch: pytest.MonkeyPatch, arch: str, register: str
+) -> None:
+    monkeypatch.setenv(_KERNEL_TREE_ENV, "/nonexistent/kernel-src")
+    monkeypatch.setenv(_GUEST_IMAGE_ENV, "/nonexistent/guest-image.qcow2")
+    profile = _provision_profile(arch, gdbstub=arch == "x86_64")
+    parsed = ProvisioningProfile.parse(profile)
+    assert LocalLibvirtProfilePolicy().gdbstub_provisioned(parsed) is (arch == "x86_64")
+    assert _SPINE_PC_REGISTER[arch] == register
 
 
 def _live_script_provision_profile(arch: str) -> dict[str, object]:
@@ -377,7 +399,9 @@ def test_report_all_projects_denied_to_project_token() -> None:
 
 
 @pytest.mark.live_stack
-def test_spine_over_the_wire() -> None:
+def test_spine_over_the_wire(
+    record_testsuite_property: Callable[[str, object], None],
+) -> None:
     """Drive allocate → … → teardown over HTTP; assert #1/#2/#3/#5; name the failing phase."""
     issuer, base_url, db_url = _spine_preflight()
     arch = require_native_guest_arch()
@@ -420,7 +444,7 @@ def test_spine_over_the_wire() -> None:
                             op,
                             "systems.provision",
                             allocation_id=allocation_id,
-                            profile=_provision_profile(arch),
+                            profile=_provision_profile(arch, gdbstub=arch == "x86_64"),
                         ),
                         "provision",
                     )
@@ -449,25 +473,40 @@ def test_spine_over_the_wire() -> None:
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
+                    # Every arch needs vmlinux: introspect.from_vmcore resolves debuginfo from it.
                     await build_and_upload_kernel(
-                        op, run_id=run_id, arch=arch, root_fs="ext4", require_kdump=True
+                        op,
+                        run_id=run_id,
+                        arch=arch,
+                        with_vmlinux=True,
+                        root_fs="ext4",
+                        require_kdump=True,
                     )
                 for step in ("install", "boot"):
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
                         await drain_job(op, step, env.object_id)
-                async with phase("attach"):
-                    env = ok(
-                        await scalar(op, "debug.start_session", run_id=run_id, transport="gdbstub"),
-                        "attach",
-                    )
-                    session_id = env.object_id
-                    ok(
-                        await scalar(
-                            op, "debug.read_registers", session_id=session_id, registers=["rip"]
-                        ),
-                        "attach",
-                    )
+                if arch == "x86_64":
+                    async with phase("attach"):
+                        env = ok(
+                            await scalar(
+                                op, "debug.start_session", run_id=run_id, transport="gdbstub"
+                            ),
+                            "attach",
+                        )
+                        session_id = env.object_id
+                        ok(
+                            await scalar(
+                                op,
+                                "debug.read_registers",
+                                session_id=session_id,
+                                registers=[_SPINE_PC_REGISTER[arch]],
+                            ),
+                            "attach",
+                        )
+                        ok(await scalar(op, "debug.end_session", session_id=session_id), "attach")
+                else:
+                    record_testsuite_property("spine_attach", _SPINE_GDBSTUB_GAP)
                 async with phase("crash-rbac-negative"):
                     denied = await scalar(op, "control.force_crash", system_id=system_id)
                     if denied.status != "error" or denied.error_category != "authorization_denied":
