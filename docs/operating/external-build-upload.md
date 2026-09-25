@@ -137,7 +137,8 @@ succeeds but returns a `data.rhel_guest_crash_config` advisory naming the missin
 os-release is Fedora, RHEL, Rocky, AlmaLinux or CentOS Stream. It is `unknown` when kdive cannot
 tell the guest's OS — the Run is not bound to a System yet, or the System boots a `local`,
 `artifact` or `upload` rootfs — and then the advisory applies only if your guest is RHEL-family.
-A known non-RHEL image, or a config carrying the whole set, draws nothing. If a kdump capture
+A known non-RHEL image, or a config carrying the whole set, draws nothing. The advisory checks
+only that each symbol is enabled: `=m` silences it, so it does not replace the `=y` advice above. If a kdump capture
 still finds no core, the failed `capture_vmcore` job carries a `failure_detail_kernel_config_hint`
 pointing back at this set.
 
