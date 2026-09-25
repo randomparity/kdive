@@ -7,6 +7,7 @@ import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from uuid import uuid4
 
 import psycopg
 from psycopg.rows import dict_row
@@ -63,7 +64,7 @@ from tests.mcp.complete_build_support import (
     seed_run as _seed_run,
 )
 from tests.mcp.complete_build_support import valid_combined_kernel_tar as _combined_kernel_tar
-from tests.mcp.systems_support import provider_resolver
+from tests.mcp.systems_support import provider_resolver, provisioning_profile
 
 _KERNEL_TAR = _combined_kernel_tar()
 _EXTERNAL_PROFILE = {"schema_version": 1}
@@ -1314,5 +1315,225 @@ def test_a_built_in_kernel_is_silent_on_every_lane(migrated_url: str) -> None:
                 resp = await _complete_with_config(pool, built_in, target_kind=kind)
                 assert resp.status == "succeeded", resp
                 assert "missing_boot_config" not in resp.data, kind
+
+    asyncio.run(_run())
+
+
+# #2762 (ADR-0678): a kernel carrying the boot and crash-capture symbols but none of the RHEL-family
+# kdump set - the upload that completed cleanly and then wrote no vmcore on a Fedora guest.
+_NO_RHEL_KDUMP_SET = b"CONFIG_EXT4_FS=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_VIRTIO_PCI=y\nCONFIG_KEXEC=y\n"
+
+
+def _config_uploaded(monkeypatch: Any) -> None:
+    """Mark the patched config as uploaded: these tests seed no effective_config artifact row."""
+    from kdive.mcp.tools.lifecycle.runs import complete_build as module
+
+    async def _present(conn: Any, run_id: Any) -> None:
+        return None
+
+    monkeypatch.setattr(module, "missing_effective_config_nudge", _present)
+
+
+def _patch_os_id(monkeypatch: Any, os_id: str | None) -> None:
+    from kdive.mcp.tools.lifecycle.runs import complete_build as module
+
+    async def _fake(conn: Any, run: Any) -> str | None:
+        return os_id
+
+    monkeypatch.setattr(module, "_target_os_id", _fake)
+    _config_uploaded(monkeypatch)
+
+
+def test_a_fedora_target_draws_the_rhel_guest_warning_and_its_replay(
+    migrated_url: str, monkeypatch: Any
+) -> None:
+    _patch_os_id(monkeypatch, "fedora")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", "abcd"))
+            with _patched_config_load(_NO_RHEL_KDUMP_SET):
+                first, replay = [
+                    await _build_handlers(validator).complete_build(
+                        pool, _ctx(), str(run_id), build_id="abcd", cmdline="x"
+                    )
+                    for _ in range(2)
+                ]
+        assert first.status == "succeeded", first
+        warning = cast(dict[str, Any], first.data["rhel_guest_crash_config"])
+        assert warning["reason"] == "kernel_missing_rhel_guest_crash_config"
+        assert warning["guest_family"] == "rhel"
+        assert "SQUASHFS_ZSTD" in warning["missing"]
+        assert first.refs["external_build_contract"] == EXTERNAL_BUILD_CONTRACT_URI
+        assert "missing_boot_config" not in first.data
+        assert replay.data["rhel_guest_crash_config"] == warning
+
+    asyncio.run(_run())
+
+
+def test_a_debian_target_is_silent(migrated_url: str, monkeypatch: Any) -> None:
+    _patch_os_id(monkeypatch, "debian")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _complete_with_config(
+                pool, _NO_RHEL_KDUMP_SET, target_kind=ResourceKind.LOCAL_LIBVIRT
+            )
+        assert resp.status == "succeeded", resp
+        assert "rhel_guest_crash_config" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_the_rhel_guest_warning_rides_beside_the_boot_warning(
+    migrated_url: str, monkeypatch: Any
+) -> None:
+    # ADR-0678 §3: the two config warnings are independent; only the nudge excludes them.
+    _patch_os_id(monkeypatch, "rocky")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _complete_with_config(
+                pool, b"CONFIG_EXT4_FS=y\n", target_kind=ResourceKind.LOCAL_LIBVIRT
+            )
+        assert resp.status == "succeeded", resp
+        assert "missing_boot_config" in resp.data
+        assert "rhel_guest_crash_config" in resp.data
+
+    asyncio.run(_run())
+
+
+def test_no_config_draws_only_the_nudge(migrated_url: str, monkeypatch: Any) -> None:
+    from kdive.mcp.tools.lifecycle.runs import complete_build as module
+
+    async def _fedora(conn: Any, run: Any) -> str:
+        return "fedora"
+
+    monkeypatch.setattr(module, "_target_os_id", _fedora)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
+            )
+        assert resp.status == "succeeded", resp
+        assert "missing_effective_config" in resp.data
+        assert "rhel_guest_crash_config" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_a_system_with_a_non_catalog_rootfs_reports_an_unknown_guest(
+    migrated_url: str, monkeypatch: Any
+) -> None:
+    # The real lookup: the seeded System boots a `local` rootfs, which names no catalog image, so
+    # kdive cannot tell the guest's OS and warns conditionally rather than staying silent.
+    _config_uploaded(monkeypatch)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _complete_with_config(
+                pool, _NO_RHEL_KDUMP_SET, target_kind=ResourceKind.LOCAL_LIBVIRT
+            )
+        assert resp.status == "succeeded", resp
+        warning = cast(dict[str, Any], resp.data["rhel_guest_crash_config"])
+        assert warning["guest_family"] == "unknown"
+
+    asyncio.run(_run())
+
+
+def test_an_unbound_run_has_no_target_os() -> None:
+    from kdive.mcp.tools.lifecycle.runs import complete_build as module
+
+    run = cast(Any, type("_UnboundRun", (), {"system_id": None, "id": None})())
+    assert asyncio.run(module._target_os_id(cast(Any, object()), run)) is None
+
+
+def test_a_failing_family_lookup_still_completes_as_unknown(
+    migrated_url: str, monkeypatch: Any
+) -> None:
+    # The lookup runs after the build committed and on every replay: a database error inside it
+    # must leave the transaction usable and degrade to the unknown advisory (ADR-0678).
+    from kdive.mcp.tools.lifecycle.runs import complete_build as module
+
+    async def _failing(conn: Any, system: Any) -> None:
+        await conn.execute("SELECT 1/0")
+
+    monkeypatch.setattr(module, "resolve_system_catalog_rootfs", _failing)
+    _config_uploaded(monkeypatch)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _complete_with_config(
+                pool, _NO_RHEL_KDUMP_SET, target_kind=ResourceKind.LOCAL_LIBVIRT
+            )
+        assert resp.status == "succeeded", resp
+        warning = cast(dict[str, Any], resp.data["rhel_guest_crash_config"])
+        assert warning["guest_family"] == "unknown"
+
+    asyncio.run(_run())
+
+
+def test_a_registered_fedora_catalog_image_resolves_to_the_rhel_family(
+    migrated_url: str, monkeypatch: Any
+) -> None:
+    # The real lookup end to end: Run -> System -> catalog rootfs -> registered public image row
+    # -> provenance.os_release.id.
+    from psycopg.types.json import Jsonb
+
+    from kdive.db.repositories import IMAGE_CATALOG
+    from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
+
+    _config_uploaded(monkeypatch)
+    image = ImageCatalogEntry.model_validate(
+        {
+            "id": uuid4(),
+            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+            "updated_at": datetime(2026, 1, 1, tzinfo=UTC),
+            "pending_since": datetime(2026, 1, 1, tzinfo=UTC),
+            "provider": "local-libvirt",
+            "name": "fedora-kdive-ready-44",
+            "arch": "x86_64",
+            "format": "qcow2",
+            "root_device": "/dev/vda",
+            "object_key": "images/local-libvirt/fedora-kdive-ready-44/x86_64.qcow2",
+            "digest": "sha256:abc",
+            "capabilities": ["agent", "kdump"],
+            "provenance": {"os_release": {"id": "fedora", "version_id": "44"}},
+            "visibility": ImageVisibility.PUBLIC,
+            "owner": None,
+            "expires_at": None,
+            "state": ImageState.REGISTERED,
+        }
+    )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                await IMAGE_CATALOG.insert(conn, image)
+                run = await RUNS.get(conn, run_id)
+                assert run is not None and run.system_id is not None
+                profile = provisioning_profile()
+                profile["provider"]["local-libvirt"]["rootfs"] = {
+                    "kind": "catalog",
+                    "provider": "local-libvirt",
+                    "name": "fedora-kdive-ready-44",
+                }
+                await conn.execute(
+                    "UPDATE systems SET provisioning_profile = %s WHERE id = %s",
+                    (Jsonb(profile), run.system_id),
+                )
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", "abcd"))
+            with _patched_config_load(_NO_RHEL_KDUMP_SET):
+                resp = await _build_handlers(validator).complete_build(
+                    pool, _ctx(), str(run_id), build_id="abcd", cmdline="x"
+                )
+        assert resp.status == "succeeded", resp
+        warning = cast(dict[str, Any], resp.data["rhel_guest_crash_config"])
+        assert warning["guest_family"] == "rhel"
 
     asyncio.run(_run())
