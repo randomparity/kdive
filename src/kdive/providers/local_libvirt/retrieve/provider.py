@@ -21,6 +21,7 @@ from kdive.artifacts.storage import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.kernel_config.requirements import EMPTY_CAPTURE_CONFIG_HINT
 from kdive.providers.local_libvirt.retrieve.guestfs import (
     _real_wait_for_vmcore,
     _remove_spool,
@@ -157,7 +158,7 @@ class LocalLibvirtRetrieve:
     ) -> CaptureOutput:
         """Store a captured core without whole-core buffering, then remove its spool dir."""
         if core is None:
-            raise self._no_core(system_id)
+            raise self._no_core(system_id, method)
         try:
             build_id = self._read_vmcore_build_id_from_file(core)
             raw = self._put_stream(run_id, f"vmcore-{method.value}", core)
@@ -191,11 +192,19 @@ class LocalLibvirtRetrieve:
             _remove_spool(core)
 
     @staticmethod
-    def _no_core(system_id: UUID) -> CategorizedError:
+    def _no_core(system_id: UUID, method: CaptureMethod) -> CategorizedError:
+        """No core at all. A guest-kernel capture points at the RHEL-family kdump set (ADR-0678).
+
+        ``host_dump`` is written by QEMU on the host, so the guest kernel's config cannot explain
+        its absence and it carries no hint.
+        """
+        details: dict[str, object] = {"system_id": str(system_id)}
+        if method is not CaptureMethod.HOST_DUMP:
+            details["kernel_config_hint"] = EMPTY_CAPTURE_CONFIG_HINT
         return CategorizedError(
             "no complete core appeared within the capture window",
             category=ErrorCategory.READINESS_FAILURE,
-            details={"system_id": str(system_id)},
+            details=details,
         )
 
     @staticmethod

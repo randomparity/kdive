@@ -21,6 +21,7 @@ from kdive.artifacts.storage import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.kernel_config.requirements import EMPTY_CAPTURE_CONFIG_HINT
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
@@ -109,10 +110,11 @@ def lookup(conn: RetrieveConn, domain_name: str) -> Domain:
 
 
 def readiness_failure(system_id: UUID, reason: str) -> CategorizedError:
+    """A kdump capture that found no core; points at the RHEL-family kdump set (ADR-0678)."""
     return CategorizedError(
         reason,
         category=ErrorCategory.READINESS_FAILURE,
-        details={"system_id": str(system_id)},
+        details={"system_id": str(system_id), "kernel_config_hint": EMPTY_CAPTURE_CONFIG_HINT},
     )
 
 
