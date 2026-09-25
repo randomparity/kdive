@@ -40,7 +40,8 @@ ProtectControlGroups=yes
 ProtectKernelModules={{ 'no' if provider_authority_host_local_mutation_enabled else 'yes' }}
 ProtectKernelTunables=yes
 ProtectKernelLogs=yes
-RestrictSUIDSGID=yes
+# libguestfs's supermin unpacks a base image that carries setuid/setgid entries.
+RestrictSUIDSGID={{ 'no' if provider_authority_host_local_mutation_enabled else 'yes' }}
 RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
