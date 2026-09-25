@@ -633,9 +633,23 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
         boot_root = dest_dir
         member = Path("vmlinuz")
     modstage = dest_dir / "modstage"
+    make_env = {
+        name: value
+        for name, value in os.environ.items()
+        if name in {"PATH", "HOME", "LANG", "LANGUAGE"} or name.startswith("LC_")
+    }
+    make_arch = {"x86_64": "x86", "ppc64le": "powerpc"}[arch]
     subprocess.run(
-        ["make", "-C", str(kernel_src), "modules_install", f"INSTALL_MOD_PATH={modstage}"],
+        [
+            "make",
+            "-C",
+            str(kernel_src),
+            "modules_install",
+            f"INSTALL_MOD_PATH={modstage}",
+            f"ARCH={make_arch}",
+        ],
         check=True,
+        env=make_env,
     )
     tar_path = dest_dir / "kernel.tar.gz"
     subprocess.run(
