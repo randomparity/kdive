@@ -10,10 +10,12 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from pydantic import SecretStr
 
+from kdive.build_artifacts.limits import MAX_LEGACY_INSTALL_MODULE_BYTES
 from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.operations.jobs import Job
@@ -28,6 +30,7 @@ from kdive.providers.ports.lifecycle import Installer, InstallRequest
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.services.external_boot.routing import require_worker_authority_route
+from kdive.services.runs.build_catalog import resolve_build
 from kdive.services.runs.build_use import acquire_build_use, release_build_use
 from kdive.services.runs.steps import (
     cmdline_for,
@@ -175,6 +178,7 @@ async def _resolve_install_plan(
         system,
         runtime.installer,
         method,
+        provider_kind=binding.kind,
         kernel_ref=kernel_ref,
         root_cmdline=root_cmdline,
         payload=payload,
@@ -223,6 +227,7 @@ async def _build_install_plan(
     installer: Installer,
     method: CaptureMethod,
     *,
+    provider_kind: ResourceKind,
     kernel_ref: str,
     root_cmdline: str | None,
     payload: _InstallPayloadContext,
@@ -249,6 +254,29 @@ async def _build_install_plan(
     _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
     initrd_ref = build_result.initrd_ref if build_result is not None else None
     debuginfo_ref = build_result.debuginfo_ref if build_result is not None else None
+    if (
+        not staging_only
+        and provider_kind is ResourceKind.LOCAL_LIBVIRT
+        and (method in KDUMP_FAMILY or debuginfo_ref is not None)
+        and run.build_ref is not None
+    ):
+        build = await resolve_build(conn, run.investigation_id, run.build_ref)
+        if build is None:
+            raise CategorizedError(
+                "install build record is missing; rebuild the Run before installing",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"reason": "install_build_record_missing"},
+            )
+        evidence = build.canonical_document.get("external_boot_evidence")
+        if isinstance(evidence, dict):
+            module_bytes = evidence.get("module_uncompressed_bytes")
+            if isinstance(module_bytes, int) and module_bytes > MAX_LEGACY_INSTALL_MODULE_BYTES:
+                raise CategorizedError(
+                    "installed modules exceed the 2 GiB uncompressed limit; rebuild with "
+                    "INSTALL_MOD_STRIP=1 and upload again",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    details={"max_uncompressed_bytes": MAX_LEGACY_INSTALL_MODULE_BYTES},
+                )
     refs = {"kernel": kernel_ref}
     if initrd_ref is not None:
         refs["initrd"] = initrd_ref

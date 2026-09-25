@@ -647,6 +647,7 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
             "modules_install",
             f"INSTALL_MOD_PATH={modstage}",
             f"ARCH={make_arch}",
+            "INSTALL_MOD_STRIP=1",
         ],
         check=True,
         env=make_env,

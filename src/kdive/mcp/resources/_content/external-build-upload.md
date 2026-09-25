@@ -218,9 +218,19 @@ Run this external packaging recipe from a built kernel tree, with `MODROOT` poin
 staging root you passed to
 `make modules_install INSTALL_MOD_PATH=…`:
 
+For a local-libvirt install that injects modules (kdump or debuginfo), the limit is **2 GiB
+(2,147,483,648 bytes)** of cumulative uncompressed regular-file content under
+`lib/modules/<release>/` in one uploaded kernel bundle. KDIVE measures the exact uploaded
+version during `runs.complete_build` and checks that measurement before the install provider
+extracts modules. An over-limit install fails with a configuration error. Strip modules during
+staging as shown below; if the tree still exceeds the limit, reduce the module set, rebuild the
+archive, and upload it again. External boot has a separate module bound.
+
 ```bash
 KBUILD=.                 # the built kernel tree (contains arch/x86/boot/bzImage)
 MODROOT=/tmp/modstage    # INSTALL_MOD_PATH from `make modules_install` (holds lib/modules/<release>)
+
+make -C "$KBUILD" modules_install INSTALL_MOD_PATH="$MODROOT" INSTALL_MOD_STRIP=1
 
 tar -czf kernel.tar.gz \
   --exclude='*/build' --exclude='*/source' \
@@ -253,6 +263,8 @@ powerpc has no bzImage — the boot member is the **stripped** ELF kernel. Strip
 ```bash
 KBUILD=.                 # the built kernel tree (contains the top-level vmlinux)
 MODROOT=/tmp/modstage    # INSTALL_MOD_PATH from `make modules_install`
+
+make -C "$KBUILD" modules_install INSTALL_MOD_PATH="$MODROOT" INSTALL_MOD_STRIP=1
 
 "${CROSS_COMPILE}strip" -s "$KBUILD/vmlinux" -o /tmp/vmlinuz   # stripped, bootable, tens of MB
 
