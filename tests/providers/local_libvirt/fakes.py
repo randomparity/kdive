@@ -109,6 +109,8 @@ class FakeDomain:
     def shutdown(self) -> int:
         self.calls.append("shutdown")
         self._maybe_raise("shutdown")
+        if self.run_state not in (libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_BLOCKED):
+            raise libvirt_error(libvirt.VIR_ERR_OPERATION_INVALID)  # libvirt: not running
         if self.honours_shutdown:
             self.active = False
         return 0

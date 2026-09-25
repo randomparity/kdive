@@ -164,9 +164,7 @@ def _libvirt_transport_failure(verb: str, domain_name: str) -> CategorizedError:
 _CLEAN_SHUTDOWN_BASE_S = 60.0
 _SHUTDOWN_POLL_S = 1.0
 _SHUTDOWN_RESEND_S = 10.0
-_HONOURS_SHUTDOWN = frozenset(
-    {libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_BLOCKED, libvirt.VIR_DOMAIN_SHUTDOWN}
-)
+_HONOURS_SHUTDOWN = frozenset({libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_BLOCKED})
 
 
 def _power_off(
@@ -181,8 +179,9 @@ def _power_off(
     A guest killed by ``destroy`` loses writes still in its page cache (#2757), so a running
     guest is asked to shut down and given ``60 s * tcg_deadline_multiplier(accel)`` on
     ``clock`` to reach ``SHUTOFF``; the request is re-sent every 10 s in case the first arrived
-    before the guest's handler was listening. A state that cannot honour a request (paused,
-    crashed, suspended) is destroyed at once. The log line names the path taken.
+    before the guest's handler was listening. A guest already shutting down is waited for
+    without a request, which libvirt would refuse. A state that cannot honour a request
+    (paused, crashed, suspended) is destroyed at once. The log line names the path taken.
 
     Raises:
         libvirt.libvirtError: from ``state()`` or ``destroy()``; the caller maps it.
@@ -190,13 +189,14 @@ def _power_off(
     state = domain.state()[0]
     if state == libvirt.VIR_DOMAIN_SHUTOFF:
         return
-    if state not in _HONOURS_SHUTDOWN:
+    stopping = state == libvirt.VIR_DOMAIN_SHUTDOWN
+    if state not in _HONOURS_SHUTDOWN and not stopping:
         _log.warning("power-off %s: destroy-state (domain state %s)", domain_name, state)
         domain.destroy()
         return
     bound_s = _CLEAN_SHUTDOWN_BASE_S * tcg_deadline_multiplier(accel)
     start = clock()
-    requested_at: float | None = None
+    requested_at: float | None = start if stopping else None
     while clock() - start < bound_s:
         if requested_at is None or clock() - requested_at >= _SHUTDOWN_RESEND_S:
             first = requested_at is None

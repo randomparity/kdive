@@ -1323,6 +1323,20 @@ class _BlockingShutdownDomain(FakeDomain):
         return 0
 
 
+@dataclass
+class _StoppingDomain(FakeDomain):
+    """Already shutting down (``VIR_DOMAIN_SHUTDOWN``); reads SHUTOFF after ``off_after`` reads."""
+
+    off_after: int = 3
+    state_reads: int = 0
+
+    def state(self, flags: int = 0) -> list[int]:
+        self.state_reads += 1
+        if self.state_reads > self.off_after:
+            return [libvirt.VIR_DOMAIN_SHUTOFF, 0]
+        return [libvirt.VIR_DOMAIN_SHUTDOWN, 0]
+
+
 def _ignoring_domain() -> FakeDomain:
     return FakeDomain(
         domain_name=f"kdive-{_SYS}", system_id=str(_SYS), active=True, honours_shutdown=False
@@ -1362,6 +1376,23 @@ def test_boot_destroys_at_once_in_a_state_that_cannot_shut_down(
     assert domain.calls == ["destroy", "prepare", "create"]
     assert clock.sleeps == []
     assert "destroy-state" in caplog.text
+
+
+def test_boot_waits_for_a_guest_already_shutting_down(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # libvirt refuses shutdown() outside RUNNING, so a stopping guest is waited for, not asked.
+    domain = _StoppingDomain(
+        domain_name=f"kdive-{_SYS}",
+        system_id=str(_SYS),
+        active=True,
+        run_state=libvirt.VIR_DOMAIN_SHUTDOWN,
+    )
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    with caplog.at_level(logging.INFO, logger=_POWER_OFF_LOGGER):
+        _install(conn=conn, staging_root=tmp_path).boot(_SYS, accel="kvm")
+    assert domain.calls == ["prepare", "create"]
+    assert "clean after 3.0 s" in caplog.text
 
 
 def test_boot_destroys_after_the_bound(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
