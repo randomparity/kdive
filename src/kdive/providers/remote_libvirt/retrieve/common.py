@@ -110,7 +110,11 @@ def lookup(conn: RetrieveConn, domain_name: str) -> Domain:
 
 
 def readiness_failure(system_id: UUID, reason: str) -> CategorizedError:
-    """A kdump capture that found no core; points at the RHEL-family kdump set (ADR-0678)."""
+    """A kdump capture that found no core; points at the RHEL-family kdump set (ADR-0678).
+
+    Kdump-only: both callers are ``kdump_capture``'s readiness failures. A host-side or non-capture
+    failure must not use it, because the hint blames the guest kernel's config.
+    """
     return CategorizedError(
         reason,
         category=ErrorCategory.READINESS_FAILURE,

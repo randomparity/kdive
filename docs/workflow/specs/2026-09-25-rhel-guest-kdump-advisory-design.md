@@ -46,8 +46,8 @@ it as `failure_detail_kernel_config_hint`. It opens "kdive found no kdump core",
 remote paths (no core in dump storage; agent never returned).
 Local `LocalLibvirtRetrieve._no_core(system_id, method)` adds it as
 `details["kernel_config_hint"]` unless `method is CaptureMethod.HOST_DUMP`. Remote
-`common.readiness_failure(system_id, reason, *, config_hint=False)` adds it when `True`; both
-readiness failures in `remote_libvirt/retrieve/kdump_capture.py` pass `True`.
+`common.readiness_failure(system_id, reason)` always adds it: its only callers are the two kdump
+readiness failures in `remote_libvirt/retrieve/kdump_capture.py`, and its docstring says so.
 
 **Spine.** `build_and_upload_kernel` declares and PUTs the bytes `check_spine_kernel_config`
 already returned as `effective_config`, guarded like `kernel`. Live callers that reserve a
