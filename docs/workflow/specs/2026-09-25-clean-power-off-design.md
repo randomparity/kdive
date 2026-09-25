@@ -18,7 +18,8 @@ again (reproduced 3 of 3 in the PR #2741 root-cause comment).
 1. Both sites stop a running domain through one helper that requests `domain.shutdown()` and
    waits, bounded, for `state()` to read `SHUTOFF`.
 2. A domain in a state that cannot honour the request goes straight to `destroy()`, with no
-   wait. Honouring states: `RUNNING`, `BLOCKED`, `SHUTDOWN`. `SHUTOFF` needs no action. Every
+   wait. Honouring states: `RUNNING`, `BLOCKED`. `SHUTDOWN` (already stopping; libvirt refuses a
+   request there) is waited for within the bound without a request. `SHUTOFF` needs no action. Every
    other `virDomainState` value destroys at once.
 3. The wait expiring, or `shutdown()` raising `libvirtError`, falls back to `destroy()`.
 4. The wait is `60 s × tcg_deadline_multiplier(accel)` (ADR-0341) measured on an injected

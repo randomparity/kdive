@@ -21,8 +21,9 @@ System. Nothing in the chain is specific to one architecture.
 
 Both power-off sites share one helper that:
 
-1. reads `domain.state()`. `SHUTOFF` needs nothing. `RUNNING`, `BLOCKED` and `SHUTDOWN` can honour
-   a request. Every other state (`PAUSED` — which includes a vCPU halted by a gdbstub client —
+1. reads `domain.state()`. `SHUTOFF` needs nothing. `RUNNING` and `BLOCKED` can honour a request.
+   `SHUTDOWN` is already stopping, and libvirt refuses a request in it, so it is waited for
+   without one. Every other state (`PAUSED` — which includes a vCPU halted by a gdbstub client —
    `CRASHED`, `PMSUSPENDED`, `NOSTATE`) goes straight to `destroy()`;
 2. otherwise calls `domain.shutdown()` with default flags, as `virsh shutdown` does: libvirt uses
    the guest agent when it answers and otherwise QEMU's `system_powerdown` (the ACPI power button

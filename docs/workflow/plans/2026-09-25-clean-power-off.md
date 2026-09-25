@@ -13,7 +13,9 @@ Tech stack: Python 3.14, libvirt-python, pytest; `uv` + `just`.
 
 Expected implementation size: 200–290 changed lines (M) — helper ~45, booter/installer wiring
 ~25, fake ~15, unit tests ~130 (incl. three existing ordering tests), handler + port ~10, live
-test ~70.
+test ~70. Actual: about 640. The unit tests (~260) cover every path on a fake clock, and the live
+test (~220) carries its own env gating, profile, SSH retry and bootstrap-key plumbing because
+the equivalent helpers in `test_console_parts_live.py` are private to that module.
 
 ## Global Constraints
 
