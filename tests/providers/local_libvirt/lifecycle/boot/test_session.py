@@ -724,6 +724,24 @@ def test_find0_tree_streams_one_multilevel_walk_and_byte_sorts_after_completion(
     session.close()
 
 
+@pytest.mark.parametrize(
+    ("root", "expected"),
+    [("/dev/sda", "5795121d-bbb3-4d47-9636-aa90ec4208af"), ("/dev/sda1", None)],
+)
+def test_guest_reports_the_root_filesystem_uuid_only_when_it_fills_the_disk(
+    root: str, expected: str | None
+) -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [])
+    producer.root = root
+    producer.filesystem_uuids = {root: "5795121d-bbb3-4d47-9636-aa90ec4208af"}
+    session, _lease_value = _stream_session(events, producer)
+
+    with session.guest() as guest:
+        assert guest.whole_disk_root_uuid() == expected
+    session.close()
+
+
 def test_find0_tree_accepts_libguestfs_rooted_entries() -> None:
     # libguestfs 1.58 find0 writes each entry below the directory with a leading "/".
     events: list[str] = []

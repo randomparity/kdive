@@ -112,6 +112,8 @@ class Conn:
 class Guest:
     def __init__(self, events: list[str]) -> None:
         self.events = events
+        self.root = "/dev/sda1"
+        self.filesystem_uuids: dict[str, str] = {}
 
     def add_drive_opts(self, overlay: str, *, format: str) -> None:
         self.events.append(f"guest.drive:{overlay}:{format}")
@@ -121,7 +123,10 @@ class Guest:
 
     def inspect_os(self) -> list[str]:
         self.events.append("guest.inspect")
-        return ["/dev/sda1"]
+        return [self.root]
+
+    def vfs_uuid(self, mountable: str) -> str:
+        return self.filesystem_uuids.get(mountable, "")
 
     def mount(self, device: str, mountpoint: str) -> None:
         self.events.append(f"guest.mount:{device}:{mountpoint}")

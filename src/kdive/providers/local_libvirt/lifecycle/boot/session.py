@@ -155,6 +155,7 @@ class _Guest(Protocol):
     def launch(self) -> None: ...
     def inspect_os(self) -> list[str]: ...
     def mount(self, device: str, mountpoint: str) -> None: ...
+    def vfs_uuid(self, mountable: str) -> str: ...
     def shutdown(self) -> None: ...
     def close(self) -> None: ...
     def find0(self, directory: str, files: str) -> None: ...
@@ -266,12 +267,14 @@ class InactiveGuest(Protocol):
     def mv(self, source: str, destination: str) -> None: ...
     def rm_rf(self, path: str) -> None: ...
     def sync(self) -> None: ...
+    def whole_disk_root_uuid(self) -> str | None: ...
 
 
 class _GuestContext(AbstractContextManager[InactiveGuest]):
     def __init__(self, session: _ConcreteSession) -> None:
         self._session = session
         self._guest: _Guest | None = None
+        self._root: str | None = None
         self._cursors: set[_Find0TreeCursor] = set()
         self._closed = False
 
@@ -399,6 +402,11 @@ class _GuardedGuest:
     def sync(self) -> None:
         self._handle().sync()
 
+    def whole_disk_root_uuid(self) -> str | None:
+        """Return the root filesystem UUID when that filesystem fills the one added disk."""
+        guest = self._handle()
+        return guest.vfs_uuid(_WHOLE_DISK) if self._owner._root == _WHOLE_DISK else None
+
     def _handle(self) -> _Guest:
         if self._owner._closed:
             raise RuntimeError("guest wrapper is closed")
@@ -406,6 +414,8 @@ class _GuardedGuest:
         return self._guest
 
 
+# libguestfs names the one drive the session adds /dev/sda; a partition root is /dev/sdaN.
+_WHOLE_DISK = "/dev/sda"
 _TREE_READ_CHUNK = 64 * 1024
 _MAX_TREE_PATH_BYTES = 4096
 
@@ -1115,6 +1125,7 @@ class _ConcreteSession:
                         "guest inspection must find exactly one operating-system root"
                     )
                 guest.mount(roots[0], "/")
+                wrapper._root = roots[0]
             except BaseException as exc:
                 for close_error in _attempt_guest_close(guest):
                     exc.add_note(f"cleanup failed: {close_error!r}")

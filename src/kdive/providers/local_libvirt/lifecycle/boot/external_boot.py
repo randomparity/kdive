@@ -46,6 +46,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ClosedDomainInspection,
     ExpectedOperationOwnership,
+    InactiveGuest,
     LocalExternalBootOperationLease,
     LocalExternalBootSession,
     LocalExternalBootSessionFactory,
@@ -385,6 +386,7 @@ class TargetProjectionV1(_ClosedValue):
     kernel_filename: Literal["kernel"] = "kernel"
     modules_filename: Literal["modules"] = "modules"
     initrd_filename: Literal["initrd"] | None
+    whole_disk_root_uuid: Annotated[str, Field(min_length=1, max_length=255)] | None = None
 
     def canonical_bytes(self) -> bytes:
         return json.dumps(
@@ -1049,6 +1051,34 @@ class _ExactVersionDescriptorStore:
         return os.pread(self._descriptor, min(length, self._size - start), start)
 
 
+# local-libvirt's platform root device (ProviderRuntime.platform_root_cmdline, ADR-0183).
+_LOCAL_WHOLE_DISK_ROOT = "root=/dev/vda"
+
+
+def _whole_disk_root_uuid(plan: ExternalBootPlan) -> str | None:
+    """Return the filesystem UUID a plan naming the whole-disk root must prove, else ``None``.
+
+    A plan without an initrd names the local whole-disk device instead of the inspected
+    ``UUID=`` token (ADR-0583 amendment); prepare proves that filesystem fills the disk.
+    """
+    if f"root={plan.root.root}" in plan.platform_arguments:
+        return None
+    if _LOCAL_WHOLE_DISK_ROOT not in plan.platform_arguments:
+        raise ValueError(f"external-boot direct root must be local {_LOCAL_WHOLE_DISK_ROOT}")
+    if not plan.root.root.startswith("UUID="):
+        raise ValueError("external-boot direct root requires an inspected filesystem UUID")
+    return plan.root.root.removeprefix("UUID=")
+
+
+def _require_whole_disk_root(guest: InactiveGuest, projection: TargetProjectionV1) -> None:
+    expected = projection.whole_disk_root_uuid
+    if expected is not None and guest.whole_disk_root_uuid() != expected:
+        raise ValueError(
+            f"external-boot without an initrd needs root filesystem UUID={expected} to fill the "
+            "System disk; supply an initrd with the build or use a whole-disk rootfs"
+        )
+
+
 class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
     """Materialize exact object versions into one authenticated activation projection."""
 
@@ -1068,6 +1098,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             architecture=plan.architecture,
             cmdline=plan.cmdline,
             initrd_filename=None if plan.initrd is None else "initrd",
+            whole_disk_root_uuid=_whole_disk_root_uuid(plan),
         )
         with session.projection_directory(projection) as directory_fd:
             try:
@@ -1828,9 +1859,11 @@ class _RealLocalExternalBootOperation:
         self._session.stop_and_require_inactive()
         with RecoveryMetadataStore(self._recovery_root) as store:
             owned_sink = store.recovery_archive_sink(reference, intent)
+        projection = self._session.reopen_projection(materialization.artifacts.kernel)
         primary: BaseException | None = None
         try:
             with self._session.guest() as guest:
+                _require_whole_disk_root(guest, projection)
                 tree = LibguestfsAuthenticatedGuestTree(
                     guest,
                     binding=binding,

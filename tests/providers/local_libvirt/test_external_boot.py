@@ -1568,6 +1568,10 @@ class _GuestTreeHandle:
         self.cursor_closes = 0
         self.tree_limits: list[int] = []
         self.lstat_paths: list[str] = []
+        self.root_uuid: str | None = None
+
+    def whole_disk_root_uuid(self) -> str | None:
+        return self.root_uuid
 
     def exists(self, path: str) -> int:
         return int(self.present)
@@ -2228,6 +2232,11 @@ class _RealSession:
             overlay=OverlayIdentity(1, 2),
         )
         self.guest_handle = _GuestTreeHandle([], present=False)
+        self.projection = _projection()
+
+    def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1:
+        del artifact
+        return self.projection
 
     def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
         del projected
@@ -5109,3 +5118,41 @@ def test_prepare_reads_the_materialize_receipt_of_its_authority_generation(
                 prepared.model_copy(update={"authority": _phase_authority(8, 2)})
             )
         assert store.publish_preparation(prepared) == prepared
+
+
+def _direct_root_plan(device: str = "/dev/vda") -> ExternalBootPlan:
+    plan = external_boot_plan(UUID(_BINDING.system_id), UUID(_BINDING.run_id))
+    return plan.model_copy(
+        update={"platform_arguments": (f"root={device}",), "cmdline": f"root={device}"}
+    )
+
+
+def test_projection_carries_the_root_uuid_a_direct_root_plan_must_prove() -> None:
+    assert external_boot_module._whole_disk_root_uuid(_direct_root_plan()) == "x"
+    plan = external_boot_plan(UUID(_BINDING.system_id), UUID(_BINDING.run_id))
+    assert external_boot_module._whole_disk_root_uuid(plan) is None
+
+
+def test_projection_refuses_a_direct_root_other_than_the_local_disk() -> None:
+    with pytest.raises(ValueError, match="/dev/vda"):
+        external_boot_module._whole_disk_root_uuid(_direct_root_plan("/dev/vdb"))
+
+
+@pytest.mark.parametrize(("observed", "accepted"), [("x", True), ("y", False), (None, False)])
+def test_prepare_requires_the_inspected_root_to_fill_the_disk_without_an_initrd(
+    tmp_path: Path, observed: str | None, accepted: bool
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    host = _RealPreparation(metadata, root)
+    io, session = _real_io(root, host)
+    session.projection = _projection().model_copy(update={"whole_disk_root_uuid": "x"})
+    session.guest_handle.root_uuid = observed
+
+    if accepted:
+        assert _real_prepare(io, materialization) == metadata
+        return
+    with pytest.raises(ValueError, match="supply an initrd"):
+        _real_prepare(io, materialization)
