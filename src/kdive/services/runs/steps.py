@@ -426,9 +426,18 @@ def system_required_cmdline(
 
 
 def platform_owned_cmdline_token(cmdline: str | None) -> str | None:
+    """Return the first platform-owned token whose exact parameter name appears in ``cmdline``.
+
+    Matches by parameter name (the text before the first ``=``), not by substring, so a param
+    whose name merely contains an owned name — ``systemd.journald.forward_to_console=1``,
+    ``netconsole=...``, ``nfsroot=...`` — is not mistaken for ``console=``/``root=`` (#2758).
+    """
     if not cmdline:
         return None
-    return next((tok for tok in _PLATFORM_OWNED_CMDLINE_TOKENS if tok in cmdline), None)
+    names = {param.split("=", 1)[0] for param in cmdline.split()}
+    return next(
+        (tok for tok in _PLATFORM_OWNED_CMDLINE_TOKENS if tok.removesuffix("=") in names), None
+    )
 
 
 async def cmdline_for(

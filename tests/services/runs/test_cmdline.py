@@ -145,6 +145,24 @@ def test_platform_owned_tokens_still_reject_root_on_any_provider() -> None:
     assert platform_owned_cmdline_token("dhash_entries=1") is None
 
 
+def test_platform_owned_match_is_by_parameter_name_not_substring() -> None:
+    # #2758: a substring test over the whole cmdline rejected any parameter whose *name*
+    # merely contained an owned token, refusing valid params like the ones below. Only a
+    # parameter whose name exactly equals an owned name is platform-owned.
+    assert platform_owned_cmdline_token("systemd.journald.forward_to_console=1") is None
+    assert platform_owned_cmdline_token("netconsole=@/,@10.0.0.1/") is None
+    assert platform_owned_cmdline_token("nfsroot=10.0.0.1:/export/root") is None
+
+
+def test_platform_owned_exact_name_still_rejected_alongside_lookalikes() -> None:
+    # The exact-name rejections still fire even in a cmdline that also carries a lookalike.
+    assert (
+        platform_owned_cmdline_token("console=ttyS1 systemd.journald.forward_to_console=1")
+        == "console="
+    )
+    assert platform_owned_cmdline_token("root=/dev/sdb nfsroot=10.0.0.1:/export/root") == "root="
+
+
 def test_kdump_crashkernel_override_replaces_default_size() -> None:
     # A per-install crashkernel reservation (ADR-0300, #989) replaces the default 256M.
     assert (
