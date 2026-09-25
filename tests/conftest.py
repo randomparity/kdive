@@ -80,12 +80,11 @@ _LOGIN_PASSWORD = "external-boot-authority-test"  # pragma: allowlist secret
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Capture the first stack revision even when pytest suppresses its header with ``-q``."""
+    """Capture live proof context even when pytest suppresses its header with ``-q``."""
     base_url = os.environ.get("KDIVE_STACK_BASE_URL")
-    if not base_url or skew_policy() is SkewPolicy.OFF:
-        return
-    stack_conftest._HEADER_PROBES[base_url] = probe_stack_skew(base_url)
-    if session.config.option.verbose < 0:
+    if base_url and skew_policy() is not SkewPolicy.OFF:
+        stack_conftest._HEADER_PROBES[base_url] = probe_stack_skew(base_url)
+    if session.config.option.verbose < 0 and (base_url or os.environ.get("KDIVE_KERNEL_SRC")):
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if reporter is not None:
             for line in pytest_report_header():
@@ -93,10 +92,13 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 
 def pytest_report_header() -> list[str]:
-    """Include probed app revisions in a live-stack proof's pytest header (#2752)."""
+    """Name the resolved kernel tree and probed app revisions in live proof output."""
+    lines = []
+    if kernel_src := os.environ.get("KDIVE_KERNEL_SRC"):
+        lines.append(f"live kernel tree: {Path(kernel_src).expanduser().resolve()}")
     base_url = os.environ.get("KDIVE_STACK_BASE_URL")
     if not base_url or skew_policy() is SkewPolicy.OFF:
-        return []
+        return lines
     probe = stack_conftest._HEADER_PROBES.get(base_url) or probe_stack_skew(base_url)
     stack_conftest._HEADER_PROBES[base_url] = probe
     revisions = [
@@ -108,7 +110,8 @@ def pytest_report_header() -> list[str]:
         )
         for result in probe.results
     ]
-    return ["live-stack probed revisions: " + ", ".join(revisions)]
+    lines.append("live-stack probed revisions: " + ", ".join(revisions))
+    return lines
 
 
 @dataclass(frozen=True, slots=True)
