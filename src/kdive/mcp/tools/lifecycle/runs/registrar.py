@@ -533,6 +533,14 @@ def _register_runs_complete_build(
         does not match the declared arch is rejected. See
         resource://kdive/contracts/external-build for the per-arch byte contract.
 
+        An uploaded effective_config is checked, never refused: `data.missing_boot_config` names
+        boot symbols the guest cannot mount its root without, and `data.rhel_guest_crash_config`
+        names crash_capture_rhel_guest symbols a RHEL-family guest needs before kdump can write a
+        vmcore. Its `guest_family` is `rhel` when the target System boots a RHEL-family catalog
+        image, or `unknown` when kdive cannot tell the guest's OS (an unbound Run, or a rootfs
+        that is not a registered catalog image); ignore an `unknown` one for a non-RHEL guest.
+        With no effective_config uploaded you get `data.missing_effective_config` instead.
+
         Finalize before the `manifest_deadline` that `artifacts.create_run_upload` returned —
         chunked and single-PUT alike. A later call is rejected with
         `reason: "upload_window_expired"`, echoing that deadline and the server clock it is

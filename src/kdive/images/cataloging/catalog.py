@@ -12,8 +12,13 @@ import psycopg
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.components.references import CatalogComponentRef
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
+from kdive.domain.errors import CategorizedError
+from kdive.domain.lifecycle.records import System
 from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
+from kdive.images.planes.base import PROVENANCE_OS_RELEASE
+from kdive.profiles.provisioning import ProvisioningProfile
 
 # Order by visibility so the project's private row (if any) sorts before the public one; the
 # resolver takes the first. `private` < `public` lexically, so the explicit CASE keeps the
@@ -62,7 +67,7 @@ async def resolve_rootfs(
     return None if row is None else ImageCatalogEntry.model_validate(row)
 
 
-_RESOLVE_PUBLIC_SYNC_SQL = f"""
+_RESOLVE_PUBLIC_ARCH_SQL = f"""
     SELECT {IMAGE_CATALOG_ENTRY_PROJECTION}
     FROM image_catalog
     WHERE provider = %(provider)s
@@ -100,6 +105,44 @@ def resolve_public_rootfs_sync(
         "public": ImageVisibility.PUBLIC.value,
     }
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(_RESOLVE_PUBLIC_SYNC_SQL, params)
+        cur.execute(_RESOLVE_PUBLIC_ARCH_SQL, params)
         row = cur.fetchone()
     return None if row is None else ImageCatalogEntry.model_validate(row)
+
+
+async def resolve_system_catalog_rootfs(
+    conn: AsyncConnection, system: System
+) -> ImageCatalogEntry | None:
+    """The registered public arch-matched image a System's local-libvirt catalog rootfs names.
+
+    The same row the local-libvirt catalog lane boots (ADR-0228), so a reader sees the image that
+    booted rather than a private shadow the provision would never have selected. Returns ``None``
+    on every resolution gap: an unparsable profile, a non-local-libvirt section, a rootfs that is
+    not ``catalog`` (``local``/``artifact``/``upload``), or no visible registered row of the
+    profile's arch (ADR-0361, ADR-0678).
+    """
+    try:
+        profile = ProvisioningProfile.parse(system.provisioning_profile)
+    except CategorizedError:
+        return None
+    section = profile.provider.local_libvirt_section
+    if section is None or not isinstance(section.rootfs, CatalogComponentRef):
+        return None
+    params = {
+        "provider": section.rootfs.provider,
+        "name": section.rootfs.name,
+        "arch": profile.arch,
+        "registered": ImageState.REGISTERED.value,
+        "public": ImageVisibility.PUBLIC.value,
+    }
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(_RESOLVE_PUBLIC_ARCH_SQL, params)
+        row = await cur.fetchone()
+    return None if row is None else ImageCatalogEntry.model_validate(row)
+
+
+def image_os_id(entry: ImageCatalogEntry) -> str | None:
+    """The build-recorded os-release ``ID`` (ADR-0311), or ``None`` when absent or malformed."""
+    record = entry.provenance.get(PROVENANCE_OS_RELEASE)
+    os_id = record.get("id") if isinstance(record, dict) else None
+    return os_id if isinstance(os_id, str) and os_id else None

@@ -629,7 +629,11 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id, arch=arch, root_fs="ext4")
+                    # The System reserves the arch's default crashkernel and the uploaded
+                    # effective_config arms install's crash-config gate, so check it here first.
+                    await build_and_upload_kernel(
+                        op, run_id=run_id, arch=arch, root_fs="ext4", require_kdump=True
+                    )
 
                 for variant in ("loglevel=4", "loglevel=7"):
                     async with phase(f"install:{variant}"):
@@ -741,6 +745,7 @@ def test_spine_live_script_over_the_wire() -> None:
                         root_fs="ext4",
                         require_network=True,
                         require_live_debug=True,
+                        require_kdump=True,
                     )
                 for step in ("install", "boot"):
                     async with phase(step):

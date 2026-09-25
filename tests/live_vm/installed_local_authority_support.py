@@ -1987,7 +1987,9 @@ async def start_external_boot_activation(
     )
     run_id = created.object_id
     ledger.record(OwnedResource(kind="run", identity=run_id))
-    await build_and_upload_kernel(client, run_id=run_id)
+    # The carrier System is minted with a crashkernel (scripts/live-vm/mint-system.sh), and the
+    # uploaded effective_config arms install's crash-config gate, so check it before staging.
+    await build_and_upload_kernel(client, run_id=run_id, require_kdump=True)
     install = ok(await scalar(client, "runs.install", run_id=run_id), "install")
     await drain_job(client, "install", install.object_id)
     if before_activate is not None:

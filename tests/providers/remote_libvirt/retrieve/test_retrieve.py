@@ -21,6 +21,7 @@ from kdive.artifacts.storage import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.kernel_config.requirements import EMPTY_CAPTURE_CONFIG_HINT
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
     DEFAULT_PUT_EXPIRY_S,
@@ -227,6 +228,7 @@ def test_capture_readiness_window_exhausted_is_readiness_failure(tmp_path: Path)
     with pytest.raises(CategorizedError) as exc:
         rt.capture(_SID, _RID, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
+    assert exc.value.details["kernel_config_hint"] == EMPTY_CAPTURE_CONFIG_HINT
 
 
 def test_capture_no_core_present_is_readiness_failure(tmp_path: Path) -> None:
@@ -235,6 +237,7 @@ def test_capture_no_core_present_is_readiness_failure(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
+    assert exc.value.details["kernel_config_hint"] == EMPTY_CAPTURE_CONFIG_HINT
 
 
 def test_capture_oversized_core_is_configuration_error(tmp_path: Path) -> None:

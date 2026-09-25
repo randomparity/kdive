@@ -688,7 +688,8 @@ async def build_and_upload_kernel(
     """Drive the external-build upload lane for ``run_id`` and complete the Run's build step.
 
     Reads the contract resource, cuts the combined ``kernel`` tar from ``KDIVE_KERNEL_SRC``,
-    declares + PUTs it via ``artifacts.create_run_upload``, then calls ``runs.complete_build``.
+    declares + PUTs it and the tree's ``.config`` (as ``effective_config``) via
+    ``artifacts.create_run_upload``, then calls ``runs.complete_build``.
     The Run goes CREATED → SUCCEEDED with ``steps.build == succeeded``, ready for ``runs.install``.
 
     ``with_vmlinux`` additionally uploads the tree's unstripped ``vmlinux``. The gdb-MI tier
@@ -703,10 +704,14 @@ async def build_and_upload_kernel(
         raise SpinePhaseError(phase_name, f"upload contract no longer accepts 'kernel': {accepted}")
     if with_vmlinux and "vmlinux" not in accepted:
         raise SpinePhaseError(phase_name, f"upload contract accepts no 'vmlinux': {accepted}")
+    if "effective_config" not in accepted:
+        raise SpinePhaseError(
+            phase_name, f"upload contract no longer accepts 'effective_config': {accepted}"
+        )
     kernel_src = os.environ.get(KERNEL_TREE_ENV)
     if not kernel_src:
         raise SpinePhaseError(phase_name, f"{KERNEL_TREE_ENV} unset; point it at a built tree")
-    check_spine_kernel_config(
+    config_bytes = check_spine_kernel_config(
         Path(kernel_src),
         arch,
         phase_name,
@@ -717,12 +722,21 @@ async def build_and_upload_kernel(
     )
     with tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-") as scratch:
         kernel_tar = combined_kernel_tar(Path(kernel_src), Path(scratch), arch=arch)
+        # The tree's own .config, so runs.complete_build's config advisories run on the live path
+        # rather than failing open on an absent config (#2762).
+        effective_config = Path(scratch) / "effective_config"
+        effective_config.write_bytes(config_bytes)
         decls = [
             {
                 "name": "kernel",
                 "sha256": sha256_b64(kernel_tar),
                 "size_bytes": kernel_tar.stat().st_size,
-            }
+            },
+            {
+                "name": "effective_config",
+                "sha256": sha256_b64(effective_config),
+                "size_bytes": len(config_bytes),
+            },
         ]
         vmlinux = Path(kernel_src) / "vmlinux"
         if with_vmlinux:
@@ -743,6 +757,9 @@ async def build_and_upload_kernel(
         if "kernel" not in by_name:
             raise SpinePhaseError(phase_name, "create_run_upload returned no 'kernel' item")
         await put_presigned(by_name["kernel"], kernel_tar)
+        if "effective_config" not in by_name:
+            raise SpinePhaseError(phase_name, "create_run_upload returned no 'effective_config'")
+        await put_presigned(by_name["effective_config"], effective_config)
         if with_vmlinux:
             if "vmlinux" not in by_name:
                 raise SpinePhaseError(phase_name, "create_run_upload returned no 'vmlinux' item")

@@ -13,17 +13,24 @@ from dataclasses import dataclass
 from functools import partial
 from uuid import UUID
 
+import psycopg
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
+from pydantic import ValidationError
 
 from kdive.artifacts.uploads.upload_manifest import UPLOAD_WINDOW_EXPIRED
-from kdive.db.repositories import RUNS
+from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.cmdline import cmdline_extra_error
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_provenance import external_source_provenance
 from kdive.domain.lifecycle.records import Run
-from kdive.kernel_config.gate import missing_effective_config_nudge, rootfs_mount_warning
+from kdive.images.cataloging.catalog import image_os_id, resolve_system_catalog_rootfs
+from kdive.kernel_config.gate import (
+    missing_effective_config_nudge,
+    rhel_guest_crash_warning,
+    rootfs_mount_warning,
+)
 from kdive.log import bind_context
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import ToolResponse
@@ -244,11 +251,14 @@ class CompleteBuildHandlers:
     async def _success_envelope(
         self, conn: AsyncConnection, run: Run, result: BuildStepResult
     ) -> ToolResponse:
-        """Build the success envelope, attaching the boot-config warning or upload nudge.
+        """Build the success envelope, attaching the config warnings or the upload nudge.
 
-        The two advisories are mutually exclusive: the warning keys on a *present* config missing
-        boot symbols, the nudge on a config *absent* entirely (so the warning could never fire).
-        Compute the nudge only when the warning is silent to avoid a second config read.
+        The nudge keys on a config *absent* entirely, so it excludes both warnings, which key on a
+        *present* config (ADR-0398, restated by ADR-0678): the boot-config warning on missing boot
+        symbols, the RHEL-guest warning on missing ``crash_capture_rhel_guest`` symbols when the
+        target image is, or may be, RHEL-family. The two warnings are independent and may appear
+        together. Compute the nudge only when the boot warning is silent to avoid a second config
+        read, and the RHEL-guest warning only when the nudge is.
 
         The boot clauses need ``=y`` unless something can load a module before root is mounted, and
         both facts that answer that are already in hand (ADR-0545) — so both are passed, not
@@ -274,14 +284,40 @@ class CompleteBuildHandlers:
             guest_builds_initramfs=guest_builds_initramfs,
         )
         nudge = None if warning is not None else await missing_effective_config_nudge(conn, uid)
+        rhel = (
+            None
+            if nudge is not None
+            else await rhel_guest_crash_warning(conn, uid, os_id=await _target_os_id(conn, run))
+        )
         async with conn.cursor() as cur:
             await cur.execute("SELECT clock_timestamp()")
             row = await cur.fetchone()
         if row is None:  # Invariant: SELECT clock_timestamp() returns exactly one row.
             raise RuntimeError("SELECT clock_timestamp() returned no row")
         return _complete_envelope(
-            uid, result, server_time=row[0].isoformat(), warning=warning, nudge=nudge
+            uid, result, server_time=row[0].isoformat(), warning=warning, nudge=nudge, rhel=rhel
         )
+
+
+async def _target_os_id(conn: AsyncConnection, run: Run) -> str | None:
+    """The target image's os-release id, or ``None`` when kdive cannot resolve it (ADR-0678).
+
+    ``None`` for an unbound Run (the decoupled path, #1881), a missing System, a rootfs that is not
+    a registered local-libvirt catalog image, or an image with no recorded os-release. Fails open:
+    this runs after the build committed and on every replay, so a lookup error must not fail a
+    completed Run. The savepoint rolls back only the lookup, leaving the enclosing transaction
+    usable for the envelope's ``clock_timestamp()`` read.
+    """
+    if run.system_id is None:
+        return None
+    try:
+        async with conn.transaction():
+            system = await SYSTEMS.get(conn, run.system_id)
+            entry = None if system is None else await resolve_system_catalog_rootfs(conn, system)
+    except psycopg.Error, ValidationError:
+        _log.warning("guest OS lookup failed for run %s; the advisory reports unknown", run.id)
+        return None
+    return None if entry is None else image_os_id(entry)
 
 
 def _forget(uid: UUID, task: asyncio.Task[ToolResponse]) -> None:
@@ -329,6 +365,7 @@ def _complete_envelope(
     server_time: str,
     warning: dict[str, JsonValue] | None = None,
     nudge: dict[str, JsonValue] | None = None,
+    rhel: dict[str, JsonValue] | None = None,
 ) -> ToolResponse:
     data: dict[str, JsonValue] = {"server_time": server_time}
     if result.build_ref is not None:
@@ -343,6 +380,9 @@ def _complete_envelope(
     elif nudge is not None:
         data["missing_effective_config"] = nudge
         actions = [CREATE_RUN_UPLOAD_TOOL, "runs.get"]
+        refs["external_build_contract"] = EXTERNAL_BUILD_CONTRACT_URI
+    if rhel is not None:
+        data["rhel_guest_crash_config"] = rhel
         refs["external_build_contract"] = EXTERNAL_BUILD_CONTRACT_URI
     return ToolResponse.success(
         str(run_id), "succeeded", suggested_next_actions=actions, refs=refs, data=data

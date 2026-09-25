@@ -295,14 +295,15 @@ def test_schema_version_is_three_since_the_gated_bool_was_replaced() -> None:
     assert _doc()["schema_version"] == 3
 
 
-def test_served_contract_advertises_the_rhel_guest_kdump_symbols_ungated() -> None:
+def test_served_contract_advertises_the_rhel_guest_kdump_symbols_as_an_upload_advisory() -> None:
     # #1626: the symbols ADR-0213/ADR-0183 had put in the deleted kdump build-config fragment must
-    # reach the agent through the one surface that replaced it. Advertised, never gated — kdive
-    # cannot tell a RHEL guest from any other, so refusing on these would block installs that
-    # capture fine elsewhere.
+    # reach the agent through the one surface that replaced it. Never gated - refusing on these
+    # would block installs that capture fine on other guests - but checked at upload since #2762
+    # (ADR-0678): runs.complete_build warns when the target image is, or may be, RHEL-family.
     features = _doc()["feature_config_requirements"]["features"]
     rhel = next(f for f in features if f["feature"] == "crash_capture_rhel_guest")
-    assert rhel["enforcement"] == Enforcement.UNCHECKED.value
+    assert rhel["enforcement"] == Enforcement.UPLOAD_ADVISORY.value
+    assert "refuses_on" not in rhel
     advertised = json.dumps(rhel["requirements"])
     for symbol in (
         "XFS_FS",

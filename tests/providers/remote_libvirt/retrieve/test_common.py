@@ -18,6 +18,7 @@ from kdive.artifacts.storage import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.kernel_config.requirements import EMPTY_CAPTURE_CONFIG_HINT
 from kdive.providers.remote_libvirt.retrieve import common
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -98,7 +99,10 @@ def test_readiness_failure_includes_system_context() -> None:
     err = common.readiness_failure(system_id, "agent did not expose vmcore")
 
     assert err.category is ErrorCategory.READINESS_FAILURE
-    assert err.details == {"system_id": str(system_id)}
+    assert err.details == {
+        "system_id": str(system_id),
+        "kernel_config_hint": EMPTY_CAPTURE_CONFIG_HINT,
+    }
     assert str(err) == "agent did not expose vmcore"
 
 
