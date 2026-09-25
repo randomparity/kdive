@@ -8,6 +8,7 @@ import itertools
 import logging
 import os
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -24,6 +25,11 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module
 from kdive.providers.local_libvirt.lifecycle import storage as storage_module
 from kdive.providers.local_libvirt.lifecycle import xml as xml_module
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    Readiness,
+    ReadinessResult,
+    _real_readiness,
+)
 from kdive.providers.local_libvirt.lifecycle.provisioning import (
     LocalLibvirtProvisioning,
     ProvisioningFiles,
@@ -795,6 +801,8 @@ def _prov(
     resize_overlay: Callable[[str, int], None] = lambda _overlay, _gb: None,
     guest_egress: bool = False,
     prepare_console_log: Callable[[Path], None] = lambda _path: None,
+    first_boot_readiness: Readiness | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> LocalLibvirtProvisioning:
     # The overlay seams default to no-ops so the libvirt-only tests never spawn qemu-img; the
     # console-log seam is also a no-op so they never depend on host /var/lib/kdive permissions.
@@ -820,6 +828,8 @@ def _prov(
         free_port=free_port,
         extract_baseline_kernel=extract_baseline_kernel,
         guest_egress=guest_egress,
+        first_boot_readiness=first_boot_readiness,
+        clock=clock or time.monotonic,
     )
 
 
@@ -2534,3 +2544,188 @@ def test_read_resolved_cpu_tcg_default_is_none() -> None:
 def test_read_resolved_cpu_domain_gone_is_none() -> None:
     conn = _ProvConn()  # no domain defined -> lookupByName raises NO_DOMAIN
     assert _prov(conn).read_resolved_cpu(_SYS) is None
+
+
+# --- first-boot readiness gate (ADR-0680) ------------------------------------------------------
+
+_PENDING = ReadinessResult(answered=False, ok=False)
+_READY = ReadinessResult(answered=True, ok=True)
+_CRASHED = ReadinessResult(answered=True, ok=False, crash_signature="Kernel panic")
+_EXITED = ReadinessResult(answered=True, ok=False)
+
+
+def _scripted(*results: ReadinessResult) -> tuple[Readiness, list[UUID]]:
+    """A readiness probe that answers ``results`` in order, then stays pending."""
+    queue = list(results)
+    calls: list[UUID] = []
+
+    def probe(system_id: UUID) -> ReadinessResult:
+        calls.append(system_id)
+        return queue.pop(0) if queue else _PENDING
+
+    return probe, calls
+
+
+@pytest.fixture
+def two_poll_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "10")  # ceil(10 / 5) = 2 polls on KVM
+
+
+def _gated(
+    conn: _ProvConn,
+    readiness: Readiness,
+    *,
+    removed: list[str] | None = None,
+    clock: Callable[[], float] | None = None,
+) -> LocalLibvirtProvisioning:
+    sink = removed if removed is not None else []
+    return _prov(
+        conn,
+        remove_overlay=lambda path: sink.append(f"overlay:{path}"),
+        remove_baseline=lambda path: sink.append(f"baseline:{path}"),
+        first_boot_readiness=readiness,
+        clock=clock,
+    )
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_ready_returns_name() -> None:
+    probe, calls = _scripted(_READY)
+    conn = _ProvConn()
+    assert _gated(conn, probe).provision(_SYS, _profile()) == domain_name_for(_SYS)
+    assert calls == [_SYS]
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_waits_through_pending() -> None:
+    probe, calls = _scripted(_PENDING, _READY)
+    _gated(_ProvConn(), probe).provision(_SYS, _profile())
+    assert len(calls) == 2
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_timeout_fails_and_reclaims() -> None:
+    probe, calls = _scripted()
+    conn = _ProvConn()
+    removed: list[str] = []
+    with pytest.raises(CategorizedError) as caught:
+        _gated(conn, probe, removed=removed).provision(_SYS, _profile())
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert caught.value.details["first_boot"] == "timeout"
+    assert caught.value.details["system_id"] == str(_SYS)
+    assert len(calls) == 2
+    name = domain_name_for(_SYS)
+    assert conn.defined[name].destroyed is True
+    assert conn.defined[name].undefine_flags is not None
+    assert any(item.startswith("overlay:") for item in removed)
+    assert any(item.startswith("baseline:") for item in removed)
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_crash_fails_not_ready() -> None:
+    probe, _ = _scripted(_CRASHED)
+    with pytest.raises(CategorizedError) as caught:
+        _gated(_ProvConn(), probe).provision(_SYS, _profile())
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert caught.value.details["first_boot"] == "not_ready"
+    assert caught.value.details["crash_signature"] == "Kernel panic"
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_exit_fails_not_ready() -> None:
+    probe, _ = _scripted(_EXITED)
+    conn = _ProvConn()
+    with pytest.raises(CategorizedError) as caught:
+        _gated(conn, probe).provision(_SYS, _profile())
+    assert caught.value.details["first_boot"] == "not_ready"
+    assert "crash_signature" not in caught.value.details
+    assert conn.defined[domain_name_for(_SYS)].undefine_flags is not None
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_probe_error_propagates_and_tears_down() -> None:
+    def probe(_system_id: UUID) -> ReadinessResult:
+        raise CategorizedError("console read", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    conn = _ProvConn()
+    with pytest.raises(CategorizedError) as caught:
+        _gated(conn, probe).provision(_SYS, _profile())
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert conn.defined[domain_name_for(_SYS)].undefine_flags is not None
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_deadline_bounds_wall_clock() -> None:
+    now = [0.0]
+    calls: list[UUID] = []
+
+    def slow_probe(system_id: UUID) -> ReadinessResult:
+        calls.append(system_id)
+        now[0] += 15.0  # a hung virsh domstate plus the poll sleep
+        return _PENDING
+
+    with pytest.raises(CategorizedError) as caught:
+        _gated(_ProvConn(), slow_probe, clock=lambda: now[0]).provision(_SYS, _profile())
+    assert caught.value.details["first_boot"] == "timeout"
+    assert len(calls) == 1  # the 10 s window passed after one 15 s probe, before poll two
+
+
+def test_first_boot_tcg_scales_polls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "10")
+    monkeypatch.setenv("KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER", "3")
+    probe, calls = _scripted()
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    with pytest.raises(CategorizedError):
+        _gated(conn, probe, clock=lambda: 0.0).provision(_SYS, _arch_profile("ppc64le"))
+    assert len(calls) == 6  # ceil(10 / 5) polls x the TCG multiplier
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_waits_on_running_domain() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, active=True)})
+    probe, calls = _scripted(_READY)
+    assert _gated(conn, probe).provision(_SYS, _profile()) == name
+    assert calls == [_SYS]
+    assert conn.defined[name].created is False
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_reprovision_first_boot_ready_returns_name() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    probe, calls = _scripted(_READY)
+    assert _gated(conn, probe).reprovision(_SYS, _profile()) == name
+    assert calls == [_SYS]
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_reprovision_first_boot_timeout_fails() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    probe, _ = _scripted()
+    with pytest.raises(CategorizedError) as caught:
+        _gated(conn, probe).reprovision(_SYS, _profile())
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert caught.value.details["first_boot"] == "timeout"
+    assert conn.defined[name].undefine_flags is not None
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_reprovision_first_boot_crash_fails_not_ready() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    probe, _ = _scripted(_CRASHED)
+    with pytest.raises(CategorizedError) as caught:
+        _gated(conn, probe).reprovision(_SYS, _profile())
+    assert caught.value.details["first_boot"] == "not_ready"
+    assert caught.value.details["crash_signature"] == "Kernel panic"
+
+
+def test_from_env_wires_real_first_boot_readiness() -> None:
+    prov = LocalLibvirtProvisioning.from_env()
+    assert prov._first_boot_readiness is _real_readiness
+
+
+def test_directly_built_provisioner_does_not_wait() -> None:
+    assert _prov(_ProvConn())._first_boot_readiness is None

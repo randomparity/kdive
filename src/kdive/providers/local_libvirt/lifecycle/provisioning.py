@@ -2,7 +2,8 @@
 
 `LocalLibvirtProvisioning` renders a domain XML from a `ProvisioningProfile` (tagged with the
 System id in the kdive metadata element discovery reads), `defineXML`+`create`s it on
-`provision`, and `destroy`+`undefine`s it idempotently on `teardown`, over an injected
+`provision` (then waits for the first boot's readiness marker, ADR-0680), and
+`destroy`+`undefine`s it idempotently on `teardown`, over an injected
 connection factory (unit tests never touch a real host; the real `libvirt.open` adapter is
 `live_vm`-only). It owns no Postgres — the `systems.*` handlers drive the state machine.
 
@@ -14,7 +15,9 @@ orchestration.
 from __future__ import annotations
 
 import logging
+import math
 import socket
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -45,6 +48,14 @@ from kdive.profiles.provisioning import (
     _UploadRootfs,
     validate_rootfs_reference,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    Readiness,
+    _real_readiness,
+    boot_window_polls,
+    poll_readiness,
+    readiness_failure_details,
+)
+from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
     BaselineKernel,
     ExtractBaselineKernel,
@@ -73,7 +84,7 @@ from kdive.providers.local_libvirt.lifecycle.storage import (
     overlay_path,
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
-from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIRT_URI
 from kdive.providers.shared.host_cpu import host_cpu_dict
 from kdive.providers.shared.libvirt_xml import (
     parse_domain_resolved_cpu,
@@ -206,6 +217,8 @@ class LocalLibvirtProvisioning:
         extract_baseline_kernel: ExtractBaselineKernel | None = None,
         before_extract_baseline: Callable[[BaselineKernel], None] | None = None,
         guest_egress: bool = False,
+        first_boot_readiness: Readiness | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._connect = connect
         self._files = files or ProvisioningFiles()
@@ -219,6 +232,10 @@ class LocalLibvirtProvisioning:
         # Operator-resolved egress policy for the SSH-forward NIC (ADR-0313, #1031). Default False
         # keeps restrict=on; composition binds the per-Resource value via rebind_for_resource.
         self._guest_egress = guest_egress
+        # The first-boot readiness probe (ADR-0680). None — every direct construction, including
+        # the authority lane, which proves boot_ready itself — means provision does not wait.
+        self._first_boot_readiness = first_boot_readiness
+        self._clock = clock
 
     @classmethod
     def from_env(
@@ -247,6 +264,7 @@ class LocalLibvirtProvisioning:
             catalog_fetch=rootfs_catalog_fetch_from_env(allowed_roots),
             upload_fetch=rootfs_upload_fetch_from_env(store),
             guest_egress=guest_egress,
+            first_boot_readiness=_real_readiness,
         )
 
     def provision(
@@ -261,7 +279,12 @@ class LocalLibvirtProvisioning:
         selected_ssh_port: int | None = None,
         before_extract_baseline: Callable[[BaselineKernel], None] | None = None,
     ) -> str:
-        """Define and start the tagged domain; return its name.
+        """Define and start the tagged domain, wait for its first boot to be ready; return its name.
+
+        With the first-boot readiness seam wired (``from_env``), provision returns only once the
+        guest's baseline first boot has written the ``kdive-ready`` marker, so the handler commits
+        ``ready`` for a guest that finished booting (ADR-0680). A failure after define/start
+        destroys and undefines the domain before the ADR-0435 reclaim.
 
         ``bootstrap_pubkey`` (ADR-0291) is ignored here: local-libvirt injects the bootstrap key
         pre-boot via ``overlay_customizers`` (the ``virt-customize`` path), not into the running
@@ -282,7 +305,8 @@ class LocalLibvirtProvisioning:
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for invalid profile/rootfs input,
                 ``MISSING_DEPENDENCY`` for unavailable rootfs materialization or ``qemu-img``,
-                ``PROVISIONING_FAILURE`` for domain/rootfs creation failures, or
+                ``PROVISIONING_FAILURE`` for domain/rootfs creation failures and for a first boot
+                that does not reach its readiness marker (details ``first_boot``), or
                 ``INFRASTRUCTURE_FAILURE`` for provider control-plane or overlay IO faults.
         """
         del bootstrap_pubkey  # local injects pre-boot via overlay_customizers (ADR-0291)
@@ -344,6 +368,8 @@ class LocalLibvirtProvisioning:
                     customize(overlay.path)
             started = True
             self._define_and_start(xml, system_id)
+            if self._first_boot_readiness is not None:
+                self._await_first_boot(self._first_boot_readiness, system_id, accel)
         except CategorizedError:
             if started:
                 # A failed System keeps no domain (ADR-0680): remove it before the file reclaim.
@@ -355,6 +381,36 @@ class LocalLibvirtProvisioning:
             )
             raise
         return domain_name_for(system_id)
+
+    def _await_first_boot(self, readiness: Readiness, system_id: UUID, accel: str) -> None:
+        """Wait for the baseline first boot's readiness marker (ADR-0680).
+
+        Bounded like ``runs.boot``: the boot window scaled by ``tcg_deadline_multiplier(accel)``
+        (ADR-0341), as both a poll count and a monotonic deadline, so a slow probe cannot stretch
+        the wait past the window.
+
+        Raises:
+            CategorizedError: ``PROVISIONING_FAILURE`` with ``first_boot`` ``timeout`` when the
+                window elapses, or ``not_ready`` when the guest crashes or exits before the
+                marker; a probe's own error propagates with its category.
+        """
+        scale = tcg_deadline_multiplier(accel)
+        polls = math.ceil(boot_window_polls() * scale)
+        deadline = self._clock() + config.require(LIBVIRT_BOOT_WINDOW_S) * scale
+        outcome = poll_readiness(readiness, system_id, polls, deadline=deadline, clock=self._clock)
+        result = outcome.result
+        if result is not None and result.ok:
+            return
+        crash = None if result is None else result.crash_signature
+        details = readiness_failure_details(system_id, outcome.first_probe_error, crash)
+        details["first_boot"] = "timeout" if result is None else "not_ready"
+        raise CategorizedError(
+            "the guest's first boot did not emit its readiness marker"
+            if result is None
+            else "the guest's first boot failed before its readiness marker",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details=details,
+        )
 
     def _selected_gdb_port(
         self, system_id: UUID, profile: ProvisioningProfile, selected: int | None
@@ -712,7 +768,8 @@ class LocalLibvirtProvisioning:
 
         Raises:
             CategorizedError: ``PROVISIONING_FAILURE`` if the new domain cannot be
-                defined/started; ``INFRASTRUCTURE_FAILURE`` if the wipe cannot be completed.
+                defined/started or its first boot does not reach the readiness marker
+                (ADR-0680); ``INFRASTRUCTURE_FAILURE`` if the wipe cannot be completed.
         """
         del bootstrap_pubkey  # local injects pre-boot via overlay_customizers (ADR-0291)
         self.teardown(domain_name_for(system_id))
