@@ -52,6 +52,9 @@ SAMPLE_INTERVAL_S = 1.0
 DRAIN_POLL_S = 2.0
 # The reconciler sweeps expired leases every 30 s; the drain must outlast one lease plus this.
 SWEEP_MARGIN_S = 60.0
+# A session whose calls fail this many times in a row is dead (the server went away); the client
+# stops rather than spinning on calls that fail without reaching the server.
+DEAD_SESSION_FAILURES = 5
 # A System is torn down by a worker job the reconciler enqueues after its allocation ends.
 TEARDOWN_ALLOWANCE_S = 240.0
 _DETAIL_LIMIT = 200
@@ -515,6 +518,7 @@ class Stress:
     connect: Connect
     draining: bool = False
     drain_deadline: float | None = None
+    transport_streak: dict[int, int] = field(default_factory=dict)
 
     async def call(
         self,
@@ -533,6 +537,8 @@ class Stress:
         if self.drain_deadline is not None:
             timeout_s = min(timeout_s, self.drain_left())
         call = await invoke(client, tool, args, timeout_s=timeout_s, drain=self.draining)
+        streak = self.transport_streak.get(id(client), 0) + 1 if call.outcome == TRANSPORT else 0
+        self.transport_streak[id(client)] = streak
         if limit_s is not None and call.outcome == TIMEOUT:
             call = dataclasses.replace(call, outcome=ABANDONED)
         self.ledger.record(call, invalid=invalid, abandon=abandon)
@@ -573,13 +579,19 @@ class Stress:
         rng = random.Random(f"{self.cfg.seed}:{index}")
         try:
             async with connect() as client:
-                await self.client_loop(Seat(client, rng), deadline)
+                await self.client_loop(Seat(client, rng), index, deadline)
         except Exception as exc:  # a lost session must not abort the other clients or the drain
             self.ledger.notes.append(f"client {index} lost its session: {_error(exc)}")
 
-    async def client_loop(self, seat: Seat, deadline: float) -> None:
+    async def client_loop(self, seat: Seat, index: int, deadline: float) -> None:
         cfg = self.cfg
         while time.monotonic() < deadline:
+            if self.transport_streak.get(id(seat.client), 0) >= DEAD_SESSION_FAILURES:
+                self.ledger.notes.append(
+                    f"client {index} stopped after {DEAD_SESSION_FAILURES} transport failures "
+                    "in a row; the server may be down"
+                )
+                return
             await asyncio.sleep(0)  # yield even when every call answers without suspending
             roll = seat.rng.random()
             if roll < cfg.invalid_ratio:
@@ -731,15 +743,17 @@ class Stress:
         self.drain_deadline = time.monotonic() + self.cfg.drain_timeout_s
         ledger = self.ledger
         lost = list(ledger.lost.values())
+        # Release first: a long replay backlog must not use the deadline up before the grants
+        # the run already holds are settled. Replayed grants are released by the poll passes.
+        for alloc in sorted(ledger.owned):
+            if not await self.drain_call(client, "allocations.release", {"allocation_id": alloc}):
+                return
         for tool, args, invalid in lost:
             if tool != "allocations.request":
                 continue
             if not await self.drain_call(client, tool, args, invalid=invalid, abandon=True):
                 return
-        for alloc in sorted(ledger.owned):  # before any provision replay can mint a new System
-            if not await self.drain_call(client, "allocations.release", {"allocation_id": alloc}):
-                return
-        for tool, args, invalid in lost:
+        for tool, args, invalid in lost:  # after the releases, so none can mint a new System
             if tool == "allocations.request":
                 continue
             if not await self.drain_call(client, tool, args, invalid=invalid):

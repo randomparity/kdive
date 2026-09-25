@@ -490,8 +490,7 @@ class FakeClient:
 
     async def call_tool(self, name: str, /, **args: object) -> ToolResponse:
         self.stack.count_call()
-        if self.broken:
-            await asyncio.sleep(0.005)
+        if self.broken:  # as fastmcp does once its session task has failed: at once
             raise ConnectionError("session gone")
         key = args.get("idempotency_key")
         if name == "allocations.request" and isinstance(key, str):
@@ -622,7 +621,8 @@ def test_dropped_sessions_still_drain_and_report(capsys: pytest.CaptureFixture[s
     assert code == 0, ledger.violations
     assert ledger.valid_errors["transport"] > 0
     assert "note: monitor session teardown failed: ConnectionError" in printed
-    assert "note: client 0 lost its session: ConnectionError" in printed
+    assert "note: client 0 stopped after 5 transport failures in a row" in printed
+    assert ledger.valid_errors["transport"] < 100, "a dead session kept its client spinning"
     assert _settled(stack), "the drain's fresh session settled nothing"
 
 

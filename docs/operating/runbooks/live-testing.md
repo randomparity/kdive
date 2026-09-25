@@ -428,6 +428,9 @@ Before you run it:
   `systems.profile_examples` and replace its placeholder image. The script drops the profile's
   `vcpu`, `memory_mb` and `disk_gb`, which the server fills from each allocation, and the report
   warns if no provision succeeded. Each client keeps at most one System in flight.
+- **The server must stay up for the run.** If it crashes, each client stops after five
+  transport failures in a row with a note that the server may be down; a crash under load is
+  itself a finding worth reporting.
 - **Do not change host caps mid-run.** The monitor compares `in_use` with the cap it reads at
   that moment, so a cap lowered under load reports a false violation.
 

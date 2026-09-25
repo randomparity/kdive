@@ -85,13 +85,14 @@ brought up by `stack-services.sh` and `onboard.sh`:
   a report note, never a crash. Its deadline starts when it starts and bounds every
   drain call, each call's timeout included; what the deadline cuts off stays unsettled. Every
   drain call is reported under its own label.
-  1. Replay each kept request once with the same key. A replayed `deny` request that is granted
+  1. Release each owned allocation. An `ok`, or a failure whose `current_status` is terminal,
+     settles it. This comes first so a long replay backlog cannot use the deadline up before the
+     grants the run already holds are settled.
+  2. Replay each kept request once with the same key. A replayed `deny` request that is granted
      joins the abandoned set, since only it carries the short lease. Every other replayed grant
-     is owned: a queued request the server promoted holds the server's default lease (4 h), not
-     `--lease`.
-  2. Release each owned allocation. An `ok`, or a failure whose `current_status` is terminal,
-     settles it.
-  3. Replay each kept provision once. Coming after step 2, a provision that never committed now
+     is owned, and step 4 releases it: a queued request the server promoted holds the server's
+     default lease (4 h), not `--lease`.
+  3. Replay each kept provision once. Coming after step 1, a provision that never committed now
      fails against a released allocation instead of creating a System. A `system_id` joins the
      Systems. A replay that fails with a category leaves nothing to track.
   4. Until the deadline, poll the rest: re-release owned leftovers, read abandoned allocations
@@ -164,6 +165,12 @@ violations, as are the valid-call errors above. Examples: a capacity or quota de
    - The reconciler sweeps every 30 s and the interval is not configurable, so lease-expiry
      reclamation takes up to the lease plus 30 s; `--drain-timeout` is bounded below to cover it.
    - Latency figures come from one Python process and include client-side scheduling.
+  - The server stays up for the run. If it crashes or restarts, each client whose calls fail
+    five times in a row stops with a report note ("the server may be down") instead of
+    spinning, and the drain works through what it can. Recovering a run across a server restart
+    is out of scope (operator decision, 2026-09-25). kdive sets no MCP session idle timeout,
+    and an idle connection's 65 s keep-alive close reconnects without error, so load alone does
+    not end a session.
 4. **Covered elsewhere.** Server-side fixes for anything the script finds go to separate issues
    filed through `$bounty` (charter exclusion). `just` and CI wiring are the operator's (charter
    exclusion).
