@@ -61,8 +61,8 @@ test ~70.
   `test_blocking_shutdown_counts_against_the_bound`: a fake whose ignored `shutdown` advances the
   fake clock 30 s → `destroy` after 2 requests, not 6.
 - Contract: install force-off still precedes the rw mount. `Mode: focused-test` — the existing
-  ordering tests at `test_install.py` (`events.index("destroy") < events.index("inject")`, three
-  sites) now read `events.index("shutdown")`: `_EventDomain` also appends `"shutdown"` to
+  ordering tests at `test_install.py` (two `events.index("destroy") < events.index("inject")`
+  sites and one `events[0] == "destroy"` site) now read `"shutdown"`: `_EventDomain` also appends `"shutdown"` to
   `events`. Red: `ValueError` from `events.index("destroy")` once the clean path lands.
 - Contract: force-off. `Mode: focused-test` — `test_force_off_shuts_down_cleanly` (running →
   `["shutdown"]`), `test_force_off_skips_a_shut_off_domain` (→ `[]`),

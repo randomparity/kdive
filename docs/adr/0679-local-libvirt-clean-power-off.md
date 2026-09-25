@@ -51,7 +51,9 @@ The ADR-0576 console truncate still runs after the domain is off and before `cre
   600 s at the default TCG multiplier. This is routine, not rare: the `runs.boot` after a Run whose
   kernel panicked and hung pays it every time. The log line names this case.
 - A guest's own shutdown path runs, so its shutdown messages reach the console before the
-  truncate removes them, as the prior boot's messages always were.
+  truncate removes them, as the prior boot's messages always were. The truncate still waits for
+  libvirt to report `SHUTOFF`, which it does only after QEMU has exited, so ADR-0576's ordering
+  holds on the clean path as on the destroy path.
 - The other local-libvirt `destroy()` sites (external boot sessions, the vmcore harvest, the
   customization boot) are unchanged.
 
