@@ -152,7 +152,7 @@ Everything is overridable from the environment before running the scripts:
 |----------|---------|---------|
 | `KDIVE_PROJECT` | `demo` | Project the stack seeds and the token grants `admin` on. |
 | `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test. |
-| `KDIVE_DEMO_WORKSPACE` | `KDIVE_KERNEL_SRC` | Directory `.mcp.json` is installed into. Defaults to the kernel tree, but set it separately when `KDIVE_KERNEL_SRC` doubles as a live proof's kernel fixture (#2760) — a demo bring-up must not add files to a tree a proof run also uses. |
+| `KDIVE_DEMO_WORKSPACE` | same as `KDIVE_KERNEL_SRC` | Directory `.mcp.json` is installed into. Defaults to the kernel tree, but set it separately when `KDIVE_KERNEL_SRC` doubles as a live proof's kernel fixture (#2760) — a demo bring-up must not add files to a tree a proof run also uses. |
 | `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` (`…/fedora-kdive-ready-44-ppc64le.qcow2` on a ppc64le host) | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
 | `KDIVE_LIBVIRT_URI` | the endpoint in `/etc/kdive/live-worker-libvirt.env` | libvirt connection every consumer drives — the operator-owned session daemon the lifecycle installer published. `qemu:///system` until the contract is installed, which `demo-up.sh` refuses. |
 | `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for checkout commands, server, and reconciler; fixed workers use their installed lifecycle venv. |

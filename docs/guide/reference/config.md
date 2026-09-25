@@ -346,7 +346,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_DEMO_CONTEXT` | — | kube context `demo-token.sh` uses (unset → the current context). |
 | `KDIVE_DEMO_FULLNAME` | `kdive-kdive` | Chart fullname (`<release>-kdive`) `demo-token.sh` uses to address the server/oidc pods. |
 | `KDIVE_DEMO_NAMESPACE` | `kdive-demo` | Release namespace `demo-token.sh` targets when minting a bundled-demo bearer token. |
-| `KDIVE_DEMO_WORKSPACE` | `KDIVE_KERNEL_SRC` | Directory `examples/local-libvirt/demo-up.sh` installs `.mcp.json` into; kept independent of `KDIVE_KERNEL_SRC` so a demo bring-up cannot add files to a tree a live proof is also using as its kernel fixture (#2760). |
+| `KDIVE_DEMO_WORKSPACE` | `same as KDIVE_KERNEL_SRC` | Directory `examples/local-libvirt/demo-up.sh` installs `.mcp.json` into; kept independent of `KDIVE_KERNEL_SRC` so a demo bring-up cannot add files to a tree a live proof is also using as its kernel fixture (#2760). |
 | `KDIVE_EFFECTIVE_UID` | `$EUID` | Effective uid `check-local-libvirt.sh` uses for its non-root-worker readability advisory (ADR-0223); overrides `$EUID` so the gate is testable independent of the runner's uid. |
 | `KDIVE_EXPECTED_SLOTS` | — | Internal status-response assertion handoff copied from KDIVE_LIFECYCLE_EXPECTED_SLOTS; unset or empty disables the assertion. |
 | `KDIVE_GITLEAKS` | `gitleaks` | gitleaks binary `check-pr-body.sh` runs for its credential-pattern pass (the pr-body-scan workflow points this at the release archive it unpacks, and the tests point it at a stub). |
