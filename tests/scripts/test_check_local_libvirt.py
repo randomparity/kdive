@@ -37,7 +37,8 @@ def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
 def _stub_python(bindir: Path, name: str, *, imports_ok: bool) -> Path:
     """Write a python-interpreter stub that succeeds (or fails) on `-c "import ..."`.
 
-    Mirrors how the script probes the worker venv: `"$PY" -c "import guestfs, drgn"`.
+    Mirrors how the script probes KDIVE_PYTHON, the checkout/CLI interpreter:
+    `"$PY" -c "import guestfs, drgn"`.
     """
     body = "exit 0" if imports_ok else 'echo "ModuleNotFoundError" >&2\nexit 1'
     p = bindir / name
@@ -182,6 +183,16 @@ def test_missing_venv_bindings_fails_with_hint(tmp_path: Path) -> None:
     # The old "section 4b" pointer named a heading that no longer exists in that runbook.
     assert "Wire the worker venv" in result.stderr, result.stderr
     assert "section 4b" not in result.stderr, result.stderr
+    # The failing check names the interpreter it actually probes (KDIVE_PYTHON, the
+    # checkout/CLI interpreter) rather than calling it the "worker venv" -- this checkout
+    # interpreter is not the running lifecycle worker (issue #2759).
+    fail_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith("FAIL") and "guestfs, drgn" in line
+    )
+    assert "KDIVE_PYTHON" in fail_line, fail_line
+    assert "worker" not in fail_line.lower(), fail_line
 
 
 def test_missing_venv_bindings_optional_warns(tmp_path: Path) -> None:
@@ -217,6 +228,15 @@ def test_missing_venv_bindings_optional_warns(tmp_path: Path) -> None:
     assert "guestfs" in result.stderr and "drgn" in result.stderr
     assert "python3-libguestfs" in result.stderr
     assert "host is ready" in result.stderr
+    # The WARN path's message went through the same rename as the FAIL path: it must name
+    # KDIVE_PYTHON, not the "worker venv" (issue #2759).
+    warn_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith("WARN") and "guestfs, drgn" in line
+    )
+    assert "KDIVE_PYTHON" in warn_line, warn_line
+    assert "worker" not in warn_line.lower(), warn_line
 
 
 def test_invalid_kdump_preflight_value_rejected(tmp_path: Path) -> None:
