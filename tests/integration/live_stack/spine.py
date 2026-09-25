@@ -40,6 +40,9 @@ import httpx
 import psycopg
 
 from kdive.domain.accounting.cost import quantize_kcu
+from kdive.kernel_config.parse import parse_kernel_config
+from kdive.kernel_config.requirements import CRASH_CAPTURE, feature_requirement
+from kdive.kernel_config.support import unmet_clauses
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer, mint_token
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import JsonValue, ToolResponse
@@ -546,6 +549,54 @@ def boot_member_source(kernel_src: Path, arch: str) -> Path:
     return member
 
 
+def check_spine_kernel_config(
+    kernel_src: Path,
+    arch: str,
+    phase_name: str,
+    *,
+    require_kdump: bool = False,
+    require_network: bool = False,
+    root_fs: str | None = None,
+) -> bytes:
+    """Reject a built tree that lacks the selected live proof's kernel features."""
+    if arch not in {"x86_64", "ppc64le"}:
+        raise SpinePhaseError(phase_name, f"unsupported kernel arch {arch!r}")
+    if root_fs not in {None, "ext4", "xfs"}:
+        raise SpinePhaseError(phase_name, f"unsupported guest root filesystem {root_fs!r}")
+    config_path = kernel_src / ".config"
+    try:
+        config_bytes = config_path.read_bytes()
+    except OSError as exc:
+        raise SpinePhaseError(
+            phase_name, f"could not read {config_path} ({type(exc).__name__})"
+        ) from exc
+    config = parse_kernel_config(config_bytes)
+    missing: list[str] = [
+        f"CONFIG_{symbol}=y"
+        for symbol in ("VIRTIO_PCI", "VIRTIO_BLK")
+        if not config.is_builtin(symbol)
+    ]
+    if arch == "ppc64le" or root_fs == "ext4":
+        if not config.is_builtin("EXT4_FS"):
+            missing.append("CONFIG_EXT4_FS=y")
+    elif root_fs == "xfs":
+        if not config.is_builtin("XFS_FS"):
+            missing.append("CONFIG_XFS_FS=y")
+    elif not (config.is_builtin("EXT4_FS") or config.is_builtin("XFS_FS")):
+        missing.append("CONFIG_EXT4_FS=y or CONFIG_XFS_FS=y")
+    if require_network and not config.is_enabled("VIRTIO_NET"):
+        missing.append("CONFIG_VIRTIO_NET=y or =m")
+    if require_kdump:
+        for clause in unmet_clauses(config, feature_requirement(CRASH_CAPTURE), arch=arch):
+            missing.append(" or ".join(f"CONFIG_{symbol}" for symbol in sorted(clause.symbols)))
+    if missing:
+        raise SpinePhaseError(
+            phase_name,
+            f"KDIVE_KERNEL_SRC/.config lacks required spine settings: {', '.join(missing)}",
+        )
+    return config_bytes
+
+
 def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64") -> Path:
     """Cut the ADR-0234 combined ``kernel`` artifact from a built kernel tree.
 
@@ -608,6 +659,9 @@ async def build_and_upload_kernel(
     phase_name: str = "upload-build",
     arch: str = "x86_64",
     with_vmlinux: bool = False,
+    require_kdump: bool = False,
+    require_network: bool = False,
+    root_fs: str | None = None,
 ) -> None:
     """Drive the external-build upload lane for ``run_id`` and complete the Run's build step.
 
@@ -630,6 +684,14 @@ async def build_and_upload_kernel(
     kernel_src = os.environ.get(KERNEL_TREE_ENV)
     if not kernel_src:
         raise SpinePhaseError(phase_name, f"{KERNEL_TREE_ENV} unset; point it at a built tree")
+    check_spine_kernel_config(
+        Path(kernel_src),
+        arch,
+        phase_name,
+        require_kdump=require_kdump,
+        require_network=require_network,
+        root_fs=root_fs,
+    )
     with tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-") as scratch:
         kernel_tar = combined_kernel_tar(Path(kernel_src), Path(scratch), arch=arch)
         decls = [

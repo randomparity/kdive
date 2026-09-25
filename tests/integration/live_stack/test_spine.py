@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
 import pytest
@@ -46,6 +47,76 @@ def _client(responses: list[ToolResponse]) -> _FakeClient:
 
 def _live_client(client: _FakeClient) -> Any:
     return cast(Any, client)
+
+
+_BOOT_CONFIG = b"CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_EXT4_FS=y\n"
+
+
+@pytest.mark.parametrize("missing", ["VIRTIO_PCI", "VIRTIO_BLK", "EXT4_FS"])
+def test_spine_config_refuses_missing_built_in(tmp_path: Path, missing: str) -> None:
+    config = _BOOT_CONFIG.replace(f"CONFIG_{missing}=y".encode(), f"CONFIG_{missing}=m".encode())
+    (tmp_path / ".config").write_bytes(config)
+
+    with pytest.raises(SpinePhaseError, match=f"CONFIG_{missing}=y"):
+        spine.check_spine_kernel_config(tmp_path, "ppc64le", "upload-build")
+
+
+def test_spine_config_refuses_missing_config(tmp_path: Path) -> None:
+    with pytest.raises(SpinePhaseError, match=r"\.config"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build")
+
+
+def test_spine_config_scopes_filesystem_to_guest(tmp_path: Path) -> None:
+    (tmp_path / ".config").write_bytes(
+        b"CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_XFS_FS=y\n"
+    )
+    assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build")
+    with pytest.raises(SpinePhaseError, match="CONFIG_EXT4_FS=y"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", root_fs="ext4")
+    with pytest.raises(SpinePhaseError, match="CONFIG_EXT4_FS=y"):
+        spine.check_spine_kernel_config(tmp_path, "ppc64le", "upload-build")
+
+
+def test_spine_config_network_module_route_is_caller_scoped(tmp_path: Path) -> None:
+    config = tmp_path / ".config"
+    config.write_bytes(_BOOT_CONFIG)
+    assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build")
+    with pytest.raises(SpinePhaseError, match="CONFIG_VIRTIO_NET"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_network=True)
+    config.write_bytes(_BOOT_CONFIG + b"CONFIG_VIRTIO_NET=m\n")
+    assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_network=True)
+
+
+@pytest.mark.parametrize("arch,required", [("x86_64", "FW_CFG_SYSFS"), ("ppc64le", "CRASH_DUMP")])
+def test_spine_config_kdump_respects_arch(tmp_path: Path, arch: str, required: str) -> None:
+    (tmp_path / ".config").write_bytes(
+        _BOOT_CONFIG
+        + b"CONFIG_KEXEC_FILE=y\nCONFIG_CRASH_DUMP=y\nCONFIG_PROC_VMCORE=y\n"
+        + b"CONFIG_RELOCATABLE=y\n"
+        if arch == "x86_64"
+        else _BOOT_CONFIG + b"CONFIG_KEXEC_FILE=y\nCONFIG_PROC_VMCORE=y\nCONFIG_RELOCATABLE=y\n"
+    )
+    with pytest.raises(SpinePhaseError, match=f"CONFIG_{required}"):
+        spine.check_spine_kernel_config(tmp_path, arch, "upload-build", require_kdump=True)
+
+
+def test_spine_upload_rejects_config_before_staging_or_upload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / ".config").write_bytes(b"CONFIG_VIRTIO_PCI=m\n")
+    monkeypatch.setenv(spine.KERNEL_TREE_ENV, str(tmp_path))
+    monkeypatch.setattr(spine, "accepted_run_upload_names", lambda _contract: ["kernel"])
+    stage = Mock(side_effect=AssertionError("staging reached"))
+    monkeypatch.setattr(spine, "combined_kernel_tar", stage)
+    client = SimpleNamespace(
+        read_text_resource=AsyncMock(return_value="{}"),
+        call_tool=AsyncMock(side_effect=AssertionError("upload reached")),
+    )
+
+    with pytest.raises(SpinePhaseError, match="CONFIG_VIRTIO_PCI=y"):
+        asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
+    stage.assert_not_called()
+    client.call_tool.assert_not_called()
 
 
 def _job(status: str, *, category: ErrorCategory | None = None) -> ToolResponse:
