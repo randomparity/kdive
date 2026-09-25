@@ -110,13 +110,18 @@ Verification:
   called; full seven-symbol config → `None`; loader `None` → `None`; `os_id=None` → `"unknown"`.
   Red: ImportError. Green: `just test-verbose tests/kernel_config/test_gate.py`.
 - Mode: focused-test — served entry: `tests/mcp/catalog/test_external_build_contract_resource.py`
-  `test_served_contract_advertises_the_rhel_guest_kdump_symbols_ungated` now expects
-  `Enforcement.UPLOAD_ADVISORY` (red before step 3).
+  `test_served_contract_advertises_the_rhel_guest_kdump_symbols_ungated`, renamed
+  `..._as_an_upload_advisory`, expects `Enforcement.UPLOAD_ADVISORY` (red before step 3).
+- Mode: focused-test — registry guard: `tests/kernel_config/test_requirements.py`
+  `test_the_upload_enforcement_values_name_the_features_the_gate_module_really_reads` (:353-397)
+  expects `{CRASH_CAPTURE, ROOTFS_MOUNT, CRASH_CAPTURE_RHEL_GUEST}` and the new constant read in
+  `gate.py`. Green: `just test-verbose tests/kernel_config/test_requirements.py`.
 
 Interfaces (produced): `RHEL_FAMILY_OS_IDS: frozenset[str]`,
 `RHEL_GUEST_CRASH_CONFIG_REASON = "kernel_missing_rhel_guest_crash_config"`,
 `async def rhel_guest_crash_warning(conn, run_id, *, os_id: str | None) -> dict[str, JsonValue] | None`,
-`EMPTY_CAPTURE_CONFIG_HINT: Final[dict[str, JsonValue]]` (requirements.py).
+`EMPTY_CAPTURE_CONFIG_HINT: Final[str]` (requirements.py; a string because the job worker keeps
+only scalar error details, `jobs/worker.py::_safe_detail`).
 
 Steps:
 1. Write the tests; run; expect red.
@@ -167,16 +172,13 @@ async def rhel_guest_crash_warning(
    catalog image, or when it cannot tell which OS the guest runs"; add
 
 ```python
-EMPTY_CAPTURE_CONFIG_HINT: Final[dict[str, JsonValue]] = {
-    "feature": CRASH_CAPTURE_RHEL_GUEST,
-    "contract": "resource://kdive/contracts/external-build",
-    "note": (
-        "kdump wrote no core. On a RHEL-family guest a likely cause is a kernel missing the "
-        "crash_capture_rhel_guest symbols: the capture kernel boots, cannot mount the dracut "
-        "kdump initramfs, and panics before writing. runs.complete_build reports them in "
-        "data.rhel_guest_crash_config when the uploaded effective_config lacks them."
-    ),
-}
+EMPTY_CAPTURE_CONFIG_HINT: Final[str] = (
+    "kdive found no kdump core. On a RHEL-family guest a likely cause is a kernel missing the "
+    f"{CRASH_CAPTURE_RHEL_GUEST} symbols: the capture kernel boots, cannot mount the dracut "
+    "kdump initramfs, and panics before writing. runs.complete_build reports them in "
+    "data.rhel_guest_crash_config when the uploaded effective_config lacks them "
+    "(see resource://kdive/contracts/external-build)"
+)
 ```
 4. Update the module docstring's consumer list; green, `just lint`, `just type`; commit
    `feat(kernel-config): add the RHEL-family kdump advisory (#2762)`.
@@ -190,7 +192,8 @@ Verification:
   "rhel"` and the contract ref; the replay carries the same value; `"debian"` → absent; a config
   that also lacks `VIRTIO_BLK` carries both warnings; with no config the nudge appears and the new
   key is absent. A second test runs the real `_target_os_id` on an unbound seeded Run and asserts
-  `guest_family == "unknown"`. Red: `KeyError`. Green:
+  `guest_family == "unknown"`; a third patches `SYSTEMS.get` to raise `psycopg.OperationalError`
+  and asserts the completion still succeeds with `guest_family == "unknown"`. Red: `KeyError`. Green:
   `just test-verbose tests/mcp/lifecycle/test_complete_build_tool.py`.
 - Mode: task-test-not-applicable — the wrapper docstring sentence: agent-facing prose; the
   generated reference check (`just docs-check`, `just cli-verbs-check`) guards the copies.
@@ -201,11 +204,19 @@ Steps:
 
 ```python
 async def _target_os_id(conn: AsyncConnection, run: Run) -> str | None:
-    """The target image's os-release id, or ``None`` when kdive cannot resolve it (ADR-0678)."""
+    """The target image's os-release id, or ``None`` when kdive cannot resolve it (ADR-0678).
+
+    Fails open: this runs after the build committed and on every replay, so a lookup error must
+    not fail a completed Run - it degrades to the ``unknown`` advisory.
+    """
     if run.system_id is None:
         return None
-    system = await SYSTEMS.get(conn, run.system_id)
-    entry = None if system is None else await resolve_system_catalog_rootfs(conn, system)
+    try:
+        system = await SYSTEMS.get(conn, run.system_id)
+        entry = None if system is None else await resolve_system_catalog_rootfs(conn, system)
+    except psycopg.Error, ValidationError:
+        _log.warning("guest OS lookup failed for run %s; advisory reports unknown", run.id)
+        return None
     return None if entry is None else image_os_id(entry)
 ```
    In `_success_envelope`, after `warning`/`nudge`:
@@ -231,6 +242,9 @@ Verification:
 - Mode: focused-test — remote: `test_capture_no_core_present_is_readiness_failure` and
   `test_capture_readiness_window_exhausted_is_readiness_failure` assert the hint. Green:
   `just test-verbose tests/providers/remote_libvirt/retrieve/test_retrieve.py`.
+- Mode: focused-test — agent-visible: the local test also asserts
+  `jobs.worker._failure_context(exc, SecretRegistry())["failure_detail_kernel_config_hint"] ==
+  EMPTY_CAPTURE_CONFIG_HINT`, so the hint survives the worker's scalar-only detail filter.
 
 Steps:
 1. Write the assertions; run; expect `KeyError`.
@@ -245,17 +259,26 @@ Steps:
 ## Task 5 — Spine upload and docs
 
 Verification:
-- Mode: task-test-not-applicable — `build_and_upload_kernel` runs only against a live stack; the
-  live arm proves it.
+- Mode: focused-test — `tests/integration/live_stack/test_spine.py`, reusing the fake-client
+  pattern of `test_spine_upload_rejects_config_before_staging_or_upload`: the declarations include
+  `effective_config` with the `.config` bytes' sha256/size and its PUT runs; a contract that does
+  not accept it raises `SpinePhaseError`. Green: `just test-verbose tests/integration/live_stack/test_spine.py`.
 - Mode: focused-test — packaged doc copy: `just resources-docs-check` fails before regeneration.
 
 Steps:
-1. In `build_and_upload_kernel`, keep `config_bytes = check_spine_kernel_config(...)`, write them
-   to `Path(scratch) / "effective_config"`, append a `{"name": "effective_config", "sha256",
-   "size_bytes"}` declaration, and `put_presigned(by_name["effective_config"], path)`.
-2. In `docs/operating/external-build-upload.md`, after the RHEL-family block, replace "kdive
+1. In `build_and_upload_kernel`, guard `"effective_config" in accepted` like `kernel`, keep
+   `config_bytes = check_spine_kernel_config(...)`, write them to
+   `Path(scratch) / "effective_config"`, append its declaration, and PUT it, raising
+   `SpinePhaseError` when `create_run_upload` returns no such item.
+   Trace each caller that installs with `crashkernel` (`tests/integration/test_live_stack.py`,
+   `test_remote_live_stack.py`, `test_console_parts_live.py`,
+   `tests/live_vm/installed_local_authority_support.py`): the uploaded config now arms
+   `crash_capture_refusal`, so each must pass `require_kdump=True` or not reserve a crashkernel.
+2. In `docs/operating/external-build-upload.md`: after the RHEL-family block, replace "kdive
    advertises it and never refuses on it" with a paragraph naming `data.rhel_guest_crash_config`,
-   `guest_family` `rhel`/`unknown`, and the `kernel_config_hint` on a no-core `vmcore.fetch`.
+   `guest_family` `rhel`/`unknown`, and `failure_detail_kernel_config_hint` on a no-core
+   capture job; make the "One non-blocking exception" sentence (~:20) plural; add the new advisory
+   to the `effective_config` table row (~:307).
 3. `just resources-docs`; `just resources-docs-check`; commit
    `docs(external-build): describe the RHEL-family kdump advisory (#2762)`.
 

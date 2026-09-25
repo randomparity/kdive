@@ -34,9 +34,10 @@ time, after the crash, on a Fedora guest.
 3. Advisory exclusivity (ADR-0398) is restated: `missing_effective_config` still excludes both
    warnings, because both need a present config. `missing_boot_config` and
    `rhel_guest_crash_config` are independent and may appear together.
-4. A kdump-family capture that finds no core adds a static `kernel_config_hint` to the
+4. A kdump-family capture that finds no core adds a static string `kernel_config_hint` to the
    `readiness_failure` details, naming `crash_capture_rhel_guest` and the contract, in the local
-   provider and in the remote provider's kdump capture. `host_dump` does not carry it.
+   provider and in the remote provider's kdump capture. It is a string because the job worker
+   keeps only scalar details. `host_dump` does not carry it.
 
 ## Consequences
 
@@ -55,6 +56,8 @@ time, after the crash, on a Fedora guest.
   `src/kdive/images/rootfs/catalog.py:18` sets `DEFAULT_CATALOG_PATH` to
   `Path(__file__).parents[4] / "fixtures"`, outside the installed package, so a server running
   from a wheel has no file to read; operator-declared images have no row there either.
+- **Fail the completion when the family lookup errors.** judgment: the build has committed and a
+  replay recomputes the envelope, so an advisory lookup error would fail a completed Run forever.
 - **Stay silent when the family is unknown.** judgment: the decoupled path has no System at
   `complete_build`, so the case #2762 reports would stay silent for every such Run.
 - **Warn on every upload regardless of family.** judgment: ADR-0478 rejected this; a known
