@@ -186,6 +186,18 @@ CRASH_CAPTURE_RHEL_GUEST = "crash_capture_rhel_guest"
 SYSRQ = "sysrq"
 ROOTFS_MOUNT = "rootfs_mount"
 
+# The `kernel_config_hint` a kdump-family capture that found no core adds to its readiness
+# failure (ADR-0678). The retrieve providers hold no database connection, so this cannot say
+# whether the Run's config really lacks the set - only where to look. A single string because the
+# job worker keeps only scalar error details (`jobs.worker._safe_detail`); agent-facing prose.
+EMPTY_CAPTURE_CONFIG_HINT: Final[str] = (
+    "kdive found no kdump core. On a RHEL-family guest a likely cause is a kernel missing the "
+    f"{CRASH_CAPTURE_RHEL_GUEST} symbols: the capture kernel boots, cannot mount the dracut "
+    "kdump initramfs, and panics before writing. runs.complete_build reports them in "
+    "data.rhel_guest_crash_config when the uploaded effective_config lacks them "
+    "(see resource://kdive/contracts/external-build)"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ScopedEnforcement:
@@ -404,7 +416,8 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         CRASH_CAPTURE_RHEL_GUEST,
         "Extra symbols a RHEL-family guest (RHEL/Rocky/AlmaLinux/CentOS Stream/Fedora) needs "
         "before kdump can actually write a vmcore. All are filesystem- or initramfs-dependent, so "
-        "they are advisory, never gated: kdive cannot tell which OS your guest runs. XFS_FS - the "
+        "they are advisory, never gated: runs.complete_build warns when the target System boots "
+        "a RHEL-family catalog image, or when it cannot tell which OS the guest runs. XFS_FS - the "
         "RHEL root filesystem the capture kernel must mount to write the core (a stock defconfig "
         "builds EXT4 but not XFS). SQUASHFS/SQUASHFS_ZSTD/EROFS_FS/OVERLAY_FS/BLK_DEV_LOOP - "
         "dracut builds the kdump initramfs as a compressed squashfs or erofs image over a loop "
@@ -421,6 +434,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
             "BLK_DEV_LOOP",
             "KEXEC_FILE",
         ),
+        # Advisory, not gated (ADR-0478 §1): `rhel_guest_crash_warning` reads these advertised
+        # clauses at runs.complete_build when the target image is, or may be, RHEL-family
+        # (ADR-0678). `gate_required` stays empty.
+        enforcement=Enforcement.UPLOAD_ADVISORY,
     ),
     FeatureRequirement(
         "ikconfig",

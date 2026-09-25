@@ -20,10 +20,13 @@ from kdive.kernel_config.gate import (
     DEBUGINFO_UNLOADABLE_REASON,
     MISSING_BOOT_CONFIG_REASON,
     MISSING_DEBUGINFO_REASON,
+    RHEL_FAMILY_OS_IDS,
+    RHEL_GUEST_CRASH_CONFIG_REASON,
     crash_capture_refusal,
     debuginfo_unloadable_warning,
     debuginfo_warning,
     missing_effective_config_nudge,
+    rhel_guest_crash_warning,
     rootfs_mount_warning,
 )
 from kdive.kernel_config.parse import KernelConfig
@@ -410,3 +413,61 @@ def test_a_ppc64le_kernel_missing_an_unscoped_symbol_is_still_refused():
     refusal = _crash_call(no_relocatable, arch=_PPC)
     assert refusal is not None
     assert refusal["missing"] == ["RELOCATABLE"]
+
+
+_RHEL_GUEST_SET = frozenset(
+    {"XFS_FS", "SQUASHFS", "SQUASHFS_ZSTD", "EROFS_FS", "OVERLAY_FS", "BLK_DEV_LOOP", "KEXEC_FILE"}
+)
+
+
+def _rhel(*, config: KernelConfig | None, os_id: str | None) -> dict[str, Any] | None:
+    async def _run() -> dict[str, Any] | None:
+        with _patched_load(config):
+            return await rhel_guest_crash_warning(_CONN, _RUN_ID, os_id=os_id)
+
+    return asyncio.run(_run())
+
+
+def test_rhel_guest_warning_names_squashfs_zstd_on_a_fedora_guest():
+    # #2762: the live failure - a capture kernel with no zstd squashfs panics in Fedora's dracut
+    # kdump initramfs. The advisory now names it before the crash.
+    warning = _rhel(config=all_builtin(_RHEL_GUEST_SET - {"SQUASHFS_ZSTD"}), os_id="fedora")
+    assert warning is not None
+    assert warning["reason"] == RHEL_GUEST_CRASH_CONFIG_REASON
+    assert warning["missing"] == ["SQUASHFS_ZSTD"]
+    assert warning["guest_family"] == "rhel"
+    assert "resource://kdive/contracts/external-build" in warning["remediation"]
+
+
+@pytest.mark.parametrize("os_id", sorted(RHEL_FAMILY_OS_IDS))
+def test_every_rhel_family_id_warns(os_id: str):
+    assert _rhel(config=all_builtin(set()), os_id=os_id) is not None
+
+
+def test_a_known_non_rhel_guest_is_silent_without_reading_the_config():
+    async def _boom(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
+        raise AssertionError("a known non-RHEL guest must not read the config")
+
+    async def _run() -> dict[str, Any] | None:
+        with patch("kdive.kernel_config.gate.load_effective_config", _boom):
+            return await rhel_guest_crash_warning(_CONN, _RUN_ID, os_id="debian")
+
+    assert asyncio.run(_run()) is None
+
+
+def test_a_config_carrying_the_whole_set_is_silent():
+    assert _rhel(config=all_builtin(_RHEL_GUEST_SET), os_id="fedora") is None
+    assert _rhel(config=all_builtin(_RHEL_GUEST_SET), os_id=None) is None
+
+
+def test_an_absent_config_fails_open():
+    assert _rhel(config=None, os_id="rocky") is None
+    assert _rhel(config=None, os_id=None) is None
+
+
+def test_an_unknown_guest_warns_conditionally():
+    warning = _rhel(config=all_builtin(_RHEL_GUEST_SET - {"XFS_FS"}), os_id=None)
+    assert warning is not None
+    assert warning["guest_family"] == "unknown"
+    assert warning["missing"] == ["XFS_FS"]
+    assert "if the guest is rhel-family" in warning["remediation"].lower()
