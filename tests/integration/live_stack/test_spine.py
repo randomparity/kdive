@@ -75,13 +75,16 @@ def test_combined_kernel_tar_strips_staged_modules(
 
     monkeypatch.setattr(spine.subprocess, "run", record)
     spine.combined_kernel_tar(kernel_src, tmp_path, arch=arch)
-    assert calls[0] == [
-        "make",
-        "-C",
-        str(kernel_src),
-        "modules_install",
-        f"INSTALL_MOD_PATH={tmp_path / 'modstage'}",
-        "INSTALL_MOD_STRIP=1",
+    make_calls = [cmd for cmd in calls if cmd[0] == "make"]
+    assert make_calls == [
+        [
+            "make",
+            "-C",
+            str(kernel_src),
+            "modules_install",
+            f"INSTALL_MOD_PATH={tmp_path / 'modstage'}",
+            "INSTALL_MOD_STRIP=1",
+        ]
     ]
 
 
