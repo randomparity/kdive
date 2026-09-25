@@ -398,7 +398,9 @@ def test_report_all_projects_denied_to_project_token() -> None:
 
 
 @pytest.mark.live_stack
-def test_spine_over_the_wire(record_property: Callable[[str, object], None]) -> None:
+def test_spine_over_the_wire(
+    record_testsuite_property: Callable[[str, object], None],
+) -> None:
     """Drive allocate → … → teardown over HTTP; assert #1/#2/#3/#5; name the failing phase."""
     issuer, base_url, db_url = _spine_preflight()
     arch = require_native_guest_arch()
@@ -470,9 +472,8 @@ def test_spine_over_the_wire(record_property: Callable[[str, object], None]) -> 
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(
-                        op, run_id=run_id, arch=arch, with_vmlinux=arch == "x86_64"
-                    )
+                    # Every arch needs vmlinux: introspect.from_vmcore resolves debuginfo from it.
+                    await build_and_upload_kernel(op, run_id=run_id, arch=arch, with_vmlinux=True)
                 for step in ("install", "boot"):
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
@@ -497,7 +498,7 @@ def test_spine_over_the_wire(record_property: Callable[[str, object], None]) -> 
                         )
                         ok(await scalar(op, "debug.end_session", session_id=session_id), "attach")
                 else:
-                    record_property("spine_attach", _SPINE_GDBSTUB_GAP)
+                    record_testsuite_property("spine_attach", _SPINE_GDBSTUB_GAP)
                 async with phase("crash-rbac-negative"):
                     denied = await scalar(op, "control.force_crash", system_id=system_id)
                     if denied.status != "error" or denied.error_category != "authorization_denied":
