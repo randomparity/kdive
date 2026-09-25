@@ -34,8 +34,10 @@ rotation instead of accumulating in ``/tmp`` until the filesystem runs out of in
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
@@ -92,10 +94,12 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 
 def pytest_report_header() -> list[str]:
-    """Name the resolved kernel tree and probed app revisions in live proof output."""
+    """Name the selected kernel build and probed app revisions in live proof output."""
     lines = []
     if kernel_src := os.environ.get("KDIVE_KERNEL_SRC"):
-        lines.append(f"live kernel tree: {Path(kernel_src).resolve()}")
+        tree = Path(kernel_src).resolve()
+        lines.append(f"live kernel tree: {tree}")
+        lines.extend(_kernel_tree_identity_lines(tree))
     base_url = os.environ.get("KDIVE_STACK_BASE_URL")
     if not base_url or skew_policy() is SkewPolicy.OFF:
         return lines
@@ -111,6 +115,40 @@ def pytest_report_header() -> list[str]:
         for result in probe.results
     ]
     lines.append("live-stack probed revisions: " + ", ".join(revisions))
+    return lines
+
+
+def _kernel_tree_identity_lines(tree: Path) -> list[str]:
+    """Report exact config and build identity without making header probes a test gate."""
+
+    def probe(*args: str) -> str | None:
+        try:
+            result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=15)
+        except OSError, subprocess.TimeoutExpired:
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    release = probe("make", "-s", "-C", str(tree), "kernelrelease")
+    if release and "\n" in release:
+        release = None
+    lines = [f"live kernel release: {release or 'unavailable'}"]
+    try:
+        digest = hashlib.sha256((tree / ".config").read_bytes()).hexdigest()
+    except OSError:
+        digest = "unavailable"
+    lines.append(f"live kernel config sha256: {digest}")
+
+    top_level = probe("git", "-C", str(tree), "rev-parse", "--show-toplevel")
+    if top_level and Path(top_level).resolve() == tree:
+        description = probe("git", "-C", str(tree), "describe", "--always", "--dirty")
+        status = probe("git", "-C", str(tree), "status", "--porcelain")
+        lines.append(f"live kernel git describe: {description or 'unavailable'}")
+        lines.append(
+            "live kernel git dirty: "
+            + ("unavailable" if status is None else str(bool(status)).lower())
+        )
     return lines
 
 

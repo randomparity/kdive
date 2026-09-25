@@ -63,6 +63,7 @@ from tests.integration.live_stack.spine import (
     build_and_upload_kernel,
     build_profile,
     captured_vmcore_refs,
+    check_spine_kernel_config,
     drain_job,
     mint_role_token,
     ok,
@@ -473,7 +474,14 @@ def test_spine_over_the_wire(
                     run_id = env.object_id
                 async with phase("upload-build"):
                     # Every arch needs vmlinux: introspect.from_vmcore resolves debuginfo from it.
-                    await build_and_upload_kernel(op, run_id=run_id, arch=arch, with_vmlinux=True)
+                    await build_and_upload_kernel(
+                        op,
+                        run_id=run_id,
+                        arch=arch,
+                        with_vmlinux=True,
+                        root_fs="ext4",
+                        require_kdump=True,
+                    )
                 for step in ("install", "boot"):
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
@@ -621,7 +629,7 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id, arch=arch)
+                    await build_and_upload_kernel(op, run_id=run_id, arch=arch, root_fs="ext4")
 
                 for variant in ("loglevel=4", "loglevel=7"):
                     async with phase(f"install:{variant}"):
@@ -726,7 +734,14 @@ def test_spine_live_script_over_the_wire() -> None:
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id, arch=arch)
+                    await build_and_upload_kernel(
+                        op,
+                        run_id=run_id,
+                        arch=arch,
+                        root_fs="ext4",
+                        require_network=True,
+                        require_live_debug=True,
+                    )
                 for step in ("install", "boot"):
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
@@ -984,21 +999,9 @@ def _require_v7_0_kernel_tree() -> str:
             "suse-kdump:kernel-preflight",
             f"bzImage release {artifact_release!r} does not match kernelrelease {release!r}",
         )
-    required_builtins = ("CONFIG_VIRTIO_PCI=y", "CONFIG_VIRTIO_BLK=y", "CONFIG_EXT4_FS=y")
-    try:
-        config_lines = set((Path(tree) / ".config").read_text(encoding="utf-8").splitlines())
-    except OSError as exc:
-        raise SpinePhaseError(
-            "suse-kdump:kernel-preflight",
-            f"could not read KDIVE_KERNEL_SRC/.config ({type(exc).__name__})",
-        ) from exc
-    missing = [symbol for symbol in required_builtins if symbol not in config_lines]
-    if missing:
-        required = ", ".join(required_builtins)
-        raise SpinePhaseError(
-            "suse-kdump:kernel-preflight",
-            f"the initrd-less live proof requires {required}; missing {', '.join(missing)}",
-        )
+    check_spine_kernel_config(
+        Path(tree), "x86_64", "suse-kdump:kernel-preflight", require_kdump=True, root_fs="ext4"
+    )
     return release
 
 
@@ -1081,7 +1084,9 @@ def test_require_v7_0_kernel_tree_returns_the_built_release(
 ) -> None:
     monkeypatch.setenv(_KERNEL_TREE_ENV, str(tmp_path))
     (tmp_path / ".config").write_text(
-        "CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_EXT4_FS=y\n",
+        "CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_EXT4_FS=y\n"
+        "CONFIG_KEXEC_FILE=y\nCONFIG_CRASH_DUMP=y\nCONFIG_PROC_VMCORE=y\n"
+        "CONFIG_FW_CFG_SYSFS=y\nCONFIG_RELOCATABLE=y\n",
         encoding="utf-8",
     )
 
@@ -1095,6 +1100,27 @@ def test_require_v7_0_kernel_tree_returns_the_built_release(
         lambda _path: "7.0.0-1-default",
     )
     assert _require_v7_0_kernel_tree() == "7.0.0-1-default"
+
+
+def test_require_v7_0_kernel_tree_rejects_missing_kdump_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(_KERNEL_TREE_ENV, str(tmp_path))
+    (tmp_path / ".config").write_text(
+        "CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_EXT4_FS=y\n",
+        encoding="utf-8",
+    )
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
+        return subprocess.CompletedProcess(args, 0, stdout=value, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr(
+        "tests.integration.test_live_stack._bzimage_release", lambda _path: "7.0.0-1-default"
+    )
+    with pytest.raises(SpinePhaseError, match="CONFIG_KEXEC"):
+        _require_v7_0_kernel_tree()
 
 
 def test_require_v7_0_kernel_tree_rejects_another_source_version(
@@ -1147,7 +1173,7 @@ def test_require_v7_0_kernel_tree_rejects_modular_rootfs_drivers(
         lambda _path: "7.0.0-1-default",
     )
 
-    with pytest.raises(SpinePhaseError, match="CONFIG_VIRTIO_PCI=y.*CONFIG_EXT4_FS=y"):
+    with pytest.raises(SpinePhaseError, match="CONFIG_VIRTIO_BLK=y.*CONFIG_EXT4_FS=y"):
         _require_v7_0_kernel_tree()
 
 
@@ -1299,7 +1325,11 @@ def test_suse_current_kernel_reports_incomplete_kdump_core(family: str) -> None:
                     run_id = run.object_id
                 async with phase(f"{family}:upload-build"):
                     await build_and_upload_kernel(
-                        op, run_id=run_id, phase_name=f"{family}:upload-build"
+                        op,
+                        run_id=run_id,
+                        phase_name=f"{family}:upload-build",
+                        require_kdump=True,
+                        root_fs="ext4",
                     )
                 for step in ("install", "boot"):
                     phase_name = f"{family}:{step}"
