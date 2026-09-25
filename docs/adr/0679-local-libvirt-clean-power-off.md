@@ -4,8 +4,9 @@
 
 Accepted (2026-09-25)
 
-Amends [ADR-0030](0030-install-boot-plane.md) §6: `boot()` no longer power-cycles by
-destroy-then-create.
+Amends [ADR-0030](0030-install-boot-plane.md) §6 and
+[ADR-0206](0206-modules-in-guest-shared-contract.md) §4: neither `boot()` nor the install
+force-off hard-destroys a guest that can shut down.
 
 ## Context
 
@@ -26,13 +27,16 @@ Both power-off sites share one helper that:
 2. otherwise calls `domain.shutdown()` with default flags, as `virsh shutdown` does: libvirt uses
    the guest agent when it answers and otherwise QEMU's `system_powerdown` (the ACPI power button
    on x86, an EPOW event on pseries). kdive neither selects nor requires the agent. It then
-   polls `state()` once a second until `SHUTOFF`, re-sending the request every 10 s so a request
-   that arrived before the guest's handler was listening is not lost;
+   polls `state()` once a second until `SHUTOFF` or a monotonic-clock deadline, re-sending the
+   request every 10 s so a request that arrived before the guest's handler was listening is not
+   lost;
 3. falls back to `destroy()` when the wait expires or libvirt refuses the request;
 4. logs which path ran and how long it took.
 
 The wait is 60 s for a KVM guest, scaled by `tcg_deadline_multiplier(accel)` (ADR-0341). It is a
-ceiling: a guest that powers off in 3 s costs 3 s. The bound is a module constant, not an operator
+ceiling: a guest that powers off in 3 s costs 3 s. A `shutdown()` call that blocks inside
+libvirt's guest-agent path (up to libvirt's 60 s agent shutdown timeout) counts against the
+deadline but can overrun it by that one call. The bound is a module constant, not an operator
 setting. `InstallRequest` gains an optional `accel` so the install-time force-off scales the same
 way `boot()` does; `None` gets the TCG multiplier, as it does for `boot()`.
 
@@ -44,7 +48,8 @@ The ADR-0576 console truncate still runs after the domain is off and before `cre
   removes the #2757 root cause for `runs.boot` and module-injecting installs.
 - A guest that is running but ignores the request (a panicked or hung kernel, a test kernel
   without an ACPI button or EPOW handler) now costs the full wait before `destroy()`: 60 s on KVM,
-  600 s at the default TCG multiplier. The log line names this case.
+  600 s at the default TCG multiplier. This is routine, not rare: the `runs.boot` after a Run whose
+  kernel panicked and hung pays it every time. The log line names this case.
 - A guest's own shutdown path runs, so its shutdown messages reach the console before the
   truncate removes them, as the prior boot's messages always were.
 - The other local-libvirt `destroy()` sites (external boot sessions, the vmcore harvest, the

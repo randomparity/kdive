@@ -11,8 +11,9 @@ decision: [ADR-0679](../../adr/0679-local-libvirt-clean-power-off.md).
 
 Tech stack: Python 3.14, libvirt-python, pytest; `uv` + `just`.
 
-Expected implementation size: 180–260 changed lines (M) — helper ~45, booter/installer wiring
-~25, fake ~15, unit tests ~110, handler + port ~10, live test ~70.
+Expected implementation size: 200–290 changed lines (M) — helper ~45, booter/installer wiring
+~25, fake ~15, unit tests ~130 (incl. three existing ordering tests), handler + port ~10, live
+test ~70.
 
 ## Global Constraints
 
@@ -33,7 +34,7 @@ Expected implementation size: 180–260 changed lines (M) — helper ~45, booter
 | `tests/providers/local_libvirt/test_install.py` | power-off unit tests; `_install` passes a no-op sleep |
 | `tests/jobs/handlers/test_runs_install.py` | assert `request.accel` |
 | `tests/integration/test_first_boot_host_keys_live.py` | new `live_vm` regression test |
-| `docs/adr/0030-install-boot-plane.md` | one `Amended by` blockquote under §6 |
+| `docs/adr/0030-install-boot-plane.md`, `docs/adr/0206-modules-in-guest-shared-contract.md` | one `Amended by` blockquote each (done with the design) |
 
 ## Task 1 — `_power_off` and the booter
 
@@ -43,17 +44,26 @@ Expected implementation size: 180–260 changed lines (M) — helper ~45, booter
   `just test-verbose tests/providers/local_libvirt/test_install.py -k power_off_or_boot`.
 - Contract: non-honouring state. `Mode: focused-test` — parametrized
   `test_boot_destroys_at_once_in_a_state_that_cannot_shut_down` over `PAUSED`, `CRASHED`,
-  `PMSUSPENDED`, `NOSTATE`: calls `["destroy", "prepare", "create"]`, no `shutdown`. Red: no
-  `state()` read today (the fake records `shutdown` or not at all). Same green command.
+  `PMSUSPENDED`, `NOSTATE`: calls `["destroy", "prepare", "create"]`, no `shutdown`. This is a
+  new-behaviour guard, green on current code; it fails if the helper sends `shutdown` to a
+  non-honouring state. Same green command.
 - Contract: timeout. `Mode: focused-test` — `test_boot_destroys_after_the_bound`: a fake that
-  ignores shutdown with `accel="kvm"` records 6 `shutdown` calls (probes 0,10,…,50), 60 sleeps of
-  1.0, then `destroy`; `caplog` holds `destroy-timeout`. TCG variant
+  ignores shutdown with `accel="kvm"` records 6 `shutdown` calls (t = 0, 10, …, 50 s on the fake
+  clock), 60 sleeps of 1.0, then `destroy`; `caplog` holds `destroy-timeout`. TCG variant
   `test_tcg_scales_the_shutdown_bound`: `accel=None` → 600 sleeps.
 - Contract: refused request. `Mode: focused-test` — `test_boot_destroys_when_shutdown_is_refused`:
   `raise_on={"shutdown": VIR_ERR_OPERATION_FAILED}` → `destroy`; log `destroy-refused`.
 - Contract: re-send refusal is not fatal. `Mode: focused-test` —
-  `test_refused_resend_keeps_waiting`: a fake that raises on the second `shutdown` and goes off at
-  probe 12 → no `destroy`, log `clean`.
+  `test_refused_resend_keeps_waiting`: a `FakeDomain` subclass in `test_install.py` whose
+  `shutdown` raises on its second call and whose `state()` reads `SHUTOFF` after 12 reads → no
+  `destroy`, log `clean`.
+- Contract: blocking `shutdown()` counts against the bound. `Mode: focused-test` —
+  `test_blocking_shutdown_counts_against_the_bound`: a fake whose ignored `shutdown` advances the
+  fake clock 30 s → `destroy` after 2 requests, not 6.
+- Contract: install force-off still precedes the rw mount. `Mode: focused-test` — the existing
+  ordering tests at `test_install.py` (`events.index("destroy") < events.index("inject")`, three
+  sites) now read `events.index("shutdown")`: `_EventDomain` also appends `"shutdown"` to
+  `events`. Red: `ValueError` from `events.index("destroy")` once the clean path lands.
 - Contract: force-off. `Mode: focused-test` — `test_force_off_shuts_down_cleanly` (running →
   `["shutdown"]`), `test_force_off_skips_a_shut_off_domain` (→ `[]`),
   `test_force_off_destroy_error_is_infrastructure_failure` (paused + `raise_on destroy`).
@@ -80,8 +90,10 @@ def state(self, flags: int = 0) -> list[int]:
     return [self.run_state if self.active else libvirt.VIR_DOMAIN_SHUTOFF, 0]
 ```
 
-2. Write the Task 1 tests; `_install` gains `sleep: Callable[[float], None] = lambda _s: None`
-   passed to `LocalLibvirtInstall`, recording sleeps when a test needs the count. Update
+2. Write the Task 1 tests. Add a `_Clock` test helper (`now: float = 0.0`, `sleeps: list[float]`;
+   `sleep(s)` appends `s` and adds it to `now`; `__call__` returns `now`). `_install` gains
+   `clock: _Clock | None = None`, defaults it to a fresh `_Clock()`, and passes
+   `sleep=clock.sleep, clock=clock` to `LocalLibvirtInstall`. Update
    `test_boot_powercycles_running_domain_then_readiness` and
    `test_boot_truncates_console_only_after_destroy` to expect `shutdown` in place of `destroy`.
    Run the green command; expect failures naming `shutdown`/`state`.
@@ -93,14 +105,18 @@ def state(self, flags: int = 0) -> list[int]:
 # ADR-0679: request a clean shutdown so the guest flushes its writes; destroy is the fallback.
 _CLEAN_SHUTDOWN_BASE_S = 60.0
 _SHUTDOWN_POLL_S = 1.0
-_SHUTDOWN_RESEND_EVERY = 10  # polls between shutdown re-sends
+_SHUTDOWN_RESEND_S = 10.0
 _HONOURS_SHUTDOWN = frozenset(
     {libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_BLOCKED, libvirt.VIR_DOMAIN_SHUTDOWN}
 )
 
 
 def _power_off(
-    domain: _LibvirtDomain, domain_name: str, accel: str | None, sleep: Callable[[float], None]
+    domain: _LibvirtDomain,
+    domain_name: str,
+    accel: str | None,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
 ) -> None:
     """Stop the domain, cleanly when the guest can honour a request, else by ``destroy``.
 
@@ -115,17 +131,20 @@ def _power_off(
         domain.destroy()
         return
     bound_s = _CLEAN_SHUTDOWN_BASE_S * tcg_deadline_multiplier(accel)
-    for probe in range(math.ceil(bound_s / _SHUTDOWN_POLL_S)):
-        resend = probe % _SHUTDOWN_RESEND_EVERY == 0
-        if resend and not _request_shutdown(domain, domain_name, first=probe == 0):
-            domain.destroy()
-            return
+    start = clock()
+    requested_at: float | None = None
+    while clock() - start < bound_s:
+        if requested_at is None or clock() - requested_at >= _SHUTDOWN_RESEND_S:
+            first = requested_at is None
+            requested_at = clock()
+            if not _request_shutdown(domain, domain_name, first=first):
+                domain.destroy()
+                return
         sleep(_SHUTDOWN_POLL_S)
         if domain.state()[0] == libvirt.VIR_DOMAIN_SHUTOFF:
-            elapsed = (probe + 1) * _SHUTDOWN_POLL_S
-            _log.info("power-off %s: clean after %.0f s", domain_name, elapsed)
+            _log.info("power-off %s: clean after %.1f s", domain_name, clock() - start)
             return
-    _log.warning("power-off %s: destroy-timeout after %.0f s", domain_name, bound_s)
+    _log.warning("power-off %s: destroy-timeout after %.1f s", domain_name, clock() - start)
     domain.destroy()
 
 
@@ -141,10 +160,11 @@ def _request_shutdown(domain: _LibvirtDomain, domain_name: str, *, first: bool) 
     return True
 ```
 4. `LocalLibvirtBooter.__init__` and `LocalLibvirtInstall.__init__` gain
-   `sleep: Callable[[float], None] = time.sleep` (the facade forwards it). `boot()` calls
+   `sleep: Callable[[float], None] = time.sleep` and `clock: Callable[[], float] =
+   time.monotonic` (the facade forwards both). `boot()` calls
    `self._power_cycle(domain, domain_name, system_id, accel)`; `_power_cycle` replaces
    `if domain.isActive(): domain.destroy()` with `_power_off(domain, domain_name, accel,
-   self._sleep)` inside the same `try`. `force_off_if_active(self, system_id, *, accel=None)`
+   self._sleep, self._clock)` inside the same `try`. `force_off_if_active(self, system_id, *, accel=None)`
    replaces its `isActive`/`destroy` with the same call inside its existing `try`. Update the
    module docstring and `boot()`'s to describe the clean shutdown and cite ADR-0679.
 5. Green command passes; `just lint`, `just type`; commit
@@ -155,8 +175,8 @@ def _request_shutdown(domain: _LibvirtDomain, domain_name: str, *, first: bool) 
 **Verification**
 - Contract: install force-off scales by the System accel. `Mode: focused-test` —
   `test_install_force_off_uses_request_accel` in `test_install.py`: a kdump install with an
-  ignoring fake and `accel="kvm"` sleeps 60 times (red: `force_off_if_active` gets no accel, so
-  600). Green: `just test-verbose tests/providers/local_libvirt/test_install.py -k accel`.
+  ignoring `_EventDomain` and `accel="kvm"` records 60 sleeps on the `_Clock` (red:
+  `force_off_if_active` gets no accel, so 600). Green: `just test-verbose tests/providers/local_libvirt/test_install.py -k accel`.
 - Contract: handler fills `InstallRequest.accel`. `Mode: focused-test` —
   `test_install_plan_checks_measured_modules_before_provider` builds its System as
   `SimpleNamespace(id=system_id, accel="kvm")` and asserts `plan.request.accel == "kvm"`. Red:
@@ -177,7 +197,8 @@ Steps
 - Contract: after provision → install (console) → boot, sshd answers and host keys are non-empty.
   `Mode: task-test-not-applicable` for CI — it is a `live_vm` test that needs a KVM host, the live
   stack, `KDIVE_GUEST_IMAGE` and `KDIVE_KERNEL_SRC`; its proof is the operator run recorded in
-  the PR (3 runs, plus a control run on `main` when feasible).
+  the PR: 3 runs on the branch plus one required control run on `main` on the same host. If
+  `main` passes there, the PR says the test is a smoke test on that host class.
 
 Steps
 1. Create `tests/integration/test_first_boot_host_keys_live.py`, reusing the preflight, profile,
