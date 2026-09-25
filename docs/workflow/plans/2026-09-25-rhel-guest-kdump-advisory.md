@@ -192,8 +192,8 @@ Verification:
   "rhel"` and the contract ref; the replay carries the same value; `"debian"` → absent; a config
   that also lacks `VIRTIO_BLK` carries both warnings; with no config the nudge appears and the new
   key is absent. A second test runs the real `_target_os_id` on an unbound seeded Run and asserts
-  `guest_family == "unknown"`; a third patches `SYSTEMS.get` to raise `psycopg.OperationalError`
-  and asserts the completion still succeeds with `guest_family == "unknown"`. Red: `KeyError`. Green:
+  `guest_family == "unknown"`; a third patches the resolver to run a failing SQL statement
+  (`SELECT 1/0`) and asserts the completion still succeeds with `guest_family == "unknown"`. Red: `KeyError`. Green:
   `just test-verbose tests/mcp/lifecycle/test_complete_build_tool.py`.
 - Mode: task-test-not-applicable — the wrapper docstring sentence: agent-facing prose; the
   generated reference check (`just docs-check`, `just cli-verbs-check`) guards the copies.
@@ -212,8 +212,11 @@ async def _target_os_id(conn: AsyncConnection, run: Run) -> str | None:
     if run.system_id is None:
         return None
     try:
-        system = await SYSTEMS.get(conn, run.system_id)
-        entry = None if system is None else await resolve_system_catalog_rootfs(conn, system)
+        # A savepoint, so a database error rolls back only the lookup and leaves the enclosing
+        # transaction usable for the envelope's clock_timestamp() read.
+        async with conn.transaction():
+            system = await SYSTEMS.get(conn, run.system_id)
+            entry = None if system is None else await resolve_system_catalog_rootfs(conn, system)
     except psycopg.Error, ValidationError:
         _log.warning("guest OS lookup failed for run %s; advisory reports unknown", run.id)
         return None

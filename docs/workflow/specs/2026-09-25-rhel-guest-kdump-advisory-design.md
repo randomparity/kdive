@@ -32,8 +32,8 @@ and SQL are deleted. A new `image_os_id(entry) -> str | None` returns
 
 **Envelope** (`runs/complete_build.py`). `_success_envelope` resolves `os_id`: `None` when
 `run.system_id` is `None`, the System row is missing, the resolver returns `None`, or the lookup
-raises `psycopg.Error`/`ValidationError` (logged; the Run already committed and replays recompute
-this, so it fails open to `unknown`); else `image_os_id(entry)`. It adds `data["rhel_guest_crash_config"]` and the contract ref when the
+raises `psycopg.Error`/`ValidationError` inside a savepoint (logged; the Run already committed and
+replays recompute this, so it fails open to `unknown` and leaves the transaction usable); else `image_os_id(entry)`. It adds `data["rhel_guest_crash_config"]` and the contract ref when the
 warning is non-`None`. The nudge stays exclusive with both warnings; the boot warning and this one
 are independent. The recorded-result replay path recomputes through the same method. The
 `runs.complete_build` wrapper docstring names the field. `crash_capture_rhel_guest.enforcement`
