@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import dataclasses
 import json
 import math
 import random
+import sys
 import time
 import uuid
 from collections import Counter, defaultdict
@@ -27,7 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from kdive.mcp.dev_harness import LiveStackToolError
+from kdive.cli.transport import Session
+from kdive.mcp.dev_harness import LiveStackClient, LiveStackToolError
 from kdive.mcp.responses import ToolResponse
 from kdive.profiles.provisioning import ProvisioningProfile
 
@@ -362,3 +366,404 @@ def finish(cfg: Config, ledger: Ledger, *, elapsed_s: float, interrupted: bool) 
     if interrupted:
         return EXIT_INTERRUPTED
     return EXIT_VIOLATION if ledger.violations else EXIT_CLEAN
+
+
+TRIPLE: dict[str, object] = {"vcpus": 1, "memory_gb": 1, "disk_gb": 10}
+
+
+@dataclass(frozen=True)
+class InvalidCall:
+    """One malformed call. ``args`` takes (project, shape name, target allocation id)."""
+
+    name: str
+    tool: str
+    args: Callable[[str, str, str], dict[str, object]]
+    needs_grant: bool = False
+
+
+INVALID_CALLS: tuple[InvalidCall, ...] = (
+    InvalidCall("missing-project", "allocations.request", lambda p, s, t: {"shape": s}),
+    InvalidCall(
+        "shape-and-triple",
+        "allocations.request",
+        lambda p, s, t: {"project": p, "shape": s, **TRIPLE},
+    ),
+    InvalidCall(
+        "partial-triple", "allocations.request", lambda p, s, t: {"project": p, "vcpus": 1}
+    ),
+    InvalidCall(
+        "zero-vcpus", "allocations.request", lambda p, s, t: {"project": p, **TRIPLE, "vcpus": 0}
+    ),
+    InvalidCall(
+        "negative-vcpus",
+        "allocations.request",
+        lambda p, s, t: {"project": p, **TRIPLE, "vcpus": -1},
+    ),
+    InvalidCall(
+        "unknown-shape",
+        "allocations.request",
+        lambda p, s, t: {"project": p, "shape": "stress-no-such-shape"},
+    ),
+    InvalidCall(
+        "bad-on-capacity",
+        "allocations.request",
+        lambda p, s, t: {"project": p, "shape": s, "on_capacity": "maybe"},
+    ),
+    InvalidCall(
+        "zero-window",
+        "allocations.request",
+        lambda p, s, t: {"project": p, "shape": s, "window": 0},
+    ),
+    InvalidCall(
+        "unreachable-project",
+        "allocations.request",
+        lambda p, s, t: {"project": "stress-no-such-project", "shape": s},
+    ),
+    InvalidCall(
+        "release-not-uuid", "allocations.release", lambda p, s, t: {"allocation_id": "not-a-uuid"}
+    ),
+    InvalidCall("release-unknown-id", "allocations.release", lambda p, s, t: {"allocation_id": t}),
+    InvalidCall(
+        "renew-not-uuid",
+        "allocations.renew",
+        lambda p, s, t: {"allocation_id": "not-a-uuid", "extend": 1},
+    ),
+    InvalidCall(
+        "renew-unknown-id", "allocations.renew", lambda p, s, t: {"allocation_id": t, "extend": 1}
+    ),
+    InvalidCall(
+        "renew-negative-extend",
+        "allocations.renew",
+        lambda p, s, t: {"allocation_id": t, "extend": -1},
+        needs_grant=True,
+    ),
+    InvalidCall(
+        "renew-text-extend",
+        "allocations.renew",
+        lambda p, s, t: {"allocation_id": t, "extend": "abc"},
+        needs_grant=True,
+    ),
+)
+
+
+def _triple(data: dict[str, Any]) -> tuple[int, int, int] | None:
+    vcpus, memory_mb, disk_gb = data.get("vcpus"), data.get("memory_mb"), data.get("disk_gb")
+    if isinstance(vcpus, int) and isinstance(memory_mb, int) and isinstance(disk_gb, int):
+        return vcpus, memory_mb, disk_gb
+    return None
+
+
+def sizings_from_shapes(items: Sequence[ToolResponse]) -> tuple[list[dict[str, object]], str]:
+    """Every named shape, plus the smallest shape's size as a custom triple.
+
+    Raises:
+        PreflightError: ``shapes.list`` returned no named shape.
+    """
+    names = [item.data["name"] for item in items if isinstance(item.data.get("name"), str)]
+    if not names:
+        raise PreflightError("shapes.list returned no shape; seed one with shapes.set")
+    sizings: list[dict[str, object]] = [{"shape": name} for name in names]
+    triples = [t for item in items if (t := _triple(item.data)) is not None]
+    if triples:
+        vcpus, memory_mb, disk_gb = min(triples)
+        sizings.append(
+            {"vcpus": vcpus, "memory_gb": math.ceil(memory_mb / 1024), "disk_gb": disk_gb}
+        )
+    return sizings, str(names[0])
+
+
+def _admits(host: ToolResponse) -> bool:
+    cap = host.data.get("cap")
+    return host.data.get("schedulable") is True and isinstance(cap, int) and cap > 0
+
+
+@dataclass
+class Seat:
+    """One simulated client: its session, its RNG, and what it holds between actions."""
+
+    client: Caller
+    rng: random.Random
+    last: dict[str, object] | None = None
+    system: str | None = None
+
+
+@dataclass
+class Stress:
+    """The workload, the monitor, and the drain, sharing one ledger."""
+
+    cfg: Config
+    ledger: Ledger
+    sizings: list[dict[str, object]]
+    shape: str
+    draining: bool = False
+
+    async def call(
+        self,
+        client: Caller,
+        tool: str,
+        args: dict[str, object],
+        *,
+        invalid: bool = False,
+        abandon: bool = False,
+        limit_s: float | None = None,
+    ) -> Call:
+        key = args.get("idempotency_key")
+        if isinstance(key, str):  # kept until a reply arrives, so the drain can replay it
+            self.ledger.lost[key] = (tool, args)
+        timeout_s = self.cfg.call_timeout_s if limit_s is None else limit_s
+        call = await invoke(client, tool, args, timeout_s=timeout_s, drain=self.draining)
+        if limit_s is not None and call.outcome == TIMEOUT:
+            call = dataclasses.replace(call, outcome=ABANDONED)
+        self.ledger.record(call, invalid=invalid, abandon=abandon)
+        return call
+
+    def key(self, rng: random.Random) -> str:
+        return f"stress-{self.cfg.run_id}-{uuid.UUID(int=rng.getrandbits(128))}"
+
+    def request_args(self, rng: random.Random, on_capacity: str | None = None) -> dict[str, object]:
+        return {
+            "project": self.cfg.project,
+            **rng.choice(self.sizings),
+            "on_capacity": on_capacity or rng.choice(("deny", "queue")),
+            "window": self.cfg.lease_h,
+            "idempotency_key": self.key(rng),
+        }
+
+    async def client_task(self, connect: Connect, index: int, deadline: float) -> None:
+        rng = random.Random(f"{self.cfg.seed}:{index}")
+        try:
+            async with connect() as client:
+                await self.client_loop(Seat(client, rng), deadline)
+        except Exception as exc:  # a lost session must not abort the other clients or the drain
+            self.ledger.notes.append(f"client {index} lost its session: {type(exc).__name__}")
+
+    async def client_loop(self, seat: Seat, deadline: float) -> None:
+        cfg = self.cfg
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0)  # yield even when every call answers without suspending
+            roll = seat.rng.random()
+            if roll < cfg.invalid_ratio:
+                await self.invalid_call(seat)
+            elif roll < cfg.invalid_ratio + cfg.race_ratio:
+                await self.race(seat)
+            elif roll < cfg.invalid_ratio + cfg.race_ratio + cfg.abandon_ratio:
+                await self.abandon(seat)
+            else:
+                await self.churn(seat)
+
+    async def churn(self, seat: Seat) -> None:
+        replay = seat.last is not None and seat.rng.random() < 0.25
+        args = seat.last if replay and seat.last is not None else self.request_args(seat.rng)
+        seat.last = args
+        grant = await self.call(seat.client, "allocations.request", args)
+        self.ledger.note_key(str(args["idempotency_key"]), grant)
+        if grant.outcome == OK and grant.response is not None:
+            await self.hold_and_release(seat, grant.response)
+
+    async def maybe_provision(self, seat: Seat, alloc: str) -> bool:
+        """Provision half the time, once the client's previous System is gone."""
+        if self.cfg.profile is None or seat.rng.random() >= 0.5:
+            return False
+        if seat.system is not None:
+            previous = await self.call(seat.client, "systems.get", {"system_id": seat.system})
+            if _state(previous) not in TERMINAL_SYSTEM:
+                return False
+        args: dict[str, object] = {
+            "allocation_id": alloc,
+            "profile": self.cfg.profile,
+            "idempotency_key": self.key(seat.rng),
+        }
+        call = await self.call(seat.client, "systems.provision", args)
+        system_id = call.response.data.get("system_id") if call.response is not None else None
+        if call.outcome == OK and isinstance(system_id, str):
+            seat.system = system_id
+        return True
+
+    async def hold_and_release(self, seat: Seat, grant: ToolResponse) -> None:
+        client, alloc = seat.client, grant.object_id
+        release: dict[str, object] = {"allocation_id": alloc}
+        if grant.status == "requested":  # a queued grant is released while it waits
+            await self.call(client, "allocations.release", release)
+            return
+        if await self.maybe_provision(seat, alloc) and seat.rng.random() < 0.5:
+            await self.call(client, "allocations.release", release)  # races the provision job
+            return
+        if seat.rng.random() < 0.5:
+            renew: dict[str, object] = {"allocation_id": alloc, "extend": self.cfg.lease_h}
+            await self.call(client, "allocations.renew", renew)
+        await asyncio.sleep(seat.rng.uniform(0, HOLD_MAX_S))
+        await self.call(client, "allocations.release", release)
+
+    async def abandon(self, seat: Seat) -> None:
+        """Walk away from a grant, or cancel the request in flight; lease expiry reclaims it."""
+        args = self.request_args(seat.rng, on_capacity="deny")
+        if seat.rng.random() < 0.5:
+            limit_s = seat.rng.uniform(0, CANCEL_MAX_S)
+            await self.call(seat.client, "allocations.request", args, abandon=True, limit_s=limit_s)
+            return
+        grant = await self.call(seat.client, "allocations.request", args, abandon=True)
+        if grant.outcome == OK and grant.response is not None:
+            await self.maybe_provision(seat, grant.response.object_id)
+
+    async def race(self, seat: Seat) -> None:
+        kind = seat.rng.choice(("double-release", "renew-vs-release", "shared-key"))
+        if kind == "shared-key":
+            await self.shared_key_race(seat)
+            return
+        client = seat.client
+        grant = await self.call(client, "allocations.request", self.request_args(seat.rng))
+        if grant.outcome != OK or grant.response is None:
+            return
+        alloc = grant.response.object_id
+        release = self.call(client, "allocations.release", {"allocation_id": alloc})
+        if kind == "renew-vs-release":
+            renew: dict[str, object] = {"allocation_id": alloc, "extend": self.cfg.lease_h}
+            await asyncio.gather(self.call(client, "allocations.renew", renew), release)
+            return
+        second = self.call(client, "allocations.release", {"allocation_id": alloc})
+        first_call, second_call = await asyncio.gather(release, second)
+        if first_call.outcome != OK or second_call.outcome != OK:
+            outcomes = f"{_describe(first_call)} and {_describe(second_call)}"
+            self.ledger.violate(3, f"double release of {alloc} returned {outcomes}")
+
+    async def shared_key_race(self, seat: Seat) -> None:
+        args = self.request_args(seat.rng)
+        key = str(args["idempotency_key"])
+        grants = await asyncio.gather(
+            *(self.call(seat.client, "allocations.request", args) for _ in range(3))
+        )
+        for grant in grants:
+            self.ledger.note_key(key, grant)
+        granted = {g.response.object_id for g in grants if g.outcome == OK and g.response}
+        for alloc in sorted(granted):
+            await self.call(seat.client, "allocations.release", {"allocation_id": alloc})
+
+    async def invalid_call(self, seat: Seat) -> None:
+        entry = seat.rng.choice(INVALID_CALLS)
+        target = str(uuid.UUID(int=seat.rng.getrandbits(128)))
+        if entry.needs_grant:
+            grant = await self.call(seat.client, "allocations.request", self.request_args(seat.rng))
+            if grant.outcome != OK or grant.response is None:
+                return
+            target = grant.response.object_id
+        args = entry.args(self.cfg.project, self.shape, target)
+        call = await self.call(seat.client, entry.tool, args, invalid=True)
+        self.ledger.invalid[entry.name][call.outcome] += 1
+        if call.outcome == OK:
+            self.ledger.violate(2, f"invalid call {entry.name} was accepted by {entry.tool}")
+        if entry.needs_grant:
+            await self.call(seat.client, "allocations.release", {"allocation_id": target})
+
+    async def monitor(self, client: Caller, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            call = await self.call(client, "resources.availability", {})
+            if call.outcome == OK and call.response is not None:
+                for host in call.response.items:
+                    self.check_host(host)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), SAMPLE_INTERVAL_S)
+
+    def check_host(self, host: ToolResponse) -> None:
+        cap, in_use = host.data.get("cap"), host.data.get("in_use")
+        if host.data.get("schedulable") is not True:
+            return
+        if isinstance(cap, int) and isinstance(in_use, int) and in_use > cap:
+            self.ledger.violate(1, f"host {host.object_id} in_use {in_use} > cap {cap}")
+
+    async def drain(self, client: Caller) -> None:
+        """Replay lost calls, release what the run owns, and wait for the rest to settle."""
+        self.draining = True
+        ledger = self.ledger
+        deadline = time.monotonic() + self.cfg.drain_timeout_s
+        lost = list(ledger.lost.values())
+        for tool, args in lost:
+            if tool == "allocations.request":
+                await self.call(client, tool, args, abandon=True)
+        for alloc in sorted(ledger.owned):  # before any provision replay can mint a new System
+            await self.call(client, "allocations.release", {"allocation_id": alloc})
+        for tool, args in lost:
+            if tool != "allocations.request":
+                await self.call(client, tool, args)
+        while True:
+            for alloc in sorted(ledger.owned):
+                await self.call(client, "allocations.release", {"allocation_id": alloc})
+            for alloc in sorted(ledger.abandoned):
+                wait: dict[str, object] = {"allocation_id": alloc, "timeout_s": 0}
+                await self.call(client, "allocations.wait", wait)
+            for system in sorted(ledger.systems):
+                await self.call(client, "systems.get", {"system_id": system})
+            if not (ledger.owned or ledger.abandoned or ledger.systems):
+                return
+            if time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(DRAIN_POLL_S)
+
+
+async def _preflight(cfg: Config, probe: Caller) -> tuple[list[dict[str, object]], str]:
+    shapes = await invoke(probe, "shapes.list", {}, timeout_s=cfg.call_timeout_s)
+    if shapes.outcome != OK or shapes.response is None:
+        raise PreflightError(f"shapes.list failed: {_describe(shapes)} {shapes.detail}")
+    hosts = await invoke(probe, "resources.availability", {}, timeout_s=cfg.call_timeout_s)
+    if hosts.outcome != OK or hosts.response is None:
+        raise PreflightError(f"resources.availability failed: {_describe(hosts)} {hosts.detail}")
+    if not any(_admits(host) for host in hosts.response.items):
+        raise PreflightError("no schedulable host with cap above 0; register one with onboard.sh")
+    return sizings_from_shapes(shapes.response.items)
+
+
+async def run_stress(cfg: Config, connect: Connect, ledger: Ledger) -> None:
+    """Preflight, run the clients and the monitor until the deadline, then drain.
+
+    The drain also runs when the load is cancelled (Ctrl-C); a cancel during the drain stops it,
+    and ``finish`` reports what was left.
+
+    Raises:
+        PreflightError: the stack is unreachable, has no shape, or has no schedulable host.
+    """
+    async with contextlib.AsyncExitStack() as stack:
+        try:
+            probe = await stack.enter_async_context(connect())
+        except Exception as exc:
+            raise PreflightError(f"cannot reach the stack: {type(exc).__name__}: {exc}") from exc
+        sizings, shape = await _preflight(cfg, probe)
+        stress = Stress(cfg, ledger, sizings, shape)
+        stop = asyncio.Event()
+        monitor = asyncio.create_task(stress.monitor(probe, stop))
+        deadline = time.monotonic() + cfg.duration_s
+        try:
+            async with asyncio.TaskGroup() as group:
+                for index in range(cfg.clients):
+                    group.create_task(stress.client_task(connect, index, deadline))
+        finally:
+            stop.set()
+            try:
+                await stress.drain(probe)
+            finally:
+                await monitor
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    cfg = parse_config(argv)
+    try:
+        session = Session.from_env()
+    except SystemExit as exc:
+        print(f"preflight failed: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"seed {cfg.seed}  run {cfg.run_id}", flush=True)
+    ledger = Ledger()
+    started = time.monotonic()
+    interrupted = False
+    try:
+        asyncio.run(
+            run_stress(cfg, lambda: LiveStackClient.over_http(session.url, session.token), ledger)
+        )
+    except PreflightError as exc:
+        print(f"preflight failed: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    except KeyboardInterrupt:
+        interrupted = True
+    return finish(cfg, ledger, elapsed_s=time.monotonic() - started, interrupted=interrupted)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
