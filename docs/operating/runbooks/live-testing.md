@@ -461,6 +461,23 @@ there, because it pins an x86-64-vN CPU rung. Still x86_64-only: the per-family 
 and the SUSE v7.0 kdump spine, whose preflight reads an x86 bzImage (leave their image env vars
 unset on POWER so they skip), and the gdbstub debug proofs under `tests/mcp/debug` (#2695).
 
+#### Native POWER spine kernel configuration
+
+Check the built tree's `.config` after `olddefconfig` before using it as `KDIVE_KERNEL_SRC`.
+The direct-boot spine image has an ext4 root on a virtio disk, so build in
+`CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_BLK=y`, and `CONFIG_EXT4_FS=y`. The SSH-dependent
+console-parts and `test_spine_live_script_over_the_wire` proofs also need
+`CONFIG_VIRTIO_NET=y`, or a matching virtio-net module in the guest root filesystem or
+initramfs that loads before SSH starts. A booted guest with no loaded network driver
+cannot complete the SSH banner exchange.
+
+For `test_spine_live_script_over_the_wire`, also build with `CONFIG_DEBUG_INFO_BTF=y`
+and a DWARF debug-info choice (`CONFIG_DEBUG_INFO_DWARF4=y` or
+`CONFIG_DEBUG_INFO_DWARF5=y`). BTF generation needs host `pahole`; the
+`local_worker_host` Ansible role installs its distribution package. The guest drgn
+build must be able to read the resulting `/sys/kernel/btf/vmlinux`; host-side
+`vmlinux` DWARF alone does not give the guest live debug information.
+
 To validate all four crash-capture methods against such a host, see the
 [four-method live run](four-method-live-run.md). Never hand-install a host
 dependency for one of these: declare it in the owning Ansible role in the same

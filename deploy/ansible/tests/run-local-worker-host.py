@@ -133,12 +133,12 @@ print("ok runner: 328 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
+# The fixture records the pre-extraction baseline; native BTF builds add pahole after it.
+expected_packages.insert(expected_packages.index("gdb") + 1, "pahole")
 require(
     defaults["live_vm_host_packages"] == expected_packages, "Ubuntu worker package list changed"
 )
-print(
-    f"ok runner: {len(expected_packages)} Ubuntu worker packages match the pre-extraction baseline"
-)
+print(f"ok runner: {len(expected_packages)} Ubuntu worker packages match baseline plus pahole")
 
 python_version_script = "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
 system_python = subprocess.check_output(
