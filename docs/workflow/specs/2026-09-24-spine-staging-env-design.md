@@ -50,8 +50,9 @@ claim a new cross-host packaging capability.
 
 ## Failure model
 
-The selected tree can be absent or malformed; `boot_member_source` already
-fails before make with an actionable path. A missing required executable path
-causes `subprocess.run(check=True)` to fail visibly. Unexpected caller Kbuild
+An absent boot member fails in `boot_member_source` before make with an
+actionable path. A malformed build tree can fail in make or tar. A missing
+required executable path causes `subprocess.run(check=True)` to fail visibly.
+Unexpected caller Kbuild
 settings must not silently affect the bundle. Locale and `HOME` are retained
 solely for command execution and do not select a kernel target.
