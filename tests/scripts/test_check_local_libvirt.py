@@ -228,6 +228,15 @@ def test_missing_venv_bindings_optional_warns(tmp_path: Path) -> None:
     assert "guestfs" in result.stderr and "drgn" in result.stderr
     assert "python3-libguestfs" in result.stderr
     assert "host is ready" in result.stderr
+    # The WARN path's message went through the same rename as the FAIL path: it must name
+    # KDIVE_PYTHON, not the "worker venv" (issue #2759).
+    warn_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith("WARN") and "guestfs, drgn" in line
+    )
+    assert "KDIVE_PYTHON" in warn_line, warn_line
+    assert "worker" not in warn_line.lower(), warn_line
 
 
 def test_invalid_kdump_preflight_value_rejected(tmp_path: Path) -> None:

@@ -276,11 +276,11 @@ if _venv_imports_kdump_deps; then
   note_ok "KDIVE_PYTHON (${PY}) imports guestfs and drgn"
 elif [[ "${KDUMP_PREFLIGHT}" == "optional" ]]; then
   note_warn \
-    "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling, ADR-0203); provision/build/boot and the other capture methods still work" \
+    "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling); provision/build/boot and the other capture methods still work" \
     "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\""
 else
   note_fail \
-    "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling, ADR-0203)" \
+    "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling)" \
     "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\""
 fi
 
