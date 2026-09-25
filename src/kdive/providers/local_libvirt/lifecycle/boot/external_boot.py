@@ -159,6 +159,9 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     prior_power: Literal["running", "inactive"]
     capture: ModuleCapture
     phase: RecoveryPhase
+    # The module tree observed when this activation last published it with the domain inactive.
+    # libguestfs cannot open a running domain's disk, so a running domain reports this value.
+    inactive_modules: ComponentState | None = None
 
     @model_validator(mode="after")
     def _domain_xml_matches_digests(self) -> LocalRecoveryMetadataV1:
@@ -1915,24 +1918,30 @@ class _RealLocalExternalBootOperation:
             inspection = self._session.inspect_closed(projected=True)
         except Exception:  # noqa: BLE001 - an unreadable definition is a classification
             return LocalObservedState(definition=None, modules=None, active=None)
-        modules: ComponentState | None
-        try:
-            with self._session.guest() as opened_guest:
-                tree = LibguestfsAuthenticatedGuestTree(
-                    cast(_GuestfsTreeHandle, opened_guest),
-                    binding=metadata.binding,
-                    release=metadata.release,
-                    root=f"/lib/modules/{metadata.release}",
-                    mutable=False,
-                )
-                modules = self._recovery_writer.observe(tree, metadata.release)
-        except Exception:  # noqa: BLE001 - an unreadable module tree is a classification
-            modules = None
+        modules: ComponentState | None = metadata.inactive_modules
+        if not inspection.active:
+            try:
+                with self._session.guest() as opened_guest:
+                    modules = self._observe_modules(opened_guest, metadata)
+            except Exception:  # noqa: BLE001 - an unreadable module tree is a classification
+                modules = None
         return LocalObservedState(
             definition=inspection.source_boot_identity,
             modules=modules,
             active=inspection.active,
         )
+
+    def _observe_modules(
+        self, guest: InactiveGuest, metadata: LocalRecoveryMetadataV1
+    ) -> ComponentState:
+        tree = LibguestfsAuthenticatedGuestTree(
+            cast(_GuestfsTreeHandle, guest),
+            binding=metadata.binding,
+            release=metadata.release,
+            root=f"/lib/modules/{metadata.release}",
+            mutable=False,
+        )
+        return self._recovery_writer.observe(tree, metadata.release)
 
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         if self._host_state(metadata) != ("source", False):
@@ -1975,7 +1984,8 @@ class _RealLocalExternalBootOperation:
                 )
             self._finish_present_publication(publication, prior=prior, desired=desired)
             completed = publication.metadata
-        self.record_phase(completed, "module-restored")
+            observed = self._observe_modules(opened_guest, completed)
+        self.record_phase(completed, "module-restored", inactive_modules=observed)
 
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
         while metadata.phase == "module-restored":
@@ -2069,7 +2079,8 @@ class _RealLocalExternalBootOperation:
                 assert desired is not None
                 self._finish_present_publication(publication, prior=target, desired=desired)
             completed = publication.metadata
-        self.record_phase(completed, "module-restored")
+            observed = self._observe_modules(opened_guest, completed)
+        self.record_phase(completed, "module-restored", inactive_modules=observed)
 
     def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
         while metadata.phase == "module-restored":
@@ -2102,11 +2113,19 @@ class _RealLocalExternalBootOperation:
             raise ValueError("external-boot restored power state conflicts with recovery metadata")
 
     def record_phase(
-        self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
+        self,
+        metadata: LocalRecoveryMetadataV1,
+        phase: RecoveryPhase,
+        *,
+        inactive_modules: ComponentState | None = None,
     ) -> LocalRecoveryMetadataV1:
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.record_phase(
-                _recovery_ref(metadata.binding), metadata.binding, metadata, phase
+                _recovery_ref(metadata.binding),
+                metadata.binding,
+                metadata,
+                phase,
+                inactive_modules=inactive_modules,
             )
 
     def cleanup_complete(self, recovery: RecoveryPoint) -> bool:
@@ -3452,6 +3471,8 @@ class RecoveryMetadataStore:
         binding: ExternalBootActivationBinding,
         expected: LocalRecoveryMetadataV1,
         phase: RecoveryPhase,
+        *,
+        inactive_modules: ComponentState | None = None,
     ) -> LocalRecoveryMetadataV1:
         self._require_open()
         name = recovery_directory_name(reference, binding)
@@ -3459,7 +3480,10 @@ class RecoveryMetadataStore:
         try:
             if self._read(directory_fd) != expected:
                 raise ValueError("recovery metadata changed before phase publication")
-            updated = expected.model_copy(update={"phase": phase})
+            update: dict[str, object] = {"phase": phase}
+            if inactive_modules is not None:
+                update["inactive_modules"] = inactive_modules
+            updated = expected.model_copy(update=update)
             temporary = ".intent.next"
             _replace_private_file(
                 directory_fd,

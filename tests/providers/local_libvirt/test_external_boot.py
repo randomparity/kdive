@@ -2519,7 +2519,7 @@ class _RestartWriter:
 
     def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState:
         del release
-        return self._guest.states[self._root(tree)]
+        return self._guest.states.get(self._root(tree), AbsentComponentState())
 
     def install(
         self,
@@ -3054,10 +3054,14 @@ def _record_phase_faults(
         binding: ExternalBootActivationBinding,
         expected: LocalRecoveryMetadataV1,
         phase: RecoveryPhase,
+        *,
+        inactive_modules: ComponentState | None = None,
     ) -> LocalRecoveryMetadataV1:
         result = faults.run(
             f"phase:{phase}",
-            lambda: original(store, reference, binding, expected, phase),
+            lambda: original(
+                store, reference, binding, expected, phase, inactive_modules=inactive_modules
+            ),
         )
         assert isinstance(result, LocalRecoveryMetadataV1)
         return result
@@ -3138,6 +3142,9 @@ def test_activation_restarts_exactly_around_every_publication_and_host_effect(
     assert harness.session.xml == harness.metadata.target_xml
     assert harness.session.active
     assert len(harness.sessions) >= 2
+    with RecoveryMetadataStore(harness.root) as store:
+        reopened = store.reopen(_point(harness.metadata).recovery_ref, harness.metadata.binding)
+    assert reopened.inactive_modules == harness.metadata.target_state.modules
 
 
 @pytest.mark.parametrize("effect", ["before", "after"])
@@ -5156,3 +5163,84 @@ def test_prepare_requires_the_inspected_root_to_fill_the_disk_without_an_initrd(
         return
     with pytest.raises(ValueError, match="supply an initrd"):
         _real_prepare(io, materialization)
+
+
+class _ObservingRecoveryWriter(_RecordingRecoveryWriter):
+    def __init__(self, observed: ComponentState) -> None:
+        super().__init__()
+        self.observed = observed
+        self.observations = 0
+
+    def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState:
+        del tree, release
+        self.observations += 1
+        return self.observed
+
+
+def _observing_operation(
+    tmp_path: Path, metadata: LocalRecoveryMetadataV1, *, active: bool
+) -> tuple[
+    external_boot_module._RealLocalExternalBootOperation, _RealSession, _ObservingRecoveryWriter
+]:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    session = _RealSession(_RealPreparation(metadata, root))
+    session.inspection = replace(session.inspection, active=active)
+    writer = _ObservingRecoveryWriter(PresentComponentState(manifest="sha256:" + "4" * 64))
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        root,
+        cast(external_boot_module.LocalExternalBootMaterializer, object()),
+        cast(RealGuestRecoveryWriter, writer),
+        cast(external_boot_module.LocalExternalBootSession, session),
+        32 * 1024**3,
+    )
+    return operation, session, writer
+
+
+def test_running_domain_observes_the_modules_recorded_at_the_last_inactive_point(
+    tmp_path: Path,
+) -> None:
+    recorded = PresentComponentState(manifest="sha256:" + "3" * 64)
+    metadata = _metadata("target-defined").model_copy(update={"inactive_modules": recorded})
+    operation, session, writer = _observing_operation(tmp_path, metadata, active=True)
+    session.guest_fault = True
+
+    observed = operation.observe_state(metadata)
+
+    assert observed.modules == recorded
+    assert observed.active is True
+    assert writer.observations == 0
+
+
+def test_running_domain_without_a_recorded_observation_is_unreadable(tmp_path: Path) -> None:
+    operation, session, _writer = _observing_operation(tmp_path, _metadata(), active=True)
+    session.guest_fault = True
+
+    assert operation.observe_state(_metadata()).modules is None
+
+
+def test_inactive_domain_reads_the_module_tree(tmp_path: Path) -> None:
+    recorded = PresentComponentState(manifest="sha256:" + "3" * 64)
+    metadata = _metadata("target-defined").model_copy(update={"inactive_modules": recorded})
+    operation, _session, writer = _observing_operation(tmp_path, metadata, active=False)
+
+    observed = operation.observe_state(metadata)
+
+    assert observed.modules == writer.observed
+    assert writer.observations == 1
+
+
+def test_recorded_inactive_modules_survive_phase_publication(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("publication-complete")
+    reference = _point(metadata).recovery_ref
+    observed = PresentComponentState(manifest="sha256:" + "3" * 64)
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(_pre_stop(metadata))
+        store.complete_preparation(reference, _pre_stop(metadata), metadata)
+        updated = store.record_phase(
+            reference, metadata.binding, metadata, "module-restored", inactive_modules=observed
+        )
+        assert store.reopen(reference, metadata.binding) == updated
+    assert updated.inactive_modules == observed
