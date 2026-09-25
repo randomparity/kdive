@@ -499,6 +499,7 @@ class LocalLibvirtInstaller:
                     request.debuginfo_ref,
                     versions.get("vmlinux"),
                     vmlinux,
+                    request.accel,
                 )
                 modules_injected = True
             return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
@@ -559,6 +560,7 @@ class LocalLibvirtInstaller:
         debuginfo_ref: str | None,
         debuginfo_version_id: str | None,
         vmlinux: Path,
+        accel: str | None,
     ) -> None:
         """Force-off the domain, then stage the built kernel into its overlay (ADR-0203/0207).
 
@@ -577,7 +579,8 @@ class LocalLibvirtInstaller:
 
         Ordered force-off → fetch → inject: a rw libguestfs mount of a live qcow2 corrupts it,
         and ``runs.install`` can target an already-booted System (ADR-0026 §7 recovery), so the
-        domain is destroyed (idempotent) before the writer touches the overlay. Injection itself
+        domain is powered off (idempotent; a clean shutdown scaled by ``accel``, then ``destroy``
+        as the fallback, ADR-0679) before the writer touches the overlay. Injection itself
         is idempotent (clobber + re-extract; the kernel upload truncates/creates), so a retried
         install self-heals a partial write.
 
@@ -592,7 +595,7 @@ class LocalLibvirtInstaller:
                 category=ErrorCategory.MISSING_DEPENDENCY,
                 details={"system_id": str(system_id)},
             )
-        self._booter.force_off_if_active(system_id)
+        self._booter.force_off_if_active(system_id, accel=accel)
         vmlinux_ref: Path | None = None
         if debuginfo_ref is not None:
             self._fetch_modules(debuginfo_ref, vmlinux, debuginfo_version_id)

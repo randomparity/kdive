@@ -369,6 +369,7 @@ def _request(
     initrd_ref: str | None = None,
     debuginfo_ref: str | None = None,
     artifact_versions: dict[str, str] | None = None,
+    accel: str | None = None,
 ) -> InstallRequest:
     return InstallRequest(
         system_id=_SYS,
@@ -379,6 +380,7 @@ def _request(
         initrd_ref=initrd_ref,
         debuginfo_ref=debuginfo_ref,
         artifact_versions=artifact_versions,
+        accel=accel,
     )
 
 
@@ -1450,6 +1452,24 @@ def test_force_off_destroy_error_is_infrastructure_failure(tmp_path: Path) -> No
         booter.force_off_if_active(_SYS, accel="kvm")
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details["domain"] == f"kdive-{_SYS}"
+
+
+def test_install_force_off_uses_request_accel(tmp_path: Path) -> None:
+    events: list[str] = []
+    domain = _existing_domain(events)
+    domain.honours_shutdown = False
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    clock = _Clock()
+    inst = _install(
+        conn=conn,
+        staging_root=tmp_path,
+        kernel_writer=_FakeKernelWriter(events),
+        fetch_modules=_RecordingFetch(events),
+        clock=clock,
+    )
+    inst.install(_request(method=CaptureMethod.KDUMP, accel="kvm"))
+    assert len(clock.sleeps) == 60
+    assert events.index("destroy") < events.index("inject")
 
 
 # --- from_env does not connect/spawn -------------------------------------------------
