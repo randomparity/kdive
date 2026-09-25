@@ -8,6 +8,7 @@ these assert the tolerance rather than an equality.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import socket
 import socketserver
@@ -504,7 +505,10 @@ def test_header_names_resolved_kernel_tree(monkeypatch: pytest.MonkeyPatch, tmp_
     kernel_tree.mkdir()
     monkeypatch.setenv("KDIVE_KERNEL_SRC", "kernel")
 
-    assert root_conftest.pytest_report_header() == [f"live kernel tree: {kernel_tree}"]
+    header = root_conftest.pytest_report_header()
+    assert header[0] == f"live kernel tree: {kernel_tree}"
+    assert "live kernel release: unavailable" in header
+    assert "live kernel config sha256: unavailable" in header
 
 
 def test_header_keeps_literal_tilde_in_kernel_tree(
@@ -516,7 +520,7 @@ def test_header_keeps_literal_tilde_in_kernel_tree(
     kernel_tree.mkdir(parents=True)
     monkeypatch.setenv("KDIVE_KERNEL_SRC", "~/kernel")
 
-    assert root_conftest.pytest_report_header() == [f"live kernel tree: {kernel_tree}"]
+    assert root_conftest.pytest_report_header()[0] == f"live kernel tree: {kernel_tree}"
 
 
 def test_quiet_pytest_names_kernel_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -529,7 +533,53 @@ def test_quiet_pytest_names_kernel_tree(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
     root_conftest.pytest_sessionstart(cast(pytest.Session, SimpleNamespace(config=config)))
 
-    assert lines == [f"live kernel tree: {tmp_path}"]
+    assert lines[0] == f"live kernel tree: {tmp_path}"
+    assert "live kernel release: unavailable" in lines
+
+
+def test_header_reports_kernel_identity_and_dirty_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("KDIVE_STACK_BASE_URL", raising=False)
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
+    (tmp_path / "Makefile").write_text("kernelrelease:\n\t@echo 7.0-proof\n")
+    config = b"CONFIG_VIRTIO_PCI=y\n"
+    (tmp_path / ".config").write_bytes(config)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "Makefile", ".config"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    description = subprocess.run(
+        ["git", "-C", str(tmp_path), "describe", "--always", "--dirty"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    header = root_conftest.pytest_report_header()
+    assert "live kernel release: 7.0-proof" in header
+    assert f"live kernel git describe: {description}" in header
+    assert "live kernel git dirty: false" in header
+    assert f"live kernel config sha256: {hashlib.sha256(config).hexdigest()}" in header
+
+    (tmp_path / ".config").write_bytes(config + b"CONFIG_VIRTIO_BLK=y\n")
+    (tmp_path / "Makefile").write_text("kernelrelease:\n\t@echo 7.0-proof\n# changed\n")
+    dirty_header = root_conftest.pytest_report_header()
+    assert "live kernel git dirty: true" in dirty_header
+    assert f"live kernel git describe: {description}-dirty" in dirty_header
 
 
 def test_probe_enforces_skew_on_a_deployed_witness() -> None:
