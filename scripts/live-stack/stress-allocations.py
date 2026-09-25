@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import dataclasses
 import json
+import logging
 import math
 import random
 import sys
@@ -838,6 +839,9 @@ async def _drain_on_fresh_session(stress: Stress, connect: Connect, ledger: Ledg
 
 def main(argv: Sequence[str] | None = None) -> int:
     cfg = parse_config(argv)
+    # The MCP SDK's client session ("client" logger) warns on every call to a tool it has not
+    # listed; LiveStackClient never lists, so under load that warning buries the report.
+    logging.getLogger("client").setLevel(logging.ERROR)
     try:
         session = Session.from_env()
     except SystemExit as exc:
