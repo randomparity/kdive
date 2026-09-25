@@ -18,15 +18,19 @@ import warnings
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import uvicorn
 from _pytest.outcomes import Skipped
 
+from kdive import version as runtime_version
 from kdive.health.aux_listener import build_aux_app
 from kdive.health.heartbeat import Heartbeat
 from kdive.health.probe import BackendCheck, HealthProbe
 from kdive.version import version_info
+from tests import conftest as root_conftest
 from tests.integration.live_stack import conftest, skew
 from tests.integration.live_stack.skew import (
     POLICY_ENV,
@@ -301,6 +305,44 @@ def test_fetch_version_reads_the_real_aux_listener(ready_stack: str) -> None:
     assert set(version) == {"version", "commit", "is_release", "started_at"}
 
 
+def test_checkout_worker_endpoint_is_gradeable_from_foreign_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = Path(runtime_version.__file__).resolve().parents[2]
+    expected = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "--short", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    monkeypatch.chdir(tmp_path)
+    version_info.cache_clear()
+    try:
+        app = build_aux_app(
+            heartbeat=Heartbeat(stale_after=1e9),
+            probe=HealthProbe(checks=[]),
+            metric_reader=None,
+        )
+        for base in _serve(app):
+            payload = skew._fetch_version(f"{base}/readyz")
+            assert payload is not None
+            commit = payload["commit"]
+            started_at = payload["started_at"]
+            assert commit == expected
+            assert isinstance(commit, str)
+            assert isinstance(started_at, str)
+            full = expected.ljust(40, "a")
+            result = classify(
+                "worker",
+                commit=commit,
+                started_at=started_at,
+                facts=_facts(head=full, known={expected: full}),
+            )
+            assert result.verdict is SkewVerdict.FRESH
+    finally:
+        version_info.cache_clear()
+
+
 def test_fetch_version_reads_the_body_of_a_503(unready_stack: str) -> None:
     # The load-bearing edge (ADR-0482 §1): urllib raises HTTPError on 503, so without the
     # re-read path the preflight goes blind exactly when a backend is down.
@@ -365,6 +407,145 @@ def test_probe_stack_skew_degrades_to_unknown_when_nothing_answers() -> None:
     # Derived from readyz_urls, which has its own tests: the port table is pinned there, and
     # restating it here would only redden two tests for one edit.
     assert probed == list(readyz_urls(base).values())
+    witness = next(result for result in results if result.process == "lifecycle-witness")
+    assert "not deployed" in witness.detail
+    assert "Kubernetes" in witness.detail
+    assert not witness.applicable
+    skip, warn = partition(
+        [witness, ProcessSkew("server", SkewVerdict.FRESH, "running HEAD")], SkewPolicy.STRICT
+    )
+    assert skip == []
+    assert warn == [witness]
+
+
+def test_probe_grades_a_deployed_witness() -> None:
+    probe = probe_stack_skew(
+        _STACK_URL,
+        facts=_facts(),
+        fetch=lambda _url: {"commit": _HEAD, "started_at": _STARTED_AT},
+        inventory=lambda: frozenset({101}),
+    )
+    witness = next(result for result in probe.results if result.process == "lifecycle-witness")
+    assert witness.verdict is SkewVerdict.FRESH
+    assert witness.applicable
+    assert probe.revisions == {
+        "lifecycle-witness": _HEAD,
+        "reconciler": _HEAD,
+        "server": _HEAD,
+        "worker": _HEAD,
+    }
+
+
+def test_pytest_header_lists_probed_revisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
+    monkeypatch.delenv("KDIVE_KERNEL_SRC", raising=False)
+    monkeypatch.setattr(
+        root_conftest,
+        "probe_stack_skew",
+        lambda _url: SkewProbe(
+            [
+                ProcessSkew("server", SkewVerdict.FRESH, "running HEAD"),
+                ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit"),
+                ProcessSkew("lifecycle-witness", SkewVerdict.UNKNOWN, "not deployed", False),
+            ],
+            frozenset({101}),
+            {"server": _HEAD, "worker": None},
+        ),
+    )
+    header = root_conftest.pytest_report_header()
+    assert f"server={_HEAD}" in header[0]
+    assert "worker=unknown" in header[0]
+    assert "lifecycle-witness=not deployed" in header[0]
+    assert conftest._HEADER_PROBES[_STACK_URL].revisions["server"] == _HEAD
+
+
+def test_quiet_pytest_reports_and_retains_initial_revisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
+    monkeypatch.delenv("KDIVE_KERNEL_SRC", raising=False)
+    monkeypatch.delenv(POLICY_ENV, raising=False)
+    monkeypatch.setattr(
+        root_conftest,
+        "probe_stack_skew",
+        lambda _url: SkewProbe(
+            [ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit")],
+            frozenset({101}),
+            {"worker": None},
+        ),
+    )
+    lines: list[str] = []
+    reporter = SimpleNamespace(write_line=lines.append)
+    manager = SimpleNamespace(get_plugin=lambda _name: reporter)
+    config = SimpleNamespace(option=SimpleNamespace(verbose=-1), pluginmanager=manager)
+    root_conftest.pytest_sessionstart(cast(pytest.Session, SimpleNamespace(config=config)))
+    assert "worker=unknown" in lines[0]
+    assert conftest._HEADER_PROBES[_STACK_URL].results[0].verdict is SkewVerdict.UNKNOWN
+
+
+def test_header_does_not_probe_when_policy_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
+    monkeypatch.setenv(POLICY_ENV, "off")
+    monkeypatch.delenv("KDIVE_KERNEL_SRC", raising=False)
+
+    def fail(_url: str) -> SkewProbe:
+        raise AssertionError("off policy must not probe")
+
+    monkeypatch.setattr(root_conftest, "probe_stack_skew", fail)
+    assert root_conftest.pytest_report_header() == []
+
+
+def test_header_names_resolved_kernel_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("KDIVE_STACK_BASE_URL", raising=False)
+    monkeypatch.chdir(tmp_path)
+    kernel_tree = tmp_path / "kernel"
+    kernel_tree.mkdir()
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "kernel")
+
+    assert root_conftest.pytest_report_header() == [f"live kernel tree: {kernel_tree}"]
+
+
+def test_header_keeps_literal_tilde_in_kernel_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("KDIVE_STACK_BASE_URL", raising=False)
+    monkeypatch.chdir(tmp_path)
+    kernel_tree = tmp_path / "~" / "kernel"
+    kernel_tree.mkdir(parents=True)
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "~/kernel")
+
+    assert root_conftest.pytest_report_header() == [f"live kernel tree: {kernel_tree}"]
+
+
+def test_quiet_pytest_names_kernel_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("KDIVE_STACK_BASE_URL", raising=False)
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
+    lines: list[str] = []
+    reporter = SimpleNamespace(write_line=lines.append)
+    manager = SimpleNamespace(get_plugin=lambda _name: reporter)
+    config = SimpleNamespace(option=SimpleNamespace(verbose=-1), pluginmanager=manager)
+
+    root_conftest.pytest_sessionstart(cast(pytest.Session, SimpleNamespace(config=config)))
+
+    assert lines == [f"live kernel tree: {tmp_path}"]
+
+
+def test_probe_enforces_skew_on_a_deployed_witness() -> None:
+    witness_url = readyz_urls(_STACK_URL)["lifecycle-witness"]
+    probe = probe_stack_skew(
+        _STACK_URL,
+        facts=_facts(),
+        fetch=lambda url: {
+            "commit": _OLDER if url == witness_url else _HEAD,
+            "started_at": _STARTED_AT,
+        },
+        inventory=lambda: frozenset({101}),
+    )
+    skip, warn = partition(probe.results, SkewPolicy.STRICT)
+    assert [result.process for result in skip] == ["lifecycle-witness"]
+    assert warn == []
 
 
 @pytest.mark.parametrize(
@@ -487,10 +668,12 @@ def stack_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv(POLICY_ENV, raising=False)
     monkeypatch.setattr(conftest, "running_worker_pids", lambda: frozenset({101}))
     conftest._SKEW_CACHE.clear()
+    conftest._HEADER_PROBES.clear()
     yield
     # Clear on the way out too: these tests seed the *real* conftest cache with fabricated
     # verdicts, which a later live_stack run in the same process would otherwise trust.
     conftest._SKEW_CACHE.clear()
+    conftest._HEADER_PROBES.clear()
 
 
 def _fake_probe(*results: ProcessSkew) -> object:
@@ -523,6 +706,87 @@ def test_require_stack_warns_but_runs_when_merely_behind(
         _fake_probe(ProcessSkew("server", SkewVerdict.BEHIND, "12 commits behind HEAD")),
     )
     with pytest.warns(UserWarning, match="12 commits behind HEAD"):
+        assert conftest.require_stack() == _STACK_URL
+
+
+def test_strict_stack_skips_unknown_worker(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(POLICY_ENV, "strict")
+    monkeypatch.setattr(
+        conftest,
+        "probe_stack_skew",
+        _fake_probe(ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit")),
+    )
+    with pytest.raises(Skipped, match="worker: unknown"):
+        conftest.require_stack()
+
+
+def test_strict_stack_rejects_fresh_admission_after_unknown_header(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(POLICY_ENV, "strict")
+    conftest._HEADER_PROBES[_STACK_URL] = SkewProbe(
+        [ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit")], frozenset({101})
+    )
+    monkeypatch.setattr(
+        conftest,
+        "probe_stack_skew",
+        _fake_probe(ProcessSkew("worker", SkewVerdict.FRESH, "running HEAD")),
+    )
+    with pytest.raises(Skipped, match="header probe.*worker: unknown"):
+        conftest.require_stack()
+
+
+def test_strict_stack_reprobes_server_with_unchanged_workers(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(POLICY_ENV, "strict")
+    conftest._HEADER_PROBES[_STACK_URL] = SkewProbe(
+        [ProcessSkew("server", SkewVerdict.FRESH, "running HEAD")], frozenset({101})
+    )
+    probes = iter(
+        [
+            SkewProbe([ProcessSkew("server", SkewVerdict.FRESH, "running HEAD")], frozenset({101})),
+            SkewProbe([ProcessSkew("server", SkewVerdict.UNKNOWN, "no commit")], frozenset({101})),
+        ]
+    )
+    monkeypatch.setattr(conftest, "probe_stack_skew", lambda _url: next(probes))
+    assert conftest.require_stack() == _STACK_URL
+    with pytest.raises(Skipped, match="server: unknown"):
+        conftest.require_stack()
+
+
+def test_default_stack_still_warns_on_unknown_worker(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        conftest,
+        "probe_stack_skew",
+        _fake_probe(ProcessSkew("worker", SkewVerdict.UNKNOWN, "no commit")),
+    )
+    with pytest.warns(UserWarning, match="worker: unknown"):
+        assert conftest.require_stack() == _STACK_URL
+
+
+def test_require_stack_explains_absent_witness_without_strict_skip(
+    stack_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(POLICY_ENV, "strict")
+    monkeypatch.setattr(
+        conftest,
+        "probe_stack_skew",
+        _fake_probe(
+            ProcessSkew(
+                "lifecycle-witness",
+                SkewVerdict.UNKNOWN,
+                "not deployed in the portable three-role stack (Kubernetes-only role)",
+                applicable=False,
+            ),
+            ProcessSkew("server", SkewVerdict.FRESH, "running HEAD"),
+        ),
+    )
+    with pytest.warns(UserWarning, match="lifecycle-witness: unknown — not deployed"):
         assert conftest.require_stack() == _STACK_URL
 
 

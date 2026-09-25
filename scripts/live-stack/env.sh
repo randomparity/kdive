@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # shellcheck disable=SC2034 # callers source env.sh and use the resolved checkout root
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -12,7 +11,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 # libvirt-uri.sh so this file and lib.sh share one implementation.
 # shellcheck source=scripts/live-stack/libvirt-uri.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/libvirt-uri.sh"
-resolve_libvirt_uri
+resolve_libvirt_uri || return $?
 
 # Host-published ports for the compose backends. Each is the single source of truth for BOTH the
 # compose publish side (docker-compose.yml reads the same ${VAR:-default}) and the client-facing

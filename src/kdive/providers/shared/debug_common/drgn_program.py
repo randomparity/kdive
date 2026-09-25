@@ -13,6 +13,7 @@ a kdump core carries VMCOREINFO but not the kernel image's own ``.notes`` sectio
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -144,12 +145,61 @@ class DrgnProgramAdapter:
             return 0
 
 
+# libkdumpfile (through 0.5.6) maps ppc64 Linux with the pre-4.x hash layout: all of
+# 0xc000000000000000-0xcfffffffffffffff is the linear map, vmalloc is at 0xd000..., vmemmap at
+# 0xf000.... Book3S-64 kernels put vmalloc, kernel I/O and vmemmap above __vmalloc_start
+# (0xc008...), so every kdump-compressed read there fails "No way to translate" (#2763). drgn
+# gives a later segment priority, so the non-linear tail of the 0xc region is routed through
+# drgn's own page-table walk. Remove once a libkdumpfile release carries the layout fix.
+_PPC64_LINEAR_REGION_END = 0xD000000000000000
+
+
+def _page_split_reader(
+    translate: Callable[[int], int],
+    read_physical: Callable[[int, int], bytes],
+    page_size: int,
+) -> Callable[[int, int, int, bool], bytes]:
+    """A drgn segment read function that translates and reads one page at a time."""
+
+    def read(address: int, count: int, offset: int, physical: bool) -> bytes:
+        out = bytearray()
+        while len(out) < count:
+            chunk = min(count - len(out), page_size - address % page_size)
+            out += read_physical(translate(address), chunk)
+            address += chunk
+        return bytes(out)
+
+    return read
+
+
+def _route_ppc64_vmalloc(drgn: Any, prog: Any, follow_phys: Callable[[Any, int], int]) -> None:
+    """Serve ppc64 vmalloc/I/O/vmemmap reads from page tables instead of libkdumpfile (#2763)."""
+    if prog.platform.arch != drgn.Architecture.PPC64:
+        return
+    try:
+        start = prog["__vmalloc_start"].value_()
+    except KeyError:  # pre-Book3S-64-layout kernel: libkdumpfile's map is right for it
+        return
+    init_mm = prog["init_mm"].address_of_()
+    reader = _page_split_reader(
+        lambda address: follow_phys(init_mm, address),
+        lambda address, count: prog.read(address, count, True),
+        prog["PAGE_SIZE"].value_(),
+    )
+    prog.add_memory_segment(start, _PPC64_LINEAR_REGION_END - start, reader)
+
+
 def open_vmcore_program(core: Path, vmlinux: Path) -> DrgnProgramAdapter:
     """Open a drgn program over a staged vmcore + vmlinux pair (the ``open_program`` seam)."""
     drgn = _require_drgn()
+    from drgn.helpers.linux.mm import (  # noqa: PLC0415  # ty: ignore[unresolved-import]
+        follow_phys,
+    )
+
     prog = drgn.Program()
     prog.set_core_dump(core)
     prog.load_debug_info([vmlinux])
+    _route_ppc64_vmalloc(drgn, prog, follow_phys)
     return DrgnProgramAdapter(prog)
 
 

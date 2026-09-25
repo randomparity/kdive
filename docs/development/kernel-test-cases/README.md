@@ -54,7 +54,7 @@ cases rarely reach. Their order runs from the cheapest deterministic repro to th
 ## Architecture notes
 
 - Cases 19, 21, and 24 reproduce only on ppc64le (book3s64) guests. Run them on a POWER host.
-- Live gdbstub debug sessions are not yet proven on ppc64le guests (tracked by #2678). Run the `debug.*`
+- Live gdbstub debug sessions are not yet proven on ppc64le guests (tracked by #2736). Run the `debug.*`
   steps of the other cases on an x86_64 host until that gap closes.
 - `introspect.run` and `introspect.script` need a live drgn session. Check
   `capability_signals.live_drgn` from `images.describe` for the guest image before a case

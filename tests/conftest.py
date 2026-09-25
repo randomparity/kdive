@@ -60,6 +60,8 @@ from kdive.store.assembly import ObjectStoreAssembly, ObjectStoreFactory
 from kdive.store.objectstore import ObjectStore
 from tests._addopts_scrub import pytest_collection  # noqa: F401  registered as a conftest hook
 from tests.db.conftest import _cluster_global_role_lock, _MigratedWorkerDb
+from tests.integration.live_stack import conftest as stack_conftest
+from tests.integration.live_stack.skew import SkewPolicy, probe_stack_skew, skew_policy
 
 # Direct object-store boundary tests still need a complete configuration at collection time.
 # ``setdefault`` yields to a real ``KDIVE_S3_*`` in the developer's shell.
@@ -75,6 +77,41 @@ os.environ.setdefault("KDIVE_S3_BUCKET", _DUMMY_S3_BUCKET)
 _S3_ENDPOINT_URL = os.environ["KDIVE_S3_ENDPOINT_URL"]
 _S3_BUCKET = os.environ["KDIVE_S3_BUCKET"]
 _LOGIN_PASSWORD = "external-boot-authority-test"  # pragma: allowlist secret
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Capture live proof context even when pytest suppresses its header with ``-q``."""
+    base_url = os.environ.get("KDIVE_STACK_BASE_URL")
+    if base_url and skew_policy() is not SkewPolicy.OFF:
+        stack_conftest._HEADER_PROBES[base_url] = probe_stack_skew(base_url)
+    if session.config.option.verbose < 0 and (base_url or os.environ.get("KDIVE_KERNEL_SRC")):
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            for line in pytest_report_header():
+                reporter.write_line(line)
+
+
+def pytest_report_header() -> list[str]:
+    """Name the resolved kernel tree and probed app revisions in live proof output."""
+    lines = []
+    if kernel_src := os.environ.get("KDIVE_KERNEL_SRC"):
+        lines.append(f"live kernel tree: {Path(kernel_src).resolve()}")
+    base_url = os.environ.get("KDIVE_STACK_BASE_URL")
+    if not base_url or skew_policy() is SkewPolicy.OFF:
+        return lines
+    probe = stack_conftest._HEADER_PROBES.get(base_url) or probe_stack_skew(base_url)
+    stack_conftest._HEADER_PROBES[base_url] = probe
+    revisions = [
+        f"{result.process}="
+        + (
+            "not deployed"
+            if not result.applicable
+            else probe.revisions.get(result.process) or "unknown"
+        )
+        for result in probe.results
+    ]
+    lines.append("live-stack probed revisions: " + ", ".join(revisions))
+    return lines
 
 
 @dataclass(frozen=True, slots=True)

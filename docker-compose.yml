@@ -26,6 +26,8 @@
 # (postgres:5432, oidc:8080, seaweedfs:8333) — not the host-published ports above, which
 # are for a server run on the host. See deploy/compose/README.md for the bring-up.
 
+name: kdive
+
 # Shared aux readiness-probe cadence (ADR-0090 §5), merged into each app service's
 # healthcheck via `<<: *readyz_cadence`. Each service supplies its own `test` because
 # the /readyz URL port differs per process (server 9464, worker 9465, reconciler 9466).
