@@ -440,6 +440,7 @@ def test_pytest_header_lists_probed_revisions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
+    monkeypatch.delenv("KDIVE_KERNEL_SRC", raising=False)
     monkeypatch.setattr(
         root_conftest,
         "probe_stack_skew",
@@ -464,6 +465,7 @@ def test_quiet_pytest_reports_and_retains_initial_revisions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
+    monkeypatch.delenv("KDIVE_KERNEL_SRC", raising=False)
     monkeypatch.delenv(POLICY_ENV, raising=False)
     monkeypatch.setattr(
         root_conftest,
@@ -486,12 +488,48 @@ def test_quiet_pytest_reports_and_retains_initial_revisions(
 def test_header_does_not_probe_when_policy_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
     monkeypatch.setenv(POLICY_ENV, "off")
+    monkeypatch.delenv("KDIVE_KERNEL_SRC", raising=False)
 
     def fail(_url: str) -> SkewProbe:
         raise AssertionError("off policy must not probe")
 
     monkeypatch.setattr(root_conftest, "probe_stack_skew", fail)
     assert root_conftest.pytest_report_header() == []
+
+
+def test_header_names_resolved_kernel_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("KDIVE_STACK_BASE_URL", raising=False)
+    monkeypatch.chdir(tmp_path)
+    kernel_tree = tmp_path / "kernel"
+    kernel_tree.mkdir()
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "kernel")
+
+    assert root_conftest.pytest_report_header() == [f"live kernel tree: {kernel_tree}"]
+
+
+def test_header_keeps_literal_tilde_in_kernel_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("KDIVE_STACK_BASE_URL", raising=False)
+    monkeypatch.chdir(tmp_path)
+    kernel_tree = tmp_path / "~" / "kernel"
+    kernel_tree.mkdir(parents=True)
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "~/kernel")
+
+    assert root_conftest.pytest_report_header() == [f"live kernel tree: {kernel_tree}"]
+
+
+def test_quiet_pytest_names_kernel_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("KDIVE_STACK_BASE_URL", raising=False)
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
+    lines: list[str] = []
+    reporter = SimpleNamespace(write_line=lines.append)
+    manager = SimpleNamespace(get_plugin=lambda _name: reporter)
+    config = SimpleNamespace(option=SimpleNamespace(verbose=-1), pluginmanager=manager)
+
+    root_conftest.pytest_sessionstart(cast(pytest.Session, SimpleNamespace(config=config)))
+
+    assert lines == [f"live kernel tree: {tmp_path}"]
 
 
 def test_probe_enforces_skew_on_a_deployed_witness() -> None:
