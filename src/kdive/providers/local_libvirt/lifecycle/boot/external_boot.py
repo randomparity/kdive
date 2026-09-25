@@ -2890,6 +2890,16 @@ class AbortablePartial:
     materialization: ExternalBootMaterialization | None
 
 
+def _same_authority_generation(left: OpaqueProviderRef, right: OpaqueProviderRef) -> bool:
+    """Whether two phase receipts belong to one authority generation.
+
+    One generation owns materialize, prepare, and activate (ADR-0608), but migration 0135 binds
+    each phase receipt to its own operation attempt: ``authority/<id>/<generation>/<attempt>``.
+    Receipts from different phases therefore agree on everything except the final segment.
+    """
+    return left.ref.rsplit("/", 1)[0] == right.ref.rsplit("/", 1)[0]
+
+
 class LocalPreparationReceiptsV1(BaseModel):
     """Both phase receipts retained in one owner-bound canonical record."""
 
@@ -2909,7 +2919,7 @@ class LocalPreparationReceiptsV1(BaseModel):
         if any(
             item.binding != first.binding
             or item.plan_identity != first.plan_identity
-            or item.authority != first.authority
+            or not _same_authority_generation(item.authority, first.authority)
             for item in receipts[1:]
         ):
             raise ValueError("preparation receipts have conflicting ownership")
@@ -3165,7 +3175,7 @@ class RecoveryMetadataStore:
             or receipt.materialization is None
             or receipt.binding != request.binding
             or receipt.plan_identity != request.plan.identity
-            or receipt.authority != request.authority
+            or not _same_authority_generation(receipt.authority, request.authority)
         ):
             raise ValueError("prepare requires a matching durable materialization receipt")
         return receipt.materialization

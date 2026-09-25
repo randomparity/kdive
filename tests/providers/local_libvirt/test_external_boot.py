@@ -91,6 +91,10 @@ from tests.providers.local_libvirt.external_boot_support import (
     _point,
     _pre_stop,
 )
+from tests.support.external_boot_plan import (
+    external_boot_materialization,
+    external_boot_plan,
+)
 
 _TEARDOWN_RESERVATION = AuthorityTeardownReservationV1(
     disposition="ready",
@@ -4984,3 +4988,61 @@ def test_authenticated_partial_abort_removes_activation_artifacts_before_absence
         assert not store.exact_recovery_absence(_BINDING)
         store.remove_abortable_partial(_BINDING, projection.plan_identity, request.authority)
         assert store.exact_recovery_absence(_BINDING)
+
+
+def _phase_authority(generation: int, attempt: int) -> OpaqueProviderRef:
+    # Migration 0135 binds each phase receipt to its own operation attempt within the generation.
+    return OpaqueProviderRef(ref=f"authority/{UUID(int=1)}/{generation}/{UUID(int=100 + attempt)}")
+
+
+def test_prepare_reads_the_materialize_receipt_of_its_authority_generation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    plan = external_boot_plan(UUID(_BINDING.system_id), UUID(_BINDING.run_id))
+    materialization = external_boot_materialization(plan)
+    metadata = _metadata().model_copy(
+        update={
+            "plan_identity": plan.identity,
+            "materialization_identity": materialization.identity,
+        }
+    )
+    materialized = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=_BINDING,
+        plan_identity=plan.identity,
+        authority=_phase_authority(7, 1),
+        operation_identity="materialize-operation",
+        materialization=materialization,
+    )
+    prepared = materialized.model_copy(
+        update={
+            "state": "prepared",
+            "authority": _phase_authority(7, 2),
+            "operation_identity": "prepare-operation",
+            "recovery_point": _point(metadata),
+        }
+    )
+
+    def prepare_request(authority: OpaqueProviderRef) -> ExternalBootPreparationRequest:
+        return ExternalBootPreparationRequest(
+            phase="prepare",
+            plan=plan,
+            binding=_BINDING,
+            authority=authority,
+            operation_identity="prepare-operation",
+        )
+
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(materialized)
+        assert store.preparation_materialization(prepare_request(_phase_authority(7, 2))) == (
+            materialization
+        )
+        with pytest.raises(ValueError, match="matching durable materialization receipt"):
+            store.preparation_materialization(prepare_request(_phase_authority(8, 2)))
+        with pytest.raises(ValueError, match="conflicting ownership"):
+            store.publish_preparation(
+                prepared.model_copy(update={"authority": _phase_authority(8, 2)})
+            )
+        assert store.publish_preparation(prepared) == prepared
