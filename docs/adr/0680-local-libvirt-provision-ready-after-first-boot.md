@@ -82,7 +82,8 @@ gap is the job lane only.
   src/kdive/jobs/models.py src/kdive/mcp/tools/lifecycle/runs/common.py` (main @ d2b0686ed) shows
   both carry Run and external-boot recovery meaning; a System failure reads as a provisioning fault.
 - **Run the wait outside the worker's dispatch lane.** judgment: it needs a new lane or a
-  resumable wait job, a larger change than the gate itself; left as a follow-up.
+  resumable wait job, a larger change than the gate itself, for an occupancy this record
+  bounds and accepts.
 - **Power-cycle an already-running domain on retry.** judgment: it interrupts the first boot this
   record exists to protect.
 - **Order the marker after `cloud-final.service`.** judgment: an image rebuild for a stronger

@@ -36,6 +36,7 @@ docstring, help text and regenerated references, ~60 lines of live test.
 | `src/kdive/providers/local_libvirt/lifecycle/provisioning.py` | define/start, teardown | active check, domain teardown on failure, first-boot wait seam |
 | `src/kdive/providers/local_libvirt/settings.py` | settings | `LIBVIRT_BOOT_WINDOW_S` help clause |
 | `src/kdive/mcp/tools/lifecycle/systems/registrar.py` | tool wrappers | provision/reprovision docstring sentence |
+| `docs/guide/toolsets/systems.md` | hand-written toolset guide | one sentence on the first-boot wait |
 | `docs/guide/reference/systems.md`, `docs/guide/reference/config.md` | generated references | regenerated |
 | `tests/providers/local_libvirt/lifecycle/boot/test_readiness_poll.py` | — | new: shared loop tests |
 | `tests/providers/local_libvirt/test_install.py` | booter tests | imports renamed |
@@ -54,10 +55,16 @@ Interfaces (later tasks rely on these exact names):
 
 ```python
 type Readiness = Callable[[UUID], ReadinessResult]
+
+
 def boot_window_polls() -> int: ...
+
+
 class ReadinessOutcome(NamedTuple):
     result: ReadinessResult | None
     first_probe_error: ProbeFailure | None
+
+
 def poll_readiness(
     readiness: Readiness,
     system_id: UUID,
@@ -306,7 +313,9 @@ def test_provision_teardown_fault_keeps_original_error() -> None:
    `except libvirt.libvirtError` → `PROVISIONING_FAILURE`). `_best_effort_teardown_domain` wraps
    `self._teardown_domain(domain_name)` in `try/except CategorizedError`, logging a warning with
    `exc_info=True`, as `_best_effort_reclaim` does.
-5. Update the two `closed` counts. Focused green; `just lint && just type`. Commit
+5. Update the two `closed` counts. Focused green; also run the authority lane that shares
+   `provision()`: `just test-verbose tests/providers/local_libvirt/test_system_authority.py
+   tests/providers/system_authority` — expect all pass unchanged. `just lint && just type`. Commit
    `fix(local-libvirt): skip console truncate for a running domain on retry`.
 
 ## Task 3 — the first-boot wait
@@ -389,7 +398,7 @@ Steps:
 ## Task 4 — agent- and operator-facing text
 
 Files: `src/kdive/mcp/tools/lifecycle/systems/registrar.py`,
-`src/kdive/providers/local_libvirt/settings.py`, regenerated `docs/guide/reference/systems.md`
+`src/kdive/providers/local_libvirt/settings.py`, `docs/guide/toolsets/systems.md`, regenerated `docs/guide/reference/systems.md`
 and `docs/guide/reference/config.md`.
 
 Verification: Mode: focused-test — `just docs-check`, `just config-docs-check`, and
@@ -400,7 +409,10 @@ Steps: add to the `systems.provision` wrapper docstring, after its first paragra
 local-libvirt the job succeeds, and the System reaches `ready`, only after the guest's first boot
 writes its readiness marker to the console — minutes on KVM, longer on an emulated arch. A guest
 that crashes or never writes it ends `failed` with `provisioning_failure`." Add the same sentence,
-reworded for reprovision, to `systems.reprovision`. Add to the `LIBVIRT_BOOT_WINDOW_S` help: "It
+reworded for reprovision, to `systems.reprovision`. In `docs/guide/toolsets/systems.md`, after
+the sentence telling the agent to poll `jobs.wait` then check `systems.get` for READY, add: "On
+local-libvirt that job lasts through the guest's first boot — minutes on KVM, longer on an
+emulated arch." Add to the `LIBVIRT_BOOT_WINDOW_S` help: "It
 also bounds the local-libvirt provision/reprovision first-boot wait (ADR-0680)." Regenerate; run
 the three checks and `just mcp-spec-check`; if a tool-schema snapshot or the runner-task fixture
 changes, regenerate it with its recipe, never by hand. Commit

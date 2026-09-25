@@ -42,7 +42,8 @@ interrupt it. `reprovision` calls `provision` and has the same gap.
 7. The `systems.provision` and `systems.reprovision` tool docstrings state that on local-libvirt
    the job ends, and the System reaches `ready`, only after the guest's first boot emits its
    readiness marker, and that a guest that does not ends `failed` with `provisioning_failure`.
-   The `KDIVE_LIBVIRT_BOOT_WINDOW_S` help text says the window also bounds this wait. The
+   `docs/guide/toolsets/systems.md` says the same in one sentence where it tells the agent to
+   poll the provision job. The `KDIVE_LIBVIRT_BOOT_WINDOW_S` help text says the window also bounds this wait. The
    generated tool and config references are regenerated.
 8. A `live_vm` test provisions a System, and at the moment it reads `ready` requires the
    System's console log to contain the `kdive-ready` marker and sshd to answer with non-empty
@@ -104,7 +105,6 @@ interrupt it. `reprovision` calls `provision` and has the same gap.
    - A retry whose earlier attempt already failed readiness and destroyed the domain starts a
      fresh boot; the handler has already recorded the System `failed`, so that retry exits early.
 4. **Covered elsewhere**
-   - Running the wait off the worker's dispatch lane — follow-up candidate.
    - Authority-lane TCG scaling of its `boot_ready` window and its 15-minute intent deadline —
      follow-up candidate, operator-excluded.
    - `ready` implying cloud-init's final stage — follow-up candidate, operator-excluded.
