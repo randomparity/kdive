@@ -25,10 +25,11 @@ brought up by `stack-services.sh` and `onboard.sh`:
 - **Knobs.** `--project` (default `demo`), `--clients` (8), `--duration` seconds (60),
   `--seed` (random, always printed), `--invalid-ratio` (0.2), `--race-ratio` (0.2),
   `--abandon-ratio` (0.1), `--lease` hours (0.02, that is 72 s), `--call-timeout` seconds (60),
-  `--drain-timeout` seconds (300), `--provision-profile FILE` (off). A value out of range is a
+  `--drain-timeout` seconds (600), `--provision-profile FILE` (off). A value out of range is a
   usage error: the three ratios must each be in [0, 1] and sum to at most 1, `--lease` must be in
   (0, 24], and `--drain-timeout` must be at least the lease plus 60 s, so an abandoned grant can
-  expire and be swept within it.
+  expire and be swept within it. With `--provision-profile` the floor adds 240 s, because a
+  System is torn down by a worker job the reconciler enqueues after its allocation ends.
 - **Keys and leases.** Every `allocations.request` and `systems.provision` carries an idempotency
   key, and every request carries `window` = `--lease`. A key is
   `stress-<run id>-<uuid from the client RNG>`. The run id is a fresh random value per run,
@@ -75,18 +76,24 @@ brought up by `stack-services.sh` and `onboard.sh`:
   of every keyed call whose reply never arrived (timeout, transport, cancellation). The drain
   runs in a `finally` that also covers Ctrl-C. Its deadline starts when it starts, and every
   drain call is reported under its own label.
-  1. Replay each kept call once with the same key. A request whose replay reports `requested` is
-     released; any other granted request joins the abandoned set; a provision's `system_id` joins
-     the Systems. A replay that fails with a category leaves nothing to track.
+  1. Replay each kept request once with the same key. A replayed `deny` request that is granted
+     joins the abandoned set, since only it carries the short lease. Every other replayed grant
+     is owned: a queued request the server promoted holds the server's default lease (4 h), not
+     `--lease`.
   2. Release each owned allocation. An `ok`, or a failure whose `current_status` is terminal,
      settles it.
-  3. Until the deadline, poll the rest: re-release owned leftovers, read abandoned allocations
+  3. Replay each kept provision once. Coming after step 2, a provision that never committed now
+     fails against a released allocation instead of creating a System. A `system_id` joins the
+     Systems. A replay that fails with a category leaves nothing to track.
+  4. Until the deadline, poll the rest: re-release owned leftovers, read abandoned allocations
      with `allocations.wait` (`timeout_s=0`), and read Systems with `systems.get`.
-  Whatever is still unsettled when the run ends, including after a second Ctrl-C that aborts the
-  drain, is invariant 7.
+  Whatever is still unsettled when the run ends is invariant 7. The first Ctrl-C during the load
+  ends the load and starts the drain; a Ctrl-C during the drain stops it, and the report still
+  lists what was left.
 - **Report.** To stdout: the seed and run id, calls per tool and outcome, latency p50, p95 and max
-  per tool, a histogram of error categories, the count of granted requests (with a warning line
-  when it is zero), and the violation list. Exit status 0 means no violation, 1 means at least one
+  per tool, a histogram of error categories, the count of granted requests (live grants from the
+  load, not replays of finished ones; with a warning line when it is zero), and the violation
+  list. Exit status 0 means no violation, 1 means at least one
   violation, 2 means a usage or preflight failure (bad flag, invalid profile, no token, failed
   preflight). On Ctrl-C the script drains, prints the report, and exits 130.
 - **Invalid-call bucket.** The report adds per-entry outcome counts for the invalid catalog, so
@@ -134,8 +141,10 @@ violations. Examples: a capacity or quota denial, or `stale_handle` on a release
      in-process `tests/adversarial/test_admission_concurrency.py` holds the exact proof.
    - An operator changing host caps mid-run can trigger a false invariant 1. Documented in the
      runbook.
-   - A `kill -9` skips the drain. Leftovers expire on their short lease, except a queued request,
-     which the server reaps after its queue wait.
+   - A `kill -9` skips the drain. A `deny` grant expires on its short lease. A queued request is
+     reaped after its 24 h queue wait, or, once promoted, expires on the server's default lease.
+  - A Ctrl-C during the drain stops it. What stays unsettled is reported, and short-lease grants
+     still expire.
    - The reconciler sweeps every 30 s and the interval is not configurable, so lease-expiry
      reclamation takes up to the lease plus 30 s; `--drain-timeout` is bounded below to cover it.
    - Latency figures come from one Python process and include client-side scheduling.
@@ -155,9 +164,12 @@ violations. Examples: a capacity or quota denial, or `stale_handle` on a release
     yield exit 1 and name its invariant (1, 4, 6, 5 and 7, and 7);
   - a fake that commits a request and never replies, with the run cancelled mid-flight: the drain
     replays the key, and every fake allocation ends terminal;
+  - a run cancelled during the drain exits 130 and reports its leftovers as invariant 7;
+  - the fake promotes queued rows with a long lease and tears Systems down one poll late, so the
+    drain's release of promoted replays and its wait for Systems are exercised;
   - a stack with no schedulable host, and one with no shape, fail preflight;
   - unit cases cover outcome classification, flag validation (exit 2, including an invalid
-    profile), and percentile and report rendering.
+    profile and the teardown floor), and percentile and report rendering.
 
   Red: each case fails before its code exists. Green:
   `uv run python -m pytest tests/scripts/test_stress_allocations.py -q`.
