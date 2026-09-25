@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import subprocess  # noqa: S404 - virsh domstate uses fixed argv, no shell  # nosec B404
@@ -14,7 +15,7 @@ from typing import NamedTuple
 from uuid import UUID
 
 import kdive.config as config
-from kdive.domain.lifecycle.crash_signatures import first_crash_signature
+from kdive.domain.lifecycle.crash_signatures import first_crash_signature, is_crash_signature
 from kdive.providers.local_libvirt.lifecycle.host_tool_search import (
     PROVIDER_TOOL_SEARCH_PATH,
     resolve_provider_tool,
@@ -65,6 +66,77 @@ class ReadinessResult(NamedTuple):
     ok: bool
     probe_error: ProbeFailure | None = None
     crash_signature: str | None = None
+
+
+type Readiness = Callable[[UUID], ReadinessResult]
+
+
+class ReadinessOutcome(NamedTuple):
+    """How a readiness poll ended: the first answer, or ``None`` when the window elapsed."""
+
+    result: ReadinessResult | None
+    first_probe_error: ProbeFailure | None
+
+
+# The boot window is derived from KDIVE_LIBVIRT_BOOT_WINDOW_S (default 900 s) divided by the
+# _POLL_INTERVAL_SECONDS cadence (5 s) — 180 polls at the default. The poll loop counts polls;
+# _real_readiness owns the per-poll cadence. The window accommodates the kdive-ready signal
+# ordering After=kdump.service (#817): a crash-capture guest does not report ready until
+# kdump.service has built the capture initramfs and kexec-loaded it, which on POWER9 takes several
+# minutes on the first dracut run. It is a ceiling, not a fixed wait — the loop returns the instant
+# the marker appears, so the wider window costs nothing on a fast boot and the crash-signature
+# fail-fast still surfaces a panicked boot immediately. Operators on very fast hosts can tighten
+# it; operators on slow hosts (POWER, large kdump initramfs) can widen it — all without rebuilding
+# the image. The same window bounds the provision first-boot wait (ADR-0680).
+def boot_window_polls() -> int:
+    """Return the number of readiness polls for the configured boot window."""
+    return math.ceil(config.require(LIBVIRT_BOOT_WINDOW_S) / _POLL_INTERVAL_SECONDS)
+
+
+def poll_readiness(
+    readiness: Readiness,
+    system_id: UUID,
+    polls: int,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> ReadinessOutcome:
+    """Poll ``readiness`` until it answers, ``polls`` run out, or ``deadline`` passes (ADR-0680).
+
+    ``deadline`` is on ``clock`` and bounds wall-clock time when a probe itself is slow (a hung
+    ``virsh domstate`` costs its timeout on every poll); ``runs.boot`` passes none and keeps its
+    poll-count bound.
+    """
+    first_probe_error: ProbeFailure | None = None
+    for _ in range(polls):
+        if deadline is not None and clock() >= deadline:
+            break
+        result = readiness(system_id)
+        if first_probe_error is None and result.probe_error is not None:
+            first_probe_error = result.probe_error
+        if result.answered:
+            return ReadinessOutcome(result, first_probe_error)
+    return ReadinessOutcome(None, first_probe_error)
+
+
+def readiness_failure_details(
+    system_id: UUID,
+    first_probe_error: ProbeFailure | None,
+    crash_signature: str | None = None,
+) -> dict[str, object]:
+    """The System plus closed probe and crash reasons, as JSON scalars (ADR-0594, #2691).
+
+    ``crash_signature`` is the pre-marker crash literal the readiness scan matched; the worker
+    persists it as ``failure_detail_crash_signature`` for ``runs.get`` to read back. Only a
+    literal in the scanner's closed vocabulary is written, because ``jobs.get`` and ``jobs.wait``
+    publish ``failure_context`` without a read-side filter.
+    """
+    details: dict[str, object] = {"system_id": str(system_id)}
+    if first_probe_error is not None:
+        details["probe_error"] = first_probe_error.value
+    if crash_signature is not None and is_crash_signature(crash_signature):
+        details["crash_signature"] = crash_signature
+    return details
 
 
 class _DomainExitProbe(NamedTuple):

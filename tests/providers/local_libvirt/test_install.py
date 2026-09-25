@@ -43,14 +43,14 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ReadinessResult,
     _scan_result,
     _verdict_to_result,
+    boot_window_polls,
     classify_console,
     first_crash_signature,
+    readiness_failure_details,
 )
 from kdive.providers.local_libvirt.lifecycle.install import (
     Fetch,
-    LocalLibvirtBooter,
     LocalLibvirtInstall,
-    _boot_window_polls,
     _stage_object,
     _stream_object,
 )
@@ -347,19 +347,19 @@ def _install(
 def test_boot_window_polls_default_is_180(monkeypatch: pytest.MonkeyPatch) -> None:
     # 900 s default / 5 s poll cadence = 180 polls (the widened POWER9-friendly window).
     monkeypatch.delenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", raising=False)
-    assert _boot_window_polls() == 180
+    assert boot_window_polls() == 180
 
 
 def test_boot_window_polls_rounds_up(monkeypatch: pytest.MonkeyPatch) -> None:
     # A window not divisible by the 5 s cadence rounds up (math.ceil), so the last partial
     # interval is still polled — 902 / 5 = 180.4 -> 181, never truncated to 180.
     monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "902")
-    assert _boot_window_polls() == 181
+    assert boot_window_polls() == 181
 
 
 def test_boot_window_polls_honors_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "1000")
-    assert _boot_window_polls() == 200
+    assert boot_window_polls() == 200
 
 
 def _request(
@@ -1213,7 +1213,7 @@ def test_crash_signature_survives_worker_persistence_to_the_runs_read() -> None:
     error = CategorizedError(
         "System booted but a run-readiness check failed",
         category=ErrorCategory.READINESS_FAILURE,
-        details=LocalLibvirtBooter._boot_failure_details(_SYS, None, "UBSAN:"),
+        details=readiness_failure_details(_SYS, None, "UBSAN:"),
     )
     context = _failure_context(error, SecretRegistry())
     assert observed_crash_signature(context) == "UBSAN:"
@@ -1221,7 +1221,7 @@ def test_crash_signature_survives_worker_persistence_to_the_runs_read() -> None:
 
 def test_boot_failure_details_drop_a_non_vocabulary_signature() -> None:
     # The write side fails closed: `jobs.get` publishes failure_context without a read filter.
-    details = LocalLibvirtBooter._boot_failure_details(_SYS, None, "arbitrary console text")
+    details = readiness_failure_details(_SYS, None, "arbitrary console text")
     assert "crash_signature" not in details
 
 
@@ -2089,7 +2089,7 @@ def test_nonzero_domstate_exit_keeps_transport_text_out_of_the_mcp_payload(
     error = CategorizedError(
         "System did not become ready within the boot window",
         category=ErrorCategory.BOOT_TIMEOUT,
-        details=LocalLibvirtBooter._boot_failure_details(_SYS, probe.error),
+        details=readiness_failure_details(_SYS, probe.error),
     )
     payload = dict(ToolResponse.failure_from_error(str(_SYS), error).data or {})
 
@@ -2112,7 +2112,7 @@ def test_nonzero_domstate_exit_keeps_transport_text_out_of_the_worker_payload(
     error = CategorizedError(
         "System did not become ready within the boot window",
         category=ErrorCategory.BOOT_TIMEOUT,
-        details=LocalLibvirtBooter._boot_failure_details(_SYS, probe.error),
+        details=readiness_failure_details(_SYS, probe.error),
     )
     context = _failure_context(error, SecretRegistry())
 
@@ -2139,7 +2139,7 @@ def test_oserror_probe_keeps_its_filename_out_of_the_mcp_payload(
     error = CategorizedError(
         "System booted but a run-readiness check failed",
         category=ErrorCategory.READINESS_FAILURE,
-        details=LocalLibvirtBooter._boot_failure_details(_SYS, probe.error),
+        details=readiness_failure_details(_SYS, probe.error),
     )
     payload = dict(ToolResponse.failure_from_error(str(_SYS), error).data or {})
 
