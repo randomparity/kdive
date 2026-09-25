@@ -863,7 +863,9 @@ class LibguestfsAuthenticatedGuestTree:
             gid=value["st_gid"],
             size=value["st_size"] if kind == "regular" else 0,
             target=self._guest.readlink(remote) if kind == "symlink" else None,
-            xattrs_supported=True,
+            # With no xattrs, True and False describe the same content. Report False then, as
+            # the canonical module archive does, so an installed tree reads back unchanged.
+            xattrs_supported=bool(xattrs),
             xattrs={str(item["attrname"]): _xattr_bytes(item["attrval"]) for item in xattrs},
             link_count=value["st_nlink"],
         )

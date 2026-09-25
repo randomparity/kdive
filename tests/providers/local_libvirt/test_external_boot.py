@@ -1655,6 +1655,28 @@ def test_libguestfs_tree_is_bound_private_and_no_follow() -> None:
     assert guest.cursor_closes == 1
 
 
+def test_libguestfs_tree_reports_xattr_support_only_for_entries_that_carry_xattrs() -> None:
+    # A tree installed from a converted bundle declares no xattr support and carries none;
+    # activation compares its install manifest with this readback byte for byte.
+    class _LabelledGuest(_GuestTreeHandle):
+        def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]:
+            if path.endswith("/labelled.ko"):
+                return [{"attrname": "security.selinux", "attrval": b"label"}]
+            return []
+
+    guest = _LabelledGuest(entries=["labelled.ko", "plain.ko"])
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest, binding=_BINDING, release="6.12.0", root="/lib/modules/6.12.0", mutable=False
+    )
+
+    entries = {entry.path: entry for entry in tree.entries()}
+
+    assert entries["plain.ko"].xattrs_supported is False
+    assert entries["plain.ko"].xattrs == {}
+    assert entries["labelled.ko"].xattrs_supported is True
+    assert entries["labelled.ko"].xattrs == {"security.selinux": b"label"}
+
+
 def test_libguestfs_tree_rejects_cross_activation_root_before_guest_call() -> None:
     guest = _GuestTreeHandle()
     with pytest.raises(ValueError, match="bound release"):
