@@ -35,8 +35,11 @@ def test_ppc64le_combined_tar_strips_scratch_copy(
     real_run = subprocess.run
     strip_args: list[str] = []
 
-    def run(args: list[str], *, check: bool = False) -> subprocess.CompletedProcess[bytes]:
+    def run(
+        args: list[str], *, check: bool = False, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
         if args[0] == "make":
+            assert env is not None
             modstage = scratch / "modstage" / "lib" / "modules" / "test"
             modstage.mkdir(parents=True)
             (modstage / "module.ko").write_bytes(b"module")

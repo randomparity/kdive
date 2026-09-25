@@ -52,6 +52,46 @@ def _live_client(client: _FakeClient) -> Any:
 _BOOT_CONFIG = b"CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_EXT4_FS=y\n"
 
 
+@pytest.mark.parametrize(
+    ("arch", "boot_member", "make_arch"),
+    [("x86_64", "arch/x86/boot/bzImage", "x86"), ("ppc64le", "vmlinux", "powerpc")],
+)
+def test_combined_kernel_tar_ignores_caller_kbuild_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arch: str,
+    boot_member: str,
+    make_arch: str,
+) -> None:
+    kernel_src = tmp_path / "kernel"
+    boot = kernel_src / boot_member
+    boot.parent.mkdir(parents=True)
+    boot.write_bytes(b"built")
+    for name, value in {
+        "ARCH": "wrong",
+        "INSTALL_MOD_STRIP": "wrong",
+        "CROSS_COMPILE": "wrong-",
+        "KBUILD_OUTPUT": "wrong",
+        "INSTALL_MOD_DIR": "wrong",
+    }.items():
+        monkeypatch.setenv(name, value)
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def record(command: list[str], *, check: bool, env: dict[str, str] | None = None) -> None:
+        assert check
+        calls.append((command, env))
+
+    monkeypatch.setattr(spine.subprocess, "run", record)
+    spine.combined_kernel_tar(kernel_src, tmp_path, arch=arch)
+    make_command, make_env = next((cmd, env) for cmd, env in calls if cmd[0] == "make")
+    assert f"ARCH={make_arch}" in make_command
+    assert make_env == {
+        name: value
+        for name, value in os.environ.items()
+        if name in {"PATH", "HOME", "LANG", "LANGUAGE"} or name.startswith("LC_")
+    }
+
+
 @pytest.mark.parametrize("missing", ["VIRTIO_PCI", "VIRTIO_BLK", "EXT4_FS"])
 def test_spine_config_refuses_missing_built_in(tmp_path: Path, missing: str) -> None:
     config = _BOOT_CONFIG.replace(f"CONFIG_{missing}=y".encode(), f"CONFIG_{missing}=m".encode())
@@ -157,11 +197,15 @@ def _job(status: str, *, category: ErrorCategory | None = None) -> ToolResponse:
 
 
 @pytest.mark.parametrize(
-    ("arch", "boot_member"),
-    [("x86_64", "arch/x86/boot/bzImage"), ("ppc64le", "vmlinux")],
+    ("arch", "boot_member", "make_arch"),
+    [("x86_64", "arch/x86/boot/bzImage", "x86"), ("ppc64le", "vmlinux", "powerpc")],
 )
 def test_combined_kernel_tar_strips_staged_modules(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arch: str, boot_member: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arch: str,
+    boot_member: str,
+    make_arch: str,
 ) -> None:
     kernel_src = tmp_path / "kernel-src"
     boot = kernel_src / boot_member
@@ -169,8 +213,10 @@ def test_combined_kernel_tar_strips_staged_modules(
     boot.write_bytes(b"built")
     calls: list[list[str]] = []
 
-    def record(cmd: list[str], *, check: bool) -> None:
+    def record(cmd: list[str], *, check: bool, env: dict[str, str] | None = None) -> None:
         assert check
+        if cmd[0] == "make":
+            assert env is not None
         calls.append(cmd)
 
     monkeypatch.setattr(spine.subprocess, "run", record)
@@ -183,6 +229,7 @@ def test_combined_kernel_tar_strips_staged_modules(
             str(kernel_src),
             "modules_install",
             f"INSTALL_MOD_PATH={tmp_path / 'modstage'}",
+            f"ARCH={make_arch}",
             "INSTALL_MOD_STRIP=1",
         ]
     ]
