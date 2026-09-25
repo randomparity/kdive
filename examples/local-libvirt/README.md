@@ -37,6 +37,9 @@ demo walkthrough below. Otherwise:
   registers one from the rootfs catalog (Fedora 44 is the kdump-capable default); it needs the
   backends up, so run it after `demo-up.sh`.
 - A kernel source tree at `KDIVE_KERNEL_SRC` (default `~/src/linux`).
+- A workspace to install the MCP client config into, at `KDIVE_DEMO_WORKSPACE` (default
+  `KDIVE_KERNEL_SRC`). Set it separately from `KDIVE_KERNEL_SRC` if that tree is also a live
+  proof's kernel fixture, so `demo-up.sh` does not write `.mcp.json` into it.
 - Local kdump capture requires drgn/libguestfs in the installed lifecycle worker environment,
   `/opt/kdive-live-worker-lifecycle/.venv`. The lifecycle installer/host role owns that environment.
   The checkout preflight probes `KDIVE_PYTHON`; it does not certify the installed worker's imports.
@@ -57,12 +60,12 @@ it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `demo-up.sh` insist on it.
 | File | Purpose |
 |------|---------|
 | `install-host.sh` | Compatibility caller for the canonical host-preparation recipe in the installation guide. |
-| `env.sh` | Sources the live-stack env (which resolves the published session `KDIVE_LIBVIRT_URI`), then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_PYTHON`, and an XDG log directory. Source it; don't run it. |
+| `env.sh` | Sources the live-stack env (which resolves the published session `KDIVE_LIBVIRT_URI`), then sets `KDIVE_PROJECT`, `KDIVE_DEMO_WORKSPACE`, `KDIVE_GUEST_IMAGE`, `KDIVE_PYTHON`, and an XDG log directory. Source it; don't run it. |
 | `demo-up.sh` | Idempotent bring-up: control-group and endpoint check → preflight → `scripts/live-stack/stack-services.sh` (backends, migrate, role bootstrap, session libvirt, daemons, lifecycle workers, inventory reconcile) → `scripts/live-stack/onboard.sh` (fund `demo`, verify, mint a token) → merge `.mcp.json`. |
 | `build-image.sh` | Build one or more catalog images with `build-fs`, label the rootfs directory `svirt_image_t` on SELinux hosts (ADR-0640), append a `staged-path` `[[image]]` block to `systems.toml` from the build's provenance sidecar, and `reconcile-systems`. |
 | `demo-down.sh` | `scripts/live-stack/stack-down.sh` with the example env: retires the lifecycle workers through the witness, stops the daemons and the compose backends, keeps state. `--wipe` also drops the data volumes and reaps kdive domains. |
 | `mint-token.sh` | Print an admin developer token for `KDIVE_PROJECT` to stdout. |
-| `mcp.json` | The MCP client config installed into the kernel tree; reads the token from `${KDIVE_TOKEN}` (holds no secret). |
+| `mcp.json` | The MCP client config installed into `KDIVE_DEMO_WORKSPACE`; reads the token from `${KDIVE_TOKEN}` (holds no secret). |
 
 ## Usage
 
@@ -136,7 +139,7 @@ examples/local-libvirt/demo-down.sh --wipe   # ...or also drop the database, the
   backed up to `.mcp.json.bak` (never overwritten on re-run, so the original is preserved), and
   only the `kdive` server entry is replaced — any other MCP servers and top-level keys you
   configured are kept. A missing file is created from the template. The step is idempotent and
-  runs last, so a missing kernel tree leaves a working stack behind.
+  runs last, so a missing `KDIVE_DEMO_WORKSPACE` leaves a working stack behind.
 - **Teardown goes through the witness.** `demo-down.sh` retires the worker slots, stops the daemons
   (SIGTERM, then `--force` for SIGKILL), and stops the compose backends. Plain teardown keeps
   the data volumes and any running kdive domains; `--wipe` drops both.
@@ -148,7 +151,8 @@ Everything is overridable from the environment before running the scripts:
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `KDIVE_PROJECT` | `demo` | Project the stack seeds and the token grants `admin` on. |
-| `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test; where `.mcp.json` is installed. |
+| `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test. |
+| `KDIVE_DEMO_WORKSPACE` | `KDIVE_KERNEL_SRC` | Directory `.mcp.json` is installed into. Defaults to the kernel tree, but set it separately when `KDIVE_KERNEL_SRC` doubles as a live proof's kernel fixture (#2760) — a demo bring-up must not add files to a tree a proof run also uses. |
 | `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` (`…/fedora-kdive-ready-44-ppc64le.qcow2` on a ppc64le host) | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
 | `KDIVE_LIBVIRT_URI` | the endpoint in `/etc/kdive/live-worker-libvirt.env` | libvirt connection every consumer drives — the operator-owned session daemon the lifecycle installer published. `qemu:///system` until the contract is installed, which `demo-up.sh` refuses. |
 | `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for checkout commands, server, and reconciler; fixed workers use their installed lifecycle venv. |
