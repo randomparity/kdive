@@ -28,8 +28,9 @@ live-debug setting.
 
 Local callers pass their known `root_fs="ext4"`; remote callers retain the
 filesystem alternative unless their fixture names a verified filesystem.
-Only callers that request kdump set `require_kdump=True`. Reuse the existing
-`crash_capture` feature clauses for that check, with the actual target arch:
+Only callers whose selected capture method is kdump set `require_kdump=True`;
+the standard local spine selects it implicitly through its crashkernel profile.
+Reuse the existing `crash_capture` feature clauses for that check, with the actual target arch:
 `KEXEC` or `KEXEC_FILE`, `CRASH_DUMP`, `PROC_VMCORE`, `RELOCATABLE`, and
 `FW_CFG_SYSFS` on x86-64. Do not require unconfigurable selectors. The SUSE
 v7.0 proof reuses the shared boot check in place of its duplicated symbol list,

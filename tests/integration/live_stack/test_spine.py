@@ -140,6 +140,10 @@ def test_spine_upload_rejects_config_before_staging_or_upload(
                 cast(Any, client), run_id="run-1", require_live_debug=True
             )
         )
+    with pytest.raises(SpinePhaseError, match="CONFIG_KEXEC"):
+        asyncio.run(
+            spine.build_and_upload_kernel(cast(Any, client), run_id="run-1", require_kdump=True)
+        )
     stage.assert_not_called()
     client.call_tool.assert_not_called()
 

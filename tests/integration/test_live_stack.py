@@ -449,7 +449,9 @@ def test_spine_over_the_wire() -> None:
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id, arch=arch, root_fs="ext4")
+                    await build_and_upload_kernel(
+                        op, run_id=run_id, arch=arch, root_fs="ext4", require_kdump=True
+                    )
                 for step in ("install", "boot"):
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
