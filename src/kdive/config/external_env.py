@@ -622,6 +622,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "`examples/local-libvirt/env.sh` overrides the default to an XDG state path.",
     ),
     ExternalEnvVar(
+        "KDIVE_DEMO_WORKSPACE",
+        "script",
+        "same as KDIVE_KERNEL_SRC",
+        "Directory `examples/local-libvirt/demo-up.sh` installs `.mcp.json` into; kept "
+        "independent of `KDIVE_KERNEL_SRC` so a demo bring-up cannot add files to a tree a live "
+        "proof is also using as its kernel fixture (#2760).",
+    ),
+    ExternalEnvVar(
         "KDIVE_ROOTFS_DIR",
         "script",
         "/var/lib/kdive/rootfs",

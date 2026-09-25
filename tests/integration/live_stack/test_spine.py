@@ -163,7 +163,9 @@ def test_spine_upload_rejects_config_before_staging_or_upload(
 ) -> None:
     (tmp_path / ".config").write_bytes(b"CONFIG_VIRTIO_PCI=m\n")
     monkeypatch.setenv(spine.KERNEL_TREE_ENV, str(tmp_path))
-    monkeypatch.setattr(spine, "accepted_run_upload_names", lambda _contract: ["kernel"])
+    monkeypatch.setattr(
+        spine, "accepted_run_upload_names", lambda _contract: ["kernel", "effective_config"]
+    )
     stage = Mock(side_effect=AssertionError("staging reached"))
     monkeypatch.setattr(spine, "combined_kernel_tar", stage)
     client = SimpleNamespace(
@@ -186,6 +188,62 @@ def test_spine_upload_rejects_config_before_staging_or_upload(
         )
     stage.assert_not_called()
     client.call_tool.assert_not_called()
+
+
+def _upload_item(name: str) -> ToolResponse:
+    return ToolResponse.success(name, "pending", data={"name": name})
+
+
+def test_spine_upload_sends_the_tree_config_as_effective_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # #2762: the spine uploads its own .config, so runs.complete_build's config advisories run on
+    # the live path instead of failing open on an absent config.
+    config = _BOOT_CONFIG + b"CONFIG_VIRTIO_NET=y\n"
+    (tmp_path / ".config").write_bytes(config)
+    kernel_tar = tmp_path / "kernel.tar"
+    kernel_tar.write_bytes(b"tar")
+    monkeypatch.setenv(spine.KERNEL_TREE_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        spine, "accepted_run_upload_names", lambda _c: ["kernel", "effective_config"]
+    )
+    monkeypatch.setattr(spine, "combined_kernel_tar", lambda *_a, **_k: kernel_tar)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def _scalar(client: object, name: str, **args: object) -> ToolResponse:
+        calls.append((name, args))
+        if name == "artifacts.create_run_upload":
+            items = [_upload_item("kernel"), _upload_item("effective_config")]
+            return ToolResponse.collection("run-1", "pending", items)
+        return ToolResponse.success("run-1", "succeeded")
+
+    put: dict[str, bytes] = {}
+
+    async def _put(item: ToolResponse, path: Path) -> None:
+        put[str(item.data["name"])] = path.read_bytes()
+
+    monkeypatch.setattr(spine, "scalar", _scalar)
+    monkeypatch.setattr(spine, "put_presigned", _put)
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+
+    asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
+
+    decls = cast(list[dict[str, object]], calls[0][1]["artifacts"])
+    by_name = {d["name"]: d for d in decls}
+    assert by_name["effective_config"]["size_bytes"] == len(config)
+    assert put["effective_config"] == config
+    assert calls[-1][0] == "runs.complete_build"
+
+
+def test_spine_upload_requires_the_contract_to_accept_effective_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / ".config").write_bytes(_BOOT_CONFIG)
+    monkeypatch.setenv(spine.KERNEL_TREE_ENV, str(tmp_path))
+    monkeypatch.setattr(spine, "accepted_run_upload_names", lambda _c: ["kernel"])
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+    with pytest.raises(SpinePhaseError, match="effective_config"):
+        asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
 
 
 def _job(status: str, *, category: ErrorCategory | None = None) -> ToolResponse:

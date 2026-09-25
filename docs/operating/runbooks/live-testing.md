@@ -371,6 +371,69 @@ lacking `kernel.tar.gz`, it raises rather than skipping, because a measurement t
 produces no row is indistinguishable from one nobody started. That arm is unrun and owned by
 [debt record 0015](../../debt/0015-ppc64le-finalization-measurement-unrun.md).
 
+#### Multi-client stress (#2769)
+
+`scripts/live-stack/stress-allocations.py` drives a running stack from many concurrent MCP
+clients at once: allocation churn, deliberate races, invalid arguments, grants the clients walk
+away from, and optionally System provisioning. It checks invariants while the load runs and
+after it, prints a report, and exits non-zero on a violation. It is an operator tool, not a
+pytest tier. Design: [the spec](../../workflow/specs/2026-09-24-stress-allocations-design.md).
+
+Bring the stack up with `stack-services.sh` (with or without `--skip-libvirt`), run
+`just onboard`, and make the server URL and token available the way `kdivectl` reads them.
+Then, from the repository root:
+
+```bash
+uv run python scripts/live-stack/stress-allocations.py --clients 8 --duration 120 --seed 7
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--project` | `demo` | Project the clients allocate in |
+| `--clients` | 8 | Concurrent simulated clients, one MCP session each |
+| `--duration` | 60 | Seconds of load before the drain |
+| `--seed` | random | Replays each client's action sequence; always printed |
+| `--invalid-ratio` | 0.2 | Share of actions that send a malformed call |
+| `--race-ratio` | 0.2 | Share of actions that run a race (double release, renew vs release, shared key) |
+| `--abandon-ratio` | 0.1 | Share of actions that abandon a grant or cancel a request in flight |
+| `--lease` | 0.02 | Lease window in hours on every request (72 s) |
+| `--call-timeout` | 60 | Seconds before one call counts as a timeout |
+| `--drain-timeout` | 600 | Seconds the drain may take; at least the lease plus 60 s, plus 240 s with a profile |
+| `--provision-profile` | off | JSON provisioning profile; enables `systems.provision` |
+
+The three ratios must sum to at most 1; the rest of the actions are churn cycles. A violation is
+recorded when:
+
+1. a schedulable host reports `in_use` above `cap`;
+2. an invalid call is accepted, or ends in a transport failure or timeout;
+3. a double release where both calls replied does not return `ok` both times;
+4. two `ok` replies for one idempotency key carry different ids;
+5. anything the run created is still unsettled at the end: an allocation not `released`,
+   `expired` or `failed`, a System not `torn_down` or `failed`, or a call whose reply never
+   arrived and could not be replayed.
+
+Transport failures, timeouts and tool-errors on valid calls are counted in the report, not
+treated as violations. Exit status: 0 no violation, 1 at least one violation, 2 a usage or
+preflight failure (no shape, no schedulable host, no token, invalid profile), 130 interrupted.
+
+Before you run it:
+
+- **Abandoned grants are reclaimed by lease expiry.** The reconciler sweeps every 30 s, and that
+  interval is fixed, so a grant nobody releases goes to `expired` within the lease plus 30 s. The
+  drain waits for that, which is why `--drain-timeout` has a floor.
+- **Ctrl-C once** ends the load and starts the drain. A Ctrl-C during the drain stops it; the
+  report still lists what was left, and short-lease grants still expire. A `kill -9` skips the
+  drain entirely.
+- **`--provision-profile` needs the stack with libvirt** and a provisionable profile. Start from
+  `systems.profile_examples` and replace its placeholder image. The script drops the profile's
+  `vcpu`, `memory_mb` and `disk_gb`, which the server fills from each allocation, and the report
+  warns if no provision succeeded. Each client keeps at most one System in flight.
+- **The server must stay up for the run.** If it crashes, each client stops after five
+  transport failures in a row with a note that the server may be down; a crash under load is
+  itself a finding worth reporting.
+- **Do not change host caps mid-run.** The monitor compares `in_use` with the cap it reads at
+  that moment, so a cap lowered under load reports a false violation.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```

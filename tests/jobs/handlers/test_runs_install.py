@@ -127,7 +127,7 @@ def test_install_plan_checks_measured_modules_before_provider(
     monkeypatch.setattr(runs_install, "system_arch", lambda _system: "x86_64")
     monkeypatch.setattr(runs_install, "resolve_build", resolve)
     run = cast(Run, SimpleNamespace(id=run_id, investigation_id=uuid4(), build_ref=build_ref))
-    system = cast(System, SimpleNamespace(id=system_id))
+    system = cast(System, SimpleNamespace(id=system_id, accel="kvm"))
     payload = runs_install._InstallPayloadContext(run_id, None, None, None, None)
 
     async def plan() -> runs_install._InstallPlan:
@@ -154,7 +154,9 @@ def test_install_plan_checks_measured_modules_before_provider(
             assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
             assert exc.value.details["max_uncompressed_bytes"] == MAX_LEGACY_INSTALL_MODULE_BYTES
     else:
-        assert asyncio.run(plan()).request.kernel_ref == "kernel"
+        request = asyncio.run(plan()).request
+        assert request.kernel_ref == "kernel"
+        assert request.accel == "kvm"  # the install force-off scales by it (ADR-0679)
     assert reads == (
         ["build"]
         if provider_kind is ResourceKind.LOCAL_LIBVIRT

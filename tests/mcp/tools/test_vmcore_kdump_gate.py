@@ -39,7 +39,7 @@ def _patch_resolution(
         assert block is not None
         return block
 
-    monkeypatch.setattr(gate, "_resolve_catalog_rootfs", _resolve)
+    monkeypatch.setattr(gate, "resolve_system_catalog_rootfs", _resolve)
     monkeypatch.setattr(gate, "render_kdump_signal", _render)
 
 
@@ -74,8 +74,3 @@ def test_non_string_capability_passes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_refusing_statuses_are_exactly_the_two_confident_negatives() -> None:
     assert frozenset({"incapable", "not_applicable"}) == gate._REFUSING_STATUSES
-
-
-def test_resolve_returns_none_for_an_unparsable_profile() -> None:
-    entry = asyncio.run(gate._resolve_catalog_rootfs(_CONN, _system("::not-a-profile::")))
-    assert entry is None

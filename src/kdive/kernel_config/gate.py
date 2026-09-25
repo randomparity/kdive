@@ -7,7 +7,9 @@ Three consumers share :func:`load_effective_config` here:
 - the drgn-live debug seams (``debug.start_session``, live ``introspect.*``) **warn** — never
   refuse — when the config provably lacks debuginfo and no host ``vmlinux`` was uploaded; and
 - ``runs.complete_build`` **warns** — never refuses — when the config provably lacks the
-  boot-required ``rootfs_mount`` symbols the guest needs to mount its root filesystem.
+  boot-required ``rootfs_mount`` symbols the guest needs to mount its root filesystem, and when it
+  lacks the ``crash_capture_rhel_guest`` symbols and the target image is, or may be, RHEL-family
+  (ADR-0678).
 
 All fail open (an absent/unreadable/degenerate config yields ``None``: arm/attach/complete as
 today). Each seam formats its own envelope from the returned payload.
@@ -25,6 +27,7 @@ from kdive.kernel_config.fetch import load_effective_config
 from kdive.kernel_config.parse import KernelConfig
 from kdive.kernel_config.requirements import (
     CRASH_CAPTURE,
+    CRASH_CAPTURE_RHEL_GUEST,
     ROOTFS_MOUNT,
     Clause,
     feature_requirement,
@@ -59,6 +62,23 @@ _ROOTFS_REMEDIATION = (
     "boot - EXT4_FS or XFS_FS, whichever your rootfs uses. Build them in (=y): any symbol listed "
     "under built_in_required is set to =m in your config, and the direct-kernel boot mounts root "
     "before a module can load. Uploading an initrd artifact with the build is the alternative "
+    f"(see {_EXTERNAL_BUILD_CONTRACT_URI})"
+)
+
+# os-release ``ID`` values of the RHEL family: their kdump service builds a dracut squashfs/erofs
+# initramfs and loads it with kexec_file_load, and they root on XFS (ADR-0478, ADR-0678).
+RHEL_FAMILY_OS_IDS: frozenset[str] = frozenset({"fedora", "rhel", "centos", "rocky", "almalinux"})
+RHEL_GUEST_CRASH_CONFIG_REASON = "kernel_missing_rhel_guest_crash_config"
+_RHEL_GUEST_REMEDIATION = (
+    "the target System boots a RHEL-family image: build the missing CONFIG_* in, or kdump's "
+    "capture kernel cannot mount its dracut initramfs or the XFS root and writes no vmcore "
+    f"(see {_EXTERNAL_BUILD_CONTRACT_URI})"
+)
+_UNKNOWN_GUEST_REMEDIATION = (
+    "kdive could not tell which OS the target System boots (the Run is not bound to a System "
+    "yet, or its rootfs is not a registered catalog image with a recorded os-release). If the "
+    "guest is RHEL-family (Fedora, RHEL, Rocky, AlmaLinux, CentOS Stream), build the missing "
+    "CONFIG_* in or kdump writes no vmcore; for any other guest ignore this "
     f"(see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
@@ -181,6 +201,37 @@ async def rootfs_mount_warning(
     return _clause_payload(
         config, unmet, reason=MISSING_BOOT_CONFIG_REASON, remediation=_ROOTFS_REMEDIATION
     )
+
+
+async def rhel_guest_crash_warning(
+    conn: AsyncConnection, run_id: UUID, *, os_id: str | None
+) -> dict[str, JsonValue] | None:
+    """Non-fatal ``crash_capture_rhel_guest`` advisory for ``runs.complete_build`` (ADR-0678).
+
+    ``os_id`` is the target image's recorded os-release ``ID``, or ``None`` when kdive could not
+    resolve one. A known non-RHEL id returns ``None`` without reading the config. Otherwise the
+    config is read (failing open to ``None`` like every seam here) against the entry's advertised
+    clauses, and an unmet set returns the shared ``{reason, missing, remediation}`` payload plus
+    ``guest_family``: ``"rhel"`` for a known RHEL-family id, ``"unknown"`` when the id is ``None``
+    - in which case the remediation says the warning only applies to a RHEL-family guest.
+    """
+    if os_id is not None and os_id not in RHEL_FAMILY_OS_IDS:
+        return None
+    config = await load_effective_config(conn, run_id)
+    if config is None:
+        return None
+    unmet = unmet_advertised_clauses(config, feature_requirement(CRASH_CAPTURE_RHEL_GUEST))
+    if not unmet:
+        return None
+    known = os_id is not None
+    payload = _clause_payload(
+        config,
+        unmet,
+        reason=RHEL_GUEST_CRASH_CONFIG_REASON,
+        remediation=_RHEL_GUEST_REMEDIATION if known else _UNKNOWN_GUEST_REMEDIATION,
+    )
+    payload["guest_family"] = "rhel" if known else "unknown"
+    return payload
 
 
 async def missing_effective_config_nudge(

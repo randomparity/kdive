@@ -29,6 +29,8 @@ import pytest
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.jobs.worker import _failure_context
+from kdive.kernel_config.requirements import EMPTY_CAPTURE_CONFIG_HINT
 from kdive.providers.local_libvirt.retrieve.kdump import (
     GuestCoreReader,
     HarvestOutcome,
@@ -199,6 +201,17 @@ def test_capture_empty_crashdir_keeps_no_core_path(tmp_path: Path) -> None:
         _kdump_capture_via_reader(reader, tmp_path / "spool")
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
     assert exc.value.details.get("reason") != "kdump_core_incomplete"
+    # #2762: the empty capture points at the RHEL-family kdump set, and the hint survives the job
+    # worker's scalar-only detail filter - the agent reads the job, not this exception.
+    assert exc.value.details["kernel_config_hint"] == EMPTY_CAPTURE_CONFIG_HINT
+    context = _failure_context(exc.value, SecretRegistry())
+    assert context["failure_detail_kernel_config_hint"] == EMPTY_CAPTURE_CONFIG_HINT
+
+
+def test_a_host_dump_no_core_carries_no_kernel_config_hint() -> None:
+    # host_dump is written by QEMU on the host, so the guest kernel's config cannot explain it.
+    err = LocalLibvirtRetrieve._no_core(_SYS, CaptureMethod.HOST_DUMP)
+    assert "kernel_config_hint" not in err.details
 
 
 def test_guest_core_reader_protocol_is_runtime_checkable() -> None:
