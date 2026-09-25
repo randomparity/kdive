@@ -87,6 +87,24 @@ def test_spine_config_network_module_route_is_caller_scoped(tmp_path: Path) -> N
     assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_network=True)
 
 
+def test_spine_config_live_debug_requires_btf_and_dwarf(tmp_path: Path) -> None:
+    config = tmp_path / ".config"
+    config.write_bytes(_BOOT_CONFIG + b"CONFIG_DEBUG_INFO_DWARF5=y\n")
+    with pytest.raises(SpinePhaseError, match="CONFIG_DEBUG_INFO_BTF=y"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_live_debug=True)
+
+    config.write_bytes(_BOOT_CONFIG + b"CONFIG_DEBUG_INFO_BTF=y\n")
+    with pytest.raises(
+        SpinePhaseError, match="CONFIG_DEBUG_INFO_DWARF4=y or CONFIG_DEBUG_INFO_DWARF5=y"
+    ):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_live_debug=True)
+
+    config.write_bytes(_BOOT_CONFIG + b"CONFIG_DEBUG_INFO_BTF=y\nCONFIG_DEBUG_INFO_DWARF5=y\n")
+    assert spine.check_spine_kernel_config(
+        tmp_path, "x86_64", "upload-build", require_live_debug=True
+    )
+
+
 @pytest.mark.parametrize("arch,required", [("x86_64", "FW_CFG_SYSFS"), ("ppc64le", "CRASH_DUMP")])
 def test_spine_config_kdump_respects_arch(tmp_path: Path, arch: str, required: str) -> None:
     (tmp_path / ".config").write_bytes(
@@ -115,6 +133,13 @@ def test_spine_upload_rejects_config_before_staging_or_upload(
 
     with pytest.raises(SpinePhaseError, match="CONFIG_VIRTIO_PCI=y"):
         asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
+    (tmp_path / ".config").write_bytes(_BOOT_CONFIG + b"CONFIG_VIRTIO_NET=y\n")
+    with pytest.raises(SpinePhaseError, match="CONFIG_DEBUG_INFO_BTF=y"):
+        asyncio.run(
+            spine.build_and_upload_kernel(
+                cast(Any, client), run_id="run-1", require_live_debug=True
+            )
+        )
     stage.assert_not_called()
     client.call_tool.assert_not_called()
 

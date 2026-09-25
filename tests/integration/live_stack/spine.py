@@ -556,6 +556,7 @@ def check_spine_kernel_config(
     *,
     require_kdump: bool = False,
     require_network: bool = False,
+    require_live_debug: bool = False,
     root_fs: str | None = None,
 ) -> bytes:
     """Reject a built tree that lacks the selected live proof's kernel features."""
@@ -586,6 +587,11 @@ def check_spine_kernel_config(
         missing.append("CONFIG_EXT4_FS=y or CONFIG_XFS_FS=y")
     if require_network and not config.is_enabled("VIRTIO_NET"):
         missing.append("CONFIG_VIRTIO_NET=y or =m")
+    if require_live_debug:
+        if not config.is_builtin("DEBUG_INFO_BTF"):
+            missing.append("CONFIG_DEBUG_INFO_BTF=y")
+        if not (config.is_builtin("DEBUG_INFO_DWARF4") or config.is_builtin("DEBUG_INFO_DWARF5")):
+            missing.append("CONFIG_DEBUG_INFO_DWARF4=y or CONFIG_DEBUG_INFO_DWARF5=y")
     if require_kdump:
         for clause in unmet_clauses(config, feature_requirement(CRASH_CAPTURE), arch=arch):
             missing.append(" or ".join(f"CONFIG_{symbol}" for symbol in sorted(clause.symbols)))
@@ -661,6 +667,7 @@ async def build_and_upload_kernel(
     with_vmlinux: bool = False,
     require_kdump: bool = False,
     require_network: bool = False,
+    require_live_debug: bool = False,
     root_fs: str | None = None,
 ) -> None:
     """Drive the external-build upload lane for ``run_id`` and complete the Run's build step.
@@ -690,6 +697,7 @@ async def build_and_upload_kernel(
         phase_name,
         require_kdump=require_kdump,
         require_network=require_network,
+        require_live_debug=require_live_debug,
         root_fs=root_fs,
     )
     with tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-") as scratch:

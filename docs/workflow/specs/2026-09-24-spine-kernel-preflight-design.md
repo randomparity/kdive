@@ -21,6 +21,11 @@ there, but accept `=m` because the guest may load the matching
 module before SSH, as #2734 documents. The module's availability is an operator
 image condition and cannot be established from the kernel `.config`.
 
+The live drgn script proof additionally opts into `CONFIG_DEBUG_INFO_BTF=y`
+and at least one of `CONFIG_DEBUG_INFO_DWARF4=y` or
+`CONFIG_DEBUG_INFO_DWARF5=y`, as #2734 documents. Other spine proofs need no
+live-debug setting.
+
 Local callers pass their known `root_fs="ext4"`; remote callers retain the
 filesystem alternative unless their fixture names a verified filesystem.
 Only callers that request kdump set `require_kdump=True`. Reuse the existing
@@ -66,7 +71,7 @@ available, and SHA-256 of the supplied `.config`.
 
 - Mode: focused-test. Config refusal and acceptance, including `=m`, local
   x86-64 XFS-only refusal, remote x86-64 XFS acceptance, ppc64le ext4,
-  arch-aware kdump clauses, and no
+  live-debug BTF/DWARF, arch-aware kdump clauses, and no
   upload on refusal; expected red is acceptance of an invalid tree or refusal
   of a documented module route; green command:
   `uv run python -m pytest tests/integration/live_stack/test_spine.py -q`.

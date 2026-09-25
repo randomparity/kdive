@@ -694,7 +694,12 @@ def test_spine_live_script_over_the_wire() -> None:
                     run_id = env.object_id
                 async with phase("upload-build"):
                     await build_and_upload_kernel(
-                        op, run_id=run_id, arch=arch, root_fs="ext4", require_network=True
+                        op,
+                        run_id=run_id,
+                        arch=arch,
+                        root_fs="ext4",
+                        require_network=True,
+                        require_live_debug=True,
                     )
                 for step in ("install", "boot"):
                     async with phase(step):
