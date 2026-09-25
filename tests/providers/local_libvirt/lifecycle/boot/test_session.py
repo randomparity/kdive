@@ -724,6 +724,31 @@ def test_find0_tree_streams_one_multilevel_walk_and_byte_sorts_after_completion(
     session.close()
 
 
+def test_find0_tree_accepts_libguestfs_rooted_entries() -> None:
+    # libguestfs 1.58 find0 writes each entry below the directory with a leading "/".
+    events: list[str] = []
+    producer = Find0Guest(events, [b"/modules.dep", b"/kernel", b"/kernel/a.ko"])
+    session, _lease_value = _stream_session(events, producer)
+
+    with session.guest() as guest, guest.open_tree("/lib/modules/6.12.0", limit=3) as entries:
+        assert [entry.path for entry in entries] == ["kernel", "kernel/a.ko", "modules.dep"]
+    session.close()
+
+
+def test_find0_tree_rejects_an_empty_leading_segment() -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [b"//kernel"])
+    session, _lease_value = _stream_session(events, producer)
+
+    with (
+        session.guest() as guest,
+        pytest.raises(ValueError, match="canonical relative path"),
+        guest.open_tree("/lib/modules/6.12.0", limit=1) as entries,
+    ):
+        list(entries)
+    session.close()
+
+
 def test_find0_tree_limit_plus_one_rejects_without_retaining_the_extra_entry() -> None:
     events: list[str] = []
     producer = Find0Guest(events, [b"a", b"b", b"not-visited"])

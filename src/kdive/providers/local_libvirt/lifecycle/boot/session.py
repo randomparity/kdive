@@ -781,6 +781,8 @@ def _guest_tree_relative_bytes(value: bytes) -> str:
         path = value.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("guest-tree entry is not UTF-8") from exc
+    # libguestfs find0 writes each entry below the listed directory with one leading "/".
+    path = path.removeprefix("/")
     if (
         path.startswith("/")
         or unicodedata.normalize("NFC", path) != path
