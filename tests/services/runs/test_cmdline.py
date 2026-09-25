@@ -163,6 +163,23 @@ def test_platform_owned_exact_name_still_rejected_alongside_lookalikes() -> None
     assert platform_owned_cmdline_token("root=/dev/sdb nfsroot=10.0.0.1:/export/root") == "root="
 
 
+def test_platform_owned_rejects_quoted_forms_the_kernel_unquotes() -> None:
+    # next_arg() (lib/cmdline.c) strips one leading '"' before splitting name from value, so
+    # the kernel still parses a quoted param as the exact owned name (#2758 review finding).
+    assert platform_owned_cmdline_token('"console=ttyS1"') == "console="
+    assert platform_owned_cmdline_token('quiet "root=/dev/sdb"') == "root="
+    assert platform_owned_cmdline_token('"fadump=off"') == "fadump="
+
+
+def test_platform_owned_rejects_crashkernel_lookalikes_kernel_substring_scans() -> None:
+    # crashkernel is parsed by parse_crashkernel() (kernel/crash_reserve.c) via a raw strstr()
+    # over the whole boot_command_line, never through next_arg's exact-name tokenizer -- so a
+    # caller-controlled lookalike still supplies the kernel's crashkernel= reservation
+    # (#2758 review finding).
+    assert platform_owned_cmdline_token("xcrashkernel=2G") == "crashkernel="
+    assert platform_owned_cmdline_token("debug.crashkernel=2G quiet") == "crashkernel="
+
+
 def test_kdump_crashkernel_override_replaces_default_size() -> None:
     # A per-install crashkernel reservation (ADR-0300, #989) replaces the default 256M.
     assert (
