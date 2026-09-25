@@ -299,6 +299,7 @@ async def _build_install_plan(
             initrd_ref=initrd_ref,
             debuginfo_ref=debuginfo_ref,
             artifact_versions=artifact_versions,
+            accel=system.accel,
         ),
         applied_extra=applied_extra,
         crashkernel=payload.crashkernel,
