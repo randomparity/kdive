@@ -18,7 +18,8 @@ which Kconfig symbols are enabled before you upload — a debug kernel is one yo
 debug options turned on. The validator constrains only the artifacts' **structure** (bzImage
 magic, gzip layout, a `lib/modules` member); it never rejects a build over your `.config`.
 There is no allowed-config allowlist and no required-symbol gate: enable what the
-investigation needs. One non-blocking exception: if you upload an `effective_config` that does not
+investigation needs. Two non-blocking exceptions read an uploaded `effective_config`; the RHEL-family
+kdump one is described with its symbol set below. The first: if the config does not
 carry the symbols needed to mount the root filesystem and boot (`VIRTIO_BLK` for the `/dev/vda`
 root device, plus `EXT4_FS` **or** `XFS_FS` for the filesystem on it), `runs.complete_build` still
 succeeds but returns a `data.missing_boot_config` advisory naming the missing symbols, so a kernel
@@ -126,9 +127,19 @@ CONFIG_BLK_DEV_LOOP=y
 All `=y`, not `=m`: a crash initramfs must not depend on the primary kernel loading modules first.
 A stock `x86_64_defconfig` supplies none of them. This set is filesystem- and initramfs-dependent,
 not universal — a guest with a different root filesystem or initramfs scheme needs a different set,
-so kdive advertises it and never refuses on it. Missing any one of these fails only at capture
-time, after the crash, when the guest and the evidence are gone; each omission masks the next, so
-build the whole set in at once.
+so kdive never refuses on it. Missing any one of these fails only at capture time, after the
+crash, when the guest and the evidence are gone; each omission masks the next, so build the whole
+set in at once.
+
+kdive checks the set for you when you upload an `effective_config`: `runs.complete_build` still
+succeeds but returns a `data.rhel_guest_crash_config` advisory naming the missing symbols. Its
+`guest_family` is `rhel` when the Run's System boots a registered catalog image whose recorded
+os-release is Fedora, RHEL, Rocky, AlmaLinux or CentOS Stream. It is `unknown` when kdive cannot
+tell the guest's OS — the Run is not bound to a System yet, or the System boots a `local`,
+`artifact` or `upload` rootfs — and then the advisory applies only if your guest is RHEL-family.
+A known non-RHEL image, or a config carrying the whole set, draws nothing. If a kdump capture
+still finds no core, the failed `capture_vmcore` job carries a `failure_detail_kernel_config_hint`
+pointing back at this set.
 
 **Whatever the guest family**, a crash-config refusal names only symbols you can set. `KEXEC_CORE`
 and `VMCORE_INFO` are missing from the lists above, from the manifest, and from the refusal:
@@ -304,7 +315,7 @@ tar -tzf kernel.tar.gz | head    # boot/vmlinuz must be first; lib/modules/<rele
 | Name | When to upload | Notes |
 |---|---|---|
 | `vmlinux` | to enable kernel-debugging / DWARF introspection | the uncompressed kernel ELF with debug info. If you upload it you **must** declare a `build_id` in `runs.complete_build`, and it must match the ELF's GNU build-id note, or the upload is rejected. |
-| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. On a direct-kernel target `=m` counts as missing unless you also upload an `initrd`; on a `disk-image` target it does not, because the guest builds its own initramfs. |
+| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. On a direct-kernel target `=m` counts as missing unless you also upload an `initrd`; on a `disk-image` target it does not, because the guest builds its own initramfs. A config missing the RHEL-family kdump set (`crash_capture_rhel_guest`) draws a non-blocking `rhel_guest_crash_config` advisory when the target is, or may be, RHEL-family. |
 | `initrd` | when booting needs a specific initramfs | the initial ramdisk image. On a direct-kernel target, uploading one also silences the built-in requirement above, since the modules then have somewhere to load from. A `disk-image` target never reads it — that lane boots through the guest's own bootloader and builds its initramfs in-guest — so upload one there only to record it. |
 
 ## The upload flow
