@@ -2246,6 +2246,24 @@ def test_released_lease_opens_nothing() -> None:
     assert events == []
 
 
+def test_inspection_reads_the_persistent_definition_of_a_running_domain() -> None:
+    # A running domain's live XML adds runtime-only facts (id, aliases, pty paths). Prepare
+    # records the definition while the guest runs and activate compares it after the stop.
+    events: list[str] = []
+    inactive = _xml()
+    live = inactive.replace("<domain>", "<domain id='14'>").replace(
+        '<target dev="vda" bus="virtio"/>', '<target dev="vda" bus="virtio"/><alias name="disk0"/>'
+    )
+    domain = Domain(events, live, inactive_xml=inactive)
+    domain.active = True
+    session = _factory(events, domain).open(_lease(), _expected())
+
+    assert session.inspect_closed().xml == inactive.encode()
+    domain.active = False
+    assert session.inspect_closed().xml == inactive.encode()
+    session.close()
+
+
 def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
     events: list[str] = []
     session = _factory(events).open(_lease(), _expected())

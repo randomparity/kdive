@@ -943,7 +943,10 @@ class _ConcreteSession:
 
     def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
         domain = self._require_open_domain()
-        xml = domain.XMLDesc(0)
+        # The persistent definition: a running domain's live XML adds runtime-only facts
+        # (id, aliases, pty paths) that disappear when it stops, so it cannot be compared across
+        # the stop that separates prepare from activate.
+        xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
         root = _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         active = _active(domain)
         return ClosedDomainInspection(

@@ -61,7 +61,8 @@ class Domain:
     ) -> None:
         self.events = events
         self.xml = xml or _xml()
-        self.inactive_xml = inactive_xml or self.xml
+        # None: the running and persistent definitions agree (libvirt after define or stop).
+        self.inactive_xml = inactive_xml
         self.active = False
 
     def name(self) -> str:
@@ -70,7 +71,9 @@ class Domain:
 
     def XMLDesc(self, flags: int) -> str:  # noqa: N802
         self.events.append(f"domain.xml:{flags}")
-        return self.inactive_xml if flags == 2 else self.xml
+        if flags == 2 and self.inactive_xml is not None:
+            return self.inactive_xml
+        return self.xml
 
     def isActive(self) -> int:  # noqa: N802
         self.events.append("domain.active")
@@ -99,6 +102,7 @@ class Conn:
     def defineXML(self, xml: str) -> Domain:  # noqa: N802
         self.events.append("domain.define")
         self.domain.xml = xml
+        self.domain.inactive_xml = None
         return self.domain
 
     def close(self) -> None:
