@@ -42,11 +42,13 @@ brought up by `stack-services.sh` and `onboard.sh`:
     shape's custom triple, `on_capacity` `deny` or `queue`, and a fresh key or a replay of that
     client's previous request (same key and arguments). Then an optional `allocations.renew`
     (`extend` = `--lease`), a jittered hold of 0–2 s, and `allocations.release`. A queued
-    (`requested`) grant is released after one `allocations.wait` of at most 2 s. With
+    (`requested`) grant is released at once, while it waits in the queue. With
     `--provision-profile`, half of the granted cycles call `systems.provision` with that profile.
     Half of those release immediately, racing the provision job; the other half release after
     the hold. A client provisions again only once `systems.get` shows its previous System
-    `torn_down` or `failed`, so each client has at most one System in flight.
+    `torn_down` or `failed`, so each client has at most one System in flight. That read is a
+    capacity safeguard for the provisioning flag; the operator approved it under exclusion (c) on
+    2026-09-25. No other read steers the workload.
   - **Races.** One is picked at random: (a) a double release, where two concurrent releases hit
     one grant; (b) renew racing release; (c) one idempotency key sent from three concurrent
     requests with identical arguments.
@@ -87,13 +89,14 @@ brought up by `stack-services.sh` and `onboard.sh`:
      Systems. A replay that fails with a category leaves nothing to track.
   4. Until the deadline, poll the rest: re-release owned leftovers, read abandoned allocations
      with `allocations.wait` (`timeout_s=0`), and read Systems with `systems.get`.
-  Whatever is still unsettled when the run ends is invariant 7. The first Ctrl-C during the load
+  Whatever is still unsettled when the run ends is invariant 5. The first Ctrl-C during the load
   ends the load and starts the drain; a Ctrl-C during the drain stops it, and the report still
   lists what was left.
 - **Report.** To stdout: the seed and run id, calls per tool and outcome, latency p50, p95 and max
   per tool, a histogram of error categories, the count of granted requests (live grants from the
-  load, not replays of finished ones; with a warning line when it is zero), and the violation
-  list. Exit status 0 means no violation, 1 means at least one
+  load, not replays of finished ones; with a warning line when it is zero), the count of
+  `transport`, `timeout` and `tool-error` outcomes on valid calls, a note for each client whose
+  session was lost, and the violation list. Exit status 0 means no violation, 1 means at least one
   violation, 2 means a usage or preflight failure (bad flag, invalid profile, no token, failed
   preflight). On Ctrl-C the script drains, prints the report, and exits 130.
 - **Invalid-call bucket.** The report adds per-entry outcome counts for the invalid catalog, so
@@ -105,27 +108,28 @@ brought up by `stack-services.sh` and `onboard.sh`:
 (`error_category` set), `tool-error` (`LiveStackToolError`, which is an MCP `is_error` result),
 `transport` (any other exception), `timeout` (`--call-timeout` exceeded), or `abandoned` (a
 deliberate in-flight cancel). The operator decided on 2026-09-24 that a `tool-error` counts as a
-valid rejection of an invalid call and is reported in its own bucket.
+valid rejection of an invalid call and is reported in its own bucket. On 2026-09-25 the operator
+decided that `transport`, `timeout` and `tool-error` on a valid call are counted and reported,
+not violations: the charter forbids them only for invalid input, and it treats a lost reply on
+valid traffic as expected. A grant such a call strands is still held to invariant 5.
 
 **Invariants.** A violation is recorded when:
 
 1. a monitor sample shows `in_use > cap` on a schedulable host item;
-2. any call ends in `transport` or `timeout`;
-3. a call from the valid workload (churn, races, abandonment, monitor, drain) ends in
-   `tool-error`;
-4. an invalid-catalog call ends in `ok`. The script also tracks the returned id so the drain
-   settles it;
-5. a double-release race does not end with both calls `ok`;
-6. an idempotency replay, sequential or concurrent, returns an `ok` whose `object_id` differs
+2. an invalid-catalog call ends in `ok`, `transport` or `timeout`. The script tracks the id an
+   accepted call returns so the drain settles it;
+3. a double-release race does not end with both calls `ok`;
+4. an idempotency replay, sequential or concurrent, returns an `ok` whose `object_id` differs
    from another `ok` response for the same key;
-7. when the run ends, an allocation the script created is not `released`, `expired` or `failed`,
+5. when the run ends, an allocation the script created is not `released`, `expired` or `failed`,
    a System it created is not `torn_down` or `failed`, or a call whose reply never arrived could
    not be replayed. An abandoned allocation that is still occupying means lease expiry did not
    reclaim it. The state is read from the envelope `status`, or from `data.current_status` on a
    failure envelope.
 
 Denials and other `envelope-failure` results on valid calls are counted, not treated as
-violations. Examples: a capacity or quota denial, or `stale_handle` on a release that lost a race.
+violations, as are the valid-call errors above. Examples: a capacity or quota denial, or
+`stale_handle` on a release that lost a race.
 
 ### Failure model
 
@@ -161,15 +165,16 @@ violations. Examples: a capacity or quota denial, or `stale_handle` on a release
     and every fake allocation ends terminal;
   - fakes that each plant one defect: `in_use > cap`, an `ok` on an invalid call, a different id
     on a key replay, a release that never succeeds, and a lease that never expires. Each must
-    yield exit 1 and name its invariant (1, 4, 6, 5 and 7, and 7);
+    yield exit 1 and name its invariant (1, 2, 4, 3 and 5, and 5);
   - a fake that commits a request and never replies, with the run cancelled mid-flight: the drain
     replays the key, and every fake allocation ends terminal;
-  - a run cancelled during the drain exits 130 and reports its leftovers as invariant 7;
+  - a run cancelled during the drain exits 130 and reports its leftovers as invariant 5;
   - the fake promotes queued rows with a long lease and tears Systems down one poll late, so the
     drain's release of promoted replays and its wait for Systems are exercised;
   - a stack with no schedulable host, and one with no shape, fail preflight;
   - unit cases cover outcome classification, flag validation (exit 2, including an invalid
-    profile and the teardown floor), and percentile and report rendering.
+    profile and the teardown floor), valid-call errors counted without a violation, and
+    percentile and report rendering.
 
   Red: each case fails before its code exists. Green:
   `uv run python -m pytest tests/scripts/test_stress_allocations.py -q`.
