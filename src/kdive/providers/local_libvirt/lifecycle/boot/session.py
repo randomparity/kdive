@@ -212,6 +212,7 @@ class LocalExternalBootSession(Protocol):
     def require_inactive(self) -> None: ...
     def stop_and_require_inactive(self) -> None: ...
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int: ...
+    def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int: ...
     def unlink_artifact(self, name: str) -> None: ...
     def guest(self) -> AbstractContextManager[InactiveGuest]: ...
     def define_xml(self, xml: str, *, projected: bool = False) -> None: ...
@@ -972,6 +973,25 @@ class _ConcreteSession:
         self._require_open_domain()
         assert self._artifact_fd is not None
         return self._open_relative(self._artifact_fd, _relative_name(name), flags, mode)
+
+    def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
+        """Open one payload inside its owner-checked projection digest directory."""
+        from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
+            _artifact_ref_parts,
+        )
+        from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
+
+        self._require_open_domain()
+        owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
+        parts = _artifact_ref_parts(artifact, owner, self._binding.activation_id)
+        assert self._artifact_fd is not None
+        directory = self._open_relative(
+            self._artifact_fd, parts[4], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, 0
+        )
+        try:
+            return self._open_relative(directory, parts[5], flags, 0)
+        finally:
+            self._close_descriptor(directory)
 
     def unlink_artifact(self, name: str) -> None:
         self._require_open_domain()

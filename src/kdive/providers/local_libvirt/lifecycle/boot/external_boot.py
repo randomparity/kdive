@@ -2146,14 +2146,9 @@ class _RealLocalExternalBootOperation:
             return store.exact_recovery_absence(binding)
 
     def _kernel_bundle_source(self, metadata: LocalRecoveryMetadataV1) -> KernelBundleSource:
-        ownership = ActivationOwnership(
-            system_id=metadata.binding.system_id,
-            run_id=metadata.binding.run_id,
+        descriptor = self._session.open_projection_artifact(
+            metadata.materialized_modules, os.O_RDONLY
         )
-        parts = _artifact_ref_parts(
-            metadata.materialized_modules, ownership, metadata.binding.activation_id
-        )
-        descriptor = self._session.open_artifact(parts[5], os.O_RDONLY)
         try:
             return KernelBundleSource(
                 descriptor,

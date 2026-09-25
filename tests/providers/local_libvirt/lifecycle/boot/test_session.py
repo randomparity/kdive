@@ -419,6 +419,51 @@ def test_reopen_projection_reads_the_published_projection_through_the_session(
     session.close()
 
 
+def test_projection_artifact_opens_the_payload_inside_its_digest_directory(
+    tmp_path: Path,
+) -> None:
+    activation = tmp_path / "activation"
+    activation.mkdir(mode=0o700)
+    overlay = tmp_path / "overlay"
+    overlay.write_bytes(b"qcow")
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: os.open(activation, os.O_RDONLY | os.O_DIRECTORY),
+        open_guest=lambda: Guest(events),
+        open_overlay=lambda _path: os.open(overlay, os.O_RDONLY),
+    )
+    session = factory.open(_lease(), _expected())
+    projection = TargetProjectionV1(
+        ownership={"system_id": BINDING.system_id, "run_id": BINDING.run_id},
+        activation_id=BINDING.activation_id,
+        plan_identity="sha256:" + "a" * 64,
+        architecture="x86_64",
+        cmdline="root=UUID=x",
+        initrd_filename=None,
+    )
+    with session.projection_directory(projection) as descriptor:
+        payload = os.open("modules", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=descriptor)
+        os.write(payload, b"module tree")
+        os.close(payload)
+    digest = projection.digest.removeprefix("sha256:")
+    prefix = f"local-artifact-v2/{BINDING.system_id}/{BINDING.run_id}"
+
+    modules = session.open_projection_artifact(
+        OpaqueProviderRef(ref=f"{prefix}/{BINDING.activation_id}/{digest}/modules"), os.O_RDONLY
+    )
+    try:
+        assert os.read(modules, 64) == b"module tree"
+    finally:
+        os.close(modules)
+    with pytest.raises(ValueError, match="cross-owner"):
+        session.open_projection_artifact(
+            OpaqueProviderRef(ref=f"{prefix}/{UUID(int=9)}/{digest}/modules"), os.O_RDONLY
+        )
+    session.close()
+
+
 @pytest.mark.parametrize(
     "expected",
     [

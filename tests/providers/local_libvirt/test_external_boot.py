@@ -2566,6 +2566,13 @@ class _RestartSession(_RealSession):
         del name, mode
         return os.open(self.artifact, flags)
 
+    def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
+        owner = external_boot_module.ActivationOwnership(
+            system_id=_BINDING.system_id, run_id=_BINDING.run_id
+        )
+        external_boot_module._artifact_ref_parts(artifact, owner, _BINDING.activation_id)
+        return os.open(self.artifact, flags)
+
     @contextmanager
     def guest(self) -> Iterator[_RestartGuest]:
         self.require_inactive()
