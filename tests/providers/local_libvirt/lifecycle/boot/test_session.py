@@ -20,6 +20,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot import session as session_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
+    TargetProjectionStore,
     TargetProjectionV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
@@ -47,6 +48,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
+    OpaqueProviderRef,
     RunningKernelObservation,
 )
 from kdive.providers.shared.libvirt_external_boot import boot_projection_identity
@@ -378,6 +380,42 @@ def test_projection_directory_is_binding_confined_and_closes_descriptor(tmp_path
     changed = projection.model_copy(update={"plan_identity": "sha256:" + "b" * 64})
     with pytest.raises(ValueError, match="different target projection"):
         session.projection_directory(changed).__enter__()
+    session.close()
+
+
+def test_reopen_projection_reads_the_published_projection_through_the_session(
+    tmp_path: Path,
+) -> None:
+    activation = tmp_path / "activation"
+    activation.mkdir(mode=0o700)
+    overlay = tmp_path / "overlay"
+    overlay.write_bytes(b"qcow")
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: os.open(activation, os.O_RDONLY | os.O_DIRECTORY),
+        open_guest=lambda: Guest(events),
+        open_overlay=lambda _path: os.open(overlay, os.O_RDONLY),
+    )
+    session = factory.open(_lease(), _expected())
+    projection = TargetProjectionV1(
+        ownership={"system_id": BINDING.system_id, "run_id": BINDING.run_id},
+        activation_id=BINDING.activation_id,
+        plan_identity="sha256:" + "a" * 64,
+        architecture="x86_64",
+        cmdline="root=UUID=x",
+        initrd_filename=None,
+    )
+    with session.projection_directory(projection) as descriptor:
+        TargetProjectionStore.publish_at(descriptor, projection)
+    digest = projection.digest.removeprefix("sha256:")
+    kernel = OpaqueProviderRef(
+        ref=f"local-artifact-v2/{BINDING.system_id}/{BINDING.run_id}/"
+        f"{BINDING.activation_id}/{digest}/kernel"
+    )
+
+    assert session.reopen_projection(kernel) == projection
     session.close()
 
 

@@ -892,6 +892,7 @@ class _ConcreteSession:
         """Read an exact projection selected by an owner-checked local artifact reference."""
         from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
             TargetProjectionStore,
+            TargetProjectionV1,
             _artifact_ref_parts,
         )
         from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
