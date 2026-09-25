@@ -31,6 +31,8 @@ class FakeDomain:
     active: bool = False  # isActive() result; boot's "destroy if running" reads it
     sent_keys: list[tuple[int, list[int]]] = field(default_factory=list)  # (codeset, keycodes)
     xml_desc: str | None = None  # XMLDesc() result; install reads it to add a direct-kernel <os>
+    run_state: int = libvirt.VIR_DOMAIN_RUNNING  # state() while active (ADR-0679 power-off)
+    honours_shutdown: bool = True  # shutdown() takes the domain off at once
 
     def name(self) -> str:
         return self.domain_name
@@ -103,6 +105,16 @@ class FakeDomain:
 
     def isActive(self) -> int:  # noqa: N802 - mirrors the libvirt binding name
         return 1 if self.active else 0
+
+    def shutdown(self) -> int:
+        self.calls.append("shutdown")
+        self._maybe_raise("shutdown")
+        if self.honours_shutdown:
+            self.active = False
+        return 0
+
+    def state(self, flags: int = 0) -> list[int]:
+        return [self.run_state if self.active else libvirt.VIR_DOMAIN_SHUTOFF, 0]
 
     def sendKey(  # noqa: N802 - mirrors the libvirt binding name
         self, codeset: int, holdtime: int, keycodes: list[int], nkeycodes: int, flags: int

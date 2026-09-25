@@ -253,7 +253,7 @@ class _RecordingFetch:
 
 @dataclass
 class _EventDomain(FakeDomain):
-    """A FakeDomain that records ``destroy`` into a shared events list (force-off ordering)."""
+    """A FakeDomain that records its power-off into a shared events list (force-off ordering)."""
 
     events: list[str] = field(default_factory=list)
 
@@ -261,12 +261,31 @@ class _EventDomain(FakeDomain):
         self.events.append("destroy")
         return super().destroy()
 
+    def shutdown(self) -> int:
+        self.events.append("shutdown")
+        return super().shutdown()
+
+
+@dataclass
+class _Clock:
+    """A fake monotonic clock that ``sleep`` advances, so the power-off bound needs no real wait."""
+
+    now: float = 0.0
+    sleeps: list[float] = field(default_factory=list)
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
 
 def _existing_domain(events: list[str] | None = None) -> FakeDomain:
     """The domain provisioning already defined (no <os> direct-kernel section yet).
 
     When ``events`` is supplied the domain reports ``isActive() == 1`` and records its
-    ``destroy`` into the shared list so the install force-off ordering is observable.
+    power-off into the shared list so the install force-off ordering is observable.
     """
     if events is None:
         return FakeDomain(domain_name=f"kdive-{_SYS}", system_id=str(_SYS))
@@ -292,8 +311,10 @@ def _install(
     kernel_writer: GuestKernelWriter | None = None,
     fetch_modules: Fetch | None = None,
     stream: _StreamKernel | None = None,
+    clock: _Clock | None = None,
 ) -> LocalLibvirtInstall:
     fetch = fetch or _Fetch()
+    clock = clock or _Clock()
     seam = seam or _Readiness()
     # The kernel is streamed (ADR-0400); derive the stream content from the fetch config so
     # existing tests that tune the combined tar via ``fetch`` keep working. The initrd and
@@ -318,6 +339,8 @@ def _install(
         scratch_root=scratch_root,
         fetch_modules=fetch_modules or fetch,
         kernel_writer=kernel_writer,
+        sleep=clock.sleep,
+        clock=clock,
     )
 
 
@@ -768,7 +791,7 @@ def test_install_kdump_injects_modules_from_combined_tar_and_no_initrd_rendered(
     assert writer.modules_tar == tmp_path / str(_SYS) / str(_RUN) / "modules.tar.gz"
     assert writer.modules_tar_existed  # the repacked tar was present when handed to the injector
     # force-off precedes the inject (no debuginfo fetch here).
-    assert events.index("destroy") < events.index("inject")
+    assert events.index("shutdown") < events.index("inject")
     assert "fetch" not in events
     assert len(conn.defined_xml) == 1
     assert "<initrd>" not in conn.defined_xml[0]  # production boot has no separate initrd
@@ -807,7 +830,7 @@ def test_install_kdump_with_debuginfo_fetches_and_stages_vmlinux(tmp_path: Path)
     assert fetch.refs == ["runs/r/vmlinux"]  # only the DWARF vmlinux is fetched, not modules
     assert writer.vmlinux == tmp_path / str(_SYS) / str(_RUN) / "vmlinux"
     # force-off precedes the debuginfo fetch which precedes the inject.
-    assert events.index("destroy") < events.index("fetch") < events.index("inject")
+    assert events.index("shutdown") < events.index("fetch") < events.index("inject")
 
 
 @pytest.mark.parametrize(
@@ -940,7 +963,7 @@ def test_install_kdump_force_off_precedes_mount_even_if_inject_fails(
         inst.install(_request(method=CaptureMethod.KDUMP))
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert events[0] == "destroy"  # force-off happened before the failed inject
+    assert events[0] == "shutdown"  # force-off happened before the failed inject
     assert conn.defined_xml == []  # nothing redefined
 
 
@@ -1106,7 +1129,7 @@ def test_boot_powercycles_running_domain_then_readiness(tmp_path: Path) -> None:
     conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
     inst = _install(conn=conn, staging_root=tmp_path)
     inst.boot(_SYS)  # no raise
-    assert domain.calls == ["destroy", "prepare", "create"]  # destroy → truncate → create
+    assert domain.calls == ["shutdown", "prepare", "create"]  # clean off → truncate → create
 
 
 def test_boot_starts_stopped_domain(tmp_path: Path) -> None:
@@ -1117,15 +1140,17 @@ def test_boot_starts_stopped_domain(tmp_path: Path) -> None:
     assert domain.calls == ["prepare", "create"]  # not running → truncate then create
 
 
-def test_boot_truncates_console_only_after_destroy(tmp_path: Path) -> None:
-    # ADR-0576 ordering: the per-start truncate must land after the prior boot's destroy and
+def test_boot_truncates_console_only_after_power_off(tmp_path: Path) -> None:
+    # ADR-0576 ordering: the per-start truncate must land after the prior boot's power-off and
     # before this boot's create, so the fresh window never mixes boots.
     domain = _domain(active=True)
     conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
     inst = _install(conn=conn, staging_root=tmp_path)
     inst.boot(_SYS)
     assert (
-        domain.calls.index("destroy") < domain.calls.index("prepare") < domain.calls.index("create")
+        domain.calls.index("shutdown")
+        < domain.calls.index("prepare")
+        < domain.calls.index("create")
     )
 
 
@@ -1230,6 +1255,7 @@ def test_boot_powercycle_error_is_infrastructure_failure_naming_the_verb(tmp_pat
         domain_name=f"kdive-{_SYS}",
         system_id=str(_SYS),
         active=True,
+        run_state=libvirt.VIR_DOMAIN_PAUSED,
         raise_on={"destroy": libvirt.VIR_ERR_INTERNAL_ERROR},
     )
     conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
@@ -1252,6 +1278,177 @@ def test_boot_absent_domain_is_retryable_infrastructure_failure(tmp_path: Path) 
     assert retryable_category(caught.value.category) is True
     # The lookup failure names the verb and carries the domain under the documented key.
     assert str(caught.value) == "libvirt error looking up domain"
+    assert caught.value.details["domain"] == f"kdive-{_SYS}"
+
+
+# --- ADR-0679: clean shutdown before a power-off --------------------------------------
+
+_POWER_OFF_LOGGER = "kdive.providers.local_libvirt.lifecycle.install"
+
+
+@dataclass
+class _ResendRefusedDomain(FakeDomain):
+    """Refuses its second shutdown request, then reads SHUTOFF after ``off_after`` state reads."""
+
+    off_after: int = 12
+    shutdowns: int = 0
+    state_reads: int = 0
+
+    def shutdown(self) -> int:
+        self.calls.append("shutdown")
+        self.shutdowns += 1
+        if self.shutdowns == 2:
+            raise libvirt.libvirtError("synthetic re-send refusal")
+        return 0
+
+    def state(self, flags: int = 0) -> list[int]:
+        self.state_reads += 1
+        if self.state_reads > self.off_after:
+            return [libvirt.VIR_DOMAIN_SHUTOFF, 0]
+        return [libvirt.VIR_DOMAIN_RUNNING, 0]
+
+
+@dataclass
+class _BlockingShutdownDomain(FakeDomain):
+    """Ignores shutdown, and each request blocks the fake clock for ``block_s``."""
+
+    clock: _Clock = field(default_factory=_Clock)
+    block_s: float = 30.0
+
+    def shutdown(self) -> int:
+        self.calls.append("shutdown")
+        self.clock.now += self.block_s
+        return 0
+
+
+def _ignoring_domain() -> FakeDomain:
+    return FakeDomain(
+        domain_name=f"kdive-{_SYS}", system_id=str(_SYS), active=True, honours_shutdown=False
+    )
+
+
+def test_boot_shuts_down_cleanly_then_creates(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    domain = _domain(active=True)
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    with caplog.at_level(logging.INFO, logger=_POWER_OFF_LOGGER):
+        _install(conn=conn, staging_root=tmp_path).boot(_SYS, accel="kvm")
+    assert domain.calls == ["shutdown", "prepare", "create"]
+    assert "clean after 1.0 s" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        libvirt.VIR_DOMAIN_PAUSED,
+        libvirt.VIR_DOMAIN_CRASHED,
+        libvirt.VIR_DOMAIN_PMSUSPENDED,
+        libvirt.VIR_DOMAIN_NOSTATE,
+    ],
+)
+def test_boot_destroys_at_once_in_a_state_that_cannot_shut_down(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, state: int
+) -> None:
+    domain = FakeDomain(
+        domain_name=f"kdive-{_SYS}", system_id=str(_SYS), active=True, run_state=state
+    )
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    clock = _Clock()
+    with caplog.at_level(logging.WARNING, logger=_POWER_OFF_LOGGER):
+        _install(conn=conn, staging_root=tmp_path, clock=clock).boot(_SYS, accel="kvm")
+    assert domain.calls == ["destroy", "prepare", "create"]
+    assert clock.sleeps == []
+    assert "destroy-state" in caplog.text
+
+
+def test_boot_destroys_after_the_bound(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    domain = _ignoring_domain()
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    clock = _Clock()
+    with caplog.at_level(logging.WARNING, logger=_POWER_OFF_LOGGER):
+        _install(conn=conn, staging_root=tmp_path, clock=clock).boot(_SYS, accel="kvm")
+    assert domain.calls == ["shutdown"] * 6 + ["destroy", "prepare", "create"]
+    assert clock.sleeps == [1.0] * 60
+    assert "destroy-timeout after 60.0 s" in caplog.text
+
+
+def test_tcg_scales_the_shutdown_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(LIBVIRT_TCG_DEADLINE_MULTIPLIER.name, "10.0")
+    domain = _ignoring_domain()
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    clock = _Clock()
+    _install(conn=conn, staging_root=tmp_path, clock=clock).boot(_SYS, accel=None)
+    assert len(clock.sleeps) == 600
+    assert domain.calls.count("shutdown") == 60
+
+
+def test_blocking_shutdown_counts_against_the_bound(tmp_path: Path) -> None:
+    clock = _Clock()
+    domain = _BlockingShutdownDomain(
+        domain_name=f"kdive-{_SYS}",
+        system_id=str(_SYS),
+        active=True,
+        honours_shutdown=False,
+        clock=clock,
+    )
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    _install(conn=conn, staging_root=tmp_path, clock=clock).boot(_SYS, accel="kvm")
+    assert domain.calls == ["shutdown", "shutdown", "destroy", "prepare", "create"]
+
+
+def test_boot_destroys_when_shutdown_is_refused(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    domain = FakeDomain(
+        domain_name=f"kdive-{_SYS}",
+        system_id=str(_SYS),
+        active=True,
+        raise_on={"shutdown": libvirt.VIR_ERR_OPERATION_FAILED},
+    )
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    with caplog.at_level(logging.WARNING, logger=_POWER_OFF_LOGGER):
+        _install(conn=conn, staging_root=tmp_path).boot(_SYS, accel="kvm")
+    assert domain.calls == ["shutdown", "destroy", "prepare", "create"]
+    assert "destroy-refused" in caplog.text
+
+
+def test_refused_resend_keeps_waiting(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    domain = _ResendRefusedDomain(domain_name=f"kdive-{_SYS}", system_id=str(_SYS), active=True)
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    with caplog.at_level(logging.INFO, logger=_POWER_OFF_LOGGER):
+        _install(conn=conn, staging_root=tmp_path).boot(_SYS, accel="kvm")
+    assert domain.calls == ["shutdown", "shutdown", "prepare", "create"]
+    assert "clean after" in caplog.text
+
+
+def test_force_off_shuts_down_cleanly(tmp_path: Path) -> None:
+    domain = _domain(active=True)
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    _install(conn=conn, staging_root=tmp_path)._booter.force_off_if_active(_SYS, accel="kvm")
+    assert domain.calls == ["shutdown"]
+
+
+def test_force_off_skips_a_shut_off_domain(tmp_path: Path) -> None:
+    domain = _domain(active=False)
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    _install(conn=conn, staging_root=tmp_path)._booter.force_off_if_active(_SYS, accel="kvm")
+    assert domain.calls == []
+
+
+def test_force_off_destroy_error_is_infrastructure_failure(tmp_path: Path) -> None:
+    domain = FakeDomain(
+        domain_name=f"kdive-{_SYS}",
+        system_id=str(_SYS),
+        active=True,
+        run_state=libvirt.VIR_DOMAIN_PAUSED,
+        raise_on={"destroy": libvirt.VIR_ERR_INTERNAL_ERROR},
+    )
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    booter = _install(conn=conn, staging_root=tmp_path)._booter
+    with pytest.raises(CategorizedError) as caught:
+        booter.force_off_if_active(_SYS, accel="kvm")
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details["domain"] == f"kdive-{_SYS}"
 
 

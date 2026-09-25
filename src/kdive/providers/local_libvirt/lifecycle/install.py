@@ -11,11 +11,12 @@ domain (`kdive-{system_id}`, minted by the provisioning plane, ADR-0025):
   initrd is fetched and no `<initrd>` element is emitted. `defineXML`s the domain with a
   direct-kernel `<os>` (`<kernel>`/[`<initrd>`]/`<cmdline>`). The `<os>` is built with
   `xml.etree.ElementTree` (no string interpolation), so a `cmdline` value cannot inject XML.
-- `boot(system_id)` power-cycles the domain into the staged `<kernel>` (`destroy` if running,
-  then `create`) and polls the run-readiness preflight within a bounded window: the System
-  never answering is `boot_timeout`; answering-but-failing a check is `readiness_failure`; a
-  libvirt error starting the domain is `infrastructure_failure` — it crosses the libvirtd
-  socket, so a daemon restart can heal it and the queue must be free to retry (ADR-0483).
+- `boot(system_id)` power-cycles the domain into the staged `<kernel>` (a bounded clean
+  shutdown if running, `destroy` only as the fallback, then `create`; ADR-0679) and polls the
+  run-readiness preflight within a bounded window: the System never answering is
+  `boot_timeout`; answering-but-failing a check is `readiness_failure`; a libvirt error
+  starting the domain is `infrastructure_failure` — it crosses the libvirtd socket, so a
+  daemon restart can heal it and the queue must be free to retry (ADR-0483).
 
 DB-free: it owns no Postgres — the `runs.*` install/boot handlers drive the step ledger.
 The slow, host-bound seams (libvirt connect, object-store fetch, kdump/readiness checks, the
@@ -28,8 +29,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import time
 import xml.etree.ElementTree as ET  # noqa: S405 - constructs/edits self-owned domain XML only
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -94,6 +96,9 @@ class _LibvirtDomain(Protocol):
     def isActive(self) -> int: ...  # noqa: N802 - mirrors the libvirt binding name
     def create(self) -> int: ...
     def destroy(self) -> int: ...
+    def shutdown(self) -> int: ...
+    # The binding annotates ``state`` as ``str`` but returns ``[state, reason]``.
+    def state(self, flags: int = 0) -> Sequence[object]: ...
 
 
 class _LibvirtConn(Protocol):
@@ -155,6 +160,70 @@ def _libvirt_transport_failure(verb: str, domain_name: str) -> CategorizedError:
     )
 
 
+# ADR-0679: request a clean shutdown so the guest flushes its writes; destroy is the fallback.
+_CLEAN_SHUTDOWN_BASE_S = 60.0
+_SHUTDOWN_POLL_S = 1.0
+_SHUTDOWN_RESEND_S = 10.0
+_HONOURS_SHUTDOWN = frozenset(
+    {libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_BLOCKED, libvirt.VIR_DOMAIN_SHUTDOWN}
+)
+
+
+def _power_off(
+    domain: _LibvirtDomain,
+    domain_name: str,
+    accel: str | None,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
+) -> None:
+    """Stop the domain, cleanly when the guest can honour a request, else by ``destroy``.
+
+    A guest killed by ``destroy`` loses writes still in its page cache (#2757), so a running
+    guest is asked to shut down and given ``60 s * tcg_deadline_multiplier(accel)`` on
+    ``clock`` to reach ``SHUTOFF``; the request is re-sent every 10 s in case the first arrived
+    before the guest's handler was listening. A state that cannot honour a request (paused,
+    crashed, suspended) is destroyed at once. The log line names the path taken.
+
+    Raises:
+        libvirt.libvirtError: from ``state()`` or ``destroy()``; the caller maps it.
+    """
+    state = domain.state()[0]
+    if state == libvirt.VIR_DOMAIN_SHUTOFF:
+        return
+    if state not in _HONOURS_SHUTDOWN:
+        _log.warning("power-off %s: destroy-state (domain state %s)", domain_name, state)
+        domain.destroy()
+        return
+    bound_s = _CLEAN_SHUTDOWN_BASE_S * tcg_deadline_multiplier(accel)
+    start = clock()
+    requested_at: float | None = None
+    while clock() - start < bound_s:
+        if requested_at is None or clock() - requested_at >= _SHUTDOWN_RESEND_S:
+            first = requested_at is None
+            requested_at = clock()
+            if not _request_shutdown(domain, domain_name, first=first):
+                domain.destroy()
+                return
+        sleep(_SHUTDOWN_POLL_S)
+        if domain.state()[0] == libvirt.VIR_DOMAIN_SHUTOFF:
+            _log.info("power-off %s: clean after %.1f s", domain_name, clock() - start)
+            return
+    _log.warning("power-off %s: destroy-timeout after %.1f s", domain_name, clock() - start)
+    domain.destroy()
+
+
+def _request_shutdown(domain: _LibvirtDomain, domain_name: str, *, first: bool) -> bool:
+    """Send a shutdown request; only a refused first request is a failure."""
+    try:
+        domain.shutdown()
+    except libvirt.libvirtError:
+        if first:
+            _log.warning("power-off %s: destroy-refused", domain_name, exc_info=True)
+            return False
+        _log.debug("power-off %s: shutdown re-send refused; still waiting", domain_name)
+    return True
+
+
 def _open(connect: Connect, purpose: str) -> _LibvirtConn:
     try:
         return connect()
@@ -179,11 +248,15 @@ class LocalLibvirtBooter:
         readiness: Readiness,
         boot_window_polls: int,
         prepare_console: Callable[[UUID], None],
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._connect = connect
         self._readiness = readiness
         self._boot_window_polls = boot_window_polls
         self._prepare_console = prepare_console
+        self._sleep = sleep
+        self._clock = clock
 
     def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
         """Power-cycle the domain into the staged kernel and confirm run-readiness.
@@ -192,7 +265,8 @@ class LocalLibvirtBooter:
         is scaled by ``tcg_deadline_multiplier(accel)`` (ADR-0341): a KVM guest keeps the base
         window, while a TCG or unknown/``None`` accelerator gets the generous scaled window so
         a slow emulated boot is not timed out spuriously. The window is a ceiling, not a fixed
-        wait — a fast boot still returns the instant the readiness marker appears.
+        wait — a fast boot still returns the instant the readiness marker appears. The same
+        ``accel`` scales the clean-shutdown bound of a running domain (ADR-0679).
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` if the domain is absent or libvirt
@@ -205,14 +279,18 @@ class LocalLibvirtBooter:
         conn = _open(self._connect, "to boot")
         try:
             domain = _lookup(conn, domain_name)
-            self._power_cycle(domain, domain_name, system_id)
+            self._power_cycle(domain, domain_name, system_id, accel)
         finally:
             _close(conn)
         polls = math.ceil(self._boot_window_polls * tcg_deadline_multiplier(accel))
         self._await_ready(system_id, polls)
 
-    def force_off_if_active(self, system_id: UUID) -> None:
-        """Destroy the System's domain if it is running before a rw overlay mount."""
+    def force_off_if_active(self, system_id: UUID, *, accel: str | None = None) -> None:
+        """Power the System's domain off if it is running, before a rw overlay mount.
+
+        A clean shutdown first, ``destroy`` as the fallback (ADR-0679); ``accel`` scales the
+        shutdown bound as it does for ``boot``.
+        """
         domain_name = domain_name_for(system_id)
         conn = _open(self._connect, "to force-off before module injection")
         try:
@@ -221,8 +299,7 @@ class LocalLibvirtBooter:
             except libvirt.libvirtError:
                 return
             try:
-                if domain.isActive():
-                    domain.destroy()
+                _power_off(domain, domain_name, accel, self._sleep, self._clock)
             except libvirt.libvirtError as exc:
                 raise CategorizedError(
                     "failed to force-off the System domain before module injection",
@@ -232,11 +309,12 @@ class LocalLibvirtBooter:
         finally:
             _close(conn)
 
-    def _power_cycle(self, domain: _LibvirtDomain, domain_name: str, system_id: UUID) -> None:
+    def _power_cycle(
+        self, domain: _LibvirtDomain, domain_name: str, system_id: UUID, accel: str | None
+    ) -> None:
         try:
-            if domain.isActive():
-                domain.destroy()
-            # Truncate after destroy, before create: the fresh window must hold only this
+            _power_off(domain, domain_name, accel, self._sleep, self._clock)
+            # Truncate after the power-off, before create: the fresh window must hold only this
             # boot, and the worker-owned inode must exist before the daemon opens it
             # (ADR-0576, #1940).
             self._prepare_console(system_id)
@@ -612,12 +690,16 @@ class LocalLibvirtInstall:
         scratch_root: Path | None = None,
         fetch_modules: Fetch | None = None,
         kernel_writer: GuestKernelWriter | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         booter = LocalLibvirtBooter(
             connect=connect,
             readiness=readiness,
             boot_window_polls=boot_window_polls,
             prepare_console=prepare_console,
+            sleep=sleep,
+            clock=clock,
         )
         self._installer = LocalLibvirtInstaller(
             connect=connect,
