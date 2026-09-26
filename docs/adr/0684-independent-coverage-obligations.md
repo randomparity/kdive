@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -18,6 +18,8 @@ Keep an explicit versioned operation-to-assertion mapping, expanded against the 
 catalog and architecture/provider owners. Qualification compares results with that independent
 set and separately supplied candidate/input bindings; missing or inadmissible evidence is red.
 Pending mappings carry owners and assertions without claiming an executable or a live result.
+The [design](../workflow/specs/2026-09-26-coverage-obligations-design.md) defines the
+evidence boundary; the [contributor guide](../development/coverage-qualification.md) describes usage.
 
 ## Consequences
 
