@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Annotated, Any, LiteralString
+from typing import Annotated, LiteralString
 
 from fastmcp import FastMCP
 from psycopg.rows import dict_row
@@ -27,6 +27,7 @@ from pydantic import Field
 
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
 from kdive.images.cataloging.capability_signals import REGISTERED_SIGNALS
+from kdive.images.cataloging.catalog import image_os_id
 from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 from kdive.images.kdump_support import (
     DEFAULT_KERNEL_BASIS,
@@ -130,18 +131,20 @@ class ImagesListRequest:
     cursor: str | None = None
 
 
-def _compact_os(provenance: dict[str, Any]) -> dict[str, JsonValue]:
-    """Project ``provenance["os_release"]`` into a compact ``{id[, version_id]}`` identity.
+def _compact_os(entry: ImageCatalogEntry) -> dict[str, JsonValue]:
+    """Project the image's os-release record into a compact ``{id[, version_id]}`` identity.
 
-    ADR-0311. Empty when there is no ``os_release`` record, it is not a dict, or it carries no
-    ``id`` — a record without a distro id is not a usable identity, so a bare version is never
-    surfaced. ``version_id`` is included only when present (a rolling distro may omit it).
+    ADR-0311. The id comes from :func:`image_os_id`, the single owner of that read — empty when
+    there is no ``os_release`` record, it is not a dict, or its ``id`` is missing or not a
+    non-empty ``str``. A record without a usable distro id never surfaces a bare version.
+    ``version_id`` is included only when present (a rolling distro may omit it).
     """
-    record = provenance.get(PROVENANCE_OS_RELEASE)
-    if not isinstance(record, dict) or not record.get("id"):
+    os_id = image_os_id(entry)
+    if os_id is None:
         return {}
-    compact: dict[str, JsonValue] = {"id": str(record["id"])}
-    version_id = record.get("version_id")
+    compact: dict[str, JsonValue] = {"id": os_id}
+    record = entry.provenance.get(PROVENANCE_OS_RELEASE)
+    version_id = record.get("version_id") if isinstance(record, dict) else None
     if version_id:
         compact["version_id"] = str(version_id)
     return compact
@@ -169,7 +172,7 @@ def _row_envelope(entry: ImageCatalogEntry) -> ToolResponse:
             "state": entry.state.value,
             "volume": entry.volume or "",
             "capabilities": [cap.value for cap in entry.capabilities],
-            "os": _compact_os(entry.provenance),
+            "os": _compact_os(entry),
             "default_kernel_version": default_kernel_version(entry.provenance),
             "has_kernel_config": entry.kernel_config_key is not None,
             "description": entry.description or "",
@@ -276,7 +279,7 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
             "state": entry.state.value,
             "digest": entry.digest or "",
             "capabilities": [cap.value for cap in entry.capabilities],
-            "os": _compact_os(entry.provenance),
+            "os": _compact_os(entry),
             "default_kernel_version": default_kernel_version(entry.provenance),
             "has_kernel_config": entry.kernel_config_key is not None,
             "description": entry.description or "",
