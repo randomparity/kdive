@@ -98,12 +98,20 @@ def external_boot_root_arguments(
 
     An initrd resolves the inspected root token itself. Without one, a provider that owns the
     whole-disk root device (``platform_root_cmdline``) boots that device by name, and the
-    provider proves before activation that the inspected root filesystem fills it.
+    provider proves before activation that the inspected root filesystem fills it. A provider
+    without an owned root device requires an initrd for the inspected filesystem UUID.
     """
     evidence = build.canonical_document.get("external_boot_evidence")
-    if provider_root_cmdline is None or (
-        isinstance(evidence, dict) and evidence.get("initrd") is not None
-    ):
+    if provider_root_cmdline is None:
+        if isinstance(evidence, dict) and evidence.get("initrd") is None:
+            raise CategorizedError(
+                "remote external boot requires an initrd; create a new Run, supply an initrd "
+                "with its uploaded build, then complete the build, install, and boot that Run",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"reason": "remote_external_boot_initrd_required"},
+            )
+        return root.arguments
+    if isinstance(evidence, dict) and evidence.get("initrd") is not None:
         return root.arguments
     return direct_root_arguments(root, provider_root_cmdline.removeprefix("root="))
 

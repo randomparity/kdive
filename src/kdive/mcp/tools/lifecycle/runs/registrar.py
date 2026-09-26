@@ -695,6 +695,10 @@ def _register_runs_boot(
         enqueuing a fresh boot (an already-booted or in-flight Run), and `false` for a fresh or
         force-recycled boot. Absent `force`, a fresh boot of an already-booted Run needs a
         `runs.install` re-stage (a changed cmdline/crashkernel) or `force=true`.
+
+        Remote-libvirt external boot requires an initrd with the build. Without one, this call
+        returns `configuration_error` before activation. Create a new Run without `build_ref`,
+        upload a build with an initrd, then complete the build, install, and boot the new Run.
         """
         return await _boot_run(
             pool,
