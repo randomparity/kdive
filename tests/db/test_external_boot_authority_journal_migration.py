@@ -440,6 +440,19 @@ def test_allocating_binding_can_create_and_read_exact_genesis_head(
             "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
             (*advance_parameters, Jsonb(extra)),
         ).fetchone() == ("conflict",)
+        takeover_with_timing = payload | {
+            "local_timing": {
+                "schema": "local-external-boot-timing-v1",
+                "accel": "kvm",
+                "console_window_s": 900,
+                "deadline_budget_s": 1200,
+            }
+        }
+        _canonicalize(takeover_with_timing)
+        assert provider_authority.execute(
+            "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
+            (*advance_parameters, Jsonb(takeover_with_timing)),
+        ).fetchone() == ("conflict",)
         assert provider_authority.execute(
             "SELECT sequence, digest FROM read_external_boot_authority_journal_head(%s,%s,%s,%s)",
             (

@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import psycopg
@@ -14,6 +14,7 @@ import pytest
 from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import AuthorityRequestSender
@@ -25,9 +26,12 @@ from kdive.jobs.models import (
     _FailureResult,
     _RecoveryAttemptResult,
 )
+from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityAcknowledgementV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityTakeoverRequestV1,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
@@ -270,6 +274,146 @@ def test_activate_commits_deadline_before_provider_and_reuses_it(
                 seconds=90
             )
             assert len(executor.requests) == 1
+
+    asyncio.run(main())
+
+
+def test_local_activation_client_starts_after_preparation_and_uses_committed_deadline(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def main() -> None:
+        vehicle = build_vehicle()
+        admitted = datetime(2026, 9, 4, tzinfo=UTC)
+        current = [admitted]
+        client_deadlines: list[float] = []
+        acknowledger = RecordingAcknowledger(authority_role_dsns("kdive_provider_authority"))
+        executor = RecordingExecutor("target")
+
+        class Client:
+            async def acknowledge(
+                self, request: AuthorityTakeoverRequestV1
+            ) -> AuthorityAcknowledgementV1:
+                return await acknowledger.acknowledge(request)
+
+            async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+                return await executor.execute(request)
+
+        def client_factory(_binding: object, _marker: object, deadline: float) -> Client:
+            client_deadlines.append(deadline)
+            return Client()
+
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(seed, vehicle, purpose="activate", activation_state="prepared")
+            ports = ExternalBootHandlerPorts(
+                resolver=resolver_for(vehicle),
+                incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
+                authority_client_factory=cast(Any, client_factory),
+                clock=lambda: current[0],
+            )
+            handler = build_operations(ports).get("activate")
+            assert handler is not None
+            marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+            timing = LocalExternalBootTimingV1(
+                accel="kvm", console_window_s=900, deadline_budget_s=1200
+            )
+            job = build_job(
+                JobKind.BOOT,
+                {
+                    "run_id": str(vehicle.run_id),
+                    "external_boot_authority_v1": case.marker,
+                    "local_timing": timing.model_dump(mode="json", by_alias=True),
+                },
+            ).model_copy(update={"id": case.job_id, "attempt": case.attempt})
+            async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+                result = await handler(worker, job, marker)
+                assert result.result.operation == "deadline"
+                committed = await queue.complete_external_boot(
+                    worker,
+                    job,
+                    result,
+                    incarnation_credential=SecretStr(case.credential),
+                )
+                assert isinstance(committed, Job) and committed.state.value == "running"
+                current[0] = admitted + timedelta(seconds=400)
+                before = asyncio.get_running_loop().time()
+                replay = await handler(worker, job, marker)
+                after = asyncio.get_running_loop().time()
+            assert replay.result.operation == "activate"
+            assert replay.result.model_dump()["activation_readiness_deadline"] == (
+                admitted + timedelta(seconds=1200)
+            )
+            assert before + 830 <= client_deadlines[1] <= after + 830
+            assert executor.requests[0].local_timing == timing
+
+    asyncio.run(main())
+
+
+def test_local_recovery_client_is_capped_by_persisted_request_deadline(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def main() -> None:
+        vehicle = build_vehicle()
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        deadlines: list[float] = []
+        acknowledger = RecordingAcknowledger(authority_role_dsns("kdive_provider_authority"))
+        executor = RecordingExecutor("source")
+
+        class Client:
+            async def acknowledge(
+                self, request: AuthorityTakeoverRequestV1
+            ) -> AuthorityAcknowledgementV1:
+                return await acknowledger.acknowledge(request)
+
+            async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+                return await executor.execute(request)
+
+        def client_factory(_binding: object, _marker: object, deadline: float) -> Client:
+            deadlines.append(deadline)
+            return Client()
+
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose="recover",
+                activation_state="active",
+                system_state="crashed",
+                with_reservation=True,
+                with_pre_recovery=True,
+            )
+            timing = LocalExternalBootTimingV1(
+                accel="kvm", console_window_s=900, deadline_budget_s=1200
+            )
+            metadata = RecoveryRequestV1(
+                request_identity="sha256:" + "a" * 64,
+                readiness_deadline=now + timedelta(seconds=100),
+                local_timing=timing,
+            )
+            job = build_job(
+                JobKind.BOOT,
+                {
+                    "run_id": str(vehicle.run_id),
+                    "external_boot_authority_v1": case.marker,
+                    "recovery_request_v1": metadata.model_dump(mode="json", by_alias=True),
+                },
+            ).model_copy(update={"id": case.job_id, "attempt": case.attempt})
+            ports = ExternalBootHandlerPorts(
+                resolver=resolver_for(vehicle),
+                incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
+                authority_client_factory=cast(Any, client_factory),
+                clock=lambda: now,
+            )
+            handler = build_operations(ports).get("recover")
+            assert handler is not None
+            marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+            before = asyncio.get_running_loop().time()
+            async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+                result = await handler(worker, job, marker)
+            after = asyncio.get_running_loop().time()
+            assert result.result.operation == "recovery-attempt"
+            assert before + 100 <= deadlines[0] <= after + 100
 
     asyncio.run(main())
 

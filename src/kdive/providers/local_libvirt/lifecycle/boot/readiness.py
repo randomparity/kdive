@@ -211,14 +211,17 @@ class ConsoleReadinessWindow:
 
 
 def prepare_console_readiness_window(
-    system_id: UUID, *, multiplier: float = 1.0
+    system_id: UUID, *, multiplier: float = 1.0, window_s: int | None = None
 ) -> ConsoleReadinessWindow:
     """Truncate and retain a console inode for one boot's scaled readiness window."""
     path = console_log_path(system_id)
     descriptor = _open_validated_console_log(path, os.O_RDWR)
     try:
         os.ftruncate(descriptor, 0)
-        deadline = time.monotonic() + config.require(LIBVIRT_BOOT_WINDOW_S) * multiplier
+        duration = (
+            window_s if window_s is not None else config.require(LIBVIRT_BOOT_WINDOW_S) * multiplier
+        )
+        deadline = time.monotonic() + duration
         return ConsoleReadinessWindow(path, descriptor, deadline=deadline)
     except BaseException:
         os.close(descriptor)

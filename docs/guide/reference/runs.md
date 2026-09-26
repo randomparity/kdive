@@ -289,6 +289,13 @@ Enqueue release of this Run's external boot and return a durable `job_id`.
 Repeating the exact request returns the same job. Poll it with `jobs.wait`; successful
 release returns the System to ordinary use through the worker-owned recovery path.
 
+`data.recovery_readiness_deadline` is an absolute server-clock timestamp for this
+request's recovery job. For local libvirt it contains the configured console readiness
+window, scaled for TCG; other providers retain their own deadline. Once the deadline
+expires, the job fails instead of renewing the window. Inspect with `runs.get`, then
+submit a fresh `runs.release_external_boot` request with a new idempotency key if the
+activation still permits release; the same key replays the original job.
+
 Requires contributor on the Run's project. Only an `active` activation owned by this
 Run is admissible, and a release is refused while a job or a debug session still holds
 the System. A System stuck in `recovery_conflict` or `recovery_failed` is recovered

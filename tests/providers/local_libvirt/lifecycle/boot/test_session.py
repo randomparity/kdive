@@ -11,13 +11,15 @@ import threading
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
 import libvirt
 import pytest
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.local_libvirt.lifecycle.boot import session as session_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
@@ -2245,6 +2247,65 @@ def test_factory_pins_before_open_and_lease_cannot_release_while_session_live() 
         lease.release()
     session.close()
     lease.release()
+
+
+@pytest.mark.parametrize(
+    ("accel", "window", "message"),
+    [
+        ("tcg", 9000, "accelerator"),
+        ("kvm", 901, "boot window"),
+    ],
+)
+def test_factory_rejects_timing_disagreement_before_provider_mutation(
+    accel: Literal["kvm", "tcg"], window: int, message: str
+) -> None:
+    events: list[str] = []
+    domain = Domain(events, xml=_xml(domain_type="kvm"))
+    timing = LocalExternalBootTimingV1(
+        accel=accel, console_window_s=window, deadline_budget_s=12000
+    )
+    config.load({})
+    try:
+        with pytest.raises(CategorizedError, match=message):
+            _factory(events, domain).open(_lease(), _expected(), local_timing=timing)
+    finally:
+        config.reset()
+    assert "domain.create" not in events
+    assert "artifact.open" not in events
+
+
+def test_factory_accepts_matching_snapshot_and_unknown_accelerator() -> None:
+    events: list[str] = []
+    domain = Domain(events, xml=_xml(domain_type="kvm"))
+    timing = LocalExternalBootTimingV1(accel=None, console_window_s=9000, deadline_budget_s=12000)
+    config.load({})
+    try:
+        session = _factory(events, domain).open(_lease(), _expected(), local_timing=timing)
+        session.close()
+    finally:
+        config.reset()
+
+
+def test_snapshotted_window_reaches_console_creator() -> None:
+    events: list[str] = []
+    received: list[int | None] = []
+
+    def prepare(_system_id: UUID, *, window_s: int | None = None) -> ConsoleReadinessWindow:
+        received.append(window_s)
+        return cast(ConsoleReadinessWindow, _Window(events, "snapshot"))
+
+    domain = Domain(events, xml=_xml(domain_type="kvm"))
+    timing = LocalExternalBootTimingV1(accel="kvm", console_window_s=900, deadline_budget_s=1200)
+    config.load({})
+    try:
+        session = _factory(events, domain, prepare_console=prepare).open(
+            _lease(), _expected(), local_timing=timing
+        )
+        session.start()
+        session.close()
+    finally:
+        config.reset()
+    assert received == [900]
 
 
 class _Window:

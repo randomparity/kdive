@@ -22,6 +22,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
 from kdive.domain.capacity.state import DebugSessionState, ExternalBootActivationState
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.external_boot import recovery_requests
@@ -31,6 +32,7 @@ from kdive.mcp.tools.external_boot.recovery_requests import (
     resolve_conflict,
     resolve_recovery_orphan,
 )
+from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role, RoleDenied
 from kdive.serialization import _MAX_ERROR_ENTRIES
@@ -867,6 +869,7 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.mcp.tools._common:external_boot_denial",
         "kdive.mcp.tools._common:invalid_uuid_error",
         "kdive.mcp.tools.external_boot.recovery_idempotency:recovery_request",
+        "kdive.mcp.tools.external_boot.recovery_idempotency:local_recovery_metadata",
         "kdive.mcp.tools.external_boot.recovery_idempotency:recovery_response",
         "kdive.security.authz.context:RequestContext",
         "kdive.security.authz.rbac:AuthorizationError",
@@ -880,6 +883,7 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.services.external_boot:ExternalBootDenied",
         "kdive.services.external_boot:ExternalBootOperation",
         "kdive.services.external_boot:check_external_boot_admission",
+        "kdive.providers.local_libvirt.local_timing:local_external_boot_timing",
         "kdive.providers.core.resolver:ProviderResolver",
     }
 )
@@ -1034,8 +1038,53 @@ def test_release_key_replays_after_activation_state_changes(migrated_url: str) -
             )
         ).fetchone()
         assert row is not None and row[0]["readiness_deadline"] == deadline
+        assert row[0]["local_timing"]["console_window_s"] == 9000
+        assert row[0]["local_timing"]["deadline_budget_s"] == 12000
 
     _drive(migrated_url, _body)
+
+
+def test_local_release_replay_keeps_timing_after_config_change(migrated_url: str) -> None:
+    async def _body(fixture: _Fixture) -> None:
+        seeded = await _seed(fixture.conn, state=_STATE.ACTIVE)
+        await _seed_retired_conflict_authority(fixture.conn, seeded)
+        await fixture.conn.execute("UPDATE jobs SET state = 'succeeded'")
+        config.load({LIBVIRT_BOOT_WINDOW_S.name: "1200"})
+        first = await request_release(
+            fixture.pool,
+            _ctx(),
+            run_id=str(seeded.run_id),
+            resolver=_RESOLVER,
+            idempotency_key="frozen-window",
+        )
+        assert first.status == "queued"
+        row = await (
+            await fixture.conn.execute(
+                "SELECT payload->'recovery_request_v1' FROM jobs WHERE id = %s",
+                (first.object_id,),
+            )
+        ).fetchone()
+        assert row is not None
+        assert row[0]["local_timing"]["console_window_s"] == 12000
+        assert row[0]["local_timing"]["deadline_budget_s"] == 15000
+        config.reset()
+        config.load({LIBVIRT_BOOT_WINDOW_S.name: "900"})
+        replay = await request_release(
+            fixture.pool,
+            _ctx(),
+            run_id=str(seeded.run_id),
+            resolver=_RESOLVER,
+            idempotency_key="frozen-window",
+        )
+        assert replay.object_id == first.object_id
+        assert (
+            replay.data["recovery_readiness_deadline"] == first.data["recovery_readiness_deadline"]
+        )
+
+    try:
+        _drive(migrated_url, _body)
+    finally:
+        config.reset()
 
 
 def test_release_distinct_keys_bind_distinct_authority_operations(migrated_url: str) -> None:

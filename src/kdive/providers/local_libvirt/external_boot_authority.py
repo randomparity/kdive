@@ -599,7 +599,7 @@ class LocalExternalBootAuthorityAdapter:
             # the state is reported as the conflict ADR-0584 calls an unowned observation.
             raise AuthorityServiceError("provider_conflict")
         if operation in _MUTATING_OPERATIONS:
-            self._apply(operation, matched, authority, context)
+            self._apply(operation, matched, authority, context, request)
         return self._observation(request, binding, authority, matched)
 
     def _apply(
@@ -608,6 +608,7 @@ class LocalExternalBootAuthorityAdapter:
         point: RecoveryPoint,
         authority: OpaqueProviderRef,
         context: AuthorityCommitContextV1,
+        request: AuthorityMutationRequestV1,
     ) -> None:
         """Drive the named local commit points for one mutating operation.
 
@@ -618,12 +619,12 @@ class LocalExternalBootAuthorityAdapter:
         """
         try:
             if operation is AuthorityOperation.ACTIVATE:
-                self._ports.activate(point, authority)
+                self._ports.activate(point, authority, local_timing=request.local_timing)
             elif operation in {
                 AuthorityOperation.RECOVER,
                 AuthorityOperation.RECOVERY_ATTEMPT,
             }:
-                self._ports.recover(point, authority)
+                self._ports.recover(point, authority, local_timing=request.local_timing)
             elif operation in _DELETING_OPERATIONS:
                 if not self._ports.cleanup_is_accounted(point, authority):
                     self._pending_cleanup_finalization[context.operation_identity] = point

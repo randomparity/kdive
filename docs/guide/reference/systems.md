@@ -323,6 +323,13 @@ identity returns that same job. The worker freshly observes provider state and c
 the activation only when the identity still matches; otherwise the job fails and leaves
 the conflict and its evidence intact. Poll with `jobs.wait`.
 
+`data.recovery_readiness_deadline` is an absolute server-clock timestamp for this
+request's recovery job. For local libvirt it contains the configured console readiness
+window, scaled for TCG; other providers retain their own deadline. Expiry fails the job
+without renewing it. Read `systems.get` for a fresh composite identity, then submit a
+new `systems.resolve_external_boot_conflict` request with a new idempotency key, or use
+`systems.teardown` if recovery is unavailable. The same key replays the original job.
+
 Requires admin on the System's project. Only an activation in `recovery_conflict` is
 admissible. `runs.get` reports the owning Run's current state; `systems.teardown` remains
 the recovery action when the conflict cannot be resolved.

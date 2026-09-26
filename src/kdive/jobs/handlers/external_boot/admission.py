@@ -25,6 +25,7 @@ from kdive.db.remote_module_attempt_obligations import (
     ModuleAttemptObligationError,
     RemoteModuleAttemptObligationRepository,
 )
+from kdive.db.repositories import SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.payloads import (
@@ -34,6 +35,7 @@ from kdive.jobs.payloads import (
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import Purpose
+from kdive.providers.local_libvirt.local_timing import local_external_boot_timing
 from kdive.providers.ports.external_boot import ExternalBootPlan
 from kdive.services.external_boot.routing import server_authority_instance
 
@@ -83,6 +85,12 @@ async def build_external_boot_payload(
             f"provider_kind {provider_kind!r} does not match the {binding.kind.value!r} runtime "
             f"bound for system {activation.system_id}"
         )
+    local_timing = None
+    if provider_kind == "local-libvirt" and purpose == "activate":
+        system = await SYSTEMS.get(conn, activation.system_id)
+        if system is None:
+            raise _refuse("external-boot System disappeared during timing admission")
+        local_timing = local_external_boot_timing(system.accel)
     if (
         binding.runtime.external_boot is None
         and server_authority_instance(binding) != authority_instance
@@ -139,6 +147,7 @@ async def build_external_boot_payload(
             "run_id": str(activation.run_id),
             "external_boot_authority_v1": marker,
             "external_boot_plan_v1": preparation_plan,
+            "local_timing": local_timing,
             "remote_module_attempt_v1": remote_module_attempt,
         }
     )

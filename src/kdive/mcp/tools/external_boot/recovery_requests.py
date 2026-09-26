@@ -37,8 +37,13 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
-from kdive.mcp.tools.external_boot.recovery_idempotency import recovery_request, recovery_response
+from kdive.mcp.tools.external_boot.recovery_idempotency import (
+    local_recovery_metadata,
+    recovery_request,
+    recovery_response,
+)
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.local_libvirt.local_timing import local_external_boot_timing
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
     AuthorizationError,
@@ -443,6 +448,27 @@ async def _release_locked(
                 detail=f"the durable release authority cannot dispatch recovery: {exc}",
                 next_action="runs.get",
             )
+        if str(authority["provider_kind"]) == "local-libvirt":
+            system = await SYSTEMS.get(conn, system_id)
+            if system is None:
+                return _config_error(
+                    object_id,
+                    reason="system_missing",
+                    detail="System disappeared",
+                    next_action="runs.get",
+                )
+            assert metadata is not None
+            try:
+                metadata = await local_recovery_metadata(
+                    conn, metadata, local_external_boot_timing(system.accel)
+                )
+            except CategorizedError as exc:
+                return _config_error(
+                    object_id,
+                    reason="local_timing_invalid",
+                    detail=str(exc),
+                    next_action="runs.get",
+                )
         job = await queue.enqueue(
             conn,
             kind,
@@ -643,6 +669,27 @@ async def _resolve_conflict_locked(
                 detail=f"the durable conflict authority cannot dispatch recovery: {exc}",
                 next_action="systems.get",
             )
+        if str(authority["provider_kind"]) == "local-libvirt":
+            system = await SYSTEMS.get(conn, system_id)
+            if system is None:
+                return _config_error(
+                    object_id,
+                    reason="system_missing",
+                    detail="System disappeared",
+                    next_action="systems.get",
+                )
+            assert metadata is not None
+            try:
+                metadata = await local_recovery_metadata(
+                    conn, metadata, local_external_boot_timing(system.accel)
+                )
+            except CategorizedError as exc:
+                return _config_error(
+                    object_id,
+                    reason="local_timing_invalid",
+                    detail=str(exc),
+                    next_action="systems.get",
+                )
         job = await queue.enqueue(
             conn,
             kind,
