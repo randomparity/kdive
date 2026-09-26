@@ -570,16 +570,19 @@ async def _handle_session(
     system_service: AuthoritySystemTransportService | None = None,
 ) -> None:
     try:
+        # Only peer frame I/O is TLS-bounded: a dispatch drives provider work that can run for
+        # minutes, and the caller's own request deadline bounds it.
         async with asyncio.timeout(_TLS_TIMEOUT_SECONDS):
             payload = await read_frame(reader, maximum=MAX_ENVELOPE_BYTES)
-            response = await _dispatch(
-                payload,
-                authenticate_peer,
-                service,
-                identity_service,
-                remote_module_service,
-                system_service,
-            )
+        response = await _dispatch(
+            payload,
+            authenticate_peer,
+            service,
+            identity_service,
+            remote_module_service,
+            system_service,
+        )
+        async with asyncio.timeout(_TLS_TIMEOUT_SECONDS):
             await _write_frame(writer, response)
     except _TransportError as exc:
         with suppress(ConnectionError, ssl.SSLError):

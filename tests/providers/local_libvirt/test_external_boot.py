@@ -91,6 +91,10 @@ from tests.providers.local_libvirt.external_boot_support import (
     _point,
     _pre_stop,
 )
+from tests.support.external_boot_plan import (
+    external_boot_materialization,
+    external_boot_plan,
+)
 
 _TEARDOWN_RESERVATION = AuthorityTeardownReservationV1(
     disposition="ready",
@@ -1564,6 +1568,10 @@ class _GuestTreeHandle:
         self.cursor_closes = 0
         self.tree_limits: list[int] = []
         self.lstat_paths: list[str] = []
+        self.root_uuid: str | None = None
+
+    def whole_disk_root_uuid(self) -> str | None:
+        return self.root_uuid
 
     def exists(self, path: str) -> int:
         return int(self.present)
@@ -1649,6 +1657,28 @@ def test_libguestfs_tree_is_bound_private_and_no_follow() -> None:
         tree.open_regular("../escape", 0).__enter__()
     assert guest.tree_limits == [external_boot_module.MAX_ENTRIES]
     assert guest.cursor_closes == 1
+
+
+def test_libguestfs_tree_reports_xattr_support_only_for_entries_that_carry_xattrs() -> None:
+    # A tree installed from a converted bundle declares no xattr support and carries none;
+    # activation compares its install manifest with this readback byte for byte.
+    class _LabelledGuest(_GuestTreeHandle):
+        def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]:
+            if path.endswith("/labelled.ko"):
+                return [{"attrname": "security.selinux", "attrval": b"label"}]
+            return []
+
+    guest = _LabelledGuest(entries=["labelled.ko", "plain.ko"])
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest, binding=_BINDING, release="6.12.0", root="/lib/modules/6.12.0", mutable=False
+    )
+
+    entries = {entry.path: entry for entry in tree.entries()}
+
+    assert entries["plain.ko"].xattrs_supported is False
+    assert entries["plain.ko"].xattrs == {}
+    assert entries["labelled.ko"].xattrs_supported is True
+    assert entries["labelled.ko"].xattrs == {"security.selinux": b"label"}
 
 
 def test_libguestfs_tree_rejects_cross_activation_root_before_guest_call() -> None:
@@ -2203,6 +2233,11 @@ class _RealSession:
             overlay=OverlayIdentity(1, 2),
         )
         self.guest_handle = _GuestTreeHandle([], present=False)
+        self.projection = _projection()
+
+    def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1:
+        del artifact
+        return self.projection
 
     def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
         del projected
@@ -2486,7 +2521,7 @@ class _RestartWriter:
 
     def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState:
         del release
-        return self._guest.states[self._root(tree)]
+        return self._guest.states.get(self._root(tree), AbsentComponentState())
 
     def install(
         self,
@@ -2563,6 +2598,13 @@ class _RestartSession(_RealSession):
 
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int:
         del name, mode
+        return os.open(self.artifact, flags)
+
+    def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
+        owner = external_boot_module.ActivationOwnership(
+            system_id=_BINDING.system_id, run_id=_BINDING.run_id
+        )
+        external_boot_module._artifact_ref_parts(artifact, owner, _BINDING.activation_id)
         return os.open(self.artifact, flags)
 
     @contextmanager
@@ -2989,6 +3031,40 @@ def test_recovery_stops_a_ready_target_cleanly_and_an_unready_one_hard(
     assert session.xml == metadata.source_xml
 
 
+def _libvirt_reserialized(xml: str) -> str:
+    """libvirt stores a defined domain in its own serialization and <os> child order."""
+    kernel_start = xml.index("<kernel>")
+    kernel_end = xml.index("</kernel>") + len("</kernel>")
+    kernel = xml[kernel_start:kernel_end]
+    reordered = xml[:kernel_start] + xml[kernel_end:]
+    reordered = reordered.replace("</os>", kernel + "</os>")
+    return reordered.replace('"', "'").replace("><", ">\n  <")
+
+
+def test_activation_recognizes_the_target_libvirt_reserialized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ports, metadata, session, _guest, root = _restart_fixture(
+        tmp_path,
+        phase="module-restored",
+        source_present=True,
+    )
+    define = session.define_xml
+    monkeypatch.setattr(
+        session,
+        "define_xml",
+        lambda xml, *, projected=False: define(_libvirt_reserialized(xml), projected=projected),
+    )
+
+    ports.activate(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert session.xml != metadata.target_xml
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == (
+            "target-defined"
+        )
+
+
 def _record_phase_faults(
     monkeypatch: pytest.MonkeyPatch,
     faults: _RestartFaults,
@@ -3001,10 +3077,14 @@ def _record_phase_faults(
         binding: ExternalBootActivationBinding,
         expected: LocalRecoveryMetadataV1,
         phase: RecoveryPhase,
+        *,
+        inactive_modules: ComponentState | None = None,
     ) -> LocalRecoveryMetadataV1:
         result = faults.run(
             f"phase:{phase}",
-            lambda: original(store, reference, binding, expected, phase),
+            lambda: original(
+                store, reference, binding, expected, phase, inactive_modules=inactive_modules
+            ),
         )
         assert isinstance(result, LocalRecoveryMetadataV1)
         return result
@@ -3085,6 +3165,9 @@ def test_activation_restarts_exactly_around_every_publication_and_host_effect(
     assert harness.session.xml == harness.metadata.target_xml
     assert harness.session.active
     assert len(harness.sessions) >= 2
+    with RecoveryMetadataStore(harness.root) as store:
+        reopened = store.reopen(_point(harness.metadata).recovery_ref, harness.metadata.binding)
+    assert reopened.inactive_modules == harness.metadata.target_state.modules
 
 
 @pytest.mark.parametrize("effect", ["before", "after"])
@@ -5008,3 +5091,180 @@ def test_authenticated_partial_abort_removes_activation_artifacts_before_absence
         assert not store.exact_recovery_absence(_BINDING)
         store.remove_abortable_partial(_BINDING, projection.plan_identity, request.authority)
         assert store.exact_recovery_absence(_BINDING)
+
+
+def _phase_authority(generation: int, attempt: int) -> OpaqueProviderRef:
+    # Migration 0135 binds each phase receipt to its own operation attempt within the generation.
+    return OpaqueProviderRef(ref=f"authority/{UUID(int=1)}/{generation}/{UUID(int=100 + attempt)}")
+
+
+def test_prepare_reads_the_materialize_receipt_of_its_authority_generation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    plan = external_boot_plan(UUID(_BINDING.system_id), UUID(_BINDING.run_id))
+    materialization = external_boot_materialization(plan)
+    metadata = _metadata().model_copy(
+        update={
+            "plan_identity": plan.identity,
+            "materialization_identity": materialization.identity,
+        }
+    )
+    materialized = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=_BINDING,
+        plan_identity=plan.identity,
+        authority=_phase_authority(7, 1),
+        operation_identity="materialize-operation",
+        materialization=materialization,
+    )
+    prepared = materialized.model_copy(
+        update={
+            "state": "prepared",
+            "authority": _phase_authority(7, 2),
+            "operation_identity": "prepare-operation",
+            "recovery_point": _point(metadata),
+        }
+    )
+
+    def prepare_request(authority: OpaqueProviderRef) -> ExternalBootPreparationRequest:
+        return ExternalBootPreparationRequest(
+            phase="prepare",
+            plan=plan,
+            binding=_BINDING,
+            authority=authority,
+            operation_identity="prepare-operation",
+        )
+
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(materialized)
+        assert store.preparation_materialization(prepare_request(_phase_authority(7, 2))) == (
+            materialization
+        )
+        with pytest.raises(ValueError, match="matching durable materialization receipt"):
+            store.preparation_materialization(prepare_request(_phase_authority(8, 2)))
+        with pytest.raises(ValueError, match="conflicting ownership"):
+            store.publish_preparation(
+                prepared.model_copy(update={"authority": _phase_authority(8, 2)})
+            )
+        assert store.publish_preparation(prepared) == prepared
+
+
+def _direct_root_plan(device: str = "/dev/vda") -> ExternalBootPlan:
+    plan = external_boot_plan(UUID(_BINDING.system_id), UUID(_BINDING.run_id))
+    return plan.model_copy(
+        update={"platform_arguments": (f"root={device}",), "cmdline": f"root={device}"}
+    )
+
+
+def test_projection_carries_the_root_uuid_a_direct_root_plan_must_prove() -> None:
+    assert external_boot_module._whole_disk_root_uuid(_direct_root_plan()) == "x"
+    plan = external_boot_plan(UUID(_BINDING.system_id), UUID(_BINDING.run_id))
+    assert external_boot_module._whole_disk_root_uuid(plan) is None
+
+
+def test_projection_refuses_a_direct_root_other_than_the_local_disk() -> None:
+    with pytest.raises(ValueError, match="/dev/vda"):
+        external_boot_module._whole_disk_root_uuid(_direct_root_plan("/dev/vdb"))
+
+
+@pytest.mark.parametrize(("observed", "accepted"), [("x", True), ("y", False), (None, False)])
+def test_prepare_requires_the_inspected_root_to_fill_the_disk_without_an_initrd(
+    tmp_path: Path, observed: str | None, accepted: bool
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    host = _RealPreparation(metadata, root)
+    io, session = _real_io(root, host)
+    session.projection = _projection().model_copy(update={"whole_disk_root_uuid": "x"})
+    session.guest_handle.root_uuid = observed
+
+    if accepted:
+        assert _real_prepare(io, materialization) == metadata
+        return
+    with pytest.raises(ValueError, match="supply an initrd"):
+        _real_prepare(io, materialization)
+
+
+class _ObservingRecoveryWriter(_RecordingRecoveryWriter):
+    def __init__(self, observed: ComponentState) -> None:
+        super().__init__()
+        self.observed = observed
+        self.observations = 0
+
+    def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState:
+        del tree, release
+        self.observations += 1
+        return self.observed
+
+
+def _observing_operation(
+    tmp_path: Path, metadata: LocalRecoveryMetadataV1, *, active: bool
+) -> tuple[
+    external_boot_module._RealLocalExternalBootOperation, _RealSession, _ObservingRecoveryWriter
+]:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    session = _RealSession(_RealPreparation(metadata, root))
+    session.inspection = replace(session.inspection, active=active)
+    writer = _ObservingRecoveryWriter(PresentComponentState(manifest="sha256:" + "4" * 64))
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        root,
+        cast(external_boot_module.LocalExternalBootMaterializer, object()),
+        cast(RealGuestRecoveryWriter, writer),
+        cast(external_boot_module.LocalExternalBootSession, session),
+        32 * 1024**3,
+    )
+    return operation, session, writer
+
+
+def test_running_domain_observes_the_modules_recorded_at_the_last_inactive_point(
+    tmp_path: Path,
+) -> None:
+    recorded = PresentComponentState(manifest="sha256:" + "3" * 64)
+    metadata = _metadata("target-defined").model_copy(update={"inactive_modules": recorded})
+    operation, session, writer = _observing_operation(tmp_path, metadata, active=True)
+    session.guest_fault = True
+
+    observed = operation.observe_state(metadata)
+
+    assert observed.modules == recorded
+    assert observed.active is True
+    assert writer.observations == 0
+
+
+def test_running_domain_without_a_recorded_observation_is_unreadable(tmp_path: Path) -> None:
+    operation, session, _writer = _observing_operation(tmp_path, _metadata(), active=True)
+    session.guest_fault = True
+
+    assert operation.observe_state(_metadata()).modules is None
+
+
+def test_inactive_domain_reads_the_module_tree(tmp_path: Path) -> None:
+    recorded = PresentComponentState(manifest="sha256:" + "3" * 64)
+    metadata = _metadata("target-defined").model_copy(update={"inactive_modules": recorded})
+    operation, _session, writer = _observing_operation(tmp_path, metadata, active=False)
+
+    observed = operation.observe_state(metadata)
+
+    assert observed.modules == writer.observed
+    assert writer.observations == 1
+
+
+def test_recorded_inactive_modules_survive_phase_publication(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("publication-complete")
+    reference = _point(metadata).recovery_ref
+    observed = PresentComponentState(manifest="sha256:" + "3" * 64)
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(_pre_stop(metadata))
+        store.complete_preparation(reference, _pre_stop(metadata), metadata)
+        updated = store.record_phase(
+            reference, metadata.binding, metadata, "module-restored", inactive_modules=observed
+        )
+        assert store.reopen(reference, metadata.binding) == updated
+    assert updated.inactive_modules == observed

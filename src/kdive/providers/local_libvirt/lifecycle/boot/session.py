@@ -147,7 +147,6 @@ class _Domain(RunningDomain, Protocol):
     def shutdown(self) -> int: ...
     def state(self, flags: int = 0) -> Sequence[object]: ...
     def create(self) -> int: ...
-    def free(self) -> object: ...
 
 
 class _TeardownDomain(_Domain, Protocol):
@@ -168,6 +167,7 @@ class _Guest(Protocol):
     def launch(self) -> None: ...
     def inspect_os(self) -> list[str]: ...
     def mount(self, device: str, mountpoint: str) -> None: ...
+    def vfs_uuid(self, mountable: str) -> str: ...
     def shutdown(self) -> None: ...
     def close(self) -> None: ...
     def find0(self, directory: str, files: str) -> None: ...
@@ -225,6 +225,7 @@ class LocalExternalBootSession(Protocol):
     def require_inactive(self) -> None: ...
     def stop_and_require_inactive(self, *, mode: StopMode) -> None: ...
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int: ...
+    def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int: ...
     def unlink_artifact(self, name: str) -> None: ...
     def guest(self) -> AbstractContextManager[InactiveGuest]: ...
     def define_xml(self, xml: str, *, projected: bool = False) -> None: ...
@@ -278,12 +279,14 @@ class InactiveGuest(Protocol):
     def mv(self, source: str, destination: str) -> None: ...
     def rm_rf(self, path: str) -> None: ...
     def sync(self) -> None: ...
+    def whole_disk_root_uuid(self) -> str | None: ...
 
 
 class _GuestContext(AbstractContextManager[InactiveGuest]):
     def __init__(self, session: _ConcreteSession) -> None:
         self._session = session
         self._guest: _Guest | None = None
+        self._root: str | None = None
         self._cursors: set[_Find0TreeCursor] = set()
         self._closed = False
 
@@ -411,6 +414,11 @@ class _GuardedGuest:
     def sync(self) -> None:
         self._handle().sync()
 
+    def whole_disk_root_uuid(self) -> str | None:
+        """Return the root filesystem UUID when that filesystem fills the one added disk."""
+        guest = self._handle()
+        return guest.vfs_uuid(_WHOLE_DISK) if self._owner._root == _WHOLE_DISK else None
+
     def _handle(self) -> _Guest:
         if self._owner._closed:
             raise RuntimeError("guest wrapper is closed")
@@ -418,6 +426,8 @@ class _GuardedGuest:
         return self._guest
 
 
+# libguestfs names the one drive the session adds /dev/sda; a partition root is /dev/sdaN.
+_WHOLE_DISK = "/dev/sda"
 _TREE_READ_CHUNK = 64 * 1024
 _MAX_TREE_PATH_BYTES = 4096
 
@@ -793,6 +803,8 @@ def _guest_tree_relative_bytes(value: bytes) -> str:
         path = value.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("guest-tree entry is not UTF-8") from exc
+    # libguestfs find0 writes each entry below the listed directory with one leading "/".
+    path = path.removeprefix("/")
     if (
         path.startswith("/")
         or unicodedata.normalize("NFC", path) != path
@@ -911,6 +923,7 @@ class _ConcreteSession:
         """Read an exact projection selected by an owner-checked local artifact reference."""
         from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
             TargetProjectionStore,
+            TargetProjectionV1,
             _artifact_ref_parts,
         )
         from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
@@ -961,7 +974,10 @@ class _ConcreteSession:
 
     def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
         domain = self._require_open_domain()
-        xml = domain.XMLDesc(0)
+        # The persistent definition: a running domain's live XML adds runtime-only facts
+        # (id, aliases, pty paths) that disappear when it stops, so it cannot be compared across
+        # the stop that separates prepare from activate.
+        xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
         root = _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         active = _active(domain)
         return ClosedDomainInspection(
@@ -995,6 +1011,25 @@ class _ConcreteSession:
         assert self._artifact_fd is not None
         return self._open_relative(self._artifact_fd, _relative_name(name), flags, mode)
 
+    def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
+        """Open one payload inside its owner-checked projection digest directory."""
+        from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
+            _artifact_ref_parts,
+        )
+        from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
+
+        self._require_open_domain()
+        owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
+        parts = _artifact_ref_parts(artifact, owner, self._binding.activation_id)
+        assert self._artifact_fd is not None
+        directory = self._open_relative(
+            self._artifact_fd, parts[4], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, 0
+        )
+        try:
+            return self._open_relative(directory, parts[5], flags, 0)
+        finally:
+            self._close_descriptor(directory)
+
     def unlink_artifact(self, name: str) -> None:
         self._require_open_domain()
         assert self._artifact_fd is not None
@@ -1009,11 +1044,7 @@ class _ConcreteSession:
         self.require_inactive()
         _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         assert self._connection is not None
-        prior = self._domain
-        replacement = self._connection.defineXML(xml)
-        self._domain = replacement
-        if prior is not None and prior is not replacement:
-            prior.free()
+        self._domain = self._connection.defineXML(xml)
 
     def start(self) -> None:
         self._require_no_guest_context()
@@ -1078,7 +1109,7 @@ class _ConcreteSession:
             artifact_fd, self._artifact_fd = self._artifact_fd, None
             readiness_window, self._readiness_window = self._readiness_window, None
             overlay_fd = self._overlay.descriptor
-            domain, self._domain = self._domain, None
+            self._domain = None
             connection, self._connection = self._connection, None
             pin, self._pin = self._pin, None
             for closer in (
@@ -1086,7 +1117,6 @@ class _ConcreteSession:
                 *(lambda fd=fd: self._close_descriptor(fd) for fd in projection_fds),
                 (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
                 lambda: self._close_overlay_descriptor(overlay_fd),
-                domain.free if domain is not None else None,
                 connection.close if connection is not None else None,
                 pin.close if pin is not None else None,
             ):
@@ -1116,6 +1146,7 @@ class _ConcreteSession:
                         "guest inspection must find exactly one operating-system root"
                     )
                 guest.mount(roots[0], "/")
+                wrapper._root = roots[0]
             except BaseException as exc:
                 for close_error in _attempt_guest_close(guest):
                     exc.add_note(f"cleanup failed: {close_error!r}")
@@ -1397,7 +1428,6 @@ class LocalExternalBootSessionFactory:
                         else None
                     )
                 ),
-                domain.free if domain is not None else None,
                 connection.close if connection is not None else None,
                 pin.close,
             ):
@@ -1457,43 +1487,33 @@ class _ConcreteSystemTeardownSession:
 
     def inspect(self) -> LocalSystemTeardownInspection:
         domain = self._lookup_owned()
-        try:
-            return LocalSystemTeardownInspection(
-                domain_absent=domain is None,
-                domain_validated=domain is not None,
-                overlay_absent=_path_kind(self._overlay, "regular") == "absent",
-                baseline_absent=_path_kind(self._baseline, "directory") == "absent",
-            )
-        finally:
-            if domain is not None:
-                domain.free()
+        return LocalSystemTeardownInspection(
+            domain_absent=domain is None,
+            domain_validated=domain is not None,
+            overlay_absent=_path_kind(self._overlay, "regular") == "absent",
+            baseline_absent=_path_kind(self._baseline, "directory") == "absent",
+        )
 
     def owned_xml(self) -> tuple[str, str]:
         """Read both exact owned XML views after applying the normal teardown ownership check."""
         domain = self._lookup_owned()
         if domain is None:
             raise ValueError("owned domain is absent")
-        try:
-            inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
-            live = domain.XMLDesc(0)
-            _parse_owned_xml(inactive, self._system_id, self._overlay)
-            _parse_owned_xml(live, self._system_id, self._overlay)
-            return inactive, live
-        finally:
-            domain.free()
+        inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+        live = domain.XMLDesc(0)
+        _parse_owned_xml(inactive, self._system_id, self._overlay)
+        _parse_owned_xml(live, self._system_id, self._overlay)
+        return inactive, live
 
     def destroy(self) -> None:
         domain = self._lookup_owned()
         if domain is None:
             return
-        try:
-            # Hard by design (ADR-0679): the overlay is reclaimed next, so no write is read again.
-            if _active(domain):
-                domain.destroy()
-            if _active(domain):
-                raise RuntimeError("domain remained active after destroy")
-        finally:
-            domain.free()
+        # Hard by design (ADR-0679): the overlay is reclaimed next, so no write is read again.
+        if _active(domain):
+            domain.destroy()
+        if _active(domain):
+            raise RuntimeError("domain remained active after destroy")
 
     def undefine(self) -> None:
         domain = self._lookup_owned()
@@ -1506,8 +1526,6 @@ class _ConcreteSystemTeardownSession:
         except libvirt.libvirtError as exc:
             if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
                 raise
-        finally:
-            domain.free()
 
     def remove_overlay(self) -> None:
         if _path_kind(self._overlay, "regular") == "absent":
@@ -1549,14 +1567,10 @@ class _ConcreteSystemTeardownSession:
                 return None
             raise
         expected_overlay = self._overlay
-        try:
-            _parse_owned_xml(
-                domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), self._system_id, expected_overlay
-            )
-            _parse_owned_xml(domain.XMLDesc(0), self._system_id, expected_overlay)
-        except BaseException:
-            domain.free()
-            raise
+        _parse_owned_xml(
+            domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), self._system_id, expected_overlay
+        )
+        _parse_owned_xml(domain.XMLDesc(0), self._system_id, expected_overlay)
         return domain
 
 

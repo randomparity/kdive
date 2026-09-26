@@ -8,7 +8,10 @@ import pytest
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import InvestigationBuild
 from kdive.providers.ports.external_boot import RootSource, RootSpecV1
-from kdive.services.external_boot.plan import construct_external_boot_plan
+from kdive.services.external_boot.plan import (
+    construct_external_boot_plan,
+    external_boot_root_arguments,
+)
 
 _SHA = "sha256:" + "11" * 32
 
@@ -96,3 +99,45 @@ def test_construct_plan_fails_closed_without_v2_evidence() -> None:
             debug_cmdline=None,
         )
     assert raised.value.details["reason"] == "external_boot_evidence_missing"
+
+
+def _uuid_root() -> RootSpecV1:
+    return RootSpecV1(
+        architecture="x86_64",
+        root="UUID=x",
+        arguments=("root=UUID=x", "rootfstype=ext4"),
+        authority="stage-inspection",
+        source=RootSource(kind="staged-image", identity=_SHA),
+    )
+
+
+def _without_initrd(build: InvestigationBuild) -> InvestigationBuild:
+    evidence = build.canonical_document["external_boot_evidence"]
+    assert isinstance(evidence, dict)
+    evidence["initrd"] = None
+    return build
+
+
+def test_root_arguments_keep_the_inspected_token_when_an_initrd_resolves_it() -> None:
+    assert external_boot_root_arguments(_build(), _uuid_root(), "root=/dev/vda") == (
+        "root=UUID=x",
+        "rootfstype=ext4",
+    )
+
+
+def test_root_arguments_name_the_provider_whole_disk_root_without_an_initrd() -> None:
+    build = _without_initrd(_build())
+
+    assert external_boot_root_arguments(build, _uuid_root(), "root=/dev/vda") == (
+        "root=/dev/vda",
+        "rootfstype=ext4",
+    )
+
+
+def test_root_arguments_keep_the_inspected_token_when_the_provider_owns_no_root_device() -> None:
+    build = _without_initrd(_build())
+
+    assert external_boot_root_arguments(build, _uuid_root(), None) == (
+        "root=UUID=x",
+        "rootfstype=ext4",
+    )

@@ -46,6 +46,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ClosedDomainInspection,
     ExpectedOperationOwnership,
+    InactiveGuest,
     LocalExternalBootOperationLease,
     LocalExternalBootSession,
     LocalExternalBootSessionFactory,
@@ -79,7 +80,9 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.providers.shared.external_boot_bounds import source_byte_limit as _source_byte_limit
 from kdive.providers.shared.libvirt_external_boot import (
+    boot_projection_element_identity,
     parse_projected_domain_xml,
+    preserved_element_identity,
     render_target_xml,
 )
 from kdive.store.objectstore import ObjectStore
@@ -157,6 +160,9 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     prior_power: Literal["running", "inactive"]
     capture: ModuleCapture
     phase: RecoveryPhase
+    # The module tree observed when this activation last published it with the domain inactive.
+    # libguestfs cannot open a running domain's disk, so a running domain reports this value.
+    inactive_modules: ComponentState | None = None
 
     @model_validator(mode="after")
     def _domain_xml_matches_digests(self) -> LocalRecoveryMetadataV1:
@@ -384,6 +390,7 @@ class TargetProjectionV1(_ClosedValue):
     kernel_filename: Literal["kernel"] = "kernel"
     modules_filename: Literal["modules"] = "modules"
     initrd_filename: Literal["initrd"] | None
+    whole_disk_root_uuid: Annotated[str, Field(min_length=1, max_length=255)] | None = None
 
     def canonical_bytes(self) -> bytes:
         return json.dumps(
@@ -864,7 +871,9 @@ class LibguestfsAuthenticatedGuestTree:
             gid=value["st_gid"],
             size=value["st_size"] if kind == "regular" else 0,
             target=self._guest.readlink(remote) if kind == "symlink" else None,
-            xattrs_supported=True,
+            # With no xattrs, True and False describe the same content. Report False then, as
+            # the canonical module archive does, so an installed tree reads back unchanged.
+            xattrs_supported=bool(xattrs),
             xattrs={str(item["attrname"]): _xattr_bytes(item["attrval"]) for item in xattrs},
             link_count=value["st_nlink"],
         )
@@ -1046,6 +1055,34 @@ class _ExactVersionDescriptorStore:
         return os.pread(self._descriptor, min(length, self._size - start), start)
 
 
+# local-libvirt's platform root device (ProviderRuntime.platform_root_cmdline, ADR-0183).
+_LOCAL_WHOLE_DISK_ROOT = "root=/dev/vda"
+
+
+def _whole_disk_root_uuid(plan: ExternalBootPlan) -> str | None:
+    """Return the filesystem UUID a plan naming the whole-disk root must prove, else ``None``.
+
+    A plan without an initrd names the local whole-disk device instead of the inspected
+    ``UUID=`` token (ADR-0583 amendment); prepare proves that filesystem fills the disk.
+    """
+    if f"root={plan.root.root}" in plan.platform_arguments:
+        return None
+    if _LOCAL_WHOLE_DISK_ROOT not in plan.platform_arguments:
+        raise ValueError(f"external-boot direct root must be local {_LOCAL_WHOLE_DISK_ROOT}")
+    if not plan.root.root.startswith("UUID="):
+        raise ValueError("external-boot direct root requires an inspected filesystem UUID")
+    return plan.root.root.removeprefix("UUID=")
+
+
+def _require_whole_disk_root(guest: InactiveGuest, projection: TargetProjectionV1) -> None:
+    expected = projection.whole_disk_root_uuid
+    if expected is not None and guest.whole_disk_root_uuid() != expected:
+        raise ValueError(
+            f"external-boot without an initrd needs root filesystem UUID={expected} to fill the "
+            "System disk; supply an initrd with the build or use a whole-disk rootfs"
+        )
+
+
 class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
     """Materialize exact object versions into one authenticated activation projection."""
 
@@ -1065,6 +1102,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             architecture=plan.architecture,
             cmdline=plan.cmdline,
             initrd_filename=None if plan.initrd is None else "initrd",
+            whole_disk_root_uuid=_whole_disk_root_uuid(plan),
         )
         with session.projection_directory(projection) as directory_fd:
             try:
@@ -1825,9 +1863,11 @@ class _RealLocalExternalBootOperation:
         self._session.stop_and_require_inactive(mode="clean")
         with RecoveryMetadataStore(self._recovery_root) as store:
             owned_sink = store.recovery_archive_sink(reference, intent)
+        projection = self._session.reopen_projection(materialization.artifacts.kernel)
         primary: BaseException | None = None
         try:
             with self._session.guest() as guest:
+                _require_whole_disk_root(guest, projection)
                 tree = LibguestfsAuthenticatedGuestTree(
                     guest,
                     binding=binding,
@@ -1879,24 +1919,30 @@ class _RealLocalExternalBootOperation:
             inspection = self._session.inspect_closed(projected=True)
         except Exception:  # noqa: BLE001 - an unreadable definition is a classification
             return LocalObservedState(definition=None, modules=None, active=None)
-        modules: ComponentState | None
-        try:
-            with self._session.guest() as opened_guest:
-                tree = LibguestfsAuthenticatedGuestTree(
-                    cast(_GuestfsTreeHandle, opened_guest),
-                    binding=metadata.binding,
-                    release=metadata.release,
-                    root=f"/lib/modules/{metadata.release}",
-                    mutable=False,
-                )
-                modules = self._recovery_writer.observe(tree, metadata.release)
-        except Exception:  # noqa: BLE001 - an unreadable module tree is a classification
-            modules = None
+        modules: ComponentState | None = metadata.inactive_modules
+        if not inspection.active:
+            try:
+                with self._session.guest() as opened_guest:
+                    modules = self._observe_modules(opened_guest, metadata)
+            except Exception:  # noqa: BLE001 - an unreadable module tree is a classification
+                modules = None
         return LocalObservedState(
             definition=inspection.source_boot_identity,
             modules=modules,
             active=inspection.active,
         )
+
+    def _observe_modules(
+        self, guest: InactiveGuest, metadata: LocalRecoveryMetadataV1
+    ) -> ComponentState:
+        tree = LibguestfsAuthenticatedGuestTree(
+            cast(_GuestfsTreeHandle, guest),
+            binding=metadata.binding,
+            release=metadata.release,
+            root=f"/lib/modules/{metadata.release}",
+            mutable=False,
+        )
+        return self._recovery_writer.observe(tree, metadata.release)
 
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         if self._host_state(metadata) != ("source", False):
@@ -1939,7 +1985,8 @@ class _RealLocalExternalBootOperation:
                 )
             self._finish_present_publication(publication, prior=prior, desired=desired)
             completed = publication.metadata
-        self.record_phase(completed, "module-restored")
+            observed = self._observe_modules(opened_guest, completed)
+        self.record_phase(completed, "module-restored", inactive_modules=observed)
 
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
         while metadata.phase == "module-restored":
@@ -2033,7 +2080,8 @@ class _RealLocalExternalBootOperation:
                 assert desired is not None
                 self._finish_present_publication(publication, prior=target, desired=desired)
             completed = publication.metadata
-        self.record_phase(completed, "module-restored")
+            observed = self._observe_modules(opened_guest, completed)
+        self.record_phase(completed, "module-restored", inactive_modules=observed)
 
     def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
         while metadata.phase == "module-restored":
@@ -2066,11 +2114,19 @@ class _RealLocalExternalBootOperation:
             raise ValueError("external-boot restored power state conflicts with recovery metadata")
 
     def record_phase(
-        self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
+        self,
+        metadata: LocalRecoveryMetadataV1,
+        phase: RecoveryPhase,
+        *,
+        inactive_modules: ComponentState | None = None,
     ) -> LocalRecoveryMetadataV1:
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.record_phase(
-                _recovery_ref(metadata.binding), metadata.binding, metadata, phase
+                _recovery_ref(metadata.binding),
+                metadata.binding,
+                metadata,
+                phase,
+                inactive_modules=inactive_modules,
             )
 
     def cleanup_complete(self, recovery: RecoveryPoint) -> bool:
@@ -2147,14 +2203,9 @@ class _RealLocalExternalBootOperation:
             return store.exact_recovery_absence(binding)
 
     def _kernel_bundle_source(self, metadata: LocalRecoveryMetadataV1) -> KernelBundleSource:
-        ownership = ActivationOwnership(
-            system_id=metadata.binding.system_id,
-            run_id=metadata.binding.run_id,
+        descriptor = self._session.open_projection_artifact(
+            metadata.materialized_modules, os.O_RDONLY
         )
-        parts = _artifact_ref_parts(
-            metadata.materialized_modules, ownership, metadata.binding.activation_id
-        )
-        descriptor = self._session.open_artifact(parts[5], os.O_RDONLY)
         try:
             return KernelBundleSource(
                 descriptor,
@@ -2220,7 +2271,7 @@ class _RealLocalExternalBootOperation:
         inspection = self._session.inspect_closed(projected=True)
         if inspection.xml == metadata.source_xml.encode():
             return "source", inspection.active
-        if inspection.xml == metadata.target_xml.encode():
+        if _same_domain_definition(inspection.xml.decode(), metadata.target_xml):
             return "target", inspection.active
         raise ValueError("external-boot observed domain XML does not match recovery metadata")
 
@@ -2893,6 +2944,29 @@ class AbortablePartial:
     materialization: ExternalBootMaterialization | None
 
 
+def _same_authority_generation(left: OpaqueProviderRef, right: OpaqueProviderRef) -> bool:
+    """Whether two phase receipts belong to one authority generation.
+
+    One generation owns materialize, prepare, and activate (ADR-0608), but migration 0135 binds
+    each phase receipt to its own operation attempt: ``authority/<id>/<generation>/<attempt>``.
+    Receipts from different phases therefore agree on everything except the final segment.
+    """
+    return left.ref.rsplit("/", 1)[0] == right.ref.rsplit("/", 1)[0]
+
+
+def _same_domain_definition(observed_xml: str, expected_xml: str) -> bool:
+    """Whether libvirt's readback of a defined domain is the definition kdive rendered.
+
+    libvirt stores a defined domain in its own serialization and <os> child order, so the
+    target is compared by its ADR-0583 preserved and boot-projection identities, not by bytes.
+    """
+    observed = parse_projected_domain_xml(observed_xml)
+    expected = parse_projected_domain_xml(expected_xml)
+    return preserved_element_identity(observed) == preserved_element_identity(
+        expected
+    ) and boot_projection_element_identity(observed) == boot_projection_element_identity(expected)
+
+
 class LocalPreparationReceiptsV1(BaseModel):
     """Both phase receipts retained in one owner-bound canonical record."""
 
@@ -2912,7 +2986,7 @@ class LocalPreparationReceiptsV1(BaseModel):
         if any(
             item.binding != first.binding
             or item.plan_identity != first.plan_identity
-            or item.authority != first.authority
+            or not _same_authority_generation(item.authority, first.authority)
             for item in receipts[1:]
         ):
             raise ValueError("preparation receipts have conflicting ownership")
@@ -3168,7 +3242,7 @@ class RecoveryMetadataStore:
             or receipt.materialization is None
             or receipt.binding != request.binding
             or receipt.plan_identity != request.plan.identity
-            or receipt.authority != request.authority
+            or not _same_authority_generation(receipt.authority, request.authority)
         ):
             raise ValueError("prepare requires a matching durable materialization receipt")
         return receipt.materialization
@@ -3400,6 +3474,8 @@ class RecoveryMetadataStore:
         binding: ExternalBootActivationBinding,
         expected: LocalRecoveryMetadataV1,
         phase: RecoveryPhase,
+        *,
+        inactive_modules: ComponentState | None = None,
     ) -> LocalRecoveryMetadataV1:
         self._require_open()
         name = recovery_directory_name(reference, binding)
@@ -3407,7 +3483,10 @@ class RecoveryMetadataStore:
         try:
             if self._read(directory_fd) != expected:
                 raise ValueError("recovery metadata changed before phase publication")
-            updated = expected.model_copy(update={"phase": phase})
+            update: dict[str, object] = {"phase": phase}
+            if inactive_modules is not None:
+                update["inactive_modules"] = inactive_modules
+            updated = expected.model_copy(update=update)
             temporary = ".intent.next"
             _replace_private_file(
                 directory_fd,

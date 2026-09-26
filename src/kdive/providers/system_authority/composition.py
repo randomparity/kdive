@@ -203,7 +203,6 @@ def validate_authority_system_installation(
 
 def _fixed_domain_exit(connect: Callable[[], Any], domain_name: str) -> _DomainExitProbe:
     connection = connect()
-    domain = None
     try:
         try:
             domain = connection.lookupByName(domain_name)
@@ -213,8 +212,6 @@ def _fixed_domain_exit(connect: Callable[[], Any], domain_name: str) -> _DomainE
             return _DomainExitProbe(False)
         return _DomainExitProbe(domain.isActive() != 1)
     finally:
-        if domain is not None:
-            domain.free()
         connection.close()
 
 

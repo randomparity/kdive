@@ -427,6 +427,59 @@ def test_normal_driver_uses_public_tools_and_drains_jobs(
     assert [resource.kind for resource in ledger.resources] == ["investigation", "run"]
 
 
+def test_normal_driver_waits_out_a_system_job_before_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A console_rotate queued during the boot can still hold the System when the boot job
+    # succeeds; the release conflict names it for jobs.wait, and release is then retried.
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    releases: list[str] = []
+    drained: list[tuple[str, str]] = []
+    holder = "66666666-6666-6666-6666-666666666666"
+
+    class Client:
+        async def call_tool(self, name: str, **args: object) -> ToolResponse:
+            del args
+            if name == "runs.release_external_boot":
+                releases.append(name)
+                if len(releases) == 1:
+                    return ToolResponse.failure(
+                        "22222222-2222-2222-2222-222222222222",
+                        ErrorCategory.CONFLICT,
+                        detail="a queued or running job holds this System",
+                        suggested_next_actions=["jobs.wait"],
+                        data={"reason": "system_job_active", "job_ids": [holder]},
+                    )
+                return ToolResponse.success("55555555-5555-5555-5555-555555555555", "running")
+            return ToolResponse.success("11111111-1111-1111-1111-111111111111", "running")
+
+    async def uploaded(_client: object, **_kwargs: object) -> None:
+        return None
+
+    async def drained_job(
+        _client: object, phase_name: str, job_id: str, **_kwargs: object
+    ) -> ToolResponse:
+        drained.append((phase_name, job_id))
+        return ToolResponse.success(job_id, "succeeded")
+
+    monkeypatch.setattr(
+        "tests.live_vm.installed_local_authority_support.build_and_upload_kernel", uploaded
+    )
+    monkeypatch.setattr("tests.live_vm.installed_local_authority_support.drain_job", drained_job)
+    ledger = ResourceLedger(config.ownership_prefix)
+    result = asyncio.run(drive_normal_operations(cast(Any, Client()), config, ledger))
+
+    assert len(releases) == 2
+    assert ("release", holder) in drained
+    assert result.release_job_id == "55555555-5555-5555-5555-555555555555"
+
+
 def test_deployed_revision_uses_the_actual_active_fixed_worker_slot() -> None:
     config = NativeAuthorityConfig(
         installed_revision="1" * 40,
