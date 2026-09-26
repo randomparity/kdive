@@ -245,6 +245,13 @@ export KDIVE_LIFECYCLE_WITNESS_DATABASE_URL='<witness database URL>'
 just prepare-local-libvirt-host
 ```
 
+Before running the play, the recipe checks that the Ansible collections its roles need
+(`deploy/ansible/requirements.yml`) can be resolved from `~/.ansible/collections` — the same tree
+`just install-ansible-collections` installs to. Ansible resolves every module in an imported task
+file at parse time, so a missing collection would otherwise break the play immediately, even for a
+task guarded to run on a different host family. If a collection is missing, the recipe fails fast
+and names `just install-ansible-collections` to run first.
+
 The recipe installs and configures the local virtualization stack, worker lifecycle, project venv,
 guestfs binding, and — on Debian and Ubuntu, which ship them `root:root 0600` — the `/boot` kernel
 modes that guest-image builds need. It also installs an `/etc/kernel/postinst.d` hook that

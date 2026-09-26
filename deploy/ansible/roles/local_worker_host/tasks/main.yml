@@ -36,5 +36,9 @@
 - name: Prepare shared provider data paths
   ansible.builtin.import_tasks: shared_directories.yml
 
+- name: Label the kdive image directories for confined QEMU domains
+  ansible.builtin.import_tasks: selinux_image_labels.yml
+  when: ansible_facts['os_family'] == 'RedHat'
+
 - name: Enable the container engine and grant the operator its socket
   ansible.builtin.import_tasks: container_runtime.yml

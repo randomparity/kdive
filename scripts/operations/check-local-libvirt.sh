@@ -37,6 +37,9 @@ unset _repo_venv_py
 # runs.install stages the kernel/initrd here before booting the System; must be writable
 # by the worker user and live under a path the qemu user can traverse (see the boot check).
 readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
+# The worker's image root; with INSTALL_STAGING it must carry svirt_image_t on an
+# SELinux-enforcing host, or a confined domain cannot write or map its disks (ADR-0640).
+readonly ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
 # libguestfs builds its supermin appliance from a host kernel under this dir; Debian/Ubuntu ship
 # /boot/vmlinuz-* root:0600, unreadable by a non-root worker, so build-fs fails (ADR-0222, #694).
 # ppc64le names the kernel /boot/vmlinux-* (ELF, no 'z') instead — probe both patterns so a POWER
@@ -159,6 +162,12 @@ _host_kernels_readable() {
   done
   ((found)) || return 0 # no kernels present: unusual layout, do not false-fail
   return 0
+}
+_selinux_enforcing() { _cmd getenforce && [[ "$(getenforce 2>/dev/null)" == Enforcing ]]; }
+_selinux_type() {
+  local type
+  IFS=: read -r _ _ type _ <<<"$(stat -c %C -- "$1" 2>/dev/null)"
+  printf "%s" "${type:-unknown}"
 }
 _dir_writable() {
   local dir="$1" probe
@@ -298,6 +307,18 @@ else
   note_fail \
     "install staging ${INSTALL_STAGING} is not a directory writable by the worker user (KDIVE_INSTALL_STAGING; runs.install stages the kernel/initrd here)" \
     "create it writable under a world-traversable path (NOT \$HOME, which a 0700 mode hides from the qemu user that boots the VM): sudo install -d -o \"\$USER\" ${INSTALL_STAGING}"
+fi
+
+if _selinux_enforcing; then
+  for dir in "${ROOTFS_DIR}" "${INSTALL_STAGING}"; do
+    label="$(_selinux_type "${dir}")"
+    if [[ "${label}" == svirt_image_t ]]; then
+      note_ok "${dir} is labeled svirt_image_t"
+    else
+      note_fail "${dir} is labeled ${label}, not svirt_image_t (SELinux enforcing; a confined domain cannot write or map its images, ADR-0640)" \
+        "on Fedora/Enterprise Linux run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which labels the default /var/lib/kdive/rootfs and /var/lib/kdive/install; for another path or distribution family run: source examples/local-libvirt/selinux-label.sh && kdive_label_svirt_image $(printf %q "${dir}")"
+    fi
+  done
 fi
 
 # Warn when the effective libvirt identity is non-root under qemu:///system: that identity

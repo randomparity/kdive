@@ -54,8 +54,19 @@ setup-local-libvirt:
 # environment so it is passed to Ansible stdin rather than a process argument. Requires an
 # interactive become password (--ask-become-pass): the play installs packages and writes system
 # units as root. The play pins its own interpreter, so uv's ephemeral env is not used for modules.
+#
+# Preflights that the collections the play's roles need (deploy/ansible/requirements.yml) can be
+# resolved at all, in the same ~/.ansible/collections tree `install-ansible-collections` installs
+# to. Ansible resolves every module in an imported task file at parse time, so a missing
+# collection breaks the play immediately with an opaque `unknown-module` error rather than only
+# on the host family whose tasks need it (#2782). This is a read-only presence check, never a
+# second `ansible-galaxy` install path (#2499): `install-ansible-collections` stays the only
+# recipe that installs collections.
 prepare-local-libvirt-host:
     test -n "${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-}" || { echo "set KDIVE_LIFECYCLE_WITNESS_DATABASE_URL" >&2; exit 2; }
+    uv run python3 scripts/guards/check_ansible_collections.py --presence-only \
+        deploy/ansible/requirements.yml ~/.ansible/collections \
+        || { echo "missing Ansible collections -- run 'just install-ansible-collections'" >&2; exit 2; }
     ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' ansible-playbook deploy/ansible/playbooks/local-libvirt-host.yml --ask-become-pass -e "local_libvirt_host_operator_user=${USER:?set USER to the operator account}"
 
 # Fund a dev-stack project + mint a token (preflight, migrate, seed, verify; KDIVE_PROJECT=demo). See #834.
