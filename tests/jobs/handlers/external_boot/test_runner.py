@@ -1217,16 +1217,19 @@ def test_a_successful_run_reaches_the_port_and_returns_the_built_result(
 
 
 def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation(
-    migrated_url: str, authority_role_dsns: Callable[[str], str], vehicle: Vehicle
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    vehicle: Vehicle,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A provider raise is wrapped bound to the same allocation, and the message is dropped.
+    """A provider raise is bound to its allocation; its message stays out of the result.
 
     ``_authority_binding_matches`` is the worker's gate before the SQL boundary, so the wrap is
     driven through it rather than through a re-implementation of the same nine comparisons.
     """
     secret = "/var/lib/kdive/secret-path-that-must-not-travel"
     provider_identifier = "fault-inject://private-provider.example.internal/system-47"
-    raw_message = f"provider {provider_identifier} failed while reading {secret}"
+    raw_message = f"provider {provider_identifier} failed while reading {secret}: " + "x" * 9000
 
     def explode(_context: OperationContext) -> RunningKernelObservation:
         raise OSError(raw_message)
@@ -1238,6 +1241,7 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
             resolver=resolver_for(vehicle),
             acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
         )
+        ports.secret_registry.register(secret, scope=None)
 
         with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
             await _run(conn, case, ports=ports, call_port=explode)
@@ -1254,6 +1258,18 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
         assert raw_message not in serialized
         assert secret not in serialized
         assert provider_identifier not in serialized
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "kdive.jobs.handlers.external_boot.runner"
+        ]
+        assert len(warnings) == 1
+        warning = warnings[0].getMessage()
+        assert "exception=OSError" in warning
+        assert "phase=provider-call" in warning
+        assert "[REDACTED]" in warning
+        assert secret not in warning
+        assert len(warning.split("reason=", 1)[1]) == 8192
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
