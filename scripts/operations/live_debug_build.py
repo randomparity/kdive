@@ -226,9 +226,35 @@ async def _find_booted_run(client: LiveStackClient, schemas: _SchemaResolver) ->
 
 
 async def _provision_boot_run(
-    client: LiveStackClient, schemas: _SchemaResolver, *, project: str
+    client: LiveStackClient, schemas: _SchemaResolver, *, project: str, rootfs: str
 ) -> str:
     """Full lifecycle: investigation -> allocation -> provision -> upload/install/boot -> run_id."""
+    cursor = None
+    while True:
+        request = {"scope": "public_baseline"}
+        if cursor:
+            request["cursor"] = cursor
+        images = await _call(client, "images.list", request, schemas)
+        if images.get("status") != "ok":
+            raise RuntimeError("images.list failed; check catalog access before provisioning")
+        if any(
+            item.get("status") == "registered"
+            and (data := item.get("data") or {}).get("provider") == "local-libvirt"
+            and data.get("name") == rootfs
+            and data.get("arch") == "x86_64"
+            for item in images.get("items", [])
+        ):
+            break
+        page = images.get("data") or {}
+        if not page.get("truncated"):
+            raise RuntimeError(
+                f"rootfs {rootfs!r} is not a registered public local-libvirt x86_64 image; "
+                f"build and register it with `kdivectl images publish --provider local-libvirt "
+                f"--name {rootfs}`, then check `kdivectl images list`"
+            )
+        cursor = page.get("next_cursor")
+        if not cursor:
+            raise RuntimeError("images.list returned a truncated page without next_cursor")
     resources = await _call(client, "resources.list", {}, schemas)
     resource_id = (resources["items"][0]["object_id"]) if resources.get("items") else None
     if not resource_id:
@@ -261,7 +287,7 @@ async def _provision_boot_run(
                 "rootfs": {
                     "kind": "catalog",
                     "provider": "local-libvirt",
-                    "name": "fedora-kdive-ready-44",
+                    "name": rootfs,
                 },
                 "debug": {"gdbstub": True},
             }
