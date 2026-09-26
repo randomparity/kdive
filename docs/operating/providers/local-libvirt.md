@@ -96,10 +96,12 @@ These are the points where the two families genuinely diverge, not just in packa
   the mode at install time
   ([ADR-0668](../../adr/0668-a-kernel-upgrade-re-applies-the-boot-relabel.md)); no re-run is
   needed. `just check-deps` and `just check-local-libvirt` both report the unfixed state.
-- **SELinux.** Fedora and Enterprise Linux run SELinux enforcing, so `install-host.sh` and
-  `build-image.sh` label the kdive image directories `svirt_image_t` for the confined domain
-  (ADR-0640). `install-host.sh` installs `policycoreutils-python-utils` for the `semanage` that
-  needs. If a domain start still fails with `Permission denied` on a kdive image, a stale
+- **SELinux.** Fedora and Enterprise Linux run SELinux enforcing, so
+  `just prepare-local-libvirt-host` and `build-image.sh` label the kdive image directories
+  `svirt_image_t` for the confined domain (ADR-0640). The recipe installs
+  `policycoreutils-python-utils` for the `semanage` that needs, labels `/var/lib/kdive/rootfs` and
+  `/var/lib/kdive/install`, and `just check-local-libvirt` fails while either lacks the label.
+  If a domain start still fails with `Permission denied` on a kdive image, a stale
   per-domain label may be stuck — `sudo restorecon -R -F /var/lib/kdive/rootfs` clears it.
 
   `build-image.sh` applies the same label to its resolved `KDIVE_BUILD_IMAGE_WORKSPACE` before its

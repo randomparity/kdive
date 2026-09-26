@@ -58,6 +58,9 @@ def _healthy_env(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     # check-local-libvirt.sh probes `python3 -c "import guestfs, drgn"`; succeed on it.
     _stub(bindir, "python3", 'case "$*" in -c*) exit 0 ;; esac\nexit 0')
     _stub(bindir, "uv", _uv_stub_body(tmp_path / "uv.log"))
+    # The SELinux label probe reads the host's real getenforce off /usr/bin; pin it so an
+    # enforcing developer host does not fail the fixture's unlabeled tmp dirs (ADR-0640).
+    _stub(bindir, "getenforce", "echo Disabled")
     kvm = tmp_path / "kvm"
     kvm.write_text("")
     staging = tmp_path / "install-staging"
