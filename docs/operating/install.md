@@ -282,7 +282,7 @@ ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' \
 |---|---|---|
 | Debian / Ubuntu | Supported | Structurally checked. Ubuntu 26.04 live apply remains operator-provided and is not recorded by this checkout. |
 | Fedora | Supported | Structurally checked; no live apply is claimed. |
-| RHEL / Rocky | Supported with a guestfs limit | Structurally checked; their system Python does not provide the matching Python 3.14 `python3-guestfs` binding. The recipe reports the mismatch and continues, but build-fs and local kdump capture are unavailable from that venv. |
+| RHEL / Rocky | Not supported: no guestfs binding for the worker | Structurally checked. The family builds `python3-libguestfs` only for its system Python, not the Python 3.14 the lifecycle worker venv runs, and the worker needs that binding to provision (baseline-kernel extraction), run build-fs, stage built kernels, boot external kernels and capture kdump locally. The recipe therefore fails at the lifecycle installer, naming the missing binding ([local-libvirt](providers/local-libvirt.md#family-differences-that-matter)). |
 | SLES / openSUSE | Supported | Structurally checked; no live apply is claimed. |
 
 For foreign-architecture emulator packages and their availability, use the

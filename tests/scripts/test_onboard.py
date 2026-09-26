@@ -76,6 +76,8 @@ def _healthy_env(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "KDIVE_BOOT_DIR": str(boot),
         # The RedHat off-PATH emulator fallback, pinned absent so it cannot resolve from the host.
         "KDIVE_QEMU_LIBEXEC": str(tmp_path / "absent-qemu-kvm"),
+        # The installed lifecycle worker venv, pinned absent for the same reason.
+        "KDIVE_LIFECYCLE_PYTHON": str(tmp_path / "absent-lifecycle-python"),
         # check-local-libvirt.sh prefers the REPO .venv over the stubbed python3 when one exists,
         # and that venv has no guestfs/drgn — so without this the preflight's verdict depends on
         # whether the checkout has been synced. Downgrade the one probe with a documented soft

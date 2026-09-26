@@ -361,6 +361,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_LIFECYCLE_EXPECTED_SLOTS` | — | Internal status-check count set by live-stack bring-up after start; unset omits the started-slot count assertion. |
 | `KDIVE_LIFECYCLE_LIBVIRT_URI` | — | Internal request-construction handoff carrying the validated published session URI on start; it is empty for non-start operations. |
 | `KDIVE_LIFECYCLE_OPERATION` | — | Internal request-construction handoff derived from the worker-lifecycle.sh command; operators use start, status, stop, diagnostics, or recover arguments instead. |
+| `KDIVE_LIFECYCLE_PYTHON` | `/opt/kdive-live-worker-lifecycle/.venv/bin/python` | Installed lifecycle worker interpreter `check-local-libvirt.sh` probes for `import guestfs` when it exists: that venv provisions, and baseline-kernel extraction needs the binding (ADR-0272). Unlike the `KDIVE_PYTHON` probe, a failure here is never downgraded by `KDIVE_PREFLIGHT_KDUMP`. |
 | `KDIVE_LIMIT_KCU` | `1000000` | Budget ceiling (KCU) the setup-*-libvirt.sh scripts set for the project. |
 | `KDIVE_LIVE_SSH_PORT` | `22` | SSH port `check-ssh-reachable.sh` probes. |
 | `KDIVE_LIVE_WORKER_OPERATOR_UID` | — | Provisioner-managed numeric uid authorizing the sole lifecycle socket operator; the root service refuses requests when it is absent or invalid. |

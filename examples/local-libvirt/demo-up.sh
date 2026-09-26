@@ -46,9 +46,10 @@ fi
 echo "operator ${USER}; libvirt ${KDIVE_LIBVIRT_URI}"
 
 # 2. Preflight — fail early with actionable fixes (KVM, libvirt, a writable install-staging
-#    directory). The worker venv's drgn/libguestfs imports gate only the kdump capture method,
-#    so a first-run box gets a WARN with the fix rather than a stop; export
-#    KDIVE_PREFLIGHT_KDUMP=required to insist on it.
+#    directory). The checkout interpreter's drgn/libguestfs imports serve only its CLI
+#    tooling, so a first-run box gets a WARN with the fix rather than a stop; export
+#    KDIVE_PREFLIGHT_KDUMP=required to insist on it. The lifecycle worker venv's guestfs probe
+#    stays a FAIL: that venv provisions.
 step "preflight (check-local-libvirt.sh)"
 KDIVE_PREFLIGHT_KDUMP="${KDIVE_PREFLIGHT_KDUMP:-optional}" \
   "${repo_root}/scripts/operations/check-local-libvirt.sh"

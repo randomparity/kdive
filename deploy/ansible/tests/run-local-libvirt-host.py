@@ -296,6 +296,10 @@ require(
     "when" in mismatch and "msg" in mismatch["ansible.builtin.debug"],
     "guestfs mismatch must report",
 )
+require(
+    task_names.index(lifecycle_failure["name"]) < task_names.index(mismatch["name"]),
+    "the mismatch message relies on the lifecycle installer's guestfs failure having run first",
+)
 link = tasks["Link the system guestfs binding into the project venv"]
 require(link["ansible.builtin.file"]["state"] == "link", "guestfs binding must be linked")
 require("when" in link, "guestfs binding must be ABI guarded")

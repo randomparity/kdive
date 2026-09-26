@@ -544,6 +544,15 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "(libguestfs build-fs appliance, ADR-0222).",
     ),
     ExternalEnvVar(
+        "KDIVE_LIFECYCLE_PYTHON",
+        "script",
+        "/opt/kdive-live-worker-lifecycle/.venv/bin/python",
+        "Installed lifecycle worker interpreter `check-local-libvirt.sh` probes for `import "
+        "guestfs` when it exists: that venv provisions, and baseline-kernel extraction needs the "
+        "binding (ADR-0272). Unlike the `KDIVE_PYTHON` probe, a failure here is never downgraded "
+        "by `KDIVE_PREFLIGHT_KDUMP`.",
+    ),
+    ExternalEnvVar(
         "KDIVE_EFFECTIVE_UID",
         "script",
         "$EUID",

@@ -71,9 +71,10 @@ readonly OS_RELEASE_FILE="${KDIVE_OS_RELEASE:-/etc/os-release}"
 # permanently (ADR-0641). Overridable so the probe is testable without an EL host.
 readonly QEMU_LIBEXEC="${KDIVE_QEMU_LIBEXEC:-/usr/libexec/qemu-kvm}"
 
-# The worker imports the libguestfs binding from the project venv, not system python3, so the
-# future-tier binding probe must ask the same interpreter the worker uses (else a binding present
-# system-wide but absent from the venv reports a false green, #1328). Mirror check-local-libvirt.sh:
+# The checkout's CLI imports the libguestfs binding from the project venv, not system python3, so
+# the future-tier binding probe must ask that interpreter (else a binding present system-wide but
+# absent from the venv reports a false green, #1328); check-local-libvirt.sh probes the installed
+# lifecycle worker venv separately. Mirror check-local-libvirt.sh:
 # prefer the .venv sibling of this script when present (in-repo dev loop), honor a KDIVE_PYTHON
 # override (host-services deployment), and fall back to system python3 before the venv exists.
 #
@@ -195,7 +196,8 @@ package_for() {
   libkdumpfile-headers:fedora | libkdumpfile-headers:el | libkdumpfile-headers:opensuse) printf "libkdumpfile-devel" ;;
   libkdumpfile-headers:arch) printf "libkdumpfile" ;;
   libkdumpfile-headers:*) printf "libkdumpfile-dev" ;;
-  # The libguestfs Python binding — required for the local-libvirt kdump capture path (ADR-0203).
+  # The libguestfs Python binding — required by the local-libvirt worker to provision (ADR-0272),
+  # build images, stage built kernels, boot external kernels and capture kdump (ADR-0203).
   # Fedora/RHEL/openSUSE keep the historical `python3-libguestfs` name; Debian/Ubuntu renamed to
   # `python3-guestfs` (POWER host bring-up runbook, §1). Not pip-installable; system package only.
   python3-guestfs:fedora | python3-guestfs:el | python3-guestfs:opensuse) printf "python3-libguestfs" ;;

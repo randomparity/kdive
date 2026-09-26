@@ -17,7 +17,7 @@ which owns the command sequence, the guest-image build, and the MCP client wirin
 |---|---|---|---|
 | Debian / Ubuntu | full | yes | Ubuntu 26.04 |
 | Fedora | full | yes | Fedora 44, end to end |
-| RHEL / CentOS Stream / Rocky / Alma | full, once you install a container engine | **no — stage images from elsewhere** | Rocky 10 host prep and stack; Rocky 9 package names |
+| RHEL / CentOS Stream / Rocky / Alma | **fails at the lifecycle installer:** no guestfs binding for the worker's Python 3.14, so no provisioning ([below](#family-differences-that-matter)) | no | Rocky 10 host prep and stack before that check was added; Rocky 9 package names |
 | Anything else (Arch, SUSE, …) | refuses with `exit 2` | — | — |
 
 An unsupported host is not a dead end: the [prerequisites](#what-a-host-needs) below are the whole
@@ -49,8 +49,10 @@ Kernel compilation happens outside KDIVE — follow the
 - **KVM and libvirt:** a running `libvirtd` (Debian/Ubuntu) or `virtqemud` (RedHat family), the
   `default` network active, and the operator in the `libvirt` and `kvm` groups.
 - **A container engine:** the Postgres, SeaweedFS, and mock-OIDC backends run under `docker compose`.
-- **libguestfs and its Python binding:** `build-fs` and the kdump capture path build a supermin
-  appliance, which needs a readable host kernel under `/boot`.
+- **libguestfs and its Python binding:** the lifecycle worker imports the `guestfs` binding to
+  provision (baseline-kernel extraction, ADR-0272), stage built kernels, boot external kernels,
+  run `build-fs`, and capture kdump locally. Each libguestfs launch builds a supermin appliance,
+  which needs a readable host kernel under `/boot`.
 - **The checkout, synced:** there is no PyPI wheel yet — `uv sync --locked` in the checkout is the
   install.
 - **The fixed live-worker lifecycle contract:** `deploy/systemd/install-live-worker-lifecycle.sh`
@@ -141,17 +143,15 @@ These are the points where the two families genuinely diverge, not just in packa
   Ubuntu 26.04 and Fedora 44 ship it as `/usr/bin/python3`; EL9 ships 3.9 and EL10 ships 3.12,
   packaging 3.14 separately as `python3.14`, which `install-host.sh` installs and the lifecycle
   contract discovers. The consequence is the libguestfs Python binding: it is a C extension built
-  for the *system* interpreter, so it loads in the project venv only when the two minor versions
-  match. On EL they cannot, so the binding is unavailable and two things do not work there:
-
-  - **Local guest-image builds.** `build-image.sh` extracts a baseline kernel through the Python
-    binding, so it fails on EL with `libguestfs (the guestfs Python binding) is required to
-    extract the baseline kernel`. Build images on a matching host and stage them, or publish them
-    through the [image lifecycle runbook](../runbooks/image-lifecycle.md).
-  - **Local kdump capture** (ADR-0203). Every other capture method is unaffected.
-
-  Host preparation, the stack, provisioning, install, boot and debug do not use the binding. Note
-  also that an EL host cannot build a *btrfs* image even with a working binding: the EL libguestfs
+  for the *system* interpreter, so it loads in a venv only when the two minor versions match. On
+  EL they cannot, and EL ships the binding only for its system Python. Without a binding in the
+  lifecycle worker venv, provisioning fails with `libguestfs (the guestfs Python binding) is
+  required to extract the baseline kernel`, and so do guest-image builds (`build-fs`), built-kernel
+  staging, external boot and local kdump capture (ADR-0203). Host preparation links the binding
+  from the interpreter the worker venv is built on, so on EL it fails at the lifecycle installer:
+  there is no packaged binding for that Python 3.14 to link, and EL is not a supported
+  local-libvirt provisioning host until one exists. `just check-local-libvirt` probes the
+  installed worker venv for the binding. Note also that an EL host cannot build a *btrfs* image even with a working binding: the EL libguestfs
   appliance kernel has no btrfs, so a Fedora cloud image fails with `unknown filesystem type
   'btrfs'`. The catalog's `rocky-kdive-ready-*` entries are the EL-native choice.
 

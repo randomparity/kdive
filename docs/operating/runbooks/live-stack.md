@@ -30,9 +30,10 @@ workers on the host so they can access KVM and libvirt.
   `KDIVE_OIDC_IMAGE`; the wrapper defaults to a pinned mirror on emulated POWER. See
   [image selection](../../../deploy/mock-oidc/README.md#using-the-image).
 - The repo set up: `just setup` (or `uv sync --locked`).
-- Local-libvirt kdump capture needs drgn and libguestfs in the **installed worker environment**,
-  `/opt/kdive-live-worker-lifecycle/.venv`, supplied by the lifecycle host provisioning below.
-  The checkout preflight probes `KDIVE_PYTHON`; passing it does not verify that worker interpreter.
+- The **installed worker environment**, `/opt/kdive-live-worker-lifecycle/.venv`, needs the
+  libguestfs binding to provision, build images, stage built kernels, boot external kernels and
+  capture kdump locally, and drgn for local kdump capture. The lifecycle host provisioning below
+  supplies it, and `check-local-libvirt.sh` probes that venv for `guestfs` once it exists.
 - The fixed systemd worker contract must be installed. Persistent self-hosted runners get it from
   `deploy/ansible/roles/live_vm_host`; apply the runner playbook with the revision to install:
 

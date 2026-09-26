@@ -997,6 +997,86 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert 'usermod -G "$libvirt_group,kvm" "$worker"' in source
 
 
+def _run_guestfs_link(
+    tmp_path: Path, *, base_imports_guestfs: bool
+) -> subprocess.CompletedProcess[str]:
+    """Run ``_link_system_guestfs_binding`` for a venv whose python links to a stub base.
+
+    The stub answers as the base interpreter when invoked by its own path and as the venv when
+    invoked through the venv symlink, as ``readlink -f`` separates them in the installer.
+    """
+    binding = tmp_path / "base-site"
+    binding.mkdir()
+    (binding / "guestfs.py").write_text("", encoding="utf-8")
+    (binding / "libguestfsmod.cpython-399-x86_64-linux-gnu.so").write_text("", encoding="utf-8")
+    venv_site = tmp_path / "venv-site"
+    venv_site.mkdir()
+    base_python = tmp_path / "python3.99"
+    base_import = f"echo {binding}" if base_imports_guestfs else "echo DlopenFailed >&2; exit 1"
+    base_python.write_text(
+        "#!/bin/bash\n"
+        f"if [[ $0 == {base_python} ]]; then\n"
+        f'  case "$2" in *"import guestfs, pathlib"*) {base_import} ;; *) exit 97 ;; esac\n'
+        "  exit\n"
+        "fi\n"
+        'case "$2" in\n'
+        f"  *sysconfig*) echo {venv_site} ;;\n"
+        f"  'import guestfs') [[ -L {venv_site}/guestfs.py ]] ;;\n"
+        "  *) exit 97 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    base_python.chmod(0o755)
+    venv_python = tmp_path / "venv-python"
+    venv_python.symlink_to(base_python)
+    return subprocess.run(
+        ["/bin/bash", "-c", 'source "$1"; _link_system_guestfs_binding "$2"', "bash"]
+        + [str(INSTALLER), str(venv_python)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_guestfs_link_uses_the_venv_base_interpreter_binding(tmp_path: Path) -> None:
+    """The binding comes from the interpreter the venv is built on, not /usr/bin/python3.
+
+    On Ubuntu 26.04 and Fedora 44 the two are the same interpreter; on Enterprise Linux
+    /usr/bin/python3 is 3.12 while the venv is 3.14, so only the venv's own base interpreter can
+    hold a binding the venv can load (#2781).
+    """
+    result = _run_guestfs_link(tmp_path, base_imports_guestfs=True)
+
+    assert result.returncode == 0, result.stderr
+    linked = {path.name: path.readlink() for path in (tmp_path / "venv-site").iterdir()}
+    assert linked == {
+        "guestfs.py": tmp_path / "base-site" / "guestfs.py",
+        "libguestfsmod.cpython-399-x86_64-linux-gnu.so": (
+            tmp_path / "base-site" / "libguestfsmod.cpython-399-x86_64-linux-gnu.so"
+        ),
+    }
+
+
+def test_guestfs_link_fails_loud_without_a_base_interpreter_binding(tmp_path: Path) -> None:
+    """The worker venv provisions, so a missing binding is a failed install.
+
+    ADR-0272 makes the binding a provision prerequisite; reporting only lost kdump capture and
+    exiting 0 left an EL host "prepared" that failed every provision (#2781).
+    """
+    result = _run_guestfs_link(tmp_path, base_imports_guestfs=False)
+
+    assert result.returncode != 0
+    for needed_by in ("provision", "build-fs", "external boot", "kdump capture"):
+        assert needed_by in result.stderr, result.stderr
+    assert "unaffected" not in result.stderr
+    assert str(tmp_path / "python3.99") in result.stderr
+    assert "re-run this installer" in result.stderr
+    # The interpreter's own import error is relayed: an installed binding that fails to load
+    # must not read as an absent one.
+    assert result.stderr.index("DlopenFailed") < result.stderr.index("cannot import")
+    assert not list((tmp_path / "venv-site").iterdir())
+
+
 def test_installer_builds_the_worker_venv_locked_with_the_live_group() -> None:
     """A venv the installer builds alone must carry ``drgn`` and the locked ``grpcio``.
 
