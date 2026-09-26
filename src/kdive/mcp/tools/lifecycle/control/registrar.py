@@ -684,11 +684,12 @@ def _register_control_power(app: FastMCP, pool: AsyncConnectionPool) -> None:
                     "READY System (refused on a CRASHED/CRASHING/PAUSED System). `resume` is the "
                     "exception: it resumes a PAUSED System (left suspended by a `systems.restore` "
                     "with `start_paused=true`) back to READY, and is admitted only from PAUSED. "
-                    "On local libvirt, `off` requests clean shutdown with a wait of up to "
-                    f"{int(clean_shutdown_bound_s('kvm'))} s on KVM or that bound times the "
-                    "configured TCG multiplier "
+                    "On local libvirt, `off` requests clean shutdown with a monotonic polling "
+                    f"bound of {int(clean_shutdown_bound_s('kvm'))} s on KVM or that bound times "
+                    "the configured TCG multiplier "
                     f"({LIBVIRT_TCG_DEADLINE_MULTIPLIER.default} by default), then falls back "
-                    "to hard destroy if still active."
+                    "to hard destroy if still active. One blocking libvirt shutdown call may "
+                    "extend wall-clock completion."
                 )
             ),
         ],

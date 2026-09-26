@@ -607,6 +607,10 @@ def test_off_wait_holds_force_crash_marker_until_provider_finishes(
             crash_task = asyncio.create_task(run_crash())
             await asyncio.wait_for(crash_waiting.wait(), 2)
             try:
+                async with pool.connection() as probe, probe.transaction():
+                    assert not await try_advisory_xact_lock(
+                        probe, LockScope.SYSTEM, UUID(system_id)
+                    )
                 assert await _system_state(pool, system_id) == SystemState.READY.value
             finally:
                 ctrl.release.set()
@@ -673,6 +677,10 @@ def test_cancelled_off_keeps_fence_until_provider_thread_finishes(
             off_task.cancel()  # repeated cancellation must not interrupt fenced cleanup
             try:
                 assert not off_task.done()
+                async with pool.connection() as probe, probe.transaction():
+                    assert not await try_advisory_xact_lock(
+                        probe, LockScope.SYSTEM, UUID(system_id)
+                    )
                 assert await _system_state(pool, system_id) == SystemState.READY.value
             finally:
                 ctrl.release.set()
@@ -700,7 +708,7 @@ def test_failed_off_releases_system_fence_and_restores_autocommit(migrated_url: 
                 with pytest.raises(CategorizedError):
                     await control_plane.power_handler(conn, off_job, resolver=resolver)
                 assert conn.autocommit is False
-            async with pool.connection() as conn, conn.transaction():
-                assert await try_advisory_xact_lock(conn, LockScope.SYSTEM, UUID(system_id))
+                async with pool.connection() as probe, probe.transaction():
+                    assert await try_advisory_xact_lock(probe, LockScope.SYSTEM, UUID(system_id))
 
     asyncio.run(_run())
