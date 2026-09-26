@@ -605,7 +605,7 @@ def test_enforcing_host_without_svirt_image_label_fails(tmp_path: Path, mislabel
     assert result.returncode == 1, result.stderr
     assert f"FAIL  {directory} is labeled var_lib_t, not svirt_image_t" in result.stderr
     assert "just prepare-local-libvirt-host" in result.stderr
-    assert f"semanage fcontext -a -t svirt_image_t '{directory}(/.*)?'" in result.stderr
+    assert f"kdive_label_svirt_image {directory}" in result.stderr
 
 
 def test_unreadable_label_on_enforcing_host_fails(tmp_path: Path) -> None:
