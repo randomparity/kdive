@@ -15,7 +15,9 @@ evidence when the provider owns no root device. The MCP boot caller maps this re
 to a configuration-error response before creating an activation. Tell the caller
 to supply an initrd with the build. Preserve local whole-disk substitution and
 the inspected token when an initrd exists. `RootSpecV1` and plan serialization
-remain unchanged. PARTUUID provenance and support belong to future remote work.
+remain unchanged. Describe the refusal and recovery in the `runs.boot` wrapper
+docstring, which is the agent-facing tool contract. PARTUUID provenance and
+support belong to future remote work.
 
 ## Failure model
 

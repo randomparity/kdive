@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, LiteralString, cast
+from typing import Any, Literal, LiteralString, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -300,7 +300,10 @@ class _PreparingProvider(FaultInjectExternalBoot):
         self._active.add(recovery.binding.activation_id)
 
 
-async def _seed_public_external_boot(pool: AsyncConnectionPool) -> tuple[str, str]:
+async def _seed_public_external_boot(
+    pool: AsyncConnectionPool, *, initrd_state: Literal["present", "null", "missing"] = "present"
+) -> tuple[str, str]:
+    with_initrd = initrd_state == "present"
     system_id = await runs_support.seed_system(pool)
     investigation_id = await runs_support.seed_investigation(pool)
     run_id = str(uuid4())
@@ -310,7 +313,7 @@ async def _seed_public_external_boot(pool: AsyncConnectionPool) -> tuple[str, st
         "schema": "external-boot-evidence-v1",
         "architecture": "x86_64",
         "bundle_sha256": _SHA,
-        "initrd": {"sha256": _SHA, "size_bytes": 1024},
+        "initrd": {"sha256": _SHA, "size_bytes": 1024} if with_initrd else None,
         "archive_member_count": 3,
         "archive_uncompressed_bytes": 4096,
         "vmlinuz_sha256": _SHA,
@@ -323,6 +326,8 @@ async def _seed_public_external_boot(pool: AsyncConnectionPool) -> tuple[str, st
         "module_member_count": 2,
         "module_uncompressed_bytes": 64,
     }
+    if initrd_state == "missing":
+        del evidence["initrd"]
     root_spec = {
         "schema": "root-spec-v1",
         "architecture": "x86_64",
@@ -346,13 +351,13 @@ async def _seed_public_external_boot(pool: AsyncConnectionPool) -> tuple[str, st
                 Jsonb(
                     {
                         "kernel_ref": "builds/kernel.tar",
-                        "initrd_ref": "builds/initrd.img",
+                        **({"initrd_ref": "builds/initrd.img"} if with_initrd else {}),
                     }
                 ),
                 Jsonb(
                     {
                         "kernel": {"version_id": "kernel-v1"},
-                        "initrd": {"version_id": "initrd-v1"},
+                        **({"initrd": {"version_id": "initrd-v1"}} if with_initrd else {}),
                     }
                 ),
                 Jsonb({"schema_version": 1, "arch": "x86_64"}),
@@ -487,6 +492,33 @@ async def _public_boot_rows(
             (activation["id"],),
         )
     return job, activation, authority_rows
+
+
+@pytest.mark.parametrize("initrd_state", ["null", "missing"])
+def test_boot_without_initrd_and_provider_root_refuses_before_activation(
+    migrated_url: str,
+    initrd_state: Literal["null", "missing"],
+) -> None:
+    async def body() -> None:
+        _configure_external_boot()
+        resolver = provider_resolver(external_boot=_PreparingProvider(), platform_root_cmdline=None)
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=6) as pool:
+            run_id, _ = await _seed_public_external_boot(pool, initrd_state=initrd_state)
+            response = await boot_run(pool, runs_support.ctx(), run_id, resolver=resolver)
+            async with pool.connection() as conn:
+                row = await _one(
+                    conn,
+                    "SELECT count(*) AS n FROM external_boot_activations WHERE run_id=%s",
+                    (run_id,),
+                )
+
+        assert response.status == "error"
+        assert response.error_category == "configuration_error"
+        assert response.data["reason"] == "remote_external_boot_initrd_required"
+        assert "supply an initrd with the build" in (response.detail or "")
+        assert row["n"] == 0
+
+    asyncio.run(body())
 
 
 @pytest.mark.parametrize("interrupted_phase", [None, "materialize", "prepare"])

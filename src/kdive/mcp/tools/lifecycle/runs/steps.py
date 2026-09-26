@@ -536,9 +536,14 @@ async def _enqueue_external_boot_locked(
         return _config_error(str(run.id), data={"reason": "external_boot_provenance_missing"})
     progress = await step_progress(conn, run.id)
     method = install_method_for(system, binding.runtime.profile_policy)
-    root_arguments = external_boot_root_arguments(
-        build, root, binding.runtime.platform_root_cmdline
-    )
+    try:
+        root_arguments = external_boot_root_arguments(
+            build, root, binding.runtime.platform_root_cmdline
+        )
+    except CategorizedError as exc:
+        return _config_error(
+            str(run.id), detail=str(exc), data={"reason": str(exc.details["reason"])}
+        )
     platform = tuple(
         system_required_cmdline(
             method,

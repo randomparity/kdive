@@ -3,8 +3,8 @@
 Scope: issue #2795, `WORK:SCOPE` token `q2795-9f915ebc`.
 Base: `main`. Guardrails: `just lint`, `just type`, focused pytest,
 `just test-changed`; `just ci` before push.
-Expected implementation size: 45–95 changed lines (S) — one admission guard,
-one MCP conversion, and focused tests.
+Expected implementation size: 45–110 changed lines (S) — one admission guard,
+one MCP conversion, agent-facing wrapper text, and null/missing-initrd tests.
 
 ## Task 1: Refuse the unsupported root at plan admission
 
@@ -49,6 +49,9 @@ must first observe activation, then a
 configuration-error envelope with the initrd instruction and no activation.
 Run `uv run python -m pytest tests/integration/test_external_boot_job_lifecycle.py::test_boot_without_initrd_and_provider_root_refuses_before_activation -q`;
 expect one pass after the conversion.
+Verification: Mode: task-test-not-applicable. The `runs.boot` wrapper docstring
+is agent-facing prose with no executable behavior; no test should snapshot its
+wording. Read it against the new response and recovery contract.
 
 Interfaces: consume Task 1's `CategorizedError` and existing
 `_config_error(object_id, detail=..., data=...) -> ToolResponse`;
@@ -65,11 +68,16 @@ In `src/kdive/mcp/tools/lifecycle/runs/steps.py`, wrap only the call:
         return _config_error(str(run.id), detail=str(exc), data=exc.details)
 ```
 
+Add the remote no-initrd refusal and supply-initrd recovery sentence to the
+`runs.boot` wrapper docstring in `src/kdive/mcp/tools/lifecycle/runs/registrar.py`.
+
 In `tests/integration/test_external_boot_job_lifecycle.py`, extend
-`_seed_public_external_boot` with a `with_initrd: bool = True` parameter.
-When false, set `evidence["initrd"] = None` and omit both `initrd_ref` from
-`build_result` and `initrd` from `artifacts`; this represents one coherent
-build. A new test seeds that form, uses
+`_seed_public_external_boot` with
+`initrd_state: Literal["present", "null", "missing"] = "present"`.
+For `null` or `missing`, omit both `initrd_ref` from `build_result` and
+`initrd` from `artifacts`; set the evidence field to null or omit it,
+respectively. Both represent a no-initrd build accepted by the current plan
+builder. A parameterized test seeds those forms, uses
 `provider_resolver(external_boot=_PreparingProvider(), platform_root_cmdline=None)`,
 calls `boot_run`, and asserts error category `configuration_error`, reason
 `remote_external_boot_initrd_required`, an initrd instruction in `detail`,
