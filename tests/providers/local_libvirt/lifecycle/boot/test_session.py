@@ -2167,6 +2167,38 @@ def test_hard_stop_destroys_at_once(
     session.close()
 
 
+@pytest.mark.parametrize(
+    ("final_active", "error_code", "accepted"),
+    [
+        (False, libvirt.VIR_ERR_OPERATION_INVALID, True),
+        (True, libvirt.VIR_ERR_OPERATION_INVALID, False),
+        (False, libvirt.VIR_ERR_INTERNAL_ERROR, False),
+    ],
+)
+def test_hard_stop_accepts_only_raced_shutoff(
+    final_active: bool, error_code: int, accepted: bool
+) -> None:
+    events: list[str] = []
+
+    class RacedDomain(Domain):
+        def destroy(self) -> int:
+            events.append("domain.destroy")
+            self.active = final_active
+            raise libvirt_error(error_code)
+
+    domain = RacedDomain(events, _xml(domain_type="kvm"))
+    domain.active = True
+    session = _factory(events, domain).open(_lease(), _expected())
+    if accepted:
+        session.stop_and_require_inactive(mode="destroy")
+    else:
+        with pytest.raises(libvirt.libvirtError) as exc:
+            session.stop_and_require_inactive(mode="destroy")
+        assert exc.value.get_error_code() == error_code
+    assert events.count("domain.destroy") == 1
+    session.close()
+
+
 def test_stop_leaves_an_inactive_domain_untouched() -> None:
     events: list[str] = []
     session = _factory(events).open(_lease(), _expected())

@@ -28,7 +28,11 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
 )
-from kdive.providers.local_libvirt.lifecycle.power import clean_shutdown_bound_s, power_off
+from kdive.providers.local_libvirt.lifecycle.power import (
+    clean_shutdown_bound_s,
+    destroy_or_accept_shutoff,
+    power_off,
+)
 from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
@@ -1000,7 +1004,7 @@ class _ConcreteSession:
             if mode == "destroy" or (mode == "clean-on-kvm" and not self._kvm):
                 path = "destroy-unready" if mode == "destroy" else "destroy-unaccelerated"
                 _log.warning("power-off %s: %s", name, path)
-                domain.destroy()
+                destroy_or_accept_shutoff(domain)
             else:
                 bound = clean_shutdown_bound_s("kvm") if self._kvm else _UNACCELERATED_STOP_BOUND_S
                 power_off(domain, name, bound, self._sleep, self._clock)
