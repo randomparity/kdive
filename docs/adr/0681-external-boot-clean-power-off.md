@@ -1,4 +1,4 @@
-# 0681 — Local-libvirt external-boot stops use the clean power-off on KVM
+# 0681 — Local-libvirt external-boot stops use the clean power-off
 
 ## Status
 
@@ -24,8 +24,11 @@ deadline, and a release sets a persisted recovery deadline 5 minutes after the r
 accepted; a recovery that misses it ends `recovery_failed`, whose only exit is teardown
 (ADR-0583). None of these budgets is scaled for TCG, and the external-boot readiness window
 (`KDIVE_LIBVIRT_BOOT_WINDOW_S`, 900 s by default) is already longer than the deadline, so no
-clean-shutdown wait can be shown to fit a TCG recovery. Recovery also runs after `BOOT_TIMEOUT`,
-when the target kernel may be hung: it stays `RUNNING` and ignores the request.
+clean-shutdown wait can be shown to fit a TCG recovery. Preparation is different: it runs before
+the activation deadline is set, and overrunning its per-call client deadline is a retryable
+`INFRASTRUCTURE_FAILURE` that resumes from the pre-stop intent. Recovery also runs after
+`BOOT_TIMEOUT`, when the target kernel may be hung: it stays `RUNNING` and ignores the request.
+The operator chose the TCG treatment below (option B, 2026-09-25, #2780).
 
 ## Decision
 
@@ -33,12 +36,14 @@ when the target kernel may be hung: it stays `RUNNING` and ignores the request.
    `install.py` passes `60 s × tcg_deadline_multiplier(accel)`, so its behaviour is unchanged.
 2. The session reads the accelerator from the inactive definition it opens: `<domain type="kvm">`
    is KVM, any other type is not.
-3. `stop_and_require_inactive(clean=...)` on an active domain calls the helper with the ADR-0679
-   KVM bound of 60 s when `clean` is true and the domain is KVM. Otherwise it destroys at once and
-   logs `destroy-unready` (`clean` false) or `destroy-unaccelerated` (not KVM).
-4. Preparation passes `clean=True`. Recovery passes `clean=True` only in phase `target-defined`:
-   the phase recorded once activation defined the target, after readiness when the source was
-   running. In an earlier phase a running target never proved ready (the `BOOT_TIMEOUT` case).
+3. `stop_and_require_inactive(mode=...)` on an active domain takes one of three modes. `clean`
+   calls the helper with 60 s on KVM (the ADR-0679 KVM bound) and 120 s otherwise.
+   `clean-on-kvm` calls it with 60 s on KVM and otherwise destroys, logged
+   `destroy-unaccelerated`. `destroy` destroys at once, logged `destroy-unready`.
+4. Preparation uses `clean`. Recovery uses `clean-on-kvm` in phase `target-defined`, the phase
+   recorded once activation defined the target, after readiness when the source was running, and
+   `destroy` in an earlier phase, where a running target never proved ready (the `BOOT_TIMEOUT`
+   case).
 5. `restore_power` loses its `prior` argument and its unused `"inactive"` branch: it starts an
    inactive domain, which is all its one caller asks for.
 6. Crash harvest, the customization boot, and System teardown stay hard. Each carries a comment
@@ -46,22 +51,25 @@ when the target kernel may be hung: it stays `RUNNING` and ignores the request.
 
 ## Consequences
 
-- On KVM, a guest write not yet flushed when preparation or a release starts survives into the
-  recovery archive and the restored source.
+- A guest write not yet flushed when preparation starts survives into the recovery archive, and
+  on KVM one made before a release survives into the restored source.
 - A KVM guest that ignores the request (hung after readiness, no ACPI handler) costs 60 s before
   `destroy()`, plus up to 60 s more when a `shutdown()` call blocks in libvirt's guest-agent path,
   which every external-boot domain has. That is at most 120 s of the 5-minute recovery deadline,
   less whatever queue latency has already passed since the release was accepted. A hung source
-  System pays the same cost at preparation.
-- External-boot stops of a TCG domain stay hard and can lose unflushed writes, as before.
+  System pays the same cost at preparation, or 120 s plus the same overrun on TCG; a TCG
+  preparation that then misses its per-call deadline is retried.
+- A TCG recovery stop stays hard and can lose unflushed target writes, as before.
 - The operator `power off` in `lifecycle/control.py` (ADR-0028) is still a hard stop.
 
 ## Considered & rejected
 
-- **Scale the bound for TCG, capped (for example 120 s).** verified: the recovery deadline is
+- **A capped clean stop for TCG recovery too.** verified: the recovery deadline is
   `timedelta(minutes=5)` from acceptance (`mcp/tools/external_boot/recovery_idempotency.py`) while
   the unscaled readiness window defaults to 900 s (`providers/local_libvirt/settings.py`), so no
   cap can be shown to leave room for the TCG boot that follows, and a miss is terminal.
+- **Keep TCG preparation hard as well.** judgment: preparation overruns are retryable, so the
+  wait costs time, not the activation, and it protects the user's own System.
 - **Carry `accel` on the external-boot request or port.** judgment: a schema change for a fact the
   session already holds in the domain XML.
 - **Clean stop on every recovery.** judgment: after `BOOT_TIMEOUT` the target never ran user work,

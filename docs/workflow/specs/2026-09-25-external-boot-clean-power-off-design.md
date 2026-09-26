@@ -23,14 +23,15 @@ writes still in the guest page cache, the loss class ADR-0679 fixed for `runs.bo
    behaviour is unchanged and its tests change only the logger name they capture.
 2. `LocalExternalBootSessionFactory.open` records `kvm = inactive_root.get("type") == "kvm"` and
    the session takes injected `sleep`/`clock` (defaults `time.sleep`/`time.monotonic`).
-3. `stop_and_require_inactive(*, clean: bool)`. On an active domain: `clean` and `kvm` calls
-   `power_off` with `clean_shutdown_bound_s("kvm")` (60 s); `clean` false logs `destroy-unready`
-   (WARNING) and destroys; not `kvm` logs `destroy-unaccelerated` (WARNING) and destroys. All
-   paths then call `require_inactive()`. An inactive domain is untouched.
-4. Preparation (`_RealLocalExternalBootOperation.prepare`) calls
-   `stop_and_require_inactive(clean=True)`.
-5. `_stop_for_recovery` calls `stop_and_require_inactive(clean=metadata.phase ==
-   "target-defined")`. Its existing post-stop checks are unchanged.
+3. `stop_and_require_inactive(*, mode: StopMode)` with
+   `StopMode = Literal["clean", "clean-on-kvm", "destroy"]`. On an active domain: `clean` calls
+   `power_off` with `clean_shutdown_bound_s("kvm")` (60 s) on KVM and 120 s otherwise;
+   `clean-on-kvm` does the same on KVM and otherwise logs `destroy-unaccelerated` (WARNING) and
+   destroys; `destroy` logs `destroy-unready` (WARNING) and destroys. All paths then call
+   `require_inactive()`. An inactive domain is untouched.
+4. Preparation (`_RealLocalExternalBootOperation.prepare`) uses `mode="clean"`.
+5. `_stop_for_recovery` uses `"clean-on-kvm"` when `metadata.phase == "target-defined"`, else
+   `"destroy"`. Its existing post-stop checks are unchanged. (Operator decision, option B.)
 6. `restore_power(self) -> None` replaces `restore_power(prior)`: it refuses with an open guest
    context and starts the domain when inactive. The one caller (`_abort_preparation`) drops its
    argument; the Protocol changes to match.
@@ -51,8 +52,11 @@ writes still in the guest page cache, the loss class ADR-0679 fixed for `runs.bo
 3. **Accepted failure classes**
    - A KVM guest that ignores the request costs 60 s, plus up to 60 s when `shutdown()` blocks in
      the guest-agent path (ADR-0679), before `destroy()`; at most 120 s of the recovery deadline.
-   - A TCG domain's external-boot stops stay hard and can lose unflushed writes: the pre-change
-     behaviour, kept because no wait can be shown to fit the unscaled deadline (ADR-0681).
+   - A TCG recovery stop stays hard and can lose unflushed target writes: the pre-change
+     behaviour, kept because no wait can be shown to fit the unscaled recovery deadline
+     (ADR-0681; operator decision, option B).
+   - A TCG preparation stop costs up to 120 s plus the agent overrun; a miss of the per-call
+     deadline is a retryable `INFRASTRUCTURE_FAILURE`.
    - A domain definition without `type="kvm"` is treated as not KVM; libvirt always writes `type`.
 4. **Covered elsewhere**
    - operator `power off` (`lifecycle/control.py`, ADR-0028): operator-excluded, reported as a
@@ -64,18 +68,19 @@ writes still in the guest page cache, the loss class ADR-0679 fixed for `runs.bo
 
 - Unit, session (`tests/providers/local_libvirt/lifecycle/boot/test_session.py`, doubles in
   `session_support.py`): a KVM clean stop sends `shutdown` and no `destroy`; a KVM guest that
-  ignores it is destroyed after 60 fake-clock seconds; `clean=False` and a non-KVM domain each
-  destroy with no `shutdown` and log their path; `restore_power()` starts an inactive domain and
+  ignores it is destroyed after 60 fake-clock seconds, a non-KVM one after 120 under `clean`;
+  `destroy`, and `clean-on-kvm` on a non-KVM domain, each destroy with no `shutdown` and log
+  their path; `restore_power()` starts an inactive domain and
   leaves an active one alone.
 - Unit, provider (`tests/providers/local_libvirt/test_external_boot.py`): preparation passes
-  `clean=True`; recovery passes `clean=True` in `target-defined` and `clean=False` in
+  `clean`; recovery passes `clean-on-kvm` in `target-defined` and `destroy` in
   `module-restored`.
 - Unit, install (`tests/providers/local_libvirt/test_install.py`): the existing power-off tests
   pass with `_POWER_OFF_LOGGER` pointed at the `power` module.
 - Live, direct-provider arm on a KVM host: a real provisioned System, guest writeback disabled
   (`vm.dirty_writeback_centisecs=0`, `vm.dirty_expire_centisecs=360000`) before an unsynced write,
-  a real session `stop_and_require_inactive(clean=True)`, then the file read from the overlay
+  a real session `stop_and_require_inactive(mode="clean")`, then the file read from the overlay
   through the session's libguestfs guest: present. Negative control on the same System with
-  `clean=False`: the write is absent or empty. The full authority-carrier arm
+  `mode="destroy"`: the write is absent or empty. The full authority-carrier arm
   (`tests/live_vm/test_installed_local_authority.py`) runs where the authority service is
   installed; where it is not, the PR says so.

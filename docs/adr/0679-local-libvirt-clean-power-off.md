@@ -9,7 +9,7 @@ Amends [ADR-0030](0030-install-boot-plane.md) §6 and
 force-off hard-destroys a guest that can shut down.
 
 > **Amended by [ADR-0681](0681-external-boot-clean-power-off.md) (#2780):** the external-boot
-> preparation and recovery stops of a KVM domain now use this helper.
+> preparation stops and KVM recovery stops now use this helper.
 
 ## Context
 
