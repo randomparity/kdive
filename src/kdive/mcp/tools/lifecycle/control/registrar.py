@@ -74,8 +74,10 @@ from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_f
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
-from kdive.providers.local_libvirt.lifecycle.power import clean_shutdown_bound_s
-from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
+from kdive.providers.local_libvirt.settings import (
+    CLEAN_SHUTDOWN_BASE_S,
+    LIBVIRT_TCG_DEADLINE_MULTIPLIER,
+)
 from kdive.security import audit
 from kdive.security.artifacts.bpf_filter import hygiene_reason
 from kdive.security.authz.context import RequestContext
@@ -685,7 +687,7 @@ def _register_control_power(app: FastMCP, pool: AsyncConnectionPool) -> None:
                     "exception: it resumes a PAUSED System (left suspended by a `systems.restore` "
                     "with `start_paused=true`) back to READY, and is admitted only from PAUSED. "
                     "On local libvirt, `off` requests clean shutdown with a monotonic polling "
-                    f"bound of {int(clean_shutdown_bound_s('kvm'))} s on KVM or that bound times "
+                    f"bound of {int(CLEAN_SHUTDOWN_BASE_S)} s on KVM or that bound times "
                     "the configured TCG multiplier "
                     f"({LIBVIRT_TCG_DEADLINE_MULTIPLIER.default} by default), then falls back "
                     "to hard destroy if still active. One blocking libvirt shutdown call may "

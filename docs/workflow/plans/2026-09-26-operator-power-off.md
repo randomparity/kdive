@@ -37,6 +37,9 @@ changes to the `Controller` port.
   its hard destroy call, and the existing `Controller` signature is retained.
 - `src/kdive/mcp/tools/lifecycle/control/registrar.py`: owns the tool schema text; describe the
   local-libvirt OFF wait and fallback in the wrapper and `action` Field, keeping other actions.
+- `src/kdive/providers/local_libvirt/settings.py` and `lifecycle/power.py`: expose the existing
+  60-second helper base from dependency-light settings so the MCP Field can interpolate it
+  without importing provider implementation. Keep the helper's value and behavior unchanged.
 - `docs/guide/reference/control.md`: regenerate from that wrapper with `just docs`.
 - `src/kdive/cli/commands/_generated_verbs.py`: regenerate its wrapper description with
   `just cli-verbs`.
@@ -111,9 +114,11 @@ docstring and `action` Field are the agent-facing schema; generated `control.md`
    tests/mcp/lifecycle/test_control_registrar.py::test_register_publishes_control_tool_contracts
    -q`; expect failure before the text change.
 2. Update only OFF text in `src/kdive/mcp/tools/lifecycle/control/registrar.py`, stating unit,
-   monotonic reference clock, per-job scope, fallback, and `jobs.wait` polling. Run `just docs`.
-3. Re-run the focused test, `just docs-check`, and `just cli-verbs-check`; expect all pass.
-   Commit wrapper, generated reference and CLI description, and test.
+   monotonic reference clock, per-job scope, fallback, and `jobs.wait` polling. Interpolate the
+   KVM base from dependency-light local-libvirt settings, used also by the helper. Run `just docs`.
+3. Re-run the focused test, provider-boundary tests, `just docs-check`, and
+   `just cli-verbs-check`; expect all pass. Commit wrapper, shared constant, generated reference
+   and CLI description, and test.
 
 ## Ship checks
 

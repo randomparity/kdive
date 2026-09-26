@@ -22,6 +22,9 @@ from kdive.config.registry import Setting
 
 _RT = frozenset({"worker", "reconciler"})
 
+# The ADR-0679 local-libvirt clean-stop polling bound shared with agent-facing tool text.
+CLEAN_SHUTDOWN_BASE_S = 60.0
+
 # A round, generous ceiling: no real deployment needs a multiplier this large. Unlike the
 # multiplier itself, this constant has no env var binding; raising it if one ever needs to
 # is a follow-up code change to this line, not an operator setting (no ADR required) (#2415).

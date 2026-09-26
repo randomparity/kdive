@@ -23,7 +23,9 @@ shutdown policy or `Controller` interface is introduced here.
 
 The `control.power` MCP wrapper states the local-libvirt OFF wait in seconds, its worker monotonic
 reference clock, its per-job scope, hard-destroy consequence, and `jobs.wait` polling action. The
-generated tool reference and CLI verb description follow the wrapper.
+60-second base constant lives in dependency-light local-libvirt settings so both the provider
+helper and MCP Field use it without an MCP import of provider implementation. The generated tool
+reference and CLI verb description follow the wrapper.
 
 Excluded: other power actions (control plane), install and external-boot shutdown
 (ADR-0679/0681 owners), and a configurable wait (future decision).
@@ -86,5 +88,7 @@ dependencies or changes to the `Controller` port.
 - `focused-test`: `tests/mcp/lifecycle/test_control_registrar.py` checks that the agent-facing
   wrapper and `action` Field expose the new wait/fallback; `just docs-check` and
   `just cli-verbs-check` check generated consumers.
+- `focused-test`: `tests/providers/test_provider_boundaries.py` checks that the MCP wrapper
+  imports only provider settings, while existing helper tests check the shared base bound.
 - `task-test-not-applicable`: no live VM proof in this worktree because the native live tier
   requires a provisioned operator VM; unit tests exercise the provider with fake libvirt domains.
