@@ -17,7 +17,7 @@ which owns the command sequence, the guest-image build, and the MCP client wirin
 |---|---|---|---|
 | Debian / Ubuntu | full | yes | Ubuntu 26.04 |
 | Fedora | full | yes | Fedora 44, end to end |
-| RHEL / CentOS Stream / Rocky / Alma | full, once you install a container engine | **no — stage images from elsewhere** | Rocky 10 host prep and stack; Rocky 9 package names |
+| RHEL / CentOS Stream / Rocky / Alma | **fails at the lifecycle installer:** no guestfs binding for the worker's Python 3.14, so no provisioning ([below](#family-differences-that-matter)) | no | Rocky 10 host prep and stack before that check was added; Rocky 9 package names |
 | Anything else (Arch, SUSE, …) | refuses with `exit 2` | — | — |
 
 An unsupported host is not a dead end: the [prerequisites](#what-a-host-needs) below are the whole
