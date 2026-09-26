@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -11,20 +12,32 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.profiles.provisioning import profile_digest
 from kdive.providers.local_libvirt.lifecycle.boot.session import owned_system_semantic_identity
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
+from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
 from kdive.providers.local_libvirt.system_authority import (
     LocalAuthoritySystemError,
     LocalAuthoritySystemProvider,
     LocalAuthoritySystemTopology,
     _Intent,
 )
+from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.system_authority import (
     AuthoritySystemCommitContextV1,
     AuthoritySystemMutationRequestV1,
     AuthoritySystemOperation,
     AuthoritySystemProvisionFacts,
+    AuthoritySystemProvisionSnapshot,
 )
+from kdive.providers.system_authority.composition import _AuthorityProvisioner
 from tests.providers.local_libvirt.lifecycle.boot.session_support import _xml
+from tests.providers.local_libvirt.test_provisioning import (
+    _CAPS_X86_KVM_PPC_TCG,
+    _arch_profile,
+    _prov,
+    _ProvConn,
+)
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -118,6 +131,73 @@ def test_private_intent_is_fsynced_private_and_replay_is_exact(tmp_path: Path) -
     changed = replace(intent, deadline=intent.deadline + timedelta(seconds=1))
     with pytest.raises(LocalAuthoritySystemError, match="replaced"):
         provider._store_intent(changed)
+
+
+def test_authority_tcg_defined_domain_matches_retained_intent_identity(tmp_path: Path) -> None:
+    profile = _arch_profile("ppc64le")
+    intent = _intent(tmp_path)
+    intent = replace(
+        intent,
+        overlay=overlay_path(intent.system_id),
+        baseline=baseline_dir(intent.system_id),
+    )
+    root_spec = RootSpecV1(
+        architecture="ppc64le",
+        root="/dev/vda1",
+        arguments=("root=/dev/vda1",),
+        authority="stage-inspection",
+        source={"kind": "staged-image", "identity": _DIGEST},
+    )
+    bootstrap_key = "ssh-ed25519 YWFhYQ== kdive-system"
+    snapshot = AuthoritySystemProvisionSnapshot(
+        system_id=intent.system_id,
+        allocation_id=intent.allocation_id,
+        resource_id=intent.resource_id,
+        project="project-a",
+        provider_kind="local-libvirt",
+        resource_name="local-a",
+        authority_instance=intent.authority_instance,
+        profile=profile,
+        profile_identity="sha256:" + profile_digest(profile),
+        source_image_id=uuid4(),
+        root_identity=_DIGEST,
+        root_spec=root_spec,
+        bootstrap_public_key=bootstrap_key,
+        bootstrap_identity="sha256:" + hashlib.sha256(bootstrap_key.encode()).hexdigest(),
+    )
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    expected_guest_arch = ("tcg", "/usr/bin/qemu-system-ppc64")
+    provider = LocalAuthoritySystemProvider(
+        provisioner=_AuthorityProvisioner(_prov(conn), expected_guest_arch),
+        topology=LocalAuthoritySystemTopology(
+            intent_root=tmp_path / "intents",
+            overlay_root=tmp_path / "overlays",
+            baseline_root=tmp_path / "baseline",
+            staged_bases={_DIGEST: tmp_path / "base.qcow2"},
+            accel=expected_guest_arch[0],
+            emulator=expected_guest_arch[1],
+        ),
+        readiness_probe=lambda _system_id: False,
+        open_teardown=lambda *_args: _AbsentTeardown(),
+        assert_no_sibling_attachment=lambda _system_id, _overlay, _baseline: None,
+        allocate_port=lambda: 2200,
+    )
+    try:
+        provider._provisioner.provision(
+            intent.system_id,
+            profile,
+            selected_ssh_port=intent.ssh_port,
+        )
+        intent_with_xml = provider._intent_with_xml(
+            intent, snapshot, BaselineKernel(kernel=Path(intent.baseline) / "kernel", initrd=None)
+        )
+    finally:
+        provider.close()
+
+    assert len(conn.recorded_xml) == 1
+    assert intent_with_xml.xml_digest == owned_system_semantic_identity(
+        conn.recorded_xml[0], intent.system_id, intent.overlay
+    )
 
 
 def test_observation_load_does_not_create_private_intent_root(tmp_path: Path) -> None:
