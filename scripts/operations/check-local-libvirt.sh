@@ -34,6 +34,9 @@ else
   readonly PY="${KDIVE_PYTHON:-python3}"
 fi
 unset _repo_venv_py
+# The installed lifecycle worker's own venv, which provisions: baseline-kernel extraction imports
+# guestfs there (ADR-0272), so this probe is required whenever that venv exists.
+readonly LIFECYCLE_PY="${KDIVE_LIFECYCLE_PYTHON:-/opt/kdive-live-worker-lifecycle/.venv/bin/python}"
 # runs.install stages the kernel/initrd here before booting the System; must be writable
 # by the worker user and live under a path the qemu user can traverse (see the boot check).
 readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
@@ -51,10 +54,10 @@ readonly BOOT_DIR="${KDIVE_BOOT_DIR:-/boot}"
 # KDIVE_EFFECTIVE_UID overrides $EUID for tests, mirroring the KDIVE_KVM_NODE override.
 readonly LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
 readonly EFFECTIVE_UID="${KDIVE_EFFECTIVE_UID:-$EUID}"
-# The guestfs/drgn venv probe gates only the kdump capture method. A host that must capture
-# kdump cores (the CI runner, `just onboard`) keeps it as a FAIL; a first-run developer box can
-# downgrade it to a WARN with KDIVE_PREFLIGHT_KDUMP=optional, so the core provision/build/boot
-# lifecycle starts without the one-time libguestfs wiring. Every other check stays required.
+# The KDIVE_PYTHON guestfs/drgn probe covers the checkout's CLI tooling (build-fs, kdump). A host
+# that must capture kdump cores (the CI runner, `just onboard`) keeps it as a FAIL; a first-run
+# developer box can downgrade it to a WARN with KDIVE_PREFLIGHT_KDUMP=optional. Every other check,
+# including the lifecycle worker venv's guestfs probe, stays required.
 readonly KDUMP_PREFLIGHT="${KDIVE_PREFLIGHT_KDUMP:-required}"
 case "${KDUMP_PREFLIGHT}" in
 required | optional) ;;
@@ -148,6 +151,7 @@ _default_net_active() {
   [[ "$out" == *"Active:"*[Yy]es* ]]
 }
 _venv_imports_kdump_deps() { "${PY}" -c "import guestfs, drgn" >/dev/null 2>&1; }
+_lifecycle_venv_imports_guestfs() { "${LIFECYCLE_PY}" -c "import guestfs" >/dev/null 2>&1; }
 _host_kernels_readable() {
   local k found=0
   # A BOOT_DIR this user cannot list hides every kernel from the globs below, which would
@@ -285,12 +289,22 @@ if _venv_imports_kdump_deps; then
   note_ok "KDIVE_PYTHON (${PY}) imports guestfs and drgn"
 elif [[ "${KDUMP_PREFLIGHT}" == "optional" ]]; then
   note_warn \
-    "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling); provision/build/boot and the other capture methods still work" \
+    "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling from the checkout); the installed lifecycle venv is probed separately" \
     "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\""
 else
   note_fail \
     "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling)" \
     "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\""
+fi
+
+if [[ ! -x "${LIFECYCLE_PY}" ]]; then
+  note_info "lifecycle worker venv (${LIFECYCLE_PY}) is not installed; its guestfs probe is skipped"
+elif _lifecycle_venv_imports_guestfs; then
+  note_ok "lifecycle worker venv (${LIFECYCLE_PY}) imports guestfs"
+else
+  note_fail \
+    "lifecycle worker venv (${LIFECYCLE_PY}) cannot 'import guestfs'; the worker needs it to provision (baseline-kernel extraction), build-fs, stage built kernels, external boot and local kdump capture" \
+    "re-run deploy/systemd/install-live-worker-lifecycle.sh (just prepare-local-libvirt-host), which links the distro binding when system python3 matches the venv's Python; otherwise install a guestfs binding built for the venv's Python (guestfs.py + libguestfsmod*.so) into its site-packages"
 fi
 
 if _host_kernels_readable; then

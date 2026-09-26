@@ -993,6 +993,71 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert 'usermod -G "$libvirt_group,kvm" "$worker"' in source
 
 
+def _run_guestfs_link_on_a_mismatched_host(
+    tmp_path: Path, *, venv_imports_guestfs: bool
+) -> subprocess.CompletedProcess[str]:
+    """Run ``_link_system_guestfs_binding`` against a venv stub on a Python minor no host has.
+
+    The stub reports minor 99, so the real ``/usr/bin/python3`` always mismatches it -- the
+    Enterprise Linux shape (system 3.12, worker venv 3.14) on any test host.
+    """
+    site = tmp_path / "site-packages"
+    site.mkdir()
+    guestfs_exit = 0 if venv_imports_guestfs else 1
+    venv_python = tmp_path / "python"
+    venv_python.write_text(
+        "#!/bin/bash\n"
+        'case "$2" in\n'
+        "  *version_info*) echo 99 ;;\n"
+        f"  *sysconfig*) echo {site} ;;\n"
+        f"  'import guestfs') exit {guestfs_exit} ;;\n"
+        "  *) exit 97 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    venv_python.chmod(0o755)
+    return subprocess.run(
+        ["/bin/bash", "-c", 'source "$1"; _link_system_guestfs_binding "$2"', "bash"]
+        + [str(INSTALLER), str(venv_python)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_guestfs_mismatch_keeps_a_binding_the_worker_venv_already_imports(
+    tmp_path: Path,
+) -> None:
+    """A binding built for the venv's own Python (EL, #2781) satisfies the mismatch path.
+
+    It is loose ``guestfs.py`` + ``libguestfsmod*.so`` in site-packages with no dist-info, so
+    only an import proves it is there.
+    """
+    result = _run_guestfs_link_on_a_mismatched_host(tmp_path, venv_imports_guestfs=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "already imports guestfs" in result.stderr
+    assert not list((tmp_path / "site-packages").iterdir())
+
+
+def test_guestfs_mismatch_without_a_worker_binding_fails_loud(tmp_path: Path) -> None:
+    """The worker venv provisions, so a venv that cannot import guestfs is a failed install.
+
+    ADR-0272 makes the binding a provision prerequisite; reporting only lost kdump capture and
+    exiting 0 left an EL host "prepared" that failed every provision (#2781).
+    """
+    result = _run_guestfs_link_on_a_mismatched_host(tmp_path, venv_imports_guestfs=False)
+
+    assert result.returncode != 0
+    for needed_by in ("provision", "build-fs", "external boot", "kdump capture"):
+        assert needed_by in result.stderr, result.stderr
+    assert "unaffected" not in result.stderr
+    # The remedy names where the binding must go and that a rerun picks it up.
+    assert str(tmp_path / "site-packages") in result.stderr
+    assert "Python 3.99" in result.stderr
+    assert "re-run" in result.stderr
+
+
 def test_installer_builds_the_worker_venv_locked_with_the_live_group() -> None:
     """A venv the installer builds alone must carry ``drgn`` and the locked ``grpcio``.
 

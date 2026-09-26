@@ -30,7 +30,13 @@ def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     # /usr/libexec/qemu-kvm, which qemu-kvm-core installs on the whole RHEL family — leaving it
     # unset would make these tests read the host and fail on exactly the distros this change
     # exists to support. A caller that wants it present passes its own KDIVE_QEMU_LIBEXEC.
-    full_env = {"KDIVE_QEMU_LIBEXEC": "/nonexistent/qemu-kvm", **env}
+    # The lifecycle worker venv defaults to its real install path for the same reason: pin it
+    # absent so a test host that ran host preparation is not read either.
+    full_env = {
+        "KDIVE_QEMU_LIBEXEC": "/nonexistent/qemu-kvm",
+        "KDIVE_LIFECYCLE_PYTHON": "/nonexistent/lifecycle/python",
+        **env,
+    }
     return subprocess.run(
         [BASH, str(SCRIPT)], env=full_env, capture_output=True, text=True, check=False
     )
@@ -155,6 +161,58 @@ def test_unwritable_install_staging_fails_with_hint(tmp_path: Path) -> None:
     assert "install staging" in result.stderr.lower()
     assert "KDIVE_INSTALL_STAGING" in result.stderr
     assert "$HOME" in result.stderr  # the hint must name the qemu-traversability trap
+
+
+def _healthy_lifecycle_env(tmp_path: Path) -> dict[str, str]:
+    bindir, py = _healthy_bin(tmp_path)
+    return _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+
+
+@pytest.mark.parametrize("kdump_preflight", ["required", "optional"])
+def test_lifecycle_venv_without_guestfs_fails_whatever_the_kdump_setting(
+    tmp_path: Path, kdump_preflight: str
+) -> None:
+    """The installed lifecycle worker provisions, and provisioning needs guestfs (#2781).
+
+    So its probe is a FAIL that KDIVE_PREFLIGHT_KDUMP=optional does not downgrade: that knob
+    covers only the checkout interpreter's kdump tooling.
+    """
+    env = _healthy_lifecycle_env(tmp_path)
+    lifecycle = _stub_python(tmp_path / "bin", "lifecycle-python", imports_ok=False)
+    env |= {"KDIVE_LIFECYCLE_PYTHON": str(lifecycle), "KDIVE_PREFLIGHT_KDUMP": kdump_preflight}
+
+    result = _run(env)
+
+    assert result.returncode == 1, result.stderr
+    fail_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith("FAIL") and "import guestfs" in line
+    )
+    assert str(lifecycle) in fail_line
+    assert "provision" in fail_line
+    assert "install-live-worker-lifecycle.sh" in result.stderr
+
+
+def test_lifecycle_venv_with_guestfs_passes(tmp_path: Path) -> None:
+    env = _healthy_lifecycle_env(tmp_path)
+    lifecycle = _stub_python(tmp_path / "bin", "lifecycle-python", imports_ok=True)
+    env["KDIVE_LIFECYCLE_PYTHON"] = str(lifecycle)
+
+    result = _run(env)
+
+    assert result.returncode == 0, result.stderr
+    assert f"lifecycle worker venv ({lifecycle}) imports guestfs" in result.stderr
+
+
+def test_absent_lifecycle_venv_is_reported_not_failed(tmp_path: Path) -> None:
+    """The preflight runs before host preparation, when no lifecycle venv exists yet."""
+    result = _run(_healthy_lifecycle_env(tmp_path))
+
+    assert result.returncode == 0, result.stderr
+    assert "INFO  lifecycle worker venv (/nonexistent/lifecycle/python) is not installed" in (
+        result.stderr
+    )
 
 
 def test_missing_venv_bindings_fails_with_hint(tmp_path: Path) -> None:

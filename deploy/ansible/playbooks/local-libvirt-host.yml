@@ -288,7 +288,9 @@
         msg: >-
           system python3 is 3.{{ local_libvirt_host_system_python_minor.stdout }} but the venv is
           3.{{ local_libvirt_host_venv_python_minor.stdout }}; the distro guestfs binding cannot
-          be shared, so build-fs and local kdump capture are unavailable from this venv.
+          be shared, so build-fs and local kdump tooling are unavailable from this checkout venv.
+          Provisioning runs in the lifecycle worker venv, which the lifecycle installer above
+          already required to import guestfs.
       when: >-
         local_libvirt_host_system_python_minor.stdout != local_libvirt_host_venv_python_minor.stdout
 

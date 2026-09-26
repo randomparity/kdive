@@ -38,18 +38,32 @@ _link_system_guestfs_binding() (
   # venv only when the two minor versions match. Ubuntu 26.04 and Fedora 44 both ship the
   # project's 3.14 as /usr/bin/python3 and share it. Enterprise Linux ships 3.12 there and
   # packages 3.14 separately, so its python3-libguestfs can never load in the worker's 3.14 venv
-  # — linking it anyway fails with "No module named 'libguestfsmod'" and used to abort host
-  # preparation entirely. Skip on a mismatch and say so: it costs only local kdump capture
-  # (ADR-0203), which is exactly how examples/local-libvirt/install-host.sh reports the same
-  # condition. A mismatch is a property of the host's packaging, not a broken install; where the
-  # versions DO match, every failure below stays fatal.
+  # — linking it anyway fails with "No module named 'libguestfsmod'". This venv is the worker that
+  # provisions, and provisioning extracts the baseline kernel through the binding (ADR-0272), as
+  # do build-fs, built-kernel staging, external boot and local kdump capture. So on a mismatch the
+  # venv must already import a binding built for its own Python — loose guestfs.py +
+  # libguestfsmod*.so in site-packages, which uv sync leaves alone — or the install fails here,
+  # before the tree is hardened, so the operator can add one and re-run. Failing rather than
+  # warning is deliberate: the play runs this installer with its output censored and reports
+  # stderr only on a non-zero exit, so a warning never reaches the operator.
   system_minor="$(/usr/bin/python3 -c 'import sys; print(sys.version_info[1])')"
   venv_minor="$("$venv_python" -c 'import sys; print(sys.version_info[1])')"
   if [[ $system_minor != "$venv_minor" ]]; then
-    echo "system python3 is 3.${system_minor} but the worker venv is 3.${venv_minor}; the distro" \
-      "guestfs binding cannot be shared. Local kdump capture is unavailable on this host;" \
-      "every other capture method and the whole build/boot/debug path are unaffected." >&2
-    return 0
+    if "$venv_python" -c 'import guestfs' >/dev/null 2>&1; then
+      echo "system python3 is 3.${system_minor} but the worker venv is 3.${venv_minor}; the" \
+        "worker venv already imports guestfs, so that binding is kept." >&2
+      return 0
+    fi
+    venv_site="$(
+      "$venv_python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))'
+    )"
+    echo "system python3 is 3.${system_minor} but the worker venv is 3.${venv_minor}, so the" \
+      "distro guestfs binding cannot be shared, and the worker venv cannot import guestfs." \
+      "The lifecycle worker needs it to provision (baseline-kernel extraction), build-fs," \
+      "stage built kernels, external boot and local kdump capture. Install a guestfs binding" \
+      "built for Python 3.${venv_minor} (guestfs.py and libguestfsmod*.so) into ${venv_site}," \
+      "then re-run this installer." >&2
+    return 1
   fi
   system_site="$(
     /usr/bin/python3 -c \
