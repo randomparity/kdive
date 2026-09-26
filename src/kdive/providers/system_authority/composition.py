@@ -266,13 +266,18 @@ class _LocalReadiness:
 class _AuthorityProvisioner:
     """Narrow the concrete provisioner to the provider's deliberately small port."""
 
-    def __init__(self, delegate: LocalLibvirtProvisioning) -> None:
+    def __init__(
+        self, delegate: LocalLibvirtProvisioning, expected_guest_arch: tuple[str, str | None]
+    ) -> None:
         self._delegate = delegate
+        self._expected_guest_arch = expected_guest_arch
 
     def provision(self, system_id: UUID, profile: Any, **kwargs: Any) -> str:
         if not isinstance(profile, ProvisioningProfile):
             raise TypeError("authority System provisioning profile is invalid")
-        return self._delegate.provision(system_id, profile, **kwargs)
+        return self._delegate.provision(
+            system_id, profile, expected_guest_arch=self._expected_guest_arch, **kwargs
+        )
 
 
 def _local_base_selector(
@@ -364,7 +369,7 @@ def build_local_authority_system_provider(
         guest_egress=manifest.guest_egress,
     )
     provider = LocalAuthoritySystemProvider(
-        provisioner=_AuthorityProvisioner(provisioner),
+        provisioner=_AuthorityProvisioner(provisioner, (manifest.accel, manifest.emulator)),
         topology=topology,
         readiness_probe=readiness,
         open_teardown=lambda system_id, overlay, baseline: open_authority_system_teardown(

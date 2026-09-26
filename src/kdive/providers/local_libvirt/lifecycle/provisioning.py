@@ -278,6 +278,7 @@ class LocalLibvirtProvisioning:
         selected_gdb_port: int | None = None,
         selected_ssh_port: int | None = None,
         before_extract_baseline: Callable[[BaselineKernel], None] | None = None,
+        expected_guest_arch: tuple[str, str | None] | None = None,
     ) -> str:
         """Define and start the tagged domain, wait for its first boot to be ready; return its name.
 
@@ -315,6 +316,13 @@ class LocalLibvirtProvisioning:
         # a fail-closed arch drift or a caps-read fault rejects with zero overlay/baseline and
         # skips the expensive rootfs materialization for a System that cannot be provisioned.
         accel, emulator = self._resolve_guest_arch(profile.arch)
+        if expected_guest_arch is not None:
+            expected_accel, expected_emulator = expected_guest_arch
+            if accel != expected_accel or (accel != "kvm" and emulator != expected_emulator):
+                raise CategorizedError(
+                    "authority manifest accelerator or emulator differs from live capabilities",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                )
         # Snapshot which host artifacts pre-exist BEFORE materializing anything, so a failure after
         # materialization reclaims only what THIS call creates (ADR-0435): a pre-existing overlay,
         # baseline dir, or staged uploaded rootfs may back a live or recoverable prior attempt.

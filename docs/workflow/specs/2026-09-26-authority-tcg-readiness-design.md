@@ -24,6 +24,11 @@ unreachable. The operator approved adding `tcg` on 2026-09-26. Retain `kvm` as t
 default, align the Ansible deployment validator, and keep unknown accelerator values
 invalid. Domain XML already accepts TCG.
 
+The authority provisioner compares the manifest-selected accelerator and TCG
+emulator with live libvirt capability resolution before creating guest artifacts.
+This keeps the domain XML consistent with the retained intent XML without
+changing ordinary provisioning's live-resolution behavior.
+
 The regular provision path and external-boot deadlines belong to their existing
 owners. The multiplier default remains governed by ADR-0341.
 The authority provider's default intent lifetime remains the single source for
@@ -36,7 +41,9 @@ nominal budget decision.
 Invalid window-to-intent configuration fails during composition with an actionable
 `ValueError`, before provider construction or guest mutation. Existing readiness
 failure behavior remains unchanged. A TCG manifest without the emulator required
-by domain XML continues to fail at that existing boundary.
+by domain XML continues to fail at that existing boundary. A manifest that
+disagrees with live accelerator or TCG emulator resolution fails as a
+configuration error before guest artifact creation.
 
 ## Success
 
@@ -52,5 +59,8 @@ window fails composition. The external-boot caller continues using the base wind
   the default preserves the external-boot behavior.
 - `focused-test`: both manifest validators accept `tcg` and reject unknown
   accelerators, while retaining the KVM default.
+- `focused-test`: an authority TCG manifest matches a live foreign-architecture
+  TCG resolution on a KVM-capable host; conflicting accelerator, absent emulator,
+  and conflicting emulator fail before artifact creation.
 - `task-test-not-applicable`: a live TCG authority guest requires an operator supplied
   authority host and base image; no such fixture is provided in this checkout.

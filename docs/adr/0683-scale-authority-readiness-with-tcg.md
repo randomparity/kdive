@@ -25,6 +25,11 @@ Admit `tcg` in the operator-supplied authority manifest and its Ansible
 deployment validator, while retaining `kvm` as the default and rejecting
 unknown accelerator values. The operator approved this additive contract
 change on 2026-09-26.
+Before creating guest artifacts, authority provisioning checks that the
+manifest-selected accelerator and TCG emulator agree with live libvirt
+capability resolution. Ordinary provisioning continues to resolve from live
+capabilities. This preserves the retained intent XML identity when the
+authority manifest selects TCG.
 
 ## Consequences
 
@@ -33,6 +38,8 @@ KVM retains the current budgets. A default TCG authority configuration has a
 configuration with a larger boot window fails at assembly with an actionable
 error. The intent deadline continues to gate retries at operation entry; this
 decision does not move its clock start or promise full remaining console time.
+A TCG manifest that conflicts with live capability resolution fails before
+guest artifact creation.
 
 ## Considered & rejected
 
