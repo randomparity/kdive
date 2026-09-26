@@ -54,7 +54,9 @@ Bindings are an object with `version` (integer 1), `candidate_sha` (full lowerca
 `matrix_sha256` (from the fast check) and `cells`, a map from required cell ID to `Context`.
 The binding is the independent expectation: prepare it from the selected candidate and immutable
 fixtures before admitting producer results. Do not derive expected inputs from the result file.
-Unknown binding keys fail; missing applicable bindings prevent qualification.
+Unknown binding keys fail; missing applicable bindings prevent qualification. Catalog smoke also
+checks the exact guest distribution/version against its catalog row. Family lanes check the guest
+family, or the host family for clean-host installation, against catalog ownership.
 
 Each `Context` has these fields. Optional fields use JSON null when inapplicable; a cell's required
 input names override that optionality.
@@ -70,7 +72,7 @@ input names override that optionality.
 | `kernel_build_id` | Lowercase hexadecimal ELF build ID, 16–128 characters. |
 
 OS names are restricted to `ubuntu`, `debian`, `fedora`, `rhel`, `rocky`, `almalinux`,
-`centos-stream`, `opensuse` and `sles`, followed by a numeric dotted version. Use a public platform
+`centos-stream`, `opensuse-leap`, `opensuse-tumbleweed` and `sles`, followed by a numeric dotted version. Use a public platform
 identity, never a host name, address or private path. This schema does not declare new VM targets.
 
 Results are one JSON array. Each record contains:

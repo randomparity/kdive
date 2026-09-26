@@ -240,3 +240,51 @@ def test_report_is_complete_stable_and_omits_untrusted_record_labels() -> None:
     assert "not-run" in text
     assert all(c.id in text for c in contract.cells)
     assert text == merge_and_render(qualify(contract, bindings, list(reversed(results[1:]))))
+
+
+@pytest.mark.parametrize(
+    "operation,family,platform_field,valid,wrong",
+    [
+        ("image-smoke", "fedora", "guest_os", "fedora:43", "debian:13"),
+        ("image-smoke", "fedora", "guest_os", "fedora:43", "fedora:44"),
+        ("deep-lifecycle", "fedora", "guest_os", "fedora:44", "rocky:10"),
+        ("host-install", "debian", "host_os", "ubuntu:26.04", "fedora:44"),
+    ],
+)
+def test_both_input_files_cannot_redefine_the_required_platform_lane(
+    operation: str,
+    family: str,
+    platform_field: str,
+    valid: str,
+    wrong: str,
+) -> None:
+    from scripts.coverage_campaign.contract import build_contract
+
+    actual = build_contract()
+    cell = next(
+        c
+        for c in actual.cells
+        if c.operation == operation
+        and c.family == family
+        and c.guest_arch == "x86_64"
+        and (c.image is None or c.image == "fedora-kdive-ready-43")
+    )
+    cell = replace(cell, node_id=NODE)
+    contract = replace(actual, cells=(cell,))
+    _, bindings, results = complete_evidence()
+    for platform, should_pass in [(valid, True), (wrong, False)]:
+        context = results[0].context.model_copy(update={platform_field: platform})
+        inputs = bindings.model_copy(
+            update={"matrix_sha256": contract.matrix_sha256, "cells": {cell.id: context}}
+        )
+        result = results[0].model_copy(
+            update={
+                "cell_id": cell.id,
+                "scenario_id": cell.scenario_id,
+                "matrix_sha256": contract.matrix_sha256,
+                "context": context,
+                "input_sha256": digest(context),
+                "assertions": {key: DIGEST for key in cell.assertions},
+            }
+        )
+        assert qualify(contract, inputs, [result]).passed is should_pass

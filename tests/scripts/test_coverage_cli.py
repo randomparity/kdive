@@ -84,3 +84,17 @@ def test_cli_parser_error_is_sanitized(tmp_path: Path, capsys: pytest.CaptureFix
     error = capsys.readouterr().err
     assert "invalid-evidence" in error
     assert "private" not in error and "do-not-print" not in error
+
+
+def test_catalog_validation_failure_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from kdive.domain.errors import CategorizedError, ErrorCategory
+
+    def broken_contract():
+        raise CategorizedError("private diagnostic", category=ErrorCategory.CONFIGURATION_ERROR)
+
+    monkeypatch.setattr(cli, "build_contract", broken_contract)
+    assert cli.main(["check"]) == 2
+    output = capsys.readouterr()
+    assert "invalid-contract" in output.err and "private" not in output.err

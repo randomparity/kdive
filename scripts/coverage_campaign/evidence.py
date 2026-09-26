@@ -14,12 +14,22 @@ GitSHA = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
 SHA256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Identifier = Annotated[str, Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_./:-]*$", max_length=512)]
 NodeID = Annotated[
-    str, Field(pattern=r"^tests/[a-zA-Z0-9_/]+\.py::[a-zA-Z0-9_:\[\]-]+$", max_length=512)
+    str,
+    Field(
+        pattern=(
+            r"^tests/[a-zA-Z0-9_/]+\.py::[a-zA-Z_][a-zA-Z0-9_]*"
+            r"(?:::[a-zA-Z_][a-zA-Z0-9_]*)*(?:\[[^\x00-\x1f\x7f]*\])?$"
+        ),
+        max_length=512,
+    ),
 ]
 OSIdentity = Annotated[
     str,
     Field(
-        pattern=r"^(ubuntu|debian|fedora|rhel|rocky|almalinux|centos-stream|opensuse|sles):[0-9]+(?:\.[0-9]+)*$",
+        pattern=(
+            r"^(ubuntu|debian|fedora|rhel|rocky|almalinux|centos-stream|"
+            r"opensuse-leap|opensuse-tumbleweed|sles):[0-9]+(?:\.[0-9]+)*$"
+        ),
         max_length=64,
     ),
 ]

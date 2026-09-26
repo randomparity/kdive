@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from kdive.domain.errors import CategorizedError
 from scripts.coverage_campaign.contract import build_contract
 from scripts.coverage_campaign.evidence import EvidenceError, read_bindings, read_results
 from scripts.coverage_campaign.results import merge_and_render, qualify
@@ -23,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         contract = build_contract()
-    except ValueError, OSError, SyntaxError:
+    except ValueError, OSError, SyntaxError, CategorizedError:
         print(
             "invalid-contract: reconcile obligations.toml with registry, catalog and test nodes",
             file=sys.stderr,

@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
@@ -18,6 +18,7 @@ from kdive.providers.core.runtime import ProviderSupport
 from kdive.providers.local_libvirt.composition import build_runtime as build_local_runtime
 from kdive.providers.remote_libvirt.composition import build_runtime as build_remote_runtime
 from kdive.security.secrets.secret_registry import SecretRegistry
+from scripts.coverage_campaign.evidence import NodeID
 from scripts.coverage_campaign.gridgen import CensusRow, generate_rows
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -253,7 +254,7 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
     return cells
 
 
-def _family(image: RootfsCatalogEntry) -> str:
+def image_family(image: RootfsCatalogEntry) -> str:
     return (
         "fedora"
         if image.distro == "fedora"
@@ -301,7 +302,7 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
             "Acquire/customize image, authenticate, verify OS/architecture, reboot "
             "and reclaim domain/storage/capacity.",
             image=name,
-            family=_family(entry),
+            family=image_family(entry),
         )
         assertions = (
             "acquire",
@@ -321,7 +322,7 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
                 inputs=("image_sha256",),
             )
         )
-    families = sorted({(_family(image), image.arch) for image in inventory.images.values()})
+    families = sorted({(image_family(image), image.arch) for image in inventory.images.values()})
     for family, arch in families:
         for provider in sorted(inventory.capabilities):
             cell = _native_cell(
@@ -439,7 +440,8 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
 
 
 def _validate_node(node: str) -> None:
-    parts = node.split("::")
+    TypeAdapter(NodeID).validate_python(node, strict=True)
+    parts = node.split("[", 1)[0].split("::")
     relative = Path(parts[0])
     if (
         len(parts) < 2
@@ -457,7 +459,6 @@ def _validate_node(node: str) -> None:
         raise ValueError("pytest node file is absent or outside tests")
     body = ast.parse(path.read_text(encoding="utf-8")).body
     for name in parts[1:]:
-        name = name.split("[", 1)[0]
         matches = [
             n
             for n in body

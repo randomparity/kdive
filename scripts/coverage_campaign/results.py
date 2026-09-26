@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
-from scripts.coverage_campaign.contract import Cell, Contract, digest
+from scripts.coverage_campaign.contract import Cell, Contract, Inventory, digest, image_family
 from scripts.coverage_campaign.evidence import Context, Evidence, InputBindings, Outcome
 
 
@@ -29,7 +29,9 @@ class Qualification:
         return bool(self.cells) and not self.errors and all(cell.qualified for cell in self.cells)
 
 
-def _context_errors(cell: Cell, expected: Context, actual: Context) -> list[str]:
+def _context_errors(
+    cell: Cell, expected: Context, actual: Context, inventory: Inventory
+) -> list[str]:
     errors = []
     if actual != expected:
         errors.append("input-context-mismatch")
@@ -43,11 +45,23 @@ def _context_errors(cell: Cell, expected: Context, actual: Context) -> list[str]
         errors.append("accelerator-mismatch")
     if any(getattr(expected, name, None) is None for name in cell.inputs):
         errors.append("required-input-missing")
+    if cell.image is not None:
+        image = inventory.images[cell.image]
+        if expected.guest_os != f"{image.distro}:{image.version}":
+            errors.append("catalog-platform-mismatch")
+    if cell.family is not None:
+        platform = expected.host_os if cell.operation == "host-install" else expected.guest_os
+        distro = platform.split(":", 1)[0] if platform else None
+        families = {
+            image_family(image) for image in inventory.images.values() if image.distro == distro
+        }
+        if cell.family not in families:
+            errors.append("platform-family-mismatch")
     return errors
 
 
 def _identity_errors(
-    cell: Cell, inputs: InputBindings, result: Evidence, context: Context
+    cell: Cell, inputs: InputBindings, result: Evidence, context: Context, inventory: Inventory
 ) -> list[str]:
     errors = []
     if result.scenario_id != cell.scenario_id or result.node_id != cell.node_id:
@@ -62,11 +76,13 @@ def _identity_errors(
         errors.append("deployed-role-missing")
     if any(sha != inputs.candidate_sha for sha in result.deployed_roles.values()):
         errors.append("deployed-revision-mismatch")
-    errors.extend(_context_errors(cell, context, result.context))
+    errors.extend(_context_errors(cell, context, result.context, inventory))
     return errors
 
 
-def _cell_verdict(cell: Cell, inputs: InputBindings, records: list[Evidence]) -> CellVerdict:
+def _cell_verdict(
+    cell: Cell, inputs: InputBindings, records: list[Evidence], inventory: Inventory
+) -> CellVerdict:
     if not records:
         reasons = (
             ("missing-result",) if cell.node_id else ("pending-implementation", "missing-result")
@@ -80,7 +96,7 @@ def _cell_verdict(cell: Cell, inputs: InputBindings, records: list[Evidence]) ->
     if context is None:
         return CellVerdict(cell, Outcome.BLOCKED, False, ("input-binding-missing",))
     result = records[0]
-    errors = _identity_errors(cell, inputs, result, context)
+    errors = _identity_errors(cell, inputs, result, context, inventory)
     outcome = result.outcome
     if "known-defect" in result.impediments:
         errors.append("known-defect")
@@ -127,7 +143,7 @@ def qualify(contract: Contract, inputs: InputBindings, results: list[Evidence]) 
             errors.append("unexpected-result")
         by_cell[result.cell_id].append(result)
     verdicts = tuple(
-        _cell_verdict(cell, inputs, by_cell[cell.id])
+        _cell_verdict(cell, inputs, by_cell[cell.id], contract.inventory)
         for cell in sorted(contract.cells, key=lambda cell: cell.id)
     )
     return Qualification(

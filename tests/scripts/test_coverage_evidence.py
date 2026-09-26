@@ -97,3 +97,25 @@ def test_missing_file_reports_no_private_path(tmp_path: Path) -> None:
     with pytest.raises(EvidenceError) as error:
         read_bindings(tmp_path / "private.internal")
     assert str(error.value) == "unreadable-input: check the supplied file and permissions"
+
+
+def test_every_catalog_platform_can_be_recorded() -> None:
+    from scripts.coverage_campaign.contract import read_inventory
+    from scripts.coverage_campaign.evidence import Context
+
+    for entry in read_inventory().images.values():
+        Context(host_os=f"{entry.distro}:{entry.version}", host_arch="x86_64", accelerator="none")
+
+
+def test_manifest_and_evidence_share_dotted_parameter_node_ids() -> None:
+    from scripts.coverage_campaign.contract import _validate_node
+    from scripts.coverage_campaign.evidence import Evidence
+
+    node = (
+        "tests/scripts/test_coverage_evidence.py::"
+        "test_platform_identity_excludes_private_locators[private.internal]"
+    )
+    _validate_node(node)
+    record = complete_evidence()[2][0].model_dump(mode="json")
+    record["node_id"] = node
+    assert Evidence.model_validate(record).node_id == node
