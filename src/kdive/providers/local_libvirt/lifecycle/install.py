@@ -47,17 +47,18 @@ from kdive.config.core_settings import INSTALL_SCRATCH, INSTALL_STAGING
 from kdive.config.registry import Setting
 from kdive.domain.capture import KDUMP_FAMILY
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.crash_signatures import is_crash_signature
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
     _RealGuestKernelWriter,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
-    _POLL_INTERVAL_SECONDS,
-    ProbeFailure,
+    Readiness,
     ReadinessResult,
     _real_readiness,
+    boot_window_polls,
+    poll_readiness,
+    readiness_failure_details,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
 from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
@@ -66,7 +67,7 @@ from kdive.providers.local_libvirt.lifecycle.storage import (
     console_log_path,
     overlay_path,
 )
-from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIRT_URI
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
 from kdive.providers.shared.runtime_paths import domain_name_for
@@ -74,21 +75,6 @@ from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
 from kdive.store.objectstore import ObjectStore
 
 _log = logging.getLogger(__name__)
-
-
-# The boot window is derived from KDIVE_LIBVIRT_BOOT_WINDOW_S (default 900 s) divided by the
-# _POLL_INTERVAL_SECONDS cadence (5 s) — 180 polls at the default.  boot()._await_ready loops
-# the poll count; _real_readiness owns the per-poll cadence.  The window accommodates the
-# kdive-ready signal ordering After=kdump.service (#817): a crash-capture guest does not report
-# ready until kdump.service has built the capture initramfs and kexec-loaded it, which on POWER9
-# takes several minutes on the first dracut run.  It is a ceiling, not a fixed wait —
-# _await_ready returns the instant the marker appears, so the wider window costs nothing on a
-# fast boot and the _CRASH_SIGNATURE fail-fast still surfaces a panicked boot immediately.
-# Operators on very fast hosts can tighten it; operators on slow hosts (POWER, large kdump
-# initramfs) can widen it — all without rebuilding the image.
-def _boot_window_polls() -> int:
-    """Return the number of readiness polls for the configured boot window."""
-    return math.ceil(config.require(LIBVIRT_BOOT_WINDOW_S) / _POLL_INTERVAL_SECONDS)
 
 
 class _LibvirtDomain(Protocol):
@@ -109,7 +95,6 @@ class _LibvirtConn(Protocol):
 type Connect = Callable[[], _LibvirtConn]
 type Fetch = Callable[[str, Path, str | None], None]
 type StreamFetch = Callable[[str, str | None], contextlib.AbstractContextManager[StreamedArtifact]]
-type Readiness = Callable[[UUID], ReadinessResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,46 +307,22 @@ class LocalLibvirtBooter:
             raise _libvirt_transport_failure("power-cycling", domain_name) from exc
 
     def _await_ready(self, system_id: UUID, polls: int) -> None:
-        first_probe_error: ProbeFailure | None = None
-        for _ in range(polls):
-            result = self._readiness(system_id)
-            if first_probe_error is None and result.probe_error is not None:
-                first_probe_error = result.probe_error
-            if result.answered:
-                if result.ok:
-                    return
-                raise CategorizedError(
-                    "System booted but a run-readiness check failed",
-                    category=ErrorCategory.READINESS_FAILURE,
-                    details=self._boot_failure_details(
-                        system_id, first_probe_error, result.crash_signature
-                    ),
-                )
-        raise CategorizedError(
-            "System did not become ready within the boot window",
-            category=ErrorCategory.BOOT_TIMEOUT,
-            details=self._boot_failure_details(system_id, first_probe_error),
-        )
-
-    @staticmethod
-    def _boot_failure_details(
-        system_id: UUID,
-        first_probe_error: ProbeFailure | None,
-        crash_signature: str | None = None,
-    ) -> dict[str, object]:
-        """The System plus closed probe and crash reasons, as JSON scalars (ADR-0594, #2691).
-
-        ``crash_signature`` is the pre-marker crash literal the readiness scan matched; the
-        worker persists it as ``failure_detail_crash_signature`` for ``runs.get`` to read back.
-        Only a literal in the scanner's closed vocabulary is written, because ``jobs.get`` and
-        ``jobs.wait`` publish ``failure_context`` without a read-side filter.
-        """
-        details: dict[str, object] = {"system_id": str(system_id)}
-        if first_probe_error is not None:
-            details["probe_error"] = first_probe_error.value
-        if crash_signature is not None and is_crash_signature(crash_signature):
-            details["crash_signature"] = crash_signature
-        return details
+        outcome = poll_readiness(self._readiness, system_id, polls)
+        result = outcome.result
+        if result is None:
+            raise CategorizedError(
+                "System did not become ready within the boot window",
+                category=ErrorCategory.BOOT_TIMEOUT,
+                details=readiness_failure_details(system_id, outcome.first_probe_error),
+            )
+        if not result.ok:
+            raise CategorizedError(
+                "System booted but a run-readiness check failed",
+                category=ErrorCategory.READINESS_FAILURE,
+                details=readiness_failure_details(
+                    system_id, outcome.first_probe_error, result.crash_signature
+                ),
+            )
 
 
 class LocalLibvirtInstaller:
@@ -741,7 +702,7 @@ class LocalLibvirtInstall:
             ),
             readiness=_real_readiness,
             staging_root=staging_root,
-            boot_window_polls=_boot_window_polls(),
+            boot_window_polls=boot_window_polls(),
             prepare_console=lambda sid: _prepare_console_log(console_log_path(sid)),
             scratch_root=scratch_root,
             fetch_modules=lambda ref, dest, version_id: _stage_object(
