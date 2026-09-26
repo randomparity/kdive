@@ -68,6 +68,11 @@ image catalog, the database schema, or any other provider.
 - `libguestfs` becomes a host prerequisite for local KDUMP capture (only); its absence is a
   typed `MISSING_DEPENDENCY`, mirroring how a missing `qemu-img` surfaces in
   `storage.py`. Documented in the local-libvirt runbook and host-prereq list.
+
+  > **Amended (2026-09-25, #2781):** "(only)" no longer holds. Provisioning now extracts the
+  > baseline kernel through the same binding ([ADR-0272](0272-provision-baseline-kernel-boot.md)),
+  > as do build-fs, built-kernel staging and external boot, so the lifecycle installer fails
+  > without it. The decision above is unchanged.
 - Harvesting force-stops the domain. For a `crashed` System this is benign — kdive does not
   auto-recover a crashed System to running — but it means a guest that kdump-rebooted back
   to multi-user is stopped when its core is fetched. The core was written to the overlay
