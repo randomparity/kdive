@@ -793,7 +793,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                 name="--action",
                 dest="action",
                 required=True,
-                help="Power action: `on`/`off`/`cycle`/`reset`/`resume`. All require `contributor` (leaseholder control over your transient VM). Use `reset`/`cycle` to recover a wedged but READY guest. `on`/`off`/`cycle`/`reset` are admitted only on a READY System (refused on a CRASHED/CRASHING/PAUSED System). `resume` is the exception: it resumes a PAUSED System (left suspended by a `systems.restore` with `start_paused=true`) back to READY, and is admitted only from PAUSED.",
+                help="Power action: `on`/`off`/`cycle`/`reset`/`resume`. All require `contributor` (leaseholder control over your transient VM). Use `reset`/`cycle` to recover a wedged but READY guest. `on`/`off`/`cycle`/`reset` are admitted only on a READY System (refused on a CRASHED/CRASHING/PAUSED System). `resume` is the exception: it resumes a PAUSED System (left suspended by a `systems.restore` with `start_paused=true`) back to READY, and is admitted only from PAUSED. On local libvirt, `off` requests clean shutdown with a wait of up to 60 s on KVM or that bound times the configured TCG multiplier (10.0 by default), then falls back to hard destroy if still active.",
                 arg_type="str",
                 action=None,
                 choices=(),

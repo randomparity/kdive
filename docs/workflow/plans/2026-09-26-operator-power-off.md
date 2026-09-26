@@ -38,6 +38,8 @@ changes to the `Controller` port.
 - `src/kdive/mcp/tools/lifecycle/control/registrar.py`: owns the tool schema text; describe the
   local-libvirt OFF wait and fallback in the wrapper and `action` Field, keeping other actions.
 - `docs/guide/reference/control.md`: regenerate from that wrapper with `just docs`.
+- `src/kdive/cli/commands/_generated_verbs.py`: regenerate its wrapper description with
+  `just cli-verbs`.
 - `tests/mcp/lifecycle/test_control_registrar.py`: prove the published wrapper/Field contract.
 
 ## Task 1 — prove clean off and accelerator selection
@@ -110,8 +112,8 @@ docstring and `action` Field are the agent-facing schema; generated `control.md`
    -q`; expect failure before the text change.
 2. Update only OFF text in `src/kdive/mcp/tools/lifecycle/control/registrar.py`, stating unit,
    monotonic reference clock, per-job scope, fallback, and `jobs.wait` polling. Run `just docs`.
-3. Re-run the focused test and `just docs-check`; expect both pass. Commit wrapper, generated
-   reference, and test.
+3. Re-run the focused test, `just docs-check`, and `just cli-verbs-check`; expect all pass.
+   Commit wrapper, generated reference and CLI description, and test.
 
 ## Ship checks
 

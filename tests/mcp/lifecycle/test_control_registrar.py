@@ -72,9 +72,9 @@ def test_register_publishes_control_tool_contracts() -> None:
     action_description = tools["control.power"].parameters["properties"]["action"]["description"]
     assert power_description is not None
     assert "clean shutdown" in power_description
-    assert "60 s" in power_description
     assert "destroy" in power_description
     assert "clean shutdown" in action_description
+    assert "60 s" in action_description
 
     assert list(tools["control.force_crash"].parameters["properties"]) == [
         "system_id",

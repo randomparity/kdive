@@ -81,14 +81,14 @@ Requires contributor. A restricting external boot activation refuses every power
 When admitted, reset/cycle can recover a hung READY guest, and resume returns a System
 paused by systems.restore to READY. Preserve needed evidence before changing power.
 On local libvirt, off requests clean shutdown. The per-job wait starts on the worker's
-monotonic clock and lasts up to 60 s on KVM or 60 s times the configured TCG multiplier
-(600 s by default); if the guest remains active, the worker falls back to destroy.
+monotonic clock; KVM uses the shared clean-stop bound and TCG scales that bound by its
+configured multiplier. If the guest remains active, the worker falls back to destroy.
 Returns a job handle; poll jobs.wait. Job success confirms the provider operation,
 not guest boot or SSH readiness.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `action` | string | yes | Power action: `on`/`off`/`cycle`/`reset`/`resume`. All require `contributor` (leaseholder control over your transient VM). Use `reset`/`cycle` to recover a wedged but READY guest. `on`/`off`/`cycle`/`reset` are admitted only on a READY System (refused on a CRASHED/CRASHING/PAUSED System). `resume` is the exception: it resumes a PAUSED System (left suspended by a `systems.restore` with `start_paused=true`) back to READY, and is admitted only from PAUSED. On local libvirt, `off` requests clean shutdown with a bounded wait and falls back to hard destroy. |
+| `action` | string | yes | Power action: `on`/`off`/`cycle`/`reset`/`resume`. All require `contributor` (leaseholder control over your transient VM). Use `reset`/`cycle` to recover a wedged but READY guest. `on`/`off`/`cycle`/`reset` are admitted only on a READY System (refused on a CRASHED/CRASHING/PAUSED System). `resume` is the exception: it resumes a PAUSED System (left suspended by a `systems.restore` with `start_paused=true`) back to READY, and is admitted only from PAUSED. On local libvirt, `off` requests clean shutdown with a wait of up to 60 s on KVM or that bound times the configured TCG multiplier (10.0 by default), then falls back to hard destroy if still active. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `system_id` | string | yes | The READY System to act on. |
 

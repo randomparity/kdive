@@ -499,14 +499,17 @@ def test_force_crash_nmi_raise_propagates_and_leaves_crashing(migrated_url: str)
     asyncio.run(_run())
 
 
-def test_power_refused_on_crashing_no_physical_reset(migrated_url: str) -> None:
+@pytest.mark.parametrize("action", [PowerAction.RESET, PowerAction.OFF])
+def test_power_refused_on_crashing_no_physical_reset(
+    migrated_url: str, action: PowerAction
+) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             system_id = await _seed_system(pool, SystemState.READY, domain_name="kdive-x")
             await _set_state(pool, system_id, SystemState.CRASHING.value)
             ctrl = _RecordingController()
             resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
-            pjob = await _enqueue_power(pool, system_id, f"{system_id}:power")
+            pjob = await _enqueue_power(pool, system_id, f"{system_id}:power", action)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as excinfo:
                     await control_plane.power_handler(conn, pjob, resolver=resolver)

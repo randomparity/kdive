@@ -74,6 +74,8 @@ from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_f
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.local_libvirt.lifecycle.power import clean_shutdown_bound_s
+from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
 from kdive.security import audit
 from kdive.security.artifacts.bpf_filter import hygiene_reason
 from kdive.security.authz.context import RequestContext
@@ -682,8 +684,11 @@ def _register_control_power(app: FastMCP, pool: AsyncConnectionPool) -> None:
                     "READY System (refused on a CRASHED/CRASHING/PAUSED System). `resume` is the "
                     "exception: it resumes a PAUSED System (left suspended by a `systems.restore` "
                     "with `start_paused=true`) back to READY, and is admitted only from PAUSED. "
-                    "On local libvirt, `off` requests clean shutdown with a bounded wait and "
-                    "falls back to hard destroy."
+                    "On local libvirt, `off` requests clean shutdown with a wait of up to "
+                    f"{int(clean_shutdown_bound_s('kvm'))} s on KVM or that bound times the "
+                    "configured TCG multiplier "
+                    f"({LIBVIRT_TCG_DEADLINE_MULTIPLIER.default} by default), then falls back "
+                    "to hard destroy if still active."
                 )
             ),
         ],
@@ -698,8 +703,8 @@ def _register_control_power(app: FastMCP, pool: AsyncConnectionPool) -> None:
         When admitted, reset/cycle can recover a hung READY guest, and resume returns a System
         paused by systems.restore to READY. Preserve needed evidence before changing power.
         On local libvirt, off requests clean shutdown. The per-job wait starts on the worker's
-        monotonic clock and lasts up to 60 s on KVM or 60 s times the configured TCG multiplier
-        (600 s by default); if the guest remains active, the worker falls back to destroy.
+        monotonic clock; KVM uses the shared clean-stop bound and TCG scales that bound by its
+        configured multiplier. If the guest remains active, the worker falls back to destroy.
         Returns a job handle; poll jobs.wait. Job success confirms the provider operation,
         not guest boot or SSH readiness.
         """
