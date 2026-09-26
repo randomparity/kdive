@@ -11,7 +11,11 @@ from collections.abc import Sequence
 import libvirt
 import pytest
 
-from kdive.providers.local_libvirt.lifecycle.power import clean_shutdown_bound_s, power_off
+from kdive.providers.local_libvirt.lifecycle.power import (
+    clean_shutdown_bound_s,
+    destroy_or_accept_shutoff,
+    power_off,
+)
 from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
 from tests.providers.local_libvirt.fakes import libvirt_error
 
@@ -111,3 +115,30 @@ def test_power_off_rejects_failed_destroy(final_state: int, error_code: int) -> 
     with pytest.raises(libvirt.libvirtError) as exc:
         power_off(domain, "kdive-x", 1.0, clock.sleep, clock)
     assert exc.value.get_error_code() == error_code
+
+
+def test_power_off_accepts_race_after_refused_shutdown() -> None:
+    class RefusedShutdown(_RacedDomain):
+        def shutdown(self) -> int:
+            self.calls.append("shutdown")
+            raise libvirt_error(libvirt.VIR_ERR_OPERATION_INVALID)
+
+    domain = RefusedShutdown(
+        libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_SHUTOFF, libvirt.VIR_ERR_OPERATION_INVALID
+    )
+    clock = _Clock()
+    power_off(domain, "kdive-x", 1.0, clock.sleep, clock)
+    assert domain.calls == ["shutdown", "destroy"]
+
+
+def test_destroy_race_propagates_failed_state_reread() -> None:
+    class UnreadableState(_RacedDomain):
+        def state(self, flags: int = 0) -> Sequence[object]:
+            raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    domain = UnreadableState(
+        libvirt.VIR_DOMAIN_PAUSED, libvirt.VIR_DOMAIN_SHUTOFF, libvirt.VIR_ERR_OPERATION_INVALID
+    )
+    with pytest.raises(libvirt.libvirtError) as exc:
+        destroy_or_accept_shutoff(domain)
+    assert exc.value.get_error_code() == libvirt.VIR_ERR_INTERNAL_ERROR
