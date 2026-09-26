@@ -9,7 +9,11 @@ from pydantic import ValidationError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import InvestigationBuild
-from kdive.providers.ports.external_boot import ExternalBootPlan, RootSpecV1
+from kdive.providers.ports.external_boot import (
+    ExternalBootPlan,
+    RootSpecV1,
+    direct_root_arguments,
+)
 from kdive.serialization import JsonValue
 
 
@@ -87,6 +91,23 @@ def construct_external_boot_plan(
         raise _invalid("external_boot_plan_invalid") from exc
 
 
+def external_boot_root_arguments(
+    build: InvestigationBuild, root: RootSpecV1, provider_root_cmdline: str | None
+) -> tuple[str, ...]:
+    """Return the root arguments the plan's kernel can resolve (ADR-0583 amendment).
+
+    An initrd resolves the inspected root token itself. Without one, a provider that owns the
+    whole-disk root device (``platform_root_cmdline``) boots that device by name, and the
+    provider proves before activation that the inspected root filesystem fills it.
+    """
+    evidence = build.canonical_document.get("external_boot_evidence")
+    if provider_root_cmdline is None or (
+        isinstance(evidence, dict) and evidence.get("initrd") is not None
+    ):
+        return root.arguments
+    return direct_root_arguments(root, provider_root_cmdline.removeprefix("root="))
+
+
 def _invalid(reason: str) -> CategorizedError:
     return CategorizedError(
         "immutable build evidence cannot construct an external-boot plan; rebuild the Run",
@@ -95,4 +116,4 @@ def _invalid(reason: str) -> CategorizedError:
     )
 
 
-__all__ = ["construct_external_boot_plan"]
+__all__ = ["construct_external_boot_plan", "external_boot_root_arguments"]

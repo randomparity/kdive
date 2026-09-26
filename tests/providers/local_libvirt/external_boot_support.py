@@ -83,7 +83,14 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
 def _pre_stop(metadata: LocalRecoveryMetadataV1) -> LocalPreStopIntentV1:
     return LocalPreStopIntentV1.model_validate(
         metadata.model_dump(
-            exclude={"schema_", "source_state", "target_state", "capture", "phase"},
+            exclude={
+                "schema_",
+                "source_state",
+                "target_state",
+                "capture",
+                "phase",
+                "inactive_modules",
+            },
             by_alias=True,
         )
     )

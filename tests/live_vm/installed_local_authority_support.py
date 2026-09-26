@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -23,6 +23,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kdive.mcp.dev_harness import LiveStackClient
+from kdive.mcp.responses import ToolResponse
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.skew import _fetch_version, _resolve, readyz_urls
 from tests.integration.live_stack.spine import (
@@ -1918,6 +1919,25 @@ async def provision_authority_fixture(db_url: str, config: NativeAuthorityConfig
         raise RuntimeError(f"authority fixture {config.fixture_mode} failed: {detail}")
 
 
+_RELEASE_ADMISSION_ATTEMPTS = 3
+
+
+async def _release_external_boot(client: LiveStackClient, run_id: str) -> ToolResponse:
+    """Admit the release, first draining any System job its conflict names.
+
+    A job queued during the boot (a console rotation) can still hold the System when the boot
+    job succeeds; release refuses with ``system_job_active`` and names those jobs to wait on.
+    """
+    for _attempt in range(_RELEASE_ADMISSION_ATTEMPTS):
+        envelope = await scalar(client, "runs.release_external_boot", run_id=run_id)
+        data = envelope.data or {}
+        if envelope.status != "error" or data.get("reason") != "system_job_active":
+            return ok(envelope, "release")
+        for job_id in cast("list[str]", data.get("job_ids", [])):
+            await drain_job(client, "release", job_id)
+    return ok(envelope, "release")
+
+
 async def drive_normal_operations(
     client: LiveStackClient,
     config: NativeAuthorityConfig,
@@ -1936,10 +1956,7 @@ async def drive_normal_operations(
     """
     activation = await start_external_boot_activation(client, config, ledger, guest_arch=guest_arch)
     await drain_job(client, "activate", activation.activate_job_id)
-    release = ok(
-        await scalar(client, "runs.release_external_boot", run_id=activation.run_id),
-        "release",
-    )
+    release = await _release_external_boot(client, activation.run_id)
     await drain_job(client, "release", release.object_id)
     return NormalOperationJobs(
         investigation_id=activation.investigation_id,

@@ -199,6 +199,31 @@ def test_preparing_with_fixed_server_route_needs_no_direct_provider_ports(
     _drive(migrated_url, body)
 
 
+def test_release_with_fixed_server_route_needs_no_direct_provider_ports(
+    migrated_url: str,
+) -> None:
+    # An authority deployment's server never binds the provider port; every later operation on
+    # an activation it admitted must route to the same fixed authority, not only preparation.
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(conn, vehicle, purpose="release", activation_state="active")
+        config_registry.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": AUTHORITY_INSTANCE})
+        kind, payload = await build_external_boot_payload(
+            conn,
+            activation_id=vehicle.activation_id,
+            purpose="release",
+            operation="release",
+            provider_kind="local-libvirt",
+            authority_instance=AUTHORITY_INSTANCE,
+            operation_identity="release-with-fixed-route",
+            resolver=provider_resolver(external_boot=None, external_boot_preparation=None),
+        )
+        assert kind is JobKind.BOOT
+        assert payload.external_boot_authority_v1 is not None
+        assert payload.external_boot_authority_v1.authority_instance == AUTHORITY_INSTANCE
+
+    _drive(migrated_url, body)
+
+
 def test_identity_is_sourced_from_the_activation_row(migrated_url: str) -> None:
     """The caller passes no run, system or plan identity, and the marker carries the row's."""
 

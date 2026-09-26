@@ -10,6 +10,7 @@ import subprocess  # noqa: S404 - virsh domstate uses fixed argv, no shell  # no
 import time
 from collections.abc import Callable
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import NamedTuple
 from uuid import UUID
@@ -254,9 +255,14 @@ def _probe_failed(domain_name: str, failure: ProbeFailure, detail: str) -> _Doma
     return _DomainExitProbe(False, failure)
 
 
-def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cover - live_vm
-    """Return whether ``virsh domstate`` reports terminal state plus its classified failure."""
-    uri = config.require(LIBVIRT_URI)
+def _domain_exit_probe(
+    domain_name: str, *, uri: str | None = None
+) -> _DomainExitProbe:  # pragma: no cover - live_vm
+    """Return whether ``virsh domstate`` reports terminal state plus its classified failure.
+
+    ``uri`` names the libvirt connection that owns the domain; ``None`` is the configured one.
+    """
+    uri = config.require(LIBVIRT_URI) if uri is None else uri
     virsh = resolve_provider_tool(_VIRSH)
     if virsh is None:
         return _probe_failed(
@@ -315,11 +321,12 @@ class LocalExternalBootReadiness:
         *,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
-        domain_exit_probe: Callable[[str], _DomainExitProbe] = _domain_exit_probe,
+        domain_exit_probe: Callable[[str], _DomainExitProbe] | None = None,
+        uri: str | None = None,
     ) -> None:
         self._clock = clock
         self._sleep = sleep
-        self._domain_exit_probe = domain_exit_probe
+        self._domain_exit_probe = domain_exit_probe or partial(_domain_exit_probe, uri=uri)
 
     def __call__(self, system_id: UUID, window: ConsoleReadinessWindow) -> ReadinessResult:
         first_probe_error: ProbeFailure | None = None
