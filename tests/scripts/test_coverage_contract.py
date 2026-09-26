@@ -117,3 +117,13 @@ def test_capability_modes_and_deployed_roles_follow_operation_contract(
     )
     queue = [c for c in cells if c.operation == "ops.set_queue_paused" and c.kind == "functional"]
     assert queue and all("worker" in c.roles for c in queue)
+
+
+def test_debug_session_covers_every_advertised_transport(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+    sessions = [c for c in cells if c.operation == "debug.start_session" and c.kind == "functional"]
+    for provider, support in inventory.capabilities.items():
+        scenarios = {c.scenario_id for c in sessions if c.provider == provider}
+        assert scenarios == {
+            f"tool/debug.start_session/{mode}/functional" for mode in support.debug_transports
+        }

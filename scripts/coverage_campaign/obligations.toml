@@ -156,6 +156,29 @@ kernel = true
 "debug.set_watchpoint" = "Trigger the watched write and verify its stop reason and changed value."
 "debug.start_session" = "Verify a usable single-attach transport and matching live session record."
 
+[groups.capabilities]
+"debug.advance" = "debug_transports.gdbstub"
+"debug.backtrace" = "debug_transports.gdbstub"
+"debug.clear_breakpoint" = "debug_transports.gdbstub"
+"debug.clear_watchpoint" = "debug_transports.gdbstub"
+"debug.continue" = "debug_transports.gdbstub"
+"debug.disassemble" = "debug_transports.gdbstub"
+"debug.end_session" = "debug_transports.gdbstub"
+"debug.get_session" = "debug_transports.gdbstub"
+"debug.interrupt" = "debug_transports.gdbstub"
+"debug.list_breakpoints" = "debug_transports.gdbstub"
+"debug.list_modules" = "debug_transports.gdbstub"
+"debug.list_sessions" = "debug_transports.gdbstub"
+"debug.list_watchpoints" = "debug_transports.gdbstub"
+"debug.load_module_symbols" = "debug_transports.gdbstub"
+"debug.read_frame" = "debug_transports.gdbstub"
+"debug.read_memory" = "debug_transports.gdbstub"
+"debug.read_registers" = "debug_transports.gdbstub"
+"debug.resolve_symbol" = "debug_transports.gdbstub"
+"debug.set_breakpoint" = "debug_transports.gdbstub"
+"debug.set_watchpoint" = "debug_transports.gdbstub"
+"debug.start_session" = "debug_transports"
+
 [[groups]]
 owner = 2814
 execution = "provider"
