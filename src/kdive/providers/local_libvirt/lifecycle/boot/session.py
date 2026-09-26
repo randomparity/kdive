@@ -5,15 +5,17 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import os
 import selectors
 import shutil
 import stat
 import tempfile
 import threading
+import time
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defused parse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol, cast
@@ -26,6 +28,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
 )
+from kdive.providers.local_libvirt.lifecycle.power import clean_shutdown_bound_s, power_off
 from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
@@ -54,6 +57,13 @@ if TYPE_CHECKING:
         LocalRecoveryMetadataV1,
         TargetProjectionV1,
     )
+
+_log = logging.getLogger(__name__)
+
+# ADR-0681: how an external-boot stop treats a running guest. `clean` asks it to shut down (60 s
+# on KVM, 120 s otherwise); `clean-on-kvm` does so only on KVM; `destroy` never does.
+type StopMode = Literal["clean", "clean-on-kvm", "destroy"]
+_UNACCELERATED_STOP_BOUND_S = 120.0
 
 
 @dataclass(frozen=True)
@@ -134,6 +144,8 @@ class RunningDomain(Protocol):
 class _Domain(RunningDomain, Protocol):
     def isActive(self) -> int: ...  # noqa: N802
     def destroy(self) -> int: ...
+    def shutdown(self) -> int: ...
+    def state(self, flags: int = 0) -> Sequence[object]: ...
     def create(self) -> int: ...
     def free(self) -> object: ...
 
@@ -211,7 +223,7 @@ class LocalExternalBootSession(Protocol):
     def boot_identity(self, xml: str) -> str: ...
     def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection: ...
     def require_inactive(self) -> None: ...
-    def stop_and_require_inactive(self) -> None: ...
+    def stop_and_require_inactive(self, *, mode: StopMode) -> None: ...
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int: ...
     def unlink_artifact(self, name: str) -> None: ...
     def guest(self) -> AbstractContextManager[InactiveGuest]: ...
@@ -219,7 +231,7 @@ class LocalExternalBootSession(Protocol):
     def start(self) -> None: ...
     def readiness(self) -> ReadinessResult: ...
     def observe_running(self) -> RunningKernelObservation: ...
-    def restore_power(self, prior: Literal["running", "inactive"]) -> None: ...
+    def restore_power(self) -> None: ...
     def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def close(self) -> None: ...
 
@@ -816,6 +828,9 @@ class _ConcreteSession:
         readiness: ReadinessProbe,
         observe_running: RunningObserver,
         cleanup_payloads: CleanupPayloads,
+        kvm: bool,
+        sleep: Callable[[float], None],
+        clock: Callable[[], float],
     ) -> None:
         self._system_id = system_id
         self._binding = binding
@@ -839,6 +854,9 @@ class _ConcreteSession:
         self._readiness = readiness
         self._observe_running = observe_running
         self._cleanup_payloads = cleanup_payloads
+        self._kvm = kvm
+        self._sleep = sleep
+        self._clock = clock
         # Nested session/guest/cursor closes keep ownership until producer joins complete.
         self._lifecycle_lock = threading.RLock()
         self._guests: set[_GuestContext] = set()
@@ -959,10 +977,17 @@ class _ConcreteSession:
         if _active(self._require_open_domain()):
             raise RuntimeError("domain must be inactive before overlay mutation")
 
-    def stop_and_require_inactive(self) -> None:
+    def stop_and_require_inactive(self, *, mode: StopMode) -> None:
         domain = self._require_open_domain()
         if _active(domain):
-            domain.destroy()
+            name = domain_name_for(self._system_id)
+            if mode == "destroy" or (mode == "clean-on-kvm" and not self._kvm):
+                path = "destroy-unready" if mode == "destroy" else "destroy-unaccelerated"
+                _log.warning("power-off %s: %s", name, path)
+                domain.destroy()
+            else:
+                bound = clean_shutdown_bound_s("kvm") if self._kvm else _UNACCELERATED_STOP_BOUND_S
+                power_off(domain, name, bound, self._sleep, self._clock)
         self.require_inactive()
 
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int:
@@ -1014,15 +1039,11 @@ class _ConcreteSession:
         domain = self._require_open_domain()
         return self._observe_running(self._system_id, domain)
 
-    def restore_power(self, prior: Literal["running", "inactive"]) -> None:
+    def restore_power(self) -> None:
         domain = self._require_open_domain()
-        if prior == "running":
-            self._require_no_guest_context()
-        active = _active(domain)
-        if prior == "running" and not active:
+        self._require_no_guest_context()
+        if not _active(domain):
             self._start_domain()
-        elif prior == "inactive" and active:
-            domain.destroy()
 
     def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
         self._require_open_domain()
@@ -1256,6 +1277,8 @@ class LocalExternalBootSessionFactory:
         cleanup_payloads: CleanupPayloads | None = None,
         teardown_overlay_path: SystemPath = lambda system_id: overlay_path(system_id),
         teardown_baseline_path: SystemPath = lambda system_id: baseline_dir(system_id),
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._pin_lease = pin_lease
         self._connect = connect
@@ -1278,6 +1301,8 @@ class LocalExternalBootSessionFactory:
         self._cleanup_payloads = cleanup_payloads or _unconfigured_cleanup
         self._teardown_overlay_path = teardown_overlay_path
         self._teardown_baseline_path = teardown_baseline_path
+        self._sleep = sleep
+        self._clock = clock
 
     def open(
         self,
@@ -1357,6 +1382,9 @@ class LocalExternalBootSessionFactory:
                 readiness=self._readiness,
                 observe_running=self._observe_running,
                 cleanup_payloads=self._cleanup_payloads,
+                kvm=inactive_root.get("type") == "kvm",
+                sleep=self._sleep,
+                clock=self._clock,
             )
         except BaseException as exc:
             errors: list[Exception] = []
@@ -1459,6 +1487,7 @@ class _ConcreteSystemTeardownSession:
         if domain is None:
             return
         try:
+            # Hard by design (ADR-0679): the overlay is reclaimed next, so no write is read again.
             if _active(domain):
                 domain.destroy()
             if _active(domain):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import io
+import logging
 import os
 import queue
 import selectors
@@ -38,6 +39,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     OperationOwnership,
     PinnedOperationOwnership,
     PinOperationLease,
+    StopMode,
     _ConcreteSession,
     _Find0TreeCursor,
     open_authority_system_teardown,
@@ -61,6 +63,8 @@ from tests.providers.local_libvirt.lifecycle.boot.session_support import (
     Guest,
     _xml,
 )
+
+_SESSION_LOGGER = "kdive.providers.local_libvirt.lifecycle.boot.session"
 
 
 class FakeLease:
@@ -1966,6 +1970,88 @@ def test_concrete_find0_orders_produce_identical_recovery_identity(tmp_path: Pat
     assert captures[0].archive_sha256 == captures[1].archive_sha256
 
 
+class _Clock:
+    """A fake monotonic clock that ``sleep`` advances, so a power-off bound needs no real wait."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _running(events: list[str], domain_type: str | None, *, honours: bool = True) -> Domain:
+    domain = Domain(events, _xml(domain_type=domain_type), honours_shutdown=honours)
+    domain.active = True
+    return domain
+
+
+def test_clean_stop_requests_shutdown() -> None:
+    events: list[str] = []
+    domain = _running(events, "kvm")
+    session = _factory(events, domain).open(_lease(), _expected())
+    session.stop_and_require_inactive(mode="clean")
+    assert "domain.shutdown" in events
+    assert "domain.destroy" not in events
+    assert not domain.active
+    session.close()
+
+
+@pytest.mark.parametrize(
+    ("domain_type", "mode", "sleeps"),
+    [
+        ("kvm", "clean", 60),
+        (None, "clean", 120),
+        ("qemu", "clean", 120),
+        ("kvm", "clean-on-kvm", 60),
+    ],
+)
+def test_clean_stop_bound(domain_type: str | None, mode: StopMode, sleeps: int) -> None:
+    events: list[str] = []
+    domain = _running(events, domain_type, honours=False)
+    clock = _Clock()
+    session = _factory(events, domain, clock=clock).open(_lease(), _expected())
+    session.stop_and_require_inactive(mode=mode)
+    power = [event for event in events if event in {"domain.shutdown", "domain.destroy"}]
+    assert len(clock.sleeps) == sleeps
+    assert power == ["domain.shutdown"] * (sleeps // 10) + ["domain.destroy"]
+    session.close()
+
+
+@pytest.mark.parametrize(
+    ("domain_type", "mode", "path"),
+    [(None, "clean-on-kvm", "destroy-unaccelerated"), ("kvm", "destroy", "destroy-unready")],
+)
+def test_hard_stop_destroys_at_once(
+    domain_type: str | None, mode: StopMode, path: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    events: list[str] = []
+    domain = _running(events, domain_type)
+    clock = _Clock()
+    session = _factory(events, domain, clock=clock).open(_lease(), _expected())
+    with caplog.at_level(logging.WARNING, logger=_SESSION_LOGGER):
+        session.stop_and_require_inactive(mode=mode)
+    assert "domain.destroy" in events
+    assert "domain.shutdown" not in events
+    assert clock.sleeps == []
+    assert f"power-off kdive-{SYSTEM_ID}: {path}" in caplog.text
+    session.close()
+
+
+def test_stop_leaves_an_inactive_domain_untouched() -> None:
+    events: list[str] = []
+    session = _factory(events).open(_lease(), _expected())
+    session.stop_and_require_inactive(mode="clean")
+    assert "domain.shutdown" not in events
+    assert "domain.destroy" not in events
+    session.close()
+
+
 def _factory(
     events: list[str],
     domain: Domain | None = None,
@@ -1973,8 +2059,10 @@ def _factory(
     pin_lease: PinOperationLease = LANE.pin,
     prepare_console: Callable[[UUID], ConsoleReadinessWindow] | None = None,
     readiness: Callable[[UUID, ConsoleReadinessWindow], ReadinessResult] | None = None,
+    clock: _Clock | None = None,
 ) -> LocalExternalBootSessionFactory:
     selected = domain or Domain(events)
+    fake_clock = clock or _Clock()
     return LocalExternalBootSessionFactory(
         connect=lambda: events.append("connection.open") or Conn(events, selected),
         pin_lease=pin_lease,
@@ -1987,6 +2075,8 @@ def _factory(
         close_descriptor=lambda _fd: events.append("artifact.close"),
         prepare_console=prepare_console,
         readiness=readiness,
+        sleep=fake_clock.sleep,
+        clock=fake_clock,
     )
 
 
@@ -2598,7 +2688,7 @@ def test_only_one_guest_context_and_power_start_reject_while_open() -> None:
     with pytest.raises(RuntimeError, match="guest context"):
         session.start()
     with pytest.raises(RuntimeError, match="guest context"):
-        session.restore_power("running")
+        session.restore_power()
     defines = events.count("domain.define")
     closes = events.count("domain.close")
     with pytest.raises(RuntimeError, match="guest context"):
@@ -2811,11 +2901,14 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     session.start()
     assert session.readiness() == ReadinessResult(True, True)
     assert session.observe_running() == observation
-    session.restore_power("inactive")
+    creates = events.count("domain.create")
+    session.restore_power()
+    assert events.count("domain.create") == creates
+    session.stop_and_require_inactive(mode="destroy")
     session.cleanup_payloads(_metadata().model_copy(update={"binding": BINDING}))
-    session.restore_power("running")
+    session.restore_power()
     assert domain.active
-    session.restore_power("inactive")
+    session.stop_and_require_inactive(mode="destroy")
     assert not domain.active
     assert not hasattr(session.inspect_closed().overlay, "path")
     assert not hasattr(session, "artifact_root_descriptor")
@@ -2825,7 +2918,7 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     for call in (
         session.readiness,
         session.observe_running,
-        lambda: session.restore_power("running"),
+        session.restore_power,
         lambda: session.cleanup_payloads(_metadata().model_copy(update={"binding": BINDING})),
     ):
         with pytest.raises(RuntimeError, match="closed"):
@@ -2876,7 +2969,7 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
     session.start()
     session.readiness()
     session.observe_running()
-    session.restore_power("inactive")
+    session.stop_and_require_inactive(mode="destroy")
     session.cleanup_payloads(_metadata().model_copy(update={"binding": original_binding}))
     assert observed_ids == [SYSTEM_ID, SYSTEM_ID]
     assert cleaned == [original_binding]
