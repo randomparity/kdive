@@ -14,7 +14,9 @@ using the operation's `SecretRegistry` processes the exception message before it
 logger. The redacted message is limited to 8192 characters to bound one record's volume. The
 worker's JSON log formatters escape control characters into one output line. The warning does not
 attach `exc_info` or the exception object, so its traceback cannot expose unredacted provider
-fields. The existing failure result and `from None` behavior remain.
+fields. If rendering the exception message raises, the warning uses the fixed reason
+`<message unavailable>` and still produces the bound failure. The existing failure result and
+`from None` behavior remain.
 
 This extends the runner's existing responsibility. Its callers and the persisted authority schema
 need no transition.
@@ -29,7 +31,8 @@ need no transition.
 - Accepted failure classes: provider-supplied host paths may appear in the operator worker log
   after secret redaction, because the requested diagnostic includes the exception message.
   A reason longer than 8192 characters is truncated in the log; the remaining text is available
-  only from the provider. A logging handler failure follows Python logging's existing behavior.
+  only from the provider. An unprintable exception gives a fixed fallback reason. A logging
+  handler failure follows Python logging's existing behavior.
 - Covered elsewhere: the existing `SecretRegistry` and `Redactor` own known-secret redaction;
   the existing authority result model and commit validation own the persisted failure shape.
 
@@ -62,6 +65,7 @@ their existing fields, and the exception remains unchained.
 - `focused-test`: Assert the returned failure context's non-null fields contain only the phase
   and the refused message is absent from the serialized authority result.
 - `focused-test`: Drive a provider exception carrying a registered secret; assert the warning
-  masks that value, bounds a long reason, and the result remains unchained.
+  masks that value, bounds a long reason, and the result remains unchained. Drive an exception
+  whose message rendering raises; assert the fixed fallback and same bound failure.
 - `task-test-not-applicable`: No schema, MCP response, or provider port changes are proposed;
   their existing contract tests remain the integration guard.

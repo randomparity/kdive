@@ -1216,11 +1216,13 @@ def test_a_successful_run_reaches_the_port_and_returns_the_built_result(
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
 
+@pytest.mark.parametrize("unprintable", [False, True])
 def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     vehicle: Vehicle,
     caplog: pytest.LogCaptureFixture,
+    unprintable: bool,
 ) -> None:
     """A provider raise is bound to its allocation; its message stays out of the result.
 
@@ -1231,7 +1233,13 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
     provider_identifier = "fault-inject://private-provider.example.internal/system-47"
     raw_message = f"provider {provider_identifier} failed while reading {secret}: " + "x" * 9000
 
+    class UnprintableError(Exception):
+        def __str__(self) -> str:
+            raise ValueError("message rendering failed")
+
     def explode(_context: OperationContext) -> RunningKernelObservation:
+        if unprintable:
+            raise UnprintableError()
         raise OSError(raw_message)
 
     async def body(seed: AsyncConnection, conn: AsyncConnection) -> None:
@@ -1265,11 +1273,15 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
         ]
         assert len(warnings) == 1
         warning = warnings[0].getMessage()
-        assert "exception=OSError" in warning
         assert "phase=provider-call" in warning
-        assert "[REDACTED]" in warning
         assert secret not in warning
-        assert len(warning.split("reason=", 1)[1]) == 8192
+        if unprintable:
+            assert "exception=UnprintableError" in warning
+            assert warning.endswith("reason=<message unavailable>")
+        else:
+            assert "exception=OSError" in warning
+            assert "[REDACTED]" in warning
+            assert len(warning.split("reason=", 1)[1]) == 8192
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 

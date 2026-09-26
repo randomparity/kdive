@@ -483,7 +483,11 @@ def _bound_failure(
         if isinstance(exc, CategorizedError)
         else False
     )
-    reason = Redactor(registry=context.secret_registry).redact_text(str(exc))[:8192]
+    try:
+        message = str(exc)
+    except Exception:  # noqa: BLE001 — diagnostic rendering must not replace the bound failure
+        message = "<message unavailable>"
+    reason = Redactor(registry=context.secret_registry).redact_text(message)[:8192]
     _LOGGER.warning(
         "external-boot authority failure job_id=%s activation_id=%s "
         "phase=%s exception=%s reason=%s",
