@@ -1285,7 +1285,7 @@ def test_boot_absent_domain_is_retryable_infrastructure_failure(tmp_path: Path) 
 
 # --- ADR-0679: clean shutdown before a power-off --------------------------------------
 
-_POWER_OFF_LOGGER = "kdive.providers.local_libvirt.lifecycle.install"
+_POWER_OFF_LOGGER = "kdive.providers.local_libvirt.lifecycle.power"
 
 
 @dataclass
