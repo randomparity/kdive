@@ -1,12 +1,14 @@
 # Clean power-off for local-libvirt external-boot stops — plan
 
 Goal: the local-libvirt external-boot preparation and recovery stops ask a running guest to shut
-down before `destroy()`, within a bound that fits the external-boot authority deadline (#2780).
+down before `destroy()` on KVM, within a bound that fits the external-boot recovery deadline
+(#2780).
 
 Architecture: the ADR-0679 helper moves from `lifecycle/install.py` to a leaf module
 `lifecycle/power.py` and takes an explicit bound. The external-boot session calls it from
-`stop_and_require_inactive(clean=True)`, with a bound capped at 120 s and an accelerator read
-from the domain XML. Recovery passes `clean=False` unless the target reached `target-defined`.
+`stop_and_require_inactive(clean=True)` with the 60 s KVM bound when the domain XML says
+`type="kvm"`, and destroys otherwise. Recovery passes `clean=False` unless the target reached
+`target-defined`.
 Spec: [2026-09-25-external-boot-clean-power-off-design.md](../specs/2026-09-25-external-boot-clean-power-off-design.md);
 decision: [ADR-0681](../../adr/0681-external-boot-clean-power-off.md).
 
@@ -30,7 +32,7 @@ provider-test doubles and tests ~30.
 |------|--------|
 | `src/kdive/providers/local_libvirt/lifecycle/power.py` | new: `PowerDomain`, `clean_shutdown_bound_s`, `power_off` (moved) |
 | `src/kdive/providers/local_libvirt/lifecycle/install.py` | drop the helper and its constants; call `power.power_off` |
-| `src/kdive/providers/local_libvirt/lifecycle/boot/session.py` | `_Domain` gains `state`/`shutdown`; session `accel`, `sleep`, `clock`; `stop_and_require_inactive(*, clean)`; `restore_power()`; teardown comment |
+| `src/kdive/providers/local_libvirt/lifecycle/boot/session.py` | `_Domain` gains `state`/`shutdown`; session `kvm`, `sleep`, `clock`; `stop_and_require_inactive(*, clean)`; `restore_power()`; teardown comment |
 | `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py` | pass `clean`; `restore_power()` |
 | `retrieve/guestfs.py`, `rootfs/customization_boot.py`, `lifecycle/provisioning.py` | one comment each |
 | `tests/providers/local_libvirt/test_install.py` | `_POWER_OFF_LOGGER` names the power module |
@@ -73,7 +75,7 @@ Steps:
    "kdive.providers.local_libvirt.lifecycle.power"`; rerun, all pass. Commit
    `refactor(local-libvirt): move the clean power-off helper to a leaf module`.
 
-## Task 2 — session stops cleanly
+## Task 2 — session stops cleanly on KVM
 
 Interfaces: consumes Task 1's `power_off` and `clean_shutdown_bound_s`. Provides
 `LocalExternalBootSession.stop_and_require_inactive(self, *, clean: bool) -> None` and
@@ -83,27 +85,34 @@ clock=time.monotonic)`.
 **Verification** (all `Mode: focused-test`, file
 `tests/providers/local_libvirt/lifecycle/boot/test_session.py`, green
 `just test-verbose tests/providers/local_libvirt/lifecycle/boot/test_session.py`):
-- clean stop — `test_clean_stop_requests_shutdown`: active domain, `clean=True`; events contain
-  `domain.shutdown`, not `domain.destroy`; domain inactive. Red: `TypeError` on `clean=`.
-- unready stop — `test_unready_stop_destroys_at_once`: `clean=False`; `domain.destroy`, no
+- KVM clean stop — `test_kvm_clean_stop_requests_shutdown`: `type="kvm"` domain, active,
+  `clean=True`; events contain `domain.shutdown`, not `domain.destroy`. Red: `TypeError` on
+  `clean=`.
+- KVM bound — `test_kvm_stop_destroys_after_60_s`: `honours_shutdown=False`; a fake clock whose
+  `sleep` advances it; `len(clock.sleeps) == 60` and the last event is `domain.destroy`.
+- unready — `test_unready_stop_destroys_at_once`: KVM, `clean=False`; `domain.destroy`, no
   `domain.shutdown`; caplog WARNING `destroy-unready`.
-- bound — `test_stop_bound_is_capped`, parametrized `(xml type, expected sleeps)`:
-  `("kvm", 60)`, `("qemu", 120)`: domain with `honours_shutdown=False`; fake clock whose `sleep`
-  advances it; `clean=True`; `len(clock.sleeps) == expected` and the last event is
-  `domain.destroy`. Red before the cap: `("qemu", 600)`.
-- `restore_power()` — the existing lifecycle test drops its `"inactive"` calls and asserts
-  `restore_power()` on an active domain records no `domain.create`.
+- not KVM — `test_unaccelerated_stop_destroys_at_once`: no `type` attribute, `clean=True`;
+  `domain.destroy`, no `domain.shutdown`; caplog WARNING `destroy-unaccelerated`.
+- `restore_power()` — five existing call sites change: `restore_power("running")` at the
+  guest-context refusal and in the lifecycle test become `restore_power()`; the two
+  `restore_power("inactive")` calls before `cleanup_payloads` and in
+  `test_session_snapshots_ownership_after_lane_pin` are deleted (they were no-ops on an inactive
+  domain); the one that powered the domain off before `assert not domain.active` becomes
+  `stop_and_require_inactive(clean=False)`. Add `assert events.count("domain.create") == 1` after
+  a second `restore_power()` on the active domain.
 
 Steps:
-1. `session_support.Domain`: add `honours_shutdown: bool = True` (constructor kwarg),
+1. `session_support.Domain`: add constructor kwarg `honours_shutdown: bool = True`,
    `state(self, flags=0)` returning `[libvirt.VIR_DOMAIN_RUNNING if self.active else
    libvirt.VIR_DOMAIN_SHUTOFF, 0]`, and `shutdown()` appending `domain.shutdown` and clearing
-   `active` when `honours_shutdown`. Let `_xml(domain_type=None)` emit `<domain type="...">`.
+   `active` when `honours_shutdown`. `_xml(domain_type: str | None = None)` emits
+   `<domain type="...">` when given.
 2. Write the tests above; run; expect red.
-3. `session.py`: `_Domain` gains `shutdown` and `state`. `factory.open` reads
-   `accel = "kvm" if inactive_root.get("type") == "kvm" else None` and passes `accel`, `sleep`,
-   `clock` into `_ConcreteSession`. Add `_EXTERNAL_BOOT_STOP_CAP_S = 120.0` with a comment citing
-   ADR-0681, and `_log = logging.getLogger(__name__)` (the module has no logger yet). Replace
+3. `session.py`: add `import logging`, `import time`, `_log = logging.getLogger(__name__)`, and
+   import `clean_shutdown_bound_s, power_off` from `..power`. `_Domain` gains `shutdown()` and
+   `state(flags: int = 0) -> Sequence[object]`. The factory takes `sleep`/`clock`; `open` passes
+   `kvm=inactive_root.get("type") == "kvm"`, `sleep`, `clock` into `_ConcreteSession`. Replace
    `stop_and_require_inactive`:
 
    ```python
@@ -111,20 +120,20 @@ Steps:
        domain = self._require_open_domain()
        if _active(domain):
            name = domain_name_for(self._system_id)
-           if clean:
-               bound = min(clean_shutdown_bound_s(self._accel), _EXTERNAL_BOOT_STOP_CAP_S)
-               power_off(domain, name, bound, self._sleep, self._clock)
+           if clean and self._kvm:  # ADR-0681: TCG keeps the hard stop
+               power_off(domain, name, clean_shutdown_bound_s("kvm"), self._sleep, self._clock)
            else:
-               _log.warning("power-off %s: destroy-unready", name)
+               path = "destroy-unaccelerated" if clean else "destroy-unready"
+               _log.warning("power-off %s: %s", name, path)
                domain.destroy()
        self.require_inactive()
    ```
 
-   Replace `restore_power` with a no-argument method that calls `_require_no_guest_context()` and
-   `_start_domain()` when inactive. Update the Protocol signatures. Add the teardown comment on
-   `_ConcreteSystemTeardownSession.destroy`: the overlay is reclaimed, so unflushed writes are
-   not read again (ADR-0679).
-4. Green command passes. Commit `fix(local-libvirt): stop external-boot guests cleanly`.
+   Replace `restore_power` with a no-argument method: `_require_no_guest_context()`, then
+   `_start_domain()` when inactive. Update the Protocol signatures. Comment on
+   `_ConcreteSystemTeardownSession.destroy`: the overlay is reclaimed next, so no unflushed
+   write is read again (ADR-0679).
+4. Green command passes. Commit `fix(local-libvirt): stop external-boot guests cleanly on KVM`.
 
 ## Task 3 — callers choose the stop
 
@@ -134,15 +143,15 @@ Interfaces: consumes Task 2's `stop_and_require_inactive(*, clean)` and `restore
 green `just test-verbose tests/providers/local_libvirt/test_external_boot.py`):
 - preparation — the preparation double records `clean`; a preparation test asserts `[True]`.
   Red: `TypeError` from the double while `prepare` passes no argument.
-- recovery — a recovery test through the restart double with the target running asserts
-  `clean is True` in `target-defined` and `False` in `module-restored`.
+- recovery — through the restart double with the target running, `recover_modules` records
+  `clean=True` for phase `target-defined` and `clean=False` for `module-restored`.
 - hard-site comments — `Mode: task-test-not-applicable`: comments only; no executable behaviour
   changes, so no test can fail on them.
 
 Steps:
 1. Doubles: both `stop_and_require_inactive` doubles take `*, clean: bool` and append it to a
    `stops` list; the `restore_power` double drops its argument; the two monkeypatched wrappers
-   (`original_stop`) forward `**kwargs`.
+   of `original_stop` forward `**kwargs`.
 2. Write the two tests; run; expect red.
 3. `external_boot.py`: `prepare` calls `stop_and_require_inactive(clean=True)`;
    `_stop_for_recovery` calls
@@ -156,9 +165,17 @@ Steps:
 
 ## Task 4 — live proof (fed44-big, KVM)
 
-`Mode: task-test-not-applicable` for automation: the proof drives a live stack by hand and is
-recorded in the PR. Redeploy HEAD, confirm the deployed build contains `power.py`. Provision a
-System, write `/root/kdive-2780` without `sync`, run external-boot preparation, then release and
-recover; the file exists on the restored source and the authority log shows
-`power-off ...: clean`. If a target can be made to miss readiness, its recovery logs
-`destroy-unready` inside the deadline; otherwise record that arm as not run.
+`Mode: task-test-not-applicable` for automation: the proof drives real hosts by hand and is
+recorded in the PR. Redeploy HEAD and confirm the deployed checkout contains `lifecycle/power.py`.
+Stop the reconciler for the direct arm and restart it afterwards.
+1. Provision a System through MCP and wait for `ready`.
+2. In the guest: `sysctl -w vm.dirty_writeback_centisecs=0 vm.dirty_expire_centisecs=360000`,
+   then write `/root/kdive-2780-clean` without `sync`.
+3. From a scratch script on the host (not committed), open a real
+   `LocalExternalBootSessionFactory` session on that System with a stub lane pin and artifact
+   root, call `stop_and_require_inactive(clean=True)`, and read the file through
+   `session.guest()`. Expect it present with its content, and a `power-off ...: clean` log line.
+4. Start the domain, repeat 2 with `/root/kdive-2780-destroy`, and call
+   `stop_and_require_inactive(clean=False)`. Expect the file absent or empty (negative control).
+5. Tear the System down. If the authority service is installed on the host, also run
+   `tests/live_vm/test_installed_local_authority.py`; otherwise record that arm as not run.
