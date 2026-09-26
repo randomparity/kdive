@@ -147,7 +147,7 @@ def test_root_arguments_require_initrd_when_provider_owns_no_root_device(
     if missing_key:
         del evidence["initrd"]
 
-    with pytest.raises(CategorizedError, match="supply an initrd with the build") as caught:
+    with pytest.raises(CategorizedError, match="create a new Run, supply an initrd") as caught:
         external_boot_root_arguments(build, _uuid_root(architecture), None)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert caught.value.details["reason"] == "remote_external_boot_initrd_required"

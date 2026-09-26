@@ -105,7 +105,8 @@ def external_boot_root_arguments(
     if provider_root_cmdline is None:
         if isinstance(evidence, dict) and evidence.get("initrd") is None:
             raise CategorizedError(
-                "remote external boot requires an initrd; supply an initrd with the build",
+                "remote external boot requires an initrd; create a new Run, supply an initrd "
+                "with its uploaded build, then complete the build, install, and boot that Run",
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"reason": "remote_external_boot_initrd_required"},
             )

@@ -515,7 +515,7 @@ def test_boot_without_initrd_and_provider_root_refuses_before_activation(
         assert response.status == "error"
         assert response.error_category == "configuration_error"
         assert response.data["reason"] == "remote_external_boot_initrd_required"
-        assert "supply an initrd with the build" in (response.detail or "")
+        assert "create a new Run, supply an initrd" in (response.detail or "")
         assert row["n"] == 0
 
     asyncio.run(body())

@@ -697,7 +697,8 @@ def _register_runs_boot(
         `runs.install` re-stage (a changed cmdline/crashkernel) or `force=true`.
 
         Remote-libvirt external boot requires an initrd with the build. Without one, this call
-        returns `configuration_error` before activation; supply an initrd with the build and retry.
+        returns `configuration_error` before activation. Create a new Run without `build_ref`,
+        upload a build with an initrd, then complete the build, install, and boot the new Run.
         """
         return await _boot_run(
             pool,
