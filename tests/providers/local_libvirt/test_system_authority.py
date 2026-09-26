@@ -12,10 +12,15 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.profiles.provisioning import profile_digest
+from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.local_libvirt.lifecycle.boot.session import owned_system_semantic_identity
+from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
-from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
+from kdive.providers.local_libvirt.lifecycle.storage import (
+    ProvisioningFiles,
+    baseline_dir,
+    overlay_path,
+)
 from kdive.providers.local_libvirt.system_authority import (
     LocalAuthoritySystemError,
     LocalAuthoritySystemProvider,
@@ -31,13 +36,8 @@ from kdive.providers.system_authority import (
     AuthoritySystemProvisionSnapshot,
 )
 from kdive.providers.system_authority.composition import _AuthorityProvisioner
+from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 from tests.providers.local_libvirt.lifecycle.boot.session_support import _xml
-from tests.providers.local_libvirt.test_provisioning import (
-    _CAPS_X86_KVM_PPC_TCG,
-    _arch_profile,
-    _prov,
-    _ProvConn,
-)
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -134,7 +134,22 @@ def test_private_intent_is_fsynced_private_and_replay_is_exact(tmp_path: Path) -
 
 
 def test_authority_tcg_defined_domain_matches_retained_intent_identity(tmp_path: Path) -> None:
-    profile = _arch_profile("ppc64le")
+    profile = ProvisioningProfile.parse(
+        {
+            "schema_version": 1,
+            "arch": "ppc64le",
+            "vcpu": 2,
+            "memory_mb": 2048,
+            "disk_gb": 20,
+            "boot_method": "direct-kernel",
+            "kernel_source_ref": "linux-test",
+            "provider": {
+                "local-libvirt": {
+                    "rootfs": {"kind": "local", "path": "/var/lib/kdive/rootfs/base.qcow2"}
+                }
+            },
+        }
+    )
     intent = _intent(tmp_path)
     intent = replace(
         intent,
@@ -165,10 +180,37 @@ def test_authority_tcg_defined_domain_matches_retained_intent_identity(tmp_path:
         bootstrap_public_key=bootstrap_key,
         bootstrap_identity="sha256:" + hashlib.sha256(bootstrap_key.encode()).hexdigest(),
     )
-    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    conn = FakeLibvirtConn(
+        caps_xml=(
+            "<capabilities><host><cpu><arch>x86_64</arch></cpu></host>"
+            "<guest><os_type>hvm</os_type><arch name='x86_64'>"
+            "<emulator>/usr/bin/qemu-system-x86_64</emulator>"
+            "<domain type='qemu'/><domain type='kvm'/></arch></guest>"
+            "<guest><os_type>hvm</os_type><arch name='ppc64le'>"
+            "<emulator>/usr/bin/qemu-system-ppc64</emulator>"
+            "<domain type='qemu'/></arch></guest></capabilities>"
+        )
+    )
     expected_guest_arch = ("tcg", "/usr/bin/qemu-system-ppc64")
+    provisioner = LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        files=ProvisioningFiles(
+            make_overlay=lambda _base, _overlay: None,
+            remove_overlay=lambda _overlay: None,
+            remove_baseline=lambda _baseline: None,
+            overlay_exists=lambda _overlay: False,
+            baseline_exists=lambda _baseline: False,
+            prepare_console_log=lambda _path: None,
+            overlay_virtual_size=lambda _overlay: 1 << 60,
+        ),
+        materialize_rootfs=lambda rootfs, _system_id, _arch, *, job_id=None: rootfs.path,
+        extract_baseline_kernel=lambda _base, dest, _hint=None: BaselineKernel(
+            kernel=dest / "kernel", initrd=None
+        ),
+        free_port=lambda: 2200,
+    )
     provider = LocalAuthoritySystemProvider(
-        provisioner=_AuthorityProvisioner(_prov(conn), expected_guest_arch),
+        provisioner=_AuthorityProvisioner(provisioner, expected_guest_arch),
         topology=LocalAuthoritySystemTopology(
             intent_root=tmp_path / "intents",
             overlay_root=tmp_path / "overlays",
@@ -194,9 +236,9 @@ def test_authority_tcg_defined_domain_matches_retained_intent_identity(tmp_path:
     finally:
         provider.close()
 
-    assert len(conn.recorded_xml) == 1
+    assert len(conn.defined_xml) == 1
     assert intent_with_xml.xml_digest == owned_system_semantic_identity(
-        conn.recorded_xml[0], intent.system_id, intent.overlay
+        conn.defined_xml[0], intent.system_id, intent.overlay
     )
 
 
