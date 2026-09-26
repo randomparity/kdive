@@ -845,6 +845,7 @@ class LocalLibvirtProvisioning:
                     return  # already gone
                 raise self._infra("looking up", domain_name) from exc
             try:
+                # Hard by design (ADR-0679): the overlay is reclaimed next, never read again.
                 domain.destroy()
             except libvirt.libvirtError as exc:
                 if exc.get_error_code() != libvirt.VIR_ERR_OPERATION_INVALID:

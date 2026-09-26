@@ -8,6 +8,9 @@ Amends [ADR-0030](0030-install-boot-plane.md) §6 and
 [ADR-0206](0206-modules-in-guest-shared-contract.md) §4: neither `boot()` nor the install
 force-off hard-destroys a guest that can shut down.
 
+> **Amended by [ADR-0681](0681-external-boot-clean-power-off.md) (#2780):** the external-boot
+> preparation stops and KVM recovery stops now use this helper.
+
 ## Context
 
 `runs.boot` (`_power_cycle`) and the module-injecting install (`force_off_if_active`) hard-kill a

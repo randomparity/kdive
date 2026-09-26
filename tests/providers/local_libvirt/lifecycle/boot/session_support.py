@@ -7,7 +7,10 @@ need are defined here exactly once rather than duplicated.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
+
+import libvirt
 
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
 
@@ -26,6 +29,7 @@ def _xml(
     overlay: str = OVERLAY,
     system_id: UUID = SYSTEM_ID,
     channel: str = "valid",
+    domain_type: str | None = None,
 ) -> str:
     channels = {
         "valid": (
@@ -40,8 +44,9 @@ def _xml(
             '<channel type="unix"><target type="pty" name="org.qemu.guest_agent.0"/></channel>'
         ),
     }[channel]
+    opening = "<domain>" if domain_type is None else f'<domain type="{domain_type}">'
     return (
-        "<domain><name>kdive-" + str(system_id) + "</name><metadata>"
+        opening + "<name>kdive-" + str(system_id) + "</name><metadata>"
         '<kdive:system xmlns:kdive="https://kdive.dev/libvirt/1">'
         + str(system_id)
         + "</kdive:system></metadata><os><kernel>/old</kernel><cmdline>root=x</cmdline></os>"
@@ -58,12 +63,14 @@ class Domain:
         xml: str | None = None,
         *,
         inactive_xml: str | None = None,
+        honours_shutdown: bool = True,
     ) -> None:
         self.events = events
         self.xml = xml or _xml()
         # None: the running and persistent definitions agree (libvirt after define or stop).
         self.inactive_xml = inactive_xml
         self.active = False
+        self.honours_shutdown = honours_shutdown
 
     def name(self) -> str:
         start = self.xml.index("<name>") + len("<name>")
@@ -83,6 +90,16 @@ class Domain:
         self.events.append("domain.destroy")
         self.active = False
         return 0
+
+    def shutdown(self) -> int:
+        self.events.append("domain.shutdown")
+        if self.honours_shutdown:
+            self.active = False
+        return 0
+
+    def state(self, flags: int = 0) -> Sequence[object]:
+        del flags
+        return [libvirt.VIR_DOMAIN_RUNNING if self.active else libvirt.VIR_DOMAIN_SHUTOFF, 0]
 
     def create(self) -> int:
         self.events.append("domain.create")

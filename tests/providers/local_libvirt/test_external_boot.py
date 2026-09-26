@@ -2223,6 +2223,7 @@ class _RealSession:
         self.close_attempts = 0
         self.close_fault = False
         self.guest_fault = False
+        self.stops: list[str] = []
         self.inspection = ClosedDomainInspection(
             xml=preparation.metadata.source_xml.encode(),
             active=preparation.metadata.prior_power == "running",
@@ -2242,7 +2243,8 @@ class _RealSession:
         del projected
         return self.inspection
 
-    def stop_and_require_inactive(self) -> None:
+    def stop_and_require_inactive(self, *, mode: str) -> None:
+        self.stops.append(mode)
         reference = _point(self.preparation.metadata).recovery_ref
         with RecoveryMetadataStore(self.preparation.root) as store:
             store.reopen_pre_stop(reference, self.preparation.metadata.binding)
@@ -2269,8 +2271,8 @@ class _RealSession:
         del projected
         self.preparation.actions.append(f"define:{xml}")
 
-    def restore_power(self, prior: str) -> None:
-        self.preparation.actions.append(f"power:{prior}")
+    def restore_power(self) -> None:
+        self.preparation.actions.append("power")
 
     def readiness(self) -> ReadinessResult:
         self.preparation.actions.append("readiness")
@@ -2317,7 +2319,7 @@ def test_pre_stop_abort_restores_running_source_before_removing_partial(tmp_path
     )
 
     assert result == "removed"
-    assert preparation.actions == ["power:running", "readiness"]
+    assert preparation.actions == ["power", "readiness"]
     with RecoveryMetadataStore(root) as store:
         assert (
             store.inspect_abortable_partial(
@@ -2353,7 +2355,7 @@ def test_system_teardown_partial_abort_derives_identities_from_private_intent(
     )
 
     assert result == "removed"
-    assert preparation.actions == ["power:running", "readiness"]
+    assert preparation.actions == ["power", "readiness"]
 
 
 @pytest.mark.parametrize(
@@ -2589,7 +2591,8 @@ class _RestartSession(_RealSession):
         if self.active:
             raise RuntimeError("domain must be inactive")
 
-    def stop_and_require_inactive(self) -> None:
+    def stop_and_require_inactive(self, *, mode: str) -> None:
+        self.stops.append(mode)
         self.faults.run("stop", lambda: setattr(self, "active", False))
         self.require_inactive()
 
@@ -3006,6 +3009,26 @@ def test_recovery_from_activation_module_phase_restores_exact_source_before_powe
     assert session.active
     with RecoveryMetadataStore(root) as store:
         assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == "recovered"
+
+
+@pytest.mark.parametrize(
+    ("phase", "mode"), [("target-defined", "clean-on-kvm"), ("module-restored", "destroy")]
+)
+def test_recovery_stops_a_ready_target_cleanly_and_an_unready_one_hard(
+    tmp_path: Path, phase: RecoveryPhase, mode: str
+) -> None:
+    ports, metadata, session, _guest, _root = _restart_fixture(
+        tmp_path,
+        phase=phase,
+        source_present=True,
+        xml=_metadata().target_xml,
+        active=True,
+    )
+
+    ports.recover(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert session.stops == [mode]
+    assert session.xml == metadata.source_xml
 
 
 def _libvirt_reserialized(xml: str) -> str:
@@ -3951,6 +3974,7 @@ def test_real_adapter_persists_intent_before_first_host_mutation(tmp_path: Path)
     assert prepared == metadata
     assert host.actions == ["inspect", "first-mutation"]
     assert session.close_attempts == 1
+    assert session.stops == ["clean"]
 
 
 @pytest.mark.parametrize("effect", ["before", "after"])
@@ -3987,7 +4011,7 @@ def test_fresh_adapter_resumes_every_preparation_boundary(
         monkeypatch.setattr(
             first_session,
             "stop_and_require_inactive",
-            lambda: faults.run("stop", original_stop),
+            lambda **kwargs: faults.run("stop", lambda: original_stop(**kwargs)),
         )
     elif boundary == "capture":
         original_capture = _RecordingRecoveryWriter.capture
@@ -4188,8 +4212,8 @@ def test_real_adapter_rejects_substituted_target_metadata_before_publication_or_
     original_stop = session.stop_and_require_inactive
     substituted = _pre_stop(metadata).model_copy(update={field: substitution})
 
-    def substitute_after_stop() -> None:
-        original_stop()
+    def substitute_after_stop(**kwargs: str) -> None:
+        original_stop(**kwargs)
         intent = (
             root
             / f".{metadata.binding.system_id}.{metadata.binding.activation_id}.partial"

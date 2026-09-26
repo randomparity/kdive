@@ -52,6 +52,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootSessionFactory,
     LocalSystemTeardownInspection,
     LocalSystemTeardownSession,
+    StopMode,
     TreeCursor,
 )
 from kdive.providers.ports.external_boot import (
@@ -1859,7 +1860,7 @@ class _RealLocalExternalBootOperation:
             else:
                 _validate_preparation_owner(intent, materialization, binding)
                 _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
-        self._session.stop_and_require_inactive()
+        self._session.stop_and_require_inactive(mode="clean")
         with RecoveryMetadataStore(self._recovery_root) as store:
             owned_sink = store.recovery_archive_sink(reference, intent)
         projection = self._session.reopen_projection(materialization.artifacts.kernel)
@@ -2188,7 +2189,7 @@ class _RealLocalExternalBootOperation:
                     raise ValueError("recovery partial identity conflicts with teardown request")
                 _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
                 if intent.prior_power == "running":
-                    self._session.restore_power("running")
+                    self._session.restore_power()
                     readiness = self._session.readiness()
                     if not readiness.ok:
                         raise ValueError("source readiness failed while aborting preparation")
@@ -2283,8 +2284,10 @@ class _RealLocalExternalBootOperation:
         if not active:
             self._session.require_inactive()
             return
+        # ADR-0681: only a target that reached `target-defined` stops cleanly, and only on KVM.
+        mode: StopMode = "clean-on-kvm" if metadata.phase == "target-defined" else "destroy"
         try:
-            self._session.stop_and_require_inactive()
+            self._session.stop_and_require_inactive(mode=mode)
         except Exception as primary:
             try:
                 after = self._host_state(metadata)

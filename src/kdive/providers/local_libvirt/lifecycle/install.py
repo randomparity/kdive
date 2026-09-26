@@ -62,6 +62,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
 )
 from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
 from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
+from kdive.providers.local_libvirt.lifecycle.power import clean_shutdown_bound_s, power_off
 from kdive.providers.local_libvirt.lifecycle.storage import (
     _prepare_console_log,
     console_log_path,
@@ -144,70 +145,6 @@ def _libvirt_transport_failure(verb: str, domain_name: str) -> CategorizedError:
     )
 
 
-# ADR-0679: request a clean shutdown so the guest flushes its writes; destroy is the fallback.
-_CLEAN_SHUTDOWN_BASE_S = 60.0
-_SHUTDOWN_POLL_S = 1.0
-_SHUTDOWN_RESEND_S = 10.0
-_HONOURS_SHUTDOWN = frozenset({libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_BLOCKED})
-
-
-def _power_off(
-    domain: _LibvirtDomain,
-    domain_name: str,
-    accel: str | None,
-    sleep: Callable[[float], None],
-    clock: Callable[[], float],
-) -> None:
-    """Stop the domain, cleanly when the guest can honour a request, else by ``destroy``.
-
-    A guest killed by ``destroy`` loses writes still in its page cache (#2757), so a running
-    guest is asked to shut down and given ``60 s * tcg_deadline_multiplier(accel)`` on
-    ``clock`` to reach ``SHUTOFF``; the request is re-sent every 10 s in case the first arrived
-    before the guest's handler was listening. A guest already shutting down is waited for
-    without a request, which libvirt would refuse. A state that cannot honour a request
-    (paused, crashed, suspended) is destroyed at once. The log line names the path taken.
-
-    Raises:
-        libvirt.libvirtError: from ``state()`` or ``destroy()``; the caller maps it.
-    """
-    state = domain.state()[0]
-    if state == libvirt.VIR_DOMAIN_SHUTOFF:
-        return
-    stopping = state == libvirt.VIR_DOMAIN_SHUTDOWN
-    if state not in _HONOURS_SHUTDOWN and not stopping:
-        _log.warning("power-off %s: destroy-state (domain state %s)", domain_name, state)
-        domain.destroy()
-        return
-    bound_s = _CLEAN_SHUTDOWN_BASE_S * tcg_deadline_multiplier(accel)
-    start = clock()
-    requested_at: float | None = start if stopping else None
-    while clock() - start < bound_s:
-        if requested_at is None or clock() - requested_at >= _SHUTDOWN_RESEND_S:
-            first = requested_at is None
-            requested_at = clock()
-            if not _request_shutdown(domain, domain_name, first=first):
-                domain.destroy()
-                return
-        sleep(_SHUTDOWN_POLL_S)
-        if domain.state()[0] == libvirt.VIR_DOMAIN_SHUTOFF:
-            _log.info("power-off %s: clean after %.1f s", domain_name, clock() - start)
-            return
-    _log.warning("power-off %s: destroy-timeout after %.1f s", domain_name, clock() - start)
-    domain.destroy()
-
-
-def _request_shutdown(domain: _LibvirtDomain, domain_name: str, *, first: bool) -> bool:
-    """Send a shutdown request; only a refused first request is a failure."""
-    try:
-        domain.shutdown()
-    except libvirt.libvirtError:
-        if first:
-            _log.warning("power-off %s: destroy-refused", domain_name, exc_info=True)
-            return False
-        _log.debug("power-off %s: shutdown re-send refused; still waiting", domain_name)
-    return True
-
-
 def _open(connect: Connect, purpose: str) -> _LibvirtConn:
     try:
         return connect()
@@ -283,7 +220,8 @@ class LocalLibvirtBooter:
             except libvirt.libvirtError:
                 return
             try:
-                _power_off(domain, domain_name, accel, self._sleep, self._clock)
+                bound_s = clean_shutdown_bound_s(accel)
+                power_off(domain, domain_name, bound_s, self._sleep, self._clock)
             except libvirt.libvirtError as exc:
                 raise CategorizedError(
                     "failed to force-off the System domain before module injection",
@@ -297,7 +235,7 @@ class LocalLibvirtBooter:
         self, domain: _LibvirtDomain, domain_name: str, system_id: UUID, accel: str | None
     ) -> None:
         try:
-            _power_off(domain, domain_name, accel, self._sleep, self._clock)
+            power_off(domain, domain_name, clean_shutdown_bound_s(accel), self._sleep, self._clock)
             # Truncate after the power-off, before create: the fresh window must hold only this
             # boot, and the worker-owned inode must exist before the daemon opens it
             # (ADR-0576, #1940).
