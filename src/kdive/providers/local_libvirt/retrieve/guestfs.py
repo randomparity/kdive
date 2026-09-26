@@ -229,6 +229,7 @@ def _force_off_domain(system_id: UUID) -> None:  # pragma: no cover - live_vm (l
             domain = conn.lookupByName(domain_name_for(system_id))
         except libvirt.libvirtError:
             return  # already gone — nothing running to quiesce
+        # Hard by design (ADR-0679): the kdump wait is over, so a clean request only adds delay.
         if domain.isActive():
             domain.destroy()
     finally:

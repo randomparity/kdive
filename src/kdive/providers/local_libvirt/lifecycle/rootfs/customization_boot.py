@@ -264,6 +264,8 @@ def _force_off(domain: _Domain) -> None:
     force-off error is worth a warning; otherwise every successful build would log a traceback.
     """
     try:
+        # Hard by design (ADR-0679): only a failed or timed-out build is still running here, and
+        # its output is discarded.
         if domain.isActive():
             domain.destroy()
     except libvirt.libvirtError as err:  # pragma: no cover - live_vm
