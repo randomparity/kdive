@@ -27,6 +27,8 @@ _REQUIREMENTS = "deploy/ansible/requirements.yml"
 _SOURCE_LOCK = "deploy/ansible/requirements-ci.lock.yml"
 _COLLECTIONS_PATH = "~/.ansible/collections"
 _INSTALL_RECIPE = "install-ansible-collections"
+_PREPARE_RECIPE = "prepare-local-libvirt-host"
+_CHECK_SCRIPT = "scripts/guards/check_ansible_collections.py"
 
 _JUST = shutil.which("just")
 #: CI drives every gate through `just`, so this never skips there; the guard is for a
@@ -136,6 +138,29 @@ def test_setup_installs_the_collections_before_running_the_hooks() -> None:
     assert command.index("ansible-galaxy collection install") < command.index("prek run -a")
     # And after `sync`, because the install runs under `uv run` and needs that venv.
     assert command.index("uv sync --locked") < command.index("ansible-galaxy collection install")
+
+
+@_needs_just
+def test_prepare_local_libvirt_host_fails_fast_on_missing_collections() -> None:
+    # #2782: the play resolves every module in an imported task file at parse time, so a missing
+    # collection broke the play deep inside `ansible-playbook` on a host that only followed the
+    # documented setup. The recipe must check first and name the fix, not add a second install.
+    command = _expand(_PREPARE_RECIPE)
+
+    assert f"{_CHECK_SCRIPT} --presence-only" in command
+    assert _REQUIREMENTS in command
+    assert _COLLECTIONS_PATH in command
+    check_index = command.index(_CHECK_SCRIPT)
+    playbook_index = command.index("ansible-playbook")
+    assert check_index < playbook_index, "the collections check must run before the play"
+    assert _INSTALL_RECIPE in command[check_index:playbook_index], (
+        "a missing collection must fail with a message naming "
+        f"`just {_INSTALL_RECIPE}`, not just a bare non-zero exit"
+    )
+    # Single-source-of-install (#2499): this recipe may reference the install recipe by name in
+    # its failure message, but it must never itself invoke `ansible-galaxy` -- the presence check
+    # is a filesystem read, not a Galaxy command, so this stays a read-only preflight.
+    assert "ansible-galaxy" not in command
 
 
 def test_ci_installs_source_lock_only_on_cache_miss_with_galaxy_dead() -> None:

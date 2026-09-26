@@ -155,7 +155,8 @@ LIBVIRT_BOOT_WINDOW_S = Setting(
         "kdive-ready marker orders After=kdump.service) on slow hosts such as POWER9 and "
         "large first-dracut builds. Foreign (TCG-emulated) guests scale this by "
         "tcg_deadline_multiplier(accel) (ADR-0341). The window is a ceiling, not a fixed "
-        "wait — boot returns the instant the marker appears."
+        "wait — boot returns the instant the marker appears. It also bounds the local-libvirt "
+        "provision/reprovision first-boot wait (ADR-0680)."
     ),
     suggest="set an integer number of seconds > 0 (default 900 = 15 min native-KVM base window)",
 )
