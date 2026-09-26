@@ -44,7 +44,9 @@ _link_system_guestfs_binding() (
   # that provisions, and provisioning extracts the baseline kernel through the binding (ADR-0272),
   # as do build-fs, built-kernel staging, external boot and local kdump capture, so a missing
   # binding fails the install. Failing rather than warning is deliberate: the play runs this
-  # installer with its output censored and reports stderr only on a non-zero exit.
+  # installer with its output censored and reports stderr only on a non-zero exit. The base is
+  # whichever python3.14 uv selected from PATH below, so a non-distro 3.14 earlier on PATH needs
+  # its own binding; the failure names that interpreter so the operator can see which one it was.
   base_python="$(readlink -f -- "$venv_python")"
   system_site="$(
     "$base_python" -c \
