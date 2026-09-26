@@ -6,6 +6,10 @@ Accepted (2026-08-28)
 
 Debug-detach restrictions superseded by [ADR-0617](0617-external-boot-detach-remains-an-unblocking-operation.md).
 
+> **Amended by [ADR-0681](0681-external-boot-clean-power-off.md) (#2780):** on local-libvirt,
+> recovery stops a target that passed readiness with a bounded clean shutdown and destroys one
+> that did not.
+
 ## Context
 
 `InstallRequest` carries a combined kernel/modules bundle, an optional initrd, a composed command
