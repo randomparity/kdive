@@ -60,6 +60,10 @@ The operator chose the TCG treatment below (option B, 2026-09-25, #2780).
   System pays the same cost at preparation, or 120 s plus the same overrun on TCG; a TCG
   preparation that then misses its per-call deadline is retried.
 - A TCG recovery stop stays hard and can lose unflushed target writes, as before.
+- A preparation abort that runs while the source is still shutting down (the authority restarted
+  mid-wait) finds the domain active, starts nothing, and fails its readiness check with
+  `provider_conflict`. A crash between the pre-stop intent and `destroy()` reached the same state
+  before; the clean wait widens that window to the shutdown bound.
 - The operator `power off` in `lifecycle/control.py` (ADR-0028) is still a hard stop.
 
 ## Considered & rejected

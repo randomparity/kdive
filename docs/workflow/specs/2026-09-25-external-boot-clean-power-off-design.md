@@ -58,6 +58,8 @@ writes still in the guest page cache, the loss class ADR-0679 fixed for `runs.bo
    - A TCG preparation stop costs up to 120 s plus the agent overrun; a miss of the per-call
      deadline is a retryable `INFRASTRUCTURE_FAILURE`.
    - A domain definition without `type="kvm"` is treated as not KVM; libvirt always writes `type`.
+   - A preparation abort while the source is still shutting down starts nothing and fails with
+     `provider_conflict` (ADR-0681 Consequences); the window already existed before the change.
 4. **Covered elsewhere**
    - operator `power off` (`lifecycle/control.py`, ADR-0028): operator-excluded, reported as a
      follow-up candidate;

@@ -177,7 +177,10 @@ Stop the reconciler for the direct arm and restart it afterwards.
    `LocalExternalBootSessionFactory` session on that System with a stub lane pin and artifact
    root, call `stop_and_require_inactive(mode="clean")`, and read the file through
    `session.guest()`. Expect it present with its content, and a `power-off ...: clean` log line.
-4. Start the domain, repeat 2 with `/root/kdive-2780-destroy`, and call
+4. Start the domain, repeat 2 with `/root/kdive-2780-recover`, call
+   `stop_and_require_inactive(mode="clean-on-kvm")` (the recovery stop of a `target-defined`
+   target), and expect the file present.
+5. Start the domain, repeat 2 with `/root/kdive-2780-destroy`, and call
    `stop_and_require_inactive(mode="destroy")`. Expect the file absent or empty (negative control).
-5. Tear the System down. If the authority service is installed on the host, also run
+6. Tear the System down. If the authority service is installed on the host, also run
    `tests/live_vm/test_installed_local_authority.py`; otherwise record that arm as not run.
