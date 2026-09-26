@@ -72,6 +72,8 @@ def _healthy_local(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
         "KDIVE_INSTALL_STAGING": str(staging),
         "KDIVE_BOOT_DIR": str(boot),
         "KDIVE_PYTHON": str(bindir / "python3"),
+        # Pinned absent so a host that ran host preparation does not decide the verdict.
+        "KDIVE_LIFECYCLE_PYTHON": str(tmp_path / "absent-lifecycle-python"),
     }
     return bindir, env, calllog
 

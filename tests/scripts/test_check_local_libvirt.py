@@ -124,6 +124,7 @@ def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None
             "KDIVE_KVM_NODE": str(kvm),
             "KDIVE_INSTALL_STAGING": str(staging),
             "KDIVE_BOOT_DIR": str(boot),
+            "KDIVE_LIFECYCLE_PYTHON": str(tmp_path / "absent-lifecycle-python"),
         },
         capture_output=True,
         text=True,
