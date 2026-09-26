@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Verify an installed Ansible collection tree exactly matches its requirements manifest."""
+"""Verify an installed Ansible collection tree against its requirements manifest.
+
+Default mode requires an exact set/version match (used by CI, whose collection root holds
+nothing but this repository's pinned collections). ``--presence-only`` instead only checks that
+the required collections can be resolved at all, for a developer preflight against a shared
+``~/.ansible/collections`` that may hold unrelated collections and other versions of these.
+"""
 
 from __future__ import annotations
 
@@ -85,15 +91,38 @@ def evaluate(requirements_text: str, collections_root: Path) -> list[str]:
     return violations
 
 
+def missing(requirements_text: str, collections_root: Path) -> list[str]:
+    """Return violations for required collections that cannot be resolved.
+
+    Unlike ``evaluate``, this ignores collections the requirements manifest does not name and
+    version mismatches on the ones it does: a developer's ``~/.ansible/collections`` is free to
+    hold unrelated collections and other versions of these (see the note on
+    ``install-ansible-collections`` in the justfile), and a preflight that flagged them would
+    nag a developer into a needless reinstall instead of answering "can the play resolve its
+    modules" (#2782).
+    """
+    expected = _requirements(requirements_text)
+    installed, _structural_violations = _installed(collections_root)
+    return [
+        f"{name}: required collection is missing"
+        for name in sorted(expected.keys() - installed.keys())
+    ]
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print(f"usage: {argv[0]} REQUIREMENTS COLLECTIONS_ROOT", file=sys.stderr)
+    args = argv[1:]
+    presence_only = args[:1] == ["--presence-only"]
+    if presence_only:
+        args = args[1:]
+    if len(args) != 2:
+        print(f"usage: {argv[0]} [--presence-only] REQUIREMENTS COLLECTIONS_ROOT", file=sys.stderr)
         return 2
-    requirements_path = Path(argv[1])
+    requirements_path = Path(args[0])
+    check = missing if presence_only else evaluate
     try:
-        violations = evaluate(
+        violations = check(
             requirements_path.read_text(encoding="utf-8"),
-            Path(argv[2]),
+            Path(args[1]),
         )
     except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         print(f"Ansible collection verification failed: {exc}", file=sys.stderr)
