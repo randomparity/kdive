@@ -30,6 +30,18 @@ class PowerDomain(Protocol):
     def state(self, flags: int = 0) -> Sequence[object]: ...
 
 
+def destroy_or_accept_shutoff(domain: PowerDomain) -> None:
+    """Accept a destroy race only when libvirt confirms the domain is now shut off."""
+    try:
+        domain.destroy()
+    except libvirt.libvirtError as exc:
+        if (
+            exc.get_error_code() != libvirt.VIR_ERR_OPERATION_INVALID
+            or domain.state()[0] != libvirt.VIR_DOMAIN_SHUTOFF
+        ):
+            raise
+
+
 def clean_shutdown_bound_s(accel: str | None) -> float:
     """The ADR-0679 wait: 60 s for KVM, scaled by ``tcg_deadline_multiplier`` otherwise."""
     return _CLEAN_SHUTDOWN_BASE_S * tcg_deadline_multiplier(accel)
@@ -59,7 +71,7 @@ def power_off(
     stopping = state == libvirt.VIR_DOMAIN_SHUTDOWN
     if state not in _HONOURS_SHUTDOWN and not stopping:
         _log.warning("power-off %s: destroy-state (domain state %s)", domain_name, state)
-        domain.destroy()
+        destroy_or_accept_shutoff(domain)
         return
     start = clock()
     requested_at: float | None = start if stopping else None
@@ -68,14 +80,14 @@ def power_off(
             first = requested_at is None
             requested_at = clock()
             if not _request_shutdown(domain, domain_name, first=first):
-                domain.destroy()
+                destroy_or_accept_shutoff(domain)
                 return
         sleep(_SHUTDOWN_POLL_S)
         if domain.state()[0] == libvirt.VIR_DOMAIN_SHUTOFF:
             _log.info("power-off %s: clean after %.1f s", domain_name, clock() - start)
             return
     _log.warning("power-off %s: destroy-timeout after %.1f s", domain_name, clock() - start)
-    domain.destroy()
+    destroy_or_accept_shutoff(domain)
 
 
 def _request_shutdown(domain: PowerDomain, domain_name: str, *, first: bool) -> bool:
