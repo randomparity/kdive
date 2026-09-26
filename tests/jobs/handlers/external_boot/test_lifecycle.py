@@ -843,7 +843,10 @@ def test_cmdline_failure_redacts_before_authority_persistence(
 
 @pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict"])
 def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
-    migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    operation: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A non-terminal authority category cannot be promoted to lifecycle evidence."""
     spec = CASES[operation]
@@ -857,6 +860,20 @@ def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
         payload = excinfo.value.result.result
         assert isinstance(payload, _FailureResult)
         assert payload.failure_context.phase == "commit"
+        assert payload.failure_context.model_dump(exclude_none=True) == {"phase": "commit"}
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "kdive.jobs.handlers.external_boot.runner"
+        ]
+        assert len(warnings) == 1
+        warning = warnings[0].getMessage()
+        assert str(case.job_id) in warning
+        assert str(case.vehicle.activation_id) in warning
+        assert "phase=commit" in warning
+        assert "exception=CategorizedError" in warning
+        assert f"authority observed 'conflict' for {operation!r}" in warning
+        assert "authority observed" not in excinfo.value.result.model_dump_json(by_alias=True)
         # The mutation happened; what is refused is *recording* it as a good terminal state.
         row = await _activation_row(seed, case.vehicle.activation_id)
         expected_state = (
