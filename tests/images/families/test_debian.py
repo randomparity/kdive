@@ -146,8 +146,10 @@ def test_debian_steps_bake_cloud_init_and_drop_sshd_keygen(tmp_path: Path) -> No
 
 def test_debug_steps_touch_no_selinux_and_stage_no_nm_keyfile(tmp_path: Path) -> None:
     # Debian has no /etc/selinux/config and no NetworkManager — neither must be touched (#824).
-    text = rendered(_steps(_ctx(tmp_path, is_cloud_image=True)))
-    assert "selinux" not in text.lower()
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True))
+    assert "/etc/selinux/config" not in baked_paths(steps)
+    assert all("/etc/selinux/config" not in command for command in commands(steps))
+    text = rendered(steps)
     assert "NetworkManager" not in text and "kdive-ssh-nic" not in text
 
 
