@@ -66,7 +66,8 @@ target-version = "py314"
 extend-exclude = ["docs/adr"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+# TC004: a TYPE_CHECKING-only import used at run time is a NameError the type checker hides.
+select = ["E", "F", "I", "UP", "B", "SIM", "TC004"]
 
 [tool.ruff.lint.per-file-ignores]
 # The generated verb descriptors carry each tool parameter's full description verbatim as
