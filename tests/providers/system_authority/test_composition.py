@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import cast
+from uuid import uuid4
+
 import pytest
 
-from kdive.providers.system_authority.composition import _fixed_domain_exit
+import kdive.providers.system_authority.composition as composition
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import ConsoleReadinessWindow
+from kdive.providers.system_authority.composition import _fixed_domain_exit, _LocalReadiness
 
 
 class _Domain:
@@ -38,3 +44,22 @@ def test_domain_exit_probe_reads_an_existing_domain_and_closes_the_connection(
 
     assert probe.exited is exited
     assert connection.closed
+
+
+def test_local_readiness_forwards_authority_multiplier(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[float] = []
+
+    class _Window:
+        def close(self) -> None:
+            pass
+
+    def prepare(_system_id: object, *, multiplier: float) -> ConsoleReadinessWindow:
+        seen.append(multiplier)
+        return cast(ConsoleReadinessWindow, _Window())
+
+    monkeypatch.setattr(composition, "prepare_console_readiness_window", prepare)
+    readiness = _LocalReadiness(lambda: None, 7.0)
+    readiness.prepare(Path(f"{uuid4()}.log"))
+    readiness.close()
+
+    assert seen == [7.0]

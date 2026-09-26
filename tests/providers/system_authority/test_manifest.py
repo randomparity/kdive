@@ -13,6 +13,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+import kdive.config as config
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.system_authority.composition import (
@@ -316,8 +317,12 @@ def test_local_installation_rejects_base_with_wrong_root_identity(tmp_path: Path
         )
 
 
-def test_local_provider_rechecks_the_pinned_base_before_provisioning(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("accel", "expected_deadline"), [("kvm", 900), ("tcg", 9000)])
+def test_local_provider_rechecks_the_pinned_base_before_provisioning(
+    tmp_path: Path, accel: str, expected_deadline: int
+) -> None:
     document = _local_document()
+    document["accel"] = accel
     document["bases"] = tuple(document["bases"])
     bases_document = document["bases"]
     assert isinstance(bases_document, tuple)
@@ -362,6 +367,7 @@ def test_local_provider_rechecks_the_pinned_base_before_provisioning(tmp_path: P
         owner_uid=os.getuid(),
         owner_gid=os.getgid(),
     )
+    assert provider._deadline.total_seconds() == expected_deadline
     profile = ProvisioningProfile.parse(
         {
             "schema_version": 1,
@@ -439,3 +445,47 @@ def test_local_provider_rechecks_the_pinned_base_before_provisioning(tmp_path: P
     finally:
         close()
     assert connection_calls == []
+
+
+def test_authority_composition_rejects_boot_window_beyond_intent_lifetime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "901")
+    config.load()
+    document = _local_document()
+    document["bases"] = tuple(document["bases"])
+    manifest = LocalAuthoritySystemManifestV1.model_validate(document)
+    state_root = tmp_path / "state"
+    rootfs_root = tmp_path / "rootfs"
+    for path in (
+        state_root,
+        state_root / "intents",
+        rootfs_root,
+        rootfs_root / "systems",
+        rootfs_root / "baselines",
+        rootfs_root / "bases",
+    ):
+        path.mkdir(mode=0o700)
+
+    with pytest.raises(ValueError, match="KDIVE_LIBVIRT_BOOT_WINDOW_S.*900"):
+        build_local_authority_system_provider(
+            manifest,
+            base_files=(),
+            connect=lambda: None,
+            state_root=state_root,
+            rootfs_root=rootfs_root,
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+
+
+@pytest.mark.parametrize(("accel", "accepted"), [("kvm", True), ("tcg", True), ("other", False)])
+def test_local_manifest_accepts_only_supported_accelerators(accel: str, accepted: bool) -> None:
+    document = _local_document()
+    document["accel"] = accel
+    document["bases"] = tuple(document["bases"])
+    if accepted:
+        assert LocalAuthoritySystemManifestV1.model_validate(document).accel == accel
+    else:
+        with pytest.raises(ValidationError, match="accel"):
+            LocalAuthoritySystemManifestV1.model_validate(document)

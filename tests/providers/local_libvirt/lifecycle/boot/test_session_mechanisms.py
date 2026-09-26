@@ -176,6 +176,23 @@ def test_prepared_window_discards_prior_marker_before_new_crash(
     assert result == ReadinessResult(True, False, None, "Kernel panic")
 
 
+@pytest.mark.parametrize(("multiplier", "expected"), [(1.0, 10.0), (7.0, 70.0)])
+def test_prepared_window_uses_multiplier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, multiplier: float, expected: float
+) -> None:
+    path = tmp_path / "console.log"
+    path.touch()
+    monkeypatch.setattr(readiness_module, "console_log_path", lambda _system_id: path)
+    monkeypatch.setattr(readiness_module.config, "require", lambda _setting: 10)
+    monkeypatch.setattr(readiness_module.time, "monotonic", lambda: 100.0)
+
+    window = prepare_console_readiness_window(SYSTEM_ID, multiplier=multiplier)
+    try:
+        assert window.deadline == 100.0 + expected
+    finally:
+        window.close()
+
+
 def test_external_boot_readiness_terminal_domain_gets_one_final_read() -> None:
     window = cast(
         ConsoleReadinessWindow,
