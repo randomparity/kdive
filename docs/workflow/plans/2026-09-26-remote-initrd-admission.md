@@ -23,7 +23,7 @@ Replace the conditional in `src/kdive/services/external_boot/plan.py` with:
 
 ```python
     if provider_root_cmdline is None:
-        if isinstance(evidence, dict) and evidence.get("initrd", object()) is None:
+        if isinstance(evidence, dict) and evidence.get("initrd") is None:
             raise CategorizedError(
                 "remote external boot requires an initrd; supply an initrd with the build",
                 category=ErrorCategory.CONFIGURATION_ERROR,
@@ -37,7 +37,9 @@ Replace the conditional in `src/kdive/services/external_boot/plan.py` with:
 
 Change the existing remote no-initrd test to assert the category, reason, and
 message. Retain the local no-initrd and initrd-present test bodies as behavioral
-controls; add a remote initrd-present assertion and a missing-evidence assertion.
+controls; add a remote initrd-present assertion and a missing-`initrd`-key
+assertion. An entirely absent evidence object still reaches existing plan
+validation.
 Rollback: revert this guard and its tests together.
 
 ## Task 2: Return the refusal before activation

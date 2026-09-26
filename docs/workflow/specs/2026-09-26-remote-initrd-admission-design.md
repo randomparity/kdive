@@ -10,7 +10,7 @@ resolve. The failure currently arrives after activation.
 
 ## Scope
 
-At `external_boot_root_arguments`, reject an explicit null initrd in build
+At `external_boot_root_arguments`, reject a missing or null initrd in build
 evidence when the provider owns no root device. The MCP boot caller maps this rejection
 to a configuration-error response before creating an activation. Tell the caller
 to supply an initrd with the build. Preserve local whole-disk substitution and
@@ -25,7 +25,7 @@ remain unchanged. PARTUUID provenance and support belong to future remote work.
   preserve the existing immutable plan shape and local root substitution.
 - Accepted failure classes: remote direct boot without an initrd remains
   unavailable because no verified early-resolvable root token exists; malformed
-  evidence outside the explicit null-initrd case remains on existing validation
+  evidence outside the missing-or-null initrd case remains on existing validation
   paths because this change addresses only the supported no-initrd input.
 - Covered elsewhere: post-admission activation and recovery failures remain
   with the external-boot job lifecycle (ADR-0583).
