@@ -90,8 +90,10 @@ label_tasks_by_name = {task["name"]: task for task in label_tasks}
 mode_probe = label_tasks[0]
 require(
     mode_probe.get("ansible.builtin.command", {}).get("argv") == ["getenforce"]
-    and mode_probe.get("changed_when") is False,
-    "the SELinux mode must be read from getenforce without reporting a change",
+    and mode_probe.get("changed_when") is False
+    and mode_probe.get("failed_when") is False,
+    "the SELinux mode must be read from getenforce without reporting a change, and a host "
+    "without getenforce must skip the labels rather than fail",
 )
 enforcing = "local_worker_host_selinux_mode.stdout | default('') == 'Enforcing'"
 rules = label_tasks_by_name["Install the kdive image svirt_image_t fcontext rules"]

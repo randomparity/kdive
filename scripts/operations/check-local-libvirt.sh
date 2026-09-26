@@ -316,7 +316,7 @@ if _selinux_enforcing; then
       note_ok "${dir} is labeled svirt_image_t"
     else
       note_fail "${dir} is labeled ${label}, not svirt_image_t (SELinux enforcing; a confined domain cannot write or map its images, ADR-0640)" \
-        "run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which installs the svirt_image_t fcontext rules and restorecons ${dir}"
+        "on Fedora/Enterprise Linux run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which installs the svirt_image_t fcontext rules and restorecons ${dir}; that recipe labels only the RedHat family, so elsewhere run: sudo semanage fcontext -a -t svirt_image_t '${dir}(/.*)?' && sudo restorecon -R ${dir}"
     fi
   done
 fi
