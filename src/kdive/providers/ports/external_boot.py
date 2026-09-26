@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import unicodedata
 from typing import Annotated, Literal, Protocol, Self
 
@@ -24,6 +25,7 @@ _INITRD_MAX_BYTES = 536_870_912
 _PLATFORM_ARGUMENT_MAX_BYTES = 256
 _CMDLINE_MAX_BYTES = 2_047
 _CANONICAL_VALUE_MAX_BYTES = 65_536
+_WHOLE_DISK_DEVICE = re.compile(r"/dev/[a-z][a-z0-9]*")
 
 
 class _ClosedValue(BaseModel):
@@ -138,6 +140,18 @@ class RootSpecV1(_ClosedValue):
         return self
 
 
+def direct_root_arguments(root: RootSpecV1, device: str) -> tuple[str, ...]:
+    """Return ``root.arguments`` with the inspected root token naming ``device`` instead.
+
+    The kernel resolves a filesystem ``UUID=`` only from initramfs userspace; without an initrd a
+    provider that owns the whole-disk root device names it directly (ADR-0583 amendment).
+    """
+    if _WHOLE_DISK_DEVICE.fullmatch(device) is None:
+        raise ValueError("direct root must name one /dev whole-disk device")
+    token = f"root={root.root}"
+    return tuple(f"root={device}" if argument == token else argument for argument in root.arguments)
+
+
 class ModuleObligation(_ClosedValue):
     mode: Literal["system-root-tree"] = "system-root-tree"
     release: KernelRelease
@@ -193,7 +207,7 @@ class ExternalBootPlan(_ClosedValue):
         if self.root.architecture != self.architecture:
             raise ValueError("root architecture must match plan architecture")
         arguments = self.platform_arguments
-        root_arguments = self.root.arguments
+        root_arguments = self._composed_root_arguments()
         occurrences = sum(
             arguments[index : index + len(root_arguments)] == root_arguments
             for index in range(len(arguments) - len(root_arguments) + 1)
@@ -211,6 +225,13 @@ class ExternalBootPlan(_ClosedValue):
         if len(self.cmdline.encode()) > _CMDLINE_MAX_BYTES:
             raise ValueError("cmdline exceeds 2047 UTF-8 bytes")
         return self
+
+    def _composed_root_arguments(self) -> tuple[str, ...]:
+        roots = [a.removeprefix("root=") for a in self.platform_arguments if a.startswith("root=")]
+        direct = len(roots) == 1 and _WHOLE_DISK_DEVICE.fullmatch(roots[0]) is not None
+        if self.initrd is None and direct and roots[0] != self.root.root:
+            return direct_root_arguments(self.root, roots[0])
+        return self.root.arguments
 
     @property
     def identity(self) -> str:

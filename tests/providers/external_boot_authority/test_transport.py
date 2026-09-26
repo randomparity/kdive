@@ -1123,3 +1123,72 @@ def test_existing_operation_envelopes_keep_canonical_bytes(operation: Any) -> No
         separators=(",", ":"),
     ).encode()
     assert encode_request_envelope(operation, request, "credential") == expected
+
+
+class _RecordingWriter:
+    def __init__(self) -> None:
+        self.written = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.written.extend(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+def test_session_replies_after_dispatch_outlasts_the_tls_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Materialize and prepare run for minutes; only the peer's frame I/O is TLS-bounded.
+    monkeypatch.setattr(transport, "_TLS_TIMEOUT_SECONDS", 0.05)
+
+    async def slow_dispatch(*_args: object) -> bytes:
+        await asyncio.sleep(0.2)
+        return b"reply"
+
+    monkeypatch.setattr(transport, "_dispatch", slow_dispatch)
+
+    async def run() -> _RecordingWriter:
+        reader = asyncio.StreamReader()
+        reader.feed_data((7).to_bytes(4, "big") + b"request")
+        writer = _RecordingWriter()
+        await transport._handle_session(reader, cast(Any, writer), cast(Any, None), None)
+        return writer
+
+    writer = asyncio.run(run())
+
+    assert bytes(writer.written) == (5).to_bytes(4, "big") + b"reply"
+    assert writer.closed
+
+
+def test_session_still_bounds_a_peer_that_never_sends_a_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(transport, "_TLS_TIMEOUT_SECONDS", 0.05)
+
+    async def unexpected_dispatch(*_args: object) -> bytes:
+        raise AssertionError("dispatch must not run without a request frame")
+
+    monkeypatch.setattr(transport, "_dispatch", unexpected_dispatch)
+
+    async def run() -> _RecordingWriter:
+        writer = _RecordingWriter()
+        await asyncio.wait_for(
+            transport._handle_session(
+                asyncio.StreamReader(), cast(Any, writer), cast(Any, None), None
+            ),
+            timeout=2,
+        )
+        return writer
+
+    writer = asyncio.run(run())
+
+    assert writer.written == bytearray()
+    assert writer.closed

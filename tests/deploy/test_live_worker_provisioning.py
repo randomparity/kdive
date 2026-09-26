@@ -588,6 +588,10 @@ def test_live_authority_system_installation_precedes_readiness_and_scopes_writes
         in rendered
     )
     assert "system-provisioning/local/rootfs/bases" not in rendered
+    # libguestfs builds its appliance from /lib/modules, which ProtectKernelModules hides.
+    assert "ProtectKernelModules=no" in rendered
+    # supermin unpacks a base image that carries setuid/setgid entries.
+    assert "RestrictSUIDSGID=no" in rendered
 
 
 def test_existing_worker_provider_contract_is_preserved() -> None:

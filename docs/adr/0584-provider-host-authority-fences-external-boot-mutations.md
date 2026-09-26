@@ -225,6 +225,18 @@ The native x86_64 and ppc64le live tiers exercise the same protocol. A provider 
 place every external-boot commit point behind the authority or to preserve unresolved execution
 across authority restart does not advertise external-boot v1.
 
+### Amendment (2026-09-25): local-libvirt observes a running domain's modules as last published (#2785)
+
+This amendment qualifies the observation rule in this section for local-libvirt. Local-libvirt
+reads the guest module tree with libguestfs, which cannot open the disk of a running domain. So
+after a successful activation, when the target runs, the tree was unreadable and the observation was
+`unreadable`, and core refused the activate commit. When a module publication completes, the
+provider now observes the published tree while the domain is still inactive and records that
+observation in its recovery metadata. While the domain is active, the observation reports the
+recorded value. While the domain is inactive, the observation still reads the tree. The recorded
+value covers only provider mutations. A change that the running guest makes to its own module tree
+is not a provider mutation, and the next inactive observation sees that change.
+
 ## Consequences
 
 - External boot gains a fence at the provider mutation boundary and a separate database fence for
