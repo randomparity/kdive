@@ -975,6 +975,47 @@ def test_provision_foreign_ppc64le_renders_tcg_domain_with_discovered_emulator()
     assert emu is not None and emu.text == "/usr/bin/qemu-system-ppc64"
 
 
+def test_authority_expected_tcg_matches_live_foreign_arch_before_provision() -> None:
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    _prov(conn).provision(
+        _SYS,
+        _arch_profile("ppc64le"),
+        expected_guest_arch=("tcg", "/usr/bin/qemu-system-ppc64"),
+    )
+
+    root = _safe_fromstring(conn.recorded_xml[0])
+    assert root.get("type") == "qemu"
+    assert root.findtext("devices/emulator") == "/usr/bin/qemu-system-ppc64"
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        ("tcg", "/usr/bin/qemu-system-x86_64"),
+        ("tcg", None),
+        ("tcg", "/usr/bin/wrong-emulator"),
+    ],
+)
+def test_authority_expected_guest_arch_mismatch_fails_before_artifacts(
+    expected: tuple[str, str | None],
+) -> None:
+    overlay_calls: list[tuple[str, str]] = []
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    profile = (
+        _profile() if expected[1] == "/usr/bin/qemu-system-x86_64" else _arch_profile("ppc64le")
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        provisioner = _prov(
+            conn, make_overlay=lambda base, overlay: overlay_calls.append((base, overlay))
+        )
+        provisioner.provision(_SYS, profile, expected_guest_arch=expected)
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert conn.recorded_xml == []
+    assert overlay_calls == []
+
+
 def test_provision_arch_absent_from_nonempty_caps_is_configuration_error() -> None:
     # TOCTOU guard: a ppc64le System admitted while the host advertised ppc64le, provisioned
     # after the host lost qemu-system-ppc64 (caps now advertise only x86_64), fails CLOSED with

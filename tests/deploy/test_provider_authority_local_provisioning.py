@@ -305,6 +305,46 @@ def test_system_provisioning_validator_requires_exact_local_manifest_mapping(
     assert _run_system_provisioning_validator(value).returncode != 0
 
 
+@pytest.mark.parametrize(("accel", "accepted"), [("kvm", True), ("tcg", True), ("other", False)])
+def test_system_provisioning_validator_accepts_supported_accelerators(
+    tmp_path: Path, accel: str, accepted: bool
+) -> None:
+    base = tmp_path / "base.qcow2"
+    base.write_bytes(b"local-base")
+    base.chmod(0o600)
+    digest = sha256(base.read_bytes()).hexdigest()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_bytes(
+        _canonical_manifest(
+            {
+                "schema": "authority-system-manifest-v1",
+                "provider_kind": "local-libvirt",
+                "resource_name": "local-resource",
+                "authority_instance": "authority-test",
+                "accel": accel,
+                "bases": [
+                    {
+                        "root_identity": f"sha256:{digest}",
+                        "architecture": "x86_64",
+                        "source_kind": "local",
+                        "source_name": None,
+                    }
+                ],
+            }
+        )
+    )
+    manifest.chmod(0o600)
+    value: dict[str, object] = {
+        "manifest": str(manifest),
+        "authority_instance": "authority-test",
+        "expected_provider_kind": "local-libvirt",
+        "local_bases": [{"source": str(base), "digest": digest}],
+        "remote_bases": [],
+    }
+
+    assert (_run_system_provisioning_validator(value).returncode == 0) is accepted
+
+
 def test_system_provisioning_validator_rejects_wrong_kind_and_accepts_remote_mapping(
     tmp_path: Path,
 ) -> None:
