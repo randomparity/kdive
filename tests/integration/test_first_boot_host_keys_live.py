@@ -14,6 +14,9 @@ and every ``/etc/ssh/ssh_host_*`` file to be non-empty.
 On an x86_64 KVM host this is a smoke test, not a demonstrated regression test: the same test
 passed 3 of 3 on the pre-ADR-0679 code there, because the kernel upload between `ready` and
 `runs.boot` gives the guest time to flush. The failure was reproduced on native POWER.
+
+``test_provision_ready_implies_first_boot_marker`` proves ADR-0680: the console log already holds
+the ``kdive-ready`` marker when the System first reads ``ready``.
 """
 
 from __future__ import annotations
@@ -31,7 +34,11 @@ import pytest
 
 from kdive.mcp.dev_harness import LiveStackClient
 from kdive.providers.shared.libvirt_xml import recorded_ssh_port
-from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import (
+    console_log_path,
+    domain_name_for,
+    read_console_log,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import (
     load_system_bootstrap_private_key,
@@ -94,8 +101,10 @@ def _console_profile(arch: str, image: str) -> dict[str, object]:
     }
 
 
-def _check_host_keys(port: int, key_path: Path) -> subprocess.CompletedProcess[bytes]:
-    """SSH in over the loopback forward and run the host-key check, retrying until the deadline."""
+def _check_host_keys(
+    port: int, key_path: Path, command: str = _KEY_CHECK
+) -> subprocess.CompletedProcess[bytes]:
+    """SSH in over the loopback forward and run ``command``, retrying until the deadline."""
     argv = [
         "ssh",
         "-i",
@@ -112,7 +121,7 @@ def _check_host_keys(port: int, key_path: Path) -> subprocess.CompletedProcess[b
         str(port),
         "root@127.0.0.1",
         "--",
-        _KEY_CHECK,
+        command,
     ]
     deadline = time.monotonic() + _SSH_DEADLINE_S
     while True:
@@ -200,7 +209,61 @@ def test_first_boot_host_keys_survive_immediate_boot() -> None:
     asyncio.run(_run())
 
 
-def _assert_host_keys(db_url: str, system_id: UUID) -> None:
+def test_provision_ready_implies_first_boot_marker() -> None:
+    """ADR-0680: a System reads ``ready`` only after its first boot wrote ``kdive-ready``.
+
+    At the first ``systems.get`` that reports ``ready``, the console log already holds the marker
+    and sshd answers with non-empty host keys. Prints the provision duration and the guest's
+    ``cloud-init status`` for the PR record; neither is asserted.
+    """
+    image, db_url = _require_env()
+    issuer = require_issuer()
+    base_url = require_stack()
+    arch = require_native_guest_arch()
+    token = mint_role_token(issuer, project=_PROJECT, agent_session=_AGENT_SESSION, role="operator")
+
+    async def _run() -> None:
+        op = LiveStackClient.over_http(base_url, token)
+        async with op:
+            await seed_metering(db_url, _PROJECT)
+            env = ok(
+                await scalar(
+                    op,
+                    "allocations.request",
+                    project=_PROJECT,
+                    vcpus=2,
+                    memory_gb=2,
+                    disk_gb=LOCAL_ALLOCATION_DISK_GB,
+                    resource={"mode": "kind"},
+                ),
+                "allocate",
+            )
+            allocation_id = env.object_id
+            try:
+                started = time.monotonic()
+                async with phase("provision"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.provision",
+                            allocation_id=allocation_id,
+                            profile=_console_profile(arch, image),
+                        ),
+                        "provision",
+                    )
+                    system_id = UUID(data_str(env, "system_id"))
+                    await await_system_state(op, "provision", str(system_id), "ready")
+                console = read_console_log(console_log_path(system_id))
+                print(f"provision to ready: {time.monotonic() - started:.1f} s")
+                assert b"kdive-ready" in console, "System reached ready before its readiness marker"
+                await asyncio.to_thread(_assert_host_keys, db_url, system_id, "cloud-init status")
+            finally:
+                ok(await scalar(op, "allocations.release", allocation_id=allocation_id), "release")
+
+    asyncio.run(_run())
+
+
+def _assert_host_keys(db_url: str, system_id: UUID, report: str | None = None) -> None:
     async def _key() -> str:
         async with await psycopg.AsyncConnection.connect(db_url) as conn:
             return await load_system_bootstrap_private_key(
@@ -216,6 +279,9 @@ def _assert_host_keys(db_url: str, system_id: UUID) -> None:
     assert port is not None, "no SSH hostfwd port in the domain XML (ADR-0281)"
     with materialized_private_key(private_key) as key_path:
         result = _check_host_keys(port, key_path)
+        if report is not None:
+            extra = _check_host_keys(port, key_path, report)
+            print(f"{report}: exit={extra.returncode} {extra.stdout.decode(errors='replace')!r}")
     assert result.returncode == 0, (
         "after an immediate runs.boot, sshd did not answer (exit 255) or a host key is missing "
         f"or 0 bytes (#2757): exit={result.returncode} "

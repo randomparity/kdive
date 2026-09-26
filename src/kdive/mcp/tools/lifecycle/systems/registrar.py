@@ -237,6 +237,11 @@ def _register_systems_provision(
         request a fresh one (`allocations.release`, then `allocations.request`) for a fresh
         System. Requires contributor on the Allocation's project.
 
+        On local-libvirt the job succeeds, and the System reaches `ready`, only after the
+        guest's first boot writes its readiness marker to the console — minutes on KVM, longer
+        on an emulated arch. A guest that crashes or never writes it ends `failed` with
+        `provisioning_failure`.
+
         A profile whose `arch` the backing host cannot boot is rejected `configuration_error`
         at admission — before any capacity is committed — naming the arches the host supports;
         pick one of those or an allocation on a host that offers the arch you need. A profile
@@ -510,6 +515,11 @@ def _register_systems_reprovision(
         The System's resource kind is fixed by its allocation, so a profile whose `provider`
         section names a different kind is rejected `configuration_error` before the System
         leaves `ready`, naming both; keep the section the System was provisioned with.
+
+        On local-libvirt the job succeeds, and the System returns to `ready`, only after the
+        rebuilt guest's first boot writes its readiness marker to the console — minutes on KVM,
+        longer on an emulated arch. A guest that crashes or never writes it ends `failed` with
+        `provisioning_failure`.
         """
         ctx = current_context()
         try:
