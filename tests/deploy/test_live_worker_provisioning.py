@@ -1008,7 +1008,7 @@ def _run_guestfs_link(
     venv_site = tmp_path / "venv-site"
     venv_site.mkdir()
     base_python = tmp_path / "python3.99"
-    base_import = f"echo {binding}" if base_imports_guestfs else "exit 1"
+    base_import = f"echo {binding}" if base_imports_guestfs else "echo DlopenFailed >&2; exit 1"
     base_python.write_text(
         "#!/bin/bash\n"
         f"if [[ $0 == {base_python} ]]; then\n"
@@ -1067,6 +1067,9 @@ def test_guestfs_link_fails_loud_without_a_base_interpreter_binding(tmp_path: Pa
     assert "unaffected" not in result.stderr
     assert str(tmp_path / "python3.99") in result.stderr
     assert "re-run this installer" in result.stderr
+    # The interpreter's own import error is relayed: an installed binding that fails to load
+    # must not read as an absent one.
+    assert result.stderr.index("DlopenFailed") < result.stderr.index("cannot import")
     assert not list((tmp_path / "venv-site").iterdir())
 
 

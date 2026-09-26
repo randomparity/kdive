@@ -48,15 +48,14 @@ _link_system_guestfs_binding() (
   base_python="$(readlink -f -- "$venv_python")"
   system_site="$(
     "$base_python" -c \
-      'import guestfs, pathlib; print(pathlib.Path(guestfs.__file__).resolve().parent)' \
-      2>/dev/null
+      'import guestfs, pathlib; print(pathlib.Path(guestfs.__file__).resolve().parent)'
   )" || {
     echo "$base_python, the interpreter the lifecycle worker venv is built on, cannot import" \
-      "the guestfs binding, so there is none to link. The lifecycle worker needs it to" \
-      "provision (baseline-kernel extraction), build-fs, stage built kernels, external boot" \
-      "and local kdump capture. Install the distribution's binding for that interpreter" \
-      "(python3-guestfs on Debian/Ubuntu, python3-libguestfs on Fedora), then re-run this" \
-      "installer. Enterprise Linux builds python3-libguestfs only for its system python3, so" \
+      "the guestfs binding (error above), so there is nothing to link. The lifecycle worker" \
+      "needs it to provision (baseline-kernel extraction), build-fs, stage built kernels," \
+      "external boot and local kdump capture. Install the distribution's binding for that" \
+      "interpreter (python3-guestfs on Debian/Ubuntu, python3-libguestfs on Fedora), then" \
+      "re-run this installer. Enterprise Linux builds python3-libguestfs only for its system python3, so" \
       "no packaged binding exists for $base_python there and the family cannot provision" \
       "(docs/operating/install.md)." >&2
     return 1
