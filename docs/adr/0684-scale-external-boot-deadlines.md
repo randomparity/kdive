@@ -48,8 +48,10 @@ requires equality. Before mutation, the local authority validates an explicit `k
 `tcg` accelerator against its owned inactive XML. A `None` accelerator accepts either
 domain type but keeps the TCG-safe scale. It also computes its effective console window
 from its own settings using the snapshot accelerator and requires exact equality with the
-snapshot window. A mismatch fails with a configuration error before mutation. The provider
-uses the validated snapshot window, so no later local read can silently lengthen it.
+snapshot window. A mismatch raises a local configuration error before mutation. The existing
+closed authority transport reports provider failures as `provider_conflict` and logs the local
+cause for the operator. The provider uses the validated snapshot window, so no later local read
+can silently lengthen it.
 Historical requests without a snapshot keep the host-configured window. Remote provider
 requests carry no local snapshot and retain their 300-second timeout. Recovery-orphan repair
 has no console readiness and retains its 300-second request deadline.

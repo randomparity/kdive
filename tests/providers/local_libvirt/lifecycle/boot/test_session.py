@@ -2266,12 +2266,17 @@ def test_factory_rejects_timing_disagreement_before_provider_mutation(
     )
     config.load({})
     try:
-        with pytest.raises(CategorizedError, match=message):
+        with pytest.raises(CategorizedError, match=message) as caught:
             _factory(events, domain).open(_lease(), _expected(), local_timing=timing)
     finally:
         config.reset()
     assert "domain.create" not in events
     assert "artifact.open" not in events
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    fix = (
+        "correct the System accelerator" if accel == "tcg" else "align KDIVE_LIBVIRT_BOOT_WINDOW_S"
+    )
+    assert fix in str(caught.value)
 
 
 def test_factory_accepts_matching_snapshot_and_unknown_accelerator() -> None:

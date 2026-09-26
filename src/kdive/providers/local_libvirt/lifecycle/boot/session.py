@@ -23,8 +23,9 @@ from uuid import UUID, uuid4
 
 import libvirt
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
@@ -35,7 +36,10 @@ from kdive.providers.local_libvirt.lifecycle.power import (
     power_off,
 )
 from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
-from kdive.providers.local_libvirt.local_timing import local_external_boot_timing
+from kdive.providers.local_libvirt.settings import (
+    LIBVIRT_BOOT_WINDOW_S,
+    LIBVIRT_TCG_DEADLINE_MULTIPLIER,
+)
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,
@@ -1399,14 +1403,21 @@ class LocalExternalBootSessionFactory:
                 xml_accel = inactive_root.get("type")
                 if local_timing.accel is not None and local_timing.accel != xml_accel:
                     raise CategorizedError(
-                        "local external-boot accelerator disagrees with inactive domain XML",
+                        "local external-boot accelerator disagrees with inactive domain XML; "
+                        "correct the System accelerator or domain definition",
                         category=ErrorCategory.CONFIGURATION_ERROR,
                         terminal=True,
                     )
-                host_window = local_external_boot_timing(local_timing.accel).console_window_s
+                host_window = resolve_local_timing(
+                    local_timing.accel,
+                    config.require(LIBVIRT_BOOT_WINDOW_S),
+                    config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER),
+                ).console_window_s
                 if host_window != local_timing.console_window_s:
                     raise CategorizedError(
-                        "local external-boot authority boot window differs from admitted window",
+                        "local external-boot authority boot window differs from admitted window; "
+                        "align KDIVE_LIBVIRT_BOOT_WINDOW_S and "
+                        "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER across server and authority host",
                         category=ErrorCategory.CONFIGURATION_ERROR,
                         terminal=True,
                     )

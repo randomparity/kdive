@@ -43,7 +43,6 @@ from kdive.mcp.tools.external_boot.recovery_idempotency import (
     recovery_response,
 )
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.local_libvirt.local_timing import local_external_boot_timing
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
     AuthorizationError,
@@ -63,6 +62,7 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
+from kdive.services.external_boot.local_timing import local_external_boot_timing
 
 RELEASE_TOOL = "runs.release_external_boot"
 RESOLVE_CONFLICT_TOOL = "systems.resolve_external_boot_conflict"

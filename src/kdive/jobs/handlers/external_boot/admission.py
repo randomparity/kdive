@@ -35,8 +35,8 @@ from kdive.jobs.payloads import (
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import Purpose
-from kdive.providers.local_libvirt.local_timing import local_external_boot_timing
 from kdive.providers.ports.external_boot import ExternalBootPlan
+from kdive.services.external_boot.local_timing import local_external_boot_timing
 from kdive.services.external_boot.routing import server_authority_instance
 
 __all__ = ["build_external_boot_payload"]

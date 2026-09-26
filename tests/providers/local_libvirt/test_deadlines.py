@@ -14,11 +14,11 @@ from kdive.providers.local_libvirt.lifecycle.deadlines import (
     host_appliance_multiplier,
     tcg_deadline_multiplier,
 )
-from kdive.providers.local_libvirt.local_timing import local_external_boot_timing
 from kdive.providers.local_libvirt.settings import (
     LIBVIRT_BOOT_WINDOW_S,
     LIBVIRT_TCG_DEADLINE_MULTIPLIER,
 )
+from kdive.services.external_boot.local_timing import local_external_boot_timing
 
 
 @pytest.fixture(autouse=True)

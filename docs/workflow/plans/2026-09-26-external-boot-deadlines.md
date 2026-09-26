@@ -68,7 +68,9 @@ either XML type with the TCG-safe scale. Use the validated snapshot window for t
 without a snapshot, keep historical host configuration behavior. Keep ADR-0681's TCG hard
 recovery stop.
 
-Contract: a host-window mismatch and XML disagreement both refuse before mutation; a
+Contract: a host-window mismatch and XML disagreement both refuse before mutation with a
+local `configuration_error`; the existing authority transport reports `provider_conflict`
+and logs the cause. A
 matching host configuration cannot extend a snapshotted poll; KVM/TCG/unknown and legacy
 paths work. Mode: focused-test — extend
 `tests/providers/local_libvirt/lifecycle/boot/test_session.py`,

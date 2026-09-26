@@ -40,7 +40,8 @@ The local authority checks explicit snapshot accelerator against the owned inact
 XML before mutation. A `None` accelerator uses the larger TCG-safe scale for either XML
 type. It computes its effective console window from its own settings with the snapshot
 accelerator and requires equality with the snapshot window before mutation. A mismatch is
-an actionable configuration error. `LocalLibvirtExternalBoot.activate/recover`, its
+a local `configuration_error` before mutation; the existing authority transport reports
+`provider_conflict` and logs that cause for the operator. `LocalLibvirtExternalBoot.activate/recover`, its
 IO/session factory, and console creator then receive that validated snapshot window.
 Historical requests without a snapshot use the previous behavior. Remote provider requests
 retain the 300-second timeout and have no local timing snapshot.
@@ -57,7 +58,8 @@ remaining-time bound reaches the provider.
 ### Failure model
 
 - Invalid or oversized timing rejects a new request before enqueue with `configuration_error`.
-- Host-window or explicit accelerator disagreement rejects before provider mutation.
+- Host-window or explicit accelerator disagreement rejects before provider mutation. The
+  authority transport reports `provider_conflict` and logs the local configuration cause.
 - A new request can expire after queue or transport delay; existing terminal recovery rules apply.
 - Historical jobs keep their recorded deadlines and old provider timing.
 
