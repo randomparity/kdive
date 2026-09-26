@@ -681,7 +681,9 @@ def _register_control_power(app: FastMCP, pool: AsyncConnectionPool) -> None:
                     "a wedged but READY guest. `on`/`off`/`cycle`/`reset` are admitted only on a "
                     "READY System (refused on a CRASHED/CRASHING/PAUSED System). `resume` is the "
                     "exception: it resumes a PAUSED System (left suspended by a `systems.restore` "
-                    "with `start_paused=true`) back to READY, and is admitted only from PAUSED."
+                    "with `start_paused=true`) back to READY, and is admitted only from PAUSED. "
+                    "On local libvirt, `off` requests clean shutdown with a bounded wait and "
+                    "falls back to hard destroy."
                 )
             ),
         ],
@@ -695,6 +697,9 @@ def _register_control_power(app: FastMCP, pool: AsyncConnectionPool) -> None:
         Requires contributor. A restricting external boot activation refuses every power action.
         When admitted, reset/cycle can recover a hung READY guest, and resume returns a System
         paused by systems.restore to READY. Preserve needed evidence before changing power.
+        On local libvirt, off requests clean shutdown. The per-job wait starts on the worker's
+        monotonic clock and lasts up to 60 s on KVM or 60 s times the configured TCG multiplier
+        (600 s by default); if the guest remains active, the worker falls back to destroy.
         Returns a job handle; poll jobs.wait. Job success confirms the provider operation,
         not guest boot or SSH readiness.
         """

@@ -5,7 +5,11 @@ The local-libvirt control provider reads its domain XML type, selects the existi
 and calls the shared helper. The `Controller` port and other actions remain stable.
 Tech stack: Python 3.14, libvirt, `defusedxml`, pytest.
 
-Expected implementation size: 150–240 changed lines (M) — provider route, OFF fence, and focused race tests
+Expected implementation size: 310–390 changed lines (M) — provider route, OFF fence, race tests, and agent-facing docs
+
+The original 150–240 estimate missed the setup and cleanup needed for three deterministic
+database-backed race cases in the existing adversarial test module. Those cases serve the frozen
+OFF/force-crash and cancellation criteria; the added lines do not widen the approved surface.
 
 Fixed design denominator: 250 changed lines (M), from #2801's control semantics, wait contract,
 and accepted-ADR hazard. Base: `main`; branch:
@@ -25,11 +29,16 @@ changes to the `Controller` port.
 - `src/kdive/jobs/handlers/control/control.py`: owns the power-job precheck and provider call;
   fence only OFF across those steps with the existing System advisory key. Other actions retain
   their route and signature.
-- `tests/jobs/handlers/control/test_power_off.py`: proves OFF and force-crash ordering plus
-  release/autocommit restoration on exception or cancellation.
+- `tests/adversarial/test_provider_state_races.py`: already owns power/force-crash races; extend
+  it to prove OFF and force-crash ordering plus release/autocommit restoration on exception or
+  cancellation, reusing its database fixtures and System seeding.
 - `docs/adr/0685-operator-power-off-clean-shutdown.md`: records the operator decision and
   amendment to ADR-0028. No caller migration or obsolete path is needed; the off branch replaces
   its hard destroy call, and the existing `Controller` signature is retained.
+- `src/kdive/mcp/tools/lifecycle/control/registrar.py`: owns the tool schema text; describe the
+  local-libvirt OFF wait and fallback in the wrapper and `action` Field, keeping other actions.
+- `docs/guide/reference/control.md`: regenerate from that wrapper with `just docs`.
+- `tests/mcp/lifecycle/test_control_registrar.py`: prove the published wrapper/Field contract.
 
 ## Task 1 — prove clean off and accelerator selection
 
@@ -72,23 +81,37 @@ keeps its signature. The OFF branch uses `scoped_session_advisory_lock(conn,
 LockScope.SYSTEM, system_id)` while the other actions keep their current path. The connection's
 prior autocommit mode is restored in `finally`, following `publication_fence`.
 
-1. Add `tests/jobs/handlers/control/test_power_off.py` with a blocked OFF fake controller and
+1. Extend `tests/adversarial/test_provider_state_races.py` with a blocked OFF fake controller and
    concurrent force-crash job. Verify CRASHING cannot commit until OFF returns, and that an OFF
    started after CRASHING is refused before provider IO. Add provider-raise and task-cancellation
    cases. In cancellation, hold the fake provider thread blocked after cancelling the handler and
    prove the crash marker still cannot commit; then unblock it and assert cancellation propagates,
    the session lock releases, and original autocommit mode is restored.
    `focused-test`: expect the race test to fail before the fence; run
-   `uv run python -m pytest tests/jobs/handlers/control/test_power_off.py -q`.
+   `uv run python -m pytest tests/adversarial/test_provider_state_races.py -q`.
 2. In `control.py`, for OFF only, require an idle top-level connection, temporarily set
    autocommit true, enter the scoped session advisory lock, run the existing `_power_target`
    precheck and provider call, then release the lock and restore autocommit in `finally`. Run the
-   provider call in a shielded task. If the handler is cancelled, continue awaiting that task
-   inside the fence until it finishes, then propagate cancellation. Keep the audit transaction
-   after the provider call. Do not change the other action path.
-3. Run `uv run python -m pytest tests/jobs/handlers/control/test_power_off.py -q`; expect pass.
-   Run `uv run python -m pytest tests/adversarial/test_provider_state_races.py -q`; expect pass
+   complete fenced operation in a shielded task. If the handler is cancelled, continue awaiting
+   that task until provider IO, lock release, and autocommit restoration finish, then propagate
+   cancellation. Keep the audit transaction after the provider call. Do not change other actions.
+3. Run `uv run python -m pytest tests/adversarial/test_provider_state_races.py -q`; expect pass
    and confirm the existing pre-marker contract for other actions remains intact. Commit.
+
+## Task 4 — publish the OFF wait contract
+
+**Interfaces:** `control.power` tool name and parameters are unchanged. The decorated wrapper's
+docstring and `action` Field are the agent-facing schema; generated `control.md` derives from it.
+
+1. In `tests/mcp/lifecycle/test_control_registrar.py`, assert wrapper/Field descriptions name
+   clean shutdown, KVM's 60-second bound, and hard destroy fallback.
+   `focused-test`: run `uv run python -m pytest
+   tests/mcp/lifecycle/test_control_registrar.py::test_register_publishes_control_tool_contracts
+   -q`; expect failure before the text change.
+2. Update only OFF text in `src/kdive/mcp/tools/lifecycle/control/registrar.py`, stating unit,
+   monotonic reference clock, per-job scope, fallback, and `jobs.wait` polling. Run `just docs`.
+3. Re-run the focused test and `just docs-check`; expect both pass. Commit wrapper, generated
+   reference, and test.
 
 ## Ship checks
 

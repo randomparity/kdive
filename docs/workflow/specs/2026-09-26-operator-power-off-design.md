@@ -17,9 +17,13 @@ The helper owns the clean request, bounded wait, and destroy fallback. For OFF o
 job handler holds the existing System advisory key as a session lock from READY precheck through
 provider IO, so a force-crash marker cannot land before the fallback. Short transactions commit
 within that fence. If cancellation arrives while the provider thread runs, the handler waits for
-that thread to complete before unlocking and propagating cancellation; failure and cancellation
-restore the connection mode. No new
+the fenced operation, including lock release and connection-mode restoration, to complete before
+propagating cancellation; provider failure also restores the connection mode. No new
 shutdown policy or `Controller` interface is introduced here.
+
+The `control.power` MCP wrapper states the local-libvirt OFF wait in seconds, its worker monotonic
+reference clock, its per-job scope, hard-destroy consequence, and `jobs.wait` polling action. The
+generated tool reference follows the wrapper.
 
 Excluded: other power actions (control plane), install and external-boot shutdown
 (ADR-0679/0681 owners), and a configurable wait (future decision).
@@ -76,8 +80,10 @@ dependencies or changes to the `Controller` port.
   TCG bounds, timeout fallback, already-off, malformed XML, and error mapping.
 - `focused-test`: `tests/providers/local_libvirt/lifecycle/test_power.py` protects the shared
   helper's existing state-race behavior.
-- `focused-test`: `tests/jobs/handlers/control/test_power_off.py` races the OFF wait with a
+- `focused-test`: `tests/adversarial/test_provider_state_races.py` races the OFF wait with a
   force-crash marker and verifies fence release and connection-mode restoration on exception and
   cancellation.
+- `focused-test`: `tests/mcp/lifecycle/test_control_registrar.py` checks that the agent-facing
+  wrapper and `action` Field expose the new wait/fallback; `just docs-check` checks generation.
 - `task-test-not-applicable`: no live VM proof in this worktree because the native live tier
   requires a provisioned operator VM; unit tests exercise the provider with fake libvirt domains.
