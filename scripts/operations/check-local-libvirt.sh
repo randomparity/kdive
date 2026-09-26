@@ -304,7 +304,7 @@ elif _lifecycle_venv_imports_guestfs; then
 else
   note_fail \
     "lifecycle worker venv (${LIFECYCLE_PY}) cannot 'import guestfs'; the worker needs it to provision (baseline-kernel extraction), build-fs, stage built kernels, external boot and local kdump capture" \
-    "re-run deploy/systemd/install-live-worker-lifecycle.sh (just prepare-local-libvirt-host), which links the distro binding when system python3 matches the venv's Python; otherwise install a guestfs binding built for the venv's Python (guestfs.py + libguestfsmod*.so) into its site-packages"
+    "install the distribution's guestfs binding for the interpreter that venv is built on (python3-guestfs on Debian/Ubuntu, python3-libguestfs on Fedora), then re-run just prepare-local-libvirt-host, whose lifecycle installer links it; Enterprise Linux packages no binding for the venv's Python 3.14 (docs/operating/install.md)"
 fi
 
 if _host_kernels_readable; then

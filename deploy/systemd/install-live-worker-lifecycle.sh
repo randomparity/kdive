@@ -32,44 +32,33 @@ _fixture_files=(
 )
 
 _link_system_guestfs_binding() (
-  local venv_python="$1" system_site venv_site source system_minor venv_minor
+  local venv_python="$1" base_python system_site venv_site source
   local -a native_modules sources
-  # The binding is a C extension built for the system interpreter, so it is importable from the
-  # venv only when the two minor versions match. Ubuntu 26.04 and Fedora 44 both ship the
-  # project's 3.14 as /usr/bin/python3 and share it. Enterprise Linux ships 3.12 there and
-  # packages 3.14 separately, so its python3-libguestfs can never load in the worker's 3.14 venv
-  # — linking it anyway fails with "No module named 'libguestfsmod'". This venv is the worker that
-  # provisions, and provisioning extracts the baseline kernel through the binding (ADR-0272), as
-  # do build-fs, built-kernel staging, external boot and local kdump capture. So on a mismatch the
-  # venv must already import a binding built for its own Python — loose guestfs.py +
-  # libguestfsmod*.so in site-packages, which uv sync leaves alone — or the install fails here,
-  # before the tree is hardened, so the operator can add one and re-run. Failing rather than
-  # warning is deliberate: the play runs this installer with its output censored and reports
-  # stderr only on a non-zero exit, so a warning never reaches the operator.
-  system_minor="$(/usr/bin/python3 -c 'import sys; print(sys.version_info[1])')"
-  venv_minor="$("$venv_python" -c 'import sys; print(sys.version_info[1])')"
-  if [[ $system_minor != "$venv_minor" ]]; then
-    if "$venv_python" -c 'import guestfs' >/dev/null 2>&1; then
-      echo "system python3 is 3.${system_minor} but the worker venv is 3.${venv_minor}; the" \
-        "worker venv already imports guestfs, so that binding is kept." >&2
-      return 0
-    fi
-    venv_site="$(
-      "$venv_python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))'
-    )"
-    echo "system python3 is 3.${system_minor} but the worker venv is 3.${venv_minor}, so the" \
-      "distro guestfs binding cannot be shared, and the worker venv cannot import guestfs." \
-      "The lifecycle worker needs it to provision (baseline-kernel extraction), build-fs," \
-      "stage built kernels, external boot and local kdump capture. Install a guestfs binding" \
-      "built for Python 3.${venv_minor} (guestfs.py and libguestfsmod*.so) into ${venv_site}," \
-      "then re-run this installer." >&2
-    return 1
-  fi
+  # The binding is a C extension for one interpreter ABI and has no PyPI package, so it is linked
+  # from the interpreter this venv was built on, whose site-packages is where a system package or a
+  # from-source build installs it. Ubuntu 26.04 and Fedora 44 ship the project's 3.14 as
+  # /usr/bin/python3 with the distro binding. Enterprise Linux ships 3.12 there, packages 3.14
+  # separately, and builds python3-libguestfs only for 3.12, so there is no binding to link until
+  # one exists for python3.14. A binding copied into the venv by hand would not last either:
+  # _prepare_attested_runtime_root empties the runtime root on every run. This venv is the worker
+  # that provisions, and provisioning extracts the baseline kernel through the binding (ADR-0272),
+  # as do build-fs, built-kernel staging, external boot and local kdump capture, so a missing
+  # binding fails the install. Failing rather than warning is deliberate: the play runs this
+  # installer with its output censored and reports stderr only on a non-zero exit.
+  base_python="$(readlink -f -- "$venv_python")"
   system_site="$(
-    /usr/bin/python3 -c \
-      'import guestfs, pathlib; print(pathlib.Path(guestfs.__file__).resolve().parent)'
+    "$base_python" -c \
+      'import guestfs, pathlib; print(pathlib.Path(guestfs.__file__).resolve().parent)' \
+      2>/dev/null
   )" || {
-    echo "system Python cannot import the required guestfs binding" >&2
+    echo "$base_python, the interpreter the lifecycle worker venv is built on, cannot import" \
+      "the guestfs binding, so there is none to link. The lifecycle worker needs it to" \
+      "provision (baseline-kernel extraction), build-fs, stage built kernels, external boot" \
+      "and local kdump capture. Install the distribution's binding for that interpreter" \
+      "(python3-guestfs on Debian/Ubuntu, python3-libguestfs on Fedora), then re-run this" \
+      "installer. Enterprise Linux builds python3-libguestfs only for its system python3, so" \
+      "no packaged binding exists for $base_python there and the family cannot provision" \
+      "(docs/operating/install.md)." >&2
     return 1
   }
   venv_site="$(

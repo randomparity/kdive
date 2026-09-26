@@ -191,7 +191,8 @@ def test_lifecycle_venv_without_guestfs_fails_whatever_the_kdump_setting(
     )
     assert str(lifecycle) in fail_line
     assert "provision" in fail_line
-    assert "install-live-worker-lifecycle.sh" in result.stderr
+    assert "prepare-local-libvirt-host" in result.stderr
+    assert "python3-libguestfs" in result.stderr
 
 
 def test_lifecycle_venv_with_guestfs_passes(tmp_path: Path) -> None:

@@ -993,29 +993,38 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert 'usermod -G "$libvirt_group,kvm" "$worker"' in source
 
 
-def _run_guestfs_link_on_a_mismatched_host(
-    tmp_path: Path, *, venv_imports_guestfs: bool
+def _run_guestfs_link(
+    tmp_path: Path, *, base_imports_guestfs: bool
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``_link_system_guestfs_binding`` against a venv stub on a Python minor no host has.
+    """Run ``_link_system_guestfs_binding`` for a venv whose python links to a stub base.
 
-    The stub reports minor 99, so the real ``/usr/bin/python3`` always mismatches it -- the
-    Enterprise Linux shape (system 3.12, worker venv 3.14) on any test host.
+    The stub answers as the base interpreter when invoked by its own path and as the venv when
+    invoked through the venv symlink, as ``readlink -f`` separates them in the installer.
     """
-    site = tmp_path / "site-packages"
-    site.mkdir()
-    guestfs_exit = 0 if venv_imports_guestfs else 1
-    venv_python = tmp_path / "python"
-    venv_python.write_text(
+    binding = tmp_path / "base-site"
+    binding.mkdir()
+    (binding / "guestfs.py").write_text("", encoding="utf-8")
+    (binding / "libguestfsmod.cpython-399-x86_64-linux-gnu.so").write_text("", encoding="utf-8")
+    venv_site = tmp_path / "venv-site"
+    venv_site.mkdir()
+    base_python = tmp_path / "python3.99"
+    base_import = f"echo {binding}" if base_imports_guestfs else "exit 1"
+    base_python.write_text(
         "#!/bin/bash\n"
+        f"if [[ $0 == {base_python} ]]; then\n"
+        f'  case "$2" in *"import guestfs, pathlib"*) {base_import} ;; *) exit 97 ;; esac\n'
+        "  exit\n"
+        "fi\n"
         'case "$2" in\n'
-        "  *version_info*) echo 99 ;;\n"
-        f"  *sysconfig*) echo {site} ;;\n"
-        f"  'import guestfs') exit {guestfs_exit} ;;\n"
+        f"  *sysconfig*) echo {venv_site} ;;\n"
+        f"  'import guestfs') [[ -L {venv_site}/guestfs.py ]] ;;\n"
         "  *) exit 97 ;;\n"
         "esac\n",
         encoding="utf-8",
     )
-    venv_python.chmod(0o755)
+    base_python.chmod(0o755)
+    venv_python = tmp_path / "venv-python"
+    venv_python.symlink_to(base_python)
     return subprocess.run(
         ["/bin/bash", "-c", 'source "$1"; _link_system_guestfs_binding "$2"', "bash"]
         + [str(INSTALLER), str(venv_python)],
@@ -1025,37 +1034,40 @@ def _run_guestfs_link_on_a_mismatched_host(
     )
 
 
-def test_guestfs_mismatch_keeps_a_binding_the_worker_venv_already_imports(
-    tmp_path: Path,
-) -> None:
-    """A binding built for the venv's own Python (EL, #2781) satisfies the mismatch path.
+def test_guestfs_link_uses_the_venv_base_interpreter_binding(tmp_path: Path) -> None:
+    """The binding comes from the interpreter the venv is built on, not /usr/bin/python3.
 
-    It is loose ``guestfs.py`` + ``libguestfsmod*.so`` in site-packages with no dist-info, so
-    only an import proves it is there.
+    On Ubuntu 26.04 and Fedora 44 the two are the same interpreter; on Enterprise Linux
+    /usr/bin/python3 is 3.12 while the venv is 3.14, so only the venv's own base interpreter can
+    hold a binding the venv can load (#2781).
     """
-    result = _run_guestfs_link_on_a_mismatched_host(tmp_path, venv_imports_guestfs=True)
+    result = _run_guestfs_link(tmp_path, base_imports_guestfs=True)
 
     assert result.returncode == 0, result.stderr
-    assert "already imports guestfs" in result.stderr
-    assert not list((tmp_path / "site-packages").iterdir())
+    linked = {path.name: path.readlink() for path in (tmp_path / "venv-site").iterdir()}
+    assert linked == {
+        "guestfs.py": tmp_path / "base-site" / "guestfs.py",
+        "libguestfsmod.cpython-399-x86_64-linux-gnu.so": (
+            tmp_path / "base-site" / "libguestfsmod.cpython-399-x86_64-linux-gnu.so"
+        ),
+    }
 
 
-def test_guestfs_mismatch_without_a_worker_binding_fails_loud(tmp_path: Path) -> None:
-    """The worker venv provisions, so a venv that cannot import guestfs is a failed install.
+def test_guestfs_link_fails_loud_without_a_base_interpreter_binding(tmp_path: Path) -> None:
+    """The worker venv provisions, so a missing binding is a failed install.
 
     ADR-0272 makes the binding a provision prerequisite; reporting only lost kdump capture and
     exiting 0 left an EL host "prepared" that failed every provision (#2781).
     """
-    result = _run_guestfs_link_on_a_mismatched_host(tmp_path, venv_imports_guestfs=False)
+    result = _run_guestfs_link(tmp_path, base_imports_guestfs=False)
 
     assert result.returncode != 0
     for needed_by in ("provision", "build-fs", "external boot", "kdump capture"):
         assert needed_by in result.stderr, result.stderr
     assert "unaffected" not in result.stderr
-    # The remedy names where the binding must go and that a rerun picks it up.
-    assert str(tmp_path / "site-packages") in result.stderr
-    assert "Python 3.99" in result.stderr
-    assert "re-run" in result.stderr
+    assert str(tmp_path / "python3.99") in result.stderr
+    assert "re-run this installer" in result.stderr
+    assert not list((tmp_path / "venv-site").iterdir())
 
 
 def test_installer_builds_the_worker_venv_locked_with_the_live_group() -> None:

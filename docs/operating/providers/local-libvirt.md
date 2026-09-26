@@ -147,15 +147,11 @@ These are the points where the two families genuinely diverge, not just in packa
   EL they cannot, and EL ships the binding only for its system Python. Without a binding in the
   lifecycle worker venv, provisioning fails with `libguestfs (the guestfs Python binding) is
   required to extract the baseline kernel`, and so do guest-image builds (`build-fs`), built-kernel
-  staging, external boot and local kdump capture (ADR-0203). Host preparation therefore fails on
-  EL unless the worker venv already imports `guestfs`: install a binding built for the venv's
-  Python 3.14 (`guestfs.py` and `libguestfsmod*.so`) into
-  `/opt/kdive-live-worker-lifecycle/.venv`'s site-packages, then re-run
-  `just prepare-local-libvirt-host`, which keeps it. `just check-local-libvirt` probes that venv
-  for the binding once it exists. The checkout's own venv stays without one, so run `build-fs`
-  from the CLI on a matching host and stage the image, or publish it through the
-  [image lifecycle runbook](../runbooks/image-lifecycle.md). Note
-  also that an EL host cannot build a *btrfs* image even with a working binding: the EL libguestfs
+  staging, external boot and local kdump capture (ADR-0203). Host preparation links the binding
+  from the interpreter the worker venv is built on, so on EL it fails at the lifecycle installer:
+  there is no packaged binding for that Python 3.14 to link, and EL is not a supported
+  local-libvirt provisioning host until one exists. `just check-local-libvirt` probes the
+  installed worker venv for the binding. Note also that an EL host cannot build a *btrfs* image even with a working binding: the EL libguestfs
   appliance kernel has no btrfs, so a Fedora cloud image fails with `unknown filesystem type
   'btrfs'`. The catalog's `rocky-kdive-ready-*` entries are the EL-native choice.
 

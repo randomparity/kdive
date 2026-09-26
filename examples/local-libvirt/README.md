@@ -40,15 +40,17 @@ demo walkthrough below. Otherwise:
 - A workspace to install the MCP client config into, at `KDIVE_DEMO_WORKSPACE` (default
   `KDIVE_KERNEL_SRC`). Set it separately from `KDIVE_KERNEL_SRC` if that tree is also a live
   proof's kernel fixture, so `demo-up.sh` does not write `.mcp.json` into it.
-- Local kdump capture requires drgn/libguestfs in the installed lifecycle worker environment,
-  `/opt/kdive-live-worker-lifecycle/.venv`. The lifecycle installer/host role owns that environment.
-  The checkout preflight probes `KDIVE_PYTHON`; it does not certify the installed worker's imports.
+- The installed lifecycle worker environment, `/opt/kdive-live-worker-lifecycle/.venv`, needs
+  the libguestfs binding to provision, build images, and capture kdump locally, and drgn for
+  local kdump capture. The lifecycle installer/host role owns that environment, and the
+  preflight probes it for `guestfs` once it exists.
 
 `demo-up.sh` runs the preflight first and stops with an actionable message if anything is
-missing. The kdump-only `guestfs`/`drgn` check is the one exception: `demo-up.sh` runs the preflight
-with `KDIVE_PREFLIGHT_KDUMP=optional`, so that gap prints as a `WARN` with the fix and the
-bring-up continues — provision, build, boot, debug, and the other capture methods do not need
-it. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `demo-up.sh` insist on it.
+missing. The checkout interpreter's `guestfs`/`drgn` check is the one exception: `demo-up.sh` runs
+the preflight with `KDIVE_PREFLIGHT_KDUMP=optional`, so that gap prints as a `WARN` with the fix
+and the bring-up continues, because the stack's jobs run in the lifecycle worker environment
+rather than `KDIVE_PYTHON`. Export `KDIVE_PREFLIGHT_KDUMP=required` to make `demo-up.sh` insist
+on it.
 
 > **Day-to-day development?** `scripts/live-stack/stack-services.sh` / `stack-down.sh` / `stack-status.sh` are the
 > underlying host-lifecycle scripts; `demo-up.sh` here adds the preflight, the project funding, and
