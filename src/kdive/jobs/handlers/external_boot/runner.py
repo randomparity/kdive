@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -70,6 +71,7 @@ class _CommandLineMismatch(Exception):
 
 _ACTIVATIONS = ExternalBootActivationRepository()
 _MODULE_ATTEMPTS = RemoteModuleAttemptObligationRepository()
+_LOGGER = logging.getLogger(__name__)
 
 
 async def prepare_remote_module_on_authority_host(**values: Any) -> Any:
@@ -480,6 +482,20 @@ def _bound_failure(
         else exc.terminal
         if isinstance(exc, CategorizedError)
         else False
+    )
+    try:
+        message = str(exc)
+    except Exception:  # noqa: BLE001 — diagnostic rendering must not replace the bound failure
+        message = "<message unavailable>"
+    reason = Redactor(registry=context.secret_registry).redact_text(message)[:8192]
+    _LOGGER.warning(
+        "external-boot authority failure job_id=%s activation_id=%s "
+        "phase=%s exception=%s reason=%s",
+        context.job.id,
+        marker.activation_id,
+        phase,
+        type(exc).__name__,
+        reason,
     )
     failure_context: dict[str, object] = {"phase": phase}
     if mismatch is not None:
