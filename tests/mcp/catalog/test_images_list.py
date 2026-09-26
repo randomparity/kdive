@@ -15,11 +15,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
 from kdive.mcp.tools.catalog import images as catalog_images
 from kdive.mcp.tools.catalog.images import ImageListScope
 from kdive.security.authz.context import RequestContext
@@ -307,24 +310,51 @@ def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def _os_entry(provenance: dict[str, Any]) -> ImageCatalogEntry:
+    """A minimal catalog entry carrying only the ``provenance`` a ``_compact_os`` case needs."""
+    now = datetime.now(UTC)
+    return ImageCatalogEntry(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        provider="local-libvirt",
+        name="test",
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        visibility=ImageVisibility.PUBLIC,
+        pending_since=now,
+        provenance=provenance,
+    )
+
+
 def test_compact_os_full() -> None:
     prov = {"os_release": {"id": "fedora", "version_id": "43", "pretty_name": "Fedora Linux 43"}}
-    assert catalog_images._compact_os(prov) == {"id": "fedora", "version_id": "43"}
+    assert catalog_images._compact_os(_os_entry(prov)) == {"id": "fedora", "version_id": "43"}
 
 
 def test_compact_os_id_only() -> None:
-    assert catalog_images._compact_os({"os_release": {"id": "debian"}}) == {"id": "debian"}
+    entry = _os_entry({"os_release": {"id": "debian"}})
+    assert catalog_images._compact_os(entry) == {"id": "debian"}
 
 
 def test_compact_os_absent_returns_empty() -> None:
-    assert catalog_images._compact_os({}) == {}
-    assert catalog_images._compact_os({"os_release": None}) == {}
-    assert catalog_images._compact_os({"os_release": "not-a-dict"}) == {}
+    assert catalog_images._compact_os(_os_entry({})) == {}
+    assert catalog_images._compact_os(_os_entry({"os_release": None})) == {}
+    assert catalog_images._compact_os(_os_entry({"os_release": "not-a-dict"})) == {}
 
 
 def test_compact_os_no_id_returns_empty() -> None:
     # A record without a distro id is not a usable identity; never emit a bare version.
-    assert catalog_images._compact_os({"os_release": {"version_id": "43"}}) == {}
+    entry = _os_entry({"os_release": {"version_id": "43"}})
+    assert catalog_images._compact_os(entry) == {}
+
+
+def test_compact_os_non_str_id_returns_empty() -> None:
+    # image_os_id (ADR-0311) is the single owner of the id read and rejects a non-str id;
+    # _compact_os must defer to it rather than coercing with str() (issue #2778).
+    entry = _os_entry({"os_release": {"id": 7}})
+    assert catalog_images._compact_os(entry) == {}
 
 
 def test_list_row_carries_capabilities_os_description(migrated_url: str) -> None:
