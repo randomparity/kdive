@@ -73,7 +73,9 @@ async def _stopped(args: argparse.Namespace) -> int:
         if run_id:
             print(f"  reusing booted run {run_id}", file=sys.stderr)
         else:
-            run_id = await _provision_boot_run(client, schemas, project=args.project)
+            run_id = await _provision_boot_run(
+                client, schemas, project=args.project, rootfs=args.rootfs
+            )
         await _call(
             client, "debug.start_session", {"run_id": run_id, "transport": "gdbstub"}, schemas
         )
@@ -108,7 +110,9 @@ async def _step(args: argparse.Namespace) -> int:
         schemas = _SchemaResolver()
         run_id = (await _find_booted_run(client, schemas)) if args.reuse else None
         if not run_id:
-            run_id = await _provision_boot_run(client, schemas, project=args.project)
+            run_id = await _provision_boot_run(
+                client, schemas, project=args.project, rootfs=args.rootfs
+            )
         await _call(
             client, "debug.start_session", {"run_id": run_id, "transport": "gdbstub"}, schemas
         )
@@ -315,11 +319,17 @@ def _parser() -> argparse.ArgumentParser:
         "--reuse", action="store_true", help="reuse an already-booted Run if present"
     )
     stopped.add_argument(
+        "--rootfs", default="fedora-kdive-ready-44", help="registered public x86_64 rootfs name"
+    )
+    stopped.add_argument(
         "--symbol", default=DEFAULT_BREAK_SYMBOL, help="breakpoint symbol to stop at"
     )
 
     step = sub.add_parser("step", help="prove every debug.advance mode (#1584)")
     step.add_argument("--reuse", action="store_true", help="reuse an already-booted Run if present")
+    step.add_argument(
+        "--rootfs", default="fedora-kdive-ready-44", help="registered public x86_64 rootfs name"
+    )
     step.add_argument(
         "--symbol",
         default=STEP_DEFAULT_SYMBOL,
