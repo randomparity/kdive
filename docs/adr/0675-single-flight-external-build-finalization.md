@@ -37,6 +37,17 @@ The recovery rule becomes: after a request timeout, call `complete_build` again 
 Run. Do not re-mint the upload window. The call joins the running finalize or returns the
 recorded result.
 
+### Amendment (2026-09-27): Wait without duplicate failure reports (#2713)
+
+This amends the Decision's `asyncio.shield` mechanism to reflect the implementation shipped
+for #2693 in PR #2703. Callers now use `await asyncio.wait((task,))` followed by
+`task.result()`. Like `shield`, `wait` keeps cancellation of a caller's wait from cancelling
+the shared finalize; `task.result()` delivers its response or raises its exception to a caller
+that remains waiting. Unlike `shield`, this avoids an additional loop exception-handler ERROR
+record after a caller is cancelled, leaving `_forget` as the single reporter of a finalize
+failure no caller awaits any more. The process-local single-flight ownership and retry rule
+remain as decided above.
+
 ## Consequences
 
 - With a 60 s client and a 66 s scan, the first retry returns `build_ref`. A longer finalize,
