@@ -9,7 +9,7 @@ failure. The host log has the corrective detail, but the worker has no typed sig
 
 ## Scope and contracts
 
-Implement [ADR-0688](../../adr/0688-preserve-local-external-boot-configuration-refusals.md).
+Implement [ADR-0690](../../adr/0690-preserve-local-external-boot-configuration-refusals.md).
 The two checks in `LocalExternalBootSessionFactory.open` alone raise a dedicated
 `CategorizedError` subtype. The local adapter catches that subtype before its broad
 provider catch and emits service category `configuration_error`; its logger retains
