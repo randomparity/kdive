@@ -26,6 +26,7 @@ from pydantic import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.cmdline import cmdline_extra_error
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.domain.operations.jobs import (
     RETIRED_JOB_KINDS,
     Job,
@@ -129,6 +130,9 @@ class RecoveryRequestV1(_PayloadBase):
 
     request_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     readiness_deadline: AwareDatetime
+    local_timing: LocalExternalBootTimingV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ResolveRecoveryOrphanPayload(SystemPayload):
@@ -502,6 +506,9 @@ class BootPayload(RunPayload):
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
     external_boot_plan_v1: ExternalBootPlan | None = None
     recovery_request_v1: RecoveryRequestV1 | None = None
+    local_timing: LocalExternalBootTimingV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     remote_module_attempt_v1: ModuleAttemptPreparationRequestV1 | None = None
 
     @field_validator("remote_module_attempt_v1", mode="before")

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from kdive.config.registry import never_required
+from kdive.config.registry import Registry, never_required
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt import settings
 
 _RT = frozenset({"worker", "reconciler"})
@@ -36,7 +37,7 @@ def test_tcg_multiplier_setting_fields() -> None:
     assert s.name == "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER"
     assert s.default == "10.0"
     assert s.group == "local-libvirt"
-    assert s.processes == _RT
+    assert s.processes == _RT | {"server"}
     assert s.secret is False
 
 
@@ -130,7 +131,7 @@ def test_boot_window_setting_fields() -> None:
     assert s.name == "KDIVE_LIBVIRT_BOOT_WINDOW_S"
     assert s.default == "900"
     assert s.group == "local-libvirt"
-    assert s.processes == _RT
+    assert s.processes == _RT | {"server"}
     assert s.secret is False
 
 
@@ -145,6 +146,24 @@ def test_boot_window_rejects_non_positive() -> None:
         settings.LIBVIRT_BOOT_WINDOW_S.parse("0")
     with pytest.raises(ValueError):
         settings.LIBVIRT_BOOT_WINDOW_S.parse("-1")
+
+
+@pytest.mark.parametrize(
+    ("setting", "bad"),
+    [
+        (settings.LIBVIRT_BOOT_WINDOW_S, "0"),
+        (settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER, "nan"),
+    ],
+)
+def test_server_validates_local_external_boot_timing_settings(
+    setting: settings.Setting[object], bad: str
+) -> None:
+    registry = Registry([setting])
+    registry.load({setting.name: bad})
+    with pytest.raises(CategorizedError) as error:
+        registry.validate("server")
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert error.value.details["variable"] == setting.name
 
 
 def test_recovery_root_setting_fields() -> None:

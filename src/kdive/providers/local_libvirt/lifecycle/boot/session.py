@@ -23,7 +23,9 @@ from uuid import UUID, uuid4
 
 import libvirt
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
@@ -34,6 +36,10 @@ from kdive.providers.local_libvirt.lifecycle.power import (
     power_off,
 )
 from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
+from kdive.providers.local_libvirt.settings import (
+    LIBVIRT_BOOT_WINDOW_S,
+    LIBVIRT_TCG_DEADLINE_MULTIPLIER,
+)
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,
@@ -197,7 +203,7 @@ class _Guest(Protocol):
 
 type OpenGuest = Callable[[], _Guest]
 type ReadinessProbe = Callable[[UUID, ConsoleReadinessWindow], ReadinessResult]
-type PrepareConsole = Callable[[UUID], ConsoleReadinessWindow]
+type PrepareConsole = Callable[..., ConsoleReadinessWindow]
 type RunningObserver = Callable[[UUID, RunningDomain], RunningKernelObservation]
 type CleanupPayloads = Callable[[int, "LocalRecoveryMetadataV1"], None]
 type SystemPath = Callable[[UUID], str]
@@ -844,6 +850,7 @@ class _ConcreteSession:
         readiness: ReadinessProbe,
         observe_running: RunningObserver,
         cleanup_payloads: CleanupPayloads,
+        console_window_s: int | None,
         kvm: bool,
         sleep: Callable[[float], None],
         clock: Callable[[], float],
@@ -867,6 +874,7 @@ class _ConcreteSession:
         self._temporary_artifact_name = temporary_artifact_name
         self._worker_pid = worker_pid
         self._prepare_console = prepare_console
+        self._console_window_s = console_window_s
         self._readiness = readiness
         self._observe_running = observe_running
         self._cleanup_payloads = cleanup_payloads
@@ -1092,7 +1100,11 @@ class _ConcreteSession:
         self._readiness_result = None
         if prior is not None:
             prior.close()
-        window = self._prepare_console(self._system_id)
+        window = (
+            self._prepare_console(self._system_id)
+            if self._console_window_s is None
+            else self._prepare_console(self._system_id, window_s=self._console_window_s)
+        )
         try:
             self._require_open_domain().create()
         except BaseException:
@@ -1343,6 +1355,8 @@ class LocalExternalBootSessionFactory:
         self,
         lease: LocalExternalBootOperationLease,
         expected: ExpectedOperationOwnership,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
     ) -> LocalExternalBootSession:
         ownership = self._pin_lease(lease)
         pin = ownership._pin
@@ -1385,6 +1399,28 @@ class LocalExternalBootSessionFactory:
             inactive_root = _parse_owned_xml(
                 inactive_xml, system_id, expected_overlay, projected=True
             )
+            if local_timing is not None:
+                xml_accel = inactive_root.get("type")
+                if local_timing.accel is not None and local_timing.accel != xml_accel:
+                    raise CategorizedError(
+                        "local external-boot accelerator disagrees with inactive domain XML; "
+                        "correct the System accelerator or domain definition",
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        terminal=True,
+                    )
+                host_window = resolve_local_timing(
+                    local_timing.accel,
+                    config.require(LIBVIRT_BOOT_WINDOW_S),
+                    config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER),
+                ).console_window_s
+                if host_window != local_timing.console_window_s:
+                    raise CategorizedError(
+                        "local external-boot authority boot window differs from admitted window; "
+                        "align KDIVE_LIBVIRT_BOOT_WINDOW_S and "
+                        "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER across server and authority host",
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        terminal=True,
+                    )
             _require_guest_agent_channel(inactive_root, system_id)
             xml = domain.XMLDesc(0)
             _parse_owned_xml(xml, system_id, expected_overlay, projected=True)
@@ -1417,6 +1453,9 @@ class LocalExternalBootSessionFactory:
                 readiness=self._readiness,
                 observe_running=self._observe_running,
                 cleanup_payloads=self._cleanup_payloads,
+                console_window_s=(
+                    local_timing.console_window_s if local_timing is not None else None
+                ),
                 kvm=inactive_root.get("type") == "kvm",
                 sleep=self._sleep,
                 clock=self._clock,

@@ -25,6 +25,7 @@ from kdive.domain.external_boot_activation import (
     ExternalBootReleaseEvidenceV1,
     ExternalBootTeardownEvidenceV1,
 )
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.ports.external_boot import (
     ExternalBootPlan,
     ExternalBootPreparationObservation,
@@ -227,6 +228,9 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
     """One current-authority provider mutation request."""
 
     attempt_id: UUID
+    local_timing: LocalExternalBootTimingV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     expected_source_identity: str
     intended_target_identity: str
     recovery_objects: Annotated[
@@ -242,6 +246,8 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
 
     @model_validator(mode="after")
     def _recovery_objects_belong_to_request(self) -> Self:
+        if self.local_timing is not None and self.provider_kind != "local-libvirt":
+            raise ValueError("local_timing requires local-libvirt authority")
         if any(
             item.system_id != self.system_id or item.activation_id != self.activation_id
             for item in self.recovery_objects
@@ -569,6 +575,9 @@ class JournalRecordV1(_AuthorityBinding):
     previous_digest: Digest
     phase: JournalPhase
     attempt_id: UUID
+    local_timing: LocalExternalBootTimingV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     predecessor_generation: PositiveBigInt | None = None
     watermark_sequence: PositiveBigInt | None = None
     watermark_digest: Digest | None = None
@@ -592,7 +601,8 @@ class JournalRecordV1(_AuthorityBinding):
     @model_validator(mode="after")
     def _phase_shape_is_closed(self) -> JournalRecordV1:
         has_mutation_fields = (
-            self.expected_source_identity is not None
+            self.local_timing is not None
+            or self.expected_source_identity is not None
             or self.intended_target_identity is not None
             or bool(self.recovery_objects)
             or self.observation is not None
