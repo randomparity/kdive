@@ -280,14 +280,16 @@ ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' \
 
 | Family | Host-preparation status | Limits and proof strength |
 |---|---|---|
-| Debian / Ubuntu | Supported | Structurally checked. Ubuntu 26.04 live apply remains operator-provided and is not recorded by this checkout. |
-| Fedora | Supported | Structurally checked; no live apply is claimed. |
-| RHEL / Rocky | Not supported: no guestfs binding for the worker | Structurally checked. The family builds `python3-libguestfs` only for its system Python, not the Python 3.14 the lifecycle worker venv runs, and the worker needs that binding to provision (baseline-kernel extraction), run build-fs, stage built kernels, boot external kernels and capture kdump locally. The recipe therefore fails at the lifecycle installer, naming the missing binding ([local-libvirt](providers/local-libvirt.md#family-differences-that-matter)). |
-| SLES / openSUSE | Supported | Structurally checked; no live apply is claimed. |
+| Debian / Ubuntu | Admitted, subject to the Python 3.14 guestfs binding check | Ubuntu 26.04 has a matching system binding. Other releases need the same check; no separate live apply is recorded here. |
+| Fedora | Admitted, subject to the Python 3.14 guestfs binding check | Fedora 44 has a matching system binding; no live apply is claimed here. |
+| RHEL / Rocky / AlmaLinux | Not supported: no guestfs binding for the worker | Structurally checked. The family builds `python3-libguestfs` only for its system Python, not the Python 3.14 the lifecycle worker venv runs, and the worker needs that binding to provision (baseline-kernel extraction), run build-fs, stage built kernels, boot external kernels and capture kdump locally. The recipe therefore fails at the lifecycle installer, naming the missing binding ([local-libvirt](providers/local-libvirt.md#family-differences-that-matter)). |
+| SLES / openSUSE Tumbleweed | Admitted, subject to the Python 3.14 guestfs binding check | Structurally checked; no live apply is claimed. openSUSE Leap is a cataloged guest, not an admitted worker host. |
 
 For foreign-architecture emulator packages and their availability, use the
 [per-distro emulator table](platform-support.md#cross-architecture-guests); package names are
 intentionally not duplicated here.
+For each distro's separate host and guest status, see the
+[host and guest distribution table](platform-support.md#host-and-guest-distributions).
 
 ## Run modes
 

@@ -8,6 +8,41 @@ Use the [cross-platform guide](../development/cross-platform.md) for development
 container choices and native POWER host integration. Use [live testing](runbooks/live-testing.md)
 to validate a deployment.
 
+## Host and guest distributions
+
+The host column describes the standalone local-libvirt worker installed by
+`just prepare-local-libvirt-host`. The guest column lists only images in the
+[bundled rootfs catalog](../../fixtures/local-libvirt/rootfs_catalog.toml), not every OS that
+could boot from an operator-supplied disk. Host admission by the
+[`local_worker_host` role](../../deploy/ansible/roles/local_worker_host/tasks/preflight.yml)
+does not establish a working installation: the [lifecycle installer](
+../../deploy/systemd/install-live-worker-lifecycle.sh) requires Python 3.14 and an importable
+`guestfs` binding built for that interpreter. It fails when the binding is absent. A guest row
+means the image build path exists, not that every live operation has been proved on that release.
+In the host column, **yes** identifies a release with a documented matching-binding path;
+**conditional** means the role admits the distro but no matching-binding host result is recorded;
+**blocked** means the installer has a known binding failure; **no** means the role rejects it.
+
+| Distribution | Local-libvirt worker host | Bundled guest image |
+|---|---|---|
+| Fedora | Yes for 44: matching system Python 3.14 binding; other releases need an import check | 43 and 44: x86_64, ppc64le |
+| Ubuntu | Yes for 26.04: matching system Python 3.14 binding; other releases need an import check | 24.04 and 26.04: x86_64 |
+| Debian | Conditional: role admits it, but no matching-binding host result is recorded | 12 and 13: x86_64 |
+| Rocky Linux | Blocked: role admits it, but the worker lacks a Python 3.14 `guestfs` binding | 8: x86_64; 9 and 10: x86_64, ppc64le |
+| RHEL / AlmaLinux | Blocked: role admits them, but the same binding gap prevents worker installation | No bundled entry |
+| CentOS Stream | No: worker role rejects it | 9 and 10: x86_64, ppc64le |
+| openSUSE Tumbleweed | Conditional: role admits it, but no matching-binding host result is recorded | Snapshot 20260919: x86_64 |
+| SLES | Conditional: role admits it, but no matching-binding host result is recorded | No bundled entry |
+| openSUSE Leap | No: worker role rejects it | 15.6: x86_64 |
+| Arch | No: worker role rejects it | No bundled entry |
+
+The installer uses `uv` to select an installed Python 3.14 with downloads disabled; this
+project's `uv` dependency set does not supply the native `guestfs` binding. Installing Python
+3.14 alone therefore does not clear the Enterprise Linux host gap. The
+[installation guide](install.md#local-libvirt-host-preparation)
+and [provider guide](providers/local-libvirt.md#family-differences-that-matter) describe that
+failure. Guest image architecture and the available live proofs are detailed below.
+
 ## Architecture and accelerator tiers
 
 | Guest and accelerator | Implementation and evidence |
