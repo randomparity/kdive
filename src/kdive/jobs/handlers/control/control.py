@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Literal, NamedTuple
 from uuid import UUID
 
@@ -23,7 +24,7 @@ from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
-from kdive.jobs.provider_context import set_provider_kind
+from kdive.jobs.provider_context import set_provider_kind, take_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
@@ -74,23 +75,56 @@ async def _controller(conn: AsyncConnection, system_id: UUID, resolver: Provider
     return binding.runtime.controller
 
 
-async def _fenced_power_off(
-    conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver
+async def _power_non_resume(
+    conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver, action: PowerAction
 ) -> _ControlTarget:
-    """Keep the System fence until the OFF provider thread has actually finished."""
-    require_top_level_transaction(conn, "operator power off")
-    previous_autocommit = conn.autocommit
-    if not previous_autocommit:
-        await conn.set_autocommit(True)
+    target = await _power_target(conn, system_id)
+    control = await _controller(conn, system_id, resolver)
+    await asyncio.to_thread(control.power, target.domain_name, action)
+    return target
+
+
+async def _run_fenced_power[T](
+    conn: AsyncConnection, system_id: UUID, operation: Callable[[], Awaitable[T]]
+) -> T:
+    """Keep the System fence through power I/O and connection cleanup on cancellation."""
+    provider_kind: str | None = None
+
+    async def fenced() -> T:
+        nonlocal provider_kind
+        try:
+            require_top_level_transaction(conn, "operator power")
+            previous_autocommit = conn.autocommit
+            if not previous_autocommit:
+                await conn.set_autocommit(True)
+            try:
+                async with scoped_session_advisory_lock(conn, LockScope.SYSTEM, system_id):
+                    return await operation()
+            finally:
+                if not previous_autocommit:
+                    await conn.set_autocommit(False)
+        finally:
+            provider_kind = take_provider_kind()
+
+    task = asyncio.create_task(fenced())
     try:
-        async with scoped_session_advisory_lock(conn, LockScope.SYSTEM, system_id):
-            target = await _power_target(conn, system_id)
-            control = await _controller(conn, system_id, resolver)
-            await asyncio.to_thread(control.power, target.domain_name, PowerAction.OFF)
-            return target
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # to_thread survives cancellation. Keep the whole operation, including unlock and
+            # connection-mode restoration, alive before propagating cancellation.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            task.exception()  # consume a provider fault; cancellation remains primary
+            raise
     finally:
-        if not previous_autocommit:
-            await conn.set_autocommit(False)
+        if provider_kind is not None:
+            set_provider_kind(provider_kind)
 
 
 async def power_handler(
@@ -104,27 +138,12 @@ async def power_handler(
     system_id = UUID(payload.system_id)
     action = payload.action
     if action is PowerAction.RESUME:
-        return await _resume_handler(conn, job, system_id, resolver)
-    if action is PowerAction.OFF:
-        fenced = asyncio.create_task(_fenced_power_off(conn, system_id, resolver))
-        try:
-            target = await asyncio.shield(fenced)
-        except asyncio.CancelledError:
-            # to_thread survives cancellation. Keep the whole fenced operation, including
-            # unlock and connection-mode restoration, alive before propagating cancellation.
-            while not fenced.done():
-                try:
-                    await asyncio.shield(fenced)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
-            fenced.exception()  # consume a provider fault; cancellation remains primary
-            raise
-    else:
-        target = await _power_target(conn, system_id)
-        control = await _controller(conn, system_id, resolver)
-        await asyncio.to_thread(control.power, target.domain_name, action)
+        return await _run_fenced_power(
+            conn, system_id, lambda: _resume_handler(conn, job, system_id, resolver)
+        )
+    target = await _run_fenced_power(
+        conn, system_id, lambda: _power_non_resume(conn, system_id, resolver, action)
+    )
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
