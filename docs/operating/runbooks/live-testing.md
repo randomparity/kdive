@@ -174,6 +174,23 @@ pre-provisioned disposable System UUID), its `project`, `ownership_prefix`
 to the separate deterministic fault arms.
 It contains no credentials; the active fixed worker owns authentication.
 
+Prepare `system_id` as a disposable local-libvirt System before running the carrier:
+
+1. Select a registered `local-libvirt` catalog image visible to the System's project, with
+   `arch=x86_64`, a digest, and an inspected `provenance.root_spec` (see
+   [image staging](../../../examples/local-libvirt/README.md#optional-inventory-systemstoml)).
+   Copy that image's qcow2 bytes to the fixed worker input
+   `/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2`. Use a standalone qcow2 of at most
+   16 GiB, with no backing file or external data file; the fixture rejects other paths and formats.
+2. Verify the copy's SHA-256 equals the catalog digest. Provision the System with
+   `provider.local-libvirt.rootfs` set to
+   `{kind: "local", path: "/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2",
+   sha256: "sha256:<catalog digest hex>"}`. The pin must describe those bytes and match that
+   visible catalog row; an unpinned local rootfs does not bind root provenance.
+3. Confirm `system_root_provenance` has a row for the new System before using its UUID in the
+   carrier config. A missing row makes the authority-routed install fail with
+   `root_provenance_missing`; stage the verified image and provision a new disposable System.
+
 Run only the focused carrier after provisioning and backend bring-up:
 
 ```sh
@@ -232,6 +249,18 @@ file: `installed_revision` (the exact 40-character SHA), `system_id` (a pre-prov
 disposable System UUID on the POWER host), `project`, `ownership_prefix`
 (`kdive-2151-<sha12>-<nonce8>`), and the literal `kdive-external-boot-authority.service`
 service name. `barrier_socket` is optional.
+
+Prepare the POWER host's disposable System from a registered, project-visible `local-libvirt`
+catalog image with `arch=ppc64le`, a digest, and an inspected `provenance.root_spec`. Copy its
+qcow2 bytes to `/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2` and verify that file's
+SHA-256 matches the catalog digest. Use a standalone qcow2 of at most 16 GiB, with no backing
+file or external data file. Provision with `provider.local-libvirt.rootfs` set to
+`{kind: "local", path: "/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2",
+sha256: "sha256:<catalog digest hex>"}`; the fixture rejects another path, and an unpinned rootfs
+does not bind root provenance. Confirm `system_root_provenance` has a row for the new System
+before putting its UUID in the carrier config. If the row is absent, stage the verified image
+and provision a new disposable System; otherwise authority-routed install fails with
+`root_provenance_missing`.
 
 **Machine-checkable carrier gate.** Before reading the config, the test asserts:
 
