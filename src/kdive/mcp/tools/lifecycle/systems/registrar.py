@@ -74,6 +74,9 @@ from kdive.mcp.tools.lifecycle.systems.ssh_access import (
     ssh_info as _ssh_info,
 )
 from kdive.mcp.tools.lifecycle.systems.view import (
+    RUN_INVESTIGATIONS_LIMIT as _RUN_INVESTIGATIONS_LIMIT,
+)
+from kdive.mcp.tools.lifecycle.systems.view import (
     SystemsListRequest as _SystemsListRequest,
 )
 from kdive.mcp.tools.lifecycle.systems.view import (
@@ -112,6 +115,16 @@ def _with_authorize_preflight_limit(
     func.__doc__ = func.__doc__.format(
         authorize_preflight_deadline_s=f"{_AUTHORIZE_PREFLIGHT_DEADLINE_S:g}"
     )
+    return func
+
+
+def _with_run_history_limit(
+    func: Callable[..., Awaitable[ToolResponse]],
+) -> Callable[..., Awaitable[ToolResponse]]:
+    """Interpolate the enforced history cap before FastMCP reads the docstring."""
+    if func.__doc__ is None:
+        raise AssertionError("systems.get wrapper must have a docstring")
+    func.__doc__ = func.__doc__.replace("{cap}", str(_RUN_INVESTIGATIONS_LIMIT))
     return func
 
 
@@ -279,6 +292,7 @@ def _register_systems_get(
         annotations=_docmeta.read_only(),
         meta={"maturity": "implemented"},
     )
+    @_with_run_history_limit
     async def systems_get(
         system_id: Annotated[str, Field(description="The System to render.")],
     ) -> ToolResponse:
@@ -287,7 +301,7 @@ def _register_systems_get(
         ``data.investigation_id`` is the owning Investigation's id, or ``null`` when unowned.
         ``data.run_investigation_ids`` lists distinct Investigations with Runs on this System,
         across every Run state, ordered by their newest Run's creation time (newest first),
-        capped at 20 ids per response. ``data.run_investigation_ids_truncated`` is ``true`` when
+        capped at {cap} ids per response. ``data.run_investigation_ids_truncated`` is ``true`` when
         more ids were omitted. Use ``runs.list(system_id=...)`` for the complete paginated Run
         history, including the remaining Investigation ids.
 
