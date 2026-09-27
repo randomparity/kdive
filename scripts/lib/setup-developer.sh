@@ -63,18 +63,31 @@ dev_install_archive() (
 )
 
 dev_install_go_tool() {
-  local tool="$1" module="$2" version="$3" selected
+  local tool="$1" module="$2" version="$3" ldflags="${4:-}" selected info
   selected="$(command -v "${tool}" || true)"
-  if [[ -n "${selected}" ]] && go version -m "${selected}" | grep -Fq "${version}"; then
+  info="$(go version -m "${selected}" 2>/dev/null || true)"
+  if [[ -n "${selected}" && "${info}" == *"${version}"* && "${info}" == *"${ldflags}"* ]]; then
     return
   fi
-  GOBIN="${dev_bin}" GOTOOLCHAIN=auto go install "${module}@${version}"
+  GOBIN="${dev_bin}" GOTOOLCHAIN=auto go install -ldflags "${ldflags}" "${module}@${version}"
   hash -r
   selected="$(command -v "${tool}" || true)"
-  if [[ -z "${selected}" ]] || ! go version -m "${selected}" | grep -Fq "${version}"; then
+  info="$(go version -m "${selected}" 2>/dev/null || true)"
+  if [[ -z "${selected}" || "${info}" != *"${version}"* || "${info}" != *"${ldflags}"* ]]; then
     printf 'Put %s before other tool directories on PATH, then rerun just setup (%s is shadowed).\n' "${dev_bin}" "${tool}" >&2
     return 1
   fi
+}
+
+dev_install_helm() {
+  # Match Helm v3.21.0's Makefile: client-go v0.35.1 sets both Kubernetes defaults
+  # to 1.35. Plain go install leaves them at 1.20 and rejects our chart before rendering.
+  local flags='-X helm.sh/helm/v3/internal/version.version=v3.21.0'
+  flags+=' -X helm.sh/helm/v3/pkg/lint/rules.k8sVersionMajor=1'
+  flags+=' -X helm.sh/helm/v3/pkg/lint/rules.k8sVersionMinor=35'
+  flags+=' -X helm.sh/helm/v3/pkg/chartutil.k8sVersionMajor=1'
+  flags+=' -X helm.sh/helm/v3/pkg/chartutil.k8sVersionMinor=35'
+  dev_install_go_tool helm helm.sh/helm/v3/cmd/helm v3.21.0 "${flags}"
 }
 
 install_developer_dependencies() {
@@ -152,7 +165,7 @@ install_developer_dependencies() {
   fi
   dev_install_go_tool shfmt mvdan.cc/sh/v3/cmd/shfmt v3.13.1
   dev_install_go_tool actionlint github.com/rhysd/actionlint/cmd/actionlint v1.7.12
-  dev_install_go_tool helm helm.sh/helm/v3/cmd/helm v3.21.0
+  dev_install_helm
   dev_install_go_tool gitleaks github.com/zricethezav/gitleaks/v8 v8.30.1
   if ! command_exists promtool; then
     case "${host_arch}" in

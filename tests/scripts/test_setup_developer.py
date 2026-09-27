@@ -188,3 +188,47 @@ def test_installed_go_tool_is_reused(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_helm_rebuilds_matching_version_without_release_flags(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir / "helm", "exit 0\n")
+    metadata = tmp_path / "metadata"
+    metadata.write_text("mod helm.sh/helm/v3 v3.21.0\n")
+    _stub(
+        bindir / "go",
+        "\n".join(
+            [
+                'if [[ "$1" == version ]]; then cat "$TEST_METADATA"; exit; fi',
+                '[[ "$1" == install && "$2" == -ldflags ]]',
+                'printf "%s\\n" "$3" > "$TEST_METADATA"',
+            ]
+        ),
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-euo",
+            "pipefail",
+            "-c",
+            'source "$1"; dev_bin="$2"; dev_install_helm',
+            "test",
+            str(_LIBRARY),
+            str(bindir),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "TEST_METADATA": str(metadata),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    flags = metadata.read_text()
+    assert "internal/version.version=v3.21.0" in flags
+    for package in ("pkg/lint/rules", "pkg/chartutil"):
+        assert f"{package}.k8sVersionMajor=1" in flags
+        assert f"{package}.k8sVersionMinor=35" in flags
