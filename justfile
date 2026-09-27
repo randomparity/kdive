@@ -115,6 +115,10 @@ format:
     uv run ruff check --fix .
     uv run ruff format .
 
+# Validate independent live-coverage ownership without claiming live qualification.
+coverage-check:
+    uv run python -m scripts.coverage_campaign check
+
 # Type-check the whole tree (src + tests). Whole-tree, not `src`: this is the single
 # definition CI and the pre-commit ty hook both invoke, and the only place tests/ is
 # type-checked (scoping to src once let a test-tree type error merge green).
@@ -750,4 +754,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full local gate, including checks beyond the separate PR CI recipe list.
-ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
+ci: lint type coverage-check lock-check lint-shell lint-ansible test-ansible lint-workflows docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
