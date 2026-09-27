@@ -110,8 +110,15 @@ POWER-specific host checks:
   provisioning own worker staging, console and overlay directories.
 
 The [local preflight](../../scripts/operations/check-local-libvirt.sh) can diagnose host tools,
-imports and readable kernels, using `KDIVE_PYTHON` to select the worker interpreter. It checks
-the configured libvirt endpoint; only local system-daemon URIs require the `libvirt` group and
+imports and readable kernels. `KDIVE_PYTHON` selects the checkout/CLI interpreter, where it
+checks `guestfs` and `drgn` imports for build-fs and CLI kdump tooling. Separately,
+`KDIVE_LIFECYCLE_PYTHON` selects the installed lifecycle worker interpreter, where it requires a
+`guestfs` import when that interpreter is executable. If it is absent or not executable, the
+preflight reports that the lifecycle venv is not installed and skips that probe. See
+[local-libvirt host preparation](../operating/install.md#local-libvirt-host-preparation) to install
+the environments and matching bindings.
+
+It checks the configured libvirt endpoint; only local system-daemon URIs require the `libvirt` group and
 active `default` network. Its success does not prove the installed session authority or a
 working capture. The live-stack and live-testing checks own those deployment proofs.
 
