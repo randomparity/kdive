@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import UTC, datetime, timedelta
@@ -194,8 +195,9 @@ def _upload_item(name: str) -> ToolResponse:
     return ToolResponse.success(name, "pending", data={"name": name})
 
 
+@pytest.mark.parametrize("retain", [False, True])
 def test_spine_upload_sends_the_tree_config_as_effective_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retain: bool
 ) -> None:
     # #2762: the spine uploads its own .config, so runs.complete_build's config advisories run on
     # the live path instead of failing open on an absent config.
@@ -203,17 +205,19 @@ def test_spine_upload_sends_the_tree_config_as_effective_config(
     (tmp_path / ".config").write_bytes(config)
     kernel_tar = tmp_path / "kernel.tar"
     kernel_tar.write_bytes(b"tar")
+    (tmp_path / "vmlinux").write_bytes(b"debug")
     monkeypatch.setenv(spine.KERNEL_TREE_ENV, str(tmp_path))
     monkeypatch.setattr(
-        spine, "accepted_run_upload_names", lambda _c: ["kernel", "effective_config"]
+        spine, "accepted_run_upload_names", lambda _c: ["kernel", "effective_config", "vmlinux"]
     )
     monkeypatch.setattr(spine, "combined_kernel_tar", lambda *_a, **_k: kernel_tar)
+    monkeypatch.setattr(spine, "elf_build_id", lambda _p: "abcdef")
     calls: list[tuple[str, dict[str, object]]] = []
 
     async def _scalar(client: object, name: str, **args: object) -> ToolResponse:
         calls.append((name, args))
         if name == "artifacts.create_run_upload":
-            items = [_upload_item("kernel"), _upload_item("effective_config")]
+            items = [_upload_item(name) for name in ("kernel", "effective_config", "vmlinux")]
             return ToolResponse.collection("run-1", "pending", items)
         return ToolResponse.success("run-1", "succeeded")
 
@@ -226,7 +230,28 @@ def test_spine_upload_sends_the_tree_config_as_effective_config(
     monkeypatch.setattr(spine, "put_presigned", _put)
     client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
 
-    asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
+    if retain:
+        monkeypatch.setenv(spine.KERNEL_TREE_ENV, "/absent")
+        asyncio.run(
+            spine.build_and_upload_kernel(
+                cast(Any, client),
+                run_id="run-1",
+                kernel_tree=tmp_path,
+                evidence_dir=tmp_path / "evidence",
+                with_vmlinux=True,
+            )
+        )
+        evidence = json.loads((tmp_path / "evidence/upload.json").read_text())
+        assert evidence["build_id"] == "abcdef"
+        assert evidence["result"]["status"] == "succeeded"
+        assert {a["name"] for a in evidence["artifacts"]} == {
+            "kernel",
+            "effective_config",
+            "vmlinux",
+        }
+        assert put["vmlinux"] == b"debug"
+    else:
+        asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
 
     decls = cast(list[dict[str, object]], calls[0][1]["artifacts"])
     by_name = {d["name"]: d for d in decls}
