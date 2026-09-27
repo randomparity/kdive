@@ -792,7 +792,7 @@ def test_required_present_exits_zero(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "Required dependencies missing" not in result.stderr
-    assert "Required dependencies are present" in result.stdout
+    assert "Core dependencies are present" in result.stdout
 
 
 def _stub_python(bindir: Path, name: str, *, imports_ok: bool) -> Path:
@@ -1208,36 +1208,42 @@ def test_setup_requires_hook_tools_but_report_mode_keeps_them_optional(
     assert "using the hints above" in setup.stderr
 
 
-def test_setup_does_not_require_optional_ci_or_vm_tools(tmp_path: Path) -> None:
+def test_developer_preflight_requires_ci_tools(tmp_path: Path) -> None:
     bindir = _bin(tmp_path)
     for tool in ("git", "shellcheck", "just", "prek"):
         _stub(bindir, tool, "#!/bin/sh\nexit 0\n")
     result = _run("ubuntu", str(bindir), tmp_path, args=["--setup"])
-    assert result.returncode == 0, result.stderr
-    assert "docker" in result.stderr
-    assert "shfmt" in result.stderr
-    assert "virsh" in result.stderr
+    assert result.returncode == 1, result.stderr
+    for dependency in ("docker", "shfmt", "helm", "gitleaks", "Docker daemon access"):
+        assert dependency in result.stderr
 
 
-def test_just_setup_stops_before_sync_when_hook_dependency_is_missing(tmp_path: Path) -> None:
+def test_just_setup_installs_before_sync_and_hooks() -> None:
     just = shutil.which("just")
     if just is None:
-        pytest.skip("just is required to exercise setup dependency ordering")
-    bindir = _bin(tmp_path)
-    for tool in ("git", "just", "prek"):
-        _stub(bindir, tool, "#!/bin/sh\nexit 0\n")
-    log = tmp_path / "uv.log"
-    _stub(bindir, "uv", f'#!/bin/sh\necho "$*" >> "{log}"\n')
-    os_release = tmp_path / "os-release"
-    os_release.write_text("ID=ubuntu\n")
+        pytest.skip("just is required to expand the setup recipe")
     result = subprocess.run(
-        [just, "--justfile", str(SCRIPT.parent.parent / "justfile"), "setup"],
-        env={"PATH": _with_bash(str(bindir), tmp_path), "KDIVE_OS_RELEASE": str(os_release)},
+        [just, "--justfile", str(SCRIPT.parent.parent / "justfile"), "--dry-run", "setup"],
         capture_output=True,
         text=True,
-        check=False,
+        check=True,
     )
-    assert result.returncode != 0
-    assert "Required dependencies missing: shellcheck" in result.stderr
-    assert not log.exists(), "setup reached uv sync despite an unmet hook dependency"
-    assert "Development environment is ready" not in result.stdout
+    commands = result.stderr
+    assert commands.index("check-setup-deps.sh --install-developer") < commands.index("uv sync")
+    assert commands.index("uv sync") < commands.index("prek install")
+    assert commands.index("prek install") < commands.index("prek run -a")
+
+
+def test_developer_preflight_succeeds_without_live_vm_tools(tmp_path: Path) -> None:
+    bindir = _bin(tmp_path)
+    tools = (
+        "git shellcheck just prek make shfmt gitleaks realpath stat find grep docker "
+        "cc curl tar xz unzip go helm actionlint promtool zsh gdb tcpdump ss"
+    )
+    for tool in tools.split():
+        _stub(bindir, tool, "#!/bin/sh\nexit 0\n")
+    result = _run("ubuntu", str(bindir), tmp_path, args=["--setup"])
+    assert result.returncode == 0, result.stderr
+    assert "Developer dependencies are present" in result.stdout
+    assert "Future dependencies" in result.stderr
+    assert "virt-builder" in result.stderr

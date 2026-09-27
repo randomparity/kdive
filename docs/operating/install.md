@@ -98,8 +98,8 @@ without a `PATH`, that packaged `depmod` in `/usr/sbin` is what this release mak
 ### From source
 
 Source development targets Linux with Python 3.14 managed by `uv`.
-Install the [host prerequisites](#development-and-ci-toolchain) first, including `uv`, `just`,
-and `prek`. Then clone the repository and run its setup recipe:
+Bootstrap with Git, Bash >= 4.4, `uv`, and `just`, and put `uv tool dir --bin` on `PATH`.
+Then clone the repository and run its developer setup recipe:
 
 ```bash
 git clone https://github.com/randomparity/kdive
@@ -107,16 +107,28 @@ cd kdive
 just setup
 ```
 
-The recipe checks host dependencies, syncs the locked environment, builds the capture-bootstrap
-manifest, and installs the development hooks. Choose a [run mode](#run-modes) below to configure
-backends and start the processes.
+The recipe installs the complete developer toolchain before syncing the locked environment,
+building the capture-bootstrap manifest, installing Ansible collections, and installing and
+running the commit hooks. Native libraries and tools come from distribution packages (root
+or sudo required); pinned user tools go into `uv tool dir --bin`. These include `prek`,
+ShellCheck, shfmt, actionlint, Helm, gitleaks, and promtool. Docker and Compose are required
+for developer setup, as are the compiler and native headers exercised by the tests.
+Go tools build natively, and POWER builds ShellCheck with Cabal when no release binary exists.
 
-Setup checks the external commit-hook tools (`git`, `shellcheck`, `just`, and `prek`) before
-syncing dependencies or installing hooks. If one is missing, it stops with an installation
-hint; `just check-deps` remains a report with those tools in its Recommended tier. Docker,
-standalone `shfmt`, and VM tools remain optional for setup. The hooks manage their own Python
-and Go environments, while test recipes use `uv`. Ansible regression tests may explicitly
-inspect `/usr/bin/python3` to check host provisioning behavior, but do not require system `pip`.
+An installation failure or inaccessible Docker daemon fails setup before dependency sync.
+Setup preserves an existing Docker installation and does not change group membership or
+start services: follow the reported access/startup remedy, then rerun setup. Distributions
+without a known Docker engine package require an operator-configured engine or reachable
+Docker context. The full installer runs on Linux; use a Linux development VM from macOS.
+
+`just check-deps` keeps its lighter report and optional per-tier fixes for repository users;
+`just check-deps --setup` verifies all developer requirements without installing them.
+Live VM provisioning, guest images, and host worker services remain separate operator steps.
+Choose a [run mode](#run-modes) below to configure backends and start the processes.
+
+Test recipes use `uv`; hooks manage their Python/Go environments. Ansible regression tests
+may inspect `/usr/bin/python3` to check host provisioning behavior, but do not require system
+`pip`. See [ADR-0694](../adr/0694-complete-developer-setup.md).
 
 The manifest recipe removes group-write permission from current-user-owned bootstrap files
 and their ancestor directories, including checkout parents and external Python installations
@@ -164,7 +176,9 @@ Running the code from source, and reproducing the `just ci` gate, needs a build
 toolchain in addition to the runtime backends. `libvirt-python` has no prebuilt wheels
 and compiles against the system libvirt **and Python** headers, so those headers must be
 present before `uv sync`. `just check-deps` reports gaps and may offer remediation when run
-interactively; inspect its proposed actions before accepting them.
+interactively; inspect its proposed actions before accepting them. Developers should run
+`just setup` to install these dependencies and the remaining developer tools automatically.
+The package examples below are for manual preparation.
 
 **Debian / Ubuntu:**
 
@@ -194,7 +208,7 @@ or syncing the environment. Then install [uv](https://docs.astral.sh/uv/) and th
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv tool install rust-just
-uv tool install prek
+just setup
 ```
 
 #### Bash and GNU tools (all hosts; Homebrew on macOS)

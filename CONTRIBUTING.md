@@ -10,21 +10,25 @@ KDIVE is Python 3.14, managed with [`uv`](https://docs.astral.sh/uv/). The
 `justfile` is the single source of truth for build, lint, type, and test
 commands — run the same recipes locally that CI runs.
 
-Development targets Linux. On macOS, install Bash 4.4 or later and the GNU tools from
-Homebrew first, as the [macOS steps](docs/operating/install.md#bash-and-gnu-tools-all-hosts-homebrew-on-macos)
-describe. Before installing runner tools, follow the
-[host prerequisites](docs/operating/install.md) and the
-[cross-platform prerequisites](docs/development/cross-platform.md). In particular, POWER
-hosts need Rust on PATH before installing tools that build from source; `libvirt-python`
-needs the system libvirt and Python headers.
-
-`just setup` cannot bootstrap its own runner. Once the host is prepared:
+Development targets Linux. Bootstrap with Git, Bash >= 4.4, [uv](https://docs.astral.sh/uv/),
+and `just`, with uv's tool directory on `PATH`. On POWER, installing the bootstrap runners
+may itself need Rust; see the [cross-platform guide](docs/development/cross-platform.md).
 
 ```bash
 uv tool install rust-just
-uv tool install prek
-just setup   # check host deps, sync the locked venv, install and run git hooks
+just setup
 ```
+
+`just setup` installs the native libraries, developer CLIs, Docker/Compose, locked Python
+environment, Ansible collections, and commit/push hooks, then runs the commit hooks.
+System packages require root or sudo; user tools go into `uv tool dir --bin`. Setup fails
+if an installation fails or Docker is inaccessible to the current session. It names the
+remaining action (for example, a new login after granting Docker access); rerun setup after
+that action. Full setup needs Linux, including when developing from a macOS workstation.
+
+`just check-deps` retains the lighter dependency report for repository users. Live VM host
+provisioning and guest images remain separate operator setup. See
+[installation](docs/operating/install.md#from-source) for details.
 
 ## Skipping reformat commits in `git blame`
 

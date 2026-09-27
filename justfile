@@ -18,9 +18,9 @@ WORKTREE_PYTHONPATH := justfile_directory() + "/src" + "${PYTHONPATH:+:$PYTHONPA
 default:
     @just --list
 
-# One-command first-time setup: check host deps, sync the venv, install collections and hooks.
-# Writes outside the checkout: the collections land in ~/.ansible/collections (see below).
-setup: (check-deps "--setup") sync build-capture-bootstrap-manifest install-ansible-collections install-hooks
+# Complete developer setup: install native/tool dependencies, sync, collections, and hooks.
+# Installs system packages (root/sudo), user tools, and ~/.ansible/collections.
+setup: (check-deps "--install-developer") sync build-capture-bootstrap-manifest install-ansible-collections install-hooks
     @echo "Development environment is ready."
 
 # Stage and verify attestation for the explicitly selected worker interpreter. This is
@@ -38,7 +38,8 @@ install-capture-bootstrap-manifest staged="build/capture-bootstrap-manifest.json
 
 # Report missing host packages with distro-specific install hints. Report-only in CI / when piped;
 # at an interactive terminal it offers a [y/N] install per tier (pass -y to install unattended).
-# --setup also requires the external tools used by install-hooks; optional CI/VM tools stay optional.
+# --setup verifies all developer dependencies; --install-developer installs them first.
+# Provider/VM preparation remains separate.
 check-deps *ARGS:
     ./scripts/check-setup-deps.sh {{ARGS}}
 
