@@ -284,6 +284,13 @@ def _register_systems_get(
     ) -> ToolResponse:
         """Return a System the caller can view.
 
+        ``data.investigation_id`` is the owning Investigation's id, or ``null`` when unowned.
+        ``data.run_investigation_ids`` lists distinct Investigations with Runs on this System,
+        across every Run state, ordered by their newest Run's creation time (newest first),
+        capped at 20 ids per response. ``data.run_investigation_ids_truncated`` is ``true`` when
+        more ids were omitted. Use ``runs.list(system_id=...)`` for the complete paginated Run
+        history, including the remaining Investigation ids.
+
         ``data.accel`` is the host-derived accelerator resolved at admission — ``kvm`` (native)
         or ``tcg`` (foreign-arch emulation) — or ``null`` when the backing host advertised no
         guest-arch capability. Expect a ``tcg`` System to boot and run notably slower.
