@@ -64,10 +64,46 @@ was customized or qualified here.
 | `fedora-kdive-ready-44` | x86_64 | `28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f` | Cold build and warm reuse passed |
 | `fedora-kdive-ready-44-ppc64le` | ppc64le | `3bea270eba46cdedf3c6c71b20c6ffb03b54131631497a27ff826a497c1dfac6` | Source verified; staging pending |
 
-Build the x86 row with `KDIVE_WARM_STORE_IMAGE=fedora-kdive-ready-44`,
-`KDIVE_WARM_STORE_TARGET_NVR=6.19.10-300.fc44.x86_64`, the checkout's
-`KDIVE_PYTHON`, and Fedora's `DEBUGINFOD_URLS`; run `scripts/live-vm/warm-store.sh` first with
-an empty task store and then again unchanged. The builder reacquires the pinned source inside its
+For a fresh x86 cold build, set `KDIVE_TASK_MOUNT` to the absolute path of an existing,
+operator-owned task mount, then run this block from a clean external worktree. It refuses an
+absent mount or an existing store. The capacity check runs immediately before the first build.
+
+```sh
+(
+  set -euo pipefail
+  : "${KDIVE_TASK_MOUNT:?set this to an existing task-owned mount before running}"
+  if [[ "$KDIVE_TASK_MOUNT" != /* ]] || ! mountpoint -q -- "$KDIVE_TASK_MOUNT" ||
+    [[ ! -w "$KDIVE_TASK_MOUNT" ]]; then
+    echo 'KDIVE_TASK_MOUNT must be an absolute, mounted, writable task workspace' >&2
+    exit 1
+  fi
+  if [[ -e "$KDIVE_TASK_MOUNT/store" ]]; then
+    echo 'cold build requires a fresh task store' >&2
+    exit 1
+  fi
+  install -d -m 0700 -- "$KDIVE_TASK_MOUNT/tmp" "$KDIVE_TASK_MOUNT/guestfs-cache" \
+    "$KDIVE_TASK_MOUNT/xdg" "$KDIVE_TASK_MOUNT/console" \
+    "$KDIVE_TASK_MOUNT/rootfs" "$KDIVE_TASK_MOUNT/store"
+  export KDIVE_PYTHON="$PWD/.venv/bin/python" KDIVE_LIBVIRT_URI=qemu:///session
+  export KDIVE_LANE_WORKSPACE="$KDIVE_TASK_MOUNT" KDIVE_LANE_DISK_BYTES=51539607552
+  export XDG_CONFIG_HOME="$KDIVE_TASK_MOUNT/xdg"
+  export TMPDIR="$KDIVE_TASK_MOUNT/tmp" LIBGUESTFS_TMPDIR="$KDIVE_TASK_MOUNT/tmp"
+  export LIBGUESTFS_CACHEDIR="$KDIVE_TASK_MOUNT/guestfs-cache"
+  export LIBGUESTFS_MEMSIZE=2048 LIBGUESTFS_BACKEND=direct
+  export KDIVE_LIBVIRT_CONSOLE_ROOT="$KDIVE_TASK_MOUNT/console"
+  export KDIVE_LIBVIRT_ROOTFS_ROOT="$KDIVE_TASK_MOUNT/rootfs"
+  export KDIVE_WARM_STORE_DIR="$KDIVE_TASK_MOUNT/store"
+  export KDIVE_WARM_STORE_IMAGE=fedora-kdive-ready-44
+  export KDIVE_WARM_STORE_TARGET_NVR=6.19.10-300.fc44.x86_64
+  export DEBUGINFOD_URLS=https://debuginfod.fedoraproject.org
+  bash scripts/live-vm/preflight-env.sh native-x86
+  bash scripts/live-vm/preflight-env.sh capacity
+  bash scripts/live-vm/warm-store.sh  # cold
+  bash scripts/live-vm/warm-store.sh  # warm reuse
+)
+```
+
+The builder reacquires the pinned source inside its
 fresh build workspace; a prior downloaded input is not the cold proof. A libguestfs appliance
 cache may already exist and is independent of the fixture store. A warm hit validates the whole
 manifest and artifact bytes, including the selected catalog row and clean builder commit. Legacy
@@ -86,6 +122,10 @@ kept the same fixture ID and artifact digests.
 This retained fixture belongs to builder commit `0876df4117`. The subsequent documentation
 commit changes the builder revision; using that later checkout will rebuild and assign a new
 fixture identity before downstream qualification.
+To reuse this retained fixture without rebuilding, use the exact clean builder commit
+`0876df41170b0cf6a87e3ef63b5bdbce853a7366`, the same image/NVR and task store, and run only
+the warm-store command after exporting the environment above. Do not run the cold-only store
+absence check against an existing fixture.
 
 The retained kernel and debuginfo both have GNU build ID
 `ac46f5009041c93426043e26daffa422db708cfc`. The manifest records Fedora 44 kernel
