@@ -16,13 +16,25 @@ from uuid import UUID
 
 import libvirt
 import pytest
+from pydantic import SecretStr
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
+from kdive.jobs.authority_sender import AuthorityRequestSender
+from kdive.providers.external_boot_authority import transport
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCommitContextV1,
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+    AuthorityOperation,
+)
+from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.providers.local_libvirt.lifecycle.boot import session as session_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
+    LocalLibvirtExternalBoot,
     TargetProjectionStore,
     TargetProjectionV1,
 )
@@ -39,6 +51,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ExpectedOperationOwnership,
     LocalExternalBootOperationLease,
     LocalExternalBootSessionFactory,
+    LocalExternalBootTimingConfigurationError,
     OpenArtifactRoot,
     OperationOwnership,
     PinnedOperationOwnership,
@@ -53,9 +66,11 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,
+    RecoveryPoint,
     RunningKernelObservation,
 )
 from kdive.providers.shared.libvirt_external_boot import boot_projection_identity
+from tests.providers.external_boot_authority.service_support import _mutation, _takeover
 from tests.providers.local_libvirt.external_boot_support import _metadata
 from tests.providers.local_libvirt.fakes import libvirt_error
 from tests.providers.local_libvirt.lifecycle.boot.session_support import (
@@ -2266,7 +2281,7 @@ def test_factory_rejects_timing_disagreement_before_provider_mutation(
     )
     config.load({})
     try:
-        with pytest.raises(CategorizedError, match=message) as caught:
+        with pytest.raises(LocalExternalBootTimingConfigurationError, match=message) as caught:
             _factory(events, domain).open(_lease(), _expected(), local_timing=timing)
     finally:
         config.reset()
@@ -2277,6 +2292,83 @@ def test_factory_rejects_timing_disagreement_before_provider_mutation(
         "correct the System accelerator" if accel == "tcg" else "align KDIVE_LIBVIRT_BOOT_WINDOW_S"
     )
     assert fix in str(caught.value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("accel", "window", "host_detail"),
+    [
+        ("tcg", 9000, "correct the System accelerator"),
+        ("kvm", 901, "align KDIVE_LIBVIRT_BOOT_WINDOW_S"),
+    ],
+)
+async def test_real_timing_refusal_crosses_authority_wire_without_host_detail(
+    accel: Literal["kvm", "tcg"], window: int, host_detail: str
+) -> None:
+    events: list[str] = []
+    domain = Domain(events, xml=_xml(domain_type="kvm"))
+    factory = _factory(events, domain)
+    timing = LocalExternalBootTimingV1(
+        accel=accel, console_window_s=window, deadline_budget_s=12000
+    )
+
+    class Ports:
+        def activate(
+            self,
+            _point: RecoveryPoint,
+            _authority: OpaqueProviderRef,
+            *,
+            local_timing: LocalExternalBootTimingV1 | None,
+        ) -> None:
+            session = factory.open(_lease(), _expected(), local_timing=local_timing)
+            session.close()
+            pytest.fail("mismatched timing must refuse before a provider operation")
+
+    adapter = LocalExternalBootAuthorityAdapter(cast(LocalLibvirtExternalBoot, Ports()))
+    responses: list[bytes] = []
+
+    class Service:
+        async def execute_mutation(
+            self, _peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
+        ) -> AuthorityObservationV1:
+            adapter._apply(
+                AuthorityOperation.ACTIVATE,
+                cast(RecoveryPoint, object()),
+                OpaqueProviderRef(ref="authority/test"),
+                cast(AuthorityCommitContextV1, object()),
+                request,
+            )
+            pytest.fail("mismatched timing must refuse before an observation")
+
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class Transport:
+        async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+            del deadline
+            response = await transport._dispatch(
+                envelope, authenticate, cast(transport.AuthorityService, Service())
+            )
+            responses.append(response)
+            return response
+
+    request = _mutation(_takeover()).model_copy(update={"local_timing": timing})
+    sender = AuthorityRequestSender(Transport, lambda: SecretStr("worker"))
+    config.load({})
+    try:
+        with pytest.raises(CategorizedError, match="^authority: configuration-error$") as caught:
+            await sender.execute_mutation(request, deadline=1.0)
+    finally:
+        config.reset()
+        adapter.close()
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.terminal is True
+    assert responses == [b'{"category":"configuration-error","status":"error"}']
+    assert host_detail not in responses[0].decode()
+    assert host_detail not in str(caught.value)
+    assert "domain.create" not in events
+    assert "artifact.open" not in events
 
 
 def test_factory_accepts_matching_snapshot_and_unknown_accelerator() -> None:

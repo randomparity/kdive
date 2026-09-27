@@ -43,6 +43,9 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalSystemTeardownAnchorV1,
     LocalSystemTeardownIntentV1,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    LocalExternalBootTimingConfigurationError,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalOperationLeaseScope,
 )
@@ -638,6 +641,11 @@ class LocalExternalBootAuthorityAdapter:
                 raise AuthorityServiceError("provider_conflict")
         except AuthorityServiceError:
             raise
+        except LocalExternalBootTimingConfigurationError:
+            logger.exception(
+                "external-boot provider configuration refused", extra={"operation": operation}
+            )
+            raise AuthorityServiceError("configuration_error") from None
         except Exception:  # noqa: BLE001 - bound provider failure to a closed category
             logger.exception("external-boot provider commit failed", extra={"operation": operation})
             raise AuthorityServiceError("provider_conflict") from None

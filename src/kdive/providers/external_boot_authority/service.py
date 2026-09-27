@@ -316,7 +316,13 @@ class AuthorityServiceError(RuntimeError):
 
     def __init__(
         self,
-        category: Literal["unauthenticated", "superseded", "journal_conflict", "provider_conflict"],
+        category: Literal[
+            "unauthenticated",
+            "superseded",
+            "journal_conflict",
+            "provider_conflict",
+            "configuration_error",
+        ],
         *,
         telemetry_recorded: bool = False,
     ):

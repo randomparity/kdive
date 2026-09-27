@@ -418,9 +418,11 @@ def _error(category: str) -> bytes:
 
 
 def _service_category(category: str) -> str:
-    return {"journal_conflict": "journal-conflict", "provider_conflict": "provider-conflict"}.get(
-        category, category
-    )
+    return {
+        "journal_conflict": "journal-conflict",
+        "provider_conflict": "provider-conflict",
+        "configuration_error": "configuration-error",
+    }.get(category, category)
 
 
 async def _dispatch(

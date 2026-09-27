@@ -413,18 +413,21 @@ async def test_local_transport_rejects_malformed_or_truncated_response(
 
 
 @pytest.mark.parametrize(
-    "reason",
+    ("reason", "category", "terminal"),
     [
-        "invalid-request",
-        "unauthenticated",
-        "superseded",
-        "journal-conflict",
-        "provider-conflict",
-        "provider-not-configured",
-        "provider-failure",
+        ("invalid-request", ErrorCategory.INFRASTRUCTURE_FAILURE, False),
+        ("unauthenticated", ErrorCategory.INFRASTRUCTURE_FAILURE, False),
+        ("superseded", ErrorCategory.INFRASTRUCTURE_FAILURE, False),
+        ("journal-conflict", ErrorCategory.INFRASTRUCTURE_FAILURE, False),
+        ("provider-conflict", ErrorCategory.INFRASTRUCTURE_FAILURE, False),
+        ("provider-not-configured", ErrorCategory.INFRASTRUCTURE_FAILURE, False),
+        ("provider-failure", ErrorCategory.INFRASTRUCTURE_FAILURE, False),
+        ("configuration-error", ErrorCategory.CONFIGURATION_ERROR, True),
     ],
 )
-async def test_local_sender_preserves_closed_peer_rejections(tmp_path: Path, reason: str) -> None:
+async def test_local_sender_preserves_closed_peer_rejections(
+    tmp_path: Path, reason: str, category: ErrorCategory, terminal: bool
+) -> None:
     from kdive.providers.assembly.authority import local_authority_sender_factory
 
     material = _tls_material(tmp_path, "authority-a")
@@ -455,4 +458,20 @@ async def test_local_sender_preserves_closed_peer_rejections(tmp_path: Path, rea
     async with _server(socket_path, material, rejected):
         with pytest.raises(CategorizedError, match=f"^authority: {reason}$") as caught:
             await sender.health(deadline=asyncio.get_running_loop().time() + 2)
-    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.category is category
+    assert caught.value.terminal is terminal
+
+
+def test_sender_rejects_unapproved_host_diagnostic_field() -> None:
+    from kdive.jobs.authority_sender import _decode_response
+
+    response = json.dumps(
+        {"status": "error", "category": "configuration-error", "diagnostic": "host-only detail"},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+    with pytest.raises(CategorizedError, match="^authority: invalid-response$") as caught:
+        _decode_response(response, AuthorityHealthAcknowledgementV1)
+
+    assert "host-only detail" not in str(caught.value)
