@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import libvirt
@@ -46,6 +47,7 @@ def _control(domain: FakeDomain | None, tmp_path: Path) -> RemoteLibvirtControl:
         (PowerAction.ON, "create"),
         (PowerAction.OFF, "destroy"),
         (PowerAction.RESET, "reset"),
+        (PowerAction.RESUME, "resume"),
         (PowerAction.CYCLE, "reboot"),
     ],
 )
@@ -63,11 +65,27 @@ def test_power_on_already_running_swallowed(tmp_path: Path) -> None:
     _control(domain, tmp_path).power(domain_name_for(_SYSTEM_ID), PowerAction.ON)  # no raise
 
 
+def test_power_resume_already_running_swallowed(tmp_path: Path) -> None:
+    name = domain_name_for(_SYSTEM_ID)
+    domain = FakeDomain(name, raise_on={"resume": libvirt.VIR_ERR_OPERATION_INVALID})
+    _control(domain, tmp_path).power(name, PowerAction.RESUME)
+    assert domain.calls == ["resume"]
+
+
+def test_unknown_power_action_does_not_reboot(tmp_path: Path) -> None:
+    name = domain_name_for(_SYSTEM_ID)
+    domain = FakeDomain(name)
+    with pytest.raises(AssertionError):
+        _control(domain, tmp_path).power(name, cast(PowerAction, "future"))
+    assert domain.calls == []
+
+
 @pytest.mark.parametrize(
     ("action", "call", "verb"),
     [
         (PowerAction.ON, "create", "starting"),
         (PowerAction.OFF, "destroy", "stopping"),
+        (PowerAction.RESUME, "resume", "resuming"),
     ],
 )
 def test_idempotent_non_operation_invalid_error_is_control_failure(
