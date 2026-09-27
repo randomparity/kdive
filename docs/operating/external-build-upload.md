@@ -38,7 +38,8 @@ An existing source must match the pin and have no tracked changes or untracked s
 The output must be new and separate from source. A failed build leaves diagnostic output but
 no valid manifest; retry with a new output path. The manifest binds source, config, toolchain,
 builder commit, GNU build ID and artifact hashes. Keep the source tree too: the existing upload
-packager invokes `modules_install` through the output directory's generated Makefile. Retained
+packager invokes `modules_install` through the output directory's generated Makefile. Verification
+checks that Makefile's linkage and the retained source commit/cleanliness before packaging. Retained
 vmlinux and modules are unstripped; only the packager's staged module copies are stripped.
 
 For a cold repeat, run the same commands with a different `fixture_root`, which creates fresh
