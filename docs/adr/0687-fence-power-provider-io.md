@@ -29,6 +29,8 @@ shutdown wait contract from ADR-0685. Force-crash marker and NMI behavior is unc
 - A cancelled power job may wait for a blocking provider call to return before its System lock
   and connection are released. Non-OFF provider calls have no new timeout.
 - Existing action authorization, provider port, audit fields, and RESUME state rules remain.
+- The shielded task returns its provider-kind metrics tag to the worker task on success, failure,
+  or cancellation, retaining the existing worker telemetry label.
 
 ## Considered & rejected
 

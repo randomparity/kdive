@@ -24,6 +24,8 @@ call inside it; their existing post-call audit stays outside. RESUME executes it
 precheck, provider call, PAUSED-to-READY update, and audit inside it. A READY RESUME retry remains
 an idempotent no-op. Provider failures propagate; cancellation propagates only after the provider
 thread and lock cleanup finish. No additional timeout is imposed on non-OFF calls.
+The provider-kind tag set during controller resolution is handed back from the shielded task to
+the worker task on success, failure, and cancellation so existing telemetry retains its label.
 
 ## Failure model
 
@@ -44,6 +46,7 @@ that I/O finishes; a later power call sees CRASHING and does not start provider 
 cancellation keeps the fence through provider completion and restores connection mode. RESUME
 holds the fence through its provider call and PAUSED-to-READY commit, retaining its idempotent
 READY retry and audit behavior. OFF's existing tests remain green.
+The worker still observes the provider-kind tag after success, failure, and cancellation.
 
 ## Validation
 
@@ -55,6 +58,8 @@ READY retry and audit behavior. OFF's existing tests remain green.
 - focused-test: block RESUME provider I/O and probe its System lock, then verify PAUSED-to-READY
   state and audit with focused `tests/jobs/handlers/control/test_power_resume.py` cases.
 - focused-test: existing OFF race and cancellation tests remain green with the adversarial command.
+- focused-test: RESUME success and RESET provider failure/cancellation retain the worker-visible
+  provider-kind tag in the direct handler and adversarial tests above.
 - task-test-not-applicable: ADR/spec prose has no executable contract beyond the behavior above;
   use `just records` and doc-link guards for formatting/reference integrity.
 - guardrails: `just lint`, `just type`, `just test-changed`, then coordinated pre-push `just ci`.
