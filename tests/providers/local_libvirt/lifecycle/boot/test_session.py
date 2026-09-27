@@ -214,6 +214,53 @@ def test_teardown_session_validates_both_xml_views_and_removes_only_owned_system
     assert sibling_baseline.is_dir()
 
 
+@pytest.mark.parametrize(
+    ("error_code", "inactive", "accepted"),
+    [
+        (libvirt.VIR_ERR_OPERATION_INVALID, True, True),
+        (libvirt.VIR_ERR_OPERATION_INVALID, False, False),
+        (libvirt.VIR_ERR_INTERNAL_ERROR, True, False),
+    ],
+)
+@pytest.mark.parametrize("authority", [False, True])
+def test_teardown_destroy_accepts_only_proven_inactive_race(
+    tmp_path: Path, error_code: int, inactive: bool, accepted: bool, authority: bool
+) -> None:
+    events: list[str] = []
+
+    class RacingDomain(_TeardownDomain):
+        def destroy(self) -> int:
+            self.events.append("domain.destroy")
+            self.active = not inactive
+            raise libvirt_error(error_code)
+
+    domain = RacingDomain(events)
+    factory, overlay, baseline = _teardown_factory(tmp_path, events, domain)
+    session = (
+        open_authority_system_teardown(
+            lambda: _TeardownConn(events, domain), SYSTEM_ID, str(overlay), str(baseline)
+        )
+        if authority
+        else factory.open_teardown(_lease(), _expected())
+    )
+    if accepted:
+        session.destroy()
+        session.undefine()
+        session.remove_overlay()
+        session.remove_baseline()
+        assert "domain.undefine:2" in events
+        assert not overlay.exists()
+        assert not baseline.exists()
+    else:
+        with pytest.raises(libvirt.libvirtError) as exc:
+            session.destroy()
+        assert exc.value.get_error_code() == error_code
+        assert not any(event.startswith("domain.undefine") for event in events)
+        assert overlay.exists()
+        assert baseline.exists()
+    session.close()
+
+
 @pytest.mark.parametrize("view", ["live", "inactive"])
 def test_teardown_session_rejects_xml_ownership_mismatch_before_mutation(
     tmp_path: Path, view: str

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import LiteralString
@@ -14,6 +15,7 @@ from psycopg import AsyncConnection
 from psycopg.errors import InsufficientPrivilege
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, try_advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, JobState, ResourceStatus, SystemState
 from kdive.domain.catalog.resources import Resource, ResourceKind
@@ -171,6 +173,56 @@ def test_resume_commits_paused_to_ready(
                     args_digest({"system_id": str(sid), "action": PowerAction.RESUME.value}),
                 )
             ]
+        finally:
+            await worker_pool.close()
+            await owner_pool.close()
+
+    asyncio.run(scenario())
+
+
+def test_resume_holds_system_fence_through_provider_and_state_commit(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    class BlockedControl(_FakeControl):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def power(self, domain_name: str, action: PowerAction) -> None:
+            assert action is PowerAction.RESUME
+            self.started.set()
+            assert self.release.wait(timeout=5)
+            super().power(domain_name, action)
+
+    async def scenario() -> None:
+        owner_pool = _pool(migrated_url)
+        worker_pool = _pool(authority_role_dsns("kdive_worker"))
+        await owner_pool.open()
+        await worker_pool.open()
+        try:
+            sid = await _seed_system(owner_pool, SystemState.PAUSED)
+            control = BlockedControl()
+            resolver = provider_resolver(controller=control)
+
+            async def run_resume() -> None:
+                async with worker_pool.connection() as conn:
+                    await power_handler(conn, _resume_job(sid), resolver=resolver)
+
+            resume_task = asyncio.create_task(run_resume())
+            assert await asyncio.to_thread(control.started.wait, 2)
+            try:
+                async with owner_pool.connection() as probe, probe.transaction():
+                    assert not await try_advisory_xact_lock(probe, LockScope.SYSTEM, sid)
+                async with owner_pool.connection() as conn:
+                    assert await _sys_state(conn, sid) is SystemState.PAUSED
+            finally:
+                control.release.set()
+            await resume_task
+            async with owner_pool.connection() as conn:
+                assert await _sys_state(conn, sid) is SystemState.READY
+            assert control.calls == [("kdive-x", PowerAction.RESUME)]
+            assert len(await _fetch_audit(owner_pool, sid)) == 1
         finally:
             await worker_pool.close()
             await owner_pool.close()
