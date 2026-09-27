@@ -64,8 +64,9 @@ def members(output: Path, arch: str) -> list[str]:
     if arch not in REQUIRED:
         raise ValueError("select explicit target x86_64 or ppc64le")
     modules = artifact(output, "modules.order").read_text().splitlines()
-    if not modules or any(not name.endswith(".ko") for name in modules):
-        raise ValueError("modules.order must name retained unstripped .ko files")
+    if not modules or any(not name.endswith((".o", ".ko")) for name in modules):
+        raise ValueError("modules.order must name module objects (.o or .ko)")
+    modules = [name.removesuffix(".o") + ".ko" if name.endswith(".o") else name for name in modules]
     return sorted(set((*REQUIRED[arch], *modules)))
 
 
@@ -219,6 +220,11 @@ def build(
             "%a %b %d %H:%M:%S UTC %Y"
         ),
     )
+    flags = (
+        f"-fdebug-prefix-map={source}=/usr/src/linux "
+        f"-fdebug-prefix-map={output}=/usr/src/linux-build"
+    )
+    env.update(KCFLAGS=flags, KAFLAGS=flags)
     output.mkdir(parents=True)
     (output / "input.config").write_text(fragment)
     make = ["make", "-C", str(source), f"O={output}", f"ARCH={ARCH[arch]}"]

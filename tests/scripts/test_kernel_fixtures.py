@@ -6,8 +6,25 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts import kernel_fixtures as fixture
+
+
+@pytest.mark.parametrize(
+    "family,headers,btf",
+    [
+        ("debian", ["libelf-dev", "libssl-dev"], "pahole"),
+        ("redhat", ["elfutils-libelf-devel", "openssl-devel"], "dwarves"),
+        ("suse", ["libelf-devel", "libopenssl-devel"], "dwarves"),
+    ],
+)
+def test_host_provisioning_covers_kernel_build_tools(family, headers, btf) -> None:
+    defaults = yaml.safe_load(
+        (fixture.ROOT / "deploy/ansible/roles/libvirt_stack/defaults/main.yml").read_text()
+    )
+    required = {"gcc", "binutils", "bison", "flex", "bc", "perl", "make", "tar", btf, *headers}
+    assert required <= set(defaults[f"libvirt_stack_packages_{family}"])
 
 
 def _outputs(root: Path) -> None:
@@ -48,6 +65,11 @@ def test_record_round_trip_and_identity(built: Path) -> None:
     )
     assert len(manifest["fixture_id"]) == 64
     assert manifest["artifacts"]["input.config"] == manifest["fragment_sha256"]
+
+
+def test_kbuild_object_order_resolves_retained_modules(built: Path) -> None:
+    (built / "modules.order").write_text("drivers/block/loop.o\n")
+    assert "drivers/block/loop.ko" in fixture.members(built, "x86_64")
 
 
 @pytest.mark.parametrize(
@@ -177,6 +199,9 @@ def test_build_sanitizes_environment_and_rechecks_source(tmp_path: Path, monkeyp
         nonlocal fetches
         assert "CROSS_COMPILE" not in kwargs["env"]
         assert "KBUILD_OUTPUT" not in kwargs["env"]
+        if argv[0] == "make":
+            assert "-fdebug-prefix-map=" in kwargs["env"]["KCFLAGS"]
+            assert "/usr/src/linux-build" in kwargs["env"]["KCFLAGS"]
         if argv[0] == "bash":
             fetches += 1
             if fetches == 2:
