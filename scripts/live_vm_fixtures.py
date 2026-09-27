@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record and verify live-VM fixture evidence (ADR-0687)."""
+"""Record and verify live-VM fixture evidence (ADR-0688)."""
 
 from __future__ import annotations
 

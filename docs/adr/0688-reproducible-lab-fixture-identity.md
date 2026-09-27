@@ -1,4 +1,4 @@
-# 0687 Reproducible lab fixture identity
+# 0688 Reproducible lab fixture identity
 
 ## Status
 

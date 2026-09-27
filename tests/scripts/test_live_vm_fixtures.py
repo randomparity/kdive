@@ -1,4 +1,4 @@
-"""Fixture identity boundaries for the live VM stores (ADR-0687)."""
+"""Fixture identity boundaries for the live VM stores (ADR-0688)."""
 
 from __future__ import annotations
 
