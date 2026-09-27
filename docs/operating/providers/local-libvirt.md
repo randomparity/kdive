@@ -49,6 +49,9 @@ Kernel compilation happens outside KDIVE — follow the
   provision (baseline-kernel extraction, ADR-0272), stage built kernels, boot external kernels,
   run `build-fs`, and capture kdump locally. Each libguestfs launch builds a supermin appliance,
   which needs a readable host kernel under `/boot`.
+- **Host libselinux:** the external-boot worker evaluates an inactive SELinux guest's file-context
+  policy for the final module paths before it records the target identity. The local worker Ansible
+  role installs the distribution's libselinux package; a missing library stops preparation.
 - **The checkout, synced:** there is no PyPI wheel yet — `uv sync --locked` in the checkout is the
   install.
 - **The fixed live-worker lifecycle contract:** `deploy/systemd/install-live-worker-lifecycle.sh`
