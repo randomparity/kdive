@@ -29,7 +29,7 @@ import sys
 import tempfile
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -684,6 +684,8 @@ async def build_and_upload_kernel(
     require_network: bool = False,
     require_live_debug: bool = False,
     root_fs: str | None = None,
+    kernel_tree: Path | None = None,
+    evidence_dir: Path | None = None,
 ) -> None:
     """Drive the external-build upload lane for ``run_id`` and complete the Run's build step.
 
@@ -697,6 +699,9 @@ async def build_and_upload_kernel(
     without it ``debug.read_registers`` fails ``configuration_error`` / ``no_debuginfo``. It is
     opt-in because the ELF is large (hundreds of MB) and a spine that never attaches pays the
     upload for nothing.
+
+    ``kernel_tree`` overrides the environment input. ``evidence_dir`` must be new;
+    it retains the bundle, effective config and upload declarations/completion result.
     """
     contract = json.loads(await client.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
     accepted = accepted_run_upload_names(contract)
@@ -708,7 +713,7 @@ async def build_and_upload_kernel(
         raise SpinePhaseError(
             phase_name, f"upload contract no longer accepts 'effective_config': {accepted}"
         )
-    kernel_src = os.environ.get(KERNEL_TREE_ENV)
+    kernel_src = kernel_tree or os.environ.get(KERNEL_TREE_ENV)
     if not kernel_src:
         raise SpinePhaseError(phase_name, f"{KERNEL_TREE_ENV} unset; point it at a built tree")
     config_bytes = check_spine_kernel_config(
@@ -720,7 +725,13 @@ async def build_and_upload_kernel(
         require_live_debug=require_live_debug,
         root_fs=root_fs,
     )
-    with tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-") as scratch:
+    if evidence_dir is not None:
+        evidence_dir.mkdir(parents=True, exist_ok=False)
+    with (
+        nullcontext(str(evidence_dir))
+        if evidence_dir is not None
+        else tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-")
+    ) as scratch:
         kernel_tar = combined_kernel_tar(Path(kernel_src), Path(scratch), arch=arch)
         # The tree's own .config, so runs.complete_build's config advisories run on the live path
         # rather than failing open on an absent config (#2762).
@@ -768,7 +779,20 @@ async def build_and_upload_kernel(
     # complete_build requires build_id iff a vmlinux was uploaded; sending it otherwise (or
     # omitting it here) is a configuration_error.
     extra: dict[str, JsonValue] = {"build_id": build_id} if with_vmlinux else {}
-    ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
+    result = ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
+    if evidence_dir is not None:
+        (evidence_dir / "upload.json").write_text(
+            json.dumps(
+                {
+                    "artifacts": decls,
+                    "build_id": build_id if with_vmlinux else None,
+                    "result": result.model_dump(mode="json"),
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
 
 
 # --- per-role token factory -----------------------------------------------------------------

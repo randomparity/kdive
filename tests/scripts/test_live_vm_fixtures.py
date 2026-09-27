@@ -198,10 +198,28 @@ def test_fetch_declares_strict_mode() -> None:
 
 def test_fetch_is_idempotent_on_existing_tree(tmp_path: Path) -> None:
     dest = tmp_path / "linux"
-    (dest / ".git").mkdir(parents=True)
+    dest.mkdir()
+    subprocess.run(["git", "init", "-q", str(dest)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(dest),
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    sha = subprocess.check_output(["git", "-C", str(dest), "rev-parse", "HEAD"], text=True).strip()
     result = subprocess.run(
         [BASH, str(FETCH), str(dest)],
-        env={"PATH": ""},
+        env={**os.environ, "KDIVE_KERNEL_REF": sha},
         capture_output=True,
         text=True,
         check=False,

@@ -11,6 +11,69 @@ The validator rejects a malformed upload with a precise message, but only **afte
 upload round-trip — so the cost of getting the shape wrong is a wasted upload, not just an
 error. Each rule below names the rejection it prevents.
 
+## Reusable pinned qualification fixtures
+
+The external fixture builder selects the exact LTS and stable commits in
+[`baselines.toml`](../../fixtures/kernel/baselines.toml) and layers
+[the debug config fragment](../../fixtures/kernel/debug.config) on the native architecture's defconfig.
+It requires a native Linux host, Git, GCC, make, binutils, bc, Perl, bison, flex, pahole,
+and the ELF/OpenSSL development headers. The `libvirt_stack` Ansible role declares these
+packages for Debian, Red Hat and SUSE families. Native POWER execution is tracked by
+[#2818](https://github.com/randomparity/kdive/issues/2818); this change qualifies x86_64.
+
+Check free disk/RAM and choose `--jobs` for the host. Run builds serially, outside the KDIVE
+service. From the repository root, with `fixture_root` set to an absolute private directory:
+
+```bash
+for baseline in longterm stable; do
+  uv run python scripts/kernel_fixtures.py build \
+    --baseline "$baseline" --arch x86_64 --jobs 8 \
+    --source "$fixture_root/$baseline-source" --output "$fixture_root/$baseline"
+  uv run python scripts/kernel_fixtures.py verify \
+    --baseline "$baseline" --arch x86_64 --output "$fixture_root/$baseline"
+done
+```
+
+An existing source must match the pin and have no tracked changes or untracked source files.
+The output must be new and separate from source. A failed build leaves diagnostic output but
+no valid manifest; retry with a new output path. The manifest binds source, config, toolchain,
+builder commit, GNU build ID and artifact hashes. Keep the source tree too: the existing upload
+packager invokes `modules_install` through the output directory's generated Makefile. Verification
+checks that Makefile's linkage and the retained source commit/cleanliness before packaging. Retained
+vmlinux and modules are unstripped; only the packager's staged module copies are stripped.
+
+For a cold repeat, run the same commands with a different `fixture_root`, which creates fresh
+source and output directories. Compare both manifests' source/config/toolchain and artifact
+hashes and retain both records. Debug paths are normalized, but mutable package repositories
+are not a promise of identical bytes. A changed toolchain/output produces a new fixture identity
+requiring upload qualification. Raw logs, package inventories and binaries may contain private
+machine paths; keep them private and redact shared reports.
+
+The upload proof uses real HTTP and storage, with unbound Runs and no VM. Prepare an isolated
+copy of the [live-stack backends](runbooks/live-stack.md), a candidate host server, and a mock
+OIDC issuer. Workers and reconciler are not involved in this upload-only scenario. Configure the
+ordinary `KDIVE_STACK_BASE_URL`, `KDIVE_OIDC_*`, `KDIVE_S3_*` and AWS credentials for those services,
+then set the test's inputs:
+
+```bash
+export KDIVE_FIXTURE_ROOT="$fixture_root"
+export KDIVE_FIXTURE_EVIDENCE="$fixture_root/upload-evidence"
+export KDIVE_FIXTURE_CANDIDATE="$(git rev-parse HEAD)"
+export KDIVE_FIXTURE_HEALTH_URL=http://localhost:9464/readyz
+# Read-only evidence access to the isolated test database, not the server's runtime authority:
+export KDIVE_FIXTURE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"
+uv run python -m pytest tests/integration/test_kernel_fixtures_live.py -m live_stack -q
+```
+
+The evidence directory must be new for each run. Missing inputs, failed prerequisites and unknown
+or mismatched server revisions fail the selected tests. Each result records fixture/candidate
+identity, terminal build state, stored byte digests and investigation closure. The upload
+subdirectory retains the exact submitted bundle, effective config and declarations/completion
+result. Both parametrized cases must pass; a skipped test is not proof. Afterward stop the
+candidate server and remove only that isolated deployment's backing containers and volumes;
+retain fixture/evidence files. Record and verify this teardown before publishing qualification
+results. Upload success does not claim boot, module loading or debugger behavior.
+
 ## Choosing your kernel config
 
 **The kernel config is yours to choose.** Because you build the kernel locally, you decide
