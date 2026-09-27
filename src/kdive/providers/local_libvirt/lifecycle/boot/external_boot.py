@@ -852,6 +852,7 @@ class LibguestfsAuthenticatedGuestTree:
         remote = self._remote(entry.path)
         self._guest.ln_s(entry.target, remote)
         self._guest.chown(entry.uid, entry.gid, remote)
+        self._apply_xattrs(remote, entry)
         self._apply_label(remote, entry)
 
     def remove_all(self) -> None:
@@ -890,9 +891,21 @@ class LibguestfsAuthenticatedGuestTree:
     def _apply_metadata(self, remote: str, entry: GuestTreeEntry) -> None:
         self._guest.chmod(int(entry.mode, 8), remote)
         self._guest.chown(entry.uid, entry.gid, remote)
-        for name, value in entry.xattrs.items():
-            self._guest.lsetxattr(name, value, len(value), remote)
+        self._apply_xattrs(remote, entry)
         self._apply_label(remote, entry)
+
+    def _apply_xattrs(self, remote: str, entry: GuestTreeEntry) -> None:
+        for name, value in entry.xattrs.items():
+            if name == "security.selinux":
+                if not value[:-1] or not value.endswith(b"\0") or b"\0" in value[:-1]:
+                    raise ValueError("captured SELinux label is not a NUL-terminated context")
+                try:
+                    label = value[:-1].decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError("captured SELinux label is not UTF-8") from exc
+                self._guest.lsetxattr(name, label, len(value), remote)
+            else:
+                self._guest.lsetxattr(name, value, len(value), remote)
 
     def _apply_label(self, remote: str, entry: GuestTreeEntry) -> None:
         if self._label_policy is None:

@@ -26,8 +26,10 @@ Activation evaluates the same guest policy, writes each label while populating t
 and observes the staged tree before publication. The staged manifest must match the immutable
 target identity recorded at preparation. A policy change or failure between the two phases is a
 conflict, not a reason to update the identity. Recovery continues to compare every xattr exactly;
-the source capture and restore format is unchanged. Host libselinux is a worker prerequisite and
-is provisioned on local-libvirt and live-VM hosts.
+the source capture and restore format is unchanged. The local guest-tree adapter replays captured
+SELinux xattrs on regular files, directories, and symlinks through libguestfs's string-and-length
+binding so recovery can restore the recorded source identity. Host libselinux is a worker
+prerequisite and is provisioned on local-libvirt and live-VM hosts.
 
 `ExternalBootMaterialization.installed_module_tree` remains the canonical archive-derived
 unlabeled manifest used to revalidate materialized bytes. For local-libvirt SELinux guests,

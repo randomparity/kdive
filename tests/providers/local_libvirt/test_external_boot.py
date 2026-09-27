@@ -1731,6 +1731,83 @@ def test_target_staging_applies_final_path_labels_to_regular_and_symlink() -> No
     )
 
 
+def test_source_recovery_replays_regular_and_symlink_selinux_xattrs() -> None:
+    class _StrictGuest(_GuestTreeHandle):
+        def lsetxattr(self, xattr: str, val: bytes | str, vallen: int, path: str) -> None:
+            if isinstance(val, bytes):
+                raise TypeError("guestfs_lsetxattr() argument 3 must be str, not bytes")
+            super().lsetxattr(xattr, val, vallen, path)
+
+    guest = _StrictGuest()
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest,
+        binding=_BINDING,
+        release="6.12.0",
+        root=f"/lib/modules/.kdive-{_BINDING.activation_id}-staging",
+        mutable=True,
+    )
+    raw_label = b"system_u:object_r:modules_object_t:s0\0"
+    regular = recovery_validation.GuestTreeEntry(
+        path="kernel/a.ko",
+        kind="regular",
+        mode="0644",
+        uid=0,
+        gid=0,
+        size=3,
+        target=None,
+        xattrs_supported=True,
+        xattrs={"security.selinux": raw_label},
+    )
+    link = regular.model_copy(
+        update={
+            "path": "weak-updates/a.ko",
+            "kind": "symlink",
+            "size": 0,
+            "target": "../kernel/a.ko",
+        }
+    )
+    tree.create_regular(regular, io.BytesIO(b"elf"))
+    tree.create_symlink(link)
+
+    assert [call[3] for call in guest.calls if call[0] == "xattr"] == [len(raw_label)] * 2
+    assert [call[2] for call in guest.calls if call[0] == "xattr"] == [raw_label[:-1].decode()] * 2
+
+
+@pytest.mark.parametrize(
+    "raw_label, error",
+    [
+        (b"missing-nul", "NUL-terminated"),
+        (b"label\0junk", "NUL-terminated"),
+        (b"\0", "NUL-terminated"),
+        (b"\xff\0", "UTF-8"),
+    ],
+)
+def test_source_recovery_rejects_invalid_selinux_xattr(raw_label: bytes, error: str) -> None:
+    guest = _GuestTreeHandle()
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest,
+        binding=_BINDING,
+        release="6.12.0",
+        root=f"/lib/modules/.kdive-{_BINDING.activation_id}-staging",
+        mutable=True,
+    )
+    entry = recovery_validation.GuestTreeEntry(
+        path="kernel/a.ko",
+        kind="regular",
+        mode="0644",
+        uid=0,
+        gid=0,
+        size=3,
+        target=None,
+        xattrs_supported=True,
+        xattrs={"security.selinux": raw_label},
+    )
+
+    with pytest.raises(ValueError, match=error):
+        tree.create_regular(entry, io.BytesIO(b"elf"))
+    assert not any(call[0] == "xattr" for call in guest.calls)
+
+
 def test_prepared_manifest_includes_distinct_guest_policy_labels(tmp_path: Path) -> None:
     class _Policy:
         def label(self, path: str, mode: int) -> bytes:

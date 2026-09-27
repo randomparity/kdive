@@ -28,6 +28,9 @@ recorded target before moving any live name. This also detects policy changes af
 Source capture and restoration preserve their existing xattrs. Remote-libvirt labeling and
 authority protocol changes are excluded.
 
+The local recovery adapter writes captured SELinux xattrs through the same libguestfs binding
+contract, including symlink xattrs. The source archive format remains unchanged.
+
 Current ownership is split between local-libvirt preparation and the shared recovery writer.
 The provider owns policy loading and label decisions; the existing guest-tree adapter applies
 labels during writes, while the shared writer continues to copy normalized entries. The local
