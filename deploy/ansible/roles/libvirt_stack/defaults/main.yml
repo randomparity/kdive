@@ -19,7 +19,7 @@ libvirt_stack_packages_debian:
   # (AGENTS.md puts general build-host tools in this role, not live_vm_host).
   - make
   - tar
-  # Pinned external Linux fixtures (ADR-0692).
+  # Pinned external Linux fixtures (ADR-0693).
   - gcc
   - binutils
   - bison
@@ -47,7 +47,7 @@ libvirt_stack_packages_redhat:
   # (AGENTS.md puts general build-host tools in this role, not live_vm_host).
   - make
   - tar
-  # Pinned external Linux fixtures (ADR-0692).
+  # Pinned external Linux fixtures (ADR-0693).
   - gcc
   - binutils
   - bison
@@ -77,7 +77,7 @@ libvirt_stack_packages_suse:
   # (AGENTS.md puts general build-host tools in this role, not live_vm_host).
   - make
   - tar
-  # Pinned external Linux fixtures (ADR-0692).
+  # Pinned external Linux fixtures (ADR-0693).
   - gcc
   - binutils
   - bison

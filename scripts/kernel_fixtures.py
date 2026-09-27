@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and verify pinned external Linux fixtures (ADR-0692)."""
+"""Build and verify pinned external Linux fixtures (ADR-0693)."""
 
 from __future__ import annotations
 
