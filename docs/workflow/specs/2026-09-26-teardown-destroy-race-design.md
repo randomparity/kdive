@@ -16,9 +16,11 @@ ppc64le, as declared by the project.
 
 ## Design
 
-The teardown session remains the owner of this call. After its exact ownership lookup, it checks
-whether the domain is active. If active, it calls `destroy()`. An operation-invalid libvirt error
-is accepted only when a fresh `isActive()` read proves inactivity. Other libvirt errors propagate.
+The teardown session remains the owner of this call. Both the leased external-boot teardown and
+the authority teardown constructor return this same session. After its exact ownership lookup,
+it checks whether the domain is active. If active, it calls `destroy()`. An operation-invalid
+libvirt error is accepted only when a fresh `isActive()` read proves inactivity. Other libvirt
+errors propagate.
 The existing final active check still rejects a domain that remains active after a successful or
 accepted destroy. Teardown's caller can then undefine the owned domain and remove its overlay and
 baseline in the existing order.
@@ -47,7 +49,8 @@ an inactive post-state, still fail without resource removal.
 
 ## Validation
 
-- focused-test: direct teardown tests in `test_session.py` for the race and both error branches.
+- focused-test: direct teardown tests in `test_session.py` for the race and both error branches
+  through the leased and authority constructors.
 - focused-test: existing teardown tests in that file preserve ownership and cleanup behavior.
 - task-test-not-applicable: no transport or live VM contract changes; live VM tests require an
   operator-provided image and are outside this one-call-site proof.

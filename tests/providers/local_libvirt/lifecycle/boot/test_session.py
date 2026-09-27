@@ -207,8 +207,9 @@ def test_teardown_session_validates_both_xml_views_and_removes_only_owned_system
         (libvirt.VIR_ERR_INTERNAL_ERROR, True, False),
     ],
 )
+@pytest.mark.parametrize("authority", [False, True])
 def test_teardown_destroy_accepts_only_proven_inactive_race(
-    tmp_path: Path, error_code: int, inactive: bool, accepted: bool
+    tmp_path: Path, error_code: int, inactive: bool, accepted: bool, authority: bool
 ) -> None:
     events: list[str] = []
 
@@ -220,7 +221,13 @@ def test_teardown_destroy_accepts_only_proven_inactive_race(
 
     domain = RacingDomain(events)
     factory, overlay, baseline = _teardown_factory(tmp_path, events, domain)
-    session = factory.open_teardown(_lease(), _expected())
+    session = (
+        open_authority_system_teardown(
+            lambda: _TeardownConn(events, domain), SYSTEM_ID, str(overlay), str(baseline)
+        )
+        if authority
+        else factory.open_teardown(_lease(), _expected())
+    )
     if accepted:
         session.destroy()
         session.undefine()
