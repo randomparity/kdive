@@ -1,8 +1,8 @@
-# ADR 0687 — Reproducible lab fixture identity
+# 0687 Reproducible lab fixture identity
 
 ## Status
 
-Proposed
+Accepted (2026-09-26)
 
 ## Context
 
