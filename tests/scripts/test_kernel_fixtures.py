@@ -236,6 +236,21 @@ def test_fragment_replaces_assignments_without_duplicate_symbols(tmp_path: Path)
     assert effective.read_text() == "CONFIG_OTHER=y\nCONFIG_MODULES=y\nCONFIG_BPF_SYSCALL=y\n"
 
 
+@pytest.mark.parametrize(
+    "disabled", ["# CONFIG_MODULE_SIG_ALL is not set", "CONFIG_MODULE_SIG_ALL=n"]
+)
+def test_disabled_config_is_replaced_and_checked(tmp_path: Path, disabled: str) -> None:
+    effective, fragment = tmp_path / ".config", tmp_path / "fragment"
+    effective.write_text("CONFIG_MODULE_SIG_ALL=y\nCONFIG_OTHER=y\n")
+    fragment.write_text(disabled + "\n")
+    with pytest.raises(ValueError, match="CONFIG_MODULE_SIG_ALL"):
+        fixture.check_config(effective, fragment)
+    fixture.apply_config(effective, fragment.read_text())
+    assert effective.read_text() == "CONFIG_OTHER=y\n" + disabled + "\n"
+    effective.write_text("# CONFIG_MODULE_SIG_ALL is not set\nCONFIG_OTHER=y\n")
+    fixture.check_config(effective, fragment)
+
+
 @pytest.mark.parametrize("overlap", ["inside", "ancestor"])
 def test_overlapping_output_rejected(tmp_path: Path, monkeypatch, overlap: str) -> None:
     monkeypatch.setattr(fixture.platform, "machine", lambda: "x86_64")

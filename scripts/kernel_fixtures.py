@@ -89,20 +89,26 @@ def elf_build_id(path: Path) -> str:
     return match[1]
 
 
+def config_values(text: str) -> dict[str, str]:
+    normalized = re.sub(r"^# (CONFIG_\w+) is not set$", r"\1=n", text, flags=re.MULTILINE)
+    return dict(
+        line.split("=", 1) for line in normalized.splitlines() if line.startswith("CONFIG_")
+    )
+
+
 def check_config(effective: Path, fragment: Path) -> None:
-    actual = set(effective.read_text().splitlines())
-    for line in fragment.read_text().splitlines():
-        if line.startswith("CONFIG_") and line not in actual:
-            raise ValueError(f"kernel configuration dropped {line}; check dependencies")
+    actual = config_values(effective.read_text())
+    for name, value in config_values(fragment.read_text()).items():
+        if actual.get(name) != value:
+            raise ValueError(f"kernel configuration dropped {name}={value}; check dependencies")
 
 
 def apply_config(effective: Path, fragment: str) -> None:
-    names = {line.split("=", 1)[0] for line in fragment.splitlines() if line.startswith("CONFIG_")}
+    names = config_values(fragment).keys()
     retained = [
         line
         for line in effective.read_text().splitlines()
-        if line.split("=", 1)[0] not in names
-        and not (line.startswith("# ") and line.split()[1] in names)
+        if not names & config_values(line).keys()
     ]
     effective.write_text("\n".join(retained) + "\n" + fragment)
 
