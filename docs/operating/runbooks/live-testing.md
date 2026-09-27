@@ -176,6 +176,13 @@ It contains no credentials; the active fixed worker owns authentication.
 
 Prepare `system_id` as a disposable local-libvirt System before running the carrier:
 
+`scripts/live-vm/mint-system.sh` computes the SHA-256 of the staged rootfs and includes the pin
+in its provisioning profile. Set `KDIVE_LIVE_VM_ROOTFS` to the matching registered image's bytes
+and `KDIVE_PROJECT` to the System's project. Admission binds provenance only from a registered,
+verified image visible to that project; a caller's access to other projects does not qualify it.
+An unmatched image remains usable for ordinary provisioned fixtures, but does not qualify for
+this authority carrier. Keep the persisted-row check below when using the mint script.
+
 1. Select a registered `local-libvirt` catalog image visible to the System's project, with
    `arch=x86_64`, a digest, and an inspected `provenance.root_spec` (see
    [image staging](../../../examples/local-libvirt/README.md#optional-inventory-systemstoml)).
