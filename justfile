@@ -25,11 +25,10 @@ setup: check-deps sync build-capture-bootstrap-manifest install-ansible-collecti
 
 # Stage and verify attestation for the explicitly selected worker interpreter. This is
 # intentionally unprivileged and never writes /usr; operators install in a separate step.
-# Normalize group-write bits on user-owned source and venv trees so build/verify succeeds
-# under relaxed umasks (0002).
+# Remove group write from current-user-owned manifest inputs and their ancestors, including
+# checkout parents and external Python installations, plus the staging directory ancestors.
 build-capture-bootstrap-manifest interpreter=".venv/bin/python" output="build/capture-bootstrap-manifest.json":
-    find src .venv -maxdepth 5 -perm -020 -exec chmod g-w {} + 2>/dev/null || true
-    {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py build --interpreter {{interpreter}} --source-root src --output {{output}}
+    {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py build --prepare-permissions --interpreter {{interpreter}} --source-root src --output {{output}}
     {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py verify --interpreter {{interpreter}} --source-root src --manifest {{output}}
 
 # Privileged operator action. The script requires euid 0, installs atomically as root:root mode

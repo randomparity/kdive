@@ -111,6 +111,16 @@ The recipe checks host dependencies, syncs the locked environment, builds the ca
 manifest, and installs the development hooks. Choose a [run mode](#run-modes) below to configure
 backends and start the processes.
 
+The manifest recipe removes group-write permission from current-user-owned bootstrap files
+and their ancestor directories, including checkout parents and external Python installations
+(such as uv-managed Python), and the staging directory's ancestors. This supports a `0002`
+umask without weakening runtime attestation. It logs each changed path, preserves sticky
+shared directories, and does not change files owned by another user or remove world-write
+permission. Remaining unsafe permissions still fail the build. For an intentionally
+group-writable shared checkout, use a private checkout and interpreter instead. Direct manifest
+`build` calls only change these permissions when passed `--prepare-permissions`; `verify`
+and runtime verification never repair permissions.
+
 ### Container image
 
 Released images are published to the GitHub Container Registry:
