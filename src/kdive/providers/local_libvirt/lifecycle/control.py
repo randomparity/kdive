@@ -1,15 +1,16 @@
 """Local-libvirt Control plane: power and force_crash a tagged domain (ADR-0028).
 
 `LocalLibvirtControl` looks a domain up by name over an injected connection factory and
-drives libvirt — `power(domain_name, action)` (`on->create`, `off->destroy`, `reset->reset`,
+drives libvirt — `power(domain_name, action)` (`on->create`, `off->clean shutdown`, `reset->reset`,
 `cycle->reboot`) and `force_crash(domain_name)` (`injectNMI`). DB-free: it owns no Postgres;
 the `control.*` handlers drive the state machine. It implements the current
 `kdive.providers.ports.Controller` typed port, keyed on the libvirt domain name
 (row-first ordering, ADR-0028 §1). Unit tests inject a fake connection; the real
 `libvirt.open` adapter is `live_vm`-only.
 
-`power on`/`power off` swallow the "already in the target state" libvirt error
-(`VIR_ERR_OPERATION_INVALID`) as the achieved post-state (idempotent); an absent domain or
+`power on`/`power resume` swallow the "already in the target state" libvirt error
+(`VIR_ERR_OPERATION_INVALID`); `power off` accepts SHUTOFF and uses the ADR-0679 bounded
+clean-shutdown helper. An absent domain or
 any other libvirt error is `CONTROL_FAILURE` — distinct from teardown's idempotent
 absent-is-success, because you cannot power or crash a System whose domain is gone.
 """
@@ -17,14 +18,18 @@ absent-is-success, because you cannot power or crash a System whose domain is go
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Sequence
 from typing import Protocol, assert_never
 
 import libvirt
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import ParseError, fromstring
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import PowerAction
+from kdive.providers.local_libvirt.lifecycle.power import clean_shutdown_bound_s, power_off
 from kdive.providers.local_libvirt.lifecycle.storage import prepare_console_for_domain
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.lifecycle import Controller as Controller
@@ -50,9 +55,12 @@ _SYSRQ_HOLDTIME_MS = 100
 
 
 class _LibvirtDomain(Protocol):
+    def XMLDesc(self, flags: int) -> str: ...  # noqa: N802 - mirrors the libvirt binding name
     def create(self) -> int: ...
     def isActive(self) -> int: ...  # noqa: N802 - mirrors the libvirt binding name
     def destroy(self) -> int: ...
+    def shutdown(self) -> int: ...
+    def state(self, flags: int = 0) -> Sequence[object]: ...
     def reset(self, flags: int) -> int: ...
     def reboot(self, flags: int) -> int: ...
     def resume(self) -> int: ...
@@ -81,11 +89,20 @@ def _close(conn: _LibvirtConn) -> None:
 class LocalLibvirtControl:
     """The `Controller` for the local libvirt host (power + force_crash)."""
 
-    def __init__(self, *, connect: Connect, prepare_console: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        *,
+        connect: Connect,
+        prepare_console: Callable[[str], None],
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._connect = connect
         # Identity-checked per-start console truncate (ADR-0576, #1940): a power-on that
         # starts a stopped domain must not append to the prior boot's window.
         self._prepare_console = prepare_console
+        self._sleep = sleep
+        self._clock = clock
 
     @classmethod
     def from_env(cls) -> LocalLibvirtControl:
@@ -99,7 +116,7 @@ class LocalLibvirtControl:
         )
 
     def power(self, domain_name: str, action: PowerAction) -> None:
-        """Drive the domain's power state; idempotent ``on``/``off`` swallow the post-state.
+        """Drive power; OFF requests clean shutdown with an accelerator-scaled hard fallback.
 
         Raises:
             CategorizedError: ``CONTROL_FAILURE`` if the domain is absent or a
@@ -175,7 +192,22 @@ class LocalLibvirtControl:
                     self._prepare_console(domain_name)
                 self._idempotent(domain.create, "starting", domain_name)
             elif action is PowerAction.OFF:
-                self._idempotent(domain.destroy, "stopping", domain_name)
+                if domain.state()[0] == libvirt.VIR_DOMAIN_SHUTOFF:
+                    return
+                try:
+                    root = fromstring(domain.XMLDesc(0))
+                except (DefusedXmlException, ParseError) as exc:
+                    raise self._control_failure("reading XML for", domain_name) from exc
+                if root.tag != "domain" or root.get("type") not in {"kvm", "qemu"}:
+                    raise self._control_failure("reading XML for", domain_name)
+                accel = "kvm" if root.get("type") == "kvm" else "tcg"
+                power_off(
+                    domain,
+                    domain_name,
+                    clean_shutdown_bound_s(accel),
+                    self._sleep,
+                    self._clock,
+                )
             elif action is PowerAction.RESET:
                 domain.reset(0)
             elif action is PowerAction.RESUME:
@@ -194,7 +226,7 @@ class LocalLibvirtControl:
 
     @staticmethod
     def _idempotent(call: Callable[[], int], verb: str, domain_name: str) -> None:
-        """Run an on/off call, swallowing the "already in target state" error as success."""
+        """Run an on/resume call, swallowing the achieved-state error as success."""
         try:
             call()
         except libvirt.libvirtError as exc:
