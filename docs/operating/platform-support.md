@@ -47,6 +47,7 @@ detailed below.
 
 ### EL10 binding proof (2026-09-27)
 
+The tested builder source is recorded in commit `edfd3e4e9b1735d114482f51333fc3a7e2bf7b5a`.
 On a disposable Rocky 10.2 x86_64 KVM VM, the host builder downloaded the signed
 `libguestfs-1.58.1-9.el10_2.src.rpm` matching installed `libguestfs` and
 `libguestfs-devel`, compiled the extension for AppStream Python 3.14.7, and made the base
