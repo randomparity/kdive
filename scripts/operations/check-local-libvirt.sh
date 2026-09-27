@@ -10,11 +10,11 @@ readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
 # The RedHat family ships the host's OWN emulator here, off PATH: no EL package provides
 # /usr/bin/qemu-system-<arch> (ADR-0641). Overridable for tests, mirroring KDIVE_KVM_NODE.
 readonly QEMU_LIBEXEC="${KDIVE_QEMU_LIBEXEC:-/usr/libexec/qemu-kvm}"
-# The worker imports drgn + the libguestfs binding from the project venv, not system
-# python3. Probe the same interpreter the worker uses. Prefer the .venv sibling of this
-# script when present (in-repo dev loop) so `just check-local-libvirt` needs no env var;
-# fall back to system python3, which a host-services deployment overrides via
-# KDIVE_PYTHON=/opt/kdive/.venv/bin/python (or similar).
+# KDIVE_PYTHON is the checkout/CLI interpreter. Its guestfs and drgn imports serve
+# build-fs and CLI kdump tooling; this probe does not certify the installed worker.
+# Prefer the .venv sibling of this script when present (in-repo dev loop) so
+# `just check-local-libvirt` needs no env var; fall back to system python3, which a
+# host-services deployment overrides via KDIVE_PYTHON=/opt/kdive/.venv/bin/python.
 #
 # Path derived via parameter expansion, not `dirname` — the script's own tests run it under a
 # stubbed PATH containing only the test stubs (no coreutils), so an external `dirname` call fails.
