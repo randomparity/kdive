@@ -15,7 +15,7 @@ error. Each rule below names the rejection it prevents.
 
 The external fixture builder selects the exact LTS and stable commits in
 [`baselines.toml`](../../fixtures/kernel/baselines.toml) and layers
-[`debug.config`](../../fixtures/kernel/debug.config) on the native architecture's defconfig.
+[the debug config fragment](../../fixtures/kernel/debug.config) on the native architecture's defconfig.
 It requires a native Linux host, Git, GCC, make, binutils, bc, Perl, bison, flex, pahole,
 and the ELF/OpenSSL development headers. The `libvirt_stack` Ansible role declares these
 packages for Debian, Red Hat and SUSE families. Native POWER execution is tracked by

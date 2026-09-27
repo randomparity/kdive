@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from scripts import kernel_fixtures as fixture
-from tests.scripts.test_fetch_kernel_tree import repository as repository
+from tests.scripts.kernel_fixture_support import repository as repository
 
 
 @pytest.mark.parametrize(
