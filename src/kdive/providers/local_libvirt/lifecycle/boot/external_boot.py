@@ -22,6 +22,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kdive.build_artifacts import validation as build_validation
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
@@ -977,6 +978,8 @@ class LocalExternalBootIO(Protocol):
         self,
         authority: OpaqueProviderRef,
         expected: ExpectedOperationOwnership,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
     ) -> AbstractContextManager[LocalExternalBootOperation]: ...
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
     def record_cleanup_quarantine(
@@ -1576,9 +1579,15 @@ class RealLocalExternalBootIO:
         self,
         authority: OpaqueProviderRef,
         expected: ExpectedOperationOwnership,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
     ) -> Iterator[LocalExternalBootOperation]:
         lease = self._resolve_operation_lease(authority)
-        session = self._session_factory.open(lease, expected)
+        session = (
+            self._session_factory.open(lease, expected)
+            if local_timing is None
+            else self._session_factory.open(lease, expected, local_timing=local_timing)
+        )
         operation = _RealLocalExternalBootOperation(
             self._recovery_root,
             self._materializer,
@@ -2587,8 +2596,21 @@ class LocalLibvirtExternalBoot:
             self._validate_metadata(point, metadata)
             return point
 
-    def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
+    def activate(
+        self,
+        recovery: RecoveryPoint,
+        authority: OpaqueProviderRef,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
+    ) -> None:
+        opening = (
+            self._io.open(authority, _expected_binding(recovery.binding))
+            if local_timing is None
+            else self._io.open(
+                authority, _expected_binding(recovery.binding), local_timing=local_timing
+            )
+        )
+        with opening as operation:
             metadata = self._reopen(operation, recovery)
             resumable = {
                 "pre-stop-intent",
@@ -2620,8 +2642,21 @@ class LocalLibvirtExternalBoot:
                 raise ValueError("external-boot target-defined evidence is required")
             return operation.observe_running(metadata)
 
-    def recover(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
+    def recover(
+        self,
+        recovery: RecoveryPoint,
+        authority: OpaqueProviderRef,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
+    ) -> None:
+        opening = (
+            self._io.open(authority, _expected_binding(recovery.binding))
+            if local_timing is None
+            else self._io.open(
+                authority, _expected_binding(recovery.binding), local_timing=local_timing
+            )
+        )
+        with opening as operation:
             metadata = self._reopen(operation, recovery)
             if metadata.phase in {"recovered", "cleaned"}:
                 return

@@ -294,7 +294,7 @@ class _PreparingProvider(FaultInjectExternalBoot):
             active=binding.activation_id in self._active,
         )
 
-    def activate(self, recovery: Any, authority: Any) -> None:
+    def activate(self, recovery: Any, authority: Any, *, local_timing: Any = None) -> None:
         self.phases.append("activate")
         super().activate(recovery, authority)
         self._active.add(recovery.binding.activation_id)

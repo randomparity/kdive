@@ -20,6 +20,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.external_boot_authority.teardown import AuthorityTeardownReservationV1
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
@@ -1849,7 +1850,10 @@ class _ExternalIO:
         self,
         authority: OpaqueProviderRef,
         expected: ExpectedOperationOwnership,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
     ) -> _ExternalContext:
+        assert local_timing is None
         assert authority == OpaqueProviderRef(ref="authority/current")
         self.opened.append(expected)
         return _ExternalContext(self)

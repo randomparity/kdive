@@ -107,11 +107,13 @@ LIBVIRT_TCG_DEADLINE_MULTIPLIER = Setting(
     parse=_parse_tcg_multiplier,
     default="10.0",
     group="local-libvirt",
-    processes=_RT,
+    processes=_RT | {"server"},
     help=(
         "Multiplier applied to every budget that shares one cause — no hardware acceleration "
         "— from two different keys (ADR-0341, ADR-0636, ADR-0637). Boot-readiness deadlines "
         "key off the System's persisted accelerator, because the guest executes under it. "
+        "The server snapshots local external-boot readiness and containing recovery deadlines "
+        "from this multiplier at request admission (ADR-0684). "
         "Host-side libguestfs appliance budgets — virt-customize and the rootfs build tools — "
         "key off the worker host's KVM, because the appliance is a host-arch VM the worker "
         "boots to edit a disk. KVM is unscaled (1.0); TCG and unknown accelerators scale by "
@@ -147,7 +149,7 @@ LIBVIRT_BOOT_WINDOW_S = Setting(
     parse=_parse_positive_int,
     default="900",
     group="local-libvirt",
-    processes=_RT,
+    processes=_RT | {"server"},
     help=(
         "Native-KVM base window (seconds) for the regular boot readiness poll — the window "
         "within which the guest must emit the kdive-ready marker after domain start. "
@@ -157,6 +159,8 @@ LIBVIRT_BOOT_WINDOW_S = Setting(
         "tcg_deadline_multiplier(accel) (ADR-0341). The window is a ceiling, not a fixed "
         "wait — boot returns the instant the marker appears. It also bounds the local-libvirt "
         "provision/reprovision first-boot wait (ADR-0680)."
+        " The server also snapshots local external-boot readiness and recovery deadlines "
+        "from this base window at request admission (ADR-0684)."
     ),
     suggest="set an integer number of seconds > 0 (default 900 = 15 min native-KVM base window)",
 )

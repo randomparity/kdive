@@ -727,6 +727,7 @@ class ExternalBootAuthorityService:
             and record.authority_instance == request.authority_instance
             and record.operation_identity == request.operation_identity
             and record.operation_digest == request.operation_digest
+            and record.local_timing == getattr(request, "local_timing", None)
         )
 
     async def _finalize_adapter(
