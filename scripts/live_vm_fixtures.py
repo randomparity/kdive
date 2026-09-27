@@ -34,7 +34,8 @@ def _check_import() -> None:
         import kdive
     except ModuleNotFoundError as exc:
         raise ValueError(
-            "selected Python cannot import kdive; run uv sync in this source-overlay checkout"
+            f"selected Python {sys.executable} cannot import kdive; "
+            "run uv sync in this source-overlay checkout"
         ) from exc
 
     actual = Path(kdive.__file__).resolve() if kdive.__file__ else None
