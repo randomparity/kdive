@@ -45,6 +45,41 @@ class ExternalEnvVar:
 EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
     # --- test-only (gated suites) ---------------------------------------------------------
     ExternalEnvVar(
+        "KDIVE_FIXTURE_ROOT",
+        "test",
+        None,
+        "Parent directory containing verified longterm and stable kernel fixture outputs. "
+        "Required when selecting the pinned-kernel live upload proof; unset fails the proof.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_FIXTURE_EVIDENCE",
+        "test",
+        None,
+        "Private output directory; each upload case creates a new baseline subdirectory. "
+        "Required when selecting the pinned-kernel live upload proof; unset fails the proof.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_FIXTURE_CANDIDATE",
+        "test",
+        None,
+        "Full commit SHA required to match the clean test checkout and deployed server. "
+        "Required when selecting the pinned-kernel live upload proof; unset fails the proof.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_FIXTURE_HEALTH_URL",
+        "test",
+        None,
+        "Candidate server readiness URL used to verify its revision before and after upload. "
+        "Required when selecting the pinned-kernel live upload proof; unset fails the proof.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_FIXTURE_DATABASE_URL",
+        "test",
+        None,
+        "Database DSN with read access to verify persisted build state and artifact references. "
+        "Required when selecting the pinned-kernel live upload proof; unset fails the proof.",
+    ),
+    ExternalEnvVar(
         "KDIVE_GUEST_IMAGE",
         "test",
         None,

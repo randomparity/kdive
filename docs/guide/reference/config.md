@@ -283,6 +283,11 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_ARTIFACT_DIR` | — | Directory the live_stack spine writes run artifacts to (default: an out-of-tree temp dir). |
 | `KDIVE_EL9_REACHABILITY_DOMAIN` | — | Running, agent-ready EL9/RHEL-family remote-libvirt domain name for the host-model CPU reachability live test (#975, ADR-0297); unset → that test skips. |
 | `KDIVE_EL9_REACHABILITY_URI` | — | libvirt qemu+tls connection URI for the EL9 host-model CPU reachability live test (#975, ADR-0297). |
+| `KDIVE_FIXTURE_CANDIDATE` | — | Full commit SHA required to match the clean test checkout and deployed server. Required when selecting the pinned-kernel live upload proof; unset fails the proof. |
+| `KDIVE_FIXTURE_DATABASE_URL` | — | Database DSN with read access to verify persisted build state and artifact references. Required when selecting the pinned-kernel live upload proof; unset fails the proof. |
+| `KDIVE_FIXTURE_EVIDENCE` | — | Private output directory; each upload case creates a new baseline subdirectory. Required when selecting the pinned-kernel live upload proof; unset fails the proof. |
+| `KDIVE_FIXTURE_HEALTH_URL` | — | Candidate server readiness URL used to verify its revision before and after upload. Required when selecting the pinned-kernel live upload proof; unset fails the proof. |
+| `KDIVE_FIXTURE_ROOT` | — | Parent directory containing verified longterm and stable kernel fixture outputs. Required when selecting the pinned-kernel live upload proof; unset fails the proof. |
 | `KDIVE_GUEST_IMAGE` | — | Path to the operator-built local-libvirt guest rootfs qcow2 the live_stack spine boots; unset → the live_stack suite skips. |
 | `KDIVE_GUEST_IMAGE_DEBIAN` | — | Path to a debian-family *-kdive-ready qcow2 for the per-family SSH-reachability live_stack test (#956, ADR-0294); unset → the debian parameter of that test skips. |
 | `KDIVE_GUEST_IMAGE_PPC64LE` | — | Path to a Fedora ppc64le kdive-ready qcow2 for the live TCG boot proof live_stack test (#1144, epic #1139); unset (or no qemu-system-ppc64) → that test skips. |
