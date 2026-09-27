@@ -28,6 +28,14 @@ def test_generate_rows_is_nonempty_and_unique() -> None:
     assert len(names) == len(set(names))
 
 
+def test_recovery_configuration_is_in_census() -> None:
+    rows = {row.tool: row for row in generate_rows()}
+    assert "ops.build_uses_list" in rows
+    assert "ops.recover_build_use" in rows
+    assert rows["ops.recover_build_use"].configurations == ("recovery",)
+    assert rows["resources.list"].configurations == ("default", "recovery")
+
+
 def test_grid_generation_injects_an_offline_object_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -42,6 +50,7 @@ def test_grid_generation_injects_an_offline_object_store(
         return _App()
 
     monkeypatch.setattr(gridgen, "build_app_from_assembly", _build_app)
+    monkeypatch.setattr(gridgen, "registered_tools", lambda app: iter(()))
 
     assert gridgen._build_tools() == []
     process = captured["process_assembly"]
