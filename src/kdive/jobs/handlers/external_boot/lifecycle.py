@@ -23,6 +23,7 @@ from psycopg.rows import dict_row
 from kdive.domain.capacity.state import ExternalBootActivationState as State
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.domain.external_boot_timing import timing_deadline
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.evidence import (
     authority_result,
@@ -211,6 +212,7 @@ def _derived_request(context: OperationContext, operation: str) -> AuthorityMuta
                     ),
                 )
             ),
+            "local_timing": context.local_timing,
         }
     )
 
@@ -449,6 +451,7 @@ def _mutation_request(context: OperationContext) -> AuthorityMutationRequestV1:
         "expected_source_identity": recovery.source_state.definition,
         "intended_target_identity": recovery.target_state.definition,
         "recovery_objects": objects,
+        "local_timing": context.local_timing,
     }
     if context.marker.expected_observed_composite is not None:
         values["expected_observed_composite"] = context.marker.expected_observed_composite
@@ -716,7 +719,12 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
                     terminal=True,
                 )
             return None
-        deadline = ports.clock() + ports.activation_readiness_timeout
+        deadline = timing_deadline(
+            ports.clock(),
+            int(context.local_timing.deadline_budget_s)
+            if context.local_timing is not None
+            else int(ports.activation_readiness_timeout.total_seconds()),
+        )
         return authority_result(
             context,
             {

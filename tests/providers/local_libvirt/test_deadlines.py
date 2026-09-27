@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 
 import kdive.config as config
+from kdive.domain.errors import CategorizedError
+from kdive.domain.external_boot_timing import timing_deadline
 from kdive.providers.local_libvirt.lifecycle.deadlines import (
     host_appliance_multiplier,
     tcg_deadline_multiplier,
 )
-from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
+from kdive.providers.local_libvirt.settings import (
+    LIBVIRT_BOOT_WINDOW_S,
+    LIBVIRT_TCG_DEADLINE_MULTIPLIER,
+)
+from kdive.services.external_boot.local_timing import local_external_boot_timing
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +58,39 @@ def test_kvm_never_reads_config() -> None:
     # touching configuration, so an over-optimistic operator value can never break the fast path.
     config.load({LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "not-a-float"})
     assert tcg_deadline_multiplier("kvm") == 1.0
+
+
+@pytest.mark.parametrize(
+    ("accel", "window", "budget"),
+    [("kvm", 900, 1200), ("tcg", 9000, 12000), (None, 9000, 12000)],
+)
+def test_local_external_boot_snapshot_contains_poll(
+    accel: str | None, window: int, budget: int
+) -> None:
+    config.load({})
+    timing = local_external_boot_timing(accel)
+    assert (timing.accel, timing.console_window_s, timing.deadline_budget_s) == (
+        accel,
+        window,
+        budget,
+    )
+
+
+def test_local_external_boot_snapshot_uses_configured_window_and_rounded_multiplier() -> None:
+    config.load({LIBVIRT_BOOT_WINDOW_S.name: "901", LIBVIRT_TCG_DEADLINE_MULTIPLIER.name: "1.5"})
+    timing = local_external_boot_timing("tcg")
+    assert (timing.console_window_s, timing.deadline_budget_s) == (1352, 1802)
+
+
+def test_local_external_boot_snapshot_refuses_unrepresentable_window() -> None:
+    config.load({LIBVIRT_BOOT_WINDOW_S.name: str(10**20)})
+    with pytest.raises(CategorizedError, match="reduce the boot window"):
+        local_external_boot_timing("kvm")
+
+
+def test_local_external_boot_absolute_deadline_refuses_calendar_overflow() -> None:
+    with pytest.raises(CategorizedError, match="calendar range"):
+        timing_deadline(datetime.max.replace(tzinfo=UTC), 1200)
 
 
 # --- host-side libguestfs appliance budget (#2383) -------------------------------------------

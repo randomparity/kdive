@@ -483,7 +483,9 @@ def test_the_built_payload_survives_dump_and_load(migrated_url: str) -> None:
         )
 
         dumped = dump_payload(kind, payload)
-        assert set(dumped) == {"run_id", "external_boot_authority_v1"}
+        assert set(dumped) == {"run_id", "external_boot_authority_v1", "local_timing"}
+        assert dumped["local_timing"]["console_window_s"] == 9000
+        assert dumped["local_timing"]["deadline_budget_s"] == 12000
         decoded = load_payload(build_job(kind, dumped), BootPayload)
         assert decoded == payload
 

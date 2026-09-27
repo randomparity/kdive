@@ -9,7 +9,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Final, Literal, cast
 from uuid import NAMESPACE_URL, uuid5
 
@@ -24,6 +24,7 @@ from kdive.db.remote_module_attempt_obligations import (
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, timing_deadline
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.authority import AllocatedAuthority, allocate_authority
 from kdive.jobs.handlers.external_boot.ports import (
@@ -36,6 +37,7 @@ from kdive.jobs.models import (
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthorityResultV1,
 )
+from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
@@ -157,6 +159,7 @@ class OperationContext:
     authority_executor: ExternalBootAuthorityExecutor | None
     connection: AsyncConnection
     incarnation_credential: SecretStr
+    local_timing: LocalExternalBootTimingV1 | None = None
     prerequisites: Mapping[str, Any] = field(default_factory=dict)
     """Whatever ``require_preconditions`` read, so ``build_result`` need not read it again.
 
@@ -567,16 +570,24 @@ def _render_cmdline(value: bytes, redactor: Redactor) -> str:
     return "".join(pieces)
 
 
-def _recovery_deadline(ports: ExternalBootHandlerPorts, exc: Exception) -> datetime | None:
-    if isinstance(exc, _CommandLineMismatch):
-        return ports.clock() + ports.recovery_readiness_timeout
-    if (
-        isinstance(exc, CategorizedError)
-        and exc.category is ErrorCategory.BOOT_TIMEOUT
-        and exc.terminal
+def _recovery_deadline(
+    ports: ExternalBootHandlerPorts, exc: Exception, context: OperationContext
+) -> datetime | None:
+    if not (
+        isinstance(exc, _CommandLineMismatch)
+        or (
+            isinstance(exc, CategorizedError)
+            and exc.category is ErrorCategory.BOOT_TIMEOUT
+            and exc.terminal
+        )
     ):
-        return ports.clock() + ports.recovery_readiness_timeout
-    return None
+        return None
+    recorded = context.job.payload.get("recovery_request_v1")
+    if recorded is not None:
+        metadata = RecoveryRequestV1.model_validate(recorded)
+        if metadata.local_timing is not None:
+            return metadata.readiness_deadline
+    return timing_deadline(ports.clock(), int(ports.recovery_readiness_timeout.total_seconds()))
 
 
 async def run_operation[R: ExternalBootAuthorityResultV1](
@@ -620,14 +631,44 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     nothing type-check clean.
     """
     binding, port = await _resolve_port(conn, marker, ports)
+    activation = await _read_activation(
+        conn,
+        marker,
+        require_activation_state=require_activation_state,
+        require_activation_evidence=require_activation_evidence,
+    )
+    local_timing = None
+    if marker.provider_kind == "local-libvirt":
+        if marker.purpose == "activate" and job.payload.get("local_timing") is not None:
+            local_timing = LocalExternalBootTimingV1.model_validate(job.payload["local_timing"])
+        elif job.payload.get("recovery_request_v1") is not None:
+            local_timing = RecoveryRequestV1.model_validate(
+                job.payload["recovery_request_v1"]
+            ).local_timing
+    if local_timing is not None:
+        timeout = timedelta(seconds=local_timing.deadline_budget_s)
+        ports = replace(
+            ports,
+            activation_readiness_timeout=timeout,
+            recovery_readiness_timeout=timeout,
+        )
     if ports.authority_client_factory is not None:
         timeout = (
             ports.activation_readiness_timeout
             if marker.purpose == "activate"
             else ports.recovery_readiness_timeout
         )
+        if local_timing is not None and marker.purpose == "activate":
+            committed = activation.activation_readiness_deadline
+            if committed is not None:
+                timeout = committed - ports.clock() + timedelta(seconds=30)
+        elif local_timing is not None and job.payload.get("recovery_request_v1") is not None:
+            recorded = RecoveryRequestV1.model_validate(job.payload["recovery_request_v1"])
+            timeout = recorded.readiness_deadline - ports.clock()
         client = ports.authority_client_factory(
-            binding, marker, asyncio.get_running_loop().time() + timeout.total_seconds()
+            binding,
+            marker,
+            asyncio.get_running_loop().time() + max(0, timeout.total_seconds()),
         )
         ports = replace(
             ports,
@@ -636,12 +677,6 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             preparation_executor=client,
             teardown_executor=client,
         )
-    activation = await _read_activation(
-        conn,
-        marker,
-        require_activation_state=require_activation_state,
-        require_activation_evidence=require_activation_evidence,
-    )
     prerequisites = await require_preconditions(conn, activation, marker)
     if ports.authority_client_factory is not None:
         prerequisites = dict(prerequisites) | {"authority_executor": ports.authority_executor}
@@ -677,6 +712,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         authority_executor=ports.authority_executor,
         connection=conn,
         incarnation_credential=ports.incarnation_credential,
+        local_timing=local_timing,
         prerequisites=prerequisites,
     )
     context = replace(context, activation=await _debit_preparing(conn, context, ports))
@@ -693,7 +729,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             context,
             exc,
             phase=_COMMIT,
-            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+            recovery_readiness_deadline=_recovery_deadline(ports, exc, context),
         ) from None
     try:
         # ExternalBootPorts is sync, like every other provider surface jobs/handlers/ calls.
@@ -704,7 +740,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             context,
             exc,
             phase=_PROVIDER_CALL,
-            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+            recovery_readiness_deadline=_recovery_deadline(ports, exc, context),
         ) from None
     try:
         return build_result(context, observation)
@@ -713,5 +749,5 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             context,
             exc,
             phase=_COMMIT,
-            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+            recovery_readiness_deadline=_recovery_deadline(ports, exc, context),
         ) from None

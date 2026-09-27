@@ -57,7 +57,7 @@ class LocalAuthoritySystemManifestV1(_ClosedManifest):
     resource_name: str
     authority_instance: str
     guest_egress: bool = False
-    accel: Literal["kvm"] = "kvm"
+    accel: Literal["kvm", "tcg"] = "kvm"
     emulator: str | None = None
     bases: tuple[LocalAuthoritySystemBaseV1, ...] = Field(min_length=1, max_length=_MAX_ENTRIES)
 

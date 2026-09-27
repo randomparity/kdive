@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
@@ -1057,6 +1058,27 @@ async def test_accepted_commit_points_drive_named_local_primitives() -> None:
 
     assert "activate-modules" in io.actions
     assert "define-target" in io.actions
+
+
+async def test_local_configuration_failure_is_logged_and_transport_maps_provider_conflict(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class MismatchedHostIO(_FakeIO):
+        def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+            del metadata
+            raise CategorizedError(
+                "local external-boot authority boot window differs; align server and host settings",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                terminal=True,
+            )
+
+    io = MismatchedHostIO(_metadata("pre-stop-intent"))
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).commit(_request(), _context(AuthorityOperation.ACTIVATE))
+
+    assert caught.value.category == "provider_conflict"
+    assert "align server and host settings" in caplog.text
+    assert "define-target" not in io.actions
 
 
 async def test_recover_drives_the_named_recovery_primitives() -> None:

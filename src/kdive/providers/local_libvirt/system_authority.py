@@ -44,6 +44,7 @@ _MAX_INTENT_BYTES = 1_048_576
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIR_MODE = 0o700
 _OFFLOAD_CAPACITY = 4
+_DEFAULT_PROVISION_DEADLINE = timedelta(minutes=15)
 
 
 class LocalAuthoritySystemError(RuntimeError):
@@ -277,7 +278,7 @@ class LocalAuthoritySystemProvider:
         owner_uid: int | None = None,
         owner_gid: int | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
-        deadline: timedelta = timedelta(minutes=15),
+        deadline: timedelta = _DEFAULT_PROVISION_DEADLINE,
     ) -> None:
         if deadline <= timedelta(0):
             raise ValueError("authority provision deadline must be positive")

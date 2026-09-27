@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
@@ -59,6 +60,29 @@ from tests.providers.external_boot_authority.service_support import (
     _takeover,
 )
 from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
+
+
+def test_journal_replay_binds_the_local_timing_snapshot() -> None:
+    timing = LocalExternalBootTimingV1(accel="tcg", console_window_s=9000, deadline_budget_s=12000)
+    legacy = _mutation(_takeover())
+    request = legacy.model_copy(update={"local_timing": timing})
+    record = ExternalBootAuthorityService._record(request, [], JournalPhase.ADMITTED)
+    assert record.local_timing == timing
+    assert ExternalBootAuthorityService._operation_matches(record, request)
+    changed = request.model_copy(
+        update={
+            "local_timing": LocalExternalBootTimingV1(
+                accel="tcg", console_window_s=10000, deadline_budget_s=13000
+            )
+        }
+    )
+    assert not ExternalBootAuthorityService._operation_matches(record, changed)
+    assert not ExternalBootAuthorityService._operation_matches(
+        record, request.model_copy(update={"local_timing": None})
+    )
+    legacy_record = ExternalBootAuthorityService._record(legacy, [], JournalPhase.ADMITTED)
+    assert ExternalBootAuthorityService._operation_matches(legacy_record, legacy)
+    assert "local_timing" not in legacy_record.model_dump(mode="json", by_alias=True)
 
 
 class _PreparationAdapter:

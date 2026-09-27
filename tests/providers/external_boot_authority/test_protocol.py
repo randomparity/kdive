@@ -695,6 +695,7 @@ def test_the_wire_mutation_request_carries_no_journal_field() -> None:
         "operation_identity",
         "operation_digest",
         "attempt_id",
+        "local_timing",
         "expected_source_identity",
         "intended_target_identity",
         "recovery_objects",
@@ -710,6 +711,19 @@ def test_the_wire_mutation_request_carries_no_journal_field() -> None:
     ).encode()
     with pytest.raises(ValueError, match="invalid external-boot authority request"):
         decode_authority_request(payload)
+
+
+def test_local_timing_is_rejected_for_remote_mutations() -> None:
+    values = _mutation().model_dump(mode="json", by_alias=True)
+    assert values["provider_kind"] == "remote-libvirt"
+    values["local_timing"] = {
+        "schema": "local-external-boot-timing-v1",
+        "accel": "kvm",
+        "console_window_s": 900,
+        "deadline_budget_s": 1200,
+    }
+    with pytest.raises(ValidationError, match="local_timing requires local-libvirt"):
+        AuthorityMutationRequestV1.model_validate(values)
 
 
 def test_release_authority_permits_derived_recover_phase() -> None:
