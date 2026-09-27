@@ -6,6 +6,7 @@ kdump-tools
 gdb
 kmod
 python3-guestfs
+libselinux1
 elfutils
 debuginfod
 git

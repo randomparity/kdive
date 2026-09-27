@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import itertools
@@ -23,6 +24,7 @@ from pydantic import ValidationError
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.external_boot_authority.teardown import AuthorityTeardownReservationV1
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
+from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     CleanupQuarantineReceiptV1,
     CleanupTombstoneV1,
@@ -60,6 +62,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     RecoveryArchiveSink,
     RecoveryArchiveSource,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.selinux_policy import ModuleLabelPolicy
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ClosedDomainInspection,
     ExpectedOperationOwnership,
@@ -1628,8 +1631,8 @@ class _GuestTreeHandle:
     def chown(self, owner: int, group: int, path: str) -> None:
         self.calls.append(("chown", owner, group, path))
 
-    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None:
-        self.calls.append(("xattr", xattr, val, path))
+    def lsetxattr(self, xattr: str, val: bytes | str, vallen: int, path: str) -> None:
+        self.calls.append(("xattr", xattr, val, vallen, path))
 
     def mv(self, source: str, destination: str) -> None:
         self.calls.append(("move", source, destination))
@@ -1680,6 +1683,184 @@ def test_libguestfs_tree_reports_xattr_support_only_for_entries_that_carry_xattr
     assert entries["plain.ko"].xattrs == {}
     assert entries["labelled.ko"].xattrs_supported is True
     assert entries["labelled.ko"].xattrs == {"security.selinux": b"label"}
+
+
+def test_target_staging_applies_final_path_labels_to_regular_and_symlink() -> None:
+    class _Policy:
+        def label(self, path: str, mode: int) -> bytes:
+            assert path.startswith("/lib/modules/6.12.0/")
+            assert stat.S_IFMT(mode) in {stat.S_IFREG, stat.S_IFLNK}
+            return b"system_u:object_r:modules_object_t:s0\0"
+
+    guest = _GuestTreeHandle()
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest,
+        binding=_BINDING,
+        release="6.12.0",
+        root=f"/lib/modules/.kdive-{_BINDING.activation_id}-staging",
+        mutable=True,
+        label_policy=cast(ModuleLabelPolicy, _Policy()),
+    )
+    regular = recovery_validation.GuestTreeEntry(
+        path="kernel/a.ko",
+        kind="regular",
+        mode="0644",
+        uid=0,
+        gid=0,
+        size=3,
+        target=None,
+        xattrs_supported=False,
+        xattrs={},
+    )
+    link = regular.model_copy(
+        update={
+            "path": "weak-updates/a.ko",
+            "kind": "symlink",
+            "size": 0,
+            "target": "../kernel/a.ko",
+        }
+    )
+    tree.create_regular(regular, io.BytesIO(b"elf"))
+    tree.create_symlink(link)
+
+    labelled = [call for call in guest.calls if call[0] == "xattr"]
+    assert len(labelled) == 2
+    assert all(
+        call[1:4] == ("security.selinux", "system_u:object_r:modules_object_t:s0", 38)
+        for call in labelled
+    )
+
+
+def test_source_recovery_replays_regular_and_symlink_selinux_xattrs() -> None:
+    class _StrictGuest(_GuestTreeHandle):
+        def lsetxattr(self, xattr: str, val: bytes | str, vallen: int, path: str) -> None:
+            if isinstance(val, bytes):
+                raise TypeError("guestfs_lsetxattr() argument 3 must be str, not bytes")
+            super().lsetxattr(xattr, val, vallen, path)
+
+    guest = _StrictGuest()
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest,
+        binding=_BINDING,
+        release="6.12.0",
+        root=f"/lib/modules/.kdive-{_BINDING.activation_id}-staging",
+        mutable=True,
+    )
+    raw_label = b"system_u:object_r:modules_object_t:s0\0"
+    regular = recovery_validation.GuestTreeEntry(
+        path="kernel/a.ko",
+        kind="regular",
+        mode="0644",
+        uid=0,
+        gid=0,
+        size=3,
+        target=None,
+        xattrs_supported=True,
+        xattrs={"security.selinux": raw_label},
+    )
+    link = regular.model_copy(
+        update={
+            "path": "weak-updates/a.ko",
+            "kind": "symlink",
+            "size": 0,
+            "target": "../kernel/a.ko",
+        }
+    )
+    tree.create_regular(regular, io.BytesIO(b"elf"))
+    tree.create_symlink(link)
+
+    assert [call[3] for call in guest.calls if call[0] == "xattr"] == [len(raw_label)] * 2
+    assert [call[2] for call in guest.calls if call[0] == "xattr"] == [raw_label[:-1].decode()] * 2
+
+
+@pytest.mark.parametrize(
+    "raw_label, error",
+    [
+        (b"missing-nul", "NUL-terminated"),
+        (b"label\0junk", "NUL-terminated"),
+        (b"\0", "NUL-terminated"),
+        (b"\xff\0", "UTF-8"),
+    ],
+)
+def test_source_recovery_rejects_invalid_selinux_xattr(raw_label: bytes, error: str) -> None:
+    guest = _GuestTreeHandle()
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest,
+        binding=_BINDING,
+        release="6.12.0",
+        root=f"/lib/modules/.kdive-{_BINDING.activation_id}-staging",
+        mutable=True,
+    )
+    entry = recovery_validation.GuestTreeEntry(
+        path="kernel/a.ko",
+        kind="regular",
+        mode="0644",
+        uid=0,
+        gid=0,
+        size=3,
+        target=None,
+        xattrs_supported=True,
+        xattrs={"security.selinux": raw_label},
+    )
+
+    with pytest.raises(ValueError, match=error):
+        tree.create_regular(entry, io.BytesIO(b"elf"))
+    assert not any(call[0] == "xattr" for call in guest.calls)
+
+
+def test_prepared_manifest_includes_distinct_guest_policy_labels(tmp_path: Path) -> None:
+    class _Policy:
+        def label(self, path: str, mode: int) -> bytes:
+            assert stat.S_IFMT(mode) == stat.S_IFREG
+            label = b"modules_dep_t" if path.endswith("modules.dep") else b"modules_object_t"
+            return b"system_u:object_r:" + label + b":s0\0"
+
+    archive_path = tmp_path / "modules.tar"
+    with tarfile.open(archive_path, "w", format=tarfile.PAX_FORMAT) as archive:
+        for path in ("kernel.ko", "modules.dep"):
+            entry = recovery_validation.GuestTreeEntry(
+                path=path,
+                kind="regular",
+                mode="0644",
+                uid=0,
+                gid=0,
+                size=3,
+                target=None,
+                xattrs_supported=True,
+                xattrs={"user.origin": base64.b64encode(b"keep").decode().rstrip("=")},
+            )
+            archive.addfile(recovery_validation._tar_info(entry), io.BytesIO(b"elf"))  # noqa: SLF001
+    with archive_path.open("rb") as source:
+        entries = recovery_validation._validate_archive(source)  # noqa: SLF001
+    baseline = recovery_validation._manifest(entries)[1]  # noqa: SLF001
+    descriptor = os.open(archive_path, os.O_RDONLY)
+    try:
+        target = external_boot_module._prepared_module_manifest(  # noqa: SLF001
+            descriptor, "6.12.0", baseline, cast(ModuleLabelPolicy, _Policy())
+        )
+    finally:
+        os.close(descriptor)
+    assert target != baseline
+    assert target.startswith("sha256:")
+    labelled = [
+        entry.model_copy(
+            update={
+                "xattrs_supported": True,
+                "xattrs": {
+                    **entry.xattrs,
+                    "security.selinux": base64.b64encode(
+                        _Policy().label(f"/lib/modules/6.12.0/{entry.path}", stat.S_IFREG | 0o644)
+                    )
+                    .decode()
+                    .rstrip("="),
+                },
+            }
+        )
+        for entry in entries
+    ]
+    assert target == recovery_validation._manifest(labelled)[1]  # noqa: SLF001
+    drifted = labelled[0].model_copy(update={"xattrs": {"security.selinux": "ZHJpZnQ"}})
+    assert target != recovery_validation._manifest([drifted, labelled[1]])[1]  # noqa: SLF001
 
 
 def test_libguestfs_tree_rejects_cross_activation_root_before_guest_call() -> None:
@@ -2993,6 +3174,63 @@ def test_real_activation_publishes_exact_target_and_restores_prior_power(
         assert reopened.phase == "target-defined"
 
 
+def test_label_write_failure_stops_activation_before_live_module_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ports, metadata, _session, guest, root = _restart_fixture(
+        tmp_path, phase="pre-stop-intent", source_present=True
+    )
+
+    class _Policy:
+        def label(self, path: str, mode: int) -> bytes:
+            assert path == f"/lib/modules/{metadata.release}/kernel/a.ko"
+            assert stat.S_IFMT(mode) == stat.S_IFREG
+            return b"system_u:object_r:modules_object_t:s0\0"
+
+    @contextmanager
+    def policy(_guest: object) -> Iterator[ModuleLabelPolicy]:
+        yield cast(ModuleLabelPolicy, _Policy())
+
+    def install(
+        _writer: _RestartWriter,
+        tree: AuthenticatedGuestTree,
+        _release: str,
+        source: KernelBundleSource,
+    ) -> str:
+        source.close()
+        entry = recovery_validation.GuestTreeEntry(
+            path="kernel/a.ko",
+            kind="regular",
+            mode="0644",
+            uid=0,
+            gid=0,
+            size=3,
+            target=None,
+            xattrs_supported=False,
+            xattrs={},
+        )
+        tree.create_regular(entry, io.BytesIO(b"elf"))
+        return cast(PresentComponentState, metadata.target_state.modules).manifest
+
+    def failed_label(_name: str, _value: bytes | str, _size: int, _path: str) -> None:
+        raise OSError("guest label write failed")
+
+    monkeypatch.setattr(external_boot_module, "guest_policy", policy)
+    monkeypatch.setattr(_RestartWriter, "install", install)
+    monkeypatch.setattr(guest, "lsetxattr", failed_label)
+
+    with pytest.raises(OSError, match="guest label write failed"):
+        ports.activate(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    live = f"/lib/modules/{metadata.release}"
+    assert guest.states == {live: metadata.source_state.modules}
+    assert not any(action.startswith("move:") for action in guest.faults.actions)
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == (
+            "pre-stop-intent"
+        )
+
+
 @pytest.mark.parametrize("source_present", [True, False])
 def test_recovery_from_activation_module_phase_restores_exact_source_before_power(
     tmp_path: Path,
@@ -3890,6 +4128,57 @@ def test_real_adapter_captures_recovery_through_session_owned_capabilities(
         definition=template.target_boot,
         modules=PresentComponentState(manifest=materialization.installed_module_tree),
     )
+
+
+def test_real_preparation_persists_guest_policy_target_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_path = tmp_path / "modules.tar"
+    entry = recovery_validation.GuestTreeEntry(
+        path="modules.dep",
+        kind="regular",
+        mode="0644",
+        uid=0,
+        gid=0,
+        size=3,
+        target=None,
+        xattrs_supported=False,
+        xattrs={},
+    )
+    with tarfile.open(archive_path, "w", format=tarfile.PAX_FORMAT) as archive:
+        archive.addfile(recovery_validation._tar_info(entry), io.BytesIO(b"elf"))  # noqa: SLF001
+    with archive_path.open("rb") as source:
+        baseline = recovery_validation._manifest(  # noqa: SLF001
+            recovery_validation._validate_archive(source)  # noqa: SLF001
+        )[1]
+    materialization = _materialization().model_copy(update={"installed_module_tree": baseline})
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    template = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    ports_io, session = _real_io(root, _RealPreparation(template, root))
+
+    class _Policy:
+        def label(self, path: str, mode: int) -> bytes:
+            assert path == "/lib/modules/6.12.0/modules.dep"
+            assert stat.S_IFMT(mode) == stat.S_IFREG
+            return b"system_u:object_r:modules_dep_t:s0\0"
+
+    @contextmanager
+    def policy(_guest: object) -> Iterator[ModuleLabelPolicy]:
+        yield cast(ModuleLabelPolicy, _Policy())
+
+    monkeypatch.setattr(external_boot_module, "guest_policy", policy)
+    monkeypatch.setattr(
+        session,
+        "open_projection_artifact",
+        lambda _ref, flags: os.open(archive_path, flags),
+        raising=False,
+    )
+    prepared = _real_prepare(ports_io, materialization)
+
+    assert prepared.target_state.modules.manifest != baseline  # ty: ignore[unresolved-attribute]
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(_point(prepared).recovery_ref, prepared.binding) == prepared
 
 
 def test_real_adapter_closes_recovery_sink_when_guest_open_fails(

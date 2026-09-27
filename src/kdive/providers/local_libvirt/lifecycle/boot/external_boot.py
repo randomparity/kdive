@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -11,7 +12,7 @@ import tarfile
 import tempfile
 import unicodedata
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -43,6 +44,10 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     ModuleCapture,
     RecoveryArchiveSink,
     RecoveryArchiveSource,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.selinux_policy import (
+    ModuleLabelPolicy,
+    guest_policy,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ClosedDomainInspection,
@@ -765,7 +770,7 @@ class _GuestfsTreeHandle(Protocol):  # pragma: no cover - live_vm (libguestfs bi
     def ln_s(self, target: str, linkname: str) -> None: ...
     def chmod(self, mode: int, path: str) -> None: ...
     def chown(self, owner: int, group: int, path: str) -> None: ...
-    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None: ...
+    def lsetxattr(self, xattr: str, val: bytes | str, vallen: int, path: str) -> None: ...
     def mv(self, source: str, destination: str) -> None: ...
     def rm_rf(self, path: str) -> None: ...
     def sync(self) -> None: ...
@@ -782,6 +787,7 @@ class LibguestfsAuthenticatedGuestTree:
         release: str,
         root: str,
         mutable: bool,
+        label_policy: ModuleLabelPolicy | None = None,
     ) -> None:
         expected_prefix = f"/lib/modules/.kdive-{binding.activation_id}-"
         live = f"/lib/modules/{release}"
@@ -796,6 +802,7 @@ class LibguestfsAuthenticatedGuestTree:
         self.release = release
         self.mutable = mutable
         self._root = root
+        self._label_policy = label_policy
 
     def root_kind(self) -> Literal["absent", "directory", "other"]:
         if not bool(self._guest.exists(self._root)):
@@ -845,6 +852,8 @@ class LibguestfsAuthenticatedGuestTree:
         remote = self._remote(entry.path)
         self._guest.ln_s(entry.target, remote)
         self._guest.chown(entry.uid, entry.gid, remote)
+        self._apply_xattrs(remote, entry)
+        self._apply_label(remote, entry)
 
     def remove_all(self) -> None:
         self._require_mutable()
@@ -882,8 +891,29 @@ class LibguestfsAuthenticatedGuestTree:
     def _apply_metadata(self, remote: str, entry: GuestTreeEntry) -> None:
         self._guest.chmod(int(entry.mode, 8), remote)
         self._guest.chown(entry.uid, entry.gid, remote)
+        self._apply_xattrs(remote, entry)
+        self._apply_label(remote, entry)
+
+    def _apply_xattrs(self, remote: str, entry: GuestTreeEntry) -> None:
         for name, value in entry.xattrs.items():
-            self._guest.lsetxattr(name, value, len(value), remote)
+            if name == "security.selinux":
+                if not value[:-1] or not value.endswith(b"\0") or b"\0" in value[:-1]:
+                    raise ValueError("captured SELinux label is not a NUL-terminated context")
+                try:
+                    label = value[:-1].decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError("captured SELinux label is not UTF-8") from exc
+                self._guest.lsetxattr(name, label, len(value), remote)
+            else:
+                self._guest.lsetxattr(name, value, len(value), remote)
+
+    def _apply_label(self, remote: str, entry: GuestTreeEntry) -> None:
+        if self._label_policy is None:
+            return
+        label = self._label_policy.label(
+            f"/lib/modules/{self.release}/{entry.path}", _entry_mode(entry.kind, entry.mode)
+        )
+        self._guest.lsetxattr("security.selinux", label[:-1].decode("utf-8"), len(label), remote)
 
     def _remote(self, relative: str) -> str:
         return f"{self._root}/{_guest_relative(relative)}"
@@ -1495,6 +1525,43 @@ def _installed_module_manifest(directory_fd: int) -> str:
         os.close(modules_fd)
 
 
+def _entry_mode(kind: str, mode: str) -> int:
+    file_type = {
+        "directory": stat.S_IFDIR,
+        "regular": stat.S_IFREG,
+        "symlink": stat.S_IFLNK,
+    }[kind]
+    return file_type | int(mode, 8)
+
+
+def _prepared_module_manifest(
+    descriptor: int, release: str, baseline: str, policy: ModuleLabelPolicy | None
+) -> str:
+    with os.fdopen(os.dup(descriptor), "rb") as source:
+        entries = recovery_validation._validate_archive(source)  # noqa: SLF001
+    if recovery_validation._manifest(entries)[1] != baseline:  # noqa: SLF001
+        raise ValueError("materialized module archive changed before preparation")
+    if policy is None:
+        return baseline
+    labelled = []
+    for entry in entries:
+        label = policy.label(
+            f"/lib/modules/{release}/{entry.path}", _entry_mode(entry.kind, entry.mode)
+        )
+        labelled.append(
+            entry.model_copy(
+                update={
+                    "xattrs_supported": True,
+                    "xattrs": {
+                        **entry.xattrs,
+                        "security.selinux": base64.b64encode(label).decode().rstrip("="),
+                    },
+                }
+            )
+        )
+    return recovery_validation._manifest(labelled)[1]  # noqa: SLF001
+
+
 def _cleanup_uncommitted_payloads(directory_fd: int, primary: BaseException) -> None:
     """Remove only exact private payload names while no projection commit exists."""
     try:
@@ -1886,6 +1953,21 @@ class _RealLocalExternalBootOperation:
                 )
                 capture_sink, owned_sink = owned_sink, None
                 capture = self._recovery_writer.capture(tree, intent.release, capture_sink)
+                with guest_policy(guest) as policy:
+                    target_manifest = materialization.installed_module_tree
+                    if policy is not None:
+                        descriptor = self._session.open_projection_artifact(
+                            materialization.artifacts.modules, os.O_RDONLY
+                        )
+                        try:
+                            target_manifest = _prepared_module_manifest(
+                                descriptor,
+                                intent.release,
+                                materialization.installed_module_tree,
+                                policy,
+                            )
+                        finally:
+                            os.close(descriptor)
         except BaseException as exc:
             primary = exc
             raise
@@ -1897,7 +1979,7 @@ class _RealLocalExternalBootOperation:
                     if primary is None:
                         raise
                     primary.add_note(f"recovery archive sink cleanup failed: {cleanup!r}")
-        metadata = _complete_preparation_metadata(intent, materialization, capture)
+        metadata = _complete_preparation_metadata(intent, materialization, capture, target_manifest)
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.complete_preparation(reference, intent, metadata)
 
@@ -1960,41 +2042,50 @@ class _RealLocalExternalBootOperation:
         prior = _layout_component(metadata.source_state.modules)
         with self._session.guest() as opened_guest:
             guest = cast(_GuestfsTreeHandle, opened_guest)
-            publication = _SessionModulePublicationIO(
-                guest,
-                metadata,
-                self._recovery_root,
-                self._recovery_writer,
-                self._session,
+            policy_context = (
+                guest_policy(opened_guest)
+                if metadata.phase == "pre-stop-intent"
+                else nullcontext(None)
             )
-            if metadata.phase == "pre-stop-intent":
-                before = ModuleLayout(prior, None, None)
-                staged = ModuleLayout(prior, desired, None)
-                layout = publication.observe_layout()
-                if layout == before:
-                    source = self._kernel_bundle_source(metadata)
-                    try:
-                        publication.create_staging()
-                        manifest = self._recovery_writer.install(
-                            publication.staging_tree(),
-                            metadata.release,
-                            source,
-                        )
-                    finally:
-                        source.close()
-                    if manifest != desired.manifest or publication.observe_layout() != staged:
-                        raise ValueError(
-                            "external-boot staged target modules do not match metadata"
-                        )
-                elif layout != staged:
-                    raise ValueError("external-boot target staging layout conflicts with metadata")
-                publication.guest_sync()
-                publication.record_phase(
-                    PublicationPhase.MOVE_READY if prior is not None else PublicationPhase.OLD_ASIDE
+            with policy_context as policy:
+                publication = _SessionModulePublicationIO(
+                    guest,
+                    metadata,
+                    self._recovery_root,
+                    self._recovery_writer,
+                    self._session,
+                    label_policy=policy,
                 )
-            self._finish_present_publication(publication, prior=prior, desired=desired)
-            completed = publication.metadata
-            observed = self._observe_modules(opened_guest, completed)
+                if metadata.phase == "pre-stop-intent":
+                    before = ModuleLayout(prior, None, None)
+                    staged = ModuleLayout(prior, desired, None)
+                    layout = publication.observe_layout()
+                    if layout == before:
+                        source = self._kernel_bundle_source(metadata)
+                        try:
+                            publication.create_staging()
+                            self._recovery_writer.install(
+                                publication.staging_tree(), metadata.release, source
+                            )
+                        finally:
+                            source.close()
+                        if publication.observe_layout() != staged:
+                            raise ValueError(
+                                "external-boot staged target modules do not match metadata"
+                            )
+                    elif layout != staged:
+                        raise ValueError(
+                            "external-boot target staging layout conflicts with metadata"
+                        )
+                    publication.guest_sync()
+                    publication.record_phase(
+                        PublicationPhase.MOVE_READY
+                        if prior is not None
+                        else PublicationPhase.OLD_ASIDE
+                    )
+                self._finish_present_publication(publication, prior=prior, desired=desired)
+                completed = publication.metadata
+                observed = self._observe_modules(opened_guest, completed)
         self.record_phase(completed, "module-restored", inactive_modules=observed)
 
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
@@ -2325,12 +2416,15 @@ class _SessionModulePublicationIO:
         recovery_root: Path,
         writer: GuestRecoveryWriter,
         session: LocalExternalBootSession,
+        *,
+        label_policy: ModuleLabelPolicy | None = None,
     ) -> None:
         self._guest = guest
         self.metadata = metadata
         self._recovery_root = recovery_root
         self._writer = writer
         self._session = session
+        self._label_policy = label_policy
         base = f"/lib/modules/.kdive-{metadata.binding.activation_id}"
         self._live = f"/lib/modules/{metadata.release}"
         self._staging = f"{base}-staging"
@@ -2356,6 +2450,7 @@ class _SessionModulePublicationIO:
             release=self.metadata.release,
             root=self._staging,
             mutable=True,
+            label_policy=self._label_policy,
         )
 
     def move_live_to_old(self) -> None:
@@ -2426,6 +2521,7 @@ def _complete_preparation_metadata(
     intent: LocalPreStopIntentV1,
     materialization: ExternalBootMaterialization,
     capture: ModuleCapture,
+    target_manifest: str,
 ) -> LocalRecoveryMetadataV1:
     source_modules: ComponentState
     if isinstance(capture, AbsentModuleCapture):
@@ -2441,7 +2537,7 @@ def _complete_preparation_metadata(
             ),
             "target_state": ProviderStateIdentity(
                 definition=intent.target_boot,
-                modules=PresentComponentState(manifest=materialization.installed_module_tree),
+                modules=PresentComponentState(manifest=target_manifest),
             ),
             "capture": capture,
             "phase": "pre-stop-intent",
