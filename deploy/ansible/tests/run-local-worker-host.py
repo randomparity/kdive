@@ -731,17 +731,21 @@ def uv_break_system_packages_probe_matches_host() -> None:
     # Independently derived, and against /usr/bin/python3 directly -- the harness's own
     # interpreter (whatever `uv run` resolves) need not be the same one the probe targets, so
     # reusing its `pip` module or `sysconfig` would not actually prove the probe right.
+    # A developer host may have no system pip: uv does not need it. The production probe
+    # treats that as version zero and still checks PEP 668, so the independent oracle must
+    # do the same rather than introduce a system-pip prerequisite for running the harness.
     check_script = (
         "import os, subprocess, sys, sysconfig\n"
-        "out = subprocess.run([sys.executable, '-m', 'pip', '--version'],"
-        " capture_output=True, text=True, check=True).stdout\n"
-        "version = tuple(int(p) for p in out.split()[1].split('.')[:3])\n"
+        "result = subprocess.run([sys.executable, '-I', '-m', 'pip', '--version'],"
+        " capture_output=True, text=True, check=False)\n"
+        "version = tuple(int(p) for p in result.stdout.split()[1].split('.')[:3])"
+        " if result.returncode == 0 else (0, 0, 0)\n"
         "stdlib = sysconfig.get_path('stdlib')\n"
         "marker = os.path.exists(os.path.join(stdlib, 'EXTERNALLY-MANAGED'))\n"
         "print('true' if marker or version >= (23, 0, 1) else 'false')\n"
     )
     expected = subprocess.run(
-        ["/usr/bin/python3", "-c", check_script],
+        ["/usr/bin/python3", "-I", "-c", check_script],
         capture_output=True,
         text=True,
         check=True,

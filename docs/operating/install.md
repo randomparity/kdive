@@ -111,6 +111,13 @@ The recipe checks host dependencies, syncs the locked environment, builds the ca
 manifest, and installs the development hooks. Choose a [run mode](#run-modes) below to configure
 backends and start the processes.
 
+Setup checks the external commit-hook tools (`git`, `shellcheck`, `just`, and `prek`) before
+syncing dependencies or installing hooks. If one is missing, it stops with an installation
+hint; `just check-deps` remains a report with those tools in its Recommended tier. Docker,
+standalone `shfmt`, and VM tools remain optional for setup. The hooks manage their own Python
+and Go environments, while test recipes use `uv`. Ansible regression tests may explicitly
+inspect `/usr/bin/python3` to check host provisioning behavior, but do not require system `pip`.
+
 The manifest recipe removes group-write permission from current-user-owned bootstrap files
 and their ancestor directories, including checkout parents and external Python installations
 (such as uv-managed Python), and the staging directory's ancestors. This supports a `0002`

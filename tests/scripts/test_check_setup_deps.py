@@ -1191,3 +1191,53 @@ def test_gnu_features_present_are_not_reported(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     for feature in _GNU_FEATURES:
         assert feature not in result.stderr
+
+
+@pytest.mark.parametrize("missing", ["git", "shellcheck", "just", "prek"])
+def test_setup_requires_hook_tools_but_report_mode_keeps_them_optional(
+    tmp_path: Path, missing: str
+) -> None:
+    bindir = _bin(tmp_path)
+    for tool in {"git", "shellcheck", "just", "prek"} - {missing}:
+        _stub(bindir, tool, "#!/bin/sh\nexit 0\n")
+    report = _run("ubuntu", str(bindir), tmp_path)
+    assert report.returncode == 0, report.stderr
+    setup = _run("ubuntu", str(bindir), tmp_path, args=["--setup"])
+    assert setup.returncode == 1
+    assert f"Required dependencies missing: {missing}" in setup.stderr
+    assert "using the hints above" in setup.stderr
+
+
+def test_setup_does_not_require_optional_ci_or_vm_tools(tmp_path: Path) -> None:
+    bindir = _bin(tmp_path)
+    for tool in ("git", "shellcheck", "just", "prek"):
+        _stub(bindir, tool, "#!/bin/sh\nexit 0\n")
+    result = _run("ubuntu", str(bindir), tmp_path, args=["--setup"])
+    assert result.returncode == 0, result.stderr
+    assert "docker" in result.stderr
+    assert "shfmt" in result.stderr
+    assert "virsh" in result.stderr
+
+
+def test_just_setup_stops_before_sync_when_hook_dependency_is_missing(tmp_path: Path) -> None:
+    just = shutil.which("just")
+    if just is None:
+        pytest.skip("just is required to exercise setup dependency ordering")
+    bindir = _bin(tmp_path)
+    for tool in ("git", "just", "prek"):
+        _stub(bindir, tool, "#!/bin/sh\nexit 0\n")
+    log = tmp_path / "uv.log"
+    _stub(bindir, "uv", f'#!/bin/sh\necho "$*" >> "{log}"\n')
+    os_release = tmp_path / "os-release"
+    os_release.write_text("ID=ubuntu\n")
+    result = subprocess.run(
+        [just, "--justfile", str(SCRIPT.parent.parent / "justfile"), "setup"],
+        env={"PATH": _with_bash(str(bindir), tmp_path), "KDIVE_OS_RELEASE": str(os_release)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Required dependencies missing: shellcheck" in result.stderr
+    assert not log.exists(), "setup reached uv sync despite an unmet hook dependency"
+    assert "Development environment is ready" not in result.stdout

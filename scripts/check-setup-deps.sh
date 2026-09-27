@@ -10,11 +10,13 @@ set -euo pipefail
 
 # -y / --yes auto-accepts every fix offer (for `just setup` and provisioning scripts).
 ASSUME_YES=0
+SETUP_MODE=0
 while (($#)); do
   case "$1" in
   -y | --yes) ASSUME_YES=1 ;;
+  --setup) SETUP_MODE=1 ;;
   -h | --help)
-    printf "usage: check-setup-deps.sh [-y|--yes]\n"
+    printf "usage: check-setup-deps.sh [--setup] [-y|--yes]\n"
     exit 0
     ;;
   *)
@@ -24,7 +26,7 @@ while (($#)); do
   esac
   shift
 done
-readonly ASSUME_YES
+readonly ASSUME_YES SETUP_MODE
 
 # Developer-host Bash floor (ADR-0673). This block stays Bash 3.2 compatible because it runs
 # before the Bash 4 constructs below: an old interpreter must reach the remedy, not a nameref
@@ -531,14 +533,17 @@ probe_all() {
     note_manual required "rustc/cargo" "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
   fi
 
-  # RECOMMENDED — needed to reproduce the full local CI gate.
-  require_command recommended git "${distro}"
+  # Setup installs and runs commit hooks. Their external tools must be present before
+  # sync or hook installation; uv/prek manage the hooks' other Python/Go dependencies.
+  local hook_tier=recommended
+  if ((SETUP_MODE)); then hook_tier=required; fi
+  require_command "${hook_tier}" git "${distro}"
   require_command recommended make "${distro}"
   # Fedora and EL package none of these tools.
-  require_tool recommended shellcheck "https://github.com/koalaman/shellcheck#installing"
+  require_tool "${hook_tier}" shellcheck "https://github.com/koalaman/shellcheck#installing"
   require_tool recommended shfmt "go install mvdan.cc/sh/v3/cmd/shfmt@latest"
-  require_tool recommended just "uv tool install rust-just"
-  require_tool recommended prek "uv tool install prek"
+  require_tool "${hook_tier}" just "uv tool install rust-just"
+  require_tool "${hook_tier}" prek "uv tool install prek"
   # `just check-pr-body` scans a PR/issue body before `gh ... --body-file` publishes it.
   # Most distros do not package gitleaks, so this is a manual hint like just/prek above.
   require_tool recommended gitleaks "brew install gitleaks (or a pinned release from github.com/gitleaks/gitleaks/releases)"
@@ -765,7 +770,7 @@ if ((${#manual_hints[@]} > 0)); then
 fi
 
 if ((${#required_commands[@]} > 0)); then
-  printf "\nInstall the required dependencies from a privileged shell, then rerun: just setup\n" >&2
+  printf "\nInstall the required dependencies using the hints above, then rerun: just setup\n" >&2
   exit 1
 fi
 
