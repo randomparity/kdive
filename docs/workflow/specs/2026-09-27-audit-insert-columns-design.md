@@ -42,3 +42,12 @@ Migration discovery/tail expectations include 0158; the table privilege matrix n
 longer expects table-wide audit INSERT. Run focused real Postgres tests with Docker
 required, whole-tree lint/type, and the mandatory pre-push CI gate. VM tiers do not
 exercise this database-only boundary and are not required.
+
+## Required catalog consumer
+
+The full local gate exposed the direct-write catalog guard's table-only assumption
+in tests/jobs/test_worker_write_grants.py. For audit INSERT only, check every one of
+the same eight writer columns with has_column_privilege; preserve table checks for
+other direct writes and existing definer checks. A controlled revocation of one
+audit column must fail the guard. The committed inventory shape stays unchanged.
+[ADR-0700](../../adr/0700-audit-column-grant-catalog.md) amends ADR-0653 for this case.
