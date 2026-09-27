@@ -33,6 +33,7 @@ import pytest
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
+from pydantic import JsonValue
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.assembly.app import build_app
@@ -43,6 +44,107 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
+
+
+@pytest.mark.parametrize(
+    ("field_schema", "expected"),
+    [
+        pytest.param({}, None, id="missing-ref"),
+        pytest.param({"$ref": 1}, None, id="non-string-ref"),
+        pytest.param({"anyOf": {}}, None, id="non-list-anyof"),
+        pytest.param({"anyOf": []}, None, id="empty-anyof"),
+        pytest.param({"anyOf": [None, 1, "bad", []]}, None, id="non-dict-variants"),
+        pytest.param({"anyOf": [{"$ref": 1}, {"type": "null"}]}, None, id="invalid-refs"),
+        pytest.param(
+            {"anyOf": [None, {"$ref": 1}, {"$ref": "#/$defs/Request"}]},
+            "#/$defs/Request",
+            id="valid-variant-after-malformed",
+        ),
+        pytest.param(
+            {"$ref": "#/$defs/Direct", "anyOf": [{"$ref": "#/$defs/Optional"}]},
+            "#/$defs/Direct",
+            id="direct-ref-first",
+        ),
+    ],
+)
+def test_property_ref_handles_malformed_schema(
+    field_schema: dict[str, JsonValue], expected: str | None
+) -> None:
+    assert gateway._property_ref(field_schema) == expected
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [{}, {"$defs": None}, {"$defs": []}, {"$defs": "bad"}],
+    ids=["absent", "null", "list", "string"],
+)
+def test_nested_accepted_fields_without_definitions(parameters: dict[str, JsonValue]) -> None:
+    assert (
+        gateway._resolve_nested_accepted_fields(
+            parameters, {"request": {"$ref": "#/$defs/Request"}}
+        )
+        == {}
+    )
+
+
+@pytest.mark.parametrize(
+    "field_schema",
+    [
+        pytest.param(None, id="null-property"),
+        pytest.param([], id="list-property"),
+        pytest.param("bad", id="string-property"),
+        pytest.param({}, id="missing-ref"),
+        pytest.param({"$ref": 1}, id="non-string-ref"),
+        pytest.param({"$ref": "#/definitions/Request"}, id="non-local-prefix"),
+        pytest.param({"$ref": "#/$defs/Missing"}, id="dangling-ref"),
+        pytest.param({"anyOf": {}}, id="non-list-anyof"),
+        pytest.param({"anyOf": [None, {"$ref": 1}]}, id="malformed-anyof-variants"),
+    ],
+)
+def test_nested_accepted_fields_preserves_valid_properties(field_schema: JsonValue) -> None:
+    parameters: dict[str, JsonValue] = {
+        "$defs": {"Request": {"properties": {"zeta": {}, "alpha": {}}}}
+    }
+    properties: dict[str, JsonValue] = {
+        "malformed": field_schema,
+        "valid": {"$ref": "#/$defs/Request"},
+    }
+    assert gateway._resolve_nested_accepted_fields(parameters, properties) == {
+        "valid": ["alpha", "zeta"]
+    }
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [None, [], "bad", {}, {"properties": None}, {"properties": []}],
+    ids=["null", "list", "string", "absent-properties", "null-properties", "list-properties"],
+)
+def test_nested_accepted_fields_skips_malformed_definition(definition: JsonValue) -> None:
+    parameters: dict[str, JsonValue] = {"$defs": {"Request": definition}}
+    assert (
+        gateway._resolve_nested_accepted_fields(
+            parameters, {"request": {"$ref": "#/$defs/Request"}}
+        )
+        == {}
+    )
+
+
+def test_nested_accepted_fields_without_properties() -> None:
+    assert (
+        gateway._resolve_nested_accepted_fields(
+            {"$defs": {"Request": {"properties": {"name": {}}}}}, {}
+        )
+        == {}
+    )
+
+
+def test_nested_accepted_fields_resolves_self_reference_once() -> None:
+    parameters: dict[str, JsonValue] = {
+        "$defs": {"Node": {"properties": {"value": {}, "child": {"$ref": "#/$defs/Node"}}}}
+    }
+    assert gateway._resolve_nested_accepted_fields(
+        parameters, {"node": {"anyOf": [None, {"$ref": "#/$defs/Node"}]}}
+    ) == {"node": ["child", "value"]}
 
 
 def _verifier() -> JWTVerifier:
