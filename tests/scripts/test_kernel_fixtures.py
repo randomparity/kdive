@@ -145,6 +145,13 @@ def test_dropped_config_is_rejected(tmp_path: Path) -> None:
         fixture.check_config(config, fixture.CONFIG)
 
 
+def test_fragment_replaces_assignments_without_duplicate_symbols(tmp_path: Path) -> None:
+    effective = tmp_path / ".config"
+    effective.write_text("CONFIG_MODULES=n\n# CONFIG_BPF_SYSCALL is not set\nCONFIG_OTHER=y\n")
+    fixture.apply_config(effective, "CONFIG_MODULES=y\nCONFIG_BPF_SYSCALL=y\n")
+    assert effective.read_text() == "CONFIG_OTHER=y\nCONFIG_MODULES=y\nCONFIG_BPF_SYSCALL=y\n"
+
+
 @pytest.mark.parametrize("overlap", ["inside", "ancestor"])
 def test_overlapping_output_rejected(tmp_path: Path, monkeypatch, overlap: str) -> None:
     monkeypatch.setattr(fixture.platform, "machine", lambda: "x86_64")

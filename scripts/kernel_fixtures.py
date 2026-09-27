@@ -83,6 +83,17 @@ def check_config(effective: Path, fragment: Path) -> None:
             raise ValueError(f"kernel configuration dropped {line}; check dependencies")
 
 
+def apply_config(effective: Path, fragment: str) -> None:
+    names = {line.split("=", 1)[0] for line in fragment.splitlines() if line.startswith("CONFIG_")}
+    retained = [
+        line
+        for line in effective.read_text().splitlines()
+        if line.split("=", 1)[0] not in names
+        and not (line.startswith("# ") and line.split()[1] in names)
+    ]
+    effective.write_text("\n".join(retained) + "\n" + fragment)
+
+
 def record(
     output: Path,
     *,
@@ -212,8 +223,7 @@ def build(
     (output / "input.config").write_text(fragment)
     make = ["make", "-C", str(source), f"O={output}", f"ARCH={ARCH[arch]}"]
     command([*make, "ppc64_defconfig" if arch == "ppc64le" else "defconfig"], env=env)
-    with (output / ".config").open("a") as stream:
-        stream.write("\n" + fragment)
+    apply_config(output / ".config", fragment)
     command([*make, "olddefconfig"], env=env)
     check_config(output / ".config", output / "input.config")
     targets = ["vmlinux", "modules"] + (["bzImage"] if arch == "x86_64" else [])
