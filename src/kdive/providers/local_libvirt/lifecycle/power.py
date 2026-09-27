@@ -14,10 +14,10 @@ from typing import Protocol
 import libvirt
 
 from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
+from kdive.providers.local_libvirt.settings import CLEAN_SHUTDOWN_BASE_S
 
 _log = logging.getLogger(__name__)
 
-_CLEAN_SHUTDOWN_BASE_S = 60.0
 _SHUTDOWN_POLL_S = 1.0
 _SHUTDOWN_RESEND_S = 10.0
 _HONOURS_SHUTDOWN = frozenset({libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_BLOCKED})
@@ -44,7 +44,7 @@ def destroy_or_accept_shutoff(domain: PowerDomain) -> None:
 
 def clean_shutdown_bound_s(accel: str | None) -> float:
     """The ADR-0679 wait: 60 s for KVM, scaled by ``tcg_deadline_multiplier`` otherwise."""
-    return _CLEAN_SHUTDOWN_BASE_S * tcg_deadline_multiplier(accel)
+    return CLEAN_SHUTDOWN_BASE_S * tcg_deadline_multiplier(accel)
 
 
 def power_off(

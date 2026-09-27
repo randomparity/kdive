@@ -8,10 +8,24 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import PowerAction
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
-from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
+from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
+from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn, libvirt_error
 
 
-def _control(domain: FakeDomain | None) -> tuple[LocalLibvirtControl, FakeDomain | None]:
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _control(
+    domain: FakeDomain | None, *, clock: _Clock | None = None
+) -> tuple[LocalLibvirtControl, FakeDomain | None]:
     lookup = {domain.domain_name: domain} if domain is not None else {}
     conn = FakeLibvirtConn(lookup=lookup)
     # The ADR-0576 truncate is observable through the same call log the fake domain keeps.
@@ -21,7 +35,8 @@ def _control(domain: FakeDomain | None) -> tuple[LocalLibvirtControl, FakeDomain
         if target is not None:
             target.calls.append("prepare")
 
-    return LocalLibvirtControl(connect=lambda: conn, prepare_console=_prepare), domain
+    seams = {"sleep": clock.sleep, "clock": clock} if clock is not None else {}
+    return LocalLibvirtControl(connect=lambda: conn, prepare_console=_prepare, **seams), domain
 
 
 @pytest.mark.parametrize(
@@ -30,7 +45,7 @@ def _control(domain: FakeDomain | None) -> tuple[LocalLibvirtControl, FakeDomain
         # ADR-0576: a power-on that starts a stopped domain truncates its console first, so
         # the new boot window never carries the prior boot's bytes.
         (PowerAction.ON, ["prepare", "create"]),
-        (PowerAction.OFF, ["destroy"]),
+        (PowerAction.OFF, []),  # already SHUTOFF is an achieved target state
         (PowerAction.RESET, ["reset"]),
         (PowerAction.CYCLE, ["reboot"]),
         # #1254: resume must call virDomainResume, NOT reboot (which would destroy paused state).
@@ -56,6 +71,90 @@ def test_power_on_running_domain_never_truncates() -> None:
     control, domain = _control(domain)
     control.power("kdive-x", PowerAction.ON)  # no raise
     assert domain is not None and domain.calls == ["create"]
+
+
+def test_power_off_running_guest_requests_clean_shutdown() -> None:
+    domain = FakeDomain(domain_name="kdive-x", system_id="x", active=True)
+    control, _ = _control(domain)
+    control.power("kdive-x", PowerAction.OFF)
+    assert domain.calls == ["shutdown"]
+
+
+@pytest.mark.parametrize(("domain_type", "expected_s"), [("kvm", 60.0), ("qemu", 120.0)])
+def test_power_off_timeout_uses_domain_accel_and_destroys(
+    domain_type: str, expected_s: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(LIBVIRT_TCG_DEADLINE_MULTIPLIER.name, "2.0")
+    clock = _Clock()
+    domain = FakeDomain(
+        domain_name="kdive-x",
+        system_id="x",
+        active=True,
+        honours_shutdown=False,
+        xml_desc=f'<domain type="{domain_type}"/>',
+    )
+    control, _ = _control(domain, clock=clock)
+    control.power("kdive-x", PowerAction.OFF)
+    assert clock.now == expected_s
+    assert domain.calls[0] == "shutdown"
+    assert domain.calls[-1] == "destroy"
+
+
+def test_power_off_refused_shutdown_destroys() -> None:
+    domain = FakeDomain(
+        domain_name="kdive-x",
+        system_id="x",
+        active=True,
+        raise_on={"shutdown": libvirt.VIR_ERR_OPERATION_FAILED},
+    )
+    control, _ = _control(domain)
+    control.power("kdive-x", PowerAction.OFF)
+    assert domain.calls == ["shutdown", "destroy"]
+
+
+def test_power_off_already_shutoff_ignores_malformed_xml() -> None:
+    domain = FakeDomain(domain_name="kdive-x", system_id="x", xml_desc="<not XML")
+    control, _ = _control(domain)
+    control.power("kdive-x", PowerAction.OFF)
+    assert domain.calls == []
+
+
+@pytest.mark.parametrize("xml", ["<not XML", "<domain/>", '<domain type="unknown"/>'])
+def test_power_off_active_invalid_xml_is_control_failure(xml: str) -> None:
+    domain = FakeDomain(domain_name="kdive-x", system_id="x", active=True, xml_desc=xml)
+    control, _ = _control(domain)
+    with pytest.raises(CategorizedError) as exc:
+        control.power("kdive-x", PowerAction.OFF)
+    assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert domain.calls == []
+
+
+def test_power_off_unreadable_xml_is_control_failure() -> None:
+    class UnreadableDomain(FakeDomain):
+        def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+            raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    domain = UnreadableDomain(domain_name="kdive-x", system_id="x", active=True)
+    control, _ = _control(domain)
+    with pytest.raises(CategorizedError) as exc:
+        control.power("kdive-x", PowerAction.OFF)
+    assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert domain.calls == []
+
+
+def test_power_off_failed_destroy_is_control_failure() -> None:
+    domain = FakeDomain(
+        domain_name="kdive-x",
+        system_id="x",
+        active=True,
+        run_state=libvirt.VIR_DOMAIN_PAUSED,
+        raise_on={"destroy": libvirt.VIR_ERR_INTERNAL_ERROR},
+    )
+    control, _ = _control(domain)
+    with pytest.raises(CategorizedError) as exc:
+        control.power("kdive-x", PowerAction.OFF)
+    assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert domain.calls == ["destroy"]
 
 
 def test_power_on_already_running_swallowed() -> None:
