@@ -1,4 +1,4 @@
-# 0692 Pinned external kernel fixtures
+# 0693 Pinned external kernel fixtures
 
 ## Status
 
