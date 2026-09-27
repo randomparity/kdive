@@ -514,15 +514,15 @@ lint-ansible:
 # Run the Ansible role regression harnesses (libvirt_stack families #2392; gdbstub_acl ufw
 # prune #616; image admission + staged-volume confirmation #1629; remote module appliance #2128).
 test-ansible:
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-libvirt-stack-families.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-github-runner-preflight.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-guest-base-image-admission.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-libvirt-facts-render.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-module-appliance.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-external-boot-recovery-root.sh
-    uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-worker-host.py
-    uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-libvirt-host.py
+    TIMEFORMAT='run-libvirt-stack-families.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-libvirt-stack-families.sh
+    TIMEFORMAT='run-gdbstub-acl-prune.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
+    TIMEFORMAT='run-github-runner-preflight.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-github-runner-preflight.sh
+    TIMEFORMAT='run-guest-base-image-admission.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-guest-base-image-admission.sh
+    TIMEFORMAT='run-remote-libvirt-facts-render.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-libvirt-facts-render.sh
+    TIMEFORMAT='run-remote-module-appliance.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-module-appliance.sh
+    TIMEFORMAT='run-external-boot-recovery-root.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-external-boot-recovery-root.sh
+    TIMEFORMAT='run-local-worker-host.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-worker-host.py
+    TIMEFORMAT='run-local-libvirt-host.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-libvirt-host.py
 
 # Lint and security-scan the GitHub Actions workflows.
 # actionlint-py bundles a prebuilt actionlint and upstream ships no ppc64le binary, so its

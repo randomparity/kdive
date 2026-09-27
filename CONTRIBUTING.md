@@ -98,6 +98,14 @@ PR CI runs the configured `just` recipes against GitHub's pull-request merge res
 local `just ci` checks your checkout. Before merging, require both green checks and a
 conflict-free PR against `main`.
 
+The required `lint · type · test` check aggregates four independent jobs: lint/type/guards,
+pytest, Ansible lint and role tests, and the Compose volume-persistence proof. All four must
+succeed; a failed, canceled, or skipped job cannot produce a passing aggregate. Open the
+underlying job for its failure details. The pytest job retains JUnit timings and failures as
+the `pytest-junit-<run attempt>` artifact for 14 days and lists its 50 slowest test phases in
+the log. Ansible logs each harness's elapsed time; the Compose proof logs startup and shutdown
+times. Local recipes keep their existing test selections.
+
 If a published feature branch conflicts, merge current `main` into it, resolve the conflicts,
 run the relevant checks and `just ci` before pushing, then wait for fresh PR checks. Rebase
 only unpublished commits; do not rewrite pushed history.

@@ -115,11 +115,17 @@ def _run(argv: tuple[str, ...], env: dict[str, str], *, timeout: int = 180) -> s
 
 def _compose(env: dict[str, str], *args: str, timeout: int = 180) -> str:
     # `--profile obs` renders prometheus; without it compose drops the service silently.
-    return _run(
-        ("docker", "compose", "-f", str(_COMPOSE_FILE), "--profile", "obs", *args),
-        env,
-        timeout=timeout,
-    )
+    started = time.monotonic()
+    try:
+        return _run(
+            ("docker", "compose", "-f", str(_COMPOSE_FILE), "--profile", "obs", *args),
+            env,
+            timeout=timeout,
+        )
+    finally:
+        if args and args[0] in {"up", "down"}:
+            # Visible on successful CI runs through --capture=tee-sys, including cleanup.
+            print(f"compose {' '.join(args)}: {time.monotonic() - started:.3f} seconds", flush=True)
 
 
 def _container_id(env: dict[str, str], service: str) -> str:
