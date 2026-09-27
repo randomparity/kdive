@@ -145,6 +145,33 @@ def test_non_native_build_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         )
 
 
+@pytest.mark.parametrize("arch,target", [("x86_64", "defconfig"), ("ppc64le", "ppc64le_defconfig")])
+def test_native_config_target_keeps_requested_arch(
+    tmp_path: Path, monkeypatch, arch, target
+) -> None:
+    monkeypatch.setattr(fixture.platform, "machine", lambda: arch)
+    monkeypatch.setattr(fixture, "toolchain_identity", lambda: {"gcc": "test"})
+
+    def command(argv, **kwargs):
+        if argv[0] == "git":
+            return "1"
+        if argv[0] == "make":
+            assert argv[-1] == target
+            raise RuntimeError("config target observed")
+        return ""
+
+    monkeypatch.setattr(fixture, "command", command)
+    with pytest.raises(RuntimeError, match="config target observed"):
+        fixture.build(
+            tmp_path / "source",
+            tmp_path / "out",
+            baseline="longterm",
+            arch=arch,
+            config=fixture.CONFIG,
+            jobs=1,
+        )
+
+
 def test_existing_output_rejected_without_modification(built: Path, monkeypatch) -> None:
     monkeypatch.setattr(fixture.platform, "machine", lambda: "x86_64")
     before = (built / "manifest.json").read_bytes()

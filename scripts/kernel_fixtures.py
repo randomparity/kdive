@@ -228,7 +228,7 @@ def build(
     output.mkdir(parents=True)
     (output / "input.config").write_text(fragment)
     make = ["make", "-C", str(source), f"O={output}", f"ARCH={ARCH[arch]}"]
-    command([*make, "ppc64_defconfig" if arch == "ppc64le" else "defconfig"], env=env)
+    command([*make, "ppc64le_defconfig" if arch == "ppc64le" else "defconfig"], env=env)
     apply_config(output / ".config", fragment)
     command([*make, "olddefconfig"], env=env)
     check_config(output / ".config", output / "input.config")
