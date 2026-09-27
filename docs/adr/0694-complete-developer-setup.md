@@ -1,4 +1,4 @@
-# ADR-0694: Complete developer setup
+# 0694 Complete developer setup
 
 ## Status
 
