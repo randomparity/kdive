@@ -304,9 +304,12 @@ as two deliberately-separate stores:
 
 - **Self-hosted warm store** — `scripts/live-vm/warm-store.sh`, persistent at
   `KDIVE_WARM_STORE_DIR` (default `/var/lib/kdive/warm-store`, the dir
-  `live_vm_host` creates). Idempotent: it rebuilds only when the pinned kernel
-  changes or a staged file fails its recorded digest, and otherwise reuses the
-  warm set. It only **reports** usage — the host's own disk is not budget-gated.
+  `live_vm_host` creates). Reuse verifies the selected checksum-pinned catalog
+  source, clean builder revision, kernel NVR/build ID, retained package/config
+  provenance, and every staged file digest. A legacy or mismatched manifest
+  rebuilds the set. It only **reports** usage — the host's own disk is not
+  budget-gated. See [reproducible lab lanes](reproducible-lab-lanes.md) for the
+  prepared fixture and measured resource use.
 - **Hosted TCG set** — `scripts/live-vm/stage-tcg-images.sh`, ephemeral on the
   hosted runner's `/mnt` scratch (`KDIVE_TCG_STAGE_DIR`, default
   `/mnt/kdive-tcg`). It fetches debuginfo on demand and **enforces** a disk

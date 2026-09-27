@@ -83,6 +83,7 @@ local_worker_host_packages_redhat:
   - elfutils-debuginfod-client
   - git
   - python3-pip
+  - python3-devel       # Python.h: uv builds libvirt-python from source
   - gcc
   - make
   - pkgconf-pkg-config

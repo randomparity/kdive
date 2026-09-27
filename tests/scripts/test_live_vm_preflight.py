@@ -33,6 +33,72 @@ def test_throwaway_ok_when_rootfs_exists(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
 
 
+@pytest.mark.parametrize("family", ["native-x86", "native-power", "tcg-host", "capacity"])
+def test_lane_family_dispatches_to_helper(tmp_path: Path, family: str) -> None:
+    helper_log = tmp_path / "helper-args"
+    python = tmp_path / "python"
+    python.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{helper_log}'\n")
+    python.chmod(0o755)
+    env = {
+        "KDIVE_PYTHON": str(python),
+        "KDIVE_LIBVIRT_URI": "qemu:///session",
+        "KDIVE_LANE_WORKSPACE": str(tmp_path),
+        "KDIVE_LANE_CPUS": "9",
+        "KDIVE_LANE_MEMORY_MIB": "17000",
+        "KDIVE_LANE_DISK_BYTES": "52000000000",
+    }
+    result = _run([family], env)
+    assert result.returncode == 0, result.stderr
+    assert helper_log.read_text().splitlines() == [
+        str(_SCRIPT.parents[1] / "live_vm_lane.py"),
+        family,
+        *(
+            [str(tmp_path), "9", "17000", "52000000000"]
+            if family == "capacity"
+            else ["qemu:///session"]
+        ),
+    ]
+
+
+def test_capacity_family_requires_workspace(tmp_path: Path) -> None:
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\nexit 0\n")
+    python.chmod(0o755)
+    result = _run(["capacity"], {"KDIVE_PYTHON": str(python)})
+    assert result.returncode != 0
+    assert "KDIVE_LANE_WORKSPACE" in result.stderr
+
+
+def test_capacity_family_passes_defaults(tmp_path: Path) -> None:
+    helper_log = tmp_path / "helper-args"
+    python = tmp_path / "python"
+    python.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{helper_log}'\n")
+    python.chmod(0o755)
+    result = _run(
+        ["capacity"],
+        {"KDIVE_PYTHON": str(python), "KDIVE_LANE_WORKSPACE": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert helper_log.read_text().splitlines()[-3:] == ["8", "16384", "51539607552"]
+
+
+def test_capacity_family_does_not_replace_explicit_empty_input(tmp_path: Path) -> None:
+    helper_log = tmp_path / "helper-args"
+    python = tmp_path / "python"
+    python.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{helper_log}'\n")
+    python.chmod(0o755)
+    result = _run(
+        ["capacity"],
+        {
+            "KDIVE_PYTHON": str(python),
+            "KDIVE_LANE_WORKSPACE": str(tmp_path),
+            "KDIVE_LANE_CPUS": "",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert helper_log.read_text().splitlines()[-3:] == ["", "16384", "51539607552"]
+
+
 def test_throwaway_fails_when_rootfs_missing() -> None:
     r = _run(["throwaway"], {"KDIVE_LIBVIRT_URI": "qemu:///session"})
     assert r.returncode != 0

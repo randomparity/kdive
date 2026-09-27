@@ -1752,6 +1752,13 @@ def test_local_worker_host_packages_provision_openssl_and_zlib_headers_per_famil
     assert "zlib-devel" in suse_packages
 
 
+def test_redhat_worker_provisions_python_headers_for_locked_venv() -> None:
+    defaults = _yaml(DEFAULTS)
+    packages = defaults["local_worker_host_packages_redhat"]
+    assert isinstance(packages, list)
+    assert "python3-devel" in packages
+
+
 def test_provider_authority_host_packages_provision_openssl_and_zlib_headers_per_family() -> None:
     """The provider-authority host's root `uv sync` shares the same source-build gap (#2666)."""
     defaults = yaml.safe_load(_text(PROVIDER_AUTHORITY / "defaults/main.yml"))
