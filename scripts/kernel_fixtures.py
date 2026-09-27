@@ -19,7 +19,17 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "fixtures/kernel/debug.config"
-COMMON = (".config", "input.config", "vmlinux", "modules.order", "include/config/kernel.release")
+COMMON = (
+    ".config",
+    "input.config",
+    "vmlinux",
+    "System.map",
+    "modules.order",
+    "modules.builtin",
+    "modules.builtin.modinfo",
+    "include/config/kernel.release",
+    "include/config/auto.conf",
+)
 REQUIRED = {"x86_64": (*COMMON, "arch/x86/boot/bzImage"), "ppc64le": COMMON}
 ARCH = {"x86_64": "x86", "ppc64le": "powerpc"}
 
@@ -67,6 +77,8 @@ def members(output: Path, arch: str) -> list[str]:
     if not modules or any(not name.endswith((".o", ".ko")) for name in modules):
         raise ValueError("modules.order must name module objects (.o or .ko)")
     modules = [name.removesuffix(".o") + ".ko" if name.endswith(".o") else name for name in modules]
+    if "CONFIG_BUILTIN_MODULE_RANGES=y" in artifact(output, ".config").read_text().splitlines():
+        modules.append("modules.builtin.ranges")
     return sorted(set((*REQUIRED[arch], *modules)))
 
 

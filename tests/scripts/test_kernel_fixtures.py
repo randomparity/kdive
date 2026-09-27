@@ -28,7 +28,13 @@ def test_host_provisioning_covers_kernel_build_tools(family, headers, btf) -> No
 
 
 def _outputs(root: Path) -> None:
-    for name in fixture.REQUIRED["x86_64"]:
+    for name in (
+        *fixture.REQUIRED["x86_64"],
+        "modules.builtin",
+        "modules.builtin.modinfo",
+        "System.map",
+        "include/config/auto.conf",
+    ):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"fixture")
@@ -70,6 +76,35 @@ def test_record_round_trip_and_identity(built: Path) -> None:
 def test_kbuild_object_order_resolves_retained_modules(built: Path) -> None:
     (built / "modules.order").write_text("drivers/block/loop.o\n")
     assert "drivers/block/loop.ko" in fixture.members(built, "x86_64")
+
+
+@pytest.mark.parametrize(
+    "name", ["modules.builtin", "modules.builtin.modinfo", "System.map", "include/config/auto.conf"]
+)
+@pytest.mark.parametrize("remove", [False, True])
+def test_installed_metadata_is_verified(built: Path, name: str, remove: bool) -> None:
+    if remove:
+        (built / name).unlink()
+    else:
+        (built / name).write_bytes(b"another kernel")
+    with pytest.raises(ValueError):
+        fixture.verify(built, baseline="longterm", arch="x86_64")
+
+
+def test_builtin_ranges_follow_effective_configuration(built: Path) -> None:
+    config = built / ".config"
+    config.write_text(config.read_text() + "CONFIG_BUILTIN_MODULE_RANGES=y\n")
+    assert "modules.builtin.ranges" in fixture.members(built, "x86_64")
+    with pytest.raises(ValueError, match="modules.builtin.ranges"):
+        fixture.record(
+            built,
+            baseline="longterm",
+            arch="x86_64",
+            config_digest=fixture.digest(fixture.CONFIG),
+            toolchain={"gcc": "test"},
+            builder="a" * 40,
+            source_epoch=1,
+        )
 
 
 @pytest.mark.parametrize(
