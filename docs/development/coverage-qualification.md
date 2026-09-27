@@ -120,4 +120,4 @@ retention and release enforcement belong to
 The focused tests start with a complete synthetic contract, then deliberately remove results,
 skip scenarios, stale fixture identities, mismatch deployed SHAs and fail scenarios. Every such
 experiment must turn qualification red. Synthetic success proves the checker, not a live platform.
-See [ADR-0684](../adr/0684-independent-coverage-obligations.md) for the decision and approved scope.
+See [ADR-0685](../adr/0685-independent-coverage-obligations.md) for the decision and approved scope.

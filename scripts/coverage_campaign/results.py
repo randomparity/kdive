@@ -1,4 +1,4 @@
-"""Complete expected-cell accounting and fail-closed qualification (ADR-0684)."""
+"""Complete expected-cell accounting and fail-closed qualification (ADR-0685)."""
 
 from __future__ import annotations
 
