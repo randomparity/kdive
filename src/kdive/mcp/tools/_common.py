@@ -94,6 +94,21 @@ def invalid_uuid_error(field: str, raw_id: str) -> ToolResponse:
     )
 
 
+def viewer_projects(ctx: RequestContext) -> list[str]:
+    """Projects the caller may view: a member project with any granted role."""
+    return [p for p in ctx.projects if ctx.roles.get(p) is not None]
+
+
+def project_filter(ctx: RequestContext, project: str | None) -> list[str]:
+    """Narrow the caller's readable projects to an optional ``project``.
+
+    An unreadable ``project`` returns an empty list rather than an error, so the caller
+    gets the same empty collection an absent project would (no existence signal).
+    """
+    readable = viewer_projects(ctx)
+    return readable if project is None else [project] if project in readable else []
+
+
 def clamp_list_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIST_LIMIT))
 
