@@ -10,7 +10,8 @@ separate state-changing power route and is explicitly included in the issue.
 
 The worker control handler owns the System fence; the provider port, MCP authorization, and
 force-crash implementation stay intact. Reuse ADR-0685's session lock and cancellation rule for
-each `PowerAction`; ADR-0687 amends its OFF-only clause. The existing OFF helper and wait remain.
+each `PowerAction`; ADR-0687 amends its OFF-only clause. The local-libvirt clean-stop helper and
+OFF wait remain.
 No caller migration or obsolete path is needed: the handler remains the entry point. Work targets
 Python 3.14 on x86_64 and ppc64le.
 
