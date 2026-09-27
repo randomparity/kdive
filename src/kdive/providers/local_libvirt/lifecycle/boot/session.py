@@ -1554,7 +1554,11 @@ class _ConcreteSystemTeardownSession:
             return
         # Hard by design (ADR-0679): the overlay is reclaimed next, so no write is read again.
         if _active(domain):
-            domain.destroy()
+            try:
+                domain.destroy()
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_OPERATION_INVALID or _active(domain):
+                    raise
         if _active(domain):
             raise RuntimeError("domain remained active after destroy")
 
