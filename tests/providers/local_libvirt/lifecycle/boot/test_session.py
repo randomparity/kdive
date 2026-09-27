@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import errno
+import importlib
 import io
 import logging
 import os
 import queue
 import selectors
 import stat
+import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, BinaryIO, Literal, cast
 from uuid import UUID
 
 import libvirt
@@ -2057,14 +2060,169 @@ def test_repeated_cursor_close_waits_for_faulting_teardown_owner() -> None:
     assert lease.pins == 0
 
 
+@pytest.fixture
+def regular_storage(monkeypatch: pytest.MonkeyPatch) -> list[tuple[BinaryIO, list[int]]]:
+    original = tempfile.TemporaryFile
+    opened: list[tuple[BinaryIO, list[int]]] = []
+
+    @contextmanager
+    def tracked(mode: Literal["w+b"]) -> Iterator[BinaryIO]:
+        with original(mode) as content:
+            sizes: list[int] = []
+            opened.append((content, sizes))
+            try:
+                yield content
+            finally:
+                content.flush()
+                sizes.append(os.fstat(content.fileno()).st_size)
+
+    monkeypatch.setattr(session_module.tempfile, "TemporaryFile", tracked)
+    return opened
+
+
+@pytest.mark.parametrize(
+    "payload,size,short_read,error",
+    [
+        (b"", 0, False, False),
+        (b"a\0\xff", 3, False, False),
+        (b"x" * (1024 * 1024 + 1), 1024 * 1024 + 1, False, False),
+        (b"abcdef", 6, True, False),
+        (b"too long", 3, False, True),
+        (b"nonempty", 0, False, True),
+        (b"short", 6, False, True),
+    ],
+    ids=["empty", "binary", "multi-chunk", "short-read", "overrun", "zero-overrun", "truncated"],
+)
+def test_guest_regular_bounded_bytes_and_cleanup(
+    payload: bytes,
+    size: int,
+    short_read: bool,
+    error: bool,
+    regular_storage: list[tuple[BinaryIO, list[int]]],
+) -> None:
+    requests: list[int] = []
+
+    class ReadGuest(Find0Guest):
+        def pread(self, path: str, count: int, offset: int) -> bytes:
+            requests.append(count)
+            return payload[offset : offset + (min(count, 2) if short_read else count)]
+
+        def download(self, remotefilename: str, filename: str) -> None:
+            Path(filename).write_bytes(payload)
+
+    session, _ = _stream_session([], ReadGuest([], []))
+    try:
+        with session.guest() as guest:
+            if error:
+                with (
+                    pytest.raises(ValueError, match="content changed"),
+                    guest.open_regular("/input", size=size),
+                ):
+                    pytest.fail("partial content was exposed")
+            else:
+                with guest.open_regular("/input", size=size) as content:
+                    assert content.read() == payload
+                    assert not content.closed
+    finally:
+        session.close()
+    assert regular_storage and all(f.closed for f, _ in regular_storage)
+    assert all(stored[0] <= size for _, stored in regular_storage)
+    assert requests and max(requests) <= 1024 * 1024
+
+
+@pytest.mark.parametrize("fault", ["binding", "oversized", "caller", "negative"])
+def test_guest_regular_bounded_failure_cleanup(
+    fault: str, regular_storage: list[tuple[BinaryIO, list[int]]]
+) -> None:
+    class FaultGuest(Find0Guest):
+        def pread(self, path: str, count: int, offset: int) -> bytes:
+            if fault == "oversized":
+                return b"x" * (count + 1)
+            if fault == "binding" and offset:
+                raise OSError("read fault")
+            return b"abc"[offset : offset + min(count, 1)]
+
+    session, _ = _stream_session([], FaultGuest([], []))
+    try:
+        with session.guest() as guest:
+            error = OSError if fault in {"binding", "caller"} else ValueError
+            with (
+                pytest.raises(error),
+                guest.open_regular("/input", size=-1 if fault == "negative" else 3),
+            ):
+                raise OSError("caller fault")
+    finally:
+        session.close()
+    if fault == "negative":
+        assert regular_storage == []
+    else:
+        assert regular_storage and all(f.closed for f, _ in regular_storage)
+        assert all(sizes[0] <= 3 for _, sizes in regular_storage)
+        assert regular_storage[0][1] == [{"oversized": 0, "binding": 1, "caller": 3}[fault]]
+
+
+@pytest.fixture(scope="module")
+def read_appliance() -> Iterator[Any]:
+    # Explicit selection requires the installed binding and appliance; failures do not skip.
+    guestfs = importlib.import_module("guestfs")
+    guest = guestfs.GuestFS(python_return_dict=True)
+    try:
+        guest.add_drive_scratch(128 * 1024 * 1024)
+        guest.launch()
+        guest.part_disk("/dev/sda", "mbr")
+        guest.mkfs("ext4", "/dev/sda1")
+        guest.mount("/dev/sda1", "/")
+        yield guest
+    finally:
+        guest.close()
+
+
+@pytest.mark.live_vm
+@pytest.mark.parametrize("case", ["exact", "empty", "grown", "truncated", "missing"])
+def test_live_guest_regular_bounded_read(
+    case: str,
+    read_appliance: Any,
+    tmp_path: Path,
+    regular_storage: list[tuple[BinaryIO, list[int]]],
+) -> None:
+    payload = b"" if case == "empty" else b"a\0\xff" * (400 * 1024)
+    source = tmp_path / "source"
+    source.write_bytes(payload)
+    read_appliance.upload(str(source), "/input")
+    declared = len(payload) + {"grown": -1, "truncated": 1}.get(case, 0)
+
+    class ApplianceGuest(Find0Guest):
+        def pread(self, path: str, count: int, offset: int) -> bytes:
+            return read_appliance.pread(path, count, offset)
+
+    session, _ = _stream_session([], ApplianceGuest([], []))
+    try:
+        with session.guest() as guest:
+            if case in {"exact", "empty"}:
+                with guest.open_regular("/input", size=declared) as content:
+                    assert content.read() == payload
+            else:
+                error = RuntimeError if case == "missing" else ValueError
+                with (
+                    pytest.raises(error),
+                    guest.open_regular(
+                        "/missing" if case == "missing" else "/input", size=declared
+                    ),
+                ):
+                    pytest.fail("failed read yielded content")
+    finally:
+        session.close()
+    assert regular_storage and all(f.closed for f, _ in regular_storage)
+    assert all(sizes[0] <= declared for _, sizes in regular_storage)
+
+
 def test_guest_regular_stream_transfer_exposes_no_host_path_and_closes_on_success() -> None:
     events: list[str] = []
 
     class StreamGuest(Guest):
-        def download(self, remotefilename: str, filename: str) -> None:
-            self.events.append(f"guest.download:{remotefilename}")
-            with open(filename, "wb") as destination:
-                destination.write(b"elf")
+        def pread(self, path: str, count: int, offset: int) -> bytes:
+            self.events.append(f"guest.pread:{path}")
+            return b"elf"[offset : offset + count]
 
         def upload(self, filename: str, remotefilename: str) -> None:
             with open(filename, "rb") as source:
@@ -2088,7 +2246,7 @@ def test_guest_regular_stream_transfer_exposes_no_host_path_and_closes_on_succes
             assert content.read() == b"elf"
         guest.create_regular(io.BytesIO(b"new"), "/lib/modules/staging/a.ko", size=3)
 
-    assert "guest.download:/lib/modules/6.12.0/a.ko" in events
+    assert "guest.pread:/lib/modules/6.12.0/a.ko" in events
     assert "guest.upload:/lib/modules/staging/a.ko:b'new'" in events
     assert not any("/tmp/" in event for event in events)
     session.close()
@@ -2121,10 +2279,8 @@ def test_concrete_find0_orders_produce_identical_recovery_identity(tmp_path: Pat
             del path
             return []
 
-        def download(self, remotefilename: str, filename: str) -> None:
-            del remotefilename
-            with open(filename, "wb") as destination:
-                destination.write(b"elf")
+        def pread(self, path: str, count: int, offset: int) -> bytes:
+            return b"elf"[offset : offset + count]
 
     captures: list[ModuleArchiveCapture] = []
     for name, order in (

@@ -173,6 +173,10 @@ class Guest:
     def download(self, remotefilename: str, filename: str) -> None:
         self.events.append(f"download:{remotefilename}:{filename}")
 
+    def pread(self, path: str, count: int, offset: int) -> bytes:
+        self.events.append(f"pread:{path}:{count}:{offset}")
+        return b""
+
     def mkdir(self, path: str) -> None:
         self.events.append(f"mkdir:{path}")
 
