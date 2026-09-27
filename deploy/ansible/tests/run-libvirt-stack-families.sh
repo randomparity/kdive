@@ -63,16 +63,22 @@ expected = {
         "libvirt-daemon-system", "libvirt-clients", "qemu-utils", "libguestfs-tools",
         "e2fsprogs", "virtinst", "gnutls-bin", "libseccomp2", "python3-libvirt",
         "python3-lxml", "make", "tar",
+        "gcc", "binutils", "bison", "flex", "bc", "perl",
+        "libelf-dev", "libssl-dev", "pahole",
     ],
     "RedHat": [
         "libvirt", "libvirt-client", "qemu-img", "libguestfs-tools-c", "e2fsprogs",
         "virt-install", "gnutls-utils", "libseccomp", "python3-libvirt", "python3-lxml",
         "make", "tar",
+        "gcc", "binutils", "bison", "flex", "bc", "perl",
+        "elfutils-libelf-devel", "openssl-devel", "dwarves",
     ],
     "Suse": [
         "libvirt-daemon-qemu", "libvirt-daemon-proxy", "libvirt-client", "qemu-tools",
         "guestfs-tools", "e2fsprogs", "virt-install", "gnutls", "libseccomp2",
         "python3-libvirt-python", "python3-lxml", "make", "tar",
+        "gcc", "binutils", "bison", "flex", "bc", "perl",
+        "libelf-devel", "libopenssl-devel", "dwarves",
     ],
 }
 routes = (
