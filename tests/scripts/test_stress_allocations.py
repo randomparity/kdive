@@ -302,6 +302,7 @@ class FakeStack:
         self.cap = 2
         self.states: dict[str, str] = {}
         self.expiry: dict[str, float] = {}
+        self.lease_clock = 0.0
         self.keys: dict[str, str] = {}
         self.provisions: dict[str, ToolResponse] = {}
         self.systems: dict[str, str] = {}
@@ -331,7 +332,7 @@ class FakeStack:
     def _sweep(self) -> None:
         if self.defect == "no_gc":
             return
-        now = time.monotonic()
+        now = self.lease_clock
         for alloc, expires in self.expiry.items():
             if self.states[alloc] in _OCCUPYING and expires < now:
                 self.states[alloc] = "expired"
@@ -405,7 +406,7 @@ class FakeStack:
         alloc = self._new_id()
         self.states[alloc] = state
         if state == "granted" and args.get("window"):
-            self.expiry[alloc] = time.monotonic() + float(args["window"]) * 3600
+            self.expiry[alloc] = self.lease_clock + float(args["window"]) * 3600
         if isinstance(key, str):
             self.keys[key] = alloc
             if self.hang:  # commit, then never answer this one call
@@ -442,11 +443,15 @@ class FakeStack:
             return ToolResponse.failure(alloc, ErrorCategory.CONFIGURATION_ERROR)
         if self.states[alloc] not in _OCCUPYING:
             return ToolResponse.failure(alloc, ErrorCategory.STALE_HANDLE)
-        self.expiry[alloc] = time.monotonic() + extend * 3600
+        self.expiry[alloc] = self.lease_clock + extend * 3600
         return ToolResponse.success(alloc, self.states[alloc])
 
     def _wait(self, args: dict[str, Any]) -> ToolResponse:
         alloc = args["allocation_id"]
+        # The driver waits only for abandoned grants during drain. Advance the fake
+        # lease clock there, independent of how long the runner scheduled client work.
+        self.lease_clock = max(self.expiry.values(), default=self.lease_clock) + 0.001
+        self._sweep()
         return ToolResponse.success(alloc, self.states[alloc])
 
     def _provision(self, args: dict[str, Any]) -> ToolResponse:
@@ -502,6 +507,26 @@ class FakeClient:
             await asyncio.Event().wait()
         await asyncio.sleep(0)  # the reply can be lost after the commit, as on a real server
         return response
+
+
+def test_scheduler_delay_does_not_expire_an_ordinary_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stack = FakeStack()
+    grant = stack.handle(
+        "allocations.request",
+        {
+            "project": "demo",
+            "shape": "small",
+            "window": 0.02 / 3600,
+            "idempotency_key": "ordinary",
+        },
+    )
+    assert grant.status == "granted"
+    delayed = time.monotonic() + 1.0
+    monkeypatch.setattr(time, "monotonic", lambda: delayed)
+    released = stack.handle("allocations.release", {"allocation_id": grant.object_id})
+    assert released.status == "released"
 
 
 @pytest.fixture(autouse=True)
