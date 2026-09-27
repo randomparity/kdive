@@ -180,7 +180,8 @@ Prepare `system_id` as a disposable local-libvirt System before running the carr
    `arch=x86_64`, a digest, and an inspected `provenance.root_spec` (see
    [image staging](../../../examples/local-libvirt/README.md#optional-inventory-systemstoml)).
    Copy that image's qcow2 bytes to the fixed worker input
-   `/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2`; the fixture rejects any other path.
+   `/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2`. Use a standalone qcow2 of at most
+   16 GiB, with no backing file or external data file; the fixture rejects other paths and formats.
 2. Verify the copy's SHA-256 equals the catalog digest. Provision the System with
    `provider.local-libvirt.rootfs` set to
    `{kind: "local", path: "/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2",
@@ -252,7 +253,8 @@ service name. `barrier_socket` is optional.
 Prepare the POWER host's disposable System from a registered, project-visible `local-libvirt`
 catalog image with `arch=ppc64le`, a digest, and an inspected `provenance.root_spec`. Copy its
 qcow2 bytes to `/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2` and verify that file's
-SHA-256 matches the catalog digest. Provision with `provider.local-libvirt.rootfs` set to
+SHA-256 matches the catalog digest. Use a standalone qcow2 of at most 16 GiB, with no backing
+file or external data file. Provision with `provider.local-libvirt.rootfs` set to
 `{kind: "local", path: "/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2",
 sha256: "sha256:<catalog digest hex>"}`; the fixture rejects another path, and an unpinned rootfs
 does not bind root provenance. Confirm `system_root_provenance` has a row for the new System
