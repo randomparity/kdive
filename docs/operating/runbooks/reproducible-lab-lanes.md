@@ -83,6 +83,9 @@ reached a measured minimum of 61,164,343,296 bytes, and ended with 62,155,431,93
 customization domain's XML reported 2 vCPU and 2 GiB. No domain existed before or after the
 build. Warm reuse took 5.9 seconds, added no measured scratch bytes, started no domain, and
 kept the same fixture ID and artifact digests.
+This retained fixture belongs to builder commit `0876df4117`. The subsequent documentation
+commit changes the builder revision; using that later checkout will rebuild and assign a new
+fixture identity before downstream qualification.
 
 The retained kernel and debuginfo both have GNU build ID
 `ac46f5009041c93426043e26daffa422db708cfc`. The manifest records Fedora 44 kernel
