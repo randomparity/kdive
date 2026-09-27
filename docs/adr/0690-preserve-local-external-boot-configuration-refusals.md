@@ -1,4 +1,4 @@
-# 0688 — Preserve local external-boot configuration refusals on the authority wire
+# 0690 — Preserve local external-boot configuration refusals on the authority wire
 
 ## Status
 
