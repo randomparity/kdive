@@ -40,10 +40,11 @@ Do not apply the worker lifecycle roles just to build a fixture.
 Run each prerequisite arm separately so one result does not stand in for another:
 
 ```sh
+: "${KDIVE_TASK_MOUNT:?set this to an existing task-owned mount before running}"
 export KDIVE_PYTHON="$PWD/.venv/bin/python"
 export KDIVE_LIBVIRT_URI=qemu:///session
-export XDG_CONFIG_HOME=<task-mount>/xdg
-export KDIVE_LANE_WORKSPACE=<task-mount>
+export XDG_CONFIG_HOME="$KDIVE_TASK_MOUNT/xdg"
+export KDIVE_LANE_WORKSPACE="$KDIVE_TASK_MOUNT"
 export KDIVE_LANE_DISK_BYTES=51539607552
 bash scripts/live-vm/preflight-env.sh native-x86
 bash scripts/live-vm/preflight-env.sh tcg-host
