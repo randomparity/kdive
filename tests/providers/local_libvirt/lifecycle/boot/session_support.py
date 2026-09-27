@@ -188,7 +188,7 @@ class Guest:
     def chown(self, owner: int, group: int, path: str) -> None:
         self.events.append(f"chown:{owner}:{group}:{path}")
 
-    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None:
+    def lsetxattr(self, xattr: str, val: bytes | str, vallen: int, path: str) -> None:
         self.events.append(f"xattr:{xattr}:{val!r}:{vallen}:{path}")
 
     def rm_rf(self, path: str) -> None:
