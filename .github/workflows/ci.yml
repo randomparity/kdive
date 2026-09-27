@@ -130,6 +130,9 @@ jobs:
       - name: Type check
         run: just type
 
+      - name: Coverage obligation ownership
+        run: just coverage-check
+
       - name: Doc links resolve
         # CI invokes recipes individually, so list this explicitly to gate PRs.
         run: just docs-links
