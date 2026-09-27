@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
+from kdive.images.rootfs.catalog import resolve_rootfs_entry
+from kdive.images.rootfs.specs import source_image_digest
 from tests.host_capabilities import requires_bash
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -79,17 +84,6 @@ def test_require_free_space_passes_and_fails(tmp_path: Path) -> None:
     assert "tcg" in no.stderr
 
 
-def test_sha256_ok_roundtrip_and_mismatch(tmp_path: Path) -> None:
-    f = tmp_path / "art"
-    f.write_bytes(b"payload")
-    digest = _run('sha256_of "$1"', str(f)).stdout.strip()
-    assert len(digest) == 64
-    assert _run('sha256_ok "$1" "$2"', str(f), digest).returncode == 0
-    f.write_bytes(b"payload-truncated-changed")  # byte change -> digest differs
-    bad = _run('sha256_ok "$1" "$2"', str(f), digest)
-    assert bad.returncode != 0  # non-fatal: a mismatch is status 1 (rebuild), not a die
-
-
 def test_build_ids_match_equal_mismatch_and_empty() -> None:
     assert _run('build_ids_match "$1" "$2"', "abc123", "abc123").returncode == 0
     mism = _run('build_ids_match "$1" "$2"', "abc123", "def456")
@@ -142,31 +136,6 @@ def test_assert_same_fs_same_and_cross_device(tmp_path: Path) -> None:
     assert cross.returncode != 0 and "filesystem" in cross.stderr
 
 
-def test_manifest_write_read_roundtrip(tmp_path: Path) -> None:
-    m = tmp_path / "MANIFEST"
-    _run(
-        'write_manifest "$1" "$2" "$3" "$4" "$5" "$6"',
-        str(m),
-        "kernel-6.1-nvr",
-        "bid42",
-        "rootsha",
-        "kernsha",
-        "dbgsha",
-    )
-    assert _run('manifest_field "$1" "$2"', str(m), "kernel_nvr").stdout.strip() == "kernel-6.1-nvr"
-    assert _run('manifest_field "$1" "$2"', str(m), "build_id").stdout.strip() == "bid42"
-    assert _run('manifest_field "$1" "$2"', str(m), "debuginfo_sha256").stdout.strip() == "dbgsha"
-
-
-def test_store_manifest_matches_and_absent(tmp_path: Path) -> None:
-    m = tmp_path / "MANIFEST"
-    _run('write_manifest "$1" "$2" "$3" "$4" "$5" "$6"', str(m), "nvrA", "b", "r", "k", "d")
-    assert _run('store_manifest_matches "$1" "$2"', str(m), "nvrA").returncode == 0
-    assert _run('store_manifest_matches "$1" "$2"', str(m), "nvrB").returncode != 0
-    absent = _run('store_manifest_matches "$1" "$2"', str(tmp_path / "none"), "nvrA")
-    assert absent.returncode != 0  # absent manifest is stale, not an error/crash
-
-
 def test_commit_set_flips_symlink_and_prunes(tmp_path: Path) -> None:
     store = tmp_path / "store"
     store.mkdir()
@@ -187,22 +156,40 @@ def test_commit_set_flips_symlink_and_prunes(tmp_path: Path) -> None:
 
 
 def _produce_stubs(
-    bindir: Path, build_id: str = "beef01", build_marker: Path | None = None
+    bindir: Path,
+    build_id: str = "beef01",
+    build_marker: Path | None = None,
+    image: str = "rocky-kdive-ready-10",
 ) -> None:
     """Stub the host-only tools produce_rootfs_and_kernel drives: build-fs (via python3), the
     libguestfs kernel-extract pair, and eu-readelf."""
     mark = f'echo x >> "{build_marker}"; ' if build_marker else ""
+    provenance = json.dumps(
+        {
+            "schema": "kdive.staged-provenance.v1",
+            "provenance": {
+                "source_image_digest": source_image_digest(resolve_rootfs_entry(image).source),
+                "package_versions": {"kernel": "6.1"},
+            },
+        }
+    )
+    _stub(
+        bindir,
+        "git",
+        'case " $* " in *" rev-parse HEAD "*) printf "%040d\\n" 1;; '
+        '*" status --porcelain "*) :;; *) exit 1;; esac',
+    )
     _stub(
         bindir,
         "python3",
-        # `python -c 'import kdive'` is the preflight importability probe, NOT a build: answer it
-        # before the marker so a probe never counts as a build-fs invocation.
-        '[ "$1" = "-c" ] && exit 0; '
+        f'case "$1" in *live_vm_fixtures.py) exec {shlex.quote(sys.executable)} "$@";; esac; '
         f'{mark}dest=""; ws=""; want=""; for a in "$@"; do '
         'case "$want" in dest) dest="$a";; ws) ws="$a";; esac; want=""; '
         '[ "$a" = "--dest" ] && want=dest; [ "$a" = "--workspace" ] && want=ws; done; '
         '[ -n "$ws" ] && mkdir -p "$ws"; '
-        'echo "$@" > "$(dirname "$dest")/build-fs.argv"; : > "$dest"',
+        'echo "$@" > "$(dirname "$dest")/build-fs.argv"; : > "$dest"; '
+        f'printf %s {shlex.quote(provenance)} > "$dest.provenance.json"; '
+        'printf "CONFIG_KDUMP=y\\n" > "$dest.config"',
     )
     # /boot has a rescue kernel too; the deterministic selection must skip it (it sorts first).
     _stub(
@@ -264,7 +251,7 @@ def _warm_env(bindir: Path, store: Path, **extra: str) -> dict[str, str]:
         "KDIVE_PYTHON": "python3",
         "KDIVE_WARM_STORE_DIR": str(store),
         "KDIVE_WARM_STORE_TARGET_NVR": "kernel-6.1-test",  # contains the built kver "6.1-test"
-        "KDIVE_WARM_STORE_IMAGE": "rocky10-debug",
+        "KDIVE_WARM_STORE_IMAGE": "rocky-kdive-ready-10",
         "DEBUGINFOD_URLS": "https://debuginfod.example",
     }
     env.update(extra)
@@ -451,6 +438,61 @@ def test_warm_store_force_rebuilds(tmp_path: Path) -> None:
     assert marker.read_text().count("x") == 2  # force skips the warm fast-path
 
 
+@_needs_inherit_errexit
+def test_warm_store_changed_image_and_legacy_manifest_rebuild(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    marker = tmp_path / "build.calls"
+    _produce_stubs(bindir, build_marker=marker)
+    _debuginfod_ok(bindir)
+    env = _warm_env(bindir, store)
+    first = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, env=env)
+    assert first.returncode == 0, first.stderr
+    _produce_stubs(bindir, build_marker=marker, image="rocky-kdive-ready-9")
+    changed = subprocess.run(
+        [BASH, str(WARM)],
+        capture_output=True,
+        text=True,
+        env={**env, "KDIVE_WARM_STORE_IMAGE": "rocky-kdive-ready-9"},
+    )
+    assert changed.returncode == 0, changed.stderr
+    assert marker.read_text().count("x") == 2
+    (store / "current/MANIFEST").write_text("kernel_nvr=kernel-6.1-test\n")
+    legacy = subprocess.run(
+        [BASH, str(WARM)],
+        capture_output=True,
+        text=True,
+        env={**env, "KDIVE_WARM_STORE_IMAGE": "rocky-kdive-ready-9"},
+    )
+    assert legacy.returncode == 0, legacy.stderr
+    assert marker.read_text().count("x") == 3
+
+
+@_needs_inherit_errexit
+def test_failed_replacement_preserves_current(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    _produce_stubs(bindir)
+    _debuginfod_ok(bindir)
+    env = _warm_env(bindir, store)
+    first = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, env=env)
+    assert first.returncode == 0, first.stderr
+    old = (store / "current").resolve()
+    _stub(bindir, "debuginfod-find", "exit 1")
+    failed = subprocess.run(
+        [BASH, str(WARM)],
+        capture_output=True,
+        text=True,
+        env={**env, "KDIVE_WARM_STORE_FORCE": "1"},
+    )
+    assert failed.returncode != 0
+    assert (store / "current").resolve() == old
+
+
 STAGE = ROOT / "scripts" / "live-vm" / "stage-tcg-images.sh"
 
 
@@ -463,7 +505,7 @@ def _stage_env(bindir: Path, stage: Path, **extra: str) -> dict[str, str]:
         "PATH": f"{bindir}:/usr/bin:/bin",
         "KDIVE_PYTHON": "python3",
         "KDIVE_TCG_STAGE_DIR": str(stage),
-        "KDIVE_TCG_IMAGE": "rocky10-ppc64le-debug",
+        "KDIVE_TCG_IMAGE": "rocky-kdive-ready-10-ppc64le",
         "KDIVE_TCG_BUDGET_BYTES": "1000000000",  # 1 GB, generous for the stubbed tiny files
     }
     env.update(extra)
@@ -471,7 +513,7 @@ def _stage_env(bindir: Path, stage: Path, **extra: str) -> dict[str, str]:
 
 
 def _stage_stubs(bindir: Path) -> None:
-    _produce_stubs(bindir, build_id="cafe02")  # python3/virt-ls/virt-copy-out/eu-readelf
+    _produce_stubs(bindir, build_id="cafe02", image="rocky-kdive-ready-10-ppc64le")
     _debuginfod_ok(bindir)  # present for require_tools; individual tests override as needed
     _stub(bindir, "df", "echo Avail; echo 900000000000")  # plenty free
 
@@ -494,6 +536,15 @@ def test_stage_tcg_happy_path_emits_wiring(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
     keys = sorted(ln.split("=", 1)[0] for ln in r.stdout.splitlines() if ln.strip())
     assert keys == ["KDIVE_LIVE_VM_BZIMAGE", "KDIVE_LIVE_VM_ROOTFS", "KDIVE_LIVE_VM_VMLINUX"]
+    record = json.loads((stage / "MANIFEST").read_text())
+    assert record["kernel_nvr"] == "6.1-test"
+    assert set(record["artifacts"]) == {
+        "rootfs.qcow2",
+        "vmlinux",
+        "vmlinux.debug",
+        "rootfs.qcow2.provenance.json",
+        "rootfs.qcow2.config",
+    }
 
 
 @_needs_inherit_errexit
@@ -585,6 +636,29 @@ def test_kernel_build_id_names_extract_vmlinux_when_missing(tmp_path: Path) -> N
     assert r.returncode != 0 and "extract-vmlinux" in r.stderr
 
 
+@_needs_inherit_errexit
+def test_kernel_extract_cleans_temporary_file_on_success_and_errors(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    compressed = tmp_path / "bzImage"
+    compressed.write_bytes(b"compressed-kernel")
+    _stub(bindir, "extract-vmlinux", 'printf "\\177ELF"')
+    _stub(bindir, "eu-readelf", 'echo "Build ID: abcd"')
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "TMPDIR": str(scratch)}
+    ok = _run('kernel_build_id "$1"', str(compressed), env=env)
+    assert ok.returncode == 0 and ok.stdout.strip() == "abcd"
+    assert list(scratch.iterdir()) == []
+    _stub(bindir, "extract-vmlinux", "exit 1")
+    extract_error = _run('kernel_build_id "$1"', str(compressed), env=env)
+    assert extract_error.returncode != 0 and list(scratch.iterdir()) == []
+    _stub(bindir, "extract-vmlinux", 'printf "\\177ELF"')
+    _stub(bindir, "eu-readelf", "true")
+    readelf_error = _run('kernel_build_id "$1"', str(compressed), env=env)
+    assert readelf_error.returncode != 0 and list(scratch.iterdir()) == []
+
+
 # ---------------------------------------------------------------------------
 # errexit propagation into command substitutions (`shopt -s inherit_errexit`)
 # ---------------------------------------------------------------------------
@@ -655,5 +729,5 @@ def test_stage_tcg_fails_fast_when_the_interpreter_cannot_import_kdive(tmp_path:
         env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
     )
     assert r.returncode != 0
-    assert "cannot import kdive" in r.stderr
+    assert "cannot validate fixture inputs" in r.stderr
     assert not marker.exists()  # failed fast — the build never ran
