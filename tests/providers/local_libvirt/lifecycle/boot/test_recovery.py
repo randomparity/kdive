@@ -90,6 +90,9 @@ class FakeTree:
             raise ValueError("substitution detected")
         yield io.BytesIO(value)
 
+    def prepare_restore(self, entries: Iterator[GuestTreeEntry]) -> None:
+        list(entries)
+
     def create_directory(self, entry: GuestTreeEntry) -> None:
         self.writes.append(("directory", entry.path))
 
@@ -1426,3 +1429,23 @@ def test_public_archive_rejects_undecodable_header_text_before_writes(
             target, RELEASE, _bundle(tmp_path / f"undecodable-{field}", archive_bytes)
         )
     assert target.writes == []
+
+
+def test_restore_prepares_all_authenticated_entries_before_population(tmp_path: Path) -> None:
+    writer = RealGuestRecoveryWriter()
+    source = FakeTree(
+        [_entry("a", b"a"), _entry("z", b"z", xattrs={"user.test": b"\xff"})],
+        {"a": b"a", "z": b"z"},
+    )
+    capture = writer.capture(source, RELEASE, _sink(tmp_path))
+    assert isinstance(capture, ModuleArchiveCapture)
+
+    class RejectingTree(FakeTree):
+        def prepare_restore(self, entries: Iterator[GuestTreeEntry]) -> None:
+            assert [entry.path for entry in entries] == ["a", "z"]
+            raise ValueError("unsupported captured xattr")
+
+    destination = RejectingTree(mutable=True)
+    with pytest.raises(ValueError, match="unsupported captured xattr"):
+        writer.restore(destination, RELEASE, capture, _source(tmp_path, capture))
+    assert destination.writes == []

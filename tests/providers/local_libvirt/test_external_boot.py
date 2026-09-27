@@ -1657,6 +1657,8 @@ def test_libguestfs_tree_is_bound_private_and_no_follow() -> None:
         assert content.read() == b"elf"
     with pytest.raises(ValueError, match="read-only"):
         tree.remove_all()
+    with pytest.raises(ValueError, match="read-only"):
+        tree.prepare_restore(iter(()))
     with pytest.raises(ValueError, match="canonical relative"):
         tree.open_regular("../escape", 0).__enter__()
     assert guest.tree_limits == [external_boot_module.MAX_ENTRIES]
@@ -2731,6 +2733,7 @@ class _RestartWriter:
     ) -> str:
         del release, capture
         source.close()
+        tree.prepare_restore(iter(()))
         restore_state = self._restore_state
         assert restore_state is not None
         self._guest.faults.run(
@@ -5561,3 +5564,75 @@ def test_recorded_inactive_modules_survive_phase_publication(tmp_path: Path) -> 
         )
         assert store.reopen(reference, metadata.binding) == updated
     assert updated.inactive_modules == observed
+
+
+@pytest.mark.parametrize("value", [b"plain", b"", "é".encode()])
+@pytest.mark.parametrize("kind", ["directory", "regular", "symlink"])
+def test_restore_supported_xattrs_use_exact_binding_text(value: bytes, kind: str) -> None:
+    guest = _GuestTreeHandle()
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest,
+        binding=_BINDING,
+        release="6.12.0",
+        root=f"/lib/modules/.kdive-{_BINDING.activation_id}-staging",
+        mutable=True,
+    )
+    entry = recovery_validation.GuestTreeEntry.model_validate(
+        {
+            "path": "entry",
+            "kind": kind,
+            "mode": "0644",
+            "uid": 0,
+            "gid": 0,
+            "size": 0,
+            "target": "target" if kind == "symlink" else None,
+            "xattrs_supported": True,
+            "xattrs": {"user.test": value},
+        }
+    )
+    tree.prepare_restore(iter([entry]))
+    if kind == "regular":
+        tree.create_regular(entry, io.BytesIO())
+    elif kind == "directory":
+        tree.create_directory(entry)
+    else:
+        tree.create_symlink(entry)
+    calls = [call for call in guest.calls if call[0] == "xattr"]
+    assert len(calls) == 1
+    assert calls[0][2:4] == (value.decode(), len(value))
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("user.test", b"a\0b"),
+        ("user.test", b"a\0"),
+        ("user.test", b"\xff"),
+        ("security.selinux", b"bad"),
+        ("security.selinux", b"\xff\0"),
+    ],
+)
+def test_restore_preflights_final_xattr_before_first_mutation(name: str, value: bytes) -> None:
+    guest = _GuestTreeHandle()
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest,
+        binding=_BINDING,
+        release="6.12.0",
+        root=f"/lib/modules/.kdive-{_BINDING.activation_id}-staging",
+        mutable=True,
+    )
+    first = recovery_validation.GuestTreeEntry(
+        path="a",
+        kind="directory",
+        mode="0755",
+        uid=0,
+        gid=0,
+        size=0,
+        target=None,
+        xattrs_supported=False,
+        xattrs={},
+    )
+    last = first.model_copy(update={"path": "z", "xattrs_supported": True, "xattrs": {name: value}})
+    with pytest.raises(ValueError):
+        tree.prepare_restore(iter([first, last]))
+    assert guest.calls == []
