@@ -4,26 +4,22 @@ The local-libvirt provider runs QEMU/KVM guests on the worker host's own libvirt
 shortest path to a working stack — no TLS, no second machine — and it is the provider a contributor
 uses to exercise a change against a real VM.
 
-This page owns which host families are supported and what each one needs. The scripts that carry
-out the procedure live in [`examples/local-libvirt/`](../../../examples/local-libvirt/README.md),
-which owns the command sequence, the guest-image build, and the MCP client wiring.
+This page explains the local-libvirt host requirements. The
+[host and guest distribution table](../platform-support.md#host-and-guest-distributions) owns
+the per-distro status. The scripts that carry out the procedure live in
+[`examples/local-libvirt/`](../../../examples/local-libvirt/README.md), which owns the command
+sequence, the guest-image build, and the MCP client wiring.
 
-## Supported host families
+## Host admission and installation
 
-`examples/local-libvirt/install-host.sh` prepares a host end to end. It classifies the host from
-`/etc/os-release` and refuses anything outside these families rather than installing a partial set.
-
-| Family | `install-host.sh` | Build guest images locally | Verified on |
-|---|---|---|---|
-| Debian / Ubuntu | full | yes | Ubuntu 26.04 |
-| Fedora | full | yes | Fedora 44, end to end |
-| RHEL / CentOS Stream / Rocky / Alma | **fails at the lifecycle installer:** no guestfs binding for the worker's Python 3.14, so no provisioning ([below](#family-differences-that-matter)) | no | Rocky 10 host prep and stack before that check was added; Rocky 9 package names |
-| Anything else (Arch, SUSE, …) | refuses with `exit 2` | — | — |
-
-An unsupported host is not a dead end: the [prerequisites](#what-a-host-needs) below are the whole
-contract, and a host that meets them by hand works with every later step. `deploy/ansible/roles/libvirt_stack`
-covers the same package set for a fleet, and [#2388](https://github.com/randomparity/kdive/issues/2388)
-tracks aiming it at the operator's own host.
+`examples/local-libvirt/install-host.sh` delegates to `just prepare-local-libvirt-host`, whose
+Ansible role admits Debian, Ubuntu, Fedora, RHEL, Rocky, AlmaLinux, openSUSE Tumbleweed, and SLES.
+Admission alone does not establish a usable worker: the lifecycle installer requires the Python
+3.14 `guestfs` binding. EL10 packages its binding for system Python 3.12, so host preparation
+builds one for Python 3.14 from the matching signed source RPM. CentOS Stream, openSUSE Leap,
+and Arch are rejected by the worker role. See the
+[host and guest distribution table](../platform-support.md#host-and-guest-distributions) for
+the separate host-install and guest-image status of each distro.
 
 ## Setup path
 
@@ -70,8 +66,13 @@ These are the points where the two families genuinely diverge, not just in packa
   `qemu-system-ppc`). The RedHat family answers by *nativeness* instead: `qemu-kvm` is the
   metapackage that pulls this host's own emulator, and Enterprise Linux ships no `qemu-system-*`
   package at all ([ADR-0641](../../adr/0641-redhat-qemu-emulator-package-by-nativeness.md)).
-- **CodeReady Builder.** Enterprise Linux keeps `libvirt-devel` in CRB, disabled by default;
-  `install-host.sh` enables it. Fedora has no CRB and needs nothing here.
+- **CodeReady Builder and source repositories.** Enterprise Linux keeps `libvirt-devel` and
+  `libguestfs-devel` in CRB/CodeReady Builder. Enable it before `install-host.sh`; on Rocky or
+  AlmaLinux use `sudo dnf config-manager --set-enabled crb` after installing
+  `dnf-plugins-core`. On subscribed RHEL, enable its CodeReady Builder repository through
+  `subscription-manager`. The EL10 binding builder also needs the distribution's AppStream
+  source repository definition; it enables source repositories only for its exact-source
+  download. Fedora uses its packaged binding.
 - **Container engine.** The engine and the compose v2 plugin are separate packages on every
   family: Debian/Ubuntu pair `docker.io` with `docker-compose-v2`, Fedora pairs `moby-engine`
   with `docker-compose`, and openSUSE Tumbleweed pairs `docker` with `docker-compose`. In each
@@ -150,10 +151,12 @@ These are the points where the two families genuinely diverge, not just in packa
   EL they cannot, and EL ships the binding only for its system Python. Without a binding in the
   lifecycle worker venv, provisioning fails with `libguestfs (the guestfs Python binding) is
   required to extract the baseline kernel`, and so do guest-image builds (`build-fs`), built-kernel
-  staging, external boot and local kdump capture (ADR-0203). Host preparation links the binding
-  from the interpreter the worker venv is built on, so on EL it fails at the lifecycle installer:
-  there is no packaged binding for that Python 3.14 to link, and EL is not a supported
-  local-libvirt provisioning host until one exists. `just check-local-libvirt` probes the
+  staging, external boot and local kdump capture (ADR-0203). On EL10, `local_worker_host`
+  builds the Python 3.14 extension from the signed distro source RPM whose version matches
+  installed `libguestfs` and `libguestfs-devel`; it stores the result outside the worker venv.
+  The lifecycle installer then links it from the venv's base interpreter and fails if import
+  is still unavailable. Source repository or build failure stops host preparation.
+  `just check-local-libvirt` probes the
   installed worker venv for the binding. Note also that an EL host cannot build a *btrfs* image even with a working binding: the EL libguestfs
   appliance kernel has no btrfs, so a Fedora cloud image fails with `unknown filesystem type
   'btrfs'`. The catalog's `rocky-kdive-ready-*` entries are the EL-native choice.

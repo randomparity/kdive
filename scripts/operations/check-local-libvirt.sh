@@ -290,11 +290,11 @@ if _venv_imports_kdump_deps; then
 elif [[ "${KDUMP_PREFLIGHT}" == "optional" ]]; then
   note_warn \
     "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling from the checkout); the installed lifecycle venv is probed separately" \
-    "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\""
+    "uv sync --group live (drgn); run just prepare-local-libvirt-host to link the matching guestfs binding into the checkout venv (on EL10, first enable CRB and source repositories so the host role can build its Python 3.14 binding) — see docs/operating/install.md"
 else
   note_fail \
     "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling)" \
-    "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\""
+    "uv sync --group live (drgn); run just prepare-local-libvirt-host to link the matching guestfs binding into the checkout venv (on EL10, first enable CRB and source repositories so the host role can build its Python 3.14 binding) — see docs/operating/install.md"
 fi
 
 if [[ ! -x "${LIFECYCLE_PY}" ]]; then
@@ -304,7 +304,7 @@ elif _lifecycle_venv_imports_guestfs; then
 else
   note_fail \
     "lifecycle worker venv (${LIFECYCLE_PY}) cannot 'import guestfs'; the worker needs it to provision (baseline-kernel extraction), build-fs, stage built kernels, external boot and local kdump capture" \
-    "install the distribution's guestfs binding for the interpreter that venv is built on (python3-guestfs on Debian/Ubuntu, python3-libguestfs on Fedora), then re-run just prepare-local-libvirt-host, whose lifecycle installer links it; Enterprise Linux packages no binding for the venv's Python 3.14 (docs/operating/install.md)"
+    "run just prepare-local-libvirt-host to install the matching guestfs binding (on EL10, first enable CRB and source repositories so the host role can build its Python 3.14 binding); see docs/operating/install.md"
 fi
 
 if _host_kernels_readable; then

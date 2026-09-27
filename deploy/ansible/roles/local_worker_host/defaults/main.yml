@@ -98,6 +98,16 @@ local_worker_host_packages_redhat:
   - zlib-devel          # grpcio source build on ppc64le (paired with openssl-devel above, #2666)
   - policycoreutils-python-utils  # semanage + the seobject bindings sefcontext needs (ADR-0640)
 
+# EL10 has Python 3.14 in AppStream but python3-libguestfs targets system Python 3.12.
+# The source binding builder needs CRB/CodeReady Builder and a configured source repository.
+local_worker_host_guestfs_packages_el10:
+  - python3.14
+  - python3.14-devel
+  - libguestfs-devel
+  - dnf-plugins-core
+  - rpm-build
+  - cpio
+
 # The two parent image directories this role labels svirt_image_t on an SELinux-enforcing RedHat
 # host (ADR-0640, #2779). The nested /var/lib/kdive/rootfs/local rule belongs to build-image.sh
 # and must not be added here: local fcontext rules match last-wins in file_contexts.local, so a

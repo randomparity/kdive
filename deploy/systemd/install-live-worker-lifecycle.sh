@@ -38,8 +38,9 @@ _link_system_guestfs_binding() (
   # from the interpreter this venv was built on, whose site-packages is where a system package or a
   # from-source build installs it. Ubuntu 26.04 and Fedora 44 ship the project's 3.14 as
   # /usr/bin/python3 with the distro binding. Enterprise Linux ships 3.12 there, packages 3.14
-  # separately, and builds python3-libguestfs only for 3.12, so there is no binding to link until
-  # one exists for python3.14. A binding copied into the venv by hand would not last either:
+  # separately, and builds python3-libguestfs only for 3.12. The EL10 host role builds a
+  # matching-source 3.14 binding into the base interpreter before this installer runs. A binding
+  # copied into the venv by hand would not last either:
   # _prepare_attested_runtime_root empties the runtime root on every run. This venv is the worker
   # that provisions, and provisioning extracts the baseline kernel through the binding (ADR-0272),
   # as do build-fs, built-kernel staging, external boot and local kdump capture, so a missing
@@ -57,8 +58,9 @@ _link_system_guestfs_binding() (
       "needs it to provision (baseline-kernel extraction), build-fs, stage built kernels," \
       "external boot and local kdump capture. Install the distribution's binding for that" \
       "interpreter (python3-guestfs on Debian/Ubuntu, python3-libguestfs on Fedora), then" \
-      "re-run this installer. Enterprise Linux builds python3-libguestfs only for its system python3, so" \
-      "no packaged binding exists for $base_python there and the family cannot provision" \
+      "re-run this installer. On Enterprise Linux 10, apply the local_worker_host role" \
+      "with CRB/CodeReady Builder and a distribution source repository enabled; it builds" \
+      "the matching Python 3.14 binding before worker installation" \
       "(docs/operating/install.md)." >&2
     return 1
   }
