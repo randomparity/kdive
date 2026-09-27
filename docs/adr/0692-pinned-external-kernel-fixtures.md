@@ -1,8 +1,8 @@
-# 0691 Pinned external kernel fixtures
+# 0692 Pinned external kernel fixtures
 
 ## Status
 
-Accepted
+Accepted (2026-09-27)
 
 ## Context
 
