@@ -467,9 +467,10 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_WARM_STORE_TARGET_NVR",
         "script",
         None,
-        "Supplied pinned guest-kernel NVR the warm-store refresh keys freshness on (the "
-        "operator/CI computes it from the base image; no live distro query). Unset → the script "
-        "dies. Same-NVR distro rebuilds need `KDIVE_WARM_STORE_FORCE`.",
+        "Supplied pinned guest-kernel NVR (operator/CI computes it from the base image; no live "
+        "distro query). Unset → the script dies. Warm reuse also requires the selected catalog "
+        "row, clean builder commit, provenance, and artifact digests to match; the NVR alone "
+        "does not establish freshness.",
     ),
     ExternalEnvVar(
         "KDIVE_WARM_STORE_IMAGE",
@@ -482,8 +483,8 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_WARM_STORE_FORCE",
         "script",
         "0",
-        "When `1`, `warm-store.sh` skips the warm fast-path and rebuilds — the escape hatch for a "
-        "distro that rebuilt the kernel under an unchanged NVR.",
+        "When `1`, `warm-store.sh` skips manifest-verified warm reuse and rebuilds, for example "
+        "when a distro changes package bytes without changing the pinned NVR.",
     ),
     ExternalEnvVar(
         "KDIVE_TCG_STAGE_DIR",
@@ -535,6 +536,39 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "paths are hardcoded in the provider (no setting redirects them) and live under "
         "root-owned `/var/lib/kdive`, so a non-root worker needs them pre-created; the default "
         "tracks the constants in `runtime_paths.py` and `lifecycle/storage.py`.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LANE_WORKSPACE",
+        "script",
+        None,
+        "Existing workspace directory whose filesystem free bytes `preflight-env.sh capacity` "
+        "checks. Required for that family; unset or missing → preflight fails. Set it to an "
+        "existing workspace and retry. This is a point-in-time admission check, not a disk "
+        "reservation.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LANE_CPUS",
+        "script",
+        "8",
+        "Positive CPU count required by `preflight-env.sh capacity`; available CPUs are checked "
+        "at admission only, with no reservation. Invalid or insufficient → preflight fails; "
+        "reduce the lane size or choose another host and retry.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LANE_MEMORY_MIB",
+        "script",
+        "16384",
+        "Positive available-memory requirement in MiB for `preflight-env.sh capacity`; checked "
+        "at admission only, with no reservation. Invalid or insufficient → preflight fails; "
+        "free memory, reduce the lane size, or choose another host and retry.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LANE_DISK_BYTES",
+        "script",
+        "51539607552",
+        "Positive free-space requirement in bytes on KDIVE_LANE_WORKSPACE for "
+        "`preflight-env.sh capacity`; checked at admission only, with no reservation. Invalid "
+        "or insufficient → preflight fails; free space or choose another workspace and retry.",
     ),
     ExternalEnvVar(
         "KDIVE_BOOT_DIR",
