@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from scripts.coverage_campaign.evidence import EvidenceError, read_bindings, read_results
-from tests.scripts.test_results import complete_evidence
+from tests.scripts.coverage_support import complete_evidence
 
 
 def test_json_round_trip(tmp_path: Path) -> None:

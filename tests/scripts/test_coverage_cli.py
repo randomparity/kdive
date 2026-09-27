@@ -7,7 +7,7 @@ import pytest
 
 from scripts.coverage_campaign import __main__ as cli
 from scripts.coverage_campaign.contract import build_contract
-from tests.scripts.test_results import complete_evidence
+from tests.scripts.coverage_support import complete_evidence
 
 
 def test_real_fast_check_distinguishes_ownership_from_proof(
