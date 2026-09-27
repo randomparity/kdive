@@ -62,6 +62,9 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalSystemTeardownIntentV1,
     RecoveryPhase,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    LocalExternalBootTimingConfigurationError,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalOperationLeaseScope
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
@@ -1060,7 +1063,7 @@ async def test_accepted_commit_points_drive_named_local_primitives() -> None:
     assert "define-target" in io.actions
 
 
-async def test_local_configuration_failure_is_logged_and_transport_maps_provider_conflict(
+async def test_unrelated_local_configuration_error_maps_provider_conflict(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     class MismatchedHostIO(_FakeIO):
@@ -1078,6 +1081,23 @@ async def test_local_configuration_failure_is_logged_and_transport_maps_provider
 
     assert caught.value.category == "provider_conflict"
     assert "align server and host settings" in caplog.text
+    assert "define-target" not in io.actions
+
+
+async def test_local_timing_refusal_maps_to_service_configuration_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class MismatchedHostIO(_FakeIO):
+        def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+            del metadata
+            raise LocalExternalBootTimingConfigurationError("host-only timing diagnostic")
+
+    io = MismatchedHostIO(_metadata("pre-stop-intent"))
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).commit(_request(), _context(AuthorityOperation.ACTIVATE))
+
+    assert caught.value.category == "configuration_error"
+    assert "host-only timing diagnostic" in caplog.text
     assert "define-target" not in io.actions
 
 

@@ -1299,6 +1299,13 @@ class _ConcreteSession:
         return self._domain
 
 
+class LocalExternalBootTimingConfigurationError(CategorizedError):
+    """One of the two timing mismatches refused before provider mutation."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, category=ErrorCategory.CONFIGURATION_ERROR, terminal=True)
+
+
 class LocalExternalBootSessionFactory:
     def __init__(
         self,
@@ -1402,11 +1409,9 @@ class LocalExternalBootSessionFactory:
             if local_timing is not None:
                 xml_accel = inactive_root.get("type")
                 if local_timing.accel is not None and local_timing.accel != xml_accel:
-                    raise CategorizedError(
+                    raise LocalExternalBootTimingConfigurationError(
                         "local external-boot accelerator disagrees with inactive domain XML; "
-                        "correct the System accelerator or domain definition",
-                        category=ErrorCategory.CONFIGURATION_ERROR,
-                        terminal=True,
+                        "correct the System accelerator or domain definition"
                     )
                 host_window = resolve_local_timing(
                     local_timing.accel,
@@ -1414,12 +1419,10 @@ class LocalExternalBootSessionFactory:
                     config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER),
                 ).console_window_s
                 if host_window != local_timing.console_window_s:
-                    raise CategorizedError(
+                    raise LocalExternalBootTimingConfigurationError(
                         "local external-boot authority boot window differs from admitted window; "
                         "align KDIVE_LIBVIRT_BOOT_WINDOW_S and "
-                        "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER across server and authority host",
-                        category=ErrorCategory.CONFIGURATION_ERROR,
-                        terminal=True,
+                        "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER across server and authority host"
                     )
             _require_guest_agent_channel(inactive_root, system_id)
             xml = domain.XMLDesc(0)

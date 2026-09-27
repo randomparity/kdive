@@ -34,7 +34,10 @@ from kdive.providers.external_boot_authority.host import (
     HostReadinessError,
     check_tls_health,
 )
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
+    AuthorityServiceError,
+)
 from kdive.providers.external_boot_authority.transport import (
     MAX_CREDENTIAL_BYTES,
     MAX_ENVELOPE_BYTES,
@@ -43,6 +46,32 @@ from kdive.providers.external_boot_authority.transport import (
     read_frame,
     serve_authority_transport,
 )
+from tests.providers.external_boot_authority.service_support import _mutation, _takeover
+
+
+def test_configuration_refusal_uses_closed_wire_category() -> None:
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class RefusingService:
+        async def execute_mutation(
+            self, peer: AuthenticatedPeer, request: protocol.AuthorityMutationRequestV1
+        ) -> protocol.AuthorityObservationV1:
+            del peer, request
+            raise AuthorityServiceError("configuration_error")
+
+    async def exercise() -> None:
+        request = _mutation(_takeover())
+        response = await transport._dispatch(
+            encode_request_envelope(
+                "execute-mutation", request.model_dump(mode="json", by_alias=True), "worker"
+            ),
+            authenticate,
+            cast(Any, RefusingService()),
+        )
+        assert response == b'{"category":"configuration-error","status":"error"}'
+
+    asyncio.run(exercise())
 
 
 def test_identity_dispatch_authenticates_before_independent_service() -> None:
