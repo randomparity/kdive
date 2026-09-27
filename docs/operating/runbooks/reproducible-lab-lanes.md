@@ -57,6 +57,23 @@ emulator; it does not boot a POWER guest. Native POWER execution and hardware al
 with #2818. A checksum-pinned POWER cloud image is available for that owner, but no POWER fixture
 was customized or qualified here.
 
+### Native POWER reservation handoff (#2818)
+
+Request one operator-owned, resettable ppc64le Linux slot with usable KVM-HV and local libvirt.
+Before assigning it, the operator should confirm who owns the slot, how it is reset, and which
+task-created domains and storage that owner may remove. Reserve at most 8 CPUs, 16 GiB RAM, and
+one physically bounded 64 GiB task scratch filesystem; permit only one fixture build on the host.
+Use the same 48 GiB free-space admission floor, with temporary files, libguestfs cache, console,
+rootfs, and store confined to that scratch mount. The selected input is the catalog row
+`fedora-kdive-ready-44-ppc64le`, source SHA-256
+`3bea270eba46cdedf3c6c71b20c6ffb03b54131631497a27ff826a497c1dfac6` (540,803,072
+bytes). Verify the downloaded source against that pin, then run `preflight-env.sh native-power`
+and `preflight-env.sh capacity` separately with the assigned local libvirt URI and task mount.
+Record KVM-HV, the actual resource use, candidate identity, and before/after domain/storage state
+before calling a native result qualified. Retain only agreed task-owned outputs and clean up only
+task-created temporary inputs. No native POWER hardware or scratch slot was allocated for this
+issue.
+
 ## Selected inputs and fixture evidence
 
 | Catalog row | Architecture | Pinned source SHA-256 | Outcome |
