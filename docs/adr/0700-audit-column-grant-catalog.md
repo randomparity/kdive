@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted (2026-09-27). Amends [ADR-0653](0653-worker-grant-catalog-guard.md)'s
+Accepted (2026-09-27)
+
+Amends [ADR-0653](0653-worker-grant-catalog-guard.md)'s
 table-privilege predicate for direct audit INSERT only. Issue: #2712.
 
 ## Context
