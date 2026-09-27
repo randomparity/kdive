@@ -54,6 +54,7 @@ _PEER_REASONS = frozenset(
         "provider-failure",
         "remote-module-failed",
         "remote-module-refused",
+        "configuration-error",
     }
 )
 
@@ -66,13 +67,19 @@ def _failure(reason: str) -> CategorizedError:
     category = {
         "remote-module-failed": ErrorCategory.CONFLICT,
         "remote-module-refused": ErrorCategory.CONFIGURATION_ERROR,
+        "configuration-error": ErrorCategory.CONFIGURATION_ERROR,
     }.get(reason, ErrorCategory.INFRASTRUCTURE_FAILURE)
     details: dict[str, object] | None = None
     if reason == "remote-module-failed":
         details = {"completion": "failed-after-mutation"}
     elif reason == "remote-module-refused":
         details = {"completion": "refused-before-mutation"}
-    return CategorizedError(f"authority: {reason}", category=category, details=details)
+    return CategorizedError(
+        f"authority: {reason}",
+        category=category,
+        details=details,
+        terminal=reason == "configuration-error",
+    )
 
 
 def _decode_response[Value: BaseModel](payload: bytes, model: type[Value]) -> Value:

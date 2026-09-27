@@ -1216,13 +1216,13 @@ def test_a_successful_run_reaches_the_port_and_returns_the_built_result(
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
 
-@pytest.mark.parametrize("unprintable", [False, True])
+@pytest.mark.parametrize("failure_kind", ["provider", "unprintable", "configuration"])
 def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     vehicle: Vehicle,
     caplog: pytest.LogCaptureFixture,
-    unprintable: bool,
+    failure_kind: str,
 ) -> None:
     """A provider raise is bound to its allocation; its message stays out of the result.
 
@@ -1238,8 +1238,14 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
             raise ValueError("message rendering failed")
 
     def explode(_context: OperationContext) -> RunningKernelObservation:
-        if unprintable:
+        if failure_kind == "unprintable":
             raise UnprintableError()
+        if failure_kind == "configuration":
+            raise CategorizedError(
+                "authority: configuration-error",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                terminal=True,
+            )
         raise OSError(raw_message)
 
     async def body(seed: AsyncConnection, conn: AsyncConnection) -> None:
@@ -1259,6 +1265,9 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
         result = failure.result.result
         assert isinstance(result, _FailureResult)
         assert result.failure_context.phase == "provider-call"
+        if failure_kind == "configuration":
+            assert result.error_category is ErrorCategory.CONFIGURATION_ERROR
+            assert result.terminal is True
         assert failure.result.journal_sequence > 0
         # `from None`, so the provider's own exception is not chained onto a renderable traceback.
         assert failure.__cause__ is None
@@ -1275,9 +1284,11 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
         warning = warnings[0].getMessage()
         assert "phase=provider-call" in warning
         assert secret not in warning
-        if unprintable:
+        if failure_kind == "unprintable":
             assert "exception=UnprintableError" in warning
             assert warning.endswith("reason=<message unavailable>")
+        elif failure_kind == "configuration":
+            assert warning.endswith("reason=authority: configuration-error")
         else:
             assert "exception=OSError" in warning
             assert "[REDACTED]" in warning
