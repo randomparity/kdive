@@ -193,7 +193,7 @@ def test_lifecycle_venv_without_guestfs_fails_whatever_the_kdump_setting(
     assert str(lifecycle) in fail_line
     assert "provision" in fail_line
     assert "prepare-local-libvirt-host" in result.stderr
-    assert "python3-libguestfs" in result.stderr
+    assert "source repositories" in result.stderr
 
 
 def test_lifecycle_venv_with_guestfs_passes(tmp_path: Path) -> None:
@@ -241,10 +241,9 @@ def test_missing_venv_bindings_fails_with_hint(tmp_path: Path) -> None:
     assert "guestfs" in err and "drgn" in err
     # The hint must point at both fixes: the live group and the libguestfs binding.
     assert "uv sync --group live" in result.stderr
-    assert "python3-libguestfs" in result.stderr
-    # The old "section 4b" pointer named a heading that no longer exists in that runbook.
-    assert "Wire the worker venv" in result.stderr, result.stderr
-    assert "section 4b" not in result.stderr, result.stderr
+    assert "just prepare-local-libvirt-host" in result.stderr
+    assert "EL10" in result.stderr
+    assert "source repositories" in result.stderr
     # The failing check names the interpreter it actually probes (KDIVE_PYTHON, the
     # checkout/CLI interpreter) rather than calling it the "worker venv" -- this checkout
     # interpreter is not the running lifecycle worker (issue #2759).
@@ -288,7 +287,7 @@ def test_missing_venv_bindings_optional_warns(tmp_path: Path) -> None:
     assert "WARN" in result.stderr
     assert "FAIL" not in result.stderr
     assert "guestfs" in result.stderr and "drgn" in result.stderr
-    assert "python3-libguestfs" in result.stderr
+    assert "source repositories" in result.stderr
     assert "host is ready" in result.stderr
     # The WARN path's message went through the same rename as the FAIL path: it must name
     # KDIVE_PYTHON, not the "worker venv" (issue #2759).

@@ -13,6 +13,9 @@
     # under tests/, which must keep resolving against the launching environment (#2498).
     ansible_python_interpreter: /usr/bin/python3
     local_libvirt_host_source: "{{ playbook_dir }}/../../.."
+    local_libvirt_host_guestfs_python: >-
+      {{ '/usr/bin/python3.14' if ansible_facts['distribution'] in ['RedHat', 'Rocky', 'AlmaLinux']
+         and ansible_facts['distribution_major_version'] | int == 10 else '/usr/bin/python3' }}
     local_libvirt_host_operator_user: ""
     local_libvirt_host_witness_dsn: >-
       {{ lookup('ansible.builtin.env', 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL', default='') }}
@@ -268,9 +271,9 @@
       register: local_libvirt_host_traversal
       changed_when: local_libvirt_host_traversal.stdout == 'true'
 
-    - name: Read the system Python minor version
+    - name: Read the guestfs binding Python minor version
       ansible.builtin.command:
-        argv: [/usr/bin/python3, -c, "import sys; print(sys.version_info.minor)"]
+        argv: ["{{ local_libvirt_host_guestfs_python }}", -c, "import sys; print(sys.version_info.minor)"]
       register: local_libvirt_host_system_python_minor
       changed_when: false
 
@@ -286,8 +289,8 @@
     - name: Explain why the system guestfs binding cannot be shared
       ansible.builtin.debug:
         msg: >-
-          system python3 is 3.{{ local_libvirt_host_system_python_minor.stdout }} but the venv is
-          3.{{ local_libvirt_host_venv_python_minor.stdout }}; the distro guestfs binding cannot
+          {{ local_libvirt_host_guestfs_python }} is 3.{{ local_libvirt_host_system_python_minor.stdout }}
+          but the venv is 3.{{ local_libvirt_host_venv_python_minor.stdout }}; the guestfs binding cannot
           be shared, so build-fs and local kdump tooling are unavailable from this checkout venv.
           Provisioning runs in the lifecycle worker venv, which the lifecycle installer above
           already required to import guestfs.
@@ -297,7 +300,7 @@
     - name: Read the system guestfs module directory
       ansible.builtin.command:
         argv:
-          - /usr/bin/python3
+          - "{{ local_libvirt_host_guestfs_python }}"
           - -c
           - "import os, guestfs; print(os.path.dirname(guestfs.__file__))"
       register: local_libvirt_host_guestfs_site

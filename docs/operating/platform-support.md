@@ -20,7 +20,7 @@ does not establish a working installation: the [lifecycle installer](
 `guestfs` binding built for that interpreter. It fails when the binding is absent. A guest row
 means the image build path exists, not that every live operation has been proved on that release.
 In the host column, **yes** identifies a release with a documented matching-binding path;
-**conditional** means the role admits the distro but no matching-binding host result is recorded;
+**conditional** means the role admits the distro but the complete host path has not been proved;
 **blocked** means the installer has a known binding failure; **no** means the role rejects it.
 
 | Distribution | Local-libvirt worker host | Bundled guest image |
@@ -28,8 +28,8 @@ In the host column, **yes** identifies a release with a documented matching-bind
 | Fedora | Yes for 44: matching system Python 3.14 binding; other releases need an import check | 43 and 44: x86_64, ppc64le |
 | Ubuntu | Yes for 26.04: matching system Python 3.14 binding; other releases need an import check | 24.04 and 26.04: x86_64 |
 | Debian | Conditional: role admits it, but no matching-binding host result is recorded | 12 and 13: x86_64 |
-| Rocky Linux | Blocked: role admits it, but the worker lacks a Python 3.14 `guestfs` binding | 8: x86_64; 9 and 10: x86_64, ppc64le |
-| RHEL / AlmaLinux | Blocked: role admits them, but the same binding gap prevents worker installation | No bundled entry |
+| Rocky Linux | Conditional for 10: host prep builds a Python 3.14 binding from the matching signed libguestfs source RPM. The focused Rocky 10.2 proof below passed; the complete host play and KDIVE provisioning stack have not run. Other releases need an import check. | 8: x86_64; 9 and 10: x86_64, ppc64le |
+| RHEL / AlmaLinux | Conditional for 10: same source-build path, with CRB/CodeReady Builder and a distro source repository; no live host result is recorded. Other releases need an import check. | No bundled entry |
 | CentOS Stream | No: worker role rejects it | 9 and 10: x86_64, ppc64le |
 | openSUSE Tumbleweed | Conditional: role admits it, but no matching-binding host result is recorded | Snapshot 20260919: x86_64 |
 | SLES | Conditional: role admits it, but no matching-binding host result is recorded | No bundled entry |
@@ -38,10 +38,31 @@ In the host column, **yes** identifies a release with a documented matching-bind
 
 The installer uses `uv` to select an installed Python 3.14 with downloads disabled; this
 project's `uv` dependency set does not supply the native `guestfs` binding. Installing Python
-3.14 alone therefore does not clear the Enterprise Linux host gap. The
+3.14 alone therefore does not clear the Enterprise Linux host gap. The EL10 host role
+builds the extension from the distribution's matching signed libguestfs source RPM. The
 [installation guide](install.md#local-libvirt-host-preparation)
 and [provider guide](providers/local-libvirt.md#family-differences-that-matter) describe that
-failure. Guest image architecture and the available live proofs are detailed below.
+build route and its prerequisites. Guest image architecture and the available live proofs are
+detailed below.
+
+### EL10 binding proof (2026-09-27)
+
+On a disposable Rocky 10.2 x86_64 KVM VM, the host builder downloaded the signed
+`libguestfs-1.58.1-9.el10_2.src.rpm` matching installed `libguestfs` and
+`libguestfs-devel`, compiled the extension for AppStream Python 3.14.7, and made the base
+interpreter import it. The actual lifecycle installer's binding-link function linked it into
+a fresh Python 3.14 venv and imported it again after that venv was deleted and recreated.
+The files selected by the checkout playbook also imported from a separate fresh Python 3.14 venv.
+From the venv as an unprivileged user, libguestfs launched its
+appliance, inspected a SHA-256-verified Rocky 10.2 cloud image, mounted its root and `/boot`,
+and downloaded a guest kernel. Re-running the builder reused the same versioned binding.
+A direct `kdive build-fs` attempt with the catalog URL stopped at `base_unreachable` because
+the disposable VM had no outbound network. Serving the same pinned image from a VM-local
+source let the build reach a nested customization guest: `kdive-customize.service` started,
+but its `dnf` log recorded repeated 30-second mirror timeouts and no completion marker
+appeared before the 180-second proof limit. The full
+`local-libvirt-host` play, lifecycle installer, and KDIVE provisioning stack were not run,
+so the host row remains conditional.
 
 ## Architecture and accelerator tiers
 
@@ -177,7 +198,7 @@ The driver skips non-ppc64le hosts and non-KVM accelerators (ADR-0349, #2398); c
 selected for a native proof.
 
 The [2026-09-11 native-POWER proof record](../design/2026-09-11-native-power-fadump-kdump-proof-2383.md)
-establishes the complete fadump crash→capture cycle on a native POWER9 host (ltcwspoon18,
+establishes the complete fadump crash→capture cycle on a native POWER9 host (sys-R1,
 Ubuntu 26.04.1 LTS, QEMU 10.2.1 KVM-HV) against merged `main` (`f18b5da05`). Key evidence:
 `rtas fadump: Registration is successful!` at 0.1 s of guest time; `force_crash` triggered;
 capture kernel reported `Firmware-assisted dump is active.`; `fadump-capture.service` found

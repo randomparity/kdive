@@ -16,6 +16,9 @@ against the installed C library and Python 3.14; and make the result importable 
 base interpreter. The existing lifecycle installer links that binding into each fresh venv
 and verifies the import. The build stays under a root-owned versioned directory, outside
 the replaced venv. It does not install a second libguestfs runtime or appliance.
+The local-libvirt host play also links the matching binding into its checkout venv, which
+`build-image.sh` uses. On EL10, `libvirt_stack` installs `guestfs-tools` for the rootfs
+build binaries absent from `libguestfs-tools-c`; other RedHat releases keep their package path.
 
 Source download uses enabled EL source repository definitions. The source RPM must pass RPM
 signature verification and match both `libguestfs` and `libguestfs-devel` source NEVRs.
@@ -61,6 +64,8 @@ routes, the EL btrfs appliance gap, and Ubuntu/Fedora binding routes.
   imports with Python 3.14, and repeats after deleting/recreating a venv.
 - `focused-test`: installer tests cover the base-interpreter-to-venv link and loud failure.
 - `focused-test`: Ansible task tests cover EL10-only prerequisites and ordering.
+- `focused-test`: the checkout venv imports the EL10 binding and the preflight names the
+  source-build host preparation remedy.
 - `focused-test`: a live Rocky 10 KVM VM runs the built binding and KDIVE provision/rootfs
   path; record candidate SHA, distribution, libguestfs source NEVR, and exact result.
 - `task-test-not-applicable`: documentation wording is human-facing and has no executable

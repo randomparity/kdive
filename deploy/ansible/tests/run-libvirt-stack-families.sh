@@ -35,9 +35,9 @@ def render(template, **facts):
     return jinja.from_string(template).render(**defaults, **facts)
 
 
-def module_task(module):
-    matches = [task for task in tasks if module in task]
-    require(len(matches) == 1, f"expected one {module} task")
+def module_task(module, name=None):
+    matches = [task for task in tasks if module in task and (name is None or task.get("name") == name)]
+    require(len(matches) == 1, f"expected one {module} task named {name}")
     return matches[0]
 
 
@@ -88,7 +88,22 @@ modules = {
     "RedHat": "ansible.builtin.dnf",
     "Suse": "community.general.zypper",
 }
-install = {family: module_task(module) for family, module in modules.items()}
+install = {
+    family: module_task(module, f"Install virtualization packages ({family})")
+    for family, module in modules.items()
+}
+el10_tools = module_task("ansible.builtin.dnf", "Install EL10 rootfs build tools")
+require(el10_tools["ansible.builtin.dnf"]["name"] == "guestfs-tools",
+        "EL10 rootfs tools package differs")
+for distribution, major, expected_enabled in (
+    ("RedHat", "10", True), ("Rocky", "10", True), ("AlmaLinux", "10", True),
+    ("Rocky", "9", False), ("Fedora", "44", False),
+):
+    facts = {"ansible_facts": {
+        "distribution": distribution, "distribution_major_version": major,
+    }}
+    enabled = all(evaluate(condition, **facts) for condition in el10_tools["when"])
+    require(enabled == expected_enabled, f"EL10 rootfs tool route differs for {distribution} {major}")
 selection = next(
     task for task in tasks if task.get("name", "").startswith("Select the QEMU emulators")
 )

@@ -1759,6 +1759,69 @@ def test_redhat_worker_provisions_python_headers_for_locked_venv() -> None:
     assert "python3-devel" in packages
 
 
+def test_el10_guestfs_builder_runs_after_its_host_dependencies() -> None:
+    defaults = _yaml(LOCAL_WORKER / "defaults/main.yml")
+    packages = defaults["local_worker_host_guestfs_packages_el10"]
+    assert isinstance(packages, list)
+    assert {
+        "python3.14",
+        "python3.14-devel",
+        "libguestfs-devel",
+        "dnf-plugins-core",
+        "rpm-build",
+        "cpio",
+    } <= set(packages)
+    tasks = yaml.safe_load((LOCAL_WORKER / "tasks/packages_redhat.yml").read_text())
+    install = next(task for task in tasks if task["name"].startswith("Install the EL10 Python"))
+    build = next(task for task in tasks if task["name"].startswith("Build the EL10 Python"))
+    assert tasks.index(install) < tasks.index(build)
+    assert (
+        install["when"]
+        == build["when"]
+        == [
+            "ansible_facts['distribution'] in ['RedHat', 'Rocky', 'AlmaLinux']",
+            "ansible_facts['distribution_major_version'] | int == 10",
+        ]
+    )
+    assert build["ansible.builtin.script"] == "build-el10-guestfs-binding.sh"
+    assert (LOCAL_WORKER / "files/build-el10-guestfs-binding.sh").is_file()
+
+
+def test_el10_rootfs_tools_are_provisioned_without_changing_other_redhat_hosts() -> None:
+    tasks = yaml.safe_load(_text(ROLE.parent / "libvirt_stack/tasks/main.yml"))
+    tools = next(task for task in tasks if task["name"] == "Install EL10 rootfs build tools")
+    assert tools["ansible.builtin.dnf"]["name"] == "guestfs-tools"
+    assert tools["when"] == [
+        "ansible_facts['distribution'] in ['RedHat', 'Rocky', 'AlmaLinux']",
+        "ansible_facts['distribution_major_version'] | int == 10",
+    ]
+
+
+def test_local_host_links_el10_binding_into_checkout_venv() -> None:
+    play = yaml.safe_load(_text(LOCAL_PLAY))[0]
+    python = Environment(undefined=StrictUndefined).from_string(
+        play["vars"]["local_libvirt_host_guestfs_python"]
+    )
+    for distribution, major, expected in (
+        ("Rocky", "10", "/usr/bin/python3.14"),
+        ("RedHat", "10", "/usr/bin/python3.14"),
+        ("AlmaLinux", "10", "/usr/bin/python3.14"),
+        ("Fedora", "44", "/usr/bin/python3"),
+        ("Rocky", "9", "/usr/bin/python3"),
+    ):
+        facts = {"distribution": distribution, "distribution_major_version": major}
+        assert python.render(ansible_facts=facts).strip() == expected
+
+    tasks = play["tasks"]
+    named = {task["name"]: task for task in tasks}
+    source = named["Read the system guestfs module directory"]
+    site = named["Read the project venv site-packages directory"]
+    link = named["Link the system guestfs binding into the project venv"]
+    verify = named["Verify the linked guestfs binding imports from the project venv"]
+    assert source["ansible.builtin.command"]["argv"][0] == "{{ local_libvirt_host_guestfs_python }}"
+    assert tasks.index(source) < tasks.index(site) < tasks.index(link) < tasks.index(verify)
+
+
 def test_provider_authority_host_packages_provision_openssl_and_zlib_headers_per_family() -> None:
     """The provider-authority host's root `uv sync` shares the same source-build gap (#2666)."""
     defaults = yaml.safe_load(_text(PROVIDER_AUTHORITY / "defaults/main.yml"))
