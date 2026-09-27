@@ -93,6 +93,8 @@ def test_lane_rejects_wrong_arch_or_accel(
         "qemu+tcp://remote/system",
         "qemu+unix://remote/system",
         "qemu:///system?host=remote",
+        "qemu:///system?host=",
+        "qemu+unix:///session?socket=",
     ],
 )
 def test_remote_or_unexpected_uri_rejected_before_virsh(
@@ -185,6 +187,7 @@ def test_tcg_uses_reported_emulator(
     emulator.chmod(0o755 if executable else 0o644)
     _machine(monkeypatch, "x86_64", _caps("x86_64", "ppc64le", "tcg", str(emulator)))
     if executable:
+        lane.check_lane("tcg-host", "qemu+unix:///session")
         lane.check_lane("tcg-host", "qemu+unix:///session?socket=/tmp/libvirt.sock")
     else:
         with pytest.raises(lane.PreflightError, match="emulator"):

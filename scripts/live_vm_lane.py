@@ -29,7 +29,11 @@ class PreflightError(Exception):
 def _local_uri(uri: str) -> None:
     try:
         parsed = urlsplit(uri)
-        query = parse_qs(parsed.query, strict_parsing=True) if parsed.query else {}
+        query = (
+            parse_qs(parsed.query, strict_parsing=True, keep_blank_values=True)
+            if parsed.query
+            else {}
+        )
     except ValueError as exc:
         raise PreflightError(f"invalid local libvirt URI {uri!r}: {exc}") from exc
     if (
@@ -40,6 +44,7 @@ def _local_uri(uri: str) -> None:
         or (parsed.scheme == "qemu" and query)
         or (
             parsed.scheme == "qemu+unix"
+            and query
             and (
                 set(query) != {"socket"}
                 or len(query["socket"]) != 1
