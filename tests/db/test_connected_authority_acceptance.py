@@ -29,7 +29,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityTakeoverRequestV1,
 )
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.external_boot_authority.service import AuthenticatedPeer, AuthorityServiceError
 from kdive.providers.local_libvirt import composition as local_composition
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalObservedState,
@@ -447,3 +447,160 @@ async def test_typed_sender_reaches_constructed_sql_backed_authority_service(
             if listener is not None:
                 await listener.close()
             await service.close()
+
+
+class _Ready(Exception):
+    """Raised at READY=1 to stop the host after its startup readiness passed."""
+
+
+@pytest.mark.anyio
+async def test_host_startup_retracts_a_refused_anchor_left_by_a_failed_retraction(
+    monkeypatch: pytest.MonkeyPatch,
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+) -> None:
+    """#2793: one refused anchor no longer restart-loops the host on journal: head-mismatch."""
+    with psycopg.connect(migrated_url) as connection:
+        case = _seed_case(connection, worker_suffix="r")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        allocated = _allocate(worker, case)
+    with psycopg.connect(migrated_url) as connection:
+        connection.execute(
+            "UPDATE worker_incarnations SET credential_hash = %s WHERE incarnation = %s",
+            (hashlib.sha256(case.credential).digest(), case.worker_id),
+        )
+
+    with tempfile.TemporaryDirectory(prefix="kdive-authority-", dir=Path.home()) as temporary:
+        secure = Path(temporary)
+        secure.chmod(0o700)
+        root = secure / "recovery"
+        journal = secure / "journal"
+        state = secure / "state"
+        for directory in (root, journal, state):
+            directory.mkdir(mode=0o700)
+        runtime_config.load(
+            {
+                "KDIVE_LIBVIRT_RECOVERY_ROOT": str(root),
+                "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "1048576",
+            }
+        )
+        material = _tls_material(secure, case.authority_instance)
+        database_dsn = secure / "database-dsn"
+        database_dsn.write_text(authority_role_dsns("kdive_provider_authority"), encoding="utf-8")
+        database_dsn.chmod(0o400)
+        config = AuthorityHostConfig(
+            authority_instance=case.authority_instance,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            authority_client_gid=os.getegid(),
+            journal_dir=journal,
+            request_socket=secure / "request" / "authority.sock",
+            provider_socket=secure / "provider.sock",
+            database_dsn=database_dsn,
+            server_private_key=material["server_key"],
+            server_certificate=material["server_certificate"],
+            server_ca=material["server_ca"],
+            worker_client_ca=material["server_ca"],
+            health_client_certificate=material["client_certificate"],
+            health_client_key=material["client_key"],
+            state_dir=state,
+        )
+        config.request_socket.parent.mkdir(mode=0o2750)
+        config.request_socket.parent.chmod(0o2750)
+        boundary = _HostBoundary()
+        _configure_local_composition(monkeypatch, root, boundary)
+        monkeypatch.setattr(
+            provider_composition, "object_store_from_env", lambda: cast(Any, object())
+        )
+        takeover = AuthorityTakeoverRequestV1(
+            authority_id=allocated.authority_id,
+            generation=allocated.generation,
+            system_id=case.system_id,
+            activation_id=case.activation_id,
+            run_id=case.run_id,
+            plan_identity="sha256:" + "a" * 64,
+            purpose=cast(Any, case.purpose),
+            operation=case.operation,
+            provider_kind=case.provider_kind,
+            authority_instance=case.authority_instance,
+            operation_identity=case.operation_identity,
+            operation_digest=allocated.operation_digest,
+        )
+        boundary.prime(
+            ExternalBootActivationBinding(
+                system_id=str(case.system_id),
+                run_id=str(case.run_id),
+                activation_id=str(case.activation_id),
+            ),
+            takeover.plan_identity,
+        )
+        peer = AuthenticatedPeer(case.worker_id)
+        service = host._build_mutation_service(config)  # noqa: SLF001
+        assert service is not None
+        try:
+            await service.acknowledge_takeover(peer, takeover)
+            lane = journal / f"{case.system_id}.jsonl"
+            anchored = lane.read_bytes()
+            repository = cast(Any, service)._repository  # noqa: SLF001
+            advance = repository.advance
+
+            async def fenced_advance(*args: Any) -> str:
+                # A concurrent fence lands after the service's checks: the real head-advance
+                # function then refuses the record the service has already fsynced.
+                with psycopg.connect(migrated_url) as admin:
+                    admin.execute(
+                        "UPDATE worker_incarnations SET state = 'terminated', "
+                        "terminated_at = clock_timestamp(), outcome = 'killed' "
+                        "WHERE incarnation = %s",
+                        (case.worker_id,),
+                    )
+                return await advance(*args)
+
+            def failed_retraction(*_args: object) -> None:
+                raise OSError("injected retraction failure")
+
+            monkeypatch.setattr(repository, "advance", fenced_advance)
+            monkeypatch.setattr(
+                host.FileAuthorityJournal, "retract", failed_retraction, raising=False
+            )
+            mutation = AuthorityMutationRequestV1.model_validate(
+                takeover.model_dump(mode="json", by_alias=True)
+                | {
+                    "attempt_id": str(uuid4()),
+                    "expected_source_identity": _SOURCE,
+                    "intended_target_identity": _TARGET,
+                    "recovery_objects": [],
+                }
+            )
+            with pytest.raises(AuthorityServiceError, match="superseded"):
+                await service.execute_mutation(peer, mutation)
+        finally:
+            await service.close()
+        unanchored = lane.read_bytes()
+        assert unanchored.startswith(anchored)
+        assert len(unanchored.splitlines()) == len(anchored.splitlines()) + 1
+        monkeypatch.undo()
+        _configure_local_composition(monkeypatch, root, boundary)
+        monkeypatch.setattr(
+            provider_composition, "object_store_from_env", lambda: cast(Any, object())
+        )
+
+        def ready(message: str) -> None:
+            if message == "READY=1":
+                raise _Ready
+
+        async def installed_host_fact(_config: AuthorityHostConfig) -> None:
+            return None
+
+        # The installed access boundary (fixed system paths and accounts) and the provider
+        # socket are host facts this test cannot own; everything else is the real startup.
+        monkeypatch.setattr(host, "_validate_access_boundary", lambda _config: None)
+        monkeypatch.setattr(host, "_check_provider_socket", installed_host_fact)
+        monkeypatch.setattr(host, "_notify_systemd", ready)
+
+        with pytest.raises(_Ready):
+            await host.run_authority_host(config)
+
+        assert lane.read_bytes() == anchored
+        evidence = list((journal / "retracted").iterdir())
+        assert [path.read_bytes() for path in evidence] == [unanchored[len(anchored) :]]
