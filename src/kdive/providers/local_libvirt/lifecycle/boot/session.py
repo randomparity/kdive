@@ -1,4 +1,4 @@
-"""Operation-scoped local-libvirt external-boot host capability (ADRs 0587, 0600)."""
+"""Operation-scoped local-libvirt external-boot host capability (ADRs 0587, 0600, 0704)."""
 
 from __future__ import annotations
 
@@ -190,6 +190,7 @@ class _Guest(Protocol):
     def readlink(self, path: str) -> str: ...
     def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
     def download(self, remotefilename: str, filename: str) -> None: ...
+    def pread(self, path: str, count: int, offset: int) -> bytes: ...
     def mkdir(self, path: str) -> None: ...
     def upload(self, filename: str, remotefilename: str) -> None: ...
     def ln_s(self, target: str, linkname: str) -> None: ...
@@ -1235,7 +1236,17 @@ class _ConcreteSession:
         if expected_size < 0:
             raise ValueError("guest regular size must be nonnegative")
         with tempfile.TemporaryFile("w+b") as local:
-            guest.download(guest_source, f"/proc/self/fd/{local.fileno()}")
+            offset = 0
+            while offset < expected_size:
+                count = min(1024 * 1024, expected_size - offset)
+                chunk = guest.pread(guest_source, count, offset)
+                if not chunk or len(chunk) > count:
+                    raise ValueError("guest regular content changed during download")
+                local.write(chunk)
+                offset += len(chunk)
+            if guest.pread(guest_source, 1, expected_size):
+                raise ValueError("guest regular content changed during download")
+            local.flush()
             if os.fstat(local.fileno()).st_size != expected_size:
                 raise ValueError("guest regular content changed during download")
             local.seek(0)
