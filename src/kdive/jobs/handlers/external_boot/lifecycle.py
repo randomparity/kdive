@@ -1061,7 +1061,7 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
     """Route full System teardown through the authority's terminal proof receipt."""
 
     async def complete(context: OperationContext) -> ExternalBootDerivedTeardownCompletion:
-        executor = ports.teardown_executor
+        executor = context.teardown_executor
         if executor is None:
             raise _refuse("no external-boot authority teardown executor is configured")
         artifact_store = ports.artifact_store
