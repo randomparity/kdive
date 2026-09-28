@@ -99,14 +99,18 @@ Steps:
            journal.retract(record)
        except (OSError, ValueError) as error:
            self._logger.warning(
-               "authority journal retraction failed: %s", type(error).__qualname__,
+               "authority journal retraction failed: %s",
+               type(error).__qualname__,
                extra={"system_id": str(record.system_id), "sequence": record.sequence},
            )
        else:
            self._logger.warning(
                "authority journal retracted a refused record",
-               extra={"system_id": str(record.system_id), "sequence": record.sequence,
-                      "digest": record_digest(record)},
+               extra={
+                   "system_id": str(record.system_id),
+                   "sequence": record.sequence,
+                   "digest": record_digest(record),
+               },
            )
        raise self._reject(...)  # unchanged
    ```
