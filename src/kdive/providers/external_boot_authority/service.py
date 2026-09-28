@@ -64,7 +64,7 @@ from kdive.security.secrets.redaction import REDACTION
 
 _ERROR_MESSAGE_MAX = 512
 # Every URL userinfo in free text; the log handler's SecretRedactionFilter masks key=value.
-_URL_USERINFO = re.compile(r"(?<=://)[^/@\s]+@")
+_URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
 
 
 @dataclass(frozen=True, slots=True)
@@ -886,7 +886,11 @@ class ExternalBootAuthorityService:
             self._logger.warning("authority provider boundary failed", extra=extra)
         else:
             # The wire keeps the bounded category; only the operator log names the cause.
-            message = _URL_USERINFO.sub(f"{REDACTION}@", str(error))[:_ERROR_MESSAGE_MAX]
+            try:
+                text = str(error)
+            except Exception:  # noqa: BLE001 — an unprintable error must not replace the category
+                text = "<unprintable>"
+            message = _URL_USERINFO.sub(f"{REDACTION}@", text)[:_ERROR_MESSAGE_MAX]
             self._logger.warning(
                 "authority provider boundary failed: %s: %s",
                 type(error).__qualname__,

@@ -326,7 +326,7 @@ async def test_provider_failure_log_names_the_redacted_exception(
     service, _repository, adapter, peer, request = await _ready(tmp_path)
     adapter.failure = ValueError(
         "https://api.example/x refused; retry "
-        "postgresql://kdive:hunter2@db/kdive "  # pragma: allowlist secret
+        "postgresql://kdive:hun@ter2@db/kdive "  # pragma: allowlist secret
         "or qemu+ssh://root:s3cr3t@host/system " + "x" * 600  # pragma: allowlist secret
     )
     prefix = "authority provider boundary failed: ValueError: "
@@ -344,8 +344,31 @@ async def test_provider_failure_log_names_the_redacted_exception(
     ]
     assert len(messages) == 1
     assert messages[0].startswith(prefix + "https://api.example/x refused")
-    assert "hunter2" not in messages[0]
+    assert "ter2" not in messages[0]
     assert "s3cr3t" not in messages[0]
     assert "[REDACTED]@db/kdive" in messages[0]
     assert len(messages[0]) - len(prefix) == 512
+    await service.close()
+
+
+@pytest.mark.anyio
+async def test_unprintable_provider_failure_keeps_the_bounded_category(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class _Unprintable(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("cannot render")
+
+    service, _repository, adapter, peer, request = await _ready(tmp_path)
+    adapter.failure = _Unprintable()
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(AuthorityServiceError, match="provider_conflict"),
+    ):
+        await service.execute_teardown(peer, request)
+
+    assert any(
+        record.getMessage().endswith("_Unprintable: <unprintable>") for record in caplog.records
+    )
     await service.close()
