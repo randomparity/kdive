@@ -71,7 +71,38 @@ def _bootstrap_trace(interpreter: Path, source_root: Path) -> tuple[list[str], l
     return modules, files
 
 
-def _manifest(interpreter_arg: str, source_root: Path) -> dict[str, Any]:
+def _prepare_permissions(path: Path) -> None:
+    """Remove group write from invoking-user-owned components without following links.
+
+    This setup-only operation includes ancestors outside the checkout. Sticky directories
+    retain their shared-directory semantics; attestation still checks child ownership.
+    """
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open("/", flags | os.O_DIRECTORY)
+    try:
+        for index, component in enumerate(path.parts[1:]):
+            child_flags = flags
+            if index < len(path.parts) - 2:
+                child_flags |= os.O_DIRECTORY
+            child = os.open(component, child_flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+            metadata = os.fstat(descriptor)
+            mode = stat.S_IMODE(metadata.st_mode)
+            if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+                raise RuntimeError(f"permission preparation requires a file or directory: {path}")
+            sticky_directory = stat.S_ISDIR(metadata.st_mode) and bool(mode & stat.S_ISVTX)
+            if metadata.st_uid == os.getuid() and mode & stat.S_IWGRP and not sticky_directory:
+                os.fchmod(descriptor, mode & ~stat.S_IWGRP)
+                component_path = Path(*path.parts[: index + 2])
+                print(f"removed group write: {component_path}", file=sys.stderr)
+    finally:
+        os.close(descriptor)
+
+
+def _manifest(
+    interpreter_arg: str, source_root: Path, *, prepare_permissions: bool = False
+) -> dict[str, Any]:
     interpreter = Path(interpreter_arg).resolve(strict=True)
     architecture = _ARCHITECTURES.get(platform.machine().lower())
     if architecture is None:
@@ -86,6 +117,9 @@ def _manifest(interpreter_arg: str, source_root: Path) -> dict[str, Any]:
     for path in elf_interpreters:
         kinds[path] = "elf-interpreter"
     kinds[interpreter] = "python-interpreter"
+    if prepare_permissions:
+        for path in sorted(kinds, key=str):
+            _prepare_permissions(path)
     files = [
         {
             "kind": kinds[path],
@@ -169,7 +203,12 @@ def _verify(manifest_path: Path, interpreter_arg: str, source_root: Path) -> Non
 
 
 def _build(args: argparse.Namespace) -> None:
-    payload = _manifest(args.interpreter, args.source_root)
+    payload = _manifest(
+        args.interpreter, args.source_root, prepare_permissions=args.prepare_permissions
+    )
+    if args.prepare_permissions:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        _prepare_permissions(args.output.parent.resolve(strict=True))
     changed = _atomic_write(args.output, _canonical(payload), 0o644)
     _verify(args.output, args.interpreter, args.source_root)
     print("changed" if changed else "unchanged")
@@ -582,6 +621,14 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--source-root", type=Path, required=True)
         if name == "build":
             command.add_argument("--output", type=Path, required=True)
+            command.add_argument(
+                "--prepare-permissions",
+                action="store_true",
+                help=(
+                    "remove group write from current-user-owned manifest inputs and ancestors, "
+                    "including outside the checkout, and from output directory ancestors"
+                ),
+            )
         else:
             command.add_argument("--manifest", type=Path, required=True)
     install = commands.add_parser("install")

@@ -30,6 +30,7 @@ from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_erro
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
+from kdive.mcp.tools._common import project_filter as _project_filter
 from kdive.mcp.tools.lifecycle._recovery import iso, provisioning_profile_summary
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -495,21 +496,6 @@ async def get_system(
                 else FAILURE_JOB_NOT_LOOKED_UP
             ),
         )
-
-
-def _viewer_projects(ctx: RequestContext) -> list[str]:
-    """Projects the caller may view: a member project with any granted role."""
-    return [p for p in ctx.projects if ctx.roles.get(p) is not None]
-
-
-def _project_filter(ctx: RequestContext, project: str | None) -> list[str]:
-    """Narrow the caller's readable projects to ``project`` (``allocations.list`` pattern).
-
-    An unreadable ``project`` returns an empty list rather than an error, so the caller
-    gets the same empty collection an absent project would (no existence signal).
-    """
-    readable = _viewer_projects(ctx)
-    return readable if project is None else [project] if project in readable else []
 
 
 @dataclass(frozen=True, slots=True)

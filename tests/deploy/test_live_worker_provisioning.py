@@ -2792,3 +2792,51 @@ def test_session_libvirtd_unit_depends_on_a_runtime_root_it_cannot_create() -> N
     # pairing should be revisited rather than left as two mechanisms for one invariant.
     assert "RuntimeDirectory=" not in unit
     assert "ExecStartPre=" not in unit
+
+
+@pytest.mark.parametrize("pip_version", [None, "21.2.3", "23.0.1", "25.0.1"])
+@pytest.mark.parametrize("managed", [False, True])
+def test_uv_probe_harness_oracle_handles_hosts_without_system_pip(
+    pip_version: str | None,
+    managed: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Exercise the embedded oracle without running the entire Ansible harness. Its real
+    # system-Python invocation is covered by just test-ansible; pip is not a dev dependency.
+    import ast
+    import sysconfig
+
+    tree = ast.parse((ROOT / "deploy/ansible/tests/run-local-worker-host.py").read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "uv_break_system_packages_probe_matches_host"
+    )
+    script = next(
+        ast.literal_eval(node.value)
+        for node in function.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "check_script" for target in node.targets
+        )
+    )
+
+    def pip_probe(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args[1:] == ["-I", "-m", "pip", "--version"]
+        if pip_version is None and kwargs.get("check"):
+            raise subprocess.CalledProcessError(1, args)
+        return subprocess.CompletedProcess(
+            args,
+            1 if pip_version is None else 0,
+            "" if pip_version is None else f"pip {pip_version} from /system/pip (python 3.14)",
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", pip_probe)
+        patch.setattr(sysconfig, "get_path", lambda _: "/system/stdlib")
+        patch.setattr(os.path, "exists", lambda path: managed)
+        exec(script, {})
+    expected = managed or pip_version in {"23.0.1", "25.0.1"}
+    assert capsys.readouterr().out.strip() == str(expected).lower()
