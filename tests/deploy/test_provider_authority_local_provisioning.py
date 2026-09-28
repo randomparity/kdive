@@ -605,6 +605,93 @@ def test_remote_module_private_pool_uses_the_authority_session_daemon() -> None:
     assert "provider_authority_host_remote_module_enabled | default(false) | bool" in tasks
 
 
+def _tasks(path: Path) -> list[dict[str, object]]:
+    value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(value, list):
+        raise TypeError(f"expected task list in {path}")
+    return cast(list[dict[str, object]], value)
+
+
+def _named(tasks: list[dict[str, object]], name: str) -> dict[str, object]:
+    return next(task for task in tasks if task.get("name") == name)
+
+
+MEMLOCK_DROP_IN = (
+    "/etc/systemd/system/user@{{ provider_authority_host_uid }}.service.d/kdive-memlock.conf"
+)
+
+
+def test_authority_session_libvirtd_gets_an_unlimited_memlock_ceiling() -> None:
+    # libvirt always sets RLIMIT_MEMLOCK for a ppc64 guest, and an unprivileged session daemon
+    # cannot raise it past its hard limit, so the role must raise both the user manager's and
+    # the unit's limit before the daemon starts (#2767).
+    tasks = _tasks(ROLE / "tasks" / "libvirt.yml")
+    drop_in = _named(tasks, "Raise the authority user manager memlock ceiling for ppc64 guests")
+    copy = cast(dict[str, str], drop_in["ansible.builtin.copy"])
+    assert copy["dest"] == MEMLOCK_DROP_IN
+    assert copy["content"] == "[Service]\nLimitMEMLOCK=infinity\n"
+    assert (copy["owner"], copy["group"], copy["mode"]) == ("root", "root", "0644")
+    restart = _named(tasks, "Restart the authority user manager to apply its memlock ceiling")
+    service = cast(dict[str, object], restart["ansible.builtin.systemd_service"])
+    assert service == {
+        "name": "user@{{ provider_authority_host_uid }}.service",
+        "state": "restarted",
+        "daemon_reload": True,
+    }
+    assert restart["when"] == f"{drop_in['register']} is changed"
+    unit_task = _named(tasks, "Install the dormant authority session-libvirtd user unit")
+    unit = cast(dict[str, str], unit_task["ansible.builtin.copy"])["content"]
+    assert "\nLimitMEMLOCK=infinity\n" in unit.split("[Service]", 1)[1].split("[Install]")[0]
+    start = _named(tasks, "Start the dormant authority session libvirtd")
+    assert tasks.index(drop_in) < tasks.index(restart) < tasks.index(unit_task)
+    assert tasks.index(restart) < tasks.index(start)
+
+
+def test_both_authority_call_sites_verify_the_running_memlock_limit() -> None:
+    verify = _tasks(ROLE / "tasks" / "libvirt_verify.yml")
+    limit = _named(verify, "Read the authority session libvirtd locked-memory limit")
+    argv = cast(dict[str, list[str]], limit["ansible.builtin.command"])["argv"]
+    assert argv[:2] == ["prlimit", "--memlock"]
+    check = _named(verify, "Require an unlimited authority session libvirtd memlock limit")
+    that = cast(dict[str, object], check["ansible.builtin.assert"])["that"]
+    assert f"{limit['register']}.stdout.split() == ['unlimited', 'unlimited']" in cast(
+        list[str], that
+    )
+    installed = _tasks(ROLE / "tasks" / "install.yml")
+    flush = _named(installed, "Apply deployed-input restarts before proving readiness")
+    verified = next(
+        task
+        for task in installed
+        if task.get("ansible.builtin.import_tasks") == "libvirt_verify.yml"
+    )
+    assert installed.index(flush) < installed.index(verified)
+    runner = _tasks(ROLE.parent / "live_vm_host" / "tasks" / "main.yml")
+    runner_flush = _named(runner, "Apply authority service restarts before readiness validation")
+    runner_verify = next(
+        task
+        for task in runner
+        if task.get("ansible.builtin.include_tasks")
+        == "../../provider_authority_host/tasks/libvirt_verify.yml"
+    )
+    assert runner.index(runner_flush) < runner.index(runner_verify)
+    assert runner_verify["when"] == "live_vm_host_authority_enabled | bool"
+    assert cast(dict[str, str], runner_verify["vars"]) == {
+        "provider_authority_host_account": "{{ live_vm_host_authority_account }}",
+        "provider_authority_host_uid": "{{ live_vm_host_authority_uid }}",
+    }
+
+
+def test_retiring_the_authority_removes_its_memlock_drop_in() -> None:
+    tasks = _tasks(ROLE / "tasks" / "disable.yml")
+    removal = _named(tasks, "Remove the retired authority user manager memlock drop-in")
+    path = cast(dict[str, str], removal["ansible.builtin.file"])
+    assert path["state"] == "absent"
+    assert path["path"].endswith(".service.d/kdive-memlock.conf")
+    assert removal["notify"] == "Reload systemd after authority removal"
+    flush = _named(tasks, "Apply authority removal before completing cleanup")
+    assert tasks.index(removal) < tasks.index(flush)
+
+
 def test_runbook_describes_a_complete_local_mutation_vars_file() -> None:
     runbook = (ROOT / "docs" / "operating" / "runbooks" / "self-hosted-kvm-runner.md").read_text(
         encoding="utf-8"

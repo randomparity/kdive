@@ -1570,6 +1570,13 @@
   ansible.builtin.meta: flush_handlers
   when: live_vm_host_authority_enabled | bool
 
+- name: Verify the restarted authority session libvirtd limits
+  ansible.builtin.include_tasks: ../../provider_authority_host/tasks/libvirt_verify.yml
+  vars:
+    provider_authority_host_account: "{{ live_vm_host_authority_account }}"
+    provider_authority_host_uid: "{{ live_vm_host_authority_uid }}"
+  when: live_vm_host_authority_enabled | bool
+
 - name: Run the one-shot authority readiness probe
   ansible.builtin.command: >-
     {{ live_vm_host_authority_runtime_install }}/.venv/bin/python -m kdive
