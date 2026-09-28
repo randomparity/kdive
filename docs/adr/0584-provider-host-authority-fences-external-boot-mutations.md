@@ -272,10 +272,12 @@ Rejected for this amendment:
 - **Only an operator repair command.** judgment: every refused anchor would still take the host
   out of service until an operator acted.
 - **Evidence under `state_dir`.** verified: every authority systemd unit runs
-  `ProtectSystem=strict` with `ReadWritePaths` on the journal directory only
+  `ProtectSystem=strict`, and its `ReadWritePaths` name the journal directory and fixed
+  subtrees but never `state_dir` itself
   (`deploy/systemd/system/kdive-external-boot-authority.service`,
-  `deploy/ansible/roles/provider_authority_host/templates/authority.service.j2`), so the write
-  fails with `EROFS` and the host still restart-loops. Widening `ReadWritePaths` would require
+  `deploy/ansible/roles/provider_authority_host/templates/authority.service.j2`,
+  `deploy/ansible/roles/live_vm_host/templates/external-boot-authority.service.j2`). A new
+  evidence path there fails with `EROFS`, and the host still restart-loops. Widening `ReadWritePaths` would require
   reprovisioning every host. The campaign orchestrator selected the reserved subdirectory on
   2026-09-28.
 

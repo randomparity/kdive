@@ -59,8 +59,9 @@ Evidence lives in `<journal_dir>/retracted/` as `<system_id>.<sequence>.<digest 
 mode 0600 files in a mode 0700 directory owned by the authority. The journal creates the
 directory on first use, relative to its own validated parent descriptor, and refuses one that is
 a symlink, not a directory, foreign-owned, or not exactly 0700. It cannot live under `state_dir`:
-all three authority units run `ProtectSystem=strict` with `ReadWritePaths` on the journal
-directory only, so a write there fails with `EROFS`. Writing is idempotent: an existing file
+all three authority units run `ProtectSystem=strict`, and their `ReadWritePaths` name the
+journal directory and fixed subtrees but never `state_dir` itself, so a new path there fails with
+`EROFS`. Writing is idempotent: an existing file
 with identical bytes is accepted, which covers a crash between the evidence write and the
 truncation. Both paths log a warning with the System, sequence, and digest.
 
@@ -99,8 +100,9 @@ every other file/head difference.
    once. Evidence files are never pruned; each is one record and at most 1 MiB, so growth stays
    bounded.
 4. **Covered elsewhere** — the takeover refusal that produced the retained case (#2884); shorter
-   or divergent journals (deferred operator repair); per-lane readiness (follow-up); the race
-   between the periodic check's head read and a concurrent anchor (follow-up candidate).
+   or divergent journals (deferred operator repair); per-lane readiness (follow-up). A
+   pre-existing race between the periodic check's head read and a concurrent anchor is not
+   changed here and is reported in the PR as an adjacent observation.
 
 ## Threat model
 
