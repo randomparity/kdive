@@ -39,8 +39,8 @@ its existing `recover` → cleanup → tombstone → `teardown_system` sequence 
 **Diagnostics** (`src/kdive/providers/external_boot_authority/service.py`). `_provider_error`
 takes an optional `error: Exception | None`. When given, the warning becomes
 `authority provider boundary failed: %s: %s` with `type(error).__qualname__` and `str(error)`
-after every URL userinfo (`user:password` before `@`) is replaced by `[REDACTED]@` (a local regex applied to
-all occurrences), truncated to 512 characters. The values go in the formatted text because the
+after every URL userinfo (`user:password` before `@`) is replaced by `[REDACTED]@` (a local
+regex over all occurrences), truncated to 512 characters. The values go in the formatted text because the
 host's `JsonFormatter` (installed by `kdive`'s `bootstrap_stdout_floor`) drops `extra`; its
 `SecretRedactionFilter` already masks `key=value` secrets and registered values. Every
 `except Exception:` site that returns `_provider_error` binds and passes the exception; the wire
