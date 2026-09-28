@@ -38,13 +38,15 @@ the state precondition rejected the commit.
 
 1. **Migration `0160_external_boot_teardown_failure_commit.sql`** edits
    `commit_external_boot_authority_result` by exact text replacement, the pattern 0147 uses, and
-   raises if either old text is absent:
+   raises unless each old text occurs exactly once:
    - The `fail`/`teardown` state clause becomes the 0147 allocation clause: System state in
      `provisioning, ready, reprovisioning, restoring, paused, crashing, crashed, failed`;
      activation state in `preparing, prepared, activating, active, recovering, recovered,
      recovery_conflict, recovery_failed, abandoned`; and no newer activation for the System
      (same `(created_at, id)` ordering). A `torn_down` System or activation stays superseded.
-   - The terminal-failure Run update gains `AND p_purpose <> 'teardown'`. Teardown success never
+   - The result-`fail` terminal Run update (the one setting `failure_category = p_result ->>
+     'error_category'`; the two 0128 `stale_handle` loss branches are left as they are) gains
+     `AND p_purpose <> 'teardown'`. Teardown success never
      writes the Run; before this change a teardown failure could not reach that update with a
      `created` or `running` Run, because only `failed` Systems passed. Widening the states would
      otherwise let a teardown failure mark an in-flight Run failed.
@@ -56,7 +58,8 @@ the state precondition rejected the commit.
    reclaim or finalization and the worker keeps the existing line byte for byte (live tests
    match it). `True` logs `external boot job %s attempt %s is still running but its commit was
    refused (worker credential, allocation or state precondition); result dropped`. The read is
-   post-transaction and advisory only.
+   post-transaction and advisory only; if it raises, the worker logs `external boot job %s commit
+   superseded; attempt state unreadable; result dropped` with the exception and returns `False`.
 
 Rejected: a new SQL status for "precondition mismatch", because it changes the commit function's
 return contract and the worker's classification map for a diagnostic; and returning which
@@ -68,7 +71,8 @@ predicate failed, because it needs a rewrite of the ~40-predicate fence the oper
    the local-libvirt and remote-libvirt deployments; the migration runner.
 2. **Invariants and assets at stake** — the binding fence stays exact; one job transition per
    attempt; reservation credit stays exactly once (the `fail` path writes no reservation or
-   release row); an in-flight Run is never failed by a teardown failure.
+   release row); a teardown result-`fail` commit never writes the Run (the 0128 loss branches,
+   which fail a `created`/`running` Run on an identity or authority mismatch, are unchanged).
 3. **Accepted failure classes** — the diagnostic read can race a concurrent reclaim and log the
    refused-commit line for what became a reclaim: accepted, log-only, no state effect. A migration
    applied over a hand-edited function raises and aborts: accepted, the shape guard's purpose.
@@ -81,8 +85,12 @@ predicate failed, because it needs a rewrite of the ~40-predicate fence the oper
 - DB test: seed a teardown case at System `ready` with activation `prepared`, and again with
   `activating`; allocate, acknowledge, and commit a non-terminal `fail`. Expect `superseded`
   before the migration and `('applied', 'queued')` after. Also expect terminal `fail` gives
-  `('applied', 'failed')` with the Run unchanged, and a newer activation still gives
-  `superseded`.
+  `('applied', 'failed')` with a `running` Run unchanged; the reservation row and release count
+  unchanged after a requeue and its retried failure (criterion 4); a newer activation, and a job
+  whose attempt was bumped by a reclaim, still give `('superseded', None)` (criterion 2; after 0128
+  an authority-side mismatch returns `authority_superseded`, already covered by 0128's tests).
+- DB test: `queue.external_boot_attempt_is_running` on the worker role returns `True` for a
+  running job at its attempt and `False` for a bumped attempt or a non-running job.
 - Worker tests: `SUPERSEDED` with the attempt still running logs the refused-commit line; with a
-  reclaimed attempt logs the unchanged reclaim line.
+  reclaimed attempt logs the unchanged reclaim line; a raising read logs the unreadable line.
 - Criterion 6 is met by #2880's post-merge fixture settle, not by this change.
