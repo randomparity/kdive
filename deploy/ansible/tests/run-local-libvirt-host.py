@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Check the localhost local-libvirt playbook contract without applying it."""
+"""Check the localhost playbook and execute its path tasks in temporary fixtures."""
 
+import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -352,3 +356,106 @@ print(
     "labels, locked live sync, DSN stdin, guestfs ABI handling, and the play-scoped "
     "system-interpreter pin pass"
 )
+
+
+# Execute the production tasks, including Ansible's absent-stat shape and conditional
+# evaluation. Only temporary paths need chmod; /tmp and / already allow traversal.
+tmp_mode = Path("/tmp").stat().st_mode
+require(tmp_mode & 0o001 != 0, "/tmp must already allow traversal")
+with tempfile.TemporaryDirectory(prefix="kdive-traversal-", dir="/tmp") as temporary:
+    fixture = Path(temporary)
+    # Contain chmod to this fixture: sticky /tmp ends in 't', so the production
+    # permission probe requests a redundant o+x there even though it is traversable.
+    shim = fixture / "bin"
+    shim.mkdir()
+    chmod = shim / "chmod"
+    chmod.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        '[[ "$1" == o+x && "$2" == -- ]]\n'
+        'if [[ "$3" == /tmp ]]; then exit 0; fi\n'
+        f'[[ "$3" == {temporary}/* || "$3" == {temporary} ]]\n'
+        f'exec {shutil.which("chmod")} "$@"\n'
+    )
+    chmod.chmod(0o700)
+    environment = {"PATH": f"{shim}:{os.environ['PATH']}"}
+    source = fixture / "checkout"
+    source.mkdir(mode=0o700)
+    kernel = fixture / "kernel"
+    kernel.mkdir(mode=0o700)
+    target = fixture / "target"
+    target.mkdir(mode=0o700)
+    link = fixture / "link"
+    link.symlink_to(target, target_is_directory=True)
+    dangling = fixture / "dangling"
+    dangling.symlink_to(fixture / "missing-target", target_is_directory=True)
+    regular = fixture / "file"
+    regular.write_text("not a directory")
+    regular.chmod(0o600)
+    cases = [fixture / "absent", kernel, link, dangling, regular]
+    traversal_play = fixture / "traversal.yml"
+    traversal_play.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "name": f"Traversal fixture {optional.name}",
+                    "hosts": "localhost",
+                    "connection": "local",
+                    "gather_facts": False,
+                    "environment": environment,
+                    "vars": {
+                        "local_libvirt_host_source": str(source),
+                        "local_libvirt_host_kernel_source_effective": str(optional),
+                    },
+                    "tasks": [tasks["Inspect the checkout and kernel roots"], traversal],
+                }
+                for optional in cases
+            ]
+        )
+    )
+    for _ in range(2):
+        result = subprocess.run(
+            ["ansible-playbook", "-i", "localhost,", str(traversal_play)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(result.returncode == 0, result.stdout + result.stderr)
+    require(Path("/tmp").stat().st_mode == tmp_mode, "/tmp permissions changed")
+    for directory in (fixture, source, kernel):
+        require(directory.stat().st_mode & 0o777 == 0o701, "ancestor traversal mode differs")
+    require(target.stat().st_mode & 0o777 == 0o700, "symlink target was modified")
+    require(regular.stat().st_mode & 0o777 == 0o600, "regular file was modified")
+    require(not cases[0].exists(), "absent optional root was created")
+    require(link.is_symlink() and dangling.is_symlink(), "symlink was replaced")
+
+    # Missing and incomplete required checkouts must still fail before host mutation.
+    for checkout_source in (fixture / "missing-checkout", source):
+        checkout_play = fixture / "checkout.yml"
+        checkout_play.write_text(
+            yaml.safe_dump(
+                [
+                    {
+                        "name": "Required checkout fixture",
+                        "hosts": "localhost",
+                        "connection": "local",
+                        "gather_facts": False,
+                        "vars": {"local_libvirt_host_source": str(checkout_source)},
+                        "tasks": play["pre_tasks"][:5],
+                    }
+                ]
+            )
+        )
+        result = subprocess.run(
+            ["ansible-playbook", "-i", "localhost,", str(checkout_play)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(result.returncode == 2, "invalid required checkout was accepted: " + result.stdout)
+        expected = (
+            "Require a complete local-libvirt source checkout before host mutation"
+            if checkout_source == source
+            else "Require a real local-libvirt source checkout"
+        )
+        require(f"TASK [{expected}]" in result.stdout, "checkout failed before its required guard")
+print("local-libvirt-host: actual traversal fixtures and required-checkout rejection pass")

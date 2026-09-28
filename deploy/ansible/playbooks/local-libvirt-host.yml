@@ -267,7 +267,7 @@
       args:
         executable: /bin/bash
       loop: "{{ local_libvirt_host_tree_roots.results }}"
-      when: item.stat.isdir and not item.stat.islnk
+      when: item.stat.exists and item.stat.isdir and not item.stat.islnk
       register: local_libvirt_host_traversal
       changed_when: local_libvirt_host_traversal.stdout == 'true'
 
