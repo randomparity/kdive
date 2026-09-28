@@ -2188,3 +2188,17 @@ def test_lane_inventory_rejects_an_unsafe_evidence_entry(
 
     with pytest.raises(HostReadinessError, match="journal: unsafe-tree"):
         restore_journal_inventory(config, ())
+
+
+def test_startup_retraction_stops_at_its_load_deadline(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 1)
+    lane = _write_lane(config, records)
+    before = lane.read_bytes()
+
+    with pytest.raises(HostReadinessError, match="journal: validation-timeout"):
+        host._retract_unanchored_tail(  # noqa: SLF001
+            config, str(records[0].system_id), None, retract=True, deadline=0.0
+        )
+
+    assert lane.read_bytes() == before

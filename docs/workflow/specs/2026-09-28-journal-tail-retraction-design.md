@@ -99,8 +99,12 @@ every other file/head difference.
    because the client must send `COMMIT` and a dead client's transaction is aborted (5 s idle
    timeout). If a live process's advance is still queued behind the lock, the flock excludes it.
    `check-external-boot-authority-host` still fails over a tail until the service has started
-   once. Evidence files are never pruned; each is one record and at most 1 MiB, so growth stays
-   bounded.
+   once. Evidence files are never pruned. Each is one record of at most 1 MiB, but their number
+   grows with the count of refused anchors, which the retraction warning makes visible to the
+   operator; removing files from `retracted/` is safe because nothing reads them. The reconcile's
+   lane loads share a 10 s deadline inside the 20 s readiness timeout, so a slow lane fails in
+   its thread rather than being cancelled while it still holds the locks. A retraction already
+   past its load (one evidence write and one truncate) can still outlive a cancellation.
 4. **Covered elsewhere** — the takeover refusal that produced the retained case (#2884); shorter
    or divergent journals (deferred operator repair); per-lane readiness (follow-up). A
    pre-existing race between the periodic check's head read and a concurrent anchor is not

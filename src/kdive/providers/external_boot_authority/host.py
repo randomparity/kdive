@@ -521,17 +521,24 @@ def _unanchored_tail(
 
 
 def _retract_unanchored_tail(
-    config: AuthorityHostConfig, system_id: str, head: JournalHead | None, *, retract: bool
+    config: AuthorityHostConfig,
+    system_id: str,
+    head: JournalHead | None,
+    *,
+    retract: bool,
+    deadline: float | None = None,
 ) -> JournalRecordV1 | None:
     journal: FileAuthorityJournal | None = None
     try:
         journal = FileAuthorityJournal(
             config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
         )
-        tail = _unanchored_tail(config, system_id, journal.load(), head)
+        tail = _unanchored_tail(config, system_id, journal.load(deadline=deadline), head)
         if tail is not None and retract:
             journal.retract(tail)
         return tail
+    except TimeoutError:
+        raise HostReadinessError("journal", "validation-timeout") from None
     except OSError, ValueError:
         raise HostReadinessError("journal", "invalid-lane") from None
     finally:
@@ -1174,9 +1181,17 @@ async def _reconcile_journal_tails(config: AuthorityHostConfig) -> None:
                 local = _local_lanes(config, root_fd)
             finally:
                 os.close(root_fd)
+            # Lane loads stop at their own deadline, inside the readiness timeout, so a slow
+            # load fails in its thread instead of being abandoned while it still holds work.
+            deadline = time.monotonic() + JOURNAL_VALIDATION_TIMEOUT_SECONDS
             for system_id in local:
                 if not await asyncio.to_thread(
-                    _retract_unanchored_tail, config, system_id, heads.get(system_id), retract=False
+                    _retract_unanchored_tail,
+                    config,
+                    system_id,
+                    heads.get(system_id),
+                    retract=False,
+                    deadline=deadline,
                 ):
                     continue
                 try:
@@ -1188,7 +1203,12 @@ async def _reconcile_journal_tails(config: AuthorityHostConfig) -> None:
                         )
                         head = (await _lane_heads(connection, config)).get(system_id)
                         tail = await asyncio.to_thread(
-                            _retract_unanchored_tail, config, system_id, head, retract=True
+                            _retract_unanchored_tail,
+                            config,
+                            system_id,
+                            head,
+                            retract=True,
+                            deadline=deadline,
                         )
                 except HostReadinessError:
                     raise
