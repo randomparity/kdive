@@ -392,6 +392,110 @@ def test_builder_rejects_replaceable_ancestor_under_relaxed_umask(tmp_path: Path
     assert "fingerprint_ancestor_replaceable" in result.stderr
 
 
+def test_builder_prepares_deep_inputs_and_staging_ancestors(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    source = checkout / "src"
+    shutil.copytree(_ROOT / "src", source)
+    # Include files below the old find -maxdepth 5 cutoff.
+    for path in (checkout, source, *source.rglob("*")):
+        if path.is_dir():
+            path.chmod(0o775)
+        elif path.is_file():
+            path.chmod(0o664)
+    unrelated = checkout / "unrelated.txt"
+    unrelated.write_text("keep shared\n")
+    unrelated.chmod(0o664)
+    output = checkout / "build" / "manifest.json"
+    arguments = (
+        "build",
+        "--prepare-permissions",
+        "--interpreter",
+        sys.executable,
+        "--source-root",
+        str(source),
+        "--output",
+        str(output),
+    )
+    previous_umask = os.umask(0o002)
+    try:
+        result = _run(*arguments)
+    finally:
+        os.umask(previous_umask)
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(checkout.stat().st_mode) == 0o755
+    assert stat.S_IMODE(output.parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE(unrelated.stat().st_mode) == 0o664
+    verify_capture_bootstrap_manifest(output, Path(sys.executable), expected_uid=os.getuid())
+    second = _run(*arguments)
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.strip() == "unchanged"
+    assert "removed group write:" not in second.stderr
+
+
+def test_permission_preparation_handles_external_python_path(tmp_path: Path) -> None:
+    prepare = runpy.run_path(str(_SCRIPT))["_prepare_permissions"]
+    runtime = tmp_path / "uv-python" / "bin"
+    runtime.mkdir(parents=True)
+    executable = runtime / "python"
+    executable.write_bytes(b"interpreter fixture")
+    runtime.parent.chmod(0o2775)
+    runtime.chmod(0o775)
+    executable.chmod(0o775)
+    prepare(executable)
+    assert stat.S_IMODE(runtime.parent.stat().st_mode) == 0o2755
+    assert stat.S_IMODE(runtime.stat().st_mode) == 0o755
+    assert stat.S_IMODE(executable.stat().st_mode) == 0o755
+
+
+@pytest.mark.parametrize("mode", [0o1777, 0o777])
+def test_permission_preparation_keeps_sticky_and_world_write_policy(
+    tmp_path: Path, mode: int
+) -> None:
+    prepare = runpy.run_path(str(_SCRIPT))["_prepare_permissions"]
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    target = shared / "input"
+    target.write_bytes(b"input")
+    target.chmod(0o644)
+    shared.chmod(mode)
+    prepare(target)
+    if mode == 0o1777:
+        assert stat.S_IMODE(shared.stat().st_mode) == mode
+        bootstrap_attestation.fingerprint(target, expected_uid=os.getuid())
+    else:
+        assert stat.S_IMODE(shared.stat().st_mode) == 0o757
+        with pytest.raises(PermissionError, match="fingerprint_ancestor_replaceable"):
+            bootstrap_attestation.fingerprint(target, expected_uid=os.getuid())
+
+
+def test_permission_preparation_does_not_change_other_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare = runpy.run_path(str(_SCRIPT))["_prepare_permissions"]
+    target = tmp_path / "input"
+    target.write_bytes(b"input")
+    target.chmod(0o664)
+    different_uid = os.getuid() + 1
+    monkeypatch.setattr(os, "getuid", lambda: different_uid)
+    prepare(target)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o664
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_permission_preparation_refuses_links(tmp_path: Path, directory: bool) -> None:
+    prepare = runpy.run_path(str(_SCRIPT))["_prepare_permissions"]
+    target = tmp_path / "target"
+    target.mkdir()
+    leaf = target / "input"
+    leaf.write_bytes(b"input")
+    leaf.chmod(0o664)
+    link = tmp_path / "link"
+    link.symlink_to(target if directory else leaf)
+    with pytest.raises(OSError):
+        prepare(link / "input" if directory else link)
+    assert stat.S_IMODE(leaf.stat().st_mode) == 0o664
+
+
 def test_verify_rejects_wrong_interpreter_and_import_trace_drift(tmp_path: Path) -> None:
     output = tmp_path / "manifest.json"
     built = _run(
