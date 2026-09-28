@@ -7,6 +7,7 @@ import hashlib
 import os
 import tempfile
 from contextlib import AbstractContextManager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -26,8 +27,12 @@ from kdive.providers.external_boot_authority.local_client import (
 )
 from kdive.providers.external_boot_authority.network_client import _resolve_tls_material
 from kdive.providers.external_boot_authority.protocol import (
+    GENESIS_DIGEST,
     AuthorityMutationRequestV1,
     AuthorityTakeoverRequestV1,
+    JournalPhase,
+    JournalRecordV1,
+    canonical_record_bytes,
 )
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer, AuthorityServiceError
 from kdive.providers.local_libvirt import composition as local_composition
@@ -232,6 +237,29 @@ def _configure_local_composition(
     monkeypatch.setattr(RealLocalExternalBootIO, "open", lambda *_args: boundary.open())
 
 
+def _host_config(secure: Path, instance: str, database_dsn: str) -> AuthorityHostConfig:
+    material = _tls_material(secure, instance)
+    dsn_path = secure / "database-dsn"
+    dsn_path.write_text(database_dsn, encoding="utf-8")
+    dsn_path.chmod(0o400)
+    return AuthorityHostConfig(
+        authority_instance=instance,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        authority_client_gid=os.getegid(),
+        journal_dir=secure / "journal",
+        request_socket=secure / "request" / "authority.sock",
+        provider_socket=secure / "provider.sock",
+        database_dsn=dsn_path,
+        server_private_key=material["server_key"],
+        server_certificate=material["server_certificate"],
+        server_ca=material["server_ca"],
+        worker_client_ca=material["server_ca"],
+        health_client_certificate=material["client_certificate"],
+        health_client_key=material["client_key"],
+    )
+
+
 def _plan() -> ExternalBootPlan:
     return ExternalBootPlan.model_validate(sample_plan_data())
 
@@ -323,25 +351,8 @@ async def test_typed_sender_reaches_constructed_sql_backed_authority_service(
                 "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "1048576",
             }
         )
-        material = _tls_material(secure, case.authority_instance)
-        database_dsn = secure / "database-dsn"
-        database_dsn.write_text(authority_role_dsns("kdive_provider_authority"), encoding="utf-8")
-        database_dsn.chmod(0o400)
-        config = AuthorityHostConfig(
-            authority_instance=case.authority_instance,
-            authority_uid=os.geteuid(),
-            authority_gid=os.getegid(),
-            authority_client_gid=os.getegid(),
-            journal_dir=journal,
-            request_socket=secure / "request" / "authority.sock",
-            provider_socket=secure / "provider.sock",
-            database_dsn=database_dsn,
-            server_private_key=material["server_key"],
-            server_certificate=material["server_certificate"],
-            server_ca=material["server_ca"],
-            worker_client_ca=material["server_ca"],
-            health_client_certificate=material["client_certificate"],
-            health_client_key=material["client_key"],
+        config = _host_config(
+            secure, case.authority_instance, authority_role_dsns("kdive_provider_authority")
         )
         boundary = _HostBoundary()
         _configure_local_composition(monkeypatch, root, boundary)
@@ -484,25 +495,10 @@ async def test_host_startup_retracts_a_refused_anchor_left_by_a_failed_retractio
                 "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "1048576",
             }
         )
-        material = _tls_material(secure, case.authority_instance)
-        database_dsn = secure / "database-dsn"
-        database_dsn.write_text(authority_role_dsns("kdive_provider_authority"), encoding="utf-8")
-        database_dsn.chmod(0o400)
-        config = AuthorityHostConfig(
-            authority_instance=case.authority_instance,
-            authority_uid=os.geteuid(),
-            authority_gid=os.getegid(),
-            authority_client_gid=os.getegid(),
-            journal_dir=journal,
-            request_socket=secure / "request" / "authority.sock",
-            provider_socket=secure / "provider.sock",
-            database_dsn=database_dsn,
-            server_private_key=material["server_key"],
-            server_certificate=material["server_certificate"],
-            server_ca=material["server_ca"],
-            worker_client_ca=material["server_ca"],
-            health_client_certificate=material["client_certificate"],
-            health_client_key=material["client_key"],
+        config = replace(
+            _host_config(
+                secure, case.authority_instance, authority_role_dsns("kdive_provider_authority")
+            ),
             state_dir=state,
         )
         config.request_socket.parent.mkdir(mode=0o2750)
@@ -604,3 +600,57 @@ async def test_host_startup_retracts_a_refused_anchor_left_by_a_failed_retractio
         assert lane.read_bytes() == anchored
         evidence = list((journal / "retracted").iterdir())
         assert [path.read_bytes() for path in evidence] == [unanchored[len(anchored) :]]
+
+
+@pytest.mark.anyio
+async def test_startup_reconcile_waits_on_the_lane_advisory_lock(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """#2793: no retraction while another session holds the key the head advance takes."""
+    key = "hashtextextended('kdive:system:' || v_authority.system_id::text, 2126)"
+    lock = "SELECT pg_advisory_xact_lock(hashtextextended('kdive:system:' || %s::text, 2126))"
+    with psycopg.connect(migrated_url) as admin:
+        definition = admin.execute(
+            "SELECT pg_get_functiondef('public.advance_external_boot_authority_journal_head"
+            "(text,uuid,bigint,bigint,text,jsonb)'::regprocedure)"
+        ).fetchone()
+    assert definition is not None and key in definition[0]
+    with tempfile.TemporaryDirectory(prefix="kdive-authority-", dir=Path.home()) as temporary:
+        secure = Path(temporary)
+        secure.chmod(0o700)
+        (secure / "journal").mkdir(mode=0o700)
+        (secure / "request").mkdir(mode=0o700)
+        config = _host_config(
+            secure, "authority-lock", authority_role_dsns("kdive_provider_authority")
+        )
+        system_id = uuid4()
+        record = JournalRecordV1(
+            authority_id=uuid4(),
+            generation=1,
+            system_id=system_id,
+            activation_id=uuid4(),
+            run_id=uuid4(),
+            plan_identity="sha256:" + "a" * 64,
+            purpose="activate",
+            operation="activate",
+            provider_kind="local-libvirt",
+            authority_instance=config.authority_instance,
+            operation_identity="operation-a",
+            operation_digest="sha256:" + "b" * 64,
+            sequence=1,
+            previous_digest=GENESIS_DIGEST,
+            phase=JournalPhase.WATERMARK_INSTALLED,
+            attempt_id=uuid4(),
+        )
+        lane = config.journal_dir / f"{system_id}.jsonl"
+        lane.write_bytes(canonical_record_bytes(record) + b"\n")
+        lane.chmod(0o600)
+
+        with psycopg.connect(migrated_url) as holder:
+            holder.execute(lock, (str(system_id),))
+            with pytest.raises(host.HostReadinessError, match="journal: reconcile-failed"):
+                await host._reconcile_journal_tails(config)  # noqa: SLF001
+        assert lane.read_bytes() == canonical_record_bytes(record) + b"\n"
+
+        await host._reconcile_journal_tails(config)  # noqa: SLF001
+        assert not lane.exists()
