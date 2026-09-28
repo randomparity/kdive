@@ -78,7 +78,7 @@ predicate failed, because it needs a rewrite of the ~40-predicate fence the oper
    applied over a hand-edited function raises and aborts: accepted, the shape guard's purpose.
 4. **Covered elsewhere** — why the provider teardown fails (#2880); settling the retained
    fixture (#2880's live run); the unused `teardown` success clause in the same function, which
-   the worker never reaches because success commits through the finalizer (follow-up candidate).
+   the worker never reaches because success commits through the finalizer (reported to the campaign orchestrator as a follow-up candidate).
 
 ## Validation
 
