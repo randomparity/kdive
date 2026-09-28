@@ -36,15 +36,16 @@ coordinator
 then runs the existing `define_source` and `restore_power`. The authority adapter is unchanged:
 its existing `recover` → cleanup → tombstone → `teardown_system` sequence now succeeds.
 
-**Diagnostics** (`src/kdive/providers/external_boot_authority/service.py`). `_provider_error`
-takes an optional `error: Exception | None`. When given, the warning becomes
-`authority provider boundary failed: %s: %s` with `type(error).__qualname__` and `str(error)`
-after every URL userinfo (`user:password` before `@`) is replaced by `[REDACTED]@` (a local
-regex over all occurrences), truncated to 512 characters. The values go in the formatted text because the
-host's `JsonFormatter` (installed by `kdive`'s `bootstrap_stdout_floor`) drops `extra`; its
-`SecretRedactionFilter` already masks `key=value` secrets and registered values. Every
-`except Exception:` site that returns `_provider_error` binds and passes the exception; the wire
-error and `from None` are unchanged. The two sites with no exception keep the old line.
+**Diagnostics** (`src/kdive/providers/external_boot_authority/service.py`), refined by operator
+decision on 2026-09-28 after `just ci` showed an adversarial test forbidding adapter output in
+logs. `_provider_error` takes an optional `error: Exception | None` and always logs
+`authority provider boundary failed: <type>`. It appends the message only for
+`ProviderRecoveryRefusal` (new, `src/kdive/providers/external_boot_authority/teardown.py`), a
+`ValueError` subclass whose reason is a closed set of literals. The local provider raises it for
+`recovery phase is not resumable`, the System teardown recovery-point binding mismatch, and the
+two pre-stop refusals. The refusal text still passes URL-userinfo redaction and a 512-character
+bound. Every `except Exception:` site that returns `_provider_error` passes the exception; the
+wire error and `from None` are unchanged.
 
 ## Success
 
@@ -60,8 +61,8 @@ error and `from None` are unchanged. The two sites with no exception keep the ol
 4. Authority-adapter System teardown on `pre-stop-intent` metadata reaches complete teardown facts
    with recover, cleanup, tombstone finalization, and host teardown in that order.
 5. A provider adapter raising a non-`AuthorityServiceError` yields wire `provider_conflict` and one
-   warning whose text names the exception type and the message with every URL userinfo password
-   redacted, including one after a leading userinfo-free URL, bounded to 512 characters.
+   warning naming only the exception type, at every level; a `ProviderRecoveryRefusal` adds its
+   fixed reason. The adversarial log test stays unchanged and green.
 6. Live, on the retained fixture: terminal teardown state, domain absent, cleanup evidence
    recorded, the 32 GiB ready reservation credited exactly once, and a retry that adds no second
    credit; no manual DB/journal edit or host reset. This also proves #2881's share of #2878
@@ -76,8 +77,7 @@ error and `from None` are unchanged. The two sites with no exception keep the ol
   tombstone and one reservation credit per activation; no registered secret or credential-shaped
   value reaches the log.
 - **Accepted failure classes:** a prior-running source that fails readiness fails teardown with the
-  now-logged cause, as for other phases; the log message may carry host paths from `OSError`
-  text, accepted because the authority log is operator-private and the paths are the diagnosis.
+  logged exception type, as for other phases.
 - **Covered elsewhere:** fail-commit fence and superseded diagnostics (#2881); accelerator refusal
   at activate (#2867 / #2877); remote-provider recovery (unchanged, not local).
 
@@ -85,11 +85,10 @@ error and `from None` are unchanged. The two sites with no exception keep the ol
 
 - **Boundary:** exception text crossing from provider code into the operator log (widened: it was
   dropped before). No new entry point or wire field.
-- **Actor:** an operator with log access; exception text may embed a DSN or `key=value` secret.
-- **Control:** all-occurrence URL-userinfo redaction and a length bound before logging; the
-  handler's `SecretRedactionFilter` masks `key=value` secrets and registered values.
-- **Out of scope:** secrets with no key/value or URL shape that are not in the process's secret
-  registry; accepted with the log's operator-private scope.
+- **Actor:** an operator with log access; adapter exception text may embed secrets or tenant data.
+- **Control:** adapter and foreign exception text is never logged; only a closed set of
+  kdive-owned refusal literals is, after redaction and a length bound.
+- **Out of scope:** none beyond the operator-private log scope.
 
 ## Validation
 

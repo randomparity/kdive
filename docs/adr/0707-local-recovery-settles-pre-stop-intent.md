@@ -40,6 +40,13 @@ The existing `define_source` and `restore_power` steps then take the activation 
 restoring recorded prior power. Cleanup, the tombstone, and System teardown follow unchanged. One
 route serves ordinary recover and teardown.
 
+The authority service's provider-boundary warning always names the exception type. It adds the
+message only for a `ProviderRecoveryRefusal`, the kdive-raised recovery and binding refusal whose
+text is one of a closed set of literals and so never carries provider output (operator decision,
+2026-09-28). Every other adapter or foreign exception is logged by type alone at every level,
+keeping ADR-0584's rule that provider output stays out of the operator trail. The refusal text
+still passes URL-userinfo redaction and a 512-character bound as defence in depth.
+
 ## Consequences
 
 - A teardown of such an activation restarts a prior-running source domain and waits for readiness
@@ -66,6 +73,12 @@ route serves ordinary recover and teardown.
   the states an interrupted install or removal leaves, which then have no supported way out.
 - **Skip power restoration for teardown.** judgment: a teardown-specific fork of `recover` for a
   cost every other recoverable phase already pays.
+- **Log a redacted, bounded message for every provider exception.** verified: `just ci` on this
+  branch failed
+  `tests/adversarial/test_external_boot_authority_journal.py::test_recovery_ownership_rejects_drift_without_provider_or_journal_access`,
+  which forbids adapter output in any log record. judgment (operator): that contract stands.
+- **Log the message only at DEBUG.** judgment (operator): an adapter message must not reach any
+  log level.
 - **Do nothing.** verified: issue #2880 records the retained live fixture failing teardown with
   `provider_conflict`; a read-only read of that fixture's recovery metadata on 2026-09-28 found
   phase `pre-stop-intent`.
