@@ -41,7 +41,7 @@ def _step(predicate: Callable[[dict], bool]) -> dict:
 
 
 def _test_step() -> dict:
-    return _step(lambda step: step.get("run", "").strip() == "just test")
+    return _step(lambda step: step.get("run", "").strip() == 'just test-shard "$PYTEST_SHARD"')
 
 
 def _summary_step() -> dict:
@@ -50,9 +50,9 @@ def _summary_step() -> dict:
 
 def test_the_gate_still_runs_the_recipe_verbatim() -> None:
     # The report is requested through PYTEST_ADDOPTS specifically so that CI keeps invoking
-    # `just test` unchanged — the justfile stays the single definition of the gate's command.
+    # `just test-shard` unchanged — the justfile stays the single definition of the gate's command.
     # Moving the flags onto the command line here would fork that definition.
-    assert _test_step()["run"].strip() == "just test"
+    assert _test_step()["run"].strip() == 'just test-shard "$PYTEST_SHARD"'
 
 
 def test_the_gate_run_produces_a_junit_report() -> None:
@@ -117,4 +117,5 @@ def test_timings_and_failures_are_retained_without_overriding_the_verdict() -> N
     assert upload["with"]["retention-days"] == 14
     assert upload["with"]["if-no-files-found"] == "warn"
     assert "github.run_attempt" in upload["with"]["name"]
+    assert "matrix.shard" in upload["with"]["name"]
     assert "--durations=50" in _test_step()["env"]["PYTEST_ADDOPTS"]

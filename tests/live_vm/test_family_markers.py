@@ -14,6 +14,8 @@ import ast
 import pathlib
 from functools import cache
 
+import pytest
+
 _TESTS_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _FAMILY_SUBMARKERS = ("live_vm_throwaway", "live_vm_provisioned", "live_vm_remote")
 
@@ -57,7 +59,11 @@ def _functions_with_any(markers: tuple[str, ...]) -> dict[str, set[str]]:
     # convention to handle here first. If one is ever added, extend this walk to ClassDef scope.
     found: dict[str, set[str]] = {}
     for path in _TESTS_ROOT.rglob("test_*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source = path.read_text(encoding="utf-8")
+        # The AST matcher requires a literal marker attribute; other files cannot match.
+        if not any(marker in source for marker in markers):
+            continue
+        tree = ast.parse(source, filename=str(path))
         module_marks = _module_markers(tree)
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith(
@@ -78,3 +84,27 @@ def test_every_family_submarker_test_also_carries_live_vm() -> None:
         "live_vm_throwaway/live_vm_provisioned/live_vm_remote are ADDITIVE — every carrier must "
         f"also carry the bare live_vm marker; missing on: {sorted(offenders)}"
     )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("@pytest.mark.live_vm_remote\ndef test_sync(): pass", {"live_vm_remote"}),
+        ("@pt.mark.live_vm_remote()\nasync def test_async(): pass", {"live_vm_remote"}),
+        (
+            "pytestmark: list = [pytest.mark.live_vm, pytest.mark.live_vm_remote]\n"
+            "def test_module(): pass",
+            {"live_vm", "live_vm_remote"},
+        ),
+        ("# live_vm_remote\ndef test_comment(): pass", set()),
+        ("def test_unrelated(): pass", set()),
+    ],
+)
+def test_marker_scan_preserves_supported_forms(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, source: str, expected: set[str]
+) -> None:
+    (tmp_path / "test_example.py").write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "_TESTS_ROOT", tmp_path)
+    # Bypass the repository-result cache so synthetic trees cannot affect other guards.
+    found = _functions_with_any.__wrapped__(("live_vm_remote",))
+    assert list(found.values()) == ([expected] if expected else [])
