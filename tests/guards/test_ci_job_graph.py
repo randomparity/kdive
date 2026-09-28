@@ -95,7 +95,7 @@ def test_all_original_gate_recipes_have_one_owner() -> None:
             "chart-version-check",
             "cli-verbs-check",
         },
-        "tests": {"pull-test-images", "test"},
+        "tests": {"pull-test-images", "test-shard"},
         "ansible": {"install-ansible-collections", "lint-ansible", "test-ansible"},
         "compose-volumes": {"test-compose-volumes"},
     }
@@ -182,3 +182,12 @@ def test_ansible_timings_preserve_failure_and_stop_later_harnesses(
     assert completed.returncode == (0 if fail_at is None else 42)
     for harness in expected:
         assert re.search(rf"^{re.escape(harness)}: \d+\.\d+ seconds$", completed.stderr, re.M)
+
+
+def test_pytest_matrix_runs_both_shards_without_cancelling_a_sibling() -> None:
+    job = _jobs()["tests"]
+    assert job["strategy"] == {"fail-fast": False, "matrix": {"shard": ["mcp-db", "other"]}}
+    assert "matrix.shard" in job["name"]
+    step = next(step for step in job["steps"] if step["name"] == "Test")
+    assert step["env"]["PYTEST_SHARD"] == "${{ matrix.shard }}"
+    assert step["run"] == 'just test-shard "$PYTEST_SHARD"'

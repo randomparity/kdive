@@ -240,7 +240,11 @@ jobs:
         run: just cli-verbs-check
 
   tests:
-    name: pytest
+    name: pytest (${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [mcp-db, other]
     runs-on: ubuntu-latest
     # Includes the bounded apt retry budget (ADR-0566) plus work and setup margin.
     timeout-minutes: 30
@@ -298,7 +302,7 @@ jobs:
         #
         # PYTEST_ADDOPTS asks the same run for a JUnit report, which the summary step below
         # renders into the job summary (#2062). It goes in the environment rather than as an
-        # argument to the recipe so that CI still invokes `just test` verbatim and the gate's
+        # argument to the recipe so that CI invokes `just test-shard` and the gate's
         # command keeps its single definition in the justfile. The report is written under
         # RUNNER_TEMP, outside the checkout, so no working-tree or generated-artifact gate
         # sees it. `xunit1` is asked for because pytest's default `xunit2` family drops the
@@ -306,10 +310,11 @@ jobs:
         # rendered as a node id you can paste back into pytest.
         env:
           KDIVE_REQUIRE_DOCKER: "1"
+          PYTEST_SHARD: ${{ matrix.shard }}
           PYTEST_ADDOPTS: >-
             --junit-xml=${{ runner.temp }}/pytest-junit.xml
             -o junit_family=xunit1 --durations=50
-        run: just test
+        run: just test-shard "$PYTEST_SHARD"
 
       - name: Test failure summary
         # Additive reporting, never a gate. The step above owns the verdict; this only turns
@@ -345,7 +350,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: pytest-junit-${{ github.run_attempt }}
+          name: pytest-junit-${{ matrix.shard }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/pytest-junit.xml
           retention-days: 14
           if-no-files-found: warn

@@ -218,14 +218,30 @@ def test_real_ext4_image_provisions_inode_count_beyond_default(
     import subprocess
 
     requested_entries = 20_000
+    # Host "small" filesystem profiles can already allocate more than 20,000 inodes.
+    # Pin a sparse default so removing the writer's explicit -N fails on every host.
+    mkfs_config = tmp_path / "mke2fs.conf"
+    mkfs_config.write_text(
+        "[defaults]\ninode_ratio = 16384\n[fs_types]\next4 = {\nfeatures = has_journal,extent\n}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MKE2FS_CONFIG", str(mkfs_config))
     monkeypatch.setattr(
         Ext4SourceFilesystemWriter,
         "inspect",
         lambda _self, _path: SourceFilesystemEvidence(b"operation", "sha256:" + "a" * 64, 0, 0),
     )
+    # Keep the inode pressure without making mkfs repeatedly search one huge directory.
+    # Each group contributes its parent plus 99 children: still 20,000 real directories.
     entries = tuple(
-        ModuleTreeEntry(f"directory-{index}", 0o40755) for index in range(requested_entries)
+        ModuleTreeEntry(
+            f"group-{group}" if child == 0 else f"group-{group}/directory-{child}",
+            0o40755,
+        )
+        for group in range(requested_entries // 100)
+        for child in range(100)
     )
+    assert len(entries) == requested_entries
     image = Ext4SourceFilesystemWriter(tmp_path).build(b"operation", entries)
     output = subprocess.run(  # noqa: S603 - fixed tool and generated test image
         ["tune2fs", "-l", str(image.path)],  # noqa: S607

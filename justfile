@@ -188,6 +188,20 @@ test:
     PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short
 
 
+# CI partitions the ordinary suite by path; local test/ci still run every selected test.
+# New test paths belong to other automatically. Both shards retain the gate's marker exclusion,
+# parallelism, hash seed and failure output. Each invocation owns its own test backends.
+test-shard shard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case '{{shard}}' in
+      mcp-db) paths=(tests/mcp tests/db) ;;
+      other) paths=(tests --ignore=tests/mcp --ignore=tests/db) ;;
+      *) echo 'expected shard: mcp-db or other' >&2; exit 2 ;;
+    esac
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short "${paths[@]}"
+
+
 # Detect hash-order-dependent pytest collection directly and reproducibly (#2072). The
 # weekly suite's shared per-run seed makes every xdist worker collect identically, so
 # collection drift needs a separate comparison rather than an xdist mismatch. Both direct
