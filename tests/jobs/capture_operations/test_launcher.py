@@ -11,6 +11,7 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -533,6 +534,19 @@ def test_post_spawn_attestation_faults_abort_before_release(
             return {pid: identity, impossible.pid: impossible}
 
         monkeypatch.setattr(launcher_module, "_process_group_members", _extra_handoff_member)
+        original_cleanup = launcher_module._cleanup_failed_launch
+
+        async def _cleanup_after_gate_eof(
+            process: asyncio.subprocess.Process, **kwargs: Any
+        ) -> None:
+            # Pin the EOF-exit schedule: the invented member forces a recovery scan,
+            # which otherwise races the real leader's exit and can replace our injected
+            # handoff error with a membership-change error. Keep the real cleanup and
+            # absence proof; this test targets the handoff fault, not cleanup races.
+            await asyncio.wait_for(process.wait(), timeout=5)
+            await original_cleanup(process, **kwargs)
+
+        monkeypatch.setattr(launcher_module, "_cleanup_failed_launch", _cleanup_after_gate_eof)
 
     aborts: list[LaunchAbortEvidence] = []
     expected_error = (

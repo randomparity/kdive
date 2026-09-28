@@ -53,7 +53,7 @@ _EXPECTED_SOURCES = {
 
 def _ci_steps() -> list[dict[str, Any]]:
     workflow = yaml.safe_load(_CI.read_text(encoding="utf-8"))
-    return workflow["jobs"]["lint-type-test"]["steps"]
+    return workflow["jobs"]["ansible"]["steps"]
 
 
 def _step(name: str) -> dict[str, Any]:

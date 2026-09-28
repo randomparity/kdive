@@ -27,6 +27,7 @@ from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cur
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import paginate as _paginate
+from kdive.mcp.tools._common import project_filter as _project_filter
 from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
 from kdive.security.authz.context import RequestContext
 
@@ -43,21 +44,6 @@ class RunsListRequest:
     state: RunState | None = None
     limit: int = DEFAULT_LIST_LIMIT
     cursor: str | None = None
-
-
-def _viewer_projects(ctx: RequestContext) -> list[str]:
-    """Projects the caller may view: a member project with any granted role."""
-    return [p for p in ctx.projects if ctx.roles.get(p) is not None]
-
-
-def _project_filter(ctx: RequestContext, project: str | None) -> list[str]:
-    """Narrow the caller's readable projects to ``project`` (``allocations.list`` pattern).
-
-    An unreadable ``project`` returns an empty list rather than an error, so the caller
-    gets the same empty collection an absent project would (no existence signal).
-    """
-    readable = _viewer_projects(ctx)
-    return readable if project is None else [project] if project in readable else []
 
 
 def _build_filters(
