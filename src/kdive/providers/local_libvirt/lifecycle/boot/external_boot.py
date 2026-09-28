@@ -2138,6 +2138,9 @@ class _RealLocalExternalBootOperation:
         return observed
 
     def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+        if metadata.phase == "pre-stop-intent":
+            self._settle_unpublished_modules(metadata)
+            return
         self._stop_for_recovery(metadata)
         target = _present_component(metadata.target_state.modules, "target module state")
         desired = _layout_component(metadata.source_state.modules)
@@ -2200,6 +2203,25 @@ class _RealLocalExternalBootOperation:
             completed = publication.metadata
             observed = self._observe_modules(opened_guest, completed)
         self.record_phase(completed, "module-restored", inactive_modules=observed)
+
+    def _settle_unpublished_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+        """ADR-0707: an activation that never published keeps only its own staging name."""
+        if self._host_state(metadata) != ("source", False):
+            raise ValueError("external-boot pre-stop recovery requires inactive source XML/power")
+        prior = _layout_component(metadata.source_state.modules)
+        with self._session.guest() as opened_guest:
+            publication = _SessionModulePublicationIO(
+                cast(_GuestfsTreeHandle, opened_guest),
+                metadata,
+                self._recovery_root,
+                self._recovery_writer,
+                self._session,
+            )
+            publication.discard_staging()
+            if publication.observe_layout() != ModuleLayout(prior, None, None):
+                raise ValueError("external-boot pre-stop module layout conflicts with metadata")
+            observed = self._observe_modules(opened_guest, metadata)
+        self.record_phase(metadata, "module-restored", inactive_modules=observed)
 
     def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
         while metadata.phase == "module-restored":
@@ -2482,6 +2504,11 @@ class _SessionModulePublicationIO:
 
     def remove_old(self) -> None:
         self._guest.rm_rf(self._old)
+
+    def discard_staging(self) -> None:
+        if self._guest.exists(self._staging):
+            self._guest.rm_rf(self._staging)
+            self._guest.sync()
 
     def guest_sync(self) -> None:
         self._guest.sync()
@@ -2775,6 +2802,7 @@ class LocalLibvirtExternalBoot:
             if metadata.phase in {"recovered", "cleaned"}:
                 return
             if metadata.phase not in {
+                "pre-stop-intent",
                 "target-defined",
                 "move-ready",
                 "old-aside",
