@@ -35,6 +35,12 @@ existing test wiring is unchanged. No new client, mutation path, caller migratio
 public contract. `artifact_store` and `incarnation_credential` still come from the captured ports;
 the per-call `replace` never changes them.
 
+The runner also refuses a teardown marker whose per-call `teardown_executor` is `None` before
+authority allocation, beside the existing missing-`preparation_executor` refusal. On `main` that
+refusal fired inside `complete()`, after allocation and acknowledgement, consuming a generation
+and journaling an acknowledgement for a teardown that could never run. `complete()` keeps its own
+`None` refusal for type narrowing.
+
 Rejected alternatives: putting the executor in `prerequisites` like release does (an untyped
 `Mapping[str, Any]` lookup where a typed field already exists beside it); re-reading
 `authority_client_factory` inside `complete()` (a second client per call, which the issue forbids).
@@ -44,17 +50,22 @@ Rejected alternatives: putting the executor in `prerequisites` like release does
 1. With factory-only ports (no direct `teardown_executor`), an admitted teardown calls the
    factory client's `execute_teardown` exactly once, finalizes the receipt as `applied`, leaves the
    System `torn_down`, the job `succeeded`, and exactly one reservation release row.
-2. Re-invoking the handler for the same job after that success writes no second release row or
-   receipt and does not call `execute_teardown` again.
-3. With neither a factory nor a direct executor, teardown fails with a terminal
-   `configuration_error` bound failure; no receipt or release row is written, the System is not
-   `torn_down`, and no authority teardown request is sent.
+2. Re-invoking the handler for the same job after that success is refused at admission with
+   `configuration_error`, allocates no second authority row, and does not call `execute_teardown`
+   again. Exactly-once credit itself rests on the release table's `activation_id` primary key and
+   the receipt's `root_authority_id` primary key with `applied` replay in the SQL finalizer.
+3. With neither a factory nor a direct executor, teardown refuses with terminal
+   `configuration_error` before authority allocation: no authority row, acknowledgement, receipt,
+   or release row is written, and the System stays `failed` with its reservation ready.
 4. Existing teardown tests (direct executor, quarantine, transport failure, public
    `systems.teardown` claim) stay green unchanged.
 5. Live: on the retained Ubuntu 26.04 fixture, with this branch deployed, the supported worker
    reclaim of the stale teardown job completes authority teardown: terminal job and System, domain
-   absent, cleanup evidence recorded, the ready reservation credited once, and a repeated
-   `systems.teardown` adds no credit. No host reset or manual database/journal edit.
+   absent, cleanup evidence recorded, one teardown receipt, and the ready reservation credited
+   once. A repeated `systems.teardown` replays the same job envelope (dedup key, no recycle), so
+   it proves only that credit stays at one release row. If the stale job does not recover through
+   the reclaim path, the proof stops and reports the excluded follow-up. No host reset or manual
+   database/journal edit.
 
 ## Failure model
 
@@ -64,7 +75,12 @@ Rejected alternatives: putting the executor in `prerequisites` like release does
   authority fencing (incarnation, job attempt, lease, journal head) in
   `finalize_external_boot_authority_teardown`; destructive domain removal only through the
   authority.
-- Accepted failure classes: none.
+- Accepted failure classes: a lost authority response or client-deadline expiry after the
+  authority applied teardown, and core reclaim before a `superseded` finalize. Both are existing
+  behaviour this fix first exposes in production, not changed or proven here; retry convergence
+  rests on the authority's `attempt_id` replay and the primary keys above. The per-call client
+  deadline for teardown is `recovery_readiness_timeout` (default five minutes), so a live timeout
+  is reported as that, not as this defect.
 - Covered elsewhere: stale-job reclaim/failure-commit behaviour if it reproduces with a working
   executor (follow-up via the orchestrator); release/activate captured-ports use (out of scope);
   host accelerator mismatch (#2877).
@@ -74,7 +90,7 @@ Rejected alternatives: putting the executor in `prerequisites` like release does
 | Contract | Mode | Evidence |
 |---|---|---|
 | Criterion 1 | focused-test | `test_factory_only_teardown_uses_the_per_call_executor` in `tests/jobs/handlers/external_boot/test_lifecycle.py`; red before the fix with the missing-executor configuration error |
-| Criterion 2 | focused-test | same test re-invokes the handler and asserts one release row, one receipt, one executor call |
-| Criterion 3 | focused-test | `test_teardown_without_factory_or_executor_fails_closed` in the same file |
+| Criterion 2 | focused-test | same test re-invokes the handler and asserts `configuration_error`, one authority row, one executor call, one release row and receipt |
+| Criterion 3 | focused-test | `test_teardown_without_factory_or_executor_fails_closed` in the same file; asserts zero authority rows; red on `main` (post-allocation refusal) |
 | Criterion 4 | focused-test | `just test-verbose tests/jobs/handlers/external_boot tests/integration/test_external_boot_job_lifecycle.py` |
 | Criterion 5 | task-test-not-applicable | live retained-fixture proof; needs the operator host's state, recorded in the PR |
