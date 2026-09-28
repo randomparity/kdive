@@ -18,18 +18,17 @@ WORKTREE_PYTHONPATH := justfile_directory() + "/src" + "${PYTHONPATH:+:$PYTHONPA
 default:
     @just --list
 
-# One-command first-time setup: check host deps, sync the venv, install collections and hooks.
-# Writes outside the checkout: the collections land in ~/.ansible/collections (see below).
-setup: check-deps sync build-capture-bootstrap-manifest install-ansible-collections install-hooks
+# Complete developer setup: install native/tool dependencies, sync, collections, and hooks.
+# Installs system packages (root/sudo), user tools, and ~/.ansible/collections.
+setup: (check-deps "--install-developer") sync build-capture-bootstrap-manifest install-ansible-collections install-hooks
     @echo "Development environment is ready."
 
 # Stage and verify attestation for the explicitly selected worker interpreter. This is
 # intentionally unprivileged and never writes /usr; operators install in a separate step.
-# Normalize group-write bits on user-owned source and venv trees so build/verify succeeds
-# under relaxed umasks (0002).
+# Remove group write from current-user-owned manifest inputs and their ancestors, including
+# checkout parents and external Python installations, plus the staging directory ancestors.
 build-capture-bootstrap-manifest interpreter=".venv/bin/python" output="build/capture-bootstrap-manifest.json":
-    find src .venv -maxdepth 5 -perm -020 -exec chmod g-w {} + 2>/dev/null || true
-    {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py build --interpreter {{interpreter}} --source-root src --output {{output}}
+    {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py build --prepare-permissions --interpreter {{interpreter}} --source-root src --output {{output}}
     {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py verify --interpreter {{interpreter}} --source-root src --manifest {{output}}
 
 # Privileged operator action. The script requires euid 0, installs atomically as root:root mode
@@ -39,8 +38,10 @@ install-capture-bootstrap-manifest staged="build/capture-bootstrap-manifest.json
 
 # Report missing host packages with distro-specific install hints. Report-only in CI / when piped;
 # at an interactive terminal it offers a [y/N] install per tier (pass -y to install unattended).
-check-deps:
-    ./scripts/check-setup-deps.sh
+# --setup verifies all developer dependencies; --install-developer installs them first.
+# Provider/VM preparation remains separate.
+check-deps *ARGS:
+    ./scripts/check-setup-deps.sh {{ARGS}}
 
 # Preflight: can this host run the local-libvirt provider? (report-only)
 check-local-libvirt:
@@ -185,6 +186,20 @@ _TEST_XDIST := _TEST_WORKERS + ' --dist worksteal'
 # actually needed.
 test:
     PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short
+
+
+# CI partitions the ordinary suite by path; local test/ci still run every selected test.
+# New test paths belong to other automatically. Both shards retain the gate's marker exclusion,
+# parallelism, hash seed and failure output. Each invocation owns its own test backends.
+test-shard shard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case '{{shard}}' in
+      mcp-db) paths=(tests/mcp tests/db) ;;
+      other) paths=(tests --ignore=tests/mcp --ignore=tests/db) ;;
+      *) echo 'expected shard: mcp-db or other' >&2; exit 2 ;;
+    esac
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short "${paths[@]}"
 
 
 # Detect hash-order-dependent pytest collection directly and reproducibly (#2072). The
@@ -513,15 +528,15 @@ lint-ansible:
 # Run the Ansible role regression harnesses (libvirt_stack families #2392; gdbstub_acl ufw
 # prune #616; image admission + staged-volume confirmation #1629; remote module appliance #2128).
 test-ansible:
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-libvirt-stack-families.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-github-runner-preflight.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-guest-base-image-admission.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-libvirt-facts-render.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-module-appliance.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-external-boot-recovery-root.sh
-    uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-worker-host.py
-    uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-libvirt-host.py
+    TIMEFORMAT='run-libvirt-stack-families.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-libvirt-stack-families.sh
+    TIMEFORMAT='run-gdbstub-acl-prune.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
+    TIMEFORMAT='run-github-runner-preflight.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-github-runner-preflight.sh
+    TIMEFORMAT='run-guest-base-image-admission.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-guest-base-image-admission.sh
+    TIMEFORMAT='run-remote-libvirt-facts-render.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-libvirt-facts-render.sh
+    TIMEFORMAT='run-remote-module-appliance.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-module-appliance.sh
+    TIMEFORMAT='run-external-boot-recovery-root.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-external-boot-recovery-root.sh
+    TIMEFORMAT='run-local-worker-host.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-worker-host.py
+    TIMEFORMAT='run-local-libvirt-host.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-libvirt-host.py
 
 # Lint and security-scan the GitHub Actions workflows.
 # actionlint-py bundles a prebuilt actionlint and upstream ships no ppc64le binary, so its

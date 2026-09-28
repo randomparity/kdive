@@ -169,7 +169,10 @@ def test_incompatible_or_stale_authority_fails_closed(row: dict[str, object]) ->
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_private_catalog_visibility_and_snapshot_transaction(migrated_url: str) -> None:
+@pytest.mark.parametrize("provider", ["local-libvirt", "remote-libvirt"])
+def test_private_catalog_visibility_and_snapshot_transaction(
+    migrated_url: str, provider: str
+) -> None:
     async def run() -> None:
         image_id = uuid4()
         resource_id = uuid4()
@@ -181,19 +184,41 @@ def test_private_catalog_visibility_and_snapshot_transaction(migrated_url: str) 
                 "INSERT INTO image_catalog "
                 "(id, provider, name, arch, format, root_device, object_key, digest, provenance, "
                 " visibility, owner, expires_at, state) "
-                "VALUES (%s, 'remote-libvirt', 'private-root', 'x86_64', 'qcow2', '/dev/vda', "
+                "VALUES (%s, %s, 'private-root', 'x86_64', 'qcow2', '/dev/vda', "
                 " 'private.qcow2', %s, %s, 'private', 'project-b', now() + interval '1 day', "
                 " 'registered')",
-                (image_id, _DIGEST, Jsonb(root)),
+                (image_id, provider, _DIGEST, Jsonb(root)),
             )
             await conn.commit()
-            assert await resolve_root_provenance(conn, _profile(), "project-a") is None
+            assert (
+                await resolve_root_provenance(conn, _profile(provider=provider), "project-a")
+                is None
+            )
             await conn.execute(
                 "UPDATE image_catalog SET owner = 'project-a' WHERE id = %s",
                 (image_id,),
             )
             await conn.commit()
-            snapshot = await resolve_root_provenance(conn, _profile(), "project-a")
+            assert (
+                await resolve_root_provenance(
+                    conn, _profile(provider=provider, checksum="sha256:" + "b" * 64), "project-a"
+                )
+                is None
+            )
+            await conn.execute(
+                "UPDATE image_catalog SET visibility = 'public', owner = NULL, expires_at = NULL "
+                "WHERE id = %s",
+                (image_id,),
+            )
+            public = await resolve_root_provenance(conn, _profile(provider=provider), "project-c")
+            assert public is not None and public.project == "project-c"
+            await conn.execute(
+                "UPDATE image_catalog SET visibility = 'private', owner = 'project-a', "
+                "expires_at = now() + interval '1 day' "
+                "WHERE id = %s",
+                (image_id,),
+            )
+            snapshot = await resolve_root_provenance(conn, _profile(provider=provider), "project-a")
             assert snapshot is not None
 
             await conn.execute(

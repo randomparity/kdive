@@ -22,6 +22,7 @@ import logging
 from typing import Any, cast
 
 import pytest
+from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
@@ -62,6 +63,13 @@ def _secret_registry() -> Any:
     return SecretRegistry()
 
 
+@pytest.fixture(scope="module")
+def search_app() -> FastMCP:
+    """Share the read-only registry; each test still patches its own request context."""
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    return build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+
 def _call_result(result: Any) -> dict[str, Any]:
     """Extract the structured_content dict from an app.call_tool result."""
     structured = getattr(result, "structured_content", None)
@@ -90,14 +98,15 @@ def test_schema_term_collection_never_exceeds_limit(key: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_query_ranks_relevant_tool_first(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_query_ranks_relevant_tool_first(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A query for 'boot a built kernel' returns runs.boot in the match list."""
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": "boot a built kernel"})
@@ -117,14 +126,13 @@ def test_query_ranks_relevant_tool_first(monkeypatch: pytest.MonkeyPatch) -> Non
     ],
 )
 def test_jobs_wait_discovered_from_followup_queries(
-    monkeypatch: pytest.MonkeyPatch, query: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query})
@@ -140,14 +148,15 @@ def test_jobs_wait_discovered_from_followup_queries(
 # ---------------------------------------------------------------------------
 
 
-def test_namespace_browse_returns_plane(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_namespace_browse_returns_plane(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Namespace='debug' returns all debug.* tools visible to an operator."""
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"namespace": "debug", "limit": 50})
@@ -166,14 +175,13 @@ def test_namespace_browse_returns_plane(monkeypatch: pytest.MonkeyPatch) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_payload_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_payload_is_capped(search_app: FastMCP, monkeypatch: pytest.MonkeyPatch) -> None:
     """limit=3 on a namespace with >3 tools yields 3 matches and truncated=True."""
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"namespace": "debug", "limit": 3})
@@ -203,7 +211,7 @@ def _every_scope_ctx() -> RequestContext:
 
 @pytest.mark.parametrize(("retired", "replacement"), sorted(RETIRED_TOOL_NAMES.items()))
 def test_retired_tool_name_query_finds_its_replacement(
-    monkeypatch: pytest.MonkeyPatch, retired: str, replacement: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, retired: str, replacement: str
 ) -> None:
     """Searching a retired tool name returns the tool that replaced it.
 
@@ -214,8 +222,7 @@ def test_retired_tool_name_query_finds_its_replacement(
 
     monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": retired, "limit": 50})
@@ -230,7 +237,7 @@ def test_retired_tool_name_query_finds_its_replacement(
 
 @pytest.mark.parametrize("query", ["ops.queue_pause", "ops.queue_resume", "resume"])
 def test_queue_pause_resume_vocabulary_finds_the_state_setter(
-    monkeypatch: pytest.MonkeyPatch, query: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """Both retired queue names, and the resume intent word, rank ops.set_queue_paused.
 
@@ -241,8 +248,7 @@ def test_queue_pause_resume_vocabulary_finds_the_state_setter(
 
     monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -255,15 +261,14 @@ def test_queue_pause_resume_vocabulary_finds_the_state_setter(
 
 @pytest.mark.parametrize("query", ["postmortem.triage", "triage", "postmortem"])
 def test_postmortem_triage_vocabulary_finds_postmortem_crash(
-    monkeypatch: pytest.MonkeyPatch, query: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """The retired name and its intent words all rank postmortem.crash into the results."""
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -276,7 +281,7 @@ def test_postmortem_triage_vocabulary_finds_postmortem_crash(
 
 @pytest.mark.parametrize("query", ["resources.cordon", "resources.uncordon", "cordon", "uncordon"])
 def test_cordon_vocabulary_finds_resources_set_scheduling(
-    monkeypatch: pytest.MonkeyPatch, query: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """Both retired names and the bare `cordon`/`uncordon` intent words rank the setter.
 
@@ -287,8 +292,7 @@ def test_cordon_vocabulary_finds_resources_set_scheduling(
 
     monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -309,7 +313,7 @@ def test_cordon_vocabulary_finds_resources_set_scheduling(
     ],
 )
 def test_artifact_text_search_vocabulary_finds_artifacts_get(
-    monkeypatch: pytest.MonkeyPatch, query: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """The retired name and text-search intent phrases all rank artifacts.get (ADR-0462).
 
@@ -321,8 +325,7 @@ def test_artifact_text_search_vocabulary_finds_artifacts_get(
 
     monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -336,7 +339,7 @@ def test_artifact_text_search_vocabulary_finds_artifacts_get(
 
 @pytest.mark.parametrize("query", ["images.build", "build"])
 def test_image_build_vocabulary_finds_images_publish(
-    monkeypatch: pytest.MonkeyPatch, query: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """The retired name and the bare `build` intent word rank images.publish (ADR-0461).
 
@@ -347,8 +350,7 @@ def test_image_build_vocabulary_finds_images_publish(
 
     monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -375,7 +377,7 @@ def test_image_build_vocabulary_finds_images_publish(
     ],
 )
 def test_stepping_vocabulary_finds_debug_advance(
-    monkeypatch: pytest.MonkeyPatch, query: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """All four retired stepping names and their intent words rank debug.advance (ADR-0463).
 
@@ -387,8 +389,7 @@ def test_stepping_vocabulary_finds_debug_advance(
 
     monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -410,7 +411,7 @@ def test_stepping_vocabulary_finds_debug_advance(
     ],
 )
 def test_fixtures_list_vocabulary_finds_images_list(
-    monkeypatch: pytest.MonkeyPatch, query: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """The retired name and the fixture/baseline intent phrases rank images.list (ADR-0465).
 
@@ -422,8 +423,7 @@ def test_fixtures_list_vocabulary_finds_images_list(
 
     monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -448,7 +448,7 @@ def test_fixtures_list_vocabulary_finds_images_list(
     ],
 )
 def test_resource_registration_vocabulary_finds_resources_register(
-    monkeypatch: pytest.MonkeyPatch, query: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """The three retired names and their intent phrases all rank `resources.register` (ADR-0464).
 
@@ -460,8 +460,7 @@ def test_resource_registration_vocabulary_finds_resources_register(
 
     monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -480,14 +479,13 @@ def test_resource_registration_vocabulary_finds_resources_register(
 # ---------------------------------------------------------------------------
 
 
-def test_results_rbac_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_results_rbac_filtered(search_app: FastMCP, monkeypatch: pytest.MonkeyPatch) -> None:
     """control.force_crash (admin-only) does not appear in a viewer's search results."""
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": "force crash"})
@@ -506,14 +504,15 @@ def test_results_rbac_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_match_includes_full_input_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_match_includes_full_input_schema(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A detail='full' match for runs.get carries its full input_schema (including 'run_id')."""
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool(
@@ -533,13 +532,14 @@ def test_match_includes_full_input_schema(monkeypatch: pytest.MonkeyPatch) -> No
     assert runs_get["maturity"] == "implemented"
 
 
-def test_query_indexes_parameter_names_and_descriptions(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_query_indexes_parameter_names_and_descriptions(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": "sha256 size_bytes"})
@@ -551,14 +551,14 @@ def test_query_indexes_parameter_names_and_descriptions(monkeypatch: pytest.Monk
 
 
 def test_legacy_static_artifact_tool_names_find_upload_tool(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run(query: str) -> Any:
         return await app.call_tool("tools.search", {"query": query})
@@ -570,13 +570,14 @@ def test_legacy_static_artifact_tool_names_find_upload_tool(
         assert "artifacts.create_run_upload" in _match_names(content)
 
 
-def test_result_includes_mutating_safety_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_result_includes_mutating_safety_metadata(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": "power reset"})
@@ -592,7 +593,7 @@ def test_result_includes_mutating_safety_metadata(monkeypatch: pytest.MonkeyPatc
 
 
 def test_resolver_failure_keeps_search_usable_and_rbac_filtered(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     import kdive.mcp.tools.gateway as gateway_module
     from kdive.providers.core.resolver import ProviderResolver
@@ -602,8 +603,7 @@ def test_resolver_failure_keeps_search_usable_and_rbac_filtered(
     def _raise_registered_kinds(self: ProviderResolver) -> frozenset:
         raise RuntimeError("injected resolver failure")
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
     monkeypatch.setattr(ProviderResolver, "registered_kinds", _raise_registered_kinds)
 
     async def _run() -> Any:
@@ -619,14 +619,13 @@ def test_resolver_failure_keeps_search_usable_and_rbac_filtered(
 
 
 def test_projection_failure_falls_back_to_original_tool_schema(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
     original_project = gateway_module.project_listed_tool
     original_tools = {tool.name: tool for tool in registered_tools(app)}
     original_alloc_schema = original_tools["allocations.request"].parameters
@@ -663,7 +662,9 @@ def test_projection_failure_falls_back_to_original_tool_schema(
         "which core did this run capture",
     ],
 )
-def test_vmcore_list_vocabulary_finds_runs_get(monkeypatch: pytest.MonkeyPatch, query: str) -> None:
+def test_vmcore_list_vocabulary_finds_runs_get(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
     """The retired name and the run-scoped core-lookup intent rank runs.get (ADR-0466).
 
     `vmcore.list` was the only Run-scoped vmcore listing; its replacement is `runs.get`, whose
@@ -675,8 +676,7 @@ def test_vmcore_list_vocabulary_finds_runs_get(monkeypatch: pytest.MonkeyPatch, 
 
     monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -707,7 +707,7 @@ def test_vmcore_list_vocabulary_finds_runs_get(monkeypatch: pytest.MonkeyPatch, 
     ],
 )
 def test_accounting_scope_vocabulary_finds_the_merged_tool(
-    monkeypatch: pytest.MonkeyPatch, query: str, expected: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str, expected: str
 ) -> None:
     """The six retired scope names and their intent phrases rank the merged tool (ADR-0467).
 
@@ -721,8 +721,7 @@ def test_accounting_scope_vocabulary_finds_the_merged_tool(
 
     monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -749,7 +748,7 @@ def test_accounting_scope_vocabulary_finds_the_merged_tool(
     ],
 )
 def test_point_read_vocabulary_finds_the_wait_tool(
-    monkeypatch: pytest.MonkeyPatch, query: str, expected: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str, expected: str
 ) -> None:
     """The retired getter names and their intent phrases rank the wait tool (ADR-0468).
 
@@ -762,8 +761,7 @@ def test_point_read_vocabulary_finds_the_wait_tool(
 
     monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -790,7 +788,7 @@ def test_point_read_vocabulary_finds_the_wait_tool(
     ],
 )
 def test_define_vocabulary_finds_the_one_create_lane(
-    monkeypatch: pytest.MonkeyPatch, query: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """The retired define-lane names and their intent phrases rank `systems.provision` (ADR-0457).
 
@@ -804,8 +802,7 @@ def test_define_vocabulary_finds_the_one_create_lane(
 
     monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
 
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    app = search_app
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"query": query, "limit": 50})
@@ -833,17 +830,20 @@ def _search(app: Any, args: dict[str, Any]) -> dict[str, Any]:
     return content
 
 
-def _build(monkeypatch: pytest.MonkeyPatch, ctx_factory: Any) -> Any:
+def _with_context(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, ctx_factory: Any
+) -> FastMCP:
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", ctx_factory)
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    return build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+    return search_app
 
 
-def test_default_match_omits_schema_and_full_description(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_match_omits_schema_and_full_description(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Every default match carries name/summary/annotations/maturity and nothing heavier."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"query": "boot a built kernel"})
 
@@ -855,13 +855,15 @@ def test_default_match_omits_schema_and_full_description(monkeypatch: pytest.Mon
         )
 
 
-def test_summary_is_the_first_paragraph_on_one_line(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_summary_is_the_first_paragraph_on_one_line(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``summary`` is the description's first paragraph, not a byte-truncated prefix.
 
     ``tools.invoke`` has a five-paragraph description whose first paragraph is one short
     sentence, so a summary equal to that sentence can only come from paragraph splitting.
     """
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     summary_match = next(
         m
@@ -884,10 +886,11 @@ def test_summary_is_the_first_paragraph_on_one_line(monkeypatch: pytest.MonkeyPa
 
 
 def test_summary_match_still_carries_safety_classification(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """annotations + maturity ride a summary match, so a found tool is always classifiable."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"query": "power reset"})
 
@@ -897,10 +900,11 @@ def test_summary_match_still_carries_safety_classification(
 
 
 def test_detail_full_adds_schema_and_complete_description(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """detail='full' is additive: the summary keys survive and two more appear."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"query": "boot a built kernel", "detail": "full"})
 
@@ -918,14 +922,16 @@ def test_detail_full_adds_schema_and_complete_description(
         }, f"unexpected full match keys for {match.get('name')}: {sorted(match)}"
 
 
-def test_default_query_is_far_cheaper_than_full_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_query_is_far_cheaper_than_full_detail(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The default envelope for the issue's own query is a fraction of the full one.
 
     This is the defect #1597 reports, so the assertion is on serialized bytes rather than
     on the presence of a key: a future change that re-inlines schemas under another name
     has to fail here.
     """
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     query = {"query": "boot a built kernel", "limit": 10}
     default_bytes = len(json.dumps(_search(app, query)))
@@ -939,7 +945,7 @@ def test_default_query_is_far_cheaper_than_full_detail(monkeypatch: pytest.Monke
 
 @pytest.mark.parametrize("name", ["runs.get", "jobs.wait", "runs.list"])
 def test_exact_tool_name_query_ranks_that_tool_first(
-    monkeypatch: pytest.MonkeyPatch, name: str
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     """query=<exact name> + limit=1 fetches that tool's schema, not a same-score neighbour.
 
@@ -947,7 +953,7 @@ def test_exact_tool_name_query_ranks_that_tool_first(
     exact-name rule ``limit=1`` returns ``artifacts.create_run_upload`` for ``runs.get``,
     ``control.capture_traffic`` for ``jobs.wait``, and ``runs.create`` for ``runs.list``.
     """
-    app = _build(monkeypatch, _every_scope_ctx)
+    app = _with_context(search_app, monkeypatch, _every_scope_ctx)
 
     content = _search(app, {"query": name, "detail": "full", "limit": 1})
 
@@ -958,9 +964,11 @@ def test_exact_tool_name_query_ranks_that_tool_first(
     assert matches[0]["input_schema"]["type"] == "object"
 
 
-def test_exact_name_first_does_not_drop_the_other_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_exact_name_first_does_not_drop_the_other_hits(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Ranking the exact name first reorders the hit list; it does not filter it."""
-    app = _build(monkeypatch, _every_scope_ctx)
+    app = _with_context(search_app, monkeypatch, _every_scope_ctx)
 
     content = _search(app, {"query": "runs.get", "limit": 50})
 
@@ -977,8 +985,10 @@ def test_exact_name_first_does_not_drop_the_other_hits(monkeypatch: pytest.Monke
 # ---------------------------------------------------------------------------
 
 
-def test_authorized_namespace_reports_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    app = _build(monkeypatch, _operator_ctx)
+def test_authorized_namespace_reports_ok(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"namespace": "debug", "limit": 50})
 
@@ -987,10 +997,11 @@ def test_authorized_namespace_reports_ok(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_unauthorized_namespace_names_the_grant_without_naming_tools(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A live-but-entirely-filtered plane says so and names the grants, never the tools."""
-    app = _build(monkeypatch, _viewer_ctx)
+    app = _with_context(search_app, monkeypatch, _viewer_ctx)
 
     content = _search(app, {"namespace": "ops", "limit": 50})
 
@@ -1008,9 +1019,10 @@ def test_unauthorized_namespace_names_the_grant_without_naming_tools(
 
 
 def test_unknown_namespace_is_not_reported_as_unauthorized(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build(monkeypatch, _viewer_ctx)
+    app = _with_context(search_app, monkeypatch, _viewer_ctx)
 
     content = _search(app, {"namespace": "no_such_plane", "limit": 50})
 
@@ -1019,9 +1031,11 @@ def test_unknown_namespace_is_not_reported_as_unauthorized(
     assert "namespace_required_grants" not in content["data"]
 
 
-def test_query_mode_carries_no_namespace_status(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_query_mode_carries_no_namespace_status(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The namespace keys describe a namespace argument, so query mode must not carry them."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     data = _search(app, {"query": "boot a built kernel"})["data"]
 
@@ -1034,10 +1048,14 @@ def test_query_mode_carries_no_namespace_status(monkeypatch: pytest.MonkeyPatch)
     [("ops", "unauthorized"), ("no_such_plane", "unknown")],
 )
 def test_namespace_miss_is_logged_for_curation(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, namespace: str, status: str
+    search_app: FastMCP,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    namespace: str,
+    status: str,
 ) -> None:
     """A namespace miss reaches the log the query miss already reached (#1597)."""
-    app = _build(monkeypatch, _viewer_ctx)
+    app = _with_context(search_app, monkeypatch, _viewer_ctx)
 
     with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
         _search(app, {"namespace": namespace, "limit": 50})
@@ -1051,9 +1069,9 @@ def test_namespace_miss_is_logged_for_curation(
 
 
 def test_authorized_namespace_logs_no_miss(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
         _search(app, {"namespace": "debug", "limit": 50})
@@ -1067,10 +1085,11 @@ def test_authorized_namespace_logs_no_miss(
 
 
 def test_names_returns_exactly_those_tools_at_full_detail(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """names= returns the named tools, in caller order, with description and input_schema."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"names": ["runs.install", "runs.boot"]})
 
@@ -1083,9 +1102,11 @@ def test_names_returns_exactly_those_tools_at_full_detail(
         assert "input_schema" in match, f"{match['name']} carried no input_schema"
 
 
-def test_names_reports_unknown_and_hidden_names(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_names_reports_unknown_and_hidden_names(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An unregistered name and an RBAC-hidden one both land in unknown_names, sorted."""
-    app = _build(monkeypatch, _viewer_ctx)
+    app = _with_context(search_app, monkeypatch, _viewer_ctx)
 
     content = _search(app, {"names": ["runs.get", "zzz.nope", "control.force_crash"]})
 
@@ -1094,9 +1115,9 @@ def test_names_reports_unknown_and_hidden_names(monkeypatch: pytest.MonkeyPatch)
     assert data["unknown_names"] == ["control.force_crash", "zzz.nope"]
 
 
-def test_names_mode_is_rbac_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_names_mode_is_rbac_filtered(search_app: FastMCP, monkeypatch: pytest.MonkeyPatch) -> None:
     """A viewer cannot reach control.force_crash's schema by naming it."""
-    app = _build(monkeypatch, _viewer_ctx)
+    app = _with_context(search_app, monkeypatch, _viewer_ctx)
 
     content = _search(app, {"names": ["control.force_crash"]})
 
@@ -1105,9 +1126,11 @@ def test_names_mode_is_rbac_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("detail", ["summary", "parameters"])
-def test_names_mode_ignores_summary_detail(monkeypatch: pytest.MonkeyPatch, detail: str) -> None:
+def test_names_mode_ignores_summary_detail(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, detail: str
+) -> None:
     """names= overrides any cheaper detail tier: the schema is the point of the mode."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"names": ["runs.get"], "detail": detail})
 
@@ -1117,10 +1140,11 @@ def test_names_mode_ignores_summary_detail(monkeypatch: pytest.MonkeyPatch, deta
 
 
 def test_names_mode_ignores_limit_and_carries_no_reason(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """limit does not truncate an explicit enumeration, and names mode carries no reason."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"names": ["runs.get", "runs.list"], "limit": 1})
 
@@ -1131,10 +1155,11 @@ def test_names_mode_ignores_limit_and_carries_no_reason(
 
 
 def test_names_takes_precedence_over_namespace_and_query(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """names wins over namespace, which wins over query; no namespace_status is emitted."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(
         app, {"names": ["runs.get"], "namespace": "debug", "query": "boot a built kernel"}
@@ -1145,9 +1170,11 @@ def test_names_takes_precedence_over_namespace_and_query(
     assert "namespace_status" not in data
 
 
-def test_names_normalises_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_names_normalises_and_deduplicates(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Entries are stripped and lower-cased, and a repeat returns once in first position."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"names": [" Runs.Boot ", "runs.get", "runs.boot"]})
 
@@ -1157,10 +1184,10 @@ def test_names_normalises_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> N
 
 @pytest.mark.parametrize("names", [[], ["runs.get"] * 11, ["x" * 129], [""]])
 def test_names_cardinality_rejects_out_of_bounds(
-    monkeypatch: pytest.MonkeyPatch, names: list[str]
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, names: list[str]
 ) -> None:
     """An empty list, an over-long list, an over-long entry, and a blank entry are rejected."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     async def _run() -> Any:
         return await app.call_tool("tools.search", {"names": names})
@@ -1169,9 +1196,11 @@ def test_names_cardinality_rejects_out_of_bounds(
         asyncio.run(_run())
 
 
-def test_names_cardinality_accepts_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_names_cardinality_accepts_the_ceiling(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Ten distinct names is the documented ceiling and is accepted, not rejected."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
     ten = [f"zzz.tool{index}" for index in range(10)]
 
     content = _search(app, {"names": ten})
@@ -1180,10 +1209,10 @@ def test_names_cardinality_accepts_the_ceiling(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_names_miss_is_logged_with_counts_only(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A names miss reaches vocabulary curation as counts, never as the caller's names."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
         _search(app, {"names": ["runs.get", "zzz.nope"]})
@@ -1203,9 +1232,11 @@ def test_names_miss_is_logged_with_counts_only(
 # ---------------------------------------------------------------------------
 
 
-def test_short_token_query_reports_no_usable_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_short_token_query_reports_no_usable_tokens(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A query whose every token is under two characters never reached the index."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"query": "a b"})
 
@@ -1214,10 +1245,11 @@ def test_short_token_query_reports_no_usable_tokens(monkeypatch: pytest.MonkeyPa
 
 
 def test_unsupported_operator_query_reports_no_token_matched(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The issue's select: form ran and matched nothing, which is not 'no such tool'."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"query": "select:images.describe,allocations.request"})
 
@@ -1225,9 +1257,11 @@ def test_unsupported_operator_query_reports_no_token_matched(
     assert content["data"]["reason"] == "no_token_matched"
 
 
-def test_successful_query_carries_no_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_successful_query_carries_no_reason(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The reason key is absent whenever there are matches."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"query": "boot a built kernel"})
 
@@ -1236,10 +1270,10 @@ def test_successful_query_carries_no_reason(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_query_miss_log_carries_the_reason_and_skips_namespace_calls(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """tool_search_miss carries the reason, and a namespace+query call no longer emits it."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
         _search(app, {"query": "select:images.describe"})
@@ -1258,12 +1292,12 @@ def test_query_miss_log_carries_the_reason_and_skips_namespace_calls(
 
 
 def test_query_miss_log_bounds_the_caller_query(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The logged query is cut at the bound with a marker; one at the bound is logged whole."""
     from kdive.mcp.tools.gateway import _QUERY_LOG_LEN_MAX
 
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
     # One unbroken token, so it reaches the no_token_matched arm rather than being split.
     oversized = "zz" + "q" * (4 * _QUERY_LOG_LEN_MAX)
 
@@ -1309,9 +1343,11 @@ class _StubTool:
         self.parameters = parameters
 
 
-def test_parameters_tier_returns_the_argument_list(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_parameters_tier_returns_the_argument_list(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """detail='parameters' adds exactly one key to the summary set."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"query": "boot a built kernel", "detail": "parameters"})
 
@@ -1326,6 +1362,7 @@ def test_parameters_tier_returns_the_argument_list(monkeypatch: pytest.MonkeyPat
 
 
 def test_parameters_entries_follow_declaration_order_and_required(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Entries keep the schema's property order and mark exactly the required ones.
@@ -1333,7 +1370,7 @@ def test_parameters_entries_follow_declaration_order_and_required(
     ``runs.install`` declares run_id, cmdline, crashkernel, idempotency_key in that order and
     requires only run_id, so an alphabetised or set-ordered list cannot pass here.
     """
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     content = _search(app, {"query": "runs.install", "detail": "parameters", "limit": 1})
 
@@ -1393,9 +1430,11 @@ def test_parameters_tier_handles_a_tool_with_no_parameters() -> None:
     assert described["parameters"] == []
 
 
-def test_full_tier_still_carries_parameters(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_full_tier_still_carries_parameters(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The tiers are monotone: stepping up to full never drops the parameters key."""
-    app = _build(monkeypatch, _operator_ctx)
+    app = _with_context(search_app, monkeypatch, _operator_ctx)
 
     query = {"query": "runs.install", "limit": 1}
     mid = _search(app, {**query, "detail": "parameters"})["data"]["matches"][0]
@@ -1408,6 +1447,7 @@ def test_full_tier_still_carries_parameters(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_no_live_tool_renders_an_unknown_parameter_type(
+    search_app: FastMCP,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No registered tool's schema reaches ``_type_name``'s ``unknown`` fallback.
@@ -1419,7 +1459,7 @@ def test_no_live_tool_renders_an_unknown_parameter_type(
     """
     from kdive.mcp.tools.gateway import _parameter_digest
 
-    app = _build(monkeypatch, _every_scope_ctx)
+    app = _with_context(search_app, monkeypatch, _every_scope_ctx)
 
     rendered: list[str] = []
     offenders: list[str] = []
@@ -1433,3 +1473,16 @@ def test_no_live_tool_renders_an_unknown_parameter_type(
     # exactly how this guard would stop biting without anyone noticing.
     assert len(rendered) > 200, f"expected the live catalogue's properties, walked {len(rendered)}"
     assert not offenders, f"parameters tier renders an unknown type for: {offenders}"
+
+
+def test_shared_app_rechecks_request_permissions(
+    search_app: FastMCP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for context, visible in (
+        (_every_scope_ctx, True),
+        (_viewer_ctx, False),
+        (_every_scope_ctx, True),
+    ):
+        app = _with_context(search_app, monkeypatch, context)
+        content = _search(app, {"names": ["control.force_crash"]})
+        assert ("control.force_crash" in _match_names(content)) is visible
