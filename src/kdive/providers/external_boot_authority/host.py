@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import pwd
 import re
@@ -29,9 +30,12 @@ from kdive.db.external_boot_authority_journal import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.device_identity import RemoteDeviceIdentityService
-from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.journal import (
+    RETRACTED_DIRECTORY,
+    FileAuthorityJournal,
+)
 from kdive.providers.external_boot_authority.proof_barrier import AuthorityProofBarrier
-from kdive.providers.external_boot_authority.protocol import record_digest
+from kdive.providers.external_boot_authority.protocol import JournalRecordV1, record_digest
 from kdive.providers.external_boot_authority.settings import (
     AUTHORITY_CLIENT_GID,
     AUTHORITY_DENIED_IDENTITIES,
@@ -53,6 +57,7 @@ from kdive.providers.external_boot_authority.transport import (
     AuthorityListener,
     AuthorityNetworkListener,
     SocketLockBusyError,
+    acquire_socket_lock,
     authority_server_name,
     health_tls_context,
     serve_authority_network_transport,
@@ -84,6 +89,7 @@ JOURNAL_DIRECTORY_MODE = 0o700
 PROVIDER_DIRECTORY_MODE = 0o700
 PROVIDER_SOCKET_MODE = 0o700
 MAX_JOURNAL_LANES = 4_096
+_log = logging.getLogger(__name__)
 _DATABASE_DSN_MAX_BYTES = 4_096
 _DIAGNOSTIC_MAX_BYTES = 192
 _SAFE_DIAGNOSTIC = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -429,6 +435,20 @@ def _journal_identity(status: os.stat_result) -> _JournalIdentity:
     )
 
 
+def _validate_retracted_directory(config: AuthorityHostConfig, root_fd: int) -> None:
+    """Admit the reserved evidence directory (ADR-0584 amendment) without reading inside it."""
+    try:
+        status = os.stat(RETRACTED_DIRECTORY, dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        raise HostReadinessError("journal", "unsafe-tree") from None
+    if (
+        not stat.S_ISDIR(status.st_mode)
+        or status.st_uid != config.authority_uid
+        or stat.S_IMODE(status.st_mode) != 0o700
+    ):
+        raise HostReadinessError("journal", "unsafe-tree")
+
+
 def _local_lanes(
     config: AuthorityHostConfig, root_fd: int
 ) -> dict[str, tuple[str, _JournalIdentity]]:
@@ -437,6 +457,9 @@ def _local_lanes(
         names = os.listdir(root_fd)
     except OSError:
         raise HostReadinessError("journal", "unsafe-tree") from None
+    if RETRACTED_DIRECTORY in names:
+        _validate_retracted_directory(config, root_fd)
+        names.remove(RETRACTED_DIRECTORY)
     if len(names) > MAX_JOURNAL_LANES:
         raise HostReadinessError("journal", "lane-limit")
     for name in names:
@@ -461,6 +484,59 @@ def _local_lanes(
             raise HostReadinessError("journal", "unsafe-tree") from None
         lanes[system_id] = (name, _journal_identity(status))
     return lanes
+
+
+def _head_matches(record: JournalRecordV1, head: JournalHead, config: AuthorityHostConfig) -> bool:
+    return (
+        head.authority_instance == config.authority_instance
+        and record.authority_instance == head.authority_instance
+        and record.system_id == head.system_id
+        and record.sequence == head.sequence
+        and record_digest(record) == head.digest
+        and record.phase is head.phase
+        and record.authority_id == head.authority_id
+        and record.generation == head.generation
+        and record.operation_identity == head.operation_identity
+    )
+
+
+def _unanchored_tail(
+    config: AuthorityHostConfig,
+    system_id: str,
+    records: tuple[JournalRecordV1, ...],
+    head: JournalHead | None,
+) -> JournalRecordV1 | None:
+    """Return the one final record the head never accepted, or None (ADR-0584 amendment)."""
+    if head is None:
+        if (
+            len(records) == 1
+            and records[0].authority_instance == config.authority_instance
+            and str(records[0].system_id) == system_id
+        ):
+            return records[0]
+        return None
+    if len(records) == head.sequence + 1 and _head_matches(records[-2], head, config):
+        return records[-1]
+    return None
+
+
+def _retract_unanchored_tail(
+    config: AuthorityHostConfig, system_id: str, head: JournalHead | None, *, retract: bool
+) -> JournalRecordV1 | None:
+    journal: FileAuthorityJournal | None = None
+    try:
+        journal = FileAuthorityJournal(
+            config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
+        )
+        tail = _unanchored_tail(config, system_id, journal.load(), head)
+        if tail is not None and retract:
+            journal.retract(tail)
+        return tail
+    except OSError, ValueError:
+        raise HostReadinessError("journal", "invalid-lane") from None
+    finally:
+        if journal is not None:
+            journal.close()
 
 
 def _restore_journal_inventory(
@@ -495,18 +571,7 @@ def _restore_journal_inventory(
             records = journal.load(deadline=deadline)
             if not records:
                 raise HostReadinessError("journal", "head-mismatch")
-            terminal = records[-1]
-            if (
-                head.authority_instance != config.authority_instance
-                or terminal.authority_instance != head.authority_instance
-                or terminal.system_id != head.system_id
-                or terminal.sequence != head.sequence
-                or record_digest(terminal) != head.digest
-                or terminal.phase is not head.phase
-                or terminal.authority_id != head.authority_id
-                or terminal.generation != head.generation
-                or terminal.operation_identity != head.operation_identity
-            ):
+            if not _head_matches(records[-1], head, config):
                 raise HostReadinessError("journal", "head-mismatch")
             validated[system_id] = evidence
         except HostReadinessError:
@@ -1077,6 +1142,71 @@ async def _database_heads(config: AuthorityHostConfig) -> tuple[JournalHead, ...
     return heads
 
 
+async def _lane_heads(
+    connection: AsyncConnection, config: AuthorityHostConfig
+) -> dict[str, JournalHead]:
+    try:
+        heads = await list_journal_heads(connection, config.authority_instance)
+    except Exception:
+        raise HostReadinessError("database", "inventory-failed") from None
+    return {str(head.system_id): head for head in heads}
+
+
+async def _reconcile_journal_tails(config: AuthorityHostConfig) -> None:
+    """At startup only, retract each lane's one unanchored final record (ADR-0584 amendment).
+
+    The request-socket lock excludes a live authority for this instance; the System's advisory
+    lock, the key the head-advance function takes, excludes a head advance still in flight.
+    """
+    try:
+        lock = acquire_socket_lock(config.request_socket.with_suffix(".lock"), config.authority_uid)
+    except SocketLockBusyError:
+        raise HostReadinessError("journal", "reconcile-busy") from None
+    except OSError:
+        raise HostReadinessError("journal", "unsafe-path") from None
+    try:
+        async with _database_connection(config) as connection:
+            async with connection.transaction():
+                await check_database_role(connection)
+                heads = await _lane_heads(connection, config)
+            root_fd = _validate_journal_root(config)
+            try:
+                local = _local_lanes(config, root_fd)
+            finally:
+                os.close(root_fd)
+            for system_id in local:
+                if not await asyncio.to_thread(
+                    _retract_unanchored_tail, config, system_id, heads.get(system_id), retract=False
+                ):
+                    continue
+                try:
+                    async with connection.transaction():
+                        await connection.execute(
+                            "SELECT pg_advisory_xact_lock("
+                            "hashtextextended('kdive:system:' || %s::text, 2126))",
+                            (system_id,),
+                        )
+                        head = (await _lane_heads(connection, config)).get(system_id)
+                        tail = await asyncio.to_thread(
+                            _retract_unanchored_tail, config, system_id, head, retract=True
+                        )
+                except HostReadinessError:
+                    raise
+                except Exception:
+                    raise HostReadinessError("journal", "reconcile-failed") from None
+                if tail is not None:
+                    _log.warning(
+                        "authority journal retracted an unanchored record at startup",
+                        extra={
+                            "system_id": system_id,
+                            "sequence": tail.sequence,
+                            "digest": record_digest(tail),
+                        },
+                    )
+    finally:
+        os.close(lock)
+
+
 async def _check_provider_socket(config: AuthorityHostConfig) -> None:
     try:
         validate_protected_parents(config.provider_socket, config.authority_uid)
@@ -1624,9 +1754,20 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
 
     try:
         system_installation = _load_system_installation(config)
-        await _bounded_readiness_check(
-            _check_static_authority_host(config, journal_validator, system_installation)
-        )
+        try:
+            await _bounded_readiness_check(
+                _check_static_authority_host(config, journal_validator, system_installation)
+            )
+        except HostReadinessError as error:
+            if error.component != "journal" or error.reason not in {
+                "head-mismatch",
+                "inventory-mismatch",
+            }:
+                raise
+            await _bounded_readiness_check(_reconcile_journal_tails(config))
+            await _bounded_readiness_check(
+                _check_static_authority_host(config, journal_validator, system_installation)
+            )
         if config.proof_socket is not None:
             try:
                 proof_barrier = AuthorityProofBarrier(config.proof_socket)

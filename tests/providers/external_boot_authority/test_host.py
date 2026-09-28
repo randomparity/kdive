@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import tempfile
 import threading
 from collections.abc import Iterator
@@ -14,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -1936,3 +1937,254 @@ def test_authority_host_cli_commands_parse() -> None:
     assert build_parser().parse_args(["check-external-boot-authority-host"]).command == (
         "check-external-boot-authority-host"
     )
+
+
+def _chain(config: AuthorityHostConfig, system_id: UUID, count: int) -> list[JournalRecordV1]:
+    common: dict[str, object] = {
+        "authority_id": uuid4(),
+        "generation": 1,
+        "system_id": system_id,
+        "activation_id": uuid4(),
+        "run_id": uuid4(),
+        "plan_identity": "sha256:" + "2" * 64,
+        "purpose": "activate",
+        "operation": AuthorityOperation.ACTIVATE,
+        "provider_kind": "local-libvirt",
+        "authority_instance": config.authority_instance,
+        "operation_identity": "operation-a",
+        "operation_digest": "sha256:" + "3" * 64,
+        "attempt_id": uuid4(),
+    }
+    first = JournalRecordV1.model_validate(
+        common
+        | {
+            "sequence": 1,
+            "previous_digest": "sha256:" + "0" * 64,
+            "phase": JournalPhase.WATERMARK_INSTALLED,
+        }
+    )
+    records = [first]
+    if count > 1:
+        records.append(
+            JournalRecordV1.model_validate(
+                common
+                | {
+                    "sequence": 2,
+                    "previous_digest": record_digest(first),
+                    "phase": JournalPhase.TAKEOVER_ACKNOWLEDGED,
+                    "watermark_sequence": 1,
+                    "watermark_digest": record_digest(first),
+                }
+            )
+        )
+    if count > 2:
+        records.append(
+            JournalRecordV1.model_validate(
+                common
+                | {
+                    "sequence": 3,
+                    "previous_digest": record_digest(records[-1]),
+                    "phase": JournalPhase.ADMITTED,
+                    "expected_source_identity": "sha256:" + "4" * 64,
+                    "intended_target_identity": "sha256:" + "5" * 64,
+                    "recovery_objects": (),
+                }
+            )
+        )
+    return records[:count]
+
+
+def _write_lane(config: AuthorityHostConfig, records: list[JournalRecordV1]) -> Path:
+    lane = config.journal_dir / f"{records[0].system_id}.jsonl"
+    lane.write_bytes(b"".join(canonical_record_bytes(record) + b"\n" for record in records))
+    lane.chmod(0o600)
+    return lane
+
+
+def _head_of(record: JournalRecordV1) -> JournalHead:
+    return JournalHead(
+        authority_instance=record.authority_instance,
+        system_id=record.system_id,
+        sequence=record.sequence,
+        digest=record_digest(record),
+        phase=record.phase,
+        authority_id=record.authority_id,
+        generation=record.generation,
+        operation_identity=record.operation_identity,
+        pending_takeover=None,
+        suspended_operation=None,
+    )
+
+
+@pytest.mark.parametrize(("count", "anchored"), [(2, 1), (3, 2), (1, 0)])
+def test_startup_retracts_one_record_chained_to_the_head(
+    tmp_path: Path, count: int, anchored: int
+) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), count)
+    lane = _write_lane(config, records)
+    heads = (_head_of(records[anchored - 1]),) if anchored else ()
+    with pytest.raises(HostReadinessError, match="journal: (head|inventory)-mismatch"):
+        restore_journal_inventory(config, heads)
+
+    tail = host._retract_unanchored_tail(  # noqa: SLF001
+        config, str(records[0].system_id), heads[0] if heads else None, retract=True
+    )
+
+    assert tail == records[-1]
+    evidence = next((config.journal_dir / "retracted").iterdir())
+    assert evidence.read_bytes() == canonical_record_bytes(records[-1]) + b"\n"
+    if anchored:
+        restore_journal_inventory(config, heads)
+    else:
+        assert not lane.exists()
+        restore_journal_inventory(config, ())
+
+
+@pytest.mark.parametrize("case", ["equal", "two-record-suffix", "moved-head", "foreign-instance"])
+def test_startup_keeps_every_other_file_head_difference(tmp_path: Path, case: str) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 3)
+    head: JournalHead | None = {
+        "equal": _head_of(records[2]),
+        "two-record-suffix": _head_of(records[0]),
+        "moved-head": replace(_head_of(records[1]), digest="sha256:" + "9" * 64),
+        "foreign-instance": None,
+    }[case]
+    if case == "foreign-instance":
+        records = [records[0].model_copy(update={"authority_instance": "authority-b"})]
+    lane = _write_lane(config, records)
+    before = lane.read_bytes()
+
+    tail = host._retract_unanchored_tail(  # noqa: SLF001
+        config, str(records[0].system_id), head, retract=True
+    )
+
+    assert tail is None
+    assert lane.read_bytes() == before
+    assert not (config.journal_dir / "retracted").exists()
+    if case != "equal":
+        with pytest.raises(HostReadinessError, match="journal: (head|inventory)-mismatch"):
+            restore_journal_inventory(config, (head,) if head is not None else ())
+
+
+def test_reconcile_refuses_while_another_authority_holds_the_socket_lock(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.request_socket.parent.mkdir(mode=0o700)
+    held = transport.acquire_socket_lock(
+        config.request_socket.with_suffix(".lock"), config.authority_uid
+    )
+    try:
+        with pytest.raises(HostReadinessError, match="journal: reconcile-busy"):
+            asyncio.run(host._reconcile_journal_tails(config))  # noqa: SLF001
+    finally:
+        os.close(held)
+
+
+@pytest.mark.parametrize(
+    ("failure", "reconciles"),
+    [
+        (HostReadinessError("journal", "head-mismatch"), True),
+        (HostReadinessError("journal", "inventory-mismatch"), True),
+        (HostReadinessError("journal", "invalid-lane"), False),
+        (HostReadinessError("database", "connection-failed"), False),
+    ],
+)
+def test_startup_reconciles_only_after_a_journal_head_difference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: HostReadinessError,
+    reconciles: bool,
+) -> None:
+    config = _config(tmp_path)
+    reconciled: list[AuthorityHostConfig] = []
+    checks = 0
+
+    async def check(*_args: object) -> None:
+        nonlocal checks
+        checks += 1
+        raise failure if checks == 1 else HostReadinessError("stop", "after-reconcile")
+
+    async def reconcile(value: AuthorityHostConfig) -> None:
+        reconciled.append(value)
+
+    monkeypatch.setattr(host, "_load_system_installation", lambda _config: None)
+    monkeypatch.setattr(host, "_check_static_authority_host", check)
+    monkeypatch.setattr(host, "_reconcile_journal_tails", reconcile)
+    monkeypatch.setattr(host, "_notify_systemd", lambda _message: None)
+
+    with pytest.raises(HostReadinessError) as caught:
+        asyncio.run(run_authority_host(config))
+
+    assert reconciled == ([config] if reconciles else [])
+    assert caught.value.reason == ("after-reconcile" if reconciles else failure.reason)
+
+
+def test_standalone_check_never_retracts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 2)
+    lane = _write_lane(config, records)
+    before = lane.read_bytes()
+    config.request_socket.parent.mkdir(mode=0o700)
+
+    async def heads(_config: AuthorityHostConfig) -> tuple[JournalHead, ...]:
+        return (_head_of(records[0]),)
+
+    monkeypatch.setattr(host, "_validate_access_boundary", lambda _config: None)
+    monkeypatch.setattr(host, "_database_heads", heads)
+    monkeypatch.setattr(host, "_load_system_installation", lambda _config: None)
+    monkeypatch.setattr(host, "validate_socket_parent", lambda *_args: None)
+
+    with pytest.raises(HostReadinessError, match="journal: head-mismatch"):
+        asyncio.run(host.check_authority_host_once(config))
+
+    assert lane.read_bytes() == before
+
+
+def test_lane_inventory_admits_the_reserved_evidence_directory(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evidence = config.journal_dir / "retracted"
+    evidence.mkdir(mode=0o700)
+    nested = evidence / f"{uuid4()}.jsonl"
+    nested.write_bytes(b"not a lane\n")
+    nested.chmod(0o600)
+
+    restore_journal_inventory(config, ())
+
+
+@pytest.mark.parametrize("shape", ["symlink", "file", "mode", "foreign-owner", "other-directory"])
+def test_lane_inventory_rejects_an_unsafe_evidence_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str
+) -> None:
+    config = _config(tmp_path)
+    evidence = config.journal_dir / "retracted"
+    if shape == "symlink":
+        target = tmp_path / "elsewhere"
+        target.mkdir(mode=0o700)
+        evidence.symlink_to(target)
+    elif shape == "file":
+        evidence.write_bytes(b"")
+        evidence.chmod(0o700)
+    elif shape == "mode":
+        evidence.mkdir()
+        evidence.chmod(0o750)
+    elif shape == "other-directory":
+        (config.journal_dir / "retracted-extra").mkdir(mode=0o700)
+    else:
+        evidence.mkdir(mode=0o700)
+        real_stat = host.os.stat
+
+        def foreign_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            status = real_stat(path, *args, **kwargs)
+            if path != "retracted":
+                return status
+            fields = list(status)
+            fields[stat.ST_UID] = config.authority_uid + 1
+            return os.stat_result(fields)
+
+        monkeypatch.setattr(host.os, "stat", foreign_stat)
+
+    with pytest.raises(HostReadinessError, match="journal: unsafe-tree"):
+        restore_journal_inventory(config, ())
