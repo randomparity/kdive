@@ -1,8 +1,8 @@
-# ADR-0705: Normalize copied container runtime input permissions
+# 0705 — Normalize copied container runtime input permissions
 
 ## Status
 
-Accepted — issue #2864.
+Accepted (2026-09-28)
 
 ## Context
 
