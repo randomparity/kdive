@@ -1,6 +1,7 @@
 """Full teardown traverses authentication, anchoring and host-owned IO (ADR-0620)."""
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -111,6 +112,7 @@ class _TeardownAdapter(_Adapter):
         self.read_count = 0
         self.lose_completion_reply = False
         self.release_reservation_after_commit: Callable[[], None] | None = None
+        self.failure: Exception | None = None
 
     async def execute_system_teardown(
         self,
@@ -123,6 +125,8 @@ class _TeardownAdapter(_Adapter):
         self.commit_count += 1
         self.entered.set()
         await self.release.wait()
+        if self.failure is not None:
+            raise self.failure
         if self.lose_completion_reply:
             raise OSError("injected lost host completion reply")
         if self.release_reservation_after_commit is not None:
@@ -312,4 +316,36 @@ async def test_malformed_host_facts_cannot_become_a_terminal_proof(tmp_path: Pat
         await service.execute_teardown(peer, request)
     assert repository.records[-1].phase is JournalPhase.PROVIDER_RETURNED
     assert not any(record.phase is JournalPhase.TERMINAL for record in repository.records)
+    await service.close()
+
+
+@pytest.mark.anyio
+async def test_provider_failure_log_names_the_redacted_exception(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _repository, adapter, peer, request = await _ready(tmp_path)
+    adapter.failure = ValueError(
+        "https://api.example/x refused; retry "
+        "postgresql://kdive:hunter2@db/kdive "  # pragma: allowlist secret
+        "or qemu+ssh://root:s3cr3t@host/system " + "x" * 600  # pragma: allowlist secret
+    )
+    prefix = "authority provider boundary failed: ValueError: "
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(AuthorityServiceError, match="provider_conflict"),
+    ):
+        await service.execute_teardown(peer, request)
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("authority provider boundary failed")
+    ]
+    assert len(messages) == 1
+    assert messages[0].startswith(prefix + "https://api.example/x refused")
+    assert "hunter2" not in messages[0]
+    assert "s3cr3t" not in messages[0]
+    assert "[REDACTED]@db/kdive" in messages[0]
+    assert len(messages[0]) - len(prefix) == 512
     await service.close()

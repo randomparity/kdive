@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -59,6 +60,11 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.providers.system_authority.service import AuthoritySystemService
+from kdive.security.secrets.redaction import REDACTION
+
+_ERROR_MESSAGE_MAX = 512
+# Every URL userinfo in free text; the log handler's SecretRedactionFilter masks key=value.
+_URL_USERINFO = re.compile(r"(?<=://)[^/@\s]+@")
 
 
 @dataclass(frozen=True, slots=True)
@@ -760,8 +766,8 @@ class ExternalBootAuthorityService:
             await self._adapter.finalize(request, AuthorityCommitContextV1.for_record(started))
         except AuthorityServiceError:
             raise
-        except Exception:
-            raise self._provider_error(request) from None
+        except Exception as error:
+            raise self._provider_error(request, error) from None
 
     async def _publish_cleanup_quarantine(
         self,
@@ -864,19 +870,29 @@ class ExternalBootAuthorityService:
         return records
 
     def _provider_error(
-        self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
+        self,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        error: Exception | None = None,
     ) -> AuthorityServiceError:
         labels = self.metrics.reject_labels(
             (request.provider_kind, request.authority_instance), "provider_conflict"
         )
-        self._logger.warning(
-            "authority provider boundary failed",
-            extra={
-                "provider_kind": labels[0],
-                "authority_instance": labels[1],
-                "category": "provider_conflict",
-            },
-        )
+        extra = {
+            "provider_kind": labels[0],
+            "authority_instance": labels[1],
+            "category": "provider_conflict",
+        }
+        if error is None:
+            self._logger.warning("authority provider boundary failed", extra=extra)
+        else:
+            # The wire keeps the bounded category; only the operator log names the cause.
+            message = _URL_USERINFO.sub(f"{REDACTION}@", str(error))[:_ERROR_MESSAGE_MAX]
+            self._logger.warning(
+                "authority provider boundary failed: %s: %s",
+                type(error).__qualname__,
+                message,
+                extra=extra,
+            )
         return AuthorityServiceError("provider_conflict", telemetry_recorded=True)
 
     async def _head_still_anchors(
@@ -1077,8 +1093,8 @@ class ExternalBootAuthorityService:
                 # Already a bounded category; re-classifying it as provider_conflict would
                 # lose a superseded verdict the adapter is entitled to reach.
                 raise
-            except Exception:
-                raise self._provider_error(request) from None
+            except Exception as error:
+                raise self._provider_error(request, error) from None
             records = await self._anchor(
                 binding,
                 journal,
@@ -1092,8 +1108,8 @@ class ExternalBootAuthorityService:
                 # Already a bounded category; re-classifying it as provider_conflict would
                 # lose a superseded verdict the adapter is entitled to reach.
                 raise
-            except Exception:
-                raise self._provider_error(request) from None
+            except Exception as error:
+                raise self._provider_error(request, error) from None
         elif prior.phase is JournalPhase.OBSERVED:
             if prior.observation is None:
                 raise AuthorityServiceError("journal_conflict")
@@ -1715,8 +1731,8 @@ class ExternalBootAuthorityService:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
                     raise
-                except Exception:
-                    raise self._provider_error(request) from None
+                except Exception as error:
+                    raise self._provider_error(request, error) from None
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(
@@ -1743,8 +1759,8 @@ class ExternalBootAuthorityService:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
                     raise
-                except Exception:
-                    raise self._provider_error(request) from None
+                except Exception as error:
+                    raise self._provider_error(request, error) from None
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(
@@ -2020,8 +2036,8 @@ class ExternalBootAuthorityService:
                     await self._adapter.commit(mutation, context)
                 except AuthorityServiceError:
                     raise
-                except Exception:
-                    raise self._provider_error(request) from None
+                except Exception as error:
+                    raise self._provider_error(request, error) from None
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(
@@ -2034,8 +2050,8 @@ class ExternalBootAuthorityService:
                     observation = await self._adapter.observe(mutation)
                 except AuthorityServiceError:
                     raise
-                except Exception:
-                    raise self._provider_error(request) from None
+                except Exception as error:
+                    raise self._provider_error(request, error) from None
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(
@@ -2315,8 +2331,8 @@ class ExternalBootAuthorityService:
                         observation = await read(request)
                     except AuthorityServiceError:
                         raise
-                    except Exception:
-                        raise self._provider_error(request) from None
+                    except Exception as error:
+                        raise self._provider_error(request, error) from None
                     rechecked = await self._resolve_confirmed(
                         authenticated, request, acknowledgement
                     )
@@ -2358,8 +2374,8 @@ class ExternalBootAuthorityService:
             receipt = await self._adapter.preparation_receipt(request)
         except AuthorityServiceError:
             raise
-        except Exception:
-            raise self._provider_error(request) from None
+        except Exception as error:
+            raise self._provider_error(request, error) from None
         if receipt.identity != observation.composite_state:
             raise self._provider_error(request)
         journal = self._journal_factory(request.system_id)
