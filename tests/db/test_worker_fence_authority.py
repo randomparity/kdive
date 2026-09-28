@@ -302,7 +302,6 @@ _WORKER_SELECT = {
 }
 _WORKER_MUTATIONS = {
     "INSERT": {
-        "audit_log",
         "artifacts",
         "component_uploads",
         "egress_probe_guests",
@@ -352,7 +351,6 @@ _RECONCILER_SELECT = _ORDINARY_TABLES - {
 _RECONCILER_MUTATIONS = {
     "INSERT": {
         "artifacts",
-        "audit_log",
         "capture_reap_state",
         "cost_class_coefficients",
         "image_catalog",
@@ -1314,6 +1312,63 @@ def test_runtime_roles_receive_data_access_without_crossing_fence_authority(
                 (login, f"public.{sequence}", ["SELECT", "UPDATE", "USAGE"]),
             ).fetchall()
             assert privileges == [(False,)] * 3, (role, sequence)
+
+
+@pytest.mark.parametrize("role", ["kdive_worker", "kdive_reconciler"])
+def test_audit_insert_columns_and_defaults(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns, role: str
+) -> None:
+    writable = {
+        row[0]
+        for row in pg_conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'audit_log' "
+            "AND has_column_privilege(%s, 'public.audit_log', column_name, 'INSERT')",
+            (role_dsn.logins[role],),
+        ).fetchall()
+    }
+    assert writable == {
+        "principal",
+        "agent_session",
+        "project",
+        "tool",
+        "object_kind",
+        "object_id",
+        "transition",
+        "args_digest",
+    }
+    with psycopg.connect(role_dsn(role), autocommit=True) as runtime:
+        row = runtime.execute(
+            "INSERT INTO public.audit_log "
+            "(principal, agent_session, project, tool, object_kind, object_id, "
+            "transition, args_digest) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            ("audit-test", "session", "project-a", "test.audit", "systems", uuid4(), "ready", "d"),
+        ).fetchone()
+        assert row is not None
+        audit_id = row[0]
+        assert isinstance(audit_id, UUID)
+        readable = runtime.execute(
+            "SELECT id FROM public.audit_log WHERE id = %s", (audit_id,)
+        ).fetchone()
+        assert readable == row
+    stored = pg_conn.execute(
+        "SELECT ts, reason FROM public.audit_log WHERE id = %s", (audit_id,)
+    ).fetchone()
+    assert stored is not None
+    assert isinstance(stored[0], datetime)
+    assert stored[1] is None
+
+
+@pytest.mark.parametrize("role", ["kdive_worker", "kdive_reconciler"])
+@pytest.mark.parametrize("column", ["id", "ts", "reason"])
+def test_audit_insert_rejects_excluded_columns(role_dsn: RoleDsns, role: str, column: str) -> None:
+    with (
+        psycopg.connect(role_dsn(role), autocommit=True) as runtime,
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+    ):
+        runtime.execute(
+            SQL("INSERT INTO public.audit_log ({}) VALUES (DEFAULT)").format(Identifier(column))
+        )
 
 
 def test_worker_audit_record_path_has_exact_role_authority(
