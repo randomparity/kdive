@@ -1119,7 +1119,10 @@ async def test_failed_checkpoint_never_reaches_provider_and_fails_closed(tmp_pat
         await service.acknowledge_takeover(peer, request)
     assert adapter.calls == []
     assert repository.head is None
-    assert not await service.readiness(peer, request)
+    # ADR-0584 amendment (#2793): the refused record is retracted, so the lane again equals
+    # its (absent) trusted head instead of stranding an unanchored record.
+    assert not (tmp_path / f"{request.system_id}.journal").exists()
+    assert await service.readiness(peer, request)
     assert service.metrics.checkpoints == {}
     assert service.metrics.rejections == {
         (request.provider_kind, request.authority_instance, "journal_conflict"): 1
@@ -1839,3 +1842,90 @@ async def test_a_head_moved_by_a_concurrent_takeover_still_lets_the_commit_finis
     await service.execute_mutation(peer, _mutation(request))
 
     assert len(adapter.commit_contexts) == 1
+
+
+class _FailingRetractJournal(FileAuthorityJournal):
+    def retract(self, record: JournalRecordV1) -> None:
+        raise OSError("injected retraction failure")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "category"), [("superseded", "superseded"), ("conflict", "journal_conflict")]
+)
+async def test_refused_anchor_retracts_its_record(
+    tmp_path: Path, status: Literal["superseded", "conflict"], category: str
+) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    lane = tmp_path / f"{takeover.system_id}.journal"
+    anchored = lane.read_bytes()
+    repository.advance_status = status
+
+    with pytest.raises(AuthorityServiceError, match=category):
+        await service.execute_mutation(peer, _mutation(takeover))
+
+    assert lane.read_bytes() == anchored
+    assert adapter.calls == []
+    assert [path.name.split(".")[1] for path in (tmp_path / "retracted").iterdir()] == [
+        str(len(repository.records) + 1)
+    ]
+
+
+@pytest.mark.anyio
+async def test_lane_anchors_again_after_a_superseded_refusal(tmp_path: Path) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    repository.advance_status = "superseded"
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_mutation(peer, _mutation(takeover))
+    repository.advance_status = "advanced"
+
+    observation = await service.execute_mutation(peer, _mutation(takeover))
+
+    assert observation.category == "target"
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+
+
+@pytest.mark.anyio
+async def test_anchor_error_keeps_the_unanchored_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service, repository, _adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    lane = tmp_path / f"{takeover.system_id}.journal"
+    anchored = lane.read_bytes()
+
+    async def lost_advance(*_args: object) -> str:
+        raise RuntimeError("advance outcome unknown")
+
+    monkeypatch.setattr(repository, "advance", lost_advance)
+    with pytest.raises(RuntimeError, match="outcome unknown"):
+        await service.execute_mutation(peer, _mutation(takeover))
+
+    assert lane.read_bytes().startswith(anchored)
+    assert len(lane.read_bytes().splitlines()) == len(anchored.splitlines()) + 1
+    assert not (tmp_path / "retracted").exists()
+
+
+@pytest.mark.anyio
+async def test_retraction_failure_still_raises_the_refusal(tmp_path: Path) -> None:
+    _unused, repository, adapter, peer, takeover = _service(tmp_path)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: _FailingRetractJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    lane = tmp_path / f"{takeover.system_id}.journal"
+    anchored = lane.read_bytes()
+    repository.advance_status = "conflict"
+
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await service.execute_mutation(peer, _mutation(takeover))
+
+    assert len(lane.read_bytes().splitlines()) == len(anchored.splitlines()) + 1

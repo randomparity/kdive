@@ -237,6 +237,50 @@ recorded value. While the domain is inactive, the observation still reads the tr
 value covers only provider mutations. A change that the running guest makes to its own module tree
 is not a provider mutation, and the next inactive observation sees that change.
 
+### Amendment (2026-09-28): an unanchored final record is retracted (#2793)
+
+This amendment narrows the "longer uncommitted suffix" case in *Mutation journal and stable
+ownership*. A record the trusted head never accepted records no provider mutation that the head
+does not already show: `admitted` and `mutation-started` are anchored before provider access, so an
+unanchored record either precedes that access or follows a `mutation-started` head that already
+marks the operation unresolved. The authority therefore removes exactly one unanchored final
+record, in two cases and in no others:
+
+- at runtime, the record `_anchor` has just appended, when the head advance returns a definitive
+  `superseded` or `conflict`. An error from the advance leaves the outcome unknown, and the record
+  stays;
+- at service startup, while it holds the request-socket lock and that System's advisory lock, a
+  single record at head sequence + 1 that chains to the unchanged head, or the only record of a
+  lane that has no head.
+
+Before removal, the authority preserves the record's exact bytes in a reserved `retracted/`
+subdirectory of the journal directory: mode 0700, owned by the authority, created on first use.
+The lane inventory accepts exactly that name, and only as a real directory (not a symlink) with
+that owner and mode. It never enumerates or reads the directory's contents as a lane, and every
+other entry that is not `<uuid>.jsonl` still fails `unsafe-tree`. Every other difference still
+refuses service: a longer suffix, a head that moved, a shorter journal, or any divergence. The
+trusted head never moves, and no anchored record is removed.
+
+Rejected for this amendment:
+
+- **Advance the head before the local fsync.** judgment: a crash between the two then leaves a
+  journal shorter than its head, which is the unrecoverable case this ADR refuses.
+- **Tolerate a one-record tail at readiness.** verified: `FileAuthorityJournal._prepare_record`
+  (`journal.py`, commit 83e79f112) requires `sequence == count + 1`, while the service numbers
+  its next record from the head-length record list. The next append on the lane then fails as
+  non-contiguous.
+- **Only an operator repair command.** judgment: every refused anchor would still take the host
+  out of service until an operator acted.
+- **Evidence under `state_dir`.** verified: every authority systemd unit runs
+  `ProtectSystem=strict`, and its `ReadWritePaths` name the journal directory and fixed
+  subtrees but never `state_dir` itself
+  (`deploy/systemd/system/kdive-external-boot-authority.service`,
+  `deploy/ansible/roles/provider_authority_host/templates/authority.service.j2`,
+  `deploy/ansible/roles/live_vm_host/templates/external-boot-authority.service.j2`). A new
+  evidence path there fails with `EROFS`, and the host still restart-loops. Widening `ReadWritePaths` would require
+  reprovisioning every host. The campaign orchestrator selected the reserved subdirectory on
+  2026-09-28.
+
 ## Consequences
 
 - External boot gains a fence at the provider mutation boundary and a separate database fence for
