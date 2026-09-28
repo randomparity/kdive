@@ -29,6 +29,7 @@ from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.authority import AllocatedAuthority, allocate_authority
 from kdive.jobs.handlers.external_boot.ports import (
     ExternalBootAuthorityExecutor,
+    ExternalBootAuthorityTeardownExecutor,
     ExternalBootHandlerPorts,
 )
 from kdive.jobs.models import (
@@ -168,6 +169,12 @@ class OperationContext:
     ``cleanup``/``teardown`` — are exactly the rows its precondition already had to read. Carrying
     them forward is one query rather than two, and removes the window in which the second read
     could see a different row than the check approved.
+    """
+    teardown_executor: ExternalBootAuthorityTeardownExecutor | None = None
+    """The per-call teardown executor: the factory client when one is configured.
+
+    Read from here, never from the ports ``build_operations`` captured, which production assembly
+    builds with only a client factory.
     """
 
 
@@ -685,6 +692,8 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         and ports.preparation_executor is None
     ):
         raise _refuse("no external-boot authority preparation executor is configured")
+    if marker.operation == "teardown" and ports.teardown_executor is None:
+        raise _refuse("no external-boot authority teardown executor is configured")
 
     authority = await allocate_authority(
         conn, job, marker, incarnation_credential=ports.incarnation_credential
@@ -714,6 +723,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         incarnation_credential=ports.incarnation_credential,
         local_timing=local_timing,
         prerequisites=prerequisites,
+        teardown_executor=ports.teardown_executor,
     )
     context = replace(context, activation=await _debit_preparing(conn, context, ports))
     context = replace(context, activation=await _materialize_preparing(conn, context, ports))
