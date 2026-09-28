@@ -125,13 +125,15 @@ Files: `src/kdive/providers/external_boot_authority/host.py`; tests
 `tests/db/test_external_boot_authority_head_inventory_migration.py`.
 
 Interfaces (produced, private): `_head_matches(record, head, config) -> bool`, the predicate
-extracted from `_restore_journal_inventory` and reused there. `_retract_unanchored_tail(config,
-system_id: str, head: JournalHead | None) -> bool` runs synchronously in a thread and returns
-whether it retracted. `_lock_journal_lane(connection, system_id: str) -> None` runs
-`SELECT pg_advisory_xact_lock(hashtextextended('kdive:system:' || %s, 2126))`.
-`async _reconcile_journal_tails(config) -> None` is called from `_check_static_authority_host`
-only when its new keyword `reconcile_tails=True` is set, after `validate_credential_paths` and
-before `_database_heads`. Only `run_authority_host`'s startup call passes it.
+extracted from `_restore_journal_inventory` and reused there. `_unanchored_tail(config,
+system_id, records, head) -> JournalRecordV1 | None` is the pure eligibility rule.
+`_retract_unanchored_tail(config, system_id: str, head: JournalHead | None, *, retract: bool)
+-> JournalRecordV1 | None` loads the lane in a thread and returns the eligible record, retracting
+it when `retract` is set. `async _reconcile_journal_tails(config) -> None` runs the
+`SELECT pg_advisory_xact_lock(hashtextextended('kdive:system:' || %s::text, 2126))` inline.
+`run_authority_host` calls it only when its first `_check_static_authority_host` fails with
+`journal: head-mismatch` or `inventory-mismatch`, then repeats that check once; no other caller
+exists, so the check CLI and the periodic check never retract.
 
 Verification:
 - Mode: focused-test — contract: eligibility. Tests: chained tail retracted; lone first record
@@ -141,9 +143,10 @@ Verification:
   Red: `AttributeError: module ... has no attribute '_retract_unanchored_tail'`.
 - Mode: focused-test — contract: `_reconcile_journal_tails` raises
   `HostReadinessError("journal", "reconcile-busy")` when the request-socket lock is held
-  (`acquire_socket_lock` on the same path in the test first), and only startup passes
-  `reconcile_tails=True` (monkeypatch `_reconcile_journal_tails` to record calls; run
-  `check_authority_host_once` and the periodic `check_authority_host` and assert none).
+  (`acquire_socket_lock` on the same path in the test first); `run_authority_host` reconciles
+  only after a journal head or inventory mismatch (monkeypatch `_reconcile_journal_tails` to
+  record calls); `check_authority_host_once` over a tail fails `head-mismatch` and leaves the
+  file unchanged.
 - Mode: focused-test — contract: the authority login role can run the lane lock, and it waits
   while an admin session holds the same key, failing with `LockNotAvailable` under
   `lock_timeout`. Test `test_authority_role_takes_the_lane_advisory_lock` in the 0125 DB test file.
@@ -157,9 +160,9 @@ Steps:
    (`SocketLockBusyError` → `reconcile-busy`, other `OSError` → `unsafe-path`) and closes it in
    `finally`. It opens `_database_connection(config)`, runs `check_database_role`, lists the heads,
    and gets the local lanes via `_validate_journal_root` and `_local_lanes`. For each local lane
-   whose cached comparison differs (no head, or the file's last record fails `_head_matches`), it
-   runs `async with connection.transaction()`: `_lock_journal_lane`, re-list the heads, then
-   `await asyncio.to_thread(_retract_unanchored_tail, config, system_id, head)`. A database
+   whose file ends in an eligible record (`retract=False`), it runs `async with
+   connection.transaction()`: the advisory lock, re-list the heads, then
+   `await asyncio.to_thread(_retract_unanchored_tail, config, system_id, head, retract=True)`. A database
    exception maps to `HostReadinessError("journal", "reconcile-failed")`. A retraction logs a
    warning with the System, sequence, and digest.
    `_retract_unanchored_tail` opens `FileAuthorityJournal(config.journal_dir, f"{id}.jsonl",
@@ -168,7 +171,8 @@ Steps:
    instance and System match, or when `len(records) == head.sequence + 1` and
    `_head_matches(records[-2], head, config)`. It closes the journal in `finally`.
    `OSError`/`ValueError` → `HostReadinessError("journal", "invalid-lane")`.
-3. Pass `reconcile_tails=True` from `run_authority_host`'s first `_check_static_authority_host`.
+3. In `run_authority_host`, catch a `journal` `head-mismatch` or `inventory-mismatch` from the
+   first static check, reconcile, and run the static check again; re-raise every other error.
 4. Green; lint; type. Commit `fix(authority): retract one unanchored journal tail at startup`.
 
 ## Task 4 — the evidence directory in the lane inventory

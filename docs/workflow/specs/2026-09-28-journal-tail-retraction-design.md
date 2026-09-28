@@ -41,11 +41,13 @@ unresolved. Removing exactly that one record restores the file/head equality. Tw
    exception from `advance` is an unknown outcome and keeps the record. If the retraction itself
    fails, `_anchor` logs the failure type and raises the same refusal. The record stays, and the
    startup path below handles it.
-2. **Startup reconcile.** Before its first readiness check, `run_authority_host` holds the
+2. **Startup reconcile.** Only when its first readiness check fails with `journal:
+   head-mismatch` or `journal: inventory-mismatch`, `run_authority_host` reconciles and then
+   runs that check once more, so a clean start pays nothing. The reconcile holds the
    request-socket `flock` so that no other authority process for this instance is serving. It
    opens one database connection (role-checked, with the host's 5 s lock and idle-transaction
-   timeouts) and lists the heads. For each local lane whose file does not already end at its
-   head, it opens a transaction, takes `pg_advisory_xact_lock(hashtextextended('kdive:system:' ||
+   timeouts) and lists the heads. For each local lane whose file ends in an eligible record
+   against that head, it opens a transaction, takes `pg_advisory_xact_lock(hashtextextended('kdive:system:' ||
    id, 2126))`, the same key the advance function takes, lists the heads again, and retracts the
    final record only when one of these holds:
    - the file has exactly `head.sequence + 1` records and record `head.sequence` equals the head
