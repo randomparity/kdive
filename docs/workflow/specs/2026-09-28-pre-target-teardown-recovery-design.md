@@ -21,29 +21,28 @@ reads `pre-stop-intent` with prior power `running` (read-only check, 2026-09-28)
 
 **Recovery** (`src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py`, ADR-0707).
 `LocalLibvirtExternalBoot.recover` adds `pre-stop-intent` to its resumable set.
-`RealLocalExternalBootOperation.recover_modules` (the concrete operation) branches on that phase
-before `_stop_for_recovery` into a new private `_settle_unpublished_modules(metadata)`:
+`_RealLocalExternalBootOperation.recover_modules` (the concrete operation) branches on that
+phase before `_stop_for_recovery` into a new private `_settle_unpublished_modules(metadata)`:
 
-- require `_host_state(metadata) == ("source", False)`, else `ValueError`; then
-  `self._session.require_inactive()`;
-- open the guest, build `_SessionModulePublicationIO`, observe the layout;
-- layout `ModuleLayout(prior, None, None)`: no guest change; layout
-  `ModuleLayout(prior, desired, None)`: `publication.remove_staging()` (new: `rm_rf` of the
-  staging name), `guest_sync()`, re-observe and require `ModuleLayout(prior, None, None)`; any
-  other layout: `ValueError` before mutation;
+- require `_host_state(metadata) == ("source", False)`, else `ValueError` (the guest is not
+  opened);
+- open the guest and build `_SessionModulePublicationIO`; its new `discard_staging()` removes the
+  staging name with `rm_rf` and syncs when `guest.exists` reports it, whatever it holds;
+- observe the layout and require `ModuleLayout(prior, None, None)`, else `ValueError`;
 - `record_phase(metadata, "module-restored", inactive_modules=<observed live modules>)`.
 
-`prior` and `desired` are computed exactly as `activate_modules` computes them. The coordinator
+`prior` is `_layout_component(metadata.source_state.modules)`, as in `activate_modules`. The
+coordinator
 then runs the existing `define_source` and `restore_power`. The authority adapter is unchanged:
 its existing `recover` → cleanup → tombstone → `teardown_system` sequence now succeeds.
 
 **Diagnostics** (`src/kdive/providers/external_boot_authority/service.py`). `_provider_error`
 takes an optional `error: Exception | None`. When given, the warning becomes
-`authority provider boundary failed: %s: %s` with the exception's `type(error).__qualname__` and
-a message produced by `redact_url_credentials`, then a module-level
-`Redactor(registry=SecretRegistry())`, truncated to 512 characters; the same two values are added
-to `extra` as `error_type` and `error_message`. The message is in the formatted text because the
-authority host installs no JSON formatter, so `extra` alone is invisible there. Every
+`authority provider boundary failed: %s: %s` with `type(error).__qualname__` and `str(error)`
+after every URL userinfo (`user:password` before `@`) is replaced by `[REDACTED]@` (a local regex applied to
+all occurrences), truncated to 512 characters. The values go in the formatted text because the
+host's `JsonFormatter` (installed by `kdive`'s `bootstrap_stdout_floor`) drops `extra`; its
+`SecretRedactionFilter` already masks `key=value` secrets and registered values. Every
 `except Exception:` site that returns `_provider_error` binds and passes the exception; the wire
 error and `from None` are unchanged. The two sites with no exception keep the old line.
 
@@ -51,16 +50,18 @@ error and `from None` are unchanged. The two sites with no exception keep the ol
 
 1. `recover` on complete metadata at `pre-stop-intent`, inactive source XML, and the source layout
    reaches `recovered` with no guest module mutation, restoring prior power `running`.
-2. The same with target modules staged removes only the staging name, then reaches `recovered`;
-   an interruption right after that removal converges to `recovered` on retry.
-3. At `pre-stop-intent`, an active domain, a non-source XML, or a layout other than the two above
-   raises `ValueError` with the phase still `pre-stop-intent` and no stop, define, start, or
-   guest removal recorded.
+2. The same with a staging name holding the complete target, or a partial install, removes only
+   the staging name, then reaches `recovered`; an interruption right after that removal
+   converges to `recovered` on retry.
+3. At `pre-stop-intent`, an active domain or a non-source XML raises `ValueError` with no guest
+   access; a live or old name other than the source layout raises `ValueError` with the live and
+   old names untouched. Either way the phase stays `pre-stop-intent` and no stop, define, or
+   start is recorded.
 4. Authority-adapter System teardown on `pre-stop-intent` metadata reaches complete teardown facts
    with recover, cleanup, tombstone finalization, and host teardown in that order.
 5. A provider adapter raising a non-`AuthorityServiceError` yields wire `provider_conflict` and one
-   warning whose text names the exception type and the message with a `password=` value and URL
-   userinfo password redacted, bounded to 512 characters.
+   warning whose text names the exception type and the message with every URL userinfo password
+   redacted, including one after a leading userinfo-free URL, bounded to 512 characters.
 6. Live, on the retained fixture: terminal teardown state, domain absent, cleanup evidence
    recorded, the 32 GiB ready reservation credited exactly once, and a retry that adds no second
    credit; no manual DB/journal edit or host reset. This also proves #2881's share of #2878
@@ -74,8 +75,7 @@ error and `from None` are unchanged. The two sites with no exception keep the ol
   private staging name; the domain is never stopped or redefined from `pre-stop-intent`; one
   tombstone and one reservation credit per activation; no registered secret or credential-shaped
   value reaches the log.
-- **Accepted failure classes:** a partially installed staging name still refuses (ADR-0707,
-  unchanged from `activate`); a prior-running source that fails readiness fails teardown with the
+- **Accepted failure classes:** a prior-running source that fails readiness fails teardown with the
   now-logged cause, as for other phases; the log message may carry host paths from `OSError`
   text, accepted because the authority log is operator-private and the paths are the diagnosis.
 - **Covered elsewhere:** fail-commit fence and superseded diagnostics (#2881); accelerator refusal
@@ -86,10 +86,10 @@ error and `from None` are unchanged. The two sites with no exception keep the ol
 - **Boundary:** exception text crossing from provider code into the operator log (widened: it was
   dropped before). No new entry point or wire field.
 - **Actor:** an operator with log access; exception text may embed a DSN or `key=value` secret.
-- **Control:** URL-userinfo and key/value redaction plus a length bound, applied before logging;
-  the handler-level `SecretRedactionFilter` still applies where `configure_logging` ran.
-- **Out of scope:** secrets with no key/value or URL shape, since the authority host holds no
-  secret registry; accepted with the log's operator-private scope.
+- **Control:** all-occurrence URL-userinfo redaction and a length bound before logging; the
+  handler's `SecretRedactionFilter` masks `key=value` secrets and registered values.
+- **Out of scope:** secrets with no key/value or URL shape that are not in the process's secret
+  registry; accepted with the log's operator-private scope.
 
 ## Validation
 

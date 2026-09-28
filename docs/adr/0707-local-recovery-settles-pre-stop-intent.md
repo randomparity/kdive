@@ -28,10 +28,13 @@ handles that phase itself:
 
 1. It requires the exact recorded source XML with the domain inactive and stops nothing; any other
    host state refuses without mutation.
-2. It observes the three-name module layout. The exact source layout needs no guest change. The
-   source layout plus a staging name holding exactly the target manifest has that staging name
-   removed and synced, then the layout is re-observed. Any other layout refuses without mutation.
-3. It records `module-restored` with the observed live modules.
+2. If the activation-private staging name exists, whatever it holds (a complete or partial
+   target install, or a non-directory), it is removed and the guest synced. No module move has
+   happened before `move-ready`/`old-aside`, and nothing else creates that name, so discarding it
+   never touches published modules.
+3. It then requires the exact source layout (live = recorded source modules, no staging, no old
+   name); any other layout refuses without further mutation.
+4. It records `module-restored` with the observed live modules.
 
 The existing `define_source` and `restore_power` steps then take the activation to `recovered`,
 restoring recorded prior power. Cleanup, the tombstone, and System teardown follow unchanged. One
@@ -41,23 +44,28 @@ route serves ordinary recover and teardown.
 
 - A teardown of such an activation restarts a prior-running source domain and waits for readiness
   before destroying it, as teardown from every other recoverable phase already does.
-- A partially installed staging name (install interrupted before the layout matched) is still
-  refused, exactly as `activate` refuses it; the activation stays retained for an operator.
-- A crash after the staging removal re-enters at `pre-stop-intent` and sees the plain source
-  layout; a crash after `module-restored` re-enters the existing recovery path, whose terminal
-  layout check returns early.
+- An interrupted install or an interrupted removal leaves only the staging name to discard, so
+  recovery converges on retry; `activate` still refuses such a staging name, so recovery is the
+  way out of it.
+- A crash after `module-restored` re-enters the existing recovery path, whose terminal layout
+  check returns early.
 
 ## Considered & rejected
 
-- **Route `pre-stop-intent` teardown through the partial-preparation abort.** verified:
+- **Widen the partial abort to classify complete, unpublished metadata as abortable.** verified:
   `RecoveryMetadataStore.inspect_abortable_partial`
   (`src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py:3876`, commit `e09cf81dc`)
-  returns `not-partial` once the complete recovery directory exists, so
-  `_prepare_system_teardown_recovery` returns without destroying the domain.
+  returns `not-partial` once the complete recovery directory exists, so today the route destroys
+  nothing. judgment: widening it cannot remove a staged guest tree without opening the guest,
+  bypasses the payload cleanup and tombstone the adapter accounts for complete metadata, and
+  leaves ordinary recover of the phase broken.
 - **A teardown-only path that skips recovery and destroys directly.** judgment: a second
   destructive route that bypasses the cleanup tombstone the authority accounts for, and leaves
   ordinary recover of the same phase broken.
+- **Remove the staging name only when it holds exactly the target manifest.** judgment: refuses
+  the states an interrupted install or removal leaves, which then have no supported way out.
 - **Skip power restoration for teardown.** judgment: a teardown-specific fork of `recover` for a
   cost every other recoverable phase already pays.
 - **Do nothing.** verified: issue #2880 records the retained live fixture failing teardown with
-  `provider_conflict` at this phase; the fixture's metadata reads `pre-stop-intent`.
+  `provider_conflict`; a read-only read of that fixture's recovery metadata on 2026-09-28 found
+  phase `pre-stop-intent`.
