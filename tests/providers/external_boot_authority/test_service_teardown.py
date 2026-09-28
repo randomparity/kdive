@@ -1,6 +1,7 @@
 """Full teardown traverses authentication, anchoring and host-owned IO (ADR-0620)."""
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
     AuthorityTeardownSnapshot,
+    ProviderRecoveryRefusal,
 )
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from tests.providers.external_boot_authority.service_support import _Adapter, _Repository, _takeover
@@ -111,6 +113,7 @@ class _TeardownAdapter(_Adapter):
         self.read_count = 0
         self.lose_completion_reply = False
         self.release_reservation_after_commit: Callable[[], None] | None = None
+        self.failure: Exception | None = None
 
     async def execute_system_teardown(
         self,
@@ -123,6 +126,8 @@ class _TeardownAdapter(_Adapter):
         self.commit_count += 1
         self.entered.set()
         await self.release.wait()
+        if self.failure is not None:
+            raise self.failure
         if self.lose_completion_reply:
             raise OSError("injected lost host completion reply")
         if self.release_reservation_after_commit is not None:
@@ -312,4 +317,50 @@ async def test_malformed_host_facts_cannot_become_a_terminal_proof(tmp_path: Pat
         await service.execute_teardown(peer, request)
     assert repository.records[-1].phase is JournalPhase.PROVIDER_RETURNED
     assert not any(record.phase is JournalPhase.TERMINAL for record in repository.records)
+    await service.close()
+
+
+def _boundary_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("authority provider boundary failed")
+    ]
+
+
+@pytest.mark.anyio
+async def test_adapter_failure_log_names_only_the_exception_type(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _repository, adapter, peer, request = await _ready(tmp_path)
+    adapter.failure = ValueError("adapter-output-do-not-log")
+
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(AuthorityServiceError, match="provider_conflict"),
+    ):
+        await service.execute_teardown(peer, request)
+
+    assert _boundary_messages(caplog) == ["authority provider boundary failed: ValueError"]
+    assert all("adapter-output-do-not-log" not in record.getMessage() for record in caplog.records)
+    await service.close()
+
+
+@pytest.mark.anyio
+async def test_recovery_refusal_log_names_its_fixed_reason(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _repository, adapter, peer, request = await _ready(tmp_path)
+    adapter.failure = ProviderRecoveryRefusal("external-boot recovery phase is not resumable")
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(AuthorityServiceError, match="provider_conflict"),
+    ):
+        await service.execute_teardown(peer, request)
+
+    assert _boundary_messages(caplog) == [
+        "authority provider boundary failed: ProviderRecoveryRefusal: "
+        "external-boot recovery phase is not resumable"
+    ]
     await service.close()

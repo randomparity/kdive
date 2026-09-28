@@ -22,7 +22,10 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
-from kdive.providers.external_boot_authority.teardown import AuthorityTeardownReservationV1
+from kdive.providers.external_boot_authority.teardown import (
+    AuthorityTeardownReservationV1,
+    ProviderRecoveryRefusal,
+)
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
@@ -2370,7 +2373,8 @@ def test_real_adapter_closes_operation_on_coordinator_validation_failure(method:
         elif method == "observe":
             ports.observe(point, authority)
         elif method == "recover":
-            ports.recover(point, authority)
+            crossed = point.model_copy(update={"plan_identity": "sha256:" + "f" * 64})
+            ports.recover(crossed, authority)
         else:
             ports.cleanup(point, authority)
 
@@ -3274,6 +3278,100 @@ def test_recovery_stops_a_ready_target_cleanly_and_an_unready_one_hard(
 
     assert session.stops == [mode]
     assert session.xml == metadata.source_xml
+
+
+def _staging_name(metadata: LocalRecoveryMetadataV1) -> str:
+    return f"/lib/modules/.kdive-{metadata.binding.activation_id}-staging"
+
+
+def _recovery_phase(root: Path, metadata: LocalRecoveryMetadataV1) -> RecoveryPhase:
+    with RecoveryMetadataStore(root) as store:
+        return store.reopen(_point(metadata).recovery_ref, metadata.binding).phase
+
+
+@pytest.mark.parametrize("source_present", [True, False])
+def test_pre_stop_intent_recovery_restores_prior_power_without_module_change(
+    tmp_path: Path, source_present: bool
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path, phase="pre-stop-intent", source_present=source_present
+    )
+    before = dict(guest.states)
+
+    ports.recover(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert _recovery_phase(root, metadata) == "recovered"
+    assert guest.states == before
+    assert session.xml == metadata.source_xml
+    assert session.active
+    assert session.stops == []
+    assert not any(action.startswith("remove:") for action in guest.faults.actions)
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_pre_stop_intent_recovery_discards_only_the_staging_name(
+    tmp_path: Path, partial: bool
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path, phase="pre-stop-intent", source_present=True
+    )
+    staged = (
+        PresentComponentState(manifest="sha256:" + "5" * 64)
+        if partial
+        else cast(PresentComponentState, metadata.target_state.modules)
+    )
+    guest.states[_staging_name(metadata)] = staged
+
+    ports.recover(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert _recovery_phase(root, metadata) == "recovered"
+    assert guest.states == {f"/lib/modules/{metadata.release}": metadata.source_state.modules}
+    assert f"remove:{Path(_staging_name(metadata)).name}#1" in guest.faults.actions
+    assert session.stops == []
+
+
+def test_pre_stop_intent_recovery_converges_after_an_interrupted_staging_removal(
+    tmp_path: Path,
+) -> None:
+    harness = _FreshRestartHarness.create(tmp_path, phase="pre-stop-intent", source_present=True)
+    staging = _staging_name(harness.metadata)
+    harness.guest.states[staging] = cast(
+        PresentComponentState, harness.metadata.target_state.modules
+    )
+    harness.faults.failures[f"remove:{Path(staging).name}#1"] = "after"
+
+    with pytest.raises(_ProcessLost, match="failed after effect"):
+        harness.recover()
+    assert _recovery_phase(harness.root, harness.metadata) == "pre-stop-intent"
+    harness.recover()
+
+    assert _recovery_phase(harness.root, harness.metadata) == "recovered"
+    assert staging not in harness.guest.states
+
+
+@pytest.mark.parametrize("conflict", ["active-source", "target-xml", "old-name"])
+def test_pre_stop_intent_recovery_refuses_conflicting_state_before_host_mutation(
+    tmp_path: Path, conflict: str
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+        xml=_metadata().target_xml if conflict == "target-xml" else _SOURCE_XML,
+        active=conflict == "active-source",
+    )
+    if conflict == "old-name":
+        old = f"/lib/modules/.kdive-{metadata.binding.activation_id}-old"
+        guest.states[old] = cast(PresentComponentState, metadata.target_state.modules)
+    before = dict(guest.states)
+
+    with pytest.raises(ProviderRecoveryRefusal, match="external-boot pre-stop"):
+        ports.recover(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert _recovery_phase(root, metadata) == "pre-stop-intent"
+    assert guest.states == before
+    assert session.stops == []
+    assert not any(action.split("#")[0] in {"start", "define"} for action in guest.faults.actions)
 
 
 def _libvirt_reserialized(xml: str) -> str:

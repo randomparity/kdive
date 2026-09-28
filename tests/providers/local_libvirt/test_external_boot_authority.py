@@ -518,6 +518,22 @@ async def test_system_teardown_recovers_and_cleans_owned_point_before_host_mutat
     adapter.close()
 
 
+@pytest.mark.anyio
+async def test_system_teardown_settles_pre_stop_intent_activation() -> None:
+    io = _FakeIO(_metadata("pre-stop-intent"))
+    adapter = _adapter(io)
+    request = _system_teardown_request()
+    context = _context(AuthorityOperation.TEARDOWN)
+
+    result = await adapter.execute_system_teardown(request, context, _TEARDOWN_RESERVATION)
+
+    assert result.complete
+    assert io.actions.index("recover-modules") < io.actions.index("cleanup")
+    assert io.actions.index("cleanup") < io.actions.index("finalize")
+    assert io.actions.index("finalize") < io.actions.index("teardown-system")
+    adapter.close()
+
+
 async def test_system_teardown_cancellation_waits_for_host_completion_and_releases_lease() -> None:
     scope = LocalOperationLeaseScope()
     entered = threading.Event()
