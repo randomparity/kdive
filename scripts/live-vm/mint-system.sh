@@ -80,6 +80,7 @@ KDIVE_STACK_BASE_URL="$KDIVE_STACK_BASE_URL" \
   KDIVE_PROJECT="${KDIVE_PROJECT:-demo}" \
   "${py[@]}" - "$staged_rootfs" <<'PY'
 import asyncio
+import hashlib
 import os
 import sys
 from uuid import UUID
@@ -97,6 +98,8 @@ async def main() -> int:
     token = os.environ["KDIVE_TOKEN"]
     project = os.environ.get("KDIVE_PROJECT", "demo")
     rootfs = sys.argv[1]  # the warm rootfs staged under the provider's allowed root (argv, not env)
+    with open(rootfs, "rb") as stream:
+        rootfs_digest = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
     arch = os.uname().machine
     # Match arch_traits.default_crashkernel: ppc64le reserves more (POWER kdump-utils floor) so the
     # crash kernel does not OOM before makedumpfile runs; 256M is the x86_64 default (#1319).
@@ -140,7 +143,7 @@ async def main() -> int:
             # kdump-capable (kdump.service enabled) — the operator's KDIVE_WARM_STORE_IMAGE choice.
             "provider": {
                 "local-libvirt": {
-                    "rootfs": {"kind": "local", "path": rootfs},
+                    "rootfs": {"kind": "local", "path": rootfs, "sha256": rootfs_digest},
                     "crashkernel": crashkernel,
                 }
             },
