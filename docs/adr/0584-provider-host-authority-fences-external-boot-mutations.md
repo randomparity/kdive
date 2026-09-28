@@ -253,10 +253,13 @@ record, in two cases and in no others:
   single record at head sequence + 1 that chains to the unchanged head, or the only record of a
   lane that has no head.
 
-Before removal, the authority preserves the record's exact bytes under
-`<state_dir>/journal-retractions/`. Every other difference still refuses service: a longer suffix,
-a head that moved, a shorter journal, or any divergence. The trusted head never moves, and no
-anchored record is removed.
+Before removal, the authority preserves the record's exact bytes in a reserved `retracted/`
+subdirectory of the journal directory: mode 0700, owned by the authority, created on first use.
+The lane inventory accepts exactly that name, and only as a real directory (not a symlink) with
+that owner and mode. It never enumerates or reads the directory's contents as a lane, and every
+other entry that is not `<uuid>.jsonl` still fails `unsafe-tree`. Every other difference still
+refuses service: a longer suffix, a head that moved, a shorter journal, or any divergence. The
+trusted head never moves, and no anchored record is removed.
 
 Rejected for this amendment:
 
@@ -268,6 +271,13 @@ Rejected for this amendment:
   non-contiguous.
 - **Only an operator repair command.** judgment: every refused anchor would still take the host
   out of service until an operator acted.
+- **Evidence under `state_dir`.** verified: every authority systemd unit runs
+  `ProtectSystem=strict` with `ReadWritePaths` on the journal directory only
+  (`deploy/systemd/system/kdive-external-boot-authority.service`,
+  `deploy/ansible/roles/provider_authority_host/templates/authority.service.j2`), so the write
+  fails with `EROFS` and the host still restart-loops. Widening `ReadWritePaths` would require
+  reprovisioning every host. The campaign orchestrator selected the reserved subdirectory on
+  2026-09-28.
 
 ## Consequences
 

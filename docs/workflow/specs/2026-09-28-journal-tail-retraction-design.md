@@ -2,12 +2,18 @@
 
 ## Scope and authority
 
-Campaign scope for issue #2793, token `q2793-3f982e7f`. The operator approved these exclusions on
-2026-09-28: the takeover-refusal root cause (#2884); an operator repair command for shorter or
+Campaign scope for issue #2793, token `q2793-4edeb390` (successor to `q2793-3f982e7f`; the
+exclusion set is unchanged). The operator approved these exclusions on 2026-09-28: the takeover-refusal root cause (#2884); an operator repair command for shorter or
 divergent journals (deferred); per-lane rather than instance-wide readiness (follow-up
 candidate); the retained-fixture settle (#2884); manual database or journal edits and host reset
 (not authorized). No migration and no new ADR: this amends
 [ADR-0584](../../adr/0584-provider-host-authority-fences-external-boot-mutations.md).
+
+Two orchestrator decisions (2026-09-28) refine the frozen criteria. The evidence lives in a
+reserved, validated `retracted/` subdirectory of the journal directory, because every authority
+unit runs `ProtectSystem=strict` and can write only its journal directory. The live proof is a
+DB-backed, host-level integration test; the installed-host startup is proven by #2884's settle
+on the retained lab host.
 
 ## Problem
 
@@ -29,7 +35,7 @@ unresolved. Removing exactly that one record restores the file/head equality. Tw
 
 1. **Runtime retraction.** `FileAuthorityJournal.retract(record)` removes the exact final record
    that this journal instance validated or appended. It writes the record's exact bytes to the
-   retraction directory first, then truncates the file to the previous record, or unlinks the
+   evidence directory first, then truncates the file to the previous record, or unlinks the
    file when this was the only record, fsyncs, and reloads its cache. `_anchor` calls it only
    when `advance` returned `superseded` or `conflict`, before raising the existing refusal. An
    exception from `advance` is an unknown outcome and keeps the record. If the retraction itself
@@ -49,12 +55,20 @@ unresolved. Removing exactly that one record restores the file/head equality. Tw
    Any other difference is left in place, and the unchanged inventory check still refuses it.
    `check-external-boot-authority-host` and the periodic check never retract.
 
-Evidence lives in `<state_dir>/journal-retractions/` as
-`<system_id>.<sequence>.<digest hex>.jsonl`: mode 0600 files in a 0700 directory owned by the
-authority and created on first use. They cannot sit in the journal directory, because any
-non-`<uuid>.jsonl` entry there fails `unsafe-tree`. Writing is idempotent: an existing file with
-identical bytes is accepted, which covers a crash between the evidence write and the truncation.
-Both paths log a warning with the System, sequence, and digest.
+Evidence lives in `<journal_dir>/retracted/` as `<system_id>.<sequence>.<digest hex>.jsonl`:
+mode 0600 files in a mode 0700 directory owned by the authority. The journal creates the
+directory on first use, relative to its own validated parent descriptor, and refuses one that is
+a symlink, not a directory, foreign-owned, or not exactly 0700. It cannot live under `state_dir`:
+all three authority units run `ProtectSystem=strict` with `ReadWritePaths` on the journal
+directory only, so a write there fails with `EROFS`. Writing is idempotent: an existing file
+with identical bytes is accepted, which covers a crash between the evidence write and the
+truncation. Both paths log a warning with the System, sequence, and digest.
+
+The readiness inventory (`_local_lanes`) accepts exactly the name `retracted`, and only after it
+validates as a real directory (not a symlink) owned by the authority with mode 0700. It is not a
+lane, it does not count toward the lane limit, and nothing inside it is enumerated or read. Every
+other entry that is not `<uuid>.jsonl`, including any other directory, still fails
+`unsafe-tree`.
 
 ADR-0584 gains a dated amendment that permits exactly these two cases and keeps the refusal for
 every other file/head difference.
@@ -91,8 +105,8 @@ every other file/head difference.
 ## Threat model
 
 - **Boundaries:** none is added. The file removal is local to the authority-owned journal
-  directory. The evidence directory is a new write location inside the authority-owned
-  `state_dir`.
+  directory, and the evidence directory is a reserved child of it. The inventory exemption is one
+  exact name with owner, type, and mode checks, so it cannot hide a lane or admit a symlink.
 - **Actors:** the local authority identity only. Workers cannot trigger startup retraction, and a
   worker can only cause a runtime retraction by getting an anchor refused, which already refuses
   its request.
@@ -109,8 +123,17 @@ every other file/head difference.
   `advance` exception keeps the record; after a `superseded` refusal the next anchor on the lane
   succeeds.
 - `tests/providers/external_boot_authority/test_host.py`: the eligibility cases and every refusal
-  above, plus a busy socket lock.
+  above, plus a busy socket lock. The evidence directory: a symlink named `retracted`, a
+  wrong owner or mode, a regular file named `retracted`, and any other directory entry are
+  rejected as `unsafe-tree`; a `<uuid>.jsonl` inside `retracted/` is never counted as a lane.
 - `tests/db/`: the authority login role can take the lane lock, and blocks while another session
   holds it.
-- Live: a refused anchor reproduced on a lab host restart-loops on `main` and starts on this
-  build. The retained-fixture settle is proven by #2884.
+- `tests/db/test_connected_authority_acceptance.py`: the host-level proof. It builds the real
+  SQL-backed service against Postgres, gets an anchor refused by the real head-advance function
+  (the worker incarnation is fenced between the service's checks and the advance), keeps the
+  record by failing the runtime retraction, and then runs `run_authority_host` over that journal.
+  `main` refuses with `journal: head-mismatch`; this build retracts the tail, reaches
+  `READY=1`, and keeps the record's exact bytes under `retracted/`. Only host facts that the test
+  cannot own (the installed access boundary and the provider socket) are stubbed.
+- Installed-host proof: not run on this PR. #2884's single settle on the retained lab host proves
+  the installed startup with both builds deployed.
