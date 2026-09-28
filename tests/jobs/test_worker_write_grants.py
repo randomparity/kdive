@@ -15,6 +15,16 @@ import psycopg
 _ROOT = Path(__file__).resolve().parents[2]
 _INVENTORY = _ROOT / "tests/jobs/handlers/worker_role_inventory.json"
 _WORKER = "kdive_worker"
+_AUDIT_COLUMNS = (
+    "principal",
+    "agent_session",
+    "project",
+    "tool",
+    "object_kind",
+    "object_id",
+    "transition",
+    "args_digest",
+)
 _DEFINER_SIGNATURE = "public.discharge_system_mutation_obligations(uuid)"
 
 
@@ -28,14 +38,22 @@ def _violations(conn: psycopg.Connection[Any], coverage: list[dict[str, str]]) -
     for entry in coverage:
         write_id = entry["id"]
         if entry["route"] == "direct":
-            row = conn.execute(
-                "SELECT has_table_privilege(%s, %s, %s)",
-                (_WORKER, entry["table"], entry["privilege"]),
-            ).fetchone()
+            if entry["table"] == "public.audit_log" and entry["privilege"] == "INSERT":
+                row = conn.execute(
+                    "SELECT bool_and(has_column_privilege(%s, %s, column_name, %s)) "
+                    "FROM unnest(%s::text[]) AS column_name",
+                    (_WORKER, entry["table"], entry["privilege"], list(_AUDIT_COLUMNS)),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT has_table_privilege(%s, %s, %s)",
+                    (_WORKER, entry["table"], entry["privilege"]),
+                ).fetchone()
             if row != (True,):
                 violations.append(
                     f"{write_id}: missing direct {entry['privilege']} coverage on "
-                    f"{entry['table']}; grant the table privilege or declare a lawful "
+                    f"{entry['table']}; grant the required table or writer-column privilege, "
+                    "or declare a lawful "
                     "SECURITY DEFINER function with worker EXECUTE. ADR-0629 prefers the "
                     "fenced function when table access must remain fenced."
                 )
@@ -83,3 +101,14 @@ def test_definer_execute_check_bites(migrated_url: str) -> None:
         violations = _violations(conn, coverage)
         conn.rollback()
     assert any(_DEFINER_SIGNATURE in item for item in violations)
+
+
+def test_audit_column_grant_check_bites(migrated_url: str) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute("REVOKE INSERT (args_digest) ON public.audit_log FROM kdive_worker")
+        violations = _violations(conn, _coverage())
+        conn.rollback()
+    assert any(
+        "capture-vmcore.audit-log.insert: missing direct INSERT coverage" in item
+        for item in violations
+    )
