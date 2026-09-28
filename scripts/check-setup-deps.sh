@@ -2,7 +2,8 @@
 # Report host packages KDIVE needs, grouped by tier, with a single distro-specific install hint per
 # tier. Reports by default; with `-y`/--yes (or an interactive [y/N] accept) it also remediates —
 # installs missing distro packages (via sudo when non-root) and symlinks the libguestfs binding into
-# the venv (ADR-0393). A non-TTY run without `-y` stays report-only. `-y` provisioning callers are
+# the venv (ADR-0393). --install-developer installs the developer toolchain (ADR-0694).
+# A non-TTY run without installation flags stays report-only. `-y` provisioning callers are
 # expected to run as root or with passwordless sudo. Set KDIVE_OS_RELEASE to an alternate os-release
 # file, KDIVE_KVM_NODE/KDIVE_PYTHON/KDIVE_GUESTFS_SYS_SITE/KDIVE_SYSTEM_PY_MINOR to override probes
 # (used by the tests).
@@ -10,11 +11,18 @@ set -euo pipefail
 
 # -y / --yes auto-accepts every fix offer (for `just setup` and provisioning scripts).
 ASSUME_YES=0
+SETUP_MODE=0
+INSTALL_DEVELOPER=0
 while (($#)); do
   case "$1" in
   -y | --yes) ASSUME_YES=1 ;;
+  --setup) SETUP_MODE=1 ;;
+  --install-developer)
+    SETUP_MODE=1
+    INSTALL_DEVELOPER=1
+    ;;
   -h | --help)
-    printf "usage: check-setup-deps.sh [-y|--yes]\n"
+    printf "usage: check-setup-deps.sh [--setup|--install-developer] [-y|--yes]\n"
     exit 0
     ;;
   *)
@@ -24,7 +32,10 @@ while (($#)); do
   esac
   shift
 done
-readonly ASSUME_YES
+# An explicit developer install needs no per-package consent. In a non-TTY session,
+# privilege escalation must fail promptly rather than wait for an invisible password.
+if ((INSTALL_DEVELOPER)) && [[ ! -t 0 ]]; then ASSUME_YES=1; fi
+readonly ASSUME_YES SETUP_MODE INSTALL_DEVELOPER
 
 # Developer-host Bash floor (ADR-0673). This block stays Bash 3.2 compatible because it runs
 # before the Bash 4 constructs below: an old interpreter must reach the remedy, not a nameref
@@ -179,6 +190,9 @@ package_for() {
   python-headers:fedora | python-headers:el | python-headers:opensuse) printf "python3-devel" ;;
   python-headers:arch) printf "python" ;;
   python-headers:*) printf "python3-dev" ;;
+  libseccomp:debian) printf "libseccomp-dev" ;;
+  libseccomp:arch) printf "libseccomp" ;;
+  libseccomp:*) printf "libseccomp-devel" ;;
   shellcheck:fedora | shellcheck:el) printf "ShellCheck" ;;
   libelf-headers:fedora | libelf-headers:el) printf "elfutils-libelf-devel" ;;
   libelf-headers:opensuse) printf "libelf-devel" ;;
@@ -531,14 +545,17 @@ probe_all() {
     note_manual required "rustc/cargo" "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
   fi
 
-  # RECOMMENDED — needed to reproduce the full local CI gate.
-  require_command recommended git "${distro}"
+  # Setup installs and runs commit hooks. Their external tools must be present before
+  # sync or hook installation; uv/prek manage the hooks' other Python/Go dependencies.
+  local hook_tier=recommended
+  if ((SETUP_MODE)); then hook_tier=required; fi
+  require_command "${hook_tier}" git "${distro}"
   require_command recommended make "${distro}"
   # Fedora and EL package none of these tools.
-  require_tool recommended shellcheck "https://github.com/koalaman/shellcheck#installing"
+  require_tool "${hook_tier}" shellcheck "https://github.com/koalaman/shellcheck#installing"
   require_tool recommended shfmt "go install mvdan.cc/sh/v3/cmd/shfmt@latest"
-  require_tool recommended just "uv tool install rust-just"
-  require_tool recommended prek "uv tool install prek"
+  require_tool "${hook_tier}" just "uv tool install rust-just"
+  require_tool "${hook_tier}" prek "uv tool install prek"
   # `just check-pr-body` scans a PR/issue body before `gh ... --body-file` publishes it.
   # Most distros do not package gitleaks, so this is a manual hint like just/prek above.
   require_tool recommended gitleaks "brew install gitleaks (or a pinned release from github.com/gitleaks/gitleaks/releases)"
@@ -560,7 +577,7 @@ probe_all() {
   # installs a container engine as root alongside git and make — a system service, where the tier
   # previously installed only libraries and CLIs, and on Debian/Ubuntu policy starts the daemon at
   # install time. And the tier covers the testcontainers gate only: it deliberately does not name a
-  # compose provider, which is the provisioning role's concern, not `just setup`'s.
+  # compose provider here; developer setup checks and installs Compose separately.
   case "${distro_exact}" in
   fedora | debian | ubuntu | arch | opensuse-tumbleweed)
     require_command recommended docker "${distro}"
@@ -570,6 +587,16 @@ probe_all() {
       "install Docker from https://docs.docker.com/engine/install/ or use podman with podman-docker"
     ;;
   esac
+
+  if ((SETUP_MODE)); then
+    for cmd in cc curl tar xz unzip go helm actionlint promtool zsh gdb tcpdump ss; do
+      require_tool recommended "${cmd}" "rerun just setup to install developer tools"
+    done
+    docker compose version >/dev/null 2>&1 || note_manual recommended 'Docker Compose' 'rerun just setup'
+    docker info >/dev/null 2>&1 || note_manual recommended 'Docker daemon access' 'start Docker and grant this user access, then rerun just setup'
+    require_header recommended libseccomp libseccomp "${distro}"
+    require_header recommended libelf-headers libelf "${distro}"
+  fi
 
   # FUTURE — live_vm and kernel-build milestones; warn only, never block setup.
   future_cmds=(virsh gdb crash virt-builder virt-tar-out virt-make-fs guestfish qemu-img bc flex bison)
@@ -734,19 +761,31 @@ maybe_link_guestfs() {
 
 # The three tiers, in report order, as `heading:tier` pairs (headings carry no colon). Single source
 # of truth for both the initial report+fix pass and the post-fix re-check.
+developer_heading="Recommended dependencies (full local CI)"
+if ((SETUP_MODE)); then developer_heading="Required developer dependencies"; fi
 readonly TIER_SPECS=(
   "Required dependencies:required"
-  "Recommended dependencies (full local CI):recommended"
+  "${developer_heading}:recommended"
   "Future dependencies (live_vm / kernel build):future"
 )
+
+if ((INSTALL_DEVELOPER)); then
+  # shellcheck source=scripts/lib/setup-developer.sh
+  source "${BASH_SOURCE[0]%/*}/lib/setup-developer.sh"
+  install_developer_dependencies
+fi
 
 FIX_ATTEMPTED=0
 probe_all
 for spec in "${TIER_SPECS[@]}"; do
-  report_and_fix_tier "${spec%:*}" "${spec##*:}" "${distro}"
+  if ((SETUP_MODE)); then
+    report_tier "${spec%:*}" "${spec##*:}" "${distro}"
+  else
+    report_and_fix_tier "${spec%:*}" "${spec##*:}" "${distro}"
+  fi
 done
-detect_guestfs_state # refresh state so a just-installed python3-guestfs flips absent -> unlinked
-maybe_link_guestfs   # separate prompt; sets FIX_ATTEMPTED on a successful link
+detect_guestfs_state                                # refresh state so a just-installed python3-guestfs flips absent -> unlinked
+if ((SETUP_MODE == 0)); then maybe_link_guestfs; fi # provider setup stays explicit
 
 if ((FIX_ATTEMPTED)); then
   hash -r   # drop bash's cached command lookups so just-installed binaries are found
@@ -764,13 +803,15 @@ if ((${#manual_hints[@]} > 0)); then
   printf "    %s\n" "${manual_hints[@]}" >&2
 fi
 
-if ((${#required_commands[@]} > 0)); then
-  printf "\nInstall the required dependencies from a privileged shell, then rerun: just setup\n" >&2
+if ((${#required_commands[@]} > 0 || (SETUP_MODE && ${#recommended_commands[@]} > 0))); then
+  printf "\nInstall the required dependencies using the hints above, then rerun: just setup\n" >&2
   exit 1
 fi
 
-if ((${#recommended_commands[@]} + ${#future_commands[@]} > 0)); then
-  printf "\nRequired dependencies are present. The tiers above are not needed for the core dev loop: Recommended is what \`just ci\` runs, and Future is what the live_vm and guest-image tiers need.\n"
+if ((SETUP_MODE)); then
+  printf "Developer dependencies are present. Live VM host preparation remains separate.\n"
+elif ((${#recommended_commands[@]} + ${#future_commands[@]} > 0)); then
+  printf "\nCore dependencies are present. Run just setup to install developer requirements; live VM preparation remains separate.\n"
 else
   printf "Setup dependencies are present.\n"
 fi

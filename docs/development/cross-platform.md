@@ -33,14 +33,11 @@ export GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 export GRPC_PYTHON_BUILD_SYSTEM_ZLIB=1
 ```
 
-The workflow-lint recipe uses a PATH `actionlint` on ppc64le. Install Go and build the version
-pinned by the repository's workflow tooling:
-
-```bash
-sudo apt install golang-go
-go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-export PATH="$(go env GOPATH)/bin:$PATH"
-```
+`just setup` installs the developer libraries and tools, including Go and the pinned
+workflow linter, building natively on POWER. It also builds ShellCheck with Cabal because
+upstream does not publish a POWER binary. These source builds make a first setup slower;
+later runs reuse installed tools and compiler caches. Manual package commands above are
+useful for bootstrap or operator environments; developer setup installs those headers too.
 
 For the optional `live` dependency group, install the native `drgn` build dependencies before
 `uv sync --locked --group live`. On Debian/Ubuntu:

@@ -31,7 +31,7 @@ _JUNIT_PATH = re.compile(r"--junit-xml=((?:\$\{\{[^}]*\}\}|\S)+)")
 
 def _steps() -> list[dict]:
     workflow = yaml.safe_load(_CI.read_text(encoding="utf-8"))
-    return workflow["jobs"]["lint-type-test"]["steps"]
+    return workflow["jobs"]["tests"]["steps"]
 
 
 def _step(predicate: Callable[[dict], bool]) -> dict:
@@ -107,3 +107,14 @@ def test_the_summary_step_uses_the_project_interpreter() -> None:
 
 def test_the_summary_script_exists() -> None:
     assert (_ROOT / _SCRIPT).is_file()
+
+
+def test_timings_and_failures_are_retained_without_overriding_the_verdict() -> None:
+    upload = _step(lambda step: step.get("uses", "").startswith("actions/upload-artifact@"))
+    assert upload["if"] == "always()"
+    assert upload["continue-on-error"] is True
+    assert upload["with"]["path"] == _summary_step()["env"]["PYTEST_JUNIT_REPORT"]
+    assert upload["with"]["retention-days"] == 14
+    assert upload["with"]["if-no-files-found"] == "warn"
+    assert "github.run_attempt" in upload["with"]["name"]
+    assert "--durations=50" in _test_step()["env"]["PYTEST_ADDOPTS"]

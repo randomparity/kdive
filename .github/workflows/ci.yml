@@ -14,17 +14,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Preserve the required check name without serializing its independent work.
   lint-type-test:
     name: lint · type · test
+    needs: [checks, tests, ansible, compose-volumes]
+    if: always()
     runs-on: ubuntu-latest
-    # Every job here declares timeout-minutes, because the GitHub default is 360 and a wedged
-    # step burns all of it: the apt step below hung for 13 and 33 minutes on two runs in one
-    # afternoon and a human had to cancel each (#1978). Sized as the job's observed runtime plus
-    # the apt script's own worst case (3 attempts x (60s update + 60s install), SIGKILL grace,
-    # a bounded dpkg repair after each attempt, and 20s of backoff — about 11 min) plus margin, so
-    # the step still fails with its diagnostic before the job is cut off. Observed ~11 min;
-    # tests/guards/test_apt_install_is_bounded.py fails a job that drops this (ADR-0566).
-    timeout-minutes: 30
+    timeout-minutes: 5
+    steps:
+      - name: Require every gate to succeed
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          ANSIBLE_RESULT: ${{ needs.ansible.result }}
+          COMPOSE_RESULT: ${{ needs.compose-volumes.result }}
+        shell: bash
+        run: |
+          failed=0
+          for result in CHECKS_RESULT TESTS_RESULT ANSIBLE_RESULT COMPOSE_RESULT; do
+            printf '%s: %s\n' "$result" "${!result:-missing}"
+            if [[ "${!result:-}" != success ]]; then
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+  checks:
+    name: lint · type · guards
+    runs-on: ubuntu-latest
+    # Includes the bounded apt retry budget (ADR-0566) plus work and setup margin.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,14 +71,11 @@ jobs:
       - name: Sync dependencies
         run: uv sync --locked
 
-      - name: Lockfile up to date
-        run: uv lock --check
-
-      # The lint/type/test commands live only in the justfile; CI invokes the same
-      # recipes a developer runs, so there is one source of truth (and `just type` is
-      # whole-tree, the only place CI type-checks `tests/` — the pre-commit job skips ty).
       - name: Set up just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      - name: Lockfile up to date
+        run: just lock-check
 
       - name: Build-info baking guard
         run: |
@@ -94,38 +110,6 @@ jobs:
 
       - name: Lint shell scripts
         run: just lint-shell
-
-      - name: Restore pinned Ansible collections
-        id: ansible-collections-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.ansible/collections
-          key: ${{ runner.os }}-ansible-collections-${{ hashFiles('deploy/ansible/requirements.yml', 'deploy/ansible/requirements-ci.lock.yml') }}
-
-      - name: Install source-locked Ansible collections
-        # Delegates to the justfile recipe so there is one definition shared with `just setup`.
-        if: steps.ansible-collections-cache.outputs.cache-hit != 'true'
-        env:
-          # A cold cache must use only the immutable Git sources the recipe installs from.
-          # Keeping Galaxy deliberately unreachable makes that boundary executable in CI.
-          ANSIBLE_GALAXY_SERVER: http://127.0.0.1:9
-        run: just install-ansible-collections
-
-      - name: Verify pinned Ansible collections
-        # Unconditional, unlike the install: a cache hit skips that step, leaving this the
-        # only thing between a restored tree and lint. Not a shared recipe -- it asserts an
-        # exact collection set, true of the directory CI owns and not of a developer's.
-        run: >-
-          uv run python scripts/guards/check_ansible_collections.py
-          deploy/ansible/requirements.yml ~/.ansible/collections
-
-      - name: Lint Ansible
-        # CI invokes recipes individually (never `just ci`), so list this explicitly to gate PRs.
-        run: just lint-ansible
-
-      - name: Ansible role tests
-        # CI invokes recipes individually (never `just ci`), so list this explicitly to gate PRs.
-        run: just test-ansible
 
       - name: Type check
         run: just type
@@ -255,6 +239,41 @@ jobs:
         # individually, so adding it only to `just ci` would not gate PRs.
         run: just cli-verbs-check
 
+  tests:
+    name: pytest
+    runs-on: ubuntu-latest
+    # Includes the bounded apt retry budget (ADR-0566) plus work and setup margin.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install libvirt build headers
+        # libvirt-python has no wheels; it compiles against the system libvirt
+        # headers, so `uv sync` fails without libvirt-dev present.
+        #
+        # Same script `just apt-install libvirt-dev` runs. Invoked directly rather than through
+        # `just`, which is not set up until later in this job — and not at all in the two supply
+        # chain jobs that need the same headers. It bounds each apt call with a hard timeout and
+        # retries 3 times with 5s/15s backoff: this step wedged for 13 and 33 minutes on two runs
+        # in one afternoon against a ~15s normal, and a stall does not exit, so a retry alone
+        # would never have fired (ADR-0566, #1978).
+        run: ./scripts/apt-install.sh libvirt-dev
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
       - name: Set up Helm
         # The tests/helm render gate skips when helm is absent (a skip validates
         # nothing), so CI installs helm to actually exercise the chart (ADR-0088 §7).
@@ -263,7 +282,7 @@ jobs:
           version: v3.21.0
 
       - name: Pre-pull the testcontainer images
-        # The db/store fixtures pull postgres:17 and the MinIO tag lazily from inside pytest,
+        # The db/store fixtures pull Postgres and SeaweedFS lazily from inside pytest,
         # so an unreachable Docker Hub surfaced as `3 failed, 8938 passed, 3448 errors` with
         # the real cause several screens down (#1913). Pulling here makes a registry outage
         # one red step naming one image, and a transient blip a retry rather than a re-run
@@ -289,7 +308,7 @@ jobs:
           KDIVE_REQUIRE_DOCKER: "1"
           PYTEST_ADDOPTS: >-
             --junit-xml=${{ runner.temp }}/pytest-junit.xml
-            -o junit_family=xunit1
+            -o junit_family=xunit1 --durations=50
         run: just test
 
       - name: Test failure summary
@@ -321,6 +340,118 @@ jobs:
           PYTEST_JUNIT_REPORT: ${{ runner.temp }}/pytest-junit.xml
         run: uv run --no-sync python scripts/pytest_summary.py "$PYTEST_JUNIT_REPORT"
 
+      - name: Retain test timings and failures
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pytest-junit-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pytest-junit.xml
+          retention-days: 14
+          if-no-files-found: warn
+
+  ansible:
+    name: Ansible lint + role tests
+    runs-on: ubuntu-latest
+    # Includes the bounded apt retry budget (ADR-0566) plus work and setup margin.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install libvirt build headers
+        # libvirt-python has no wheels; it compiles against the system libvirt
+        # headers, so `uv sync` fails without libvirt-dev present.
+        #
+        # Same script `just apt-install libvirt-dev` runs. Invoked directly rather than through
+        # `just`, which is not set up until later in this job — and not at all in the two supply
+        # chain jobs that need the same headers. It bounds each apt call with a hard timeout and
+        # retries 3 times with 5s/15s backoff: this step wedged for 13 and 33 minutes on two runs
+        # in one afternoon against a ~15s normal, and a stall does not exit, so a retry alone
+        # would never have fired (ADR-0566, #1978).
+        run: ./scripts/apt-install.sh libvirt-dev
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      - name: Restore pinned Ansible collections
+        id: ansible-collections-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ansible/collections
+          key: ${{ runner.os }}-ansible-collections-${{ hashFiles('deploy/ansible/requirements.yml', 'deploy/ansible/requirements-ci.lock.yml') }}
+
+      - name: Install source-locked Ansible collections
+        # Delegates to the justfile recipe so there is one definition shared with `just setup`.
+        if: steps.ansible-collections-cache.outputs.cache-hit != 'true'
+        env:
+          # A cold cache must use only the immutable Git sources the recipe installs from.
+          # Keeping Galaxy deliberately unreachable makes that boundary executable in CI.
+          ANSIBLE_GALAXY_SERVER: http://127.0.0.1:9
+        run: just install-ansible-collections
+
+      - name: Verify pinned Ansible collections
+        # Unconditional, unlike the install: a cache hit skips that step, leaving this the
+        # only thing between a restored tree and lint. Not a shared recipe -- it asserts an
+        # exact collection set, true of the directory CI owns and not of a developer's.
+        run: >-
+          uv run python scripts/guards/check_ansible_collections.py
+          deploy/ansible/requirements.yml ~/.ansible/collections
+
+      - name: Lint Ansible
+        # CI invokes recipes individually (never `just ci`), so list this explicitly to gate PRs.
+        run: just lint-ansible
+
+      - name: Ansible role tests
+        # CI invokes recipes individually (never `just ci`), so list this explicitly to gate PRs.
+        run: just test-ansible
+
+  compose-volumes:
+    name: Compose volume persistence
+    runs-on: ubuntu-latest
+    # Includes the bounded apt retry budget (ADR-0566) plus work and setup margin.
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install libvirt build headers
+        # libvirt-python has no wheels; it compiles against the system libvirt
+        # headers, so `uv sync` fails without libvirt-dev present.
+        #
+        # Same script `just apt-install libvirt-dev` runs. Invoked directly rather than through
+        # `just`, which is not set up until later in this job — and not at all in the two supply
+        # chain jobs that need the same headers. It bounds each apt call with a hard timeout and
+        # retries 3 times with 5s/15s backoff: this step wedged for 13 and 33 minutes on two runs
+        # in one afternoon against a ~15s normal, and a stall does not exit, so a retry alone
+        # would never have fired (ADR-0566, #1978).
+        run: ./scripts/apt-install.sh libvirt-dev
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
       - name: Compose data-volume persistence proof
         # The structural guard in `just test` only reads `docker compose config`; this drives
         # the committed compose file for real and proves a plain `down` keeps the named data
@@ -329,8 +460,10 @@ jobs:
         # it only to `just ci` would not gate PRs. The recipe's own environment makes an
         # unavailable Docker daemon a failure rather than a reported skip.
         #
-        # It starts only postgres, minio, and prometheus under a unique project name on free
+        # It starts only postgres, seaweedfs, and prometheus under a unique project name on free
         # loopback ports; none has a `build:`, so nothing is built here.
+        env:
+          PYTEST_ADDOPTS: --capture=tee-sys --durations=10
         run: just test-compose-volumes
 
   image-build:
@@ -416,7 +549,7 @@ jobs:
         # apt shellcheck is older than 0.11.0 and emits info-level findings 0.11.0
         # dropped (SC2015/SC2002 on `A && B || C` and `cat | tr` shapes that are
         # correct by construction). Install the same pinned 0.11.0 tarball the
-        # lint-type-test job uses so both jobs enforce one standard.
+        # checks job uses so both jobs enforce one standard.
         run: |
           sc_ver=v0.11.0
           sc_sha=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
@@ -429,13 +562,13 @@ jobs:
 
       - name: Run hooks
         # The ty hook shells out to `uv run ty check`, which would sync the whole
-        # project (and need libvirt-dev) just to type-check; the lint-type-test job
+        # project (and need libvirt-dev) just to type-check; the checks job
         # covers ty whole-tree (`ty check`, not `ty check src`), so skip it here and
         # keep this job venv-free. lint-ansible is the same shape (it shells out to
         # `just lint-ansible`, and `just` is not installed in this job) and is covered
-        # by the lint-type-test job's "Lint Ansible" step, so skip it here too.
+        # by the ansible job's "Lint Ansible" step, so skip it here too.
         # schema-immutable is the same shape: it compares against origin/main, which this
-        # job never fetches, and the lint-type-test job's "Schema immutability guard" step
+        # job never fetches, and the checks job's "Schema immutability guard" step
         # runs the identical script after fetching that ref. Running it here as well would
         # be a second copy of one gate that could only ever disagree by breaking (#1723).
         env:
