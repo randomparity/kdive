@@ -637,7 +637,7 @@ class Worker:
                 and committed.state is JobState.RUNNING
             )
         if committed is queue.ExternalBootCommitStatus.SUPERSEDED:
-            _log.warning("external boot job %s was reclaimed; result dropped", job.id)
+            await self._log_superseded_commit(job)
             return False
         failure = _classified_external_boot_failure(result, committed)
         async with self._pool.connection() as conn:
@@ -654,6 +654,28 @@ class Worker:
                 job.id,
             )
         return False
+
+    async def _log_superseded_commit(self, job: Job) -> None:
+        """Separate a real reclaim from a refused commit on the attempt that still holds the job."""
+        try:
+            async with self._pool.connection() as conn:
+                still_running = await queue.external_boot_attempt_is_running(conn, job)
+        except Exception:
+            _log.warning(
+                "external boot job %s commit superseded; attempt state unreadable; result dropped",
+                job.id,
+                exc_info=True,
+            )
+            return
+        if not still_running:
+            _log.warning("external boot job %s was reclaimed; result dropped", job.id)
+            return
+        _log.warning(
+            "external boot job %s attempt %s is still running but its commit was refused "
+            "(worker credential, allocation or state precondition); result dropped",
+            job.id,
+            job.attempt,
+        )
 
     async def _heartbeat_loop(self, job_id: UUID, attempt: int) -> None:
         """Renew the lease until cancelled, the fence misses, or a heartbeat errors.

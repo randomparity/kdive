@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import replace
 from uuid import uuid4
@@ -11,6 +12,8 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from kdive.domain.operations.jobs import Job
+from kdive.jobs import queue
 from tests.db.external_boot_authority_support import (
     _COMMIT_SIGNATURE,
     _JOURNAL,
@@ -270,3 +273,26 @@ def test_0160_teardown_failure_is_superseded(
         assert conn.execute(
             "SELECT state FROM external_boot_authorities WHERE id = %s", (authority.authority_id,)
         ).fetchone() == ("current",)
+
+
+def test_attempt_is_running_reads_the_job_attempt(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as seed:
+        case = _seed_case(seed, purpose="teardown", worker_suffix="r")
+    job = Job.model_construct(id=case.job_id, attempt=1)
+
+    async def observe(state: str, attempt: int) -> bool:
+        with psycopg.connect(migrated_url) as seed:
+            seed.execute(
+                "UPDATE jobs SET state = %s, attempt = %s WHERE id = %s",
+                (state, attempt, case.job_id),
+            )
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_worker")
+        ) as worker:
+            return await queue.external_boot_attempt_is_running(worker, job)
+
+    assert asyncio.run(observe("running", 1)) is True
+    assert asyncio.run(observe("running", 2)) is False
+    assert asyncio.run(observe("queued", 1)) is False

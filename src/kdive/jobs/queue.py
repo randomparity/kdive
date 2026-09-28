@@ -373,6 +373,22 @@ async def fail_external_boot(
     )
 
 
+async def external_boot_attempt_is_running(conn: AsyncConnection, job: Job) -> bool:
+    """Whether ``job`` is still running at its own attempt, after a commit was superseded.
+
+    Advisory only: a claim increments ``attempt``, so ``False`` means a newer attempt reclaimed the
+    job or it was finalized; ``True`` means the commit function refused this attempt's result.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM jobs WHERE id = %s AND attempt = %s "
+            "AND state = 'running')",
+            (job.id, job.attempt),
+        )
+        row = await cur.fetchone()
+    return bool(row and row[0])
+
+
 async def fail(
     conn: AsyncConnection,
     job: Job,
