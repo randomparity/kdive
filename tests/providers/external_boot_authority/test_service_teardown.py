@@ -30,6 +30,7 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
     AuthorityTeardownSnapshot,
+    ProviderRecoveryRefusal,
 )
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from tests.providers.external_boot_authority.service_support import _Adapter, _Repository, _takeover
@@ -319,48 +320,38 @@ async def test_malformed_host_facts_cannot_become_a_terminal_proof(tmp_path: Pat
     await service.close()
 
 
-@pytest.mark.anyio
-async def test_provider_failure_log_names_the_redacted_exception(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    service, _repository, adapter, peer, request = await _ready(tmp_path)
-    adapter.failure = ValueError(
-        "https://api.example/x refused; retry "
-        "postgresql://kdive:hun@ter2@db/kdive "  # pragma: allowlist secret
-        "or qemu+ssh://root:s3cr3t@host/system " + "x" * 600  # pragma: allowlist secret
-    )
-    prefix = "authority provider boundary failed: ValueError: "
-
-    with (
-        caplog.at_level(logging.WARNING),
-        pytest.raises(AuthorityServiceError, match="provider_conflict"),
-    ):
-        await service.execute_teardown(peer, request)
-
-    messages = [
+def _boundary_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
         record.getMessage()
         for record in caplog.records
         if record.getMessage().startswith("authority provider boundary failed")
     ]
-    assert len(messages) == 1
-    assert messages[0].startswith(prefix + "https://api.example/x refused")
-    assert "ter2" not in messages[0]
-    assert "s3cr3t" not in messages[0]
-    assert "[REDACTED]@db/kdive" in messages[0]
-    assert len(messages[0]) - len(prefix) == 512
+
+
+@pytest.mark.anyio
+async def test_adapter_failure_log_names_only_the_exception_type(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _repository, adapter, peer, request = await _ready(tmp_path)
+    adapter.failure = ValueError("adapter-output-do-not-log")
+
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(AuthorityServiceError, match="provider_conflict"),
+    ):
+        await service.execute_teardown(peer, request)
+
+    assert _boundary_messages(caplog) == ["authority provider boundary failed: ValueError"]
+    assert all("adapter-output-do-not-log" not in record.getMessage() for record in caplog.records)
     await service.close()
 
 
 @pytest.mark.anyio
-async def test_unprintable_provider_failure_keeps_the_bounded_category(
+async def test_recovery_refusal_log_names_its_fixed_reason(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    class _Unprintable(Exception):
-        def __str__(self) -> str:
-            raise RuntimeError("cannot render")
-
     service, _repository, adapter, peer, request = await _ready(tmp_path)
-    adapter.failure = _Unprintable()
+    adapter.failure = ProviderRecoveryRefusal("external-boot recovery phase is not resumable")
 
     with (
         caplog.at_level(logging.WARNING),
@@ -368,7 +359,8 @@ async def test_unprintable_provider_failure_keeps_the_bounded_category(
     ):
         await service.execute_teardown(peer, request)
 
-    assert any(
-        record.getMessage().endswith("_Unprintable: <unprintable>") for record in caplog.records
-    )
+    assert _boundary_messages(caplog) == [
+        "authority provider boundary failed: ProviderRecoveryRefusal: "
+        "external-boot recovery phase is not resumable"
+    ]
     await service.close()

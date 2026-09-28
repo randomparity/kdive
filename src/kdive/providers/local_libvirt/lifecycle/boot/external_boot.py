@@ -27,6 +27,7 @@ from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
+    ProviderRecoveryRefusal,
 )
 from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
@@ -1797,7 +1798,9 @@ class RealLocalExternalBootIO:
                         target_state=metadata.target_state,
                     )
         if point.binding != intent.binding or point.plan_identity != intent.plan_identity:
-            raise ValueError("System teardown recovery point does not match retained intent")
+            raise ProviderRecoveryRefusal(
+                "System teardown recovery point does not match retained intent"
+            )
         return point
 
     def system_teardown_recovery_is_absent(
@@ -2207,7 +2210,9 @@ class _RealLocalExternalBootOperation:
     def _settle_unpublished_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         """ADR-0707: an activation that never published keeps only its own staging name."""
         if self._host_state(metadata) != ("source", False):
-            raise ValueError("external-boot pre-stop recovery requires inactive source XML/power")
+            raise ProviderRecoveryRefusal(
+                "external-boot pre-stop recovery requires inactive source XML/power"
+            )
         prior = _layout_component(metadata.source_state.modules)
         with self._session.guest() as opened_guest:
             publication = _SessionModulePublicationIO(
@@ -2219,7 +2224,9 @@ class _RealLocalExternalBootOperation:
             )
             publication.discard_staging()
             if publication.observe_layout() != ModuleLayout(prior, None, None):
-                raise ValueError("external-boot pre-stop module layout conflicts with metadata")
+                raise ProviderRecoveryRefusal(
+                    "external-boot pre-stop module layout conflicts with metadata"
+                )
             observed = self._observe_modules(opened_guest, metadata)
         self.record_phase(metadata, "module-restored", inactive_modules=observed)
 
@@ -2816,7 +2823,7 @@ class LocalLibvirtExternalBoot:
                 "module-restored",
                 "source-restored",
             }:
-                raise ValueError("external-boot recovery phase is not resumable")
+                raise ProviderRecoveryRefusal("external-boot recovery phase is not resumable")
             if metadata.phase not in {"source-restored"}:
                 operation.recover_modules(metadata)
                 metadata = self._reopen(operation, recovery)

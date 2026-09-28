@@ -22,7 +22,10 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
-from kdive.providers.external_boot_authority.teardown import AuthorityTeardownReservationV1
+from kdive.providers.external_boot_authority.teardown import (
+    AuthorityTeardownReservationV1,
+    ProviderRecoveryRefusal,
+)
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
@@ -3362,7 +3365,7 @@ def test_pre_stop_intent_recovery_refuses_conflicting_state_before_host_mutation
         guest.states[old] = cast(PresentComponentState, metadata.target_state.modules)
     before = dict(guest.states)
 
-    with pytest.raises(ValueError, match="external-boot pre-stop"):
+    with pytest.raises(ProviderRecoveryRefusal, match="external-boot pre-stop"):
         ports.recover(_point(metadata), OpaqueProviderRef(ref="authority/current"))
 
     assert _recovery_phase(root, metadata) == "pre-stop-intent"

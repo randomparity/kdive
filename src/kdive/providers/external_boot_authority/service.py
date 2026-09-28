@@ -45,6 +45,7 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
     AuthorityTeardownSnapshot,
+    ProviderRecoveryRefusal,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootPreparationObservation,
@@ -63,7 +64,7 @@ from kdive.providers.system_authority.service import AuthoritySystemService
 from kdive.security.secrets.redaction import REDACTION
 
 _ERROR_MESSAGE_MAX = 512
-# Every URL userinfo in free text; the log handler's SecretRedactionFilter masks key=value.
+# Defence in depth for the fixed refusal text: every URL userinfo is masked.
 _URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
 
 
@@ -882,20 +883,21 @@ class ExternalBootAuthorityService:
             "authority_instance": labels[1],
             "category": "provider_conflict",
         }
+        # ADR-0707: the type is always logged; only a kdive-raised refusal's fixed text is,
+        # because adapter and foreign exception text is provider output (ADR-0584).
         if error is None:
             self._logger.warning("authority provider boundary failed", extra=extra)
-        else:
-            # The wire keeps the bounded category; only the operator log names the cause.
-            try:
-                text = str(error)
-            except Exception:  # noqa: BLE001 — an unprintable error must not replace the category
-                text = "<unprintable>"
-            message = _URL_USERINFO.sub(f"{REDACTION}@", text)[:_ERROR_MESSAGE_MAX]
+        elif isinstance(error, ProviderRecoveryRefusal):
+            message = _URL_USERINFO.sub(f"{REDACTION}@", str(error))[:_ERROR_MESSAGE_MAX]
             self._logger.warning(
                 "authority provider boundary failed: %s: %s",
                 type(error).__qualname__,
                 message,
                 extra=extra,
+            )
+        else:
+            self._logger.warning(
+                "authority provider boundary failed: %s", type(error).__qualname__, extra=extra
             )
         return AuthorityServiceError("provider_conflict", telemetry_recorded=True)
 
