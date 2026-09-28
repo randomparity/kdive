@@ -770,7 +770,7 @@ class _GuestfsTreeHandle(Protocol):  # pragma: no cover - live_vm (libguestfs bi
     def ln_s(self, target: str, linkname: str) -> None: ...
     def chmod(self, mode: int, path: str) -> None: ...
     def chown(self, owner: int, group: int, path: str) -> None: ...
-    def lsetxattr(self, xattr: str, val: bytes | str, vallen: int, path: str) -> None: ...
+    def lsetxattr(self, xattr: str, val: str, vallen: int, path: str) -> None: ...
     def mv(self, source: str, destination: str) -> None: ...
     def rm_rf(self, path: str) -> None: ...
     def sync(self) -> None: ...
@@ -834,6 +834,13 @@ class LibguestfsAuthenticatedGuestTree:
         with self._guest.open_regular(remote, size=size) as content:
             yield content
 
+    def prepare_restore(self, entries: Iterator[GuestTreeEntry]) -> None:
+        self._require_mutable()
+        for entry in entries:
+            for name, value in entry.xattrs.items():
+                _xattr_text(name, value)
+        self._guest.mkdir(self._root)
+
     def create_directory(self, entry: GuestTreeEntry) -> None:
         self._require_mutable()
         remote = self._remote(entry.path)
@@ -896,16 +903,7 @@ class LibguestfsAuthenticatedGuestTree:
 
     def _apply_xattrs(self, remote: str, entry: GuestTreeEntry) -> None:
         for name, value in entry.xattrs.items():
-            if name == "security.selinux":
-                if not value[:-1] or not value.endswith(b"\0") or b"\0" in value[:-1]:
-                    raise ValueError("captured SELinux label is not a NUL-terminated context")
-                try:
-                    label = value[:-1].decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise ValueError("captured SELinux label is not UTF-8") from exc
-                self._guest.lsetxattr(name, label, len(value), remote)
-            else:
-                self._guest.lsetxattr(name, value, len(value), remote)
+            self._guest.lsetxattr(name, _xattr_text(name, value), len(value), remote)
 
     def _apply_label(self, remote: str, entry: GuestTreeEntry) -> None:
         if self._label_policy is None:
@@ -932,6 +930,27 @@ def _guest_relative(path: str) -> str:
     ):
         raise ValueError("guest-tree entry path is not a canonical relative path")
     return path
+
+
+def _xattr_text(name: str, value: bytes) -> str:
+    if name == "security.selinux":
+        if not value[:-1] or not value.endswith(b"\0") or b"\0" in value[:-1]:
+            raise ValueError("captured SELinux label is not a NUL-terminated context")
+        try:
+            return value[:-1].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("captured SELinux label is not UTF-8") from exc
+    remediation = (
+        "retained capture requires operator-assisted recovery; "
+        "retrying unchanged capture cannot fix it"
+    )
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"unsupported captured non-UTF-8 xattr: {remediation}") from exc
+    if "\0" in text:
+        raise ValueError(f"unsupported captured NUL-containing xattr: {remediation}")
+    return text
 
 
 def _xattr_bytes(value: str | bytes) -> bytes:
@@ -2148,7 +2167,6 @@ class _RealLocalExternalBootOperation:
                     if layout == ModuleLayout(target, None, None):
                         source = self._recovery_archive_source(metadata)
                         try:
-                            publication.create_staging()
                             manifest = self._recovery_writer.restore(
                                 publication.staging_tree(),
                                 metadata.release,
