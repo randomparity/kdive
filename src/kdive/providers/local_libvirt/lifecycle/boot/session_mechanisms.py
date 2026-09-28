@@ -445,17 +445,14 @@ class LocalPayloadCleanup:
                             or projection.digest.removeprefix("sha256:") != parts[4]
                         ):
                             raise ValueError("target projection does not match cleanup metadata")
-                finally:
-                    os.close(projection_fd)
-            for name in PAYLOAD_NAMES:
-                with suppress(FileNotFoundError):
-                    os.unlink(name, dir_fd=root_fd)
-            try:
-                projection_fd = _open_private_directory(root_fd, parts[4])
-            except FileNotFoundError:
-                projection_fd = None
-            if projection_fd is not None:
-                try:
+                    if set(os.listdir(projection_fd)) - {*PAYLOAD_NAMES, "target-projection.json"}:
+                        raise ValueError("target projection contains unexpected residue")
+                    for name in PAYLOAD_NAMES:
+                        with suppress(FileNotFoundError):
+                            os.unlink(name, dir_fd=projection_fd)
+                    # Keep the ownership record until payload removal is durable, so an
+                    # interrupted cleanup can authenticate the remaining payloads on retry.
+                    os.fsync(projection_fd)
                     with suppress(FileNotFoundError):
                         os.unlink("target-projection.json", dir_fd=projection_fd)
                     os.fsync(projection_fd)
