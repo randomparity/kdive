@@ -1963,35 +1963,28 @@ def _chain(config: AuthorityHostConfig, system_id: UUID, count: int) -> list[Jou
             "phase": JournalPhase.WATERMARK_INSTALLED,
         }
     )
-    records = [first]
-    if count > 1:
-        records.append(
-            JournalRecordV1.model_validate(
-                common
-                | {
-                    "sequence": 2,
-                    "previous_digest": record_digest(first),
-                    "phase": JournalPhase.TAKEOVER_ACKNOWLEDGED,
-                    "watermark_sequence": 1,
-                    "watermark_digest": record_digest(first),
-                }
-            )
-        )
-    if count > 2:
-        records.append(
-            JournalRecordV1.model_validate(
-                common
-                | {
-                    "sequence": 3,
-                    "previous_digest": record_digest(records[-1]),
-                    "phase": JournalPhase.ADMITTED,
-                    "expected_source_identity": "sha256:" + "4" * 64,
-                    "intended_target_identity": "sha256:" + "5" * 64,
-                    "recovery_objects": (),
-                }
-            )
-        )
-    return records[:count]
+    second = JournalRecordV1.model_validate(
+        common
+        | {
+            "sequence": 2,
+            "previous_digest": record_digest(first),
+            "phase": JournalPhase.TAKEOVER_ACKNOWLEDGED,
+            "watermark_sequence": 1,
+            "watermark_digest": record_digest(first),
+        }
+    )
+    third = JournalRecordV1.model_validate(
+        common
+        | {
+            "sequence": 3,
+            "previous_digest": record_digest(second),
+            "phase": JournalPhase.ADMITTED,
+            "expected_source_identity": "sha256:" + "4" * 64,
+            "intended_target_identity": "sha256:" + "5" * 64,
+            "recovery_objects": (),
+        }
+    )
+    return [first, second, third][:count]
 
 
 def _write_lane(config: AuthorityHostConfig, records: list[JournalRecordV1]) -> Path:

@@ -556,9 +556,7 @@ async def test_host_startup_retracts_a_refused_anchor_left_by_a_failed_retractio
                 raise OSError("injected retraction failure")
 
             monkeypatch.setattr(repository, "advance", fenced_advance)
-            monkeypatch.setattr(
-                host.FileAuthorityJournal, "retract", failed_retraction, raising=False
-            )
+            monkeypatch.setattr(host.FileAuthorityJournal, "retract", failed_retraction)
             mutation = AuthorityMutationRequestV1.model_validate(
                 takeover.model_dump(mode="json", by_alias=True)
                 | {
