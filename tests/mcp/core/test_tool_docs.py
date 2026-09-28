@@ -901,23 +901,23 @@ def test_destructive_hint_matches_reviewed_set() -> None:
     )
 
 
-def _gate_reachers() -> set[str]:
+@pytest.fixture(scope="module")
+def gate_reachers() -> frozenset[str]:
     """Tools whose wrapper reaches ``assert_destructive_allowed`` (through its delegate)."""
-    return {t.name for t in TOOLS if _reaches_symbol(t.fn, "assert_destructive_allowed")}
+    return frozenset(t.name for t in TOOLS if _reaches_symbol(t.fn, "assert_destructive_allowed"))
 
 
-def test_gate_callers_are_in_the_destructive_set() -> None:
+def test_gate_callers_are_in_the_destructive_set(gate_reachers: frozenset[str]) -> None:
     # Backstop: any tool that reaches assert_destructive_allowed must be in the reviewed
     # set (the converse — admin-gated ops — is not asserted). The reach is transitive: the
     # gate lives in the module-level handler the wrapper delegates to, not in the wrapper.
-    gate_reachers = _gate_reachers()
     assert gate_reachers <= _docmeta.DESTRUCTIVE_TOOLS, (
         f"gate-calling tools not in the destructive set: "
         f"{sorted(gate_reachers - _docmeta.DESTRUCTIVE_TOOLS)}"
     )
 
 
-def test_backstop_actually_detects_the_known_gate_callers() -> None:
+def test_backstop_actually_detects_the_known_gate_callers(gate_reachers: frozenset[str]) -> None:
     # Canary against a vacuous backstop: the gate-reacher set must be EXACTLY the tools
     # that call assert_destructive_allowed today. Equality (not subset) catches both a broken
     # mechanism — the reach analysis stopping at the wrapper body would empty this set — and
@@ -925,7 +925,7 @@ def test_backstop_actually_detects_the_known_gate_callers() -> None:
     # here. systems.teardown and systems.reprovision are deliberately absent: ADR-0129 dropped
     # teardown to a single require_role(ADMIN) check and ADR-0326 made reprovision contributor
     # leaseholder control, so neither reaches the destructive-op gate.
-    assert _gate_reachers() == {"control.force_crash"}
+    assert gate_reachers == {"control.force_crash"}
 
 
 # --- #1367: docstring quality gates -------------------------------------------------------
