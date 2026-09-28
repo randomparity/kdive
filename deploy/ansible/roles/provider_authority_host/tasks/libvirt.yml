@@ -30,15 +30,43 @@
     mode: "0644"
   register: provider_authority_host_user_manager_memlock
 
+- name: Read the authority user manager main PID
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - --property=MainPID
+      - --value
+      - "user@{{ provider_authority_host_uid }}.service"
+  register: provider_authority_host_user_manager_pid
+  changed_when: false
+
+- name: Read the authority user manager locked-memory limit
+  ansible.builtin.command:
+    argv:
+      - prlimit
+      - --memlock
+      - --noheadings
+      - --output=HARD
+      - "--pid={{ provider_authority_host_user_manager_pid.stdout }}"
+  register: provider_authority_host_user_manager_limit
+  changed_when: false
+  when: provider_authority_host_user_manager_pid.stdout not in ["", "0"]
+
 # Restarting the user manager stops every unit it runs, including a running session libvirtd;
 # the start task below brings the daemon back under the new ceiling. Not a handler: the daemon
-# must start under the raised ceiling in this play, before any handler flush.
+# must start under the raised ceiling in this play, before any handler flush. Keyed on the
+# running manager's limit as well, so a converge interrupted after the drop-in was written
+# still restarts the manager on the next run.
 - name: Restart the authority user manager to apply its memlock ceiling
   ansible.builtin.systemd_service:
     name: "user@{{ provider_authority_host_uid }}.service"
     state: restarted
     daemon_reload: true
-  when: provider_authority_host_user_manager_memlock is changed  # noqa: no-handler
+  when:  # noqa: no-handler
+    - >-
+      provider_authority_host_user_manager_memlock is changed
+      or provider_authority_host_user_manager_limit.stdout | default('') | trim != 'unlimited'
 
 - name: Install the dormant authority session-libvirtd user unit
   ansible.builtin.copy:

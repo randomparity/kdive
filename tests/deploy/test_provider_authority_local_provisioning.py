@@ -638,7 +638,16 @@ def test_authority_session_libvirtd_gets_an_unlimited_memlock_ceiling() -> None:
         "state": "restarted",
         "daemon_reload": True,
     }
-    assert restart["when"] == f"{drop_in['register']} is changed"
+    # An interrupted converge can leave the drop-in written but the manager unrestarted, so the
+    # restart also fires while the running manager's own hard limit is not yet unlimited.
+    limit = _named(tasks, "Read the authority user manager locked-memory limit")
+    limit_argv = cast(dict[str, list[str]], limit["ansible.builtin.command"])["argv"]
+    assert limit_argv[:2] == ["prlimit", "--memlock"]
+    assert restart["when"] == [
+        f"{drop_in['register']} is changed"
+        f" or {limit['register']}.stdout | default('') | trim != 'unlimited'"
+    ]
+    assert tasks.index(drop_in) < tasks.index(limit) < tasks.index(restart)
     unit_task = _named(tasks, "Install the dormant authority session-libvirtd user unit")
     unit = cast(dict[str, str], unit_task["ansible.builtin.copy"])["content"]
     assert "\nLimitMEMLOCK=infinity\n" in unit.split("[Service]", 1)[1].split("[Install]")[0]
