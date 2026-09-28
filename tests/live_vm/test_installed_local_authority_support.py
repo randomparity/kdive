@@ -427,6 +427,45 @@ def test_normal_driver_uses_public_tools_and_drains_jobs(
     assert [resource.kind for resource in ledger.resources] == ["investigation", "run"]
 
 
+@pytest.mark.parametrize("guest_arch", ["x86_64", "ppc64le"])
+def test_normal_driver_uploads_a_kernel_for_the_recorded_guest_arch(
+    guest_arch: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The Run's build profile and the uploaded kernel tar must name the same arch: a ppc64le
+    # Run given an x86_64 tar looks for arch/x86/boot/bzImage and cannot pass (#2767).
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    profiles: list[object] = []
+    uploads: list[dict[str, object]] = []
+
+    class Client:
+        async def call_tool(self, name: str, **args: object) -> ToolResponse:
+            if name == "runs.create":
+                profiles.append(args["build_profile"])
+            return ToolResponse.success("11111111-1111-1111-1111-111111111111", "running")
+
+    async def uploaded(_client: object, **kwargs: object) -> None:
+        uploads.append(kwargs)
+
+    async def drained_job(_client: object, _phase: str, job_id: str, **_: object) -> ToolResponse:
+        return ToolResponse.success(job_id, "succeeded")
+
+    monkeypatch.setattr(
+        "tests.live_vm.installed_local_authority_support.build_and_upload_kernel", uploaded
+    )
+    monkeypatch.setattr("tests.live_vm.installed_local_authority_support.drain_job", drained_job)
+    ledger = ResourceLedger(config.ownership_prefix)
+    asyncio.run(drive_normal_operations(cast(Any, Client()), config, ledger, guest_arch=guest_arch))
+
+    assert profiles == [{"schema_version": 1, "arch": guest_arch}]
+    assert [upload["arch"] for upload in uploads] == [guest_arch]
+
+
 def test_normal_driver_waits_out_a_system_job_before_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
