@@ -12,7 +12,10 @@ same `retract`.
 Tech stack: Python 3.14, psycopg 3 async, pytest; Postgres via testcontainers for `tests/db/`.
 
 Expected implementation size: 300–400 changed lines (M) — three source files (~150 lines) plus
-four test files (~200 lines), from the task list below.
+four test files (~200 lines), from the task list below. Built size (recorded at build): about 260
+source lines and 645 test lines. The estimate undercounted the tests: the criterion-3 evidence
+directory cases, the parametrized eligibility cases, and the host-level Postgres proof reuse no
+fixture that builds a real journal chain or a real authority host, so each carries its own setup.
 
 ## Global Constraints
 
