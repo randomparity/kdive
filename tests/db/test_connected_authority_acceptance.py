@@ -556,7 +556,11 @@ async def test_host_startup_retracts_a_refused_anchor_left_by_a_failed_retractio
                 raise OSError("injected retraction failure")
 
             monkeypatch.setattr(repository, "advance", fenced_advance)
-            monkeypatch.setattr(host.FileAuthorityJournal, "retract", failed_retraction)
+            # raising=False keeps this test runnable on a build without retract, where it must
+            # fail at startup with journal: head-mismatch rather than at this patch.
+            monkeypatch.setattr(
+                host.FileAuthorityJournal, "retract", failed_retraction, raising=False
+            )
             mutation = AuthorityMutationRequestV1.model_validate(
                 takeover.model_dump(mode="json", by_alias=True)
                 | {
