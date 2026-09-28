@@ -1082,7 +1082,7 @@
   ansible.builtin.command:
     cmd: >-
       {{ live_vm_host_uv_bin }} pip install --python
-      /opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive /opt/kdive
+      /opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive {{ live_vm_venv }}
   environment:
     # This populates root's `uv` cache from empty, so it is the exact build the issue reports:
     # grpcio has no ppc64le wheel and its vendored BoringSSL has no ppc64le target (#2666). Inert

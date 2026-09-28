@@ -928,7 +928,8 @@ def test_ansible_installs_witness_venv_in_clean_host_order() -> None:
     )
     install = (
         "{{ live_vm_host_uv_bin }} pip install --python "
-        "/opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive /opt/kdive"
+        "/opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive "
+        "{{ live_vm_venv }}"
     )
     assert commands.index(create) < commands.index(install)
     assert "path: /opt/kdive-live-worker-lifecycle" in tasks
