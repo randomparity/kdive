@@ -643,6 +643,7 @@ def test_authority_session_libvirtd_gets_an_unlimited_memlock_ceiling() -> None:
     limit = _named(tasks, "Read the authority user manager locked-memory limit")
     limit_argv = cast(dict[str, list[str]], limit["ansible.builtin.command"])["argv"]
     assert limit_argv[:2] == ["prlimit", "--memlock"]
+    assert limit["environment"] == {"LC_ALL": "C"}
     assert restart["when"] == [
         f"{drop_in['register']} is changed"
         f" or {limit['register']}.stdout | default('') | trim != 'unlimited'"
@@ -661,6 +662,7 @@ def test_both_authority_call_sites_verify_the_running_memlock_limit() -> None:
     limit = _named(verify, "Read the authority session libvirtd locked-memory limit")
     argv = cast(dict[str, list[str]], limit["ansible.builtin.command"])["argv"]
     assert argv[:2] == ["prlimit", "--memlock"]
+    assert limit["environment"] == {"LC_ALL": "C"}
     check = _named(verify, "Require an unlimited authority session libvirtd memlock limit")
     that = cast(dict[str, object], check["ansible.builtin.assert"])["that"]
     assert f"{limit['register']}.stdout.split() == ['unlimited', 'unlimited']" in cast(
