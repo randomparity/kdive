@@ -86,7 +86,10 @@ through `classify_console`.
    - the remote-libvirt console collector's crash scan — separate plane, excluded by the
      operator;
    - getty and other console writers' configuration — not owned, excluded by the operator;
-   - rebuilding published catalog images — operator-owned.
+   - rebuilding published catalog images — operator-owned;
+   - the customization-boot `kdive-customize-ok` matcher (`customization_boot.py`), which shares
+     the console with the getty and anchors its marker at line start without stripping — outside
+     this change's surface; reported as a follow-up candidate.
 
 ## Validation
 

@@ -1856,6 +1856,13 @@ def test_classify_crash_before_escaped_marker_wins() -> None:
     assert classify_console(data, marker=_MARKER) == "crashed"
 
 
+def test_classify_colour_prefixed_crash_signature_is_crashed() -> None:
+    # Stripping also exposes a signature an SGR sequence glued to its left: the `m` of
+    # `ESC[31m` used to satisfy the `BUG:` lookbehind's letter exclusion and hide the crash.
+    data = b"[    1.0] \x1b[31mBUG: unable to handle page fault\x1b[0m\r\nkdive-ready\r\n"
+    assert classify_console(data, marker=_MARKER) == "crashed"
+
+
 def test_classify_getty_prefix_preserves_pre_marker_crash_region() -> None:
     # The crash scan region ends at the marker; a getty-prefixed marker line must not mask a
     # crash that preceded it.

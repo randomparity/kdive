@@ -91,7 +91,7 @@ def test_readiness_unit_ordered_after_the_family_kdump_unit(kdump_unit: str) -> 
 
 def test_readiness_unit_targets_the_arch_console_device() -> None:
     # On pseries there is no ttyS0; the serial console is hvc0. The unit must order after
-    # dev-hvc0.device and echo the marker to /dev/hvc0 or the marker never reaches the host log.
+    # dev-hvc0.device and write the marker to /dev/hvc0 or the marker never reaches the host log.
     unit = readiness_unit("kdump.service", "hvc0")
     assert "dev-hvc0.device" in _after_targets(unit)
     assert "> /dev/hvc0" in unit
