@@ -35,8 +35,10 @@ Two independent layers, each sufficient for the observed capture.
      control-string and CSI introducers above.
 
    An incomplete sequence (no terminator on its line) is left in place, so the stripping never
-   spans a line and never removes text that a terminal would print. The pre-marker crash region
-   becomes a prefix of the stripped text, so crash-before-marker still wins.
+   spans a line and never removes text that a terminal would print. The crash scan reads the
+   stripped text before the marker and the raw lines before the marker's line (removal never spans
+   a line, so the line number maps), so crash-before-marker still wins even when a torn escape
+   introducer would eat a crash literal's first letter.
 2. **Guest unit (covers future images).** `readiness_unit` renders
    `ExecStart=/bin/sh -c 'printf "\nkdive-ready\n" | dd bs=64 iflag=fullblock status=none > /dev/<console>'`.
    bash, the rhel-family `/bin/sh`, line-buffers its builtin `printf` and writes `\n` and

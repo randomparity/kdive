@@ -161,9 +161,9 @@ that never comes up stays `pending` throughout (→ `boot_timeout`). A panic lea
 
 Decision 3's marker match now runs on the console text with complete 7-bit ECMA-48 escape
 sequences removed (control strings terminated by ST or BEL, CSI, and other `ESC` sequences; an
-unterminated one stays in place). The crash scan uses the same stripped text, so the pre-marker
-region is still everything before the marker, and a signature an SGR sequence used to hide
-(`ESC[31mBUG:`) now matches. The marker shape is unchanged: its own token at a line start or after
+unterminated one stays in place). The crash scan reads the stripped text before the marker, so a
+signature an SGR sequence used to hide (`ESC[31mBUG:`) now matches, and also the raw lines before
+the marker's line, so a torn escape introducer cannot eat a crash literal's first letter. The marker shape is unchanged: its own token at a line start or after
 horizontal whitespace. The readiness unit now writes `\nkdive-ready\n` in one write (`printf`
 piped through `dd`, because bash line-buffers `printf` into two writes), so the marker starts a
 fresh line on images built after this change.
