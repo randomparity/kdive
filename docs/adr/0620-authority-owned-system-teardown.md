@@ -90,6 +90,24 @@ Rejected for this amendment:
   `hashtextextended('kdive:system:' ...)` (migration 0122), so an old attempt can commit
   between the read and the reset.
 
+### Amendment (2026-09-29): an exhausted retained teardown is dead-lettered (#2917)
+
+A `retained_quarantine` teardown receipt on the job's final attempt (`attempt >= max_attempts`)
+ends the job `failed` with `error_category = 'conflict'` in the receipt transaction, instead of
+requeueing it where no worker can claim it (migration 0163). A non-final attempt still requeues.
+The receipt, the authority supersession, and the `retained` result are unchanged. Migration 0163
+also moves authority-marked teardown jobs that were already `queued` and exhausted to `failed`.
+Recovery is the public teardown's `failed` recycle defined above, so the reservation still
+credits once.
+
+Rejected for this amendment:
+
+- **Grant one more attempt at exhaustion, as the authority-System retained path does
+  (migration 0149).** judgment: deterministic retained churn (#2901) would then retry without a
+  bound and never show a terminal state.
+- **Recycle a `queued` exhausted row in the public teardown.** judgment: it widens a generic
+  queue policy for a state one writer produces, and leaves the row stranded until a caller acts.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
