@@ -7,8 +7,8 @@ on 2026-09-28: the takeover exemption and the allocation fence (migration 0161),
 teardown dedup recycle into this issue. Exclusions: the journal file/database divergence (#2793,
 merged); activate-versus-teardown policy beyond the fence (ADR follow-up); manual database or
 journal edits and host reset (not authorized). This change amends
-[ADR-0584](../../adr/0584-provider-host-authority-fences-external-boot-mutations.md) and
-[ADR-0620](../../adr/0620-authority-owned-system-teardown.md); it adds no ADR.
+[ADR-0620](../../adr/0620-authority-owned-system-teardown.md), including how ADR-0584's
+same-operation rule applies to takeover records; it adds no ADR.
 
 ## Problem
 

@@ -10,8 +10,8 @@ Spec: `docs/workflow/specs/2026-09-28-teardown-takeover-design.md`.
 
 **Tech stack:** Python 3.14, psycopg 3, PL/pgSQL, pytest with disposable Postgres.
 
-Expected implementation size: 420–560 changed lines (M) — one ~70-line migration, ~10 service
-and admin lines, two ADR amendments of ~15 lines each, and ~350 lines across four test files.
+Expected implementation size: 420–560 changed lines (M) — one ~70-line migration, ~15 service
+and admin lines, and ~350 lines across four test files.
 
 ## Global Constraints
 
@@ -19,7 +19,7 @@ and admin lines, two ADR amendments of ~15 lines each, and ~350 lines across fou
   (`just migration-order-check`). Merged migrations are immutable (`just schema-guard`).
 - Guarded replace: each target occurs exactly once and its replacement is absent, or the
   migration raises (0160's count idiom).
-- No new ADR number; amend ADR-0584 and ADR-0620 with dated `### Amendment` subsections.
+- No new ADR number; amend ADR-0620 with one dated `### Amendment` subsection.
 - Ruff line length 100; `ty` whole tree; prose avoids "critical", "robust", "comprehensive",
   "elegant". Commits are conventional, one logical change each, and reference #2884.
 - Guardrails: `just lint`, `just type`, `just records`, `just schema-guard`,
@@ -36,7 +36,7 @@ and admin lines, two ADR amendments of ~15 lines each, and ~350 lines across fou
 | `tests/db/test_external_boot_authority_journal_migration.py` | new DB-backed service test | 4, 5 |
 | `tests/providers/local_libvirt/test_external_boot.py` | observation idempotency | 5 |
 | `tests/mcp/lifecycle/test_systems_tools.py` | recycle behavior | 3 |
-| `docs/adr/0584-…`, `docs/adr/0620-…` | amendments | 6 |
+| `docs/adr/0620-authority-owned-system-teardown.md` | amendment | 6 |
 
 ## Task 1 — Takeover exemption (migration 0161, part 1)
 
@@ -70,7 +70,7 @@ Steps:
 3. Create the migration:
 
 ```sql
--- Take over an interrupted System teardown (#2884, ADR-0584 and ADR-0620 amendments).
+-- Take over an interrupted System teardown (#2884, ADR-0620 amendment).
 DO $$
 DECLARE
     v_definition text;
@@ -92,7 +92,7 @@ END
 $$;
 ```
 
-4. Rerun: all pass. Add the ADR-0584 amendment (below). Commit
+4. Rerun: all pass. Commit
    `fix(authority): let a takeover anchor over its own unresolved operation`.
 
 ## Task 2 — Allocation fence (migration 0161, part 2)
@@ -154,7 +154,7 @@ END
 $$;
 ```
 
-4. Rerun green. Add the ADR-0620 amendment. Commit
+4. Rerun green. Commit
    `fix(authority): keep other purposes off an unresolved teardown`.
 
 ## Task 3 — Proof context binds its own generation (service)
@@ -224,16 +224,11 @@ Steps:
    `failed` row reaches here, so `TERMINAL` resets exactly that row.
 3. Rerun green. Commit `fix(systems): re-run a failed authority teardown job`.
 
-## ADR amendments
+## ADR amendment
 
-- ADR-0584 `### Amendment (2026-09-28): takeover records are not operation-phase records
-  (#2884)`: the same-operation integrity rule binds operation phase records; takeover records
-  are fenced by their own rules, so a teardown takeover whose identity equals the interrupted
-  operation's anchors and records the suspension.
-- ADR-0620 `### Amendment (2026-09-28): an unresolved teardown owns the System (#2884)`: while
-  a teardown authority is allocating or current, or the head is an unresolved or suspended
-  teardown, only a teardown may allocate; a failed authority teardown job with an identical
-  marker is re-run by the next public teardown; the proof binds its own generation's anchor.
+ADR-0620 `### Amendment (2026-09-28): an unresolved teardown owns the System (#2884)`, already
+written with the design: the allocation fence, the failed-job recycle, the takeover exemption
+from ADR-0584's same-operation rule, and generation-bound proof context.
 
 ## Deferrals
 

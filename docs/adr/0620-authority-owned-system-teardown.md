@@ -41,8 +41,12 @@ enqueue is identical. It resets that job to a fresh queued attempt under the Sys
 up by id, generation, and a live state, never by `(job_id, job_attempt)` alone. A reset attempt
 counter therefore cannot revive a superseded row, and the reservation still credits once.
 
-A teardown's attempt id is fixed across generations, so recovery observation and the final
-proof select the `mutation-started` record of their own authority generation.
+A teardown's operation identity is fixed per activation and its attempt id per identity, so a
+reclaimed or new teardown takes over with the interrupted teardown's identity. ADR-0584's
+same-operation integrity rule binds only the operation's own phase records (`admitted` through
+`terminal`), not `watermark-installed`, `takeover-superseded` or `takeover-acknowledged`, which
+keep their own fences; the takeover anchors and recovers the suspended teardown. Recovery
+observation and the final proof select the `mutation-started` record of their own generation.
 
 Rejected for this amendment:
 
@@ -51,6 +55,9 @@ Rejected for this amendment:
   takeover.
 - **A new job per public teardown.** verified: `jobs.dedup_key` is unique (migration 0001), and
   the teardown dedup key is fixed per System.
+- **Give the takeover record the suspended operation's attempt id.** verified:
+  `AuthorityTakeoverRequestV1` has no attempt field (`protocol.py`, commit 727de823e), and the
+  worker sends the takeover before it can read the head.
 - **Recycle every terminal teardown job.** judgment: a `succeeded` teardown already credited the
   reservation, and re-running it only adds a replay path to the exactly-once rule.
 
