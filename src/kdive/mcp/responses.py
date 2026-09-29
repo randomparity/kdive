@@ -8,6 +8,7 @@ payload and reference semantics. Producers remain responsible for redacting text
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -22,6 +23,8 @@ from kdive.domain.errors import (
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.serialization import JsonValue, safe_error_details, validate_json_value
+
+_log = logging.getLogger(__name__)
 
 # Literal next tool names by the job's state.
 # See the design doc's suggested_next_actions table.
@@ -41,9 +44,10 @@ _NEXT_ACTIONS: dict[JobState, list[str]] = {
 # Tool-specific next actions appended when a job of this kind reaches SUCCEEDED, so the hint
 # is a durable property of the completed job wherever it is rendered — every
 # jobs.wait / jobs.list read of the terminal job carries it, not just the enqueuing tool's
-# synchronous envelope (ADR-0414). A completed TEARDOWN drives the System to torn_down but
-# leaves its Allocation `active` until allocations.release; point the agent at that second
-# step so the two-step wind-down is not forgotten (#1385). A completed CAPTURE_VMCORE carries the
+# synchronous envelope (ADR-0414). A completed TEARDOWN reclaims the System's resources and
+# moves a live System to torn_down (a `failed` System stays `failed`), but either way leaves
+# its Allocation `active` until allocations.release; point the agent at that second step so
+# the two-step wind-down is not forgotten (#1385). A completed CAPTURE_VMCORE carries the
 # redacted core's artifact id in `refs.result` (ADR-0466), so it points at the two tools that
 # consume that reference — read the bytes with artifacts.get, or triage the core with
 # postmortem.crash. Keyed on SUCCEEDED only: a failed or canceled teardown did not free anything
@@ -328,10 +332,23 @@ class ToolResponse(BaseModel):
             status=job.state.value,
             suggested_next_actions=actions,
             refs=refs,
-            error_category=(
-                job.error_category.value
-                if job.error_category and job.state is JobState.FAILED
-                else None
-            ),
+            error_category=cls._job_category(job),
             data=data,
         )
+
+    @staticmethod
+    def _job_category(job: Job) -> str | None:
+        """The category a job's envelope carries: only a failed job has one.
+
+        The schema permits a ``failed`` job with a null category, so a missing one degrades to
+        ``infrastructure_failure`` with a warning rather than tripping the category-iff-failure
+        invariant (#2931, #582).
+        """
+        if job.state is not JobState.FAILED:
+            return None
+        if job.error_category is None:
+            _log.warning(
+                "failed job %s has no error_category; degraded to infrastructure_failure", job.id
+            )
+            return ErrorCategory.INFRASTRUCTURE_FAILURE.value
+        return job.error_category.value
