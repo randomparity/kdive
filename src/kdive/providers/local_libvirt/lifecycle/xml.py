@@ -329,9 +329,13 @@ def _append_direct_kernel(
 
 
 def _append_preserve_on_crash(domain: ET.Element, devices: ET.Element) -> None:
-    """Render the pvpanic device + ``<on_crash>preserve</on_crash>`` (ADR-0049 / ADR-0233).
+    """Render the panic device + ``<on_crash>preserve</on_crash>`` (ADR-0049 / ADR-0233).
 
-    pvpanic notifies the host on a guest panic; ``preserve`` holds the domain (vCPUs stopped)
+    The guest-panic notification is per-arch. On x86_64 the ``pvpanic`` device carries it. On a
+    ppc64le guest the ``pvpanic`` device is present but can be inert (the guest kernel may lack
+    ``CONFIG_PVPANIC_PCI``); the panic reaches the host through the pseries firmware notifier
+    (RTAS os-term), which libvirt enables implicitly for ``pseries`` (#2719). The rendered XML is
+    the same on both arches. ``preserve`` holds the domain (vCPUs stopped)
     instead of destroying it, so a crashed boot stays inspectable for host_dump capture and the
     #747 live-gdb attach.
     """

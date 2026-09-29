@@ -85,6 +85,17 @@ state-machine change.
 - Rollback is removing the four edits; no persisted state requires reversal (the new outcome
   string simply stops being written).
 
+### Amendment (2026-09-29): the panic-to-CRASHED path is per-arch (#2890)
+
+This amendment qualifies the Decision item 1 and the Consequences statement that a guest panic reaches `CRASHED` "via pvpanic".
+Later evidence (#2719, a native ppc64le POWER9 KVM run) shows the mechanism differs by
+architecture. On x86_64 the `pvpanic` device carries the panic. On ppc64le the `pvpanic` device is
+rendered but can be inert (the guest kernel may lack `CONFIG_PVPANIC_PCI`); the panic reaches the
+host through the pseries firmware notifier (RTAS os-term, libvirt's implicit pseries panic), and
+the domain then reports `crashed (panicked)`. `<on_crash>preserve</on_crash>` and the reconcile
+mapping to `CRASHED` are unchanged, and the rendered XML is unchanged on both arches. Rendering an
+explicit `<panic model='pseries'/>` is a separate decision and is not made here.
+
 ## Considered & rejected
 
 - **A new run state (e.g. `CRASHED_DEBUGGABLE`).** Rejected as premature and heavy: it needs new
