@@ -60,6 +60,16 @@ def partition_steps(steps: list[Step]) -> tuple[list[Step], list[Step]]:
 _CUSTOMIZE_LOG_PATH = "/run/kdive-customize.log"
 
 
+def _write_console_marker(marker: str) -> str:
+    """Shell line writing ``\\n<marker>\\n`` to ``$console`` in one ``write(2)`` (#2922).
+
+    The leading newline puts the marker on its own line after a captured log with no trailing
+    newline; ``dd`` collects the printf output into one block so the serial getty cannot
+    interleave bytes mid-marker (the same shape as the readiness marker, #2907).
+    """
+    return f'printf "\\n{marker}\\n" | dd bs=64 iflag=fullblock status=none > "$console"'
+
+
 def render_firstboot_script(
     exec_steps: list[Step],
     *,
@@ -129,9 +139,9 @@ def render_firstboot_script(
         # the host can only ever observe ok after every write is durable (ADR-0345).
         "sync",
         'if [ "$rc" -eq 0 ]; then',
-        f'echo {ok_marker} > "$console"',
+        f"{_write_console_marker(ok_marker)}",
         "else",
-        f'echo {fail_marker} > "$console"',
+        f"{_write_console_marker(fail_marker)}",
         "fi",
         "sync",
         "systemctl poweroff",
