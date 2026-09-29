@@ -232,6 +232,14 @@ mutates the machine. Do not put credential contents in command-line extra vars. 
 variables are only for the issue-owned clean-host carrier; routine provisioning leaves
 `live_vm_host_authority_proof_enabled` false.
 
+The first converge after the authority user manager's memlock drop-in is written restarts
+`user@<uid>.service` (`provider_authority_host` role, `tasks/libvirt.yml`). The restart ends every
+unit that manager runs, including any running authority guest and the session libvirtd, which the
+play then starts again under the raised ceiling. A converge interrupted after the drop-in was
+written restarts the manager on the next run too. Drain authority guests before the first
+converge on a host that already runs them. Retirement restarts the same manager for the reverse
+reason; see [ADR-0708](../../adr/0708-authority-retirement-restarts-the-user-manager.md).
+
 After an opted-in provision or a restart, run the one-shot readiness probe as its owner. Substitute
 the provisioned authority instance for `<instance>`; the command uses the source credential profile
 and does not print credential contents.
