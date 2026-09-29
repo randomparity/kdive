@@ -36,7 +36,10 @@ import libvirt
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes._build_common import run_guestfs_tool
-from kdive.providers.local_libvirt.lifecycle.boot.readiness import _domain_exit_probe
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    ESCAPE_SEQUENCE,
+    _domain_exit_probe,
+)
 from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
 from kdive.providers.local_libvirt.lifecycle.storage import _prepare_console_log
 from kdive.providers.local_libvirt.settings import (
@@ -91,18 +94,20 @@ class CustomizeVerdict(StrEnum):
 
 
 def _line_present(text: str, marker: str) -> bool:
-    marker_re = re.compile(rf"^[^\S\n]*{re.escape(marker)}[^\S\n]*$", re.MULTILINE)
+    marker_re = re.compile(rf"(?:^|[^\S\n]){re.escape(marker)}[^\S\n]*$", re.MULTILINE)
     return marker_re.search(text) is not None
 
 
 def classify_customization_console(data: bytes) -> CustomizeVerdict:
     """Classify a customization-boot console capture as ok, failed, or pending.
 
-    Order matters: the ok marker wins outright; otherwise the fail marker or a genuine
+    Getty escape sequences are stripped first and a marker may follow horizontal whitespace on
+    its line, so serial-console interleaving with the getty cannot hide it (#2922). Order
+    matters: the ok marker wins outright; otherwise the fail marker or a genuine
     kernel fault, or the observed terminal systemd manager-freeze pair means failed; otherwise
     the boot is still pending.
     """
-    text = data.decode("utf-8", errors="replace")
+    text = ESCAPE_SEQUENCE.sub("", data.decode("utf-8", errors="replace"))
     if _line_present(text, OK_MARKER):
         return CustomizeVerdict.OK
     if _line_present(text, FAIL_MARKER):

@@ -35,6 +35,21 @@ def test_fail_marker():
 
 
 @pytest.mark.parametrize(
+    ("console", "verdict"),
+    [
+        (b"\x1b[0m\x1b[?2004hkdive-customize-ok\n", CustomizeVerdict.OK),
+        (b"login: \x1b]0;tty\x07kdive-customize-failed\n", CustomizeVerdict.FAILED),
+        (b"dnf: last line, no newline kdive-customize-ok\n", CustomizeVerdict.OK),
+        (b"\x1b[31mKernel panic - not syncing\x1b[0m\n", CustomizeVerdict.FAILED),
+    ],
+)
+def test_getty_escapes_and_partial_lines_do_not_hide_the_verdict(
+    console: bytes, verdict: CustomizeVerdict
+):
+    assert C(console) is verdict
+
+
+@pytest.mark.parametrize(
     "console",
     [
         b"[!!!!!!] Failed to start up manager.\n[ 1083.237850] systemd[1]: Freezing execution.\n",
