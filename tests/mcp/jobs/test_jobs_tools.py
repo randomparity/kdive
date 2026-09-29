@@ -682,7 +682,7 @@ def test_null_category_failed_job_renders_in_list_and_wait(
         for resp in (by_id[bad_id], waited):
             assert resp.status == "failed"
             assert resp.error_category == "infrastructure_failure"
-            assert "kind" in resp.data
+            assert resp.data["kind"] == "install"
         assert any(f"failed job {bad_id}" in record.message for record in caplog.records)
 
     asyncio.run(_run())

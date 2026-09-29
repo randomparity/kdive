@@ -20,7 +20,6 @@ not-found-shaped error as a missing job, so existence is not leaked (matching th
 from __future__ import annotations
 
 import asyncio
-import logging
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -74,8 +73,6 @@ from kdive.services.systems.authority_owned import (
     authority_system_binding,
     enqueue_preactivation_teardown,
 )
-
-_log = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 0.5
 
