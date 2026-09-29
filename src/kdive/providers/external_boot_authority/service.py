@@ -862,6 +862,20 @@ class ExternalBootAuthorityService:
             record,
         )
         if status != "advanced":
+            # ADR-0584 amendment (#2793): a definitive refusal means the head never accepted the
+            # record, so it is retracted; a failed retraction leaves it for the startup path.
+            lane = {"system_id": str(record.system_id), "sequence": record.sequence}
+            try:
+                journal.retract(record)
+            except (OSError, ValueError) as error:
+                self._logger.warning(
+                    "authority journal retraction failed: %s", type(error).__qualname__, extra=lane
+                )
+            else:
+                self._logger.warning(
+                    "authority journal retracted a refused record",
+                    extra=lane | {"digest": record_digest(record)},
+                )
             raise self._reject(
                 "superseded" if status == "superseded" else "journal_conflict",
                 labels=self._trusted_labels(binding),

@@ -542,6 +542,9 @@
 - name: Apply deployed-input restarts before proving readiness
   ansible.builtin.meta: flush_handlers
 
+- name: Verify the restarted authority session libvirtd limits
+  ansible.builtin.import_tasks: libvirt_verify.yml
+
 - name: Run the configured authority one-shot readiness probe
   ansible.builtin.shell: |
     set -eu

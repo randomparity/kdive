@@ -12,6 +12,7 @@ import pytest
 
 from kdive.providers.external_boot_authority.journal import (
     DEFAULT_MAX_JOURNAL_BYTES,
+    RETRACTED_DIRECTORY,
     FileAuthorityJournal,
 )
 from kdive.providers.external_boot_authority.protocol import (
@@ -748,3 +749,124 @@ def test_superseded_watermark_cannot_later_be_acknowledged(tmp_path: Path) -> No
     path.write_bytes(before + canonical_record_bytes(stale_acknowledgement) + b"\n")
     with pytest.raises(ValueError, match="already superseded"):
         journal.load()
+
+
+def _two_record_lane(
+    tmp_path: Path,
+) -> tuple[FileAuthorityJournal, JournalRecordV1, JournalRecordV1]:
+    journal = FileAuthorityJournal(tmp_path, "lane.jsonl")
+    first = _record()
+    second = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        watermark_digest=record_digest(first),
+    )
+    journal.append(first)
+    journal.append(second)
+    return journal, first, second
+
+
+def _evidence(tmp_path: Path, record: JournalRecordV1) -> Path:
+    digest = record_digest(record).removeprefix("sha256:")
+    return tmp_path / RETRACTED_DIRECTORY / f"{record.system_id}.{record.sequence}.{digest}.jsonl"
+
+
+def test_retract_removes_the_final_record_and_preserves_its_bytes(tmp_path: Path) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+
+    journal.retract(second)
+
+    lane = tmp_path / "lane.jsonl"
+    assert lane.read_bytes() == canonical_record_bytes(first) + b"\n"
+    evidence = _evidence(tmp_path, second)
+    assert evidence.read_bytes() == canonical_record_bytes(second) + b"\n"
+    assert stat.S_IMODE(evidence.stat().st_mode) == 0o600
+    assert stat.S_IMODE(evidence.parent.stat().st_mode) == 0o700
+    assert journal.load() == (first,)
+    journal.append(second)
+    assert journal.load() == (first, second)
+
+
+def test_retract_of_the_only_record_unlinks_the_lane(tmp_path: Path) -> None:
+    journal = FileAuthorityJournal(tmp_path, "lane.jsonl")
+    first = _record()
+    journal.append(first)
+
+    journal.retract(first)
+
+    assert not (tmp_path / "lane.jsonl").exists()
+    assert _evidence(tmp_path, first).read_bytes() == canonical_record_bytes(first) + b"\n"
+    assert journal.load() == ()
+    journal.append(first)
+    assert journal.load() == (first,)
+
+
+def test_retract_accepts_identical_existing_evidence(tmp_path: Path) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+    evidence = _evidence(tmp_path, second)
+    evidence.parent.mkdir(mode=0o700)
+    evidence.write_bytes(canonical_record_bytes(second) + b"\n")
+    evidence.chmod(0o600)
+
+    journal.retract(second)
+
+    assert journal.load() == (first,)
+
+
+def test_retract_replaces_a_partial_evidence_write(tmp_path: Path) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+    evidence = _evidence(tmp_path, second)
+    evidence.parent.mkdir(mode=0o700)
+    partial = evidence.with_name(f".{evidence.name}.partial")
+    partial.write_bytes(b"torn")
+    partial.chmod(0o600)
+
+    journal.retract(second)
+
+    assert evidence.read_bytes() == canonical_record_bytes(second) + b"\n"
+    assert not partial.exists()
+    assert journal.load() == (first,)
+
+
+def test_retract_refuses_a_record_that_is_not_the_tail(tmp_path: Path) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+
+    with pytest.raises(ValueError, match="final record"):
+        journal.retract(first)
+
+    assert journal.load() == (first, second)
+    assert not (tmp_path / RETRACTED_DIRECTORY).exists()
+
+
+def test_retract_refuses_a_changed_file(tmp_path: Path) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+    lane = tmp_path / "lane.jsonl"
+    original = lane.read_bytes()
+    changed = original.replace(b'"purpose":"recover"', b'"purpose":"release"')
+    lane.write_bytes(changed)
+
+    with pytest.raises(ValueError, match="changed since validation"):
+        journal.retract(second)
+
+    assert lane.read_bytes() == changed
+
+
+@pytest.mark.parametrize("shape", ["symlink", "file", "mode"])
+def test_retract_refuses_an_unsafe_evidence_directory(tmp_path: Path, shape: str) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+    directory = tmp_path / RETRACTED_DIRECTORY
+    if shape == "symlink":
+        target = tmp_path / "elsewhere"
+        target.mkdir(mode=0o700)
+        directory.symlink_to(target)
+    elif shape == "file":
+        directory.write_text("")
+    else:
+        directory.mkdir()
+        directory.chmod(0o755)
+
+    with pytest.raises(OSError):
+        journal.retract(second)
+
+    assert journal.load() == (first, second)

@@ -842,6 +842,28 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     assert "PGDATABASE:" not in tasks
 
 
+def test_authority_teardown_removes_the_user_manager_memlock_drop_in() -> None:
+    document: object = yaml.safe_load(_text(AUTHORITY_TEARDOWN))
+    assert isinstance(document, list)
+    tasks = cast(list[dict[str, object]], cast(dict[str, object], document[0])["tasks"])
+    drop_in = (
+        "/etc/systemd/system/user@{{ ansible_facts.getent_passwd[authority_account][1] }}"
+        ".service.d/kdive-memlock.conf"
+    )
+    known = "ansible_facts.getent_passwd[authority_account] | default(none) is not none"
+    removal = next(
+        t for t in tasks if t["name"] == "Remove the authority user manager memlock drop-in"
+    )
+    assert removal["ansible.builtin.file"] == {"path": drop_in, "state": "absent"}
+    assert removal["when"] == known
+    inspect = next(t for t in tasks if t["name"] == "Inspect the removed memlock drop-in")
+    assert inspect["ansible.builtin.stat"] == {"path": drop_in}
+    assert inspect["when"] == known
+    check = next(t for t in tasks if t["name"] == "Assert the memlock drop-in is absent")
+    assert check["when"] == known
+    assert tasks.index(removal) < tasks.index(inspect) < tasks.index(check)
+
+
 def test_authority_teardown_reports_login_revocation_only_on_transition() -> None:
     document: object = yaml.safe_load(_text(AUTHORITY_TEARDOWN))
     assert isinstance(document, list)
@@ -928,7 +950,8 @@ def test_ansible_installs_witness_venv_in_clean_host_order() -> None:
     )
     install = (
         "{{ live_vm_host_uv_bin }} pip install --python "
-        "/opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive /opt/kdive"
+        "/opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive "
+        "{{ live_vm_venv }}"
     )
     assert commands.index(create) < commands.index(install)
     assert "path: /opt/kdive-live-worker-lifecycle" in tasks
