@@ -13,6 +13,9 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from kdive.domain.operations.jobs import JobKind
+from kdive.jobs import queue
+from kdive.jobs.payloads import TeardownPayload
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
@@ -20,7 +23,9 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownMutationRequestV1,
     JournalPhase,
     JournalRecordV1,
+    canonical_teardown_proof_bytes,
     record_digest,
+    teardown_proof_digest,
 )
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
@@ -48,7 +53,10 @@ from tests.db.test_external_boot_authority_journal_migration import (
     _record,
     _takeover_request,
 )
-from tests.db.test_migration_0147_external_boot_system_teardown import _make_ready_prepared
+from tests.db.test_migration_0147_external_boot_system_teardown import (
+    _make_ready_prepared,
+    _proof,
+)
 from tests.providers.external_boot_authority.service_support import _Adapter
 
 _OPERATION_PHASES = (
@@ -393,6 +401,7 @@ class _ContextAdapter(_Adapter):
     def __init__(self) -> None:
         super().__init__()
         self.interrupt = False
+        self.observe_failures = 0
         self.executed: list[int] = []
         self.observed: list[int] = []
         self.facts = AuthoritySystemTeardownFacts(
@@ -426,16 +435,15 @@ class _ContextAdapter(_Adapter):
         self, request: AuthorityTeardownMutationRequestV1, context: AuthorityCommitContextV1
     ) -> AuthoritySystemTeardownFacts:
         self.observed.append(context.journal_sequence)
+        if self.observe_failures:
+            self.observe_failures -= 1
+            raise RuntimeError("injected host observation failure")
         return self.facts
 
 
-@pytest.mark.anyio
-async def test_teardown_takeover_recovers_and_proves_each_generation_through_real_cas(
-    tmp_path: Path, migrated_url: str, authority_role_dsns: _RoleDsns
-) -> None:
-    """Three generations share one teardown identity; each proof binds its own anchor."""
+def _ready_teardown_case(migrated_url: str, suffix: str) -> _AuthorityCase:
     with psycopg.connect(migrated_url) as seed:
-        case = _seed_case(seed, purpose="teardown", worker_suffix="g")
+        case = _seed_case(seed, purpose="teardown", worker_suffix=suffix)
         _make_ready_prepared(seed, case)
         seed.execute(
             "INSERT INTO external_boot_reservations "
@@ -443,6 +451,25 @@ async def test_teardown_takeover_recovers_and_proves_each_generation_through_rea
             "VALUES (%s,'store/private','owner/private',4096,'ready',now())",
             (case.activation_id,),
         )
+    return case
+
+
+def _teardown_request(case: _AuthorityCase, takeover: Any) -> AuthorityTeardownMutationRequestV1:
+    return AuthorityTeardownMutationRequestV1.model_validate(
+        takeover.model_dump(mode="json", by_alias=True)
+        | {
+            "schema": "external-boot-authority-teardown-request-v1",
+            "attempt_id": str(uuid5(NAMESPACE_URL, case.operation_identity)),
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_teardown_takeover_recovers_and_proves_each_generation_through_real_cas(
+    tmp_path: Path, migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """Three generations share one teardown identity; each proof binds its own anchor."""
+    case = _ready_teardown_case(migrated_url, "g")
     adapter = _ContextAdapter()
     service = ExternalBootAuthorityService(
         repository=_database_repository(authority_role_dsns("kdive_provider_authority")),
@@ -458,13 +485,7 @@ async def test_teardown_takeover_recovers_and_proves_each_generation_through_rea
                 authority = _allocate(worker, case)
             takeover = _takeover_request(case, authority)
             await service.acknowledge_takeover(peer, takeover)
-            request = AuthorityTeardownMutationRequestV1.model_validate(
-                takeover.model_dump(mode="json", by_alias=True)
-                | {
-                    "schema": "external-boot-authority-teardown-request-v1",
-                    "attempt_id": str(uuid5(NAMESPACE_URL, case.operation_identity)),
-                }
-            )
+            request = _teardown_request(case, takeover)
             adapter.interrupt = generation < 3
             if adapter.interrupt:
                 with pytest.raises(AuthorityServiceError, match="provider_conflict"):
@@ -478,3 +499,163 @@ async def test_teardown_takeover_recovers_and_proves_each_generation_through_rea
     assert adapter.observed == [first, second, third, third]
     assert response.proof.disposition == "complete_ready"
     assert _head_row(migrated_url, case)[:2] == (response.journal_sequence, "terminal")
+
+
+def _make_current(
+    conn: psycopg.Connection, case: _AuthorityCase, authority: Any, proof: Any, sequence: int
+) -> str:
+    """Acknowledge ``authority`` and point the head at its terminal teardown record."""
+    digest = "sha256:" + f"{sequence:x}" * 64
+    conn.execute(
+        "UPDATE external_boot_authorities SET state = 'current', acknowledged_at = now() "
+        "WHERE id = %s",
+        (authority.authority_id,),
+    )
+    conn.execute(
+        "INSERT INTO external_boot_authority_acknowledgements "
+        "(authority_id, system_id, generation, authority_instance, operation_identity, "
+        "operation_digest, journal_sequence, journal_digest, positive_quiescence_digest) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (
+            authority.authority_id,
+            case.system_id,
+            authority.generation,
+            case.authority_instance,
+            case.operation_identity,
+            authority.operation_digest,
+            sequence - 1,
+            _DIGEST,
+            _DIGEST,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO external_boot_authority_journal_heads "
+        "(authority_instance, system_id, sequence, digest, phase, authority_id, generation, "
+        "operation_identity, head_record) VALUES (%s,%s,%s,%s,'terminal',%s,%s,%s,%s) "
+        "ON CONFLICT (authority_instance, system_id) DO UPDATE SET sequence = EXCLUDED.sequence, "
+        "digest = EXCLUDED.digest, authority_id = EXCLUDED.authority_id, "
+        "generation = EXCLUDED.generation, head_record = EXCLUDED.head_record",
+        (
+            case.authority_instance,
+            case.system_id,
+            sequence,
+            digest,
+            authority.authority_id,
+            authority.generation,
+            case.operation_identity,
+            Jsonb(
+                {
+                    "observation": {
+                        "category": "absent",
+                        "composite_state": teardown_proof_digest(proof),
+                    }
+                }
+            ),
+        ),
+    )
+    return digest
+
+
+def _finalize(
+    role_dsns: _RoleDsns,
+    case: _AuthorityCase,
+    authority: Any,
+    proof: Any,
+    sequence: int,
+    digest: str,
+) -> str:
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        row = worker.execute(
+            "SELECT finalize_external_boot_authority_teardown(%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                case.credential,
+                case.job_id,
+                case.attempt,
+                authority.authority_id,
+                authority.generation,
+                sequence,
+                digest,
+                canonical_teardown_proof_bytes(proof),
+            ),
+        ).fetchone()
+    assert row is not None
+    return row[0]
+
+
+@pytest.mark.anyio
+async def test_recycled_teardown_job_credits_once(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """#2884: a recycled attempt number cannot revive its failed predecessor's authority."""
+    case = _ready_teardown_case(migrated_url, "c")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        old = _allocate(worker, case)
+    proof = _proof(case, "complete_ready")
+    with psycopg.connect(migrated_url) as conn:
+        old_digest = _make_current(conn, case, old, proof, 2)
+        conn.execute(
+            "UPDATE jobs SET state = 'failed', attempt = max_attempts, "
+            "error_category = 'conflict', worker_id = NULL, lease_expires_at = NULL, "
+            "authorizing = authorizing || '{\"agent_session\": null}' WHERE id = %s",
+            (case.job_id,),
+        )
+        marker = conn.execute(
+            "SELECT payload -> 'external_boot_authority_v1' FROM jobs WHERE id = %s",
+            (case.job_id,),
+        ).fetchone()
+    assert marker is not None
+    async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+        recycled = await queue.enqueue(
+            conn,
+            JobKind.TEARDOWN,
+            TeardownPayload.model_validate(
+                {"system_id": str(case.system_id), "external_boot_authority_v1": marker[0]}
+            ),
+            {"principal": "p", "agent_session": None, "project": "proj"},
+            f"external-authority-{case.job_id}",
+            recycle=queue.JobRecyclePolicy.TERMINAL,
+        )
+    assert (recycled.id, recycled.attempt) == (case.job_id, 0)
+
+    # A different incarnation claims the recycled job, as claim_worker_job would.
+    successor = replace(
+        case, worker_id=f"docker:external-authority-c2-{uuid4()}", credential=b"z" * 32
+    )
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "INSERT INTO worker_incarnations "
+            "(incarnation, authority_kind, authority_binding, credential_hash, fence_protocol) "
+            "VALUES (%s, 'docker', '{}'::jsonb, %s, 4)",
+            (successor.worker_id, successor.credential),
+        )
+        conn.execute(
+            "UPDATE jobs SET state = 'running', attempt = 1, worker_id = %s, "
+            "lease_expires_at = now() + interval '5 minutes', heartbeat_at = now() WHERE id = %s",
+            (successor.worker_id, case.job_id),
+        )
+    assert _finalize(authority_role_dsns, case, old, proof, 2, old_digest) == "superseded"
+
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        new = _allocate(worker, successor)
+    with psycopg.connect(migrated_url) as conn:
+        rows = conn.execute(
+            "SELECT id, state FROM external_boot_authorities WHERE job_id = %s AND job_attempt = 1 "
+            "ORDER BY generation",
+            (case.job_id,),
+        ).fetchall()
+        new_digest = _make_current(conn, successor, new, proof, 4)
+    assert rows == [(old.authority_id, "superseded"), (new.authority_id, "allocating")]
+    assert _finalize(authority_role_dsns, case, old, proof, 2, old_digest) == "superseded"
+    assert _finalize(authority_role_dsns, successor, new, proof, 4, new_digest) == "applied"
+    assert _finalize(authority_role_dsns, successor, new, proof, 4, new_digest) == "applied"
+    with psycopg.connect(migrated_url) as conn:
+        released = conn.execute(
+            "SELECT count(*) FROM external_boot_reservation_releases WHERE activation_id = %s",
+            (case.activation_id,),
+        ).fetchone()
+        reservations = conn.execute(
+            "SELECT count(*) FROM external_boot_reservations WHERE activation_id = %s",
+            (case.activation_id,),
+        ).fetchone()
+        job = conn.execute("SELECT state FROM jobs WHERE id = %s", (case.job_id,)).fetchone()
+    assert (released, reservations, job) == ((1,), (0,), ("succeeded",))

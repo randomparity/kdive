@@ -85,15 +85,18 @@ Recycling is safe against the authority tables:
 - `external_boot_authorities (job_id, job_attempt)` is a non-unique index (0122). A recycled
   attempt 1 inserts a new row with a fresh id and generation beside the old, now-superseded
   attempt-1 row.
-- Allocation (0122) checks the live job row (`attempt`, `worker_id`, lease). Acknowledge, commit,
-  finalize and every provider-authority resolver look the authority up by id and generation and
-  require `state IN ('allocating','current')` or `'current'`, plus the live job attempt. An old
-  superseded row with the same `(job_id, job_attempt)` fails the state check.
+- Allocation (0122) checks the live job row (`attempt`, `worker_id`, lease). Acknowledge,
+  commit, finalize and every provider-authority resolver look the authority up by id and
+  generation, require a live state (`allocating`/`current`), and require the authority's worker
+  incarnation to own the running job with a live lease. Until the recycled job allocates, the
+  failed attempt's last authority may still be `current` with the same `(job_id, job_attempt)`;
+  the incarnation and lease binding refuses it once another incarnation claims the job, and the
+  new allocation then supersedes it.
 - Credit is exactly once. `finalize_external_boot_authority_teardown` credits only through a
-  `current` teardown authority with the live job attempt and a terminal head it owns, keys the
-  receipt by authority id, moves the reservation to `external_boot_reservation_releases`, and
-  refuses once the System is `torn_down`. A superseded earlier attempt of the same job cannot
-  commit or credit, and a replayed or second teardown after success returns the succeeded job.
+  `current` teardown authority whose terminal head it owns, keys the receipt by authority id,
+  moves the reservation to `external_boot_reservation_releases`, and refuses once the System is
+  `torn_down`. Whichever authority finalizes first credits; every later finalize for the
+  activation is refused or replays the same receipt.
 
 ### Settle path (retained fixture)
 
@@ -105,6 +108,11 @@ generation 3; `takeover-acknowledged` follows. The fresh generation-G teardown a
 and `mutation-started`, the provider adopts the retained intent as an authenticated successor and
 destroys the domain, and `_execute_teardown` proves the result with generation G's own context.
 The finalizer credits the ready reservation once.
+
+The fixture also holds an `allocating` activate authority (generation 5) from before 0161. Its
+job attempt's worker is gone, a reclaimed attempt allocates again and is fenced, and the teardown
+allocation supersedes it. The settle's read-only snapshot confirms no activate job is live
+before the public teardown is submitted.
 
 ## Success
 
@@ -157,7 +165,7 @@ The finalizer credits the ready reservation once.
   an `allocating` teardown authority, over an unresolved teardown head and over a suspended
   teardown, and admits a teardown; finalize after a recycle credits once and a superseded earlier
   attempt of the same job is refused.
-- `tests/db/test_external_boot_authority_journal_migration.py`: a DB-backed service test with
+- `tests/db/test_migration_0161_teardown_takeover.py`: a DB-backed service test with
   the real SQL repository and head function and a fake teardown adapter. Three generations share
   one teardown identity; each takeover recovers its predecessor's `mutation-started`, and the
   recorded contexts show recovery and the final proof each bind their own generation.

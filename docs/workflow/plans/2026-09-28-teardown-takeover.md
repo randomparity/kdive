@@ -32,8 +32,7 @@ and admin lines, and ~350 lines across four test files.
 | `src/kdive/db/schema/0161_external_boot_teardown_takeover.sql` | new | 1, 2 |
 | `src/kdive/providers/external_boot_authority/service.py` | `_recovery_observation`, `_execute_teardown` filters | 5 |
 | `src/kdive/mcp/tools/lifecycle/systems/admin.py` | `_enqueue_authority_teardown` recycle | 3 |
-| `tests/db/test_migration_0161_teardown_takeover.py` | new: head, fence, recycle/credit | 1–4 |
-| `tests/db/test_external_boot_authority_journal_migration.py` | new DB-backed service test | 4, 5 |
+| `tests/db/test_migration_0161_teardown_takeover.py` | new: head, fence, service, recycle/credit | 1–5 |
 | `tests/providers/local_libvirt/test_external_boot.py` | observation idempotency | 5 |
 | `tests/mcp/lifecycle/test_systems_tools.py` | recycle behavior | 3 |
 | `docs/adr/0620-authority-owned-system-teardown.md` | amendment | 6 |
@@ -165,7 +164,7 @@ $$;
   gen 3 recovers gen 2 and completes), gen 3's recovery observes with gen 2's
   `mutation-started` context and `execute_teardown` observes with gen 3's. Mode: focused-test.
   `test_teardown_takeover_recovers_and_proves_each_generation_through_real_cas` in
-  `tests/db/test_external_boot_authority_journal_migration.py`; red on main: the recorded
+  `tests/db/test_migration_0161_teardown_takeover.py`; red on main: the recorded
   observation contexts name gen 1's sequence. Green: `-k each_generation`.
 
 Steps:
@@ -209,7 +208,8 @@ Steps: write the parametrized test with `_system_teardown_io`, `_teardown_intent
   `test_teardown_does_not_recycle_authority_job[<case>]`; passes before and after.
 - Contract: after a recycle, a new attempt-1 authority allocates beside the superseded old
   attempt-1 row; the old row cannot finalize; the new one finalizes and credits the ready
-  reservation once, and a repeated finalize stays `applied` with one release row. Mode:
+  reservation once, and a repeated finalize stays `applied` with one release row. The failed
+  attempt's authority is still `current` when a different incarnation claims the recycled job. Mode:
   focused-test. `test_recycled_teardown_job_credits_once` in the 0161 test file (uses real
   `queue.enqueue` with `JobRecyclePolicy.TERMINAL` over an async connection, and the 0147
   `_proof`/`_current` helpers). Passes on main (the fences already hold); it pins them.
@@ -218,7 +218,8 @@ Steps:
 1. Write the tests; run; the first fails.
 2. In `_enqueue_authority_teardown`, after the marker check, return the prior envelope unless
    `prior.state is JobState.FAILED`; after `build_external_boot_payload`, if `prior` is not
-   `None` and `dump_payload(kind, payload) != prior.payload`, return the prior envelope; pass
+   `None` and the new payload's `external_boot_authority_v1` marker differs from the prior's,
+   return the prior envelope; pass
    `recycle=queue.JobRecyclePolicy.TERMINAL if prior is not None else
    queue.JobRecyclePolicy.NEVER` to `queue.enqueue`. Comment: the System lock is held and only a
    `failed` row reaches here, so `TERMINAL` resets exactly that row.
