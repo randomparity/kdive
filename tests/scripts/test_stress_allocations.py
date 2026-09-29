@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import importlib.util
 import json
 import sys
@@ -61,7 +60,7 @@ def _config(**overrides: Any) -> Any:
         "abandon_ratio": 0.2,
         "lease_h": 0.02 / 3600,  # 20 ms, so abandoned grants expire inside the drain
         "call_timeout_s": 5.0,
-        "drain_timeout_s": 0.5,
+        "drain_timeout_s": 30.0,  # hang guard: a settled drain exits early
         "profile": None,
     }
     base.update(overrides)
@@ -583,10 +582,14 @@ def test_clean_stack_exits_zero(provision: bool, tmp_path: Path) -> None:
         ("split_keys", {"invalid_ratio": 0.0, "race_ratio": 0.8}, {"invariant 4"}),
         (
             "stuck_release",
-            {"invalid_ratio": 0.0, "race_ratio": 0.8},
+            {"invalid_ratio": 0.0, "race_ratio": 0.8, "drain_timeout_s": 0.5},
             {"invariant 3", "invariant 5"},
         ),
-        ("no_gc", {"invalid_ratio": 0.0, "race_ratio": 0.0, "abandon_ratio": 1.0}, {"invariant 5"}),
+        (
+            "no_gc",
+            {"invalid_ratio": 0.0, "race_ratio": 0.0, "abandon_ratio": 1.0, "drain_timeout_s": 0.5},
+            {"invariant 5"},
+        ),
     ],
 )
 def test_planted_defect_is_reported(
@@ -622,7 +625,6 @@ def test_cancelled_run_replays_the_lost_request() -> None:
 def test_cancel_during_drain_reports_leftovers(capsys: pytest.CaptureFixture[str]) -> None:
     stack = FakeStack(defect="no_gc")
     cfg = _config(duration_s=0.05, invalid_ratio=0.0, race_ratio=0.0, abandon_ratio=1.0)
-    cfg = dataclasses.replace(cfg, drain_timeout_s=30.0)
     ledger = stress.Ledger()
 
     async def interrupted_drain() -> None:
