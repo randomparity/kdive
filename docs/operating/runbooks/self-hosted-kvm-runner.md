@@ -288,8 +288,9 @@ services, rejects remaining authority processes, revokes and verifies the databa
 removes the installed runtime and the authority user manager's memlock drop-in. A running user
 manager that still holds the unlimited memlock ceiling is then restarted, which ends anything it
 still runs; see [ADR-0708](../../adr/0708-authority-retirement-restarts-the-user-manager.md).
-The `provider_authority_host` role's disabled path does the same. Teardown also completes on a
-host with no authority account, skipping the account's user-scope steps. It deliberately retains
+The `provider_authority_host` role's disabled path does the same. Teardown also completes when the
+authority account is gone but its retained credential and journal directories remain, skipping
+the account's user-scope steps. It deliberately retains
 the credential and journal directories for operator inspection; remove them only after
 confirming no later #2140 deployment owns them.
 
