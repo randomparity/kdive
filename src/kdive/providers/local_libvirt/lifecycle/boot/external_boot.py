@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -2301,6 +2302,7 @@ class _RealLocalExternalBootOperation:
             plan_identity,
             authority,
             expected_identities=(source_identity, target_identity),
+            restore_power=True,
         )
 
     def abort_system_teardown_preparation(
@@ -2309,7 +2311,14 @@ class _RealLocalExternalBootOperation:
         plan_identity: Digest,
         authority: OpaqueProviderRef,
     ) -> PartialAbortResult:
-        return self._abort_preparation(binding, plan_identity, authority, expected_identities=None)
+        # The System is being torn down, so its prior running power is not restored (#2898).
+        result = self._abort_preparation(
+            binding, plan_identity, authority, expected_identities=None, restore_power=False
+        )
+        if result in {"removed", "absent"}:
+            with RecoveryMetadataStore(self._recovery_root) as store:
+                store.prune_empty_activation_parents(binding)
+        return result
 
     def _abort_preparation(
         self,
@@ -2318,6 +2327,7 @@ class _RealLocalExternalBootOperation:
         authority: OpaqueProviderRef,
         *,
         expected_identities: tuple[str, str] | None,
+        restore_power: bool,
     ) -> PartialAbortResult:
         with RecoveryMetadataStore(self._recovery_root) as store:
             partial = store.inspect_abortable_partial(binding, plan_identity, authority)
@@ -2335,7 +2345,7 @@ class _RealLocalExternalBootOperation:
                 ):
                     raise ValueError("recovery partial identity conflicts with teardown request")
                 _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
-                if intent.prior_power == "running":
+                if restore_power and intent.prior_power == "running":
                     self._session.restore_power()
                     readiness = self._session.readiness()
                     if not readiness.ok:
@@ -2796,7 +2806,15 @@ class LocalLibvirtExternalBoot:
         authority: OpaqueProviderRef,
         *,
         local_timing: LocalExternalBootTimingV1 | None = None,
+        restore_power: bool = True,
     ) -> None:
+        """Resume recovery to ``recovered``, restoring prior power unless told not to.
+
+        System teardown passes ``restore_power=False`` (#2898): it destroys the domain next,
+        so a start would only boot a guest it is about to kill. ``define_source`` records
+        ``source-restored`` only over the inactive source definition, which is the state a
+        teardown needs, so that point is recorded ``recovered`` without a start.
+        """
         opening = (
             self._io.open(authority, _expected_binding(recovery.binding))
             if local_timing is None
@@ -2831,7 +2849,10 @@ class LocalLibvirtExternalBoot:
                 operation.define_source(metadata)
                 metadata = self._reopen(operation, recovery)
             if metadata.phase == "source-restored":
-                operation.restore_power(metadata)
+                if restore_power:
+                    operation.restore_power(metadata)
+                else:
+                    operation.record_phase(metadata, "recovered")
 
     def cleanup_is_accounted(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> bool:
         """Whether accounted cleanup evidence for this exact point already exists.
@@ -2913,8 +2934,15 @@ class LocalLibvirtExternalBoot:
         proof: FinalizeCleanupProof,
         authority: OpaqueProviderRef,
     ) -> None:
-        with self._io.open(authority, _expected_binding(recovery.binding)):
-            self._io.record_cleanup_quarantine(recovery, proof)
+        if proof.binding != recovery.binding or proof.point_digest != self.point_digest(recovery):
+            raise ValueError("external-boot cleanup proof does not match recovery point")
+        # No operation session, as in ``finalize_cleanup_tombstone``: this runs after
+        # ``cleanup`` pruned the activation's artifact parents, and a session open re-creates
+        # them through the artifact root, leaving exact recovery absence unprovable (#2898).
+        # ``authority`` is therefore unused; the store re-reads the exact tombstone. The
+        # unpinned-write residual is the same as finalization's; the #2898 design's Scope
+        # (criterion 8) records it.
+        self._io.record_cleanup_quarantine(recovery, proof)
 
     def observe_object(
         self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
@@ -3768,6 +3796,7 @@ class RecoveryMetadataStore:
         except FileNotFoundError:
             # Absence is success only for the closed exact mutation-started proof
             # re-presented by #2140 for the still-current operation.
+            self.prune_empty_activation_parents(recovery.binding)
             return
         if actual != expected:
             raise ValueError("cleanup tombstone does not match recovery point")
@@ -3795,6 +3824,8 @@ class RecoveryMetadataStore:
         try:
             _open_private_directory(self._root_fd, name)
         except FileNotFoundError:
+            # A session opened after cleanup re-creates the parents it pruned (#2898).
+            self.prune_empty_activation_parents(recovery.binding)
             return
         raise ValueError("cleanup tombstone remained after finalization")
 
@@ -3805,6 +3836,13 @@ class RecoveryMetadataStore:
         self._require_open()
         name = recovery_directory_name(recovery.recovery_ref, recovery.binding)
         tombstone = self._read_tombstone_named(name)
+        expected = CleanupTombstoneV1(
+            binding=recovery.binding,
+            recovery_point=recovery,
+            point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+        )
+        if tombstone != expected or proof.point_digest != expected.point_digest:
+            raise ValueError("cleanup tombstone does not match recovery point")
         receipt = CleanupQuarantineReceiptV1(tombstone=tombstone, proof=proof)
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
@@ -4098,6 +4136,35 @@ class RecoveryMetadataStore:
         with suppress(FileNotFoundError):
             os.rmdir(binding.system_id, dir_fd=self._root_fd)
             os.fsync(self._root_fd)
+
+    def prune_empty_activation_parents(self, binding: ExternalBootActivationBinding) -> None:
+        """Remove the activation's `<system>/<run>/<activation>` directories only while empty.
+
+        An activation-scoped session open creates them, so a session opened after cleanup
+        leaves them behind with nothing to own, and exact recovery absence stays false for
+        good (#2898). Anything inside stops the walk: residue stays for quarantine.
+        """
+        chain = (binding.system_id, binding.run_id, binding.activation_id)
+        descriptors = [self._root_fd]
+        try:
+            for name in chain:
+                try:
+                    descriptors.append(_open_private_directory(descriptors[-1], name))
+                except FileNotFoundError:
+                    return
+            for parent_fd, name in reversed(tuple(zip(descriptors[:-1], chain, strict=True))):
+                try:
+                    os.rmdir(name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    if error.errno == errno.ENOTEMPTY:
+                        return
+                    raise
+                os.fsync(parent_fd)
+        finally:
+            for descriptor in descriptors[1:]:
+                os.close(descriptor)
 
     def _read_optional_abort_receipt(self, name: str) -> LocalPartialAbortReceiptV1 | None:
         try:
