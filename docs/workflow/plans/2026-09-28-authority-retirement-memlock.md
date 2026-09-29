@@ -24,12 +24,14 @@ Verification:
 - `Mode: focused-test` — guard contract: new
   `test_authority_teardown_passwd_guards_tolerate_a_missing_account` collects every task whose
   YAML dump contains `getent_passwd[authority_account][1]` and asserts its first `when` item is the
-  known-account text. It renders that text through `jinja2.Environment(undefined=StrictUndefined)`
-  as `{{ <expr> }}` with `authority_account="kdive-provider-authority"`: `False` for
+  known-account text. It evaluates that text with
+  `jinja2.Environment(undefined=StrictUndefined).compile_expression` (native booleans) and
+  `authority_account="kdive-provider-authority"`: `False` for
   `ansible_facts={"getent_passwd": {"kdive-provider-authority": None}}`, `True` for
-  `["x", "981"]`. It renders each clause of `Assert authority services and processes are
-  inactive` with the `None` entry and no other variables: `True` (the known-account half
-  short-circuits). No `when`/`that` string contains `in ansible_facts.getent_passwd`. Red today:
+  `["x", "981"]`. It evaluates the two passwd clauses of `Assert authority services and
+  processes are inactive` (the clauses after the first) with the `None` entry and no other
+  variables: `True`, because the known-account half short-circuits. No task contains
+  ` in ansible_facts.getent_passwd` (`yaml.safe_dump(..., width=10**6)`). Red today: the
   five first items are `authority_account in ansible_facts.getent_passwd`. Green:
   `uv run python -m pytest tests/deploy/test_live_worker_provisioning.py -q -k teardown`.
 - `Mode: focused-test` — restart contract: new
@@ -111,8 +113,3 @@ Steps:
 tolerates an absent authority account and restarts a user manager still holding the retired
 memlock ceiling, which ends any process it still runs.
 `Mode: task-test-not-applicable` — prose with no executable consumer. Commit `docs: ...`.
-
-## Rollback
-
-Revert the commits; a host already retired keeps its restarted manager, which is the intended
-state.

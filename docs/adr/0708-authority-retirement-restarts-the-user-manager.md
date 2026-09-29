@@ -39,8 +39,11 @@ skips all of it. The role path runs the restart before it disables linger.
 - **Restart from a handler notified by the drop-in removal.** verified: the removal task reports
   `ok`, not `changed`, once the file is gone, so a re-run after a retirement interrupted between
   removal and restart never notifies; `provider_authority_host/tasks/libvirt.yml` keys its install
-  restart on the running limit for the same reason (commit `a699f2774`).
+  restart on the running limit for the same reason (commit `410a4715d`).
 - **Restart whenever the running limit is unlimited.** verified: `systemd-system.conf(5)`
   `DefaultLimitMEMLOCK` can set `infinity` host-wide; the manager would then restart on every run.
+- **Lower the running manager's limit in place with `prlimit --pid`.** verified: `setrlimit(2)`
+  limits are per process and inherited at `fork(2)`, so the user services the manager already
+  started keep the unlimited ceiling; only a restart retires it everywhere.
 - **Stop the user manager instead.** judgment: leaves a lingering account without its manager
   until reboot, which is linger behaviour the operator owns (#2891 exclusions).
