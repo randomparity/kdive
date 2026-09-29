@@ -64,11 +64,13 @@ Only the configured operator belongs to `kdive-live-control`. Worker accounts ke
 groups and receive the `kdive-live-libvirt` and `kvm` supplemental groups; they never belong to the
 control, sudo (or RedHat-family `wheel`), or Docker groups. The installer appends those groups to an
 existing worker account, keeping memberships other provisioning added, such as the authority client
-group, and refuses an account that holds one of the forbidden groups. The distro `kvm` authority
-lets every worker read `root:kvm` mode-`0640` host kernels for libguestfs and use `/dev/kvm` without
-making either world-accessible. The witness credential and service configuration are root-only
-beneath `/etc/kdive`; per-slot state is root-owned beneath `/var/lib/kdive/live-workers`, and each
-slot account can neither traverse nor replace a sibling slot.
+group, and refuses an account that holds one of those forbidden groups. It checks only those named
+groups and prunes no others; the `local_worker_host` role, which sets each worker's exact
+membership, is what removes any other group. The distro `kvm` authority lets every worker read
+`root:kvm` mode-`0640` host kernels for libguestfs and use `/dev/kvm` without making either
+world-accessible. The witness credential and service configuration are root-only beneath
+`/etc/kdive`; per-slot state is root-owned beneath `/var/lib/kdive/live-workers`, and each slot
+account can neither traverse nor replace a sibling slot.
 
 Adding the operator to `kdive-live-control` does not refresh an already-running process's kernel
 group list. Interactive operators must start a new login session after installation before using
