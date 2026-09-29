@@ -281,6 +281,28 @@ Rejected for this amendment:
   reprovisioning every host. The campaign orchestrator selected the reserved subdirectory on
   2026-09-28.
 
+### Amendment (2026-09-28): the periodic readiness check waits out an in-flight anchor (#2899)
+
+The anchor order (local fsync, then head advance) means a running authority always holds a
+window where one lane's journal is one record ahead of its head, or a new lane has no head row.
+The periodic readiness check observed that window and exited the host. When the periodic check
+raises `head-mismatch` or `inventory-mismatch`, it re-reads the heads and reloads the lanes once
+while the service holds new anchors and waits for in-flight ones to finish, including any
+retraction of a refused record. A mismatch that persists refuses service as before. The wait and
+the retry stay inside the readiness timeout. The startup and standalone checks are unchanged, and
+the periodic check never retracts.
+
+Rejected for this amendment:
+
+- **Hold every lane lock during the check.** verified: `_release_lane` (`service.py`, commit
+  b51e5c8c9) pops an idle lane, so a lane created during the check gets a fresh lock the check
+  does not hold.
+- **Treat a one-record tail as healthy at readiness.** judgment: the check could no longer tell
+  a crash-stranded record from an anchor in progress, and the #2793 amendment already rejects a
+  tolerated tail for the next append.
+- **Serialize every anchor behind one service lock.** judgment: it trades a rare readiness retry
+  for serialized head advances on all lanes during normal operation.
+
 ## Consequences
 
 - External boot gains a fence at the provider mutation boundary and a separate database fence for
