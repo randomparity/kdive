@@ -20,7 +20,7 @@ Token `q2889-5dc4e3ed`; amends [ADR-0620](../../adr/0620-authority-owned-system-
   `_RECYCLED` lists only policies it can answer.
 - **Stray job terminalization.** Migration 0162 adds `dead_letter_unowned_external_boot_jobs()`
   (security definer; only `kdive_reconciler`, which cannot read authority rows, may execute it).
-  For each `external_boot_authority_v1` job with `kind <> 'teardown'` (public teardown owns those),
+  For each `external_boot_authority_v1` `boot` job (public teardown owns `teardown` ones),
   `running`, exhausted and lease-lapsed on the database clock, it locks the row, then in
   a later statement requires no authority row for the job in `allocating` or `current`, and sets
   `failed`/`lease_expired`. Every receipt path needs such a row and a `running` job, and
