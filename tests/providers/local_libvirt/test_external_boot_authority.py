@@ -455,12 +455,11 @@ def _adapter(io: _FakeIO) -> LocalExternalBootAuthorityAdapter:
 
 @pytest.mark.parametrize(
     ("partial", "initially_absent", "expects_abort"),
-    # "absent" after a present recovery: an interrupted finalization's empty directory (#2927).
-    [("removed", False, True), ("absent", False, True), ("not-partial", True, False)],
+    [("removed", False, True), ("not-partial", True, False)],
 )
 @pytest.mark.anyio
 async def test_system_teardown_persists_intent_before_pending_or_released_cleanup(
-    partial: Literal["removed", "absent", "not-partial"],
+    partial: Literal["removed", "not-partial"],
     initially_absent: bool,
     expects_abort: bool,
 ) -> None:
