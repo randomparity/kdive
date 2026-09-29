@@ -33,6 +33,15 @@ _VIRSH = "virsh"
 _READINESS_MARKER = "kdive-ready"
 _MAX_CONSOLE_WINDOW_BYTES = 2 * 1024 * 1024
 
+# Complete 7-bit ECMA-48 escape sequences, removed before the marker and crash scans (#2907):
+# control strings (DCS/OSC/SOS/PM/APC) ended by ST or BEL on their own line, CSI, and other ESC
+# sequences. An unterminated sequence stays, so the removal never spans a line.
+_ESCAPE_SEQUENCE = re.compile(
+    r"\x1b[P\]X^_][^\x07\x1b\n]*(?:\x07|\x1b\\)"
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"
+    r"|\x1b(?![\[\]PX^_])[ -/]*[0-~]"
+)
+
 _log = logging.getLogger(__name__)
 
 
@@ -230,7 +239,7 @@ def prepare_console_readiness_window(
 
 def _scan_console(data: bytes, marker: str) -> tuple[ConsoleVerdict, str | None]:
     """Classify a console capture and return the pre-marker crash literal it matched, if any."""
-    text = data.decode("utf-8", errors="replace")
+    text = _ESCAPE_SEQUENCE.sub("", data.decode("utf-8", errors="replace"))
     marker_re = re.compile(rf"(?:^|[^\S\n]){re.escape(marker)}[^\S\n]*$", re.MULTILINE)
     marker_match = marker_re.search(text)
     region = text if marker_match is None else text[: marker_match.start()]

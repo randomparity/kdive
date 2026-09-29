@@ -1823,6 +1823,39 @@ def test_classify_marker_glued_to_prefix_token_is_pending() -> None:
     assert classify_console(data, marker=_MARKER) == "pending"
 
 
+# #2907: the Fedora 44 serial getty wrote an OSC 3008 context record and a DCS XTGETTCAP query,
+# each ST-terminated, onto the marker's line immediately before the readiness unit's echo.
+_GETTY_ESCAPES_THEN_MARKER = (
+    b"\x1b]3008;start=4f1c;user=root;hostname=localhost;pid=812;"
+    b"unit=serial-getty@ttyS0.service;type=service\x1b\\"
+    b"\x1bP+q6E616D65\x1b\\"
+    b"kdive-ready\r\n"
+)
+
+
+def test_classify_marker_after_getty_escape_sequences_is_ready() -> None:
+    data = b"[   14.90] systemd[1]: Started serial-getty@ttyS0.service.\r\n"
+    assert classify_console(data + _GETTY_ESCAPES_THEN_MARKER, marker=_MARKER) == "ready"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"[  OK  ] Started \x1b[0;1;39mkdive-ready.service\x1b[0m - Signal readiness.\r\n",
+        b"fookdive-ready\x1b[0m\r\n",
+        b"foo\x1b[0mkdive-ready\r\n",
+        b"\x1b]3008;unit=kdive-ready\x1b\\\r\n",
+    ],
+)
+def test_classify_escape_sequences_keep_the_marker_token_shape(line: bytes) -> None:
+    assert classify_console(line, marker=_MARKER) == "pending"
+
+
+def test_classify_crash_before_escaped_marker_wins() -> None:
+    data = b"[    1.0] Kernel panic - not syncing\r\n" + _GETTY_ESCAPES_THEN_MARKER
+    assert classify_console(data, marker=_MARKER) == "crashed"
+
+
 def test_classify_getty_prefix_preserves_pre_marker_crash_region() -> None:
     # The crash scan region ends at the marker; a getty-prefixed marker line must not mask a
     # crash that preceded it.
