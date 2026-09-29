@@ -11,8 +11,8 @@ import socket
 import stat
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import AsyncIterator, Awaitable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -599,11 +599,28 @@ def restore_journal_inventory(config: AuthorityHostConfig, heads: tuple[JournalH
     _restore_journal_inventory(config, heads, {}, deadline=None)
 
 
+def _is_head_divergence(error: HostReadinessError) -> bool:
+    return error.component == "journal" and error.reason in {"head-mismatch", "inventory-mismatch"}
+
+
 @dataclass(slots=True)
 class JournalInventoryValidator:
     """Reuse unchanged lane evidence while keeping journal parsing off the event loop."""
 
     _cache: dict[str, tuple[_JournalIdentity, JournalHead]] = field(default_factory=dict)
+    # Armed by the running host for its periodic checks only (ADR-0584 amendment, #2899).
+    anchor_quiescence: Callable[[], AbstractAsyncContextManager[None]] | None = None
+
+    async def validate_current(self, config: AuthorityHostConfig) -> None:
+        """Validate the lanes against freshly read heads, once more with anchors quiesced."""
+        try:
+            await self.validate(config, await _database_heads(config))
+        except HostReadinessError as error:
+            if self.anchor_quiescence is None or not _is_head_divergence(error):
+                raise
+            # An anchor between its fsynced append and its head advance looks exactly like this.
+            async with self.anchor_quiescence():
+                await self.validate(config, await _database_heads(config))
 
     async def validate(self, config: AuthorityHostConfig, heads: tuple[JournalHead, ...]) -> None:
         deadline = time.monotonic() + JOURNAL_VALIDATION_TIMEOUT_SECONDS
@@ -1269,8 +1286,7 @@ async def _check_static_authority_host(
         raise HostReadinessError("identity", "uid-mismatch")
     await asyncio.to_thread(_validate_access_boundary, config)
     validate_credential_paths(config)
-    heads = await _database_heads(config)
-    await (journal_validator or JournalInventoryValidator()).validate(config, heads)
+    await (journal_validator or JournalInventoryValidator()).validate_current(config)
     await _check_provider_socket(config)
     if system_installation is _UNPINNED_SYSTEM_INSTALLATION:
         return await asyncio.to_thread(_load_system_installation, config)
@@ -1779,10 +1795,7 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                 _check_static_authority_host(config, journal_validator, system_installation)
             )
         except HostReadinessError as error:
-            if error.component != "journal" or error.reason not in {
-                "head-mismatch",
-                "inventory-mismatch",
-            }:
+            if not _is_head_divergence(error):
                 raise
             await _bounded_readiness_check(_reconcile_journal_tails(config))
             await _bounded_readiness_check(
@@ -1799,6 +1812,8 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
             if proof_barrier is not None
             else _build_mutation_service(config, system_installation=system_installation)
         )
+        if mutation_service is not None:
+            journal_validator.anchor_quiescence = mutation_service.quiesce_anchors
         try:
             listener = await serve_authority_transport(
                 config,
