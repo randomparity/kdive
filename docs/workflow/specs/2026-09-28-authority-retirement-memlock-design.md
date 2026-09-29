@@ -44,7 +44,8 @@ behaviour (operator). Decision: [ADR-0708](../../adr/0708-authority-retirement-r
    fixed-worker libvirt path stays usable; retirement never starts a manager that was not running.
 3. **Accepted failure classes** — an account present with no running manager: user-scope tasks
    already assume a running manager (unchanged, pre-existing). A host that grants the manager
-   `infinity` by its own configuration keeps it (ADR-0708 consequence).
+   `infinity` by its own configuration keeps it, and one that grants it through `pam_limits`
+   restarts it on every teardown run (ADR-0708 consequences).
 4. **Covered elsewhere** — linger and account removal (operator exclusion), including the state
    where the account is gone but its private unit file remains, which still fails the role's
    existing `getent` in the endpoint-stop block; install-path restart

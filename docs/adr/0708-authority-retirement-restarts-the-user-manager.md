@@ -31,6 +31,9 @@ skips all of it. The role path runs the restart before it disables linger.
   converged host never restarts again.
 - A host whose own configuration grants the manager `LimitMEMLOCK=infinity` (a
   `DefaultLimitMEMLOCK` or another drop-in) keeps it: the configured limit stays `infinity`.
+- A `pam_limits` memlock grant reaches the manager through its PAM session and not through
+  `LimitMEMLOCK`, so on such a host the restarted manager is unlimited again and every teardown run
+  restarts it once more.
 
 ## Considered & rejected
 
