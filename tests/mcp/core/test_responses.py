@@ -73,6 +73,24 @@ def test_from_job_failed_carries_category() -> None:
     assert resp.suggested_next_actions == []
 
 
+def test_from_job_failed_without_category_degrades_to_infrastructure_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    job = _BUILD_JOB.model_copy(
+        update={
+            "state": JobState.FAILED,
+            "error_category": None,
+            "failure_context": {"failure_message": "make failed"},
+        }
+    )
+    with caplog.at_level("WARNING", logger="kdive.mcp.responses"):
+        resp = ToolResponse.from_job(job)
+    assert resp.status == "failed"
+    assert resp.error_category == "infrastructure_failure"
+    assert resp.data == {"kind": "build", "failure_message": "make failed"}
+    assert f"failed job {job.id} has no error_category" in caplog.text
+
+
 @pytest.mark.parametrize(
     "state", [JobState.QUEUED, JobState.RUNNING, JobState.SUCCEEDED, JobState.CANCELED]
 )
