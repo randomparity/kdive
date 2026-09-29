@@ -701,6 +701,67 @@ def test_retiring_the_authority_removes_its_memlock_drop_in() -> None:
     assert tasks.index(removal) < tasks.index(flush)
 
 
+def test_retiring_the_authority_restarts_a_user_manager_holding_the_retired_ceiling() -> None:
+    # Removing the drop-in only changes the unit's configured limit; a lingering authority user
+    # manager keeps its unlimited ceiling until it restarts (ADR-0708). The restart precedes
+    # disabling linger, which may stop the manager instead.
+    tasks = _tasks(ROLE / "tasks" / "disable.yml")
+    known = "ansible_facts.getent_passwd['kdive-provider-authority'] | default(none) is not none"
+    manager = "user@{{ ansible_facts.getent_passwd['kdive-provider-authority'][1] }}.service"
+    pid = _named(tasks, "Read the retiring authority user manager main PID")
+    configured = _named(tasks, "Read the retiring authority user manager configured memlock limit")
+    running = _named(tasks, "Read the retiring authority user manager running memlock limit")
+    restart = _named(
+        tasks, "Restart the retiring authority user manager to drop its memlock ceiling"
+    )
+    # A re-run whose drop-in removal reports ok notifies no handler, and systemctl show reports
+    # the loaded limit until a reload, so the reload before the reads is unconditional.
+    reload = _named(tasks, "Reload systemd before reading the retiring authority user manager")
+    assert reload["ansible.builtin.systemd_service"] == {"daemon_reload": True}
+    assert "when" not in reload
+    show = ["/usr/bin/systemctl", "show"]
+    assert cast(dict[str, list[str]], pid["ansible.builtin.command"])["argv"] == [
+        *show,
+        "--property=MainPID",
+        "--value",
+        manager,
+    ]
+    assert cast(dict[str, list[str]], configured["ansible.builtin.command"])["argv"] == [
+        *show,
+        "--property=LimitMEMLOCK",
+        "--value",
+        manager,
+    ]
+    assert cast(dict[str, list[str]], running["ansible.builtin.command"])["argv"] == [
+        "/usr/bin/prlimit",
+        "--memlock",
+        "--noheadings",
+        "--output=HARD",
+        f"--pid={{{{ {pid['register']}.stdout }}}}",
+    ]
+    assert restart["ansible.builtin.systemd_service"] == {"name": manager, "state": "restarted"}
+    running_pid = f'{pid["register"]}.stdout not in ["", "0"]'
+    assert pid["when"] == configured["when"] == known
+    assert running["when"] == [known, running_pid]
+    assert restart["when"] == [
+        known,
+        running_pid,
+        f"{running['register']}.stdout | trim == 'unlimited'",
+        f"{configured['register']}.stdout | trim != 'infinity'",
+    ]
+    order = [
+        _named(tasks, "Remove the retired authority user manager memlock drop-in"),
+        reload,
+        pid,
+        configured,
+        running,
+        restart,
+        _named(tasks, "Retire authority user-service boot persistence"),
+        _named(tasks, "Apply authority removal before completing cleanup"),
+    ]
+    assert [tasks.index(t) for t in order] == sorted(tasks.index(t) for t in order)
+
+
 def test_runbook_describes_a_complete_local_mutation_vars_file() -> None:
     runbook = (ROOT / "docs" / "operating" / "runbooks" / "self-hosted-kvm-runner.md").read_text(
         encoding="utf-8"
