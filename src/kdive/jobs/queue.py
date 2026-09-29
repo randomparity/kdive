@@ -54,11 +54,16 @@ DEFAULT_DISPATCH_LANES = (DEFAULT_JOB_DISPATCH_LANE,)
 
 
 class JobRecyclePolicy(StrEnum):
-    """Terminal states an enqueue may reset under an existing deduplication key."""
+    """Rows an enqueue may reset under an existing deduplication key.
+
+    ``FAILED_OR_LAPSED_EXHAUSTED`` resets a ``failed`` row, or requeues a ``running`` row whose
+    final charged attempt's lease lapsed on the database clock (ADR-0620, #2889).
+    """
 
     NEVER = "never"
     TERMINAL = "terminal"
     TERMINAL_OR_CANCELED = "terminal_or_canceled"
+    FAILED_OR_LAPSED_EXHAUSTED = "failed_or_lapsed_exhausted"
 
 
 class ExternalBootCommitStatus(StrEnum):
@@ -111,6 +116,11 @@ async def enqueue_with_status(
     explicitly requested. ``created_at`` uses the wall clock so recycled jobs return to the back of
     the queue even when the caller's transaction waited on a lock (ADR-0447, ADR-0550).
 
+    The one exception is ``FAILED_OR_LAPSED_EXHAUSTED``'s ``running`` row, whose lease the
+    ``UPDATE`` itself judges, so a heartbeat that renewed it first keeps the row. Its dead attempt
+    may still be running, so the row keeps its attempt counter and gains another ``max_attempts``
+    budget: a reused attempt number would pass that attempt's heartbeat and finalize fences.
+
     Raises:
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
         ValueError: ``kind`` is a retired historical kind without an active handler.
@@ -142,22 +152,33 @@ async def enqueue_with_status(
         )
         inserted = await cur.fetchone() is not None
         if recycle is not JobRecyclePolicy.NEVER:
-            recyclable = [JobState.FAILED.value, JobState.SUCCEEDED.value]
+            recyclable = [JobState.FAILED.value]
+            if recycle is not JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED:
+                recyclable.append(JobState.SUCCEEDED.value)
             if recycle is JobRecyclePolicy.TERMINAL_OR_CANCELED:
                 recyclable.append(JobState.CANCELED.value)
             await cur.execute(
-                "UPDATE jobs SET state = %s, payload = %s, attempt = 0, worker_id = NULL, "
+                "UPDATE jobs SET state = %s, payload = %s, "
+                "    attempt = CASE WHEN state = %s THEN attempt ELSE 0 END, "
+                "    max_attempts = CASE WHEN state = %s THEN attempt + max_attempts "
+                "        ELSE max_attempts END, "
+                "    worker_id = NULL, "
                 "    lease_expires_at = NULL, heartbeat_at = NULL, error_category = NULL, "
                 "    result_ref = NULL, failure_context = '{}'::jsonb, "
                 "    dispatch_lane = %s, created_at = clock_timestamp() "
-                "WHERE dedup_key = %s AND state = ANY(%s) "
+                "WHERE dedup_key = %s AND (state = ANY(%s) OR (%s AND state = %s "
+                "    AND attempt >= max_attempts AND lease_expires_at < clock_timestamp())) "
                 "RETURNING id",
                 (
                     JobState.QUEUED.value,
                     Jsonb(payload_json),
+                    JobState.RUNNING.value,
+                    JobState.RUNNING.value,
                     dispatch_lane,
                     dedup_key,
                     recyclable,
+                    recycle is JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED,
+                    JobState.RUNNING.value,
                 ),
             )
             if (recycled := await cur.fetchone()) is not None:
@@ -167,7 +188,7 @@ async def enqueue_with_status(
     # This records an attempted recycle; an outer transaction may still roll it back.
     if recycled_id is not None:
         _log.info(
-            "recycled terminal job %s (kind %s, dedup_key %s) to a fresh queued attempt",
+            "recycled job %s (kind %s, dedup_key %s) to a fresh queued attempt",
             recycled_id,
             kind.value,
             dedup_key,

@@ -583,7 +583,10 @@ async def _enqueue_authority_teardown(
                 suggested_next_actions=["jobs.wait", "systems.get"],
                 data={"reason": "ordinary_teardown_fenced_by_external_boot"},
             )
-        if prior.state is not JobState.FAILED:
+        final_attempt_running = (
+            prior.state is JobState.RUNNING and prior.attempt >= prior.max_attempts
+        )
+        if prior.state is not JobState.FAILED and not final_attempt_running:
             return job_envelope(prior, "system_id", system.id)
     operation_identity = (
         "sha256:"
@@ -604,6 +607,8 @@ async def _enqueue_authority_teardown(
             resolver=resolver,
         )
     except CategorizedError as exc:
+        if prior is not None and prior.state is JobState.RUNNING:
+            return job_envelope(prior, "system_id", system.id)
         return ToolResponse.failure(
             system_id,
             ErrorCategory.CONFIGURATION_ERROR,
@@ -615,16 +620,20 @@ async def _enqueue_authority_teardown(
         dump_payload(kind, payload).get(_AUTHORITY_MARKER) != prior.payload.get(_AUTHORITY_MARKER)
     ):
         return job_envelope(prior, "system_id", system.id)
-    # A failed authority teardown with the identical marker is re-run as a fresh attempt
-    # (ADR-0620 amendment). The System lock is held and only a `failed` row reaches here, so
-    # `TERMINAL` resets exactly that row.
+    # A failed authority teardown, or one whose final attempt's lease lapsed, with the identical
+    # marker is re-run (ADR-0620 amendments). The lapse is judged only by enqueue's UPDATE on the
+    # database clock, so a final attempt that is still live comes back unchanged and replays.
     job = await queue.enqueue(
         conn,
         kind,
         payload,
         job_authorizing(ctx, system.project),
         _teardown_dedup_key(system.id),
-        recycle=queue.JobRecyclePolicy.NEVER if prior is None else queue.JobRecyclePolicy.TERMINAL,
+        recycle=(
+            queue.JobRecyclePolicy.NEVER
+            if prior is None
+            else queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
+        ),
     )
     envelope = job_envelope(job, "system_id", system.id)
     if idempotency_key is not None:

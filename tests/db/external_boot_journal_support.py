@@ -19,9 +19,12 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalPhase,
     JournalRecordV1,
     canonical_record_bytes,
+    canonical_teardown_proof_bytes,
     record_digest,
+    teardown_proof_digest,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
+from tests.db.external_boot_authority_support import _AuthorityCase, _RoleDsns, _seed_case
 
 _DIGEST = "sha256:" + "d" * 64
 
@@ -233,3 +236,97 @@ def _proof(case, disposition: str):
             },
         }
     return TypeAdapter(AuthorityTeardownProofV1).validate_python(value)
+
+
+def _ready_teardown_case(migrated_url: str, suffix: str) -> _AuthorityCase:
+    with psycopg.connect(migrated_url) as seed:
+        case = _seed_case(seed, purpose="teardown", worker_suffix=suffix)
+        _make_ready_prepared(seed, case)
+        seed.execute(
+            "INSERT INTO external_boot_reservations "
+            "(activation_id,store_identity,owner_key,reserved_bytes,state,ready_at) "
+            "VALUES (%s,'store/private','owner/private',4096,'ready',now())",
+            (case.activation_id,),
+        )
+    return case
+
+
+def _make_current(
+    conn: psycopg.Connection, case: _AuthorityCase, authority: Any, proof: Any, sequence: int
+) -> str:
+    """Acknowledge ``authority`` and point the head at its terminal teardown record."""
+    digest = "sha256:" + f"{sequence:x}" * 64
+    conn.execute(
+        "UPDATE external_boot_authorities SET state = 'current', acknowledged_at = now() "
+        "WHERE id = %s",
+        (authority.authority_id,),
+    )
+    conn.execute(
+        "INSERT INTO external_boot_authority_acknowledgements "
+        "(authority_id, system_id, generation, authority_instance, operation_identity, "
+        "operation_digest, journal_sequence, journal_digest, positive_quiescence_digest) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (
+            authority.authority_id,
+            case.system_id,
+            authority.generation,
+            case.authority_instance,
+            case.operation_identity,
+            authority.operation_digest,
+            sequence - 1,
+            _DIGEST,
+            _DIGEST,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO external_boot_authority_journal_heads "
+        "(authority_instance, system_id, sequence, digest, phase, authority_id, generation, "
+        "operation_identity, head_record) VALUES (%s,%s,%s,%s,'terminal',%s,%s,%s,%s) "
+        "ON CONFLICT (authority_instance, system_id) DO UPDATE SET sequence = EXCLUDED.sequence, "
+        "digest = EXCLUDED.digest, authority_id = EXCLUDED.authority_id, "
+        "generation = EXCLUDED.generation, head_record = EXCLUDED.head_record",
+        (
+            case.authority_instance,
+            case.system_id,
+            sequence,
+            digest,
+            authority.authority_id,
+            authority.generation,
+            case.operation_identity,
+            Jsonb(
+                {
+                    "observation": {
+                        "category": "absent",
+                        "composite_state": teardown_proof_digest(proof),
+                    }
+                }
+            ),
+        ),
+    )
+    return digest
+
+
+def _finalize(
+    role_dsns: _RoleDsns,
+    case: _AuthorityCase,
+    authority: Any,
+    proof: Any,
+    sequence: int,
+    digest: str,
+) -> str:
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        row = worker.execute(
+            "SELECT finalize_external_boot_authority_teardown(%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                case.credential,
+                case.job_id,
+                case.attempt,
+                authority.authority_id,
+                authority.generation,
+                sequence,
+                digest,
+                canonical_teardown_proof_bytes(proof),
+            ),
+        ).fetchone()
+    assert row is not None
+    return row[0]
