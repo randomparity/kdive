@@ -589,6 +589,33 @@ _resolve_uv_bin() {
   printf '%s\n' "$resolved"
 }
 
+# Append, never replace, an existing worker's supplementary groups: the local_worker_host role
+# adds each worker to the authority client group (ADR-0619) before the playbook runs this
+# installer, and a replacing `usermod -G` stripped it (#2925). Appending no longer prunes, so
+# refuse the memberships deploy/systemd/README.md says a worker never holds.
+_converge_worker_account() {
+  local worker="$1" libvirt_group="$2" control_group="$3" held group
+  local -a held_groups
+  getent group "$worker" >/dev/null || groupadd --system "$worker"
+  if ! getent passwd "$worker" >/dev/null; then
+    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
+      --gid "$worker" --groups "$libvirt_group,kvm" "$worker"
+    return
+  fi
+  held="$(id -nG "$worker")"
+  read -ra held_groups <<<"$held"
+  for group in "${held_groups[@]}"; do
+    case "$group" in
+    "$control_group" | sudo | wheel | docker)
+      echo "$worker belongs to the $group group, which a fixed worker must never hold;" \
+        "remove it with 'gpasswd -d $worker $group' and re-run this installer" >&2
+      return 1
+      ;;
+    esac
+  done
+  usermod -a -G "$libvirt_group,kvm" "$worker"
+}
+
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
   return 0
 fi
@@ -666,14 +693,7 @@ IFS=: read -r _ _ libvirt_group_gid _ < <(getent group "$libvirt_group")
 usermod -a -G "$control_group,$libvirt_group" "$operator"
 
 for slot in {1..8}; do
-  worker="kdive-worker-${slot}"
-  getent group "$worker" >/dev/null || groupadd --system "$worker"
-  if ! getent passwd "$worker" >/dev/null; then
-    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
-      --gid "$worker" --groups "$libvirt_group,kvm" "$worker"
-  else
-    usermod -G "$libvirt_group,kvm" "$worker"
-  fi
+  _converge_worker_account "kdive-worker-${slot}" "$libvirt_group" "$control_group"
 done
 
 install -d -o root -g root -m 0755 /usr/local/libexec /etc/kdive
