@@ -128,7 +128,8 @@ class LibvirtDebugOptions(_ProfileBase):
     """Per-System debug provisioning flags.
 
     Bound at provision/boot; declare which capture methods the System is
-    provisioned for. ``preserve_on_crash`` adds a pvpanic device +
+    provisioned for. ``preserve_on_crash`` adds a pvpanic device (the x86_64 panic
+    notification; ppc64le panics reach the host through the pseries firmware notifier) +
     ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument;
     ``fadump`` opts a ppc64le System into firmware-assisted dump (adds ``fadump=on`` to the
     boot cmdline, requires a ``crashkernel`` reservation, and a host QEMU that supports it).
@@ -251,7 +252,7 @@ class RemoteLibvirtProfile(_ProfileBase):
     streamed to the object store. It mirrors the *policy* of local's
     ``debug.preserve_on_crash`` (per-profile, off by default) but not its mechanism:
     remote takes the dump on demand from a halted System, so this flag adds no
-    provisioning-time device — unlike local's pvpanic + ``<on_crash>preserve</on_crash>``.
+    provisioning-time device — unlike local's panic device + ``<on_crash>preserve</on_crash>``.
     There is no SSH credential or gdbstub flag: in-guest access rides the guest-agent
     seam, and the gdbstub is unconditionally enabled with a per-System port the
     provisioning plane allocates.
