@@ -251,9 +251,10 @@ def _scan_console(data: bytes, marker: str) -> tuple[ConsoleVerdict, str | None]
         # letter of a crash literal that follows it.
         marker_line = text.count("\n", 0, marker_match.start())
         regions = (text[: marker_match.start()], "\n".join(raw.split("\n")[:marker_line]))
-    crash = next((found for r in regions if (found := first_crash_signature(r))), None)
-    if crash is not None:
-        return ConsoleVerdict.CRASHED, crash.group(0)
+    for region in regions:
+        crash = first_crash_signature(region)
+        if crash is not None:
+            return ConsoleVerdict.CRASHED, crash.group(0)
     return (ConsoleVerdict.READY if marker_match is not None else ConsoleVerdict.PENDING), None
 
 
