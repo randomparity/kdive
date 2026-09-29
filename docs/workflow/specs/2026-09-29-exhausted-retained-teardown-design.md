@@ -12,8 +12,8 @@ amendments.
 ## Problem
 
 `finalize_external_boot_authority_teardown` (migration 0147) handles a `retained_quarantine`
-receipt by setting the job `queued` with `error_category = 'conflict'` and superseding the
-authority. It does not look at the attempt counter. On the final attempt
+receipt by setting the job `queued` and superseding the authority (migration 0163 changed the
+requeue's `error_category` from `'conflict'` to `NULL`; the stranding is unchanged). It does not look at the attempt counter. On the final attempt
 (`attempt >= max_attempts`) the row is then `queued` and exhausted:
 
 - `claim_worker_job` (0112, widened by 0150/0151) claims a `queued` row only when
@@ -92,9 +92,11 @@ job. The job state stays owned by the finalizer.
    - after 0164, no authority-marked teardown job is left `queued` with
      `attempt >= max_attempts` by the finalizer or by rows that existed before 0164.
 3. **Accepted failure classes**
-   - a dead-lettered teardown stays `failed` until a public `systems.teardown` recycles it. No
-     reconciler lane re-runs it. This is the recovery that ADR-0620 already defines for a failed
-     authority teardown.
+   - the dead-lettered job itself is re-run only by a public `systems.teardown` recycle, the
+     recovery ADR-0620 already defines for a failed authority teardown. A reconciler repair lane
+     (`reconciler/repairs/external_boot.py`) may enqueue a separate teardown successor for the
+     activation, as it already does after a `fail` at exhaustion; that successor serializes
+     through the per-System lock and the authority fences.
    - each recycle grants a full `max_attempts` budget again. Deterministic retained churn can
      therefore exhaust it again. The operator sees `failed` and can call teardown again. The
      churn itself is #2901.
@@ -139,7 +141,7 @@ job. The job state stays owned by the finalizer.
 - `focused-test`: same file, non-final retained finalize leaves the job `queued` and the
   authority `superseded`; green on main as well (a regression guard).
 - `focused-test`: same file, a stranded job and its superseded retained root authority, seeded
-  after the file-by-file apply through 0162 (the `_apply_through` pattern in
+  after the file-by-file apply through 0163 (the `_apply_through` pattern in
   `tests/db/test_migration_0070_resolved_cpu.py`), are `failed` and `retired` after
   `migrate.apply_migrations`; a marked non-exhausted `queued` teardown and an unmarked exhausted
   one are unchanged. Red without 0164.
