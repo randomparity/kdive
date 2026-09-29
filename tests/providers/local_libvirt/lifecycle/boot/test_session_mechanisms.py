@@ -743,6 +743,25 @@ class TestPayloadCleanup:
         assert outside.read_bytes() == b"not owned"
         assert (recovery / "modules.tar").exists()
 
+    def test_cleanup_refuses_a_projection_owned_by_another_activation(
+        self, recovery_root: Path, tmp_path: Path
+    ) -> None:
+        artifacts = _private_dir(tmp_path / "artifacts")
+        digest = _stage(artifacts, ("kernel", "modules"))
+        foreign = BINDING.model_copy(
+            update={"activation_id": "44444444-4444-4444-4444-444444444444"}
+        )
+        _, projection = _projected(_metadata().model_copy(update={"binding": foreign}))
+        (digest / "target-projection.json").write_bytes(projection.canonical_bytes())
+        before = sorted(os.listdir(digest))
+        recovery = _archive_directory(recovery_root)
+
+        with pytest.raises(ValueError, match="does not match cleanup metadata"):
+            _cleanup(recovery_root, artifacts)
+
+        assert sorted(os.listdir(digest)) == before
+        assert (recovery / "modules.tar").exists()
+
     @pytest.mark.parametrize(
         ("operation", "name"),
         [
