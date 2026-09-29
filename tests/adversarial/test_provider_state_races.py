@@ -31,7 +31,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, try_advisory_xact_lock
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import AllocationState, SystemState
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs import queue
@@ -436,6 +436,120 @@ def test_concurrent_double_teardown_is_idempotent(migrated_url: str) -> None:
                     )
                     row = await cur.fetchone()
                 assert row is not None and row["n"] == 1
+
+    asyncio.run(_run())
+
+
+class _RecordingSnapshotter:
+    """Records ``delete_all`` so a test can prove teardown asked the provider for snapshots."""
+
+    def __init__(self) -> None:
+        self.deleted_all: list[str] = []
+
+    def delete_all(self, domain_name: str) -> None:
+        self.deleted_all.append(domain_name)
+
+
+async def _tearing_down_audit_count(pool: AsyncConnectionPool, system_id: str) -> int:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT count(*) AS n FROM audit_log WHERE object_id = %s AND transition LIKE %s",
+            (UUID(system_id), "%tearing_down%"),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return row["n"]
+
+
+def test_teardown_queued_behind_failed_provision_reclaims_and_stays_failed(
+    migrated_url: str,
+) -> None:
+    # #2908: a teardown queued behind a provision that then fails meets a terminal `failed` System.
+    # It must reclaim what the failed provision left on the host and succeed, without the illegal
+    # failed -> tearing_down move that burned every attempt as infrastructure_failure.
+    class _LeakingFailingProvisioner(_TrackingProvisioner):
+        def provision(
+            self,
+            system_id: UUID,
+            profile: Any,
+            *,
+            overlay_customizers: Any = (),
+            bootstrap_pubkey: str | None = None,
+            job_id: UUID | None = None,
+        ) -> str:
+            del profile, overlay_customizers, bootstrap_pubkey, job_id
+            self.live.add(f"kdive-{system_id}")
+            raise CategorizedError(
+                "readiness marker never appeared", category=ErrorCategory.PROVISIONING_FAILURE
+            )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.PROVISIONING)
+            prov = _LeakingFailingProvisioner()
+            snapshotter = _RecordingSnapshotter()
+            resolver = provider_resolver(provisioner=prov, snapshotter=snapshotter)
+            pjob = await _enqueue(pool, JobKind.PROVISION, system_id, f"{system_id}:provision")
+            tjob = await _enqueue(pool, JobKind.TEARDOWN, system_id, f"{system_id}:teardown")
+            async with pool.connection() as conn:
+                await conn.set_autocommit(True)
+                with pytest.raises(CategorizedError):
+                    await systems_handlers.provision_handler(conn, pjob, resolver=resolver)
+                assert await _system_state(pool, system_id) == SystemState.FAILED.value
+
+                result = await systems_handlers.teardown_handler(
+                    conn, tjob, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
+
+            assert result == system_id
+            assert await _system_state(pool, system_id) == SystemState.FAILED.value
+            assert prov.live == set()
+            assert snapshotter.deleted_all == [f"kdive-{system_id}"]
+            assert await _tearing_down_audit_count(pool, system_id) == 0
+
+    asyncio.run(_run())
+
+
+def test_failed_system_provider_teardown_fault_stays_retryable(migrated_url: str) -> None:
+    # A provider fault while reclaiming a `failed` System surfaces as the provider's own retryable
+    # error, and the next attempt asks the provider again and completes the reclaim.
+    class _FlakyTeardownProvisioner(_TrackingProvisioner):
+        def teardown(self, domain_name: str) -> None:
+            if not self.torn_down:
+                self.torn_down.append(domain_name)
+                raise CategorizedError(
+                    "virDomainDestroy timed out", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+                )
+            super().teardown(domain_name)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.FAILED)
+            domain = f"kdive-{system_id}"
+            prov = _FlakyTeardownProvisioner()
+            prov.live.add(domain)
+            resolver = provider_resolver(provisioner=prov)
+            job = await _enqueue(pool, JobKind.TEARDOWN, system_id, f"{system_id}:teardown")
+            async with pool.connection() as conn:
+                await conn.set_autocommit(True)
+                with pytest.raises(CategorizedError) as excinfo:
+                    await systems_handlers.teardown_handler(
+                        conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                    )
+                assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+                assert excinfo.value.terminal is False
+                assert retryable_category(excinfo.value.category)
+                assert await _system_state(pool, system_id) == SystemState.FAILED.value
+                assert prov.live == {domain}
+
+                result = await systems_handlers.teardown_handler(
+                    conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
+
+            assert result == system_id
+            assert prov.torn_down == [domain, domain]
+            assert prov.live == set()
+            assert await _system_state(pool, system_id) == SystemState.FAILED.value
 
     asyncio.run(_run())
 
