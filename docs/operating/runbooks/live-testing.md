@@ -494,8 +494,9 @@ inputs are separate from the ppc64le drivers' `KDIVE_GUEST_IMAGE_PPC64LE` and
 `KDIVE_PPC64LE_BUNDLE`. The ppc64le spine drivers in
 `test_live_stack.py` run under KVM on a POWER host. `test_pinned_model_is_host_usable` skips
 there, because it pins an x86-64-vN CPU rung. Still x86_64-only: the per-family SSH reachability spine
-and the SUSE v7.0 kdump spine, whose preflight reads an x86 bzImage (leave their image env vars
-unset on POWER so they skip), and the gdbstub debug proofs under `tests/mcp/debug` (#2695).
+and the SUSE v7.0 kdump spine, whose preflight reads an x86 bzImage (on POWER they skip and name
+the host arch, whatever the image env vars hold), and the gdbstub debug proofs under
+`tests/mcp/debug` (#2695).
 
 To validate all four crash-capture methods against such a host, see the
 [four-method live run](four-method-live-run.md). Never hand-install a host

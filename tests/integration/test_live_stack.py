@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 import subprocess
 import time
 from collections.abc import Callable
@@ -809,6 +810,20 @@ def test_spine_live_script_over_the_wire() -> None:
 # --- per-family SSH-reachability proof (#956, ADR-0294) -------------------------------------
 
 
+def _require_x86_64_host() -> None:
+    """Skip, naming the host arch, on a host these x86_64-only spines cannot run on (#2718).
+
+    The per-family reachability profile and the SUSE v7.0 kernel preflight (an x86 ``bzImage``)
+    are x86_64-specific; a POWER host skips here rather than failing with a ``SpinePhaseError``.
+    """
+    host_arch = platform.machine()
+    if host_arch != "x86_64":
+        pytest.skip(
+            f"the per-family reachability and SUSE kdump spines provision x86_64 guests; host "
+            f"arch is {host_arch!r} (ppc64le guests: test_ppc64le_* drivers)"
+        )
+
+
 def _reachability_preflight(family: str) -> tuple[OidcIssuer, str, str, str]:
     """Resolve issuer + stack + db + the per-family ready image, or skip with the exact fix.
 
@@ -816,6 +831,7 @@ def _reachability_preflight(family: str) -> tuple[OidcIssuer, str, str, str]:
     per-family image env var, so a host that lacks this family's image (or the kernel tree) skips
     *this parameter* cleanly rather than erroring at provision-time.
     """
+    _require_x86_64_host()
     image_env = _FAMILY_IMAGE_ENV[family]
     image = os.environ.get(image_env)
     if not image or not Path(image).exists():
@@ -1082,6 +1098,14 @@ def test_await_domain_shutoff_rejects_a_running_domain_at_deadline(
 
     with pytest.raises(SpinePhaseError, match="domain did not shut off within 0s"):
         asyncio.run(_await_domain_shutoff("system-8", deadline_s=0.0, interval_s=0.0))
+
+
+def test_reachability_preflight_skips_on_a_non_x86_64_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "machine", lambda: "ppc64le")
+    with pytest.raises(pytest.skip.Exception, match="host arch is 'ppc64le'"):
+        _reachability_preflight("debian")
 
 
 def test_require_v7_0_kernel_tree_returns_the_built_release(
