@@ -227,6 +227,12 @@ def test_mint_pins_staged_bytes_before_client_calls(tmp_path: Path, mode: str) -
     assert result.returncode == 0, result.stderr
     assert result.stdout == "system-fixture\n"
     records = [json.loads(line) for line in calls.read_text().splitlines()]
+    # No investigation is opened: nothing closes it, so each mint leaked one (#2892).
+    assert [row["tool"] for row in records] == [
+        "allocations.request",
+        "systems.provision",
+        "systems.get",
+    ]
     provision = next(row for row in records if row["tool"] == "systems.provision")
     assert provision["profile"]["provider"]["local-libvirt"]["rootfs"] == {
         "kind": "local",
