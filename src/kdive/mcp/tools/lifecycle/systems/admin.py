@@ -543,11 +543,6 @@ async def _enqueue_preactivation_authority_teardown(
     return envelope
 
 
-def _final_attempt_running(job: Job) -> bool:
-    """Whether ``job`` is running its final charged attempt, whose lease may have lapsed."""
-    return job.state is JobState.RUNNING and job.attempt >= job.max_attempts
-
-
 async def _enqueue_authority_teardown(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -588,7 +583,10 @@ async def _enqueue_authority_teardown(
                 suggested_next_actions=["jobs.wait", "systems.get"],
                 data={"reason": "ordinary_teardown_fenced_by_external_boot"},
             )
-        if prior.state is not JobState.FAILED and not _final_attempt_running(prior):
+        final_attempt_running = (
+            prior.state is JobState.RUNNING and prior.attempt >= prior.max_attempts
+        )
+        if prior.state is not JobState.FAILED and not final_attempt_running:
             return job_envelope(prior, "system_id", system.id)
     operation_identity = (
         "sha256:"
