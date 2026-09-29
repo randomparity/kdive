@@ -85,9 +85,10 @@ state-machine change.
 - Rollback is removing the four edits; no persisted state requires reversal (the new outcome
   string simply stops being written).
 
-### Amendment (2026-09-29): the panic-to-CRASHED path is per-arch (#2890)
+### Amendment (2026-09-28): the panic-to-CRASHED path is per-arch (#2890)
 
-This amendment qualifies the Decision item 1 and the Consequences statement that a guest panic reaches `CRASHED` "via pvpanic".
+This amendment qualifies the pvpanic-based panic-halt claims in Decision item 1 and in this
+section: that a guest panic is carried by the `pvpanic` device.
 Later evidence (#2719, a native ppc64le POWER9 KVM run) shows the mechanism differs by
 architecture. On x86_64 the `pvpanic` device carries the panic. On ppc64le the `pvpanic` device is
 rendered but can be inert (the guest kernel may lack `CONFIG_PVPANIC_PCI`); the panic reaches the
