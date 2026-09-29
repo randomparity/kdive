@@ -34,12 +34,15 @@ four spike steps, run on a native ppc64le (POWER9) KVM-HV host:
    `read_registers` from a host checkout at the tested SHA. Then run the three gated proofs
    (`test_live_vm_gdbmi_promoted_ops_smoke`, `test_live_vm_debug_advance_modes`,
    `test_live_vm_start_session_attaches_to_halted_early_boot_crash`) with the arch gate widened
-   by an uncommitted host-only edit. Record the first failure of each and its cause.
+   by an uncommitted host-only edit. Record the first failure of each and its cause. Where the
+   first failure is an x86 register name, repeat once with a host-only register-name edit.
 
 The record closes with a findings table: each runtime or test change #2740 needs, with file
 evidence. No source, test, or runtime file changes in this PR (exclusion: fixes -> #2740).
 Each step records the exact command, exit code, tool versions, the result, and the failure
-boundary. A step that cannot run records why and what it blocks.
+boundary. A step that cannot run records why and what it blocks. Each gdb session in steps 1-3
+and the engine drive uses a fresh guest halted at reset, because a gdb detach resumes the
+guest. A skip or fixture failure in step 4 is an environment result, not a #2740 change.
 
 ## Failure model
 
@@ -47,8 +50,9 @@ boundary. A step that cannot run records why and what it blocks.
    host; readers of the committed proof record (public repository).
 2. **Invariants and assets at stake** — the host's other work: its shared kdive checkout,
    other proof directories, and the running stack stay untouched; every spike guest and
-   domain is destroyed. The record publishes no host name, IP, user name, or home path
-   (`sys-P1`, `<REDACTED-HOME>` tokens).
+   domain is destroyed. The record publishes no host name, non-loopback IP, user name, home
+   path, or credential such as a database URL (`sys-P1`, `<REDACTED-HOME>`, `<REDACTED-USER>`,
+   `<REDACTED-DSN>` tokens).
 3. **Accepted failure classes** — a step that fails on the host is a result, not a defect of
    this change, and is recorded as a finding for #2740. A proof run on this host's Fedora 44
    guest image and 7.0.1 kernel does not show behavior for other kernels or distributions;
@@ -60,9 +64,10 @@ boundary. A step that cannot run records why and what it blocks.
 
 - The record answers criteria 1-5 of `WORK:SCOPE` q2739-e09b9bb2, each with a command and an
   observed result.
-- The findings table names each change #2740 needs, or states that none is needed for a part.
-- `just docs-links`, `just docs-paths`, and `just records` pass; the PII scan of the record
-  finds no host identifier.
+- The findings table names each change observed up to each proof's last recorded failure, plus
+  those found by reading the code, and states for each proof what stays unobserved past it.
+- `just docs-links`, `just docs-paths`, and `just records` pass; the plan's PII `rg` check of
+  the record finds no match.
 
 ## Validation
 
