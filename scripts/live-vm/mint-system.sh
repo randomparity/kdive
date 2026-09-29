@@ -108,7 +108,6 @@ async def main() -> int:
     # LiveStackClient is an async context manager (dev_harness); it must be entered before any
     # call_tool, else fastmcp raises "Client is not connected".
     async with LiveStackClient.over_http(base, token) as client:
-        await client.call_tool("investigations.open", project=project, title="live-vm-mint")
         alloc = _scalar(
             await client.call_tool(
                 "allocations.request",
