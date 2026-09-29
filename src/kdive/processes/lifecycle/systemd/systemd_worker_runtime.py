@@ -403,7 +403,8 @@ def _validate_diagnostic_directory(
         and stat.S_IMODE(metadata.st_mode) == mode
         and metadata.st_uid == expected_uid
         and metadata.st_gid == expected_gid
-        and metadata.st_nlink >= 2
+        # btrfs reports nlink 1 for every directory; 0 is a directory unlinked under us.
+        and metadata.st_nlink >= 1
     )
     if not trusted:
         raise PermissionError("slot diagnostic redaction source is unsafe")

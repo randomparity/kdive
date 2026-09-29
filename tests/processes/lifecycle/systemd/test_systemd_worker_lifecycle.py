@@ -7,6 +7,7 @@ import hashlib
 import os
 import shlex
 import socket
+import stat
 from collections.abc import Awaitable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -2257,6 +2258,41 @@ def test_diagnostic_source_loader_rejects_post_read_metadata_change(
         return os.stat_result(fields)
 
     monkeypatch.setattr(runtime_module.os, "fstat", changing_fstat)
+
+    with pytest.raises(PermissionError, match="source is unsafe"):
+        load_slot_redaction_values(root, 1, expected_uid=os.getuid(), expected_gid=os.getgid())
+
+
+def _fstat_directory_nlink(monkeypatch: pytest.MonkeyPatch, nlink: int) -> None:
+    real_fstat = os.fstat
+
+    def fstat(descriptor: int) -> os.stat_result:
+        metadata = real_fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            return metadata
+        fields = list(metadata)
+        fields[3] = nlink
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(runtime_module.os, "fstat", fstat)
+
+
+def test_diagnostic_source_loader_accepts_btrfs_directory_link_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _diagnostic_source_tree(tmp_path)
+    _fstat_directory_nlink(monkeypatch, 1)
+
+    values = load_slot_redaction_values(root, 1, expected_uid=os.getuid(), expected_gid=os.getgid())
+
+    assert values
+
+
+def test_diagnostic_source_loader_rejects_unlinked_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _diagnostic_source_tree(tmp_path)
+    _fstat_directory_nlink(monkeypatch, 0)
 
     with pytest.raises(PermissionError, match="source is unsafe"):
         load_slot_redaction_values(root, 1, expected_uid=os.getuid(), expected_gid=os.getgid())
