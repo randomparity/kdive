@@ -2940,7 +2940,8 @@ class LocalLibvirtExternalBoot:
         # ``cleanup`` pruned the activation's artifact parents, and a session open re-creates
         # them through the artifact root, leaving exact recovery absence unprovable (#2898).
         # ``authority`` is therefore unused; the store re-reads the exact tombstone. The
-        # unpinned-write residual is the same as finalization's; the #2898 design records it.
+        # unpinned-write residual is the same as finalization's; the #2898 design's Scope
+        # (criterion 8) records it.
         self._io.record_cleanup_quarantine(recovery, proof)
 
     def observe_object(
