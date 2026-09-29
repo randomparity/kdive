@@ -89,8 +89,9 @@ From `maint print registers` in guest 1 and the engine's `-data-list-register-na
   `ctr` (68), `xer`, `r0`-`r31`, `f0`-`f31`, `fpscr`, `vscr`, `vrsave`.
 - `p $nip` and `p $rip` print `void`: gdb has no register with either name.
 - Names that occur twice: `ctr`, `lr`, `tbu`, `vrsave`, `xer` (a second copy at Nr 326-356 from
-  the stub's system-register block). `read_registers` maps a name to its first ordinal, and the
-  values it returned were correct (step 4).
+  the stub's system-register block). `read_registers` maps a name to its first ordinal. For `lr`
+  it returned `0xc000000001597718`, the return address in `check_and_cede_processor` that raw
+  gdb also showed at the same idle stop in guest 12. The second copy was not cross-checked.
 
 **Result:** the POWER program counter is `pc`. The name `nip` in `tests/integration/test_live_stack.py`
 (`_SPINE_PC_REGISTER`) does not exist in gdb.
@@ -114,10 +115,16 @@ The same holds for a vCPU that is still in SLOF after boot starts (guest 7: `pc
 0x9c25af7d00000000` little-endian, `NIP 000000007daf259c` from the monitor's `info registers`).
 The #1149 record's `pc = 0x1000000000000` is this byte-swapped `0x100`.
 
-Kernel breakpoints set at reset never fire. Guest 4 set `break start_kernel`, `break
-early_setup`, and `break mount_root_generic`, then `continue`: no stop, then `[Inferior 1
-(process 1) exited normally]` when the kernel panicked (no root device) and QEMU exited
-(exit 0). Guest 14 shows why:
+Kernel breakpoints set at reset never fire. Guest 4:
+
+```
+timeout 120 gdb -nx -batch -ex 'target remote 127.0.0.1:51394' -ex 'break start_kernel' \
+  -ex 'break early_setup' -ex 'break mount_root_generic' -ex 'continue' <vmlinux>
+```
+
+No breakpoint stopped the guest. gdb printed `[Inferior 1 (process 1) exited normally]` when the
+kernel panicked (no root device) and QEMU exited; gdb exit 0. Guest 14 shows why, with
+`-ex 'x/4xw start_kernel' -ex 'x/4xw (char *)start_kernel + 0x400000'` at the reset halt:
 
 ```
 0xc000000002003d5c <start_kernel>:      0x00000000  0x00000000  0x00000000  0x00000000
@@ -142,7 +149,13 @@ Thread 1 hit Breakpoint 1, 0xc00000000034aef8 in msleep (msecs=msecs@entry=5) at
 #1  0xc0000000020059c8 in wait_for_root (root_device_name=... "/dev/vda") at init/do_mounts.c:420
 ```
 
-Guest 13 probed each command after `break msleep`, `continue`, `delete`, with `timeout 25`:
+Guest 13 probed each command in its own gdb session on one booted guest; `<probe>` is the
+command under test, and a `continue` follows the insert-type probes:
+
+```
+timeout 25 gdb -nx -batch -ex 'target remote 127.0.0.1:51403' -ex 'break msleep' \
+  -ex 'continue' -ex 'delete' -ex '<probe>' -ex 'info registers pc' <vmlinux>
+```
 
 | Command | Exit | Observed |
 |---------|------|----------|
@@ -160,7 +173,24 @@ reaches only firmware state; kdive's early-boot path is the ADR-0233 panic halt 
 ## 4. Real engine
 
 A driver in the kdive worktree (`uv run python engine_drive.py <port> <vmlinux> <transcript>`,
-exit 0) called the Debug-plane engine against guest 16, a booted kernel:
+exit 0) called the Debug-plane engine against guest 16, a booted kernel. Its call sequence, each
+call in its own `try` that prints the result or the exception and its `details`:
+
+```python
+eng = GdbMiEngine()
+att = eng.attach(host="127.0.0.1", port=port, vmlinux_path=vmlinux, transcript_path=transcript)
+register_names(eng.execute_mi_command(att, "-data-list-register-names"))
+eng.read_registers(att, ["pc", "r1", "msr", "lr"]); eng.read_registers(att, ["nip"])
+eng.read_registers(att, ["rip"])
+bp = eng.set_breakpoint(att, "msleep"); eng.continue_(att, timeout_sec=20)
+eng.read_registers(att, ["pc"]); eng.clear_breakpoint(att, bp.number)
+eng.step_instruction(att, timeout_sec=10); eng.read_registers(att, ["pc"])
+bp = eng.set_breakpoint(att, "msleep"); eng.continue_(att, timeout_sec=20)
+eng.clear_breakpoint(att, bp.number)
+eng.next(att, timeout_sec=10); eng.finish(att, timeout_sec=10); eng.interrupt(att)
+```
+
+Output:
 
 ```
 host arch: ppc64le | arch_from_elf: ppc64le | gdb: /usr/bin/gdb
@@ -224,7 +254,7 @@ inserts watchpoints only on resume).
 | # | Change | Evidence |
 |---|--------|----------|
 | 1 | Read the program counter as `pc` on ppc64le in the advance proof (`_read_instruction_pointer` reads `rip`). | `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` `_read_instruction_pointer`; sections 2, 5 |
-| 2 | Change `_SPINE_PC_REGISTER["ppc64le"]` from `nip` to `pc`; the spine can then provision a gdbstub on ppc64le (`gdbstub=arch == "x86_64"`). | `tests/integration/test_live_stack.py` `_SPINE_PC_REGISTER`, `_SPINE_GDBSTUB_GAP`; section 2 |
+| 2 | In the live-stack spine: change `_SPINE_PC_REGISTER["ppc64le"]` from `nip` to `pc`, the `("ppc64le", "nip")` parameter of `test_spine_gdbstub_profile_and_register`, the two `gdbstub=arch == "x86_64"` expressions, and the `if arch == "x86_64":` attach branch that records `_SPINE_GDBSTUB_GAP`. This spike did not run the spine on POWER, so its ppc64le attach is unobserved. | `tests/integration/test_live_stack.py` `_SPINE_PC_REGISTER`, `test_spine_gdbstub_profile_and_register`, the `attach` phase; section 2 |
 | 3 | Decide how `debug.advance` modes `into`, `over`, and `instruction` behave on ppc64le KVM-HV. The vCPU does not single-step: the MCP path returns `timed_out: True`, and the engine path returns `transport_stall`, which names a transport fault rather than an unsupported operation. `out` (`finish`) works in raw gdb. | `src/kdive/providers/shared/debug_common/gdbmi/core/engine.py` `step`, `next`, `step_instruction`; sections 3, 4, 5 |
 | 4 | Decide how `debug.set_watchpoint` behaves on ppc64le KVM-HV: the stub cannot insert a hardware watchpoint, so a resume with one armed fails. Breakpoints need no change: `set_breakpoint` already uses software breakpoints (#711). | `src/kdive/providers/shared/debug_common/gdbmi/commands/watchpoints.py`, `commands/breakpoints.py`; section 3 |
 | 5 | Add `ppc64le` to `_GDBSTUB_PROVEN_ARCHES` once 1 and 3 hold; 2 of 3 proofs already pass with only this change. | `tests/mcp/debug/session_support.py`; section 5 |
