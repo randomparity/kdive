@@ -18,7 +18,7 @@ def test_0102_is_retained_in_migration_history(pg_conn: psycopg.Connection) -> N
 def test_0102_precedes_worker_incarnation_migration() -> None:
     migrations = migrate.discover_migrations()
 
-    assert [(migration.version, migration.filename) for migration in migrations[-57:]] == [
+    assert [(migration.version, migration.filename) for migration in migrations[-58:]] == [
         ("0103", "0103_worker_incarnations.sql"),
         ("0104", "0104_worker_fence_roles.sql"),
         ("0105", "0105_worker_fence_functions.sql"),
@@ -76,4 +76,5 @@ def test_0102_precedes_worker_incarnation_migration() -> None:
         ("0160", "0160_external_boot_teardown_failure_commit.sql"),
         ("0161", "0161_external_boot_teardown_takeover.sql"),
         ("0162", "0162_dead_letter_unowned_external_boot_jobs.sql"),
+        ("0163", "0163_retained_teardown_requeue_clears_category.sql"),
     ]
