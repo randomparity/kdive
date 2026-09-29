@@ -2,13 +2,11 @@
 
 ## Problem
 
-Local System teardown settles a retained activation through `recover()` or the teardown
-partial abort. Both end in a power restore: `restore_power()` starts a domain whose recovery
-metadata says `prior_power == "running"`, and `_abort_preparation()` calls
-`session.restore_power()`. A teardown therefore boots the guest it is about to destroy. Its
-payload cleanup then unlinks `kernel`/`initrd`/`modules` in the activation root, but payloads
-live in the projection digest directory (`<activation>/<digest>/<name>`). The digest `rmdir`
-fails `ENOTEMPTY`, and every retry refuses with "target projection contains unexpected residue".
+Teardown settles a retained activation through `recover()` or the partial abort; both end in
+a power restore (`restore_power()` starts a domain whose metadata says `prior_power ==
+"running"`; `_abort_preparation()` calls `session.restore_power()`), booting the guest teardown
+destroys. Payload cleanup unlinks payloads in the activation root, but they live in
+`<activation>/<digest>/<name>`; the digest `rmdir` fails `ENOTEMPTY` and retries refuse as residue.
 
 ## Scope
 
@@ -16,8 +14,7 @@ fails `ENOTEMPTY`, and every retry refuses with "target projection contains unex
   `False`, a `source-restored` point records `recovered` directly and never calls
   `operation.restore_power`. `define_source` already proved source XML and an inactive domain
   before recording `source-restored`; a domain found running later stays running and teardown
-  destroys it. `ExternalBootPorts.recover` and the `LocalExternalBootOperation` protocol keep
-  their signatures.
+  destroys it. The `ExternalBootPorts` and `LocalExternalBootOperation` protocols are unchanged.
 - `_prepare_system_teardown_recovery` calls `recover(point, authority, restore_power=False)`.
 - `_abort_preparation()` gains keyword `restore_power: bool`: the System-teardown abort passes
   `False`, the activation-level `abort_preparation` passes `True` (today's behaviour).
@@ -34,15 +31,17 @@ fails `ENOTEMPTY`, and every retry refuses with "target projection contains unex
 2. Invariants and assets: a teardown never starts a domain; non-teardown recovery keeps
    restoring prior power; cleanup deletes only owned payloads (ADR-0600/0584) and never
    follows a symlink.
-3. Accepted failure classes: a stale `.kernel.next`-style temporary in the digest directory is
-   refused as residue — refused before this change too (an `rmdir` failure), never deleted.
+3. Accepted failure classes: an owned `.bundle.verify`/`.next` temporary left in a committed
+   digest directory by a killed materialize retry is refused, as before; the operator bounded
+   tolerated residue to exactly `PAYLOAD_NAMES`, so widening it is a follow-up candidate.
 4. Covered elsewhere: journal head-mismatch crash (#2899); exhausted-job recycle (#2889);
    generation churn on a deterministic provider conflict (orchestrator-filed churn issue);
    remote-libvirt parity (out of scope).
 
 ## Success
 
-- Teardown recover in each resumable phase and teardown partial abort call no start seam.
+- Teardown recover in each resumable phase, teardown partial abort, and a fresh teardown
+  mutation call no start seam.
 - Default recover and activation-level abort still restore power.
 - Cleanup converges from: payloads partly unlinked, projection gone, digest dir gone, archive
   present or absent, and the retained state (digest dir holds `kernel`+`modules`, no projection).
@@ -50,11 +49,12 @@ fails `ENOTEMPTY`, and every retry refuses with "target projection contains unex
 
 ## Validation
 
-- Teardown recover: `focused-test`, `test_external_boot_authority.py`, red while
-  `restore-power` appears in the fake's actions.
-- Coordinator default versus `restore_power=False`: `focused-test`, `test_external_boot.py`.
-- Teardown abort: `focused-test`, the teardown partial-abort test expects no `power` or
-  `readiness`; the activation abort test keeps both.
-- Cleanup convergence and residue refusal: `focused-test`, `test_session_mechanisms.py`,
-  parametrized over each partial state plus foreign-file and symlink refusal.
-- Live settle: `task-test-not-applicable` — needs the lab host; the orchestrator-gated settle.
+Each entry is `focused-test`; its red condition is the controlled fault.
+- Teardown recover (`test_external_boot_authority.py`): red if `restore-power` is recorded.
+- Fresh teardown, recovery absent: red if any start/power action is recorded.
+- Coordinator default versus `restore_power=False` (`test_external_boot.py`): red if either
+  branch calls the other's seam.
+- Aborts: teardown abort red on `power`/`readiness`; activation abort red without them.
+- Cleanup states and residue refusal (`test_session_mechanisms.py`): red if unlinks target the
+  activation root or the allowlist admits a foreign name or symlink.
+- Live settle: `task-test-not-applicable` — needs the lab host (orchestrator-gated).
