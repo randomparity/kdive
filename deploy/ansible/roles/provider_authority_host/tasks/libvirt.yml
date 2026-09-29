@@ -49,6 +49,8 @@
       - --noheadings
       - --output=HARD
       - "--pid={{ provider_authority_host_user_manager_pid.stdout }}"
+  environment:
+    LC_ALL: C
   register: provider_authority_host_user_manager_limit
   changed_when: false
   when: provider_authority_host_user_manager_pid.stdout not in ["", "0"]
