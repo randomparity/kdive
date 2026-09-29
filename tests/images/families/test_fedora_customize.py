@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import shlex
+import socket
+import subprocess  # noqa: S404 - runs the rendered unit's fixed shell command
 from pathlib import Path
 
 import pytest
@@ -91,11 +94,35 @@ def test_readiness_unit_ordered_after_the_family_kdump_unit(kdump_unit: str) -> 
 
 def test_readiness_unit_targets_the_arch_console_device() -> None:
     # On pseries there is no ttyS0; the serial console is hvc0. The unit must order after
-    # dev-hvc0.device and echo the marker to /dev/hvc0 or the marker never reaches the host log.
+    # dev-hvc0.device and write the marker to /dev/hvc0 or the marker never reaches the host log.
     unit = readiness_unit("kdump.service", "hvc0")
     assert "dev-hvc0.device" in _after_targets(unit)
     assert "> /dev/hvc0" in unit
     assert "ttyS0" not in unit
+
+
+@pytest.mark.parametrize("console_device", ["ttyS0", "hvc0"])
+def test_readiness_unit_writes_the_marker_line_in_one_write(console_device: str) -> None:
+    # #2907: the serial getty writes escape sequences to the same device, so the marker must go out
+    # as one write that starts a fresh line; a split write leaves a gap for the getty's bytes.
+    # A SOCK_SEQPACKET socket keeps each write(2) as its own packet, so a split is observable.
+    unit = readiness_unit("kdump.service", console_device)
+    exec_start = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
+    shell, flag, script = shlex.split(exec_start.removeprefix("ExecStart="))
+    assert (shell, flag) == ("/bin/sh", "-c")
+    redirect = f" > /dev/{console_device}"
+    assert script.endswith(redirect)
+    reader, writer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    with reader, writer:
+        subprocess.run(  # noqa: S603 - fixed argv from the rendered unit
+            [shell, flag, script.removesuffix(redirect)],
+            stdout=writer.fileno(),
+            check=True,
+            timeout=10,
+        )
+        writer.close()
+        writes = list(iter(lambda: reader.recv(4096), b""))
+    assert writes == [b"\nkdive-ready\n"]
 
 
 def _ci_ctx(tmp_path: Path, *, is_cloud_image: bool) -> CustomizeContext:
