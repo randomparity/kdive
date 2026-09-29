@@ -1166,7 +1166,7 @@ def test_installer_keeps_an_existing_worker_authority_client_membership(tmp_path
     assert usermod_calls == "-a -G kdive-live-libvirt,kvm kdive-worker-1\n"
 
 
-@pytest.mark.parametrize("forbidden", ["kdive-live-control", "sudo", "docker"])
+@pytest.mark.parametrize("forbidden", ["kdive-live-control", "sudo", "wheel", "docker"])
 def test_installer_refuses_a_worker_holding_a_forbidden_group(
     tmp_path: Path, forbidden: str
 ) -> None:

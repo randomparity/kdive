@@ -605,11 +605,13 @@ _converge_worker_account() {
   held="$(id -nG "$worker")"
   read -ra held_groups <<<"$held"
   for group in "${held_groups[@]}"; do
-    if [[ $group == "$control_group" || $group == sudo || $group == docker ]]; then
+    case "$group" in
+    "$control_group" | sudo | wheel | docker)
       echo "$worker belongs to the $group group, which a fixed worker must never hold;" \
         "remove it with 'gpasswd -d $worker $group' and re-run this installer" >&2
       return 1
-    fi
+      ;;
+    esac
   done
   usermod -a -G "$libvirt_group,kvm" "$worker"
 }
