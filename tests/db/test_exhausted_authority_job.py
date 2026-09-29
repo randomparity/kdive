@@ -24,10 +24,10 @@ from tests.db.external_boot_authority_support import (
     _RoleDsns,
     _seed_case,
 )
-from tests.db.external_boot_journal_support import _proof
-from tests.db.test_migration_0161_teardown_takeover import (
+from tests.db.external_boot_journal_support import (
     _finalize,
     _make_current,
+    _proof,
     _ready_teardown_case,
 )
 
