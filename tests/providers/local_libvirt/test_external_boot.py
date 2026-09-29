@@ -2602,6 +2602,43 @@ def test_system_teardown_partial_abort_derives_identities_from_private_intent(
         )
 
 
+@pytest.mark.parametrize("residue", [None, "kernel"])
+def test_system_teardown_abort_prunes_only_empty_activation_parents(
+    tmp_path: Path, residue: str | None
+) -> None:
+    """A session opened after cleanup re-created empty parents; the abort prunes them (#2898)."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata()
+    system = root / _BINDING.system_id
+    activation = system / _BINDING.run_id / _BINDING.activation_id
+    activation.mkdir(mode=0o700, parents=True)
+    for directory in (system, system / _BINDING.run_id):
+        directory.chmod(0o700)
+    if residue is not None:
+        (activation / residue).write_bytes(b"foreign")
+    preparation = _RealPreparation(metadata, root)
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        root,
+        cast(external_boot_module.LocalExternalBootMaterializer, preparation),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, _RealSession(preparation)),
+        32 * 1024**3,
+    )
+
+    result = operation.abort_system_teardown_preparation(
+        _BINDING, metadata.plan_identity, OpaqueProviderRef(ref="authority/current")
+    )
+
+    assert result == "absent"
+    assert preparation.actions == []
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING) is (residue is None)
+    assert system.exists() is (residue is not None)
+    if residue is not None:
+        assert (activation / residue).read_bytes() == b"foreign"
+
+
 @pytest.mark.parametrize(
     "interrupted_name",
     [
@@ -4908,6 +4945,52 @@ def test_real_adapter_finalization_replays_exact_proof_without_session(tmp_path:
 
     assert session.close_attempts == 0
     assert not (root / recovery_directory_name(point.recovery_ref, point.binding)).exists()
+
+
+def test_real_adapter_quarantine_records_without_session_or_artifact_parents(
+    tmp_path: Path,
+) -> None:
+    """A session open re-creates the activation's pruned artifact parents (#2898).
+
+    Cleanup prunes `<system>/<run>/<activation>`; an empty re-created activation directory
+    makes exact recovery absence unprovable, so a System teardown could never complete.
+    """
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    host = _RealPreparation(metadata, root)
+    session = _RealSession(host)
+
+    def reject_session(_authority: OpaqueProviderRef) -> LocalExternalBootOperationLease:
+        raise AssertionError("quarantine recording must not resolve or open an operation session")
+
+    io = RealLocalExternalBootIO(
+        root,
+        host,
+        _RecordingRecoveryWriter(host),
+        reject_session,
+        cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+        32 * 1024**3,
+    )
+    ports = LocalLibvirtExternalBoot(io)
+    proof = _cleanup_proof_for(point)
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        store.publish_tombstone(reference, metadata.binding, metadata, proof.point_digest)
+
+    authority = OpaqueProviderRef(ref="authority/authenticated-by-2140")
+    with pytest.raises(ValueError, match="cleanup proof does not match"):
+        ports.record_cleanup_quarantine(
+            point, proof.model_copy(update={"point_digest": "sha256:" + "0" * 64}), authority
+        )
+    ports.record_cleanup_quarantine(point, proof, authority)
+
+    assert session.close_attempts == 0
+    assert not (root / metadata.binding.system_id).exists()
+    with RecoveryMetadataStore(root) as store:
+        receipt = store.read_cleanup_quarantine(point.binding)
+    assert receipt is not None and receipt.proof == proof
 
 
 def _preparation_request(phase: str) -> ExternalBootPreparationRequest:

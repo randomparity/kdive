@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -2311,9 +2312,13 @@ class _RealLocalExternalBootOperation:
         authority: OpaqueProviderRef,
     ) -> PartialAbortResult:
         # The System is being torn down, so its prior running power is not restored (#2898).
-        return self._abort_preparation(
+        result = self._abort_preparation(
             binding, plan_identity, authority, expected_identities=None, restore_power=False
         )
+        if result == "absent":
+            with RecoveryMetadataStore(self._recovery_root) as store:
+                store.prune_empty_activation_parents(binding)
+        return result
 
     def _abort_preparation(
         self,
@@ -2929,8 +2934,13 @@ class LocalLibvirtExternalBoot:
         proof: FinalizeCleanupProof,
         authority: OpaqueProviderRef,
     ) -> None:
-        with self._io.open(authority, _expected_binding(recovery.binding)):
-            self._io.record_cleanup_quarantine(recovery, proof)
+        if proof.binding != recovery.binding or proof.point_digest != self.point_digest(recovery):
+            raise ValueError("external-boot cleanup proof does not match recovery point")
+        # No operation session, as in ``finalize_cleanup_tombstone``: this runs after
+        # ``cleanup`` pruned the activation's artifact parents, and a session open re-creates
+        # them through the artifact root, leaving exact recovery absence unprovable (#2898).
+        # ``authority`` is therefore unused; the store re-reads the exact tombstone.
+        self._io.record_cleanup_quarantine(recovery, proof)
 
     def observe_object(
         self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
@@ -4114,6 +4124,35 @@ class RecoveryMetadataStore:
         with suppress(FileNotFoundError):
             os.rmdir(binding.system_id, dir_fd=self._root_fd)
             os.fsync(self._root_fd)
+
+    def prune_empty_activation_parents(self, binding: ExternalBootActivationBinding) -> None:
+        """Remove the activation's `<system>/<run>/<activation>` directories only while empty.
+
+        An activation-scoped session open creates them, so a session opened after cleanup
+        leaves them behind with nothing to own, and exact recovery absence stays false for
+        good (#2898). Anything inside stops the walk: residue stays for quarantine.
+        """
+        chain = (binding.system_id, binding.run_id, binding.activation_id)
+        descriptors = [self._root_fd]
+        try:
+            for name in chain:
+                try:
+                    descriptors.append(_open_private_directory(descriptors[-1], name))
+                except FileNotFoundError:
+                    return
+            for parent_fd, name in reversed(tuple(zip(descriptors[:-1], chain, strict=True))):
+                try:
+                    os.rmdir(name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    if error.errno == errno.ENOTEMPTY:
+                        return
+                    raise
+                os.fsync(parent_fd)
+        finally:
+            for descriptor in descriptors[1:]:
+                os.close(descriptor)
 
     def _read_optional_abort_receipt(self, name: str) -> LocalPartialAbortReceiptV1 | None:
         try:
