@@ -2,7 +2,7 @@
 
 ADR-0620's #2917 amendment: a `retained_quarantine` receipt on the job's final attempt ends the
 job `failed` and its teardown authority `retired`, so the public teardown's `failed` recycle can
-re-run it; migration 0163 also moves jobs already stranded `queued` and exhausted.
+re-run it; migration 0164 also moves jobs already stranded `queued` and exhausted.
 """
 
 from __future__ import annotations
@@ -37,8 +37,8 @@ _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="proj")
 _DIGEST = "sha256:" + "e" * 64
 
 
-def test_migration_0163_is_registered() -> None:
-    assert "0163" in [item.version for item in migrate.discover_migrations()]
+def test_migration_0164_is_registered() -> None:
+    assert "0164" in [item.version for item in migrate.discover_migrations()]
 
 
 def _retain(
@@ -99,6 +99,13 @@ def test_final_attempt_retained_teardown_is_dead_lettered(
     authority = _retain(migrated_url, authority_role_dsns, case, final=True)
 
     assert _job(migrated_url, case.job_id) == ("failed", "conflict", 1, 1)
+    with psycopg.connect(migrated_url) as conn:
+        lease = conn.execute(
+            "SELECT worker_id, lease_expires_at, heartbeat_at, failure_context FROM jobs "
+            "WHERE id = %s",
+            (case.job_id,),
+        ).fetchone()
+    assert lease == (None, None, None, {})
     assert _authority(migrated_url, authority.authority_id) == ("retired", True, True)
     assert _routes(migrated_url, case.system_id) == [(case.activation_id,)]
 
@@ -203,8 +210,8 @@ def _apply_through(conn: psycopg.Connection, last_version: str) -> None:
         )
 
 
-def _stranded_before_0163(conn: psycopg.Connection) -> tuple[_AuthorityCase, UUID]:
-    """A job left `queued` at its final attempt by a pre-0163 retained receipt."""
+def _stranded_before_0164(conn: psycopg.Connection) -> tuple[_AuthorityCase, UUID]:
+    """A job left `queued` at its final attempt by a pre-0164 retained receipt."""
     case = _seed_case(conn, purpose="teardown", worker_suffix="m")
     authority_id = uuid4()
     conn.execute(
@@ -254,16 +261,16 @@ def _plain_teardown(conn: psycopg.Connection, *, attempt: int, marked: bool) -> 
     return job_id
 
 
-def test_migration_0163_dead_letters_stranded_retained_teardown(
+def test_migration_0164_dead_letters_stranded_retained_teardown(
     pg_conn: psycopg.Connection,
 ) -> None:
-    _apply_through(pg_conn, "0162")
+    _apply_through(pg_conn, "0163")
     with pg_conn.transaction():  # the seed's activation foreign keys are deferred
-        case, authority_id = _stranded_before_0163(pg_conn)
+        case, authority_id = _stranded_before_0164(pg_conn)
         retrying = _plain_teardown(pg_conn, attempt=1, marked=True)
         ordinary = _plain_teardown(pg_conn, attempt=3, marked=False)
 
-    assert "0163" in migrate.apply_migrations(pg_conn)
+    assert "0164" in migrate.apply_migrations(pg_conn)
 
     row = pg_conn.execute(
         "SELECT j.state, j.error_category, a.state, a.superseded_at IS NULL, "

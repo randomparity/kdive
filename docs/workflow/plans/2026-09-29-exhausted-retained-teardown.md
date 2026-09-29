@@ -3,7 +3,7 @@
 **Goal:** a System-teardown job whose final attempt commits a `retained_quarantine` receipt ends
 `failed` with its authority `retired` (keeping the dispatch route), which the public teardown
 recycles, instead of `queued` and unclaimable.
-**Architecture:** migration 0163 patches `finalize_external_boot_authority_teardown`'s retained
+**Architecture:** migration 0164 patches `finalize_external_boot_authority_teardown`'s retained
 branch and repairs rows that are already stranded; spec
 [`2026-09-29-exhausted-retained-teardown-design.md`](../specs/2026-09-29-exhausted-retained-teardown-design.md).
 **Tech stack:** PostgreSQL PL/pgSQL migration, pytest DB tests (testcontainers PostgreSQL).
@@ -14,14 +14,14 @@ set.
 
 ## Global Constraints
 
-- Migration number is exactly `0163` (orchestrator-assigned). Applied migrations are immutable
+- Migration number is exactly `0164` (orchestrator-assigned). Applied migrations are immutable
   (ADR-0015); change a function only through a new migration.
 - Do not edit `src/kdive/mcp/responses.py` (#2916 is changing it) or `src/kdive/jobs/queue.py`.
 - Ruff line length 100; `ty` whole tree; prose avoids "critical", "robust", "comprehensive".
 
 ## File map
 
-- create `src/kdive/db/schema/0163_dead_letter_exhausted_retained_teardown.sql` — finalizer
+- create `src/kdive/db/schema/0164_dead_letter_exhausted_retained_teardown.sql` — finalizer
   patch plus one-time repair.
 - create `tests/db/test_exhausted_retained_teardown.py` — DB-backed proofs.
 - modify `tests/db/external_boot_journal_support.py` — `_make_current` gains a keyword
@@ -30,7 +30,7 @@ set.
 - modify `tests/db/test_migrate.py` (three version lists and the `(version, filename)` list),
   `tests/db/test_migration_0091_system_object_sweep_cursors.py`,
   `tests/db/test_migration_0102_build_gc_cursors.py`,
-  `tests/db/test_migration_0115_capture_reap_state.py` — add `0163`.
+  `tests/db/test_migration_0115_capture_reap_state.py` — add `0164`.
 - modify `docs/adr/0620-authority-owned-system-teardown.md` — dated amendment (already written
   in the design commit).
 
@@ -45,7 +45,7 @@ set.
 - `Mode: focused-test` — non-final retained finalize requeues.
   `test_non_final_retained_teardown_still_requeues`; passes before and after (a guard).
 - `Mode: focused-test` — stranded-row repair.
-  `test_migration_0163_dead_letters_stranded_retained_teardown`; red before the migration file
+  `test_migration_0164_dead_letters_stranded_retained_teardown`; red before the migration file
   exists (`StopIteration`/state `queued`).
 - `Mode: focused-test` — recycle after dead-letter credits once.
   `test_dead_lettered_retained_teardown_recycles_and_credits_once`; red on main because the job
@@ -68,7 +68,7 @@ Steps:
      authority, so this is the no-other-route case.
    - non-final: no `max_attempts` change; finalize returns `"retained"`; job state `queued`;
      authority `superseded`.
-   - repair: on `pg_conn`, apply migrations through `0162` file by file and record each in
+   - repair: on `pg_conn`, apply migrations through `0163` file by file and record each in
      `schema_migrations` (the `_apply_through` helper in
      `tests/db/test_migration_0070_resolved_cpu.py`; copy it into the new file). Seed with
      `tests.db.external_boot_authority_support._seed_case(pg_conn, purpose="teardown")`, then
@@ -88,7 +88,7 @@ Steps:
 3. Run `just test-verbose tests/db/test_exhausted_retained_teardown.py`; expect the final-attempt,
    repair, and recycle tests to fail.
 
-## Task 2 — migration 0163
+## Task 2 — migration 0164
 
 **Verification**
 
@@ -109,7 +109,8 @@ Steps:
        v_definition text;
        v_old constant text := $old$RETURN 'retained';$old$;
        v_new constant text := $new$IF v_job.attempt >= v_job.max_attempts THEN
-               UPDATE public.jobs SET state = 'failed', error_category = 'conflict'
+               UPDATE public.jobs SET state = 'failed', error_category = 'conflict',
+                   heartbeat_at = NULL, failure_context = '{}'::jsonb
                WHERE id = p_job_id;
                UPDATE public.external_boot_authorities
                SET state = 'retired', retired_at = clock_timestamp(), superseded_at = NULL
@@ -130,7 +131,8 @@ Steps:
    $$;
 
    WITH stranded AS (
-       UPDATE public.jobs SET state = 'failed', error_category = 'conflict'
+       UPDATE public.jobs SET state = 'failed', error_category = 'conflict',
+           heartbeat_at = NULL, failure_context = '{}'::jsonb
        WHERE kind = 'teardown' AND state = 'queued' AND attempt >= max_attempts
          AND jsonb_typeof(payload -> 'external_boot_authority_v1') = 'object'
        RETURNING id, attempt
@@ -145,7 +147,7 @@ Steps:
      AND authority.state = 'superseded' AND authority.acknowledged_at IS NOT NULL;
    ```
 
-2. Add `0163` to the migration lists named in the file map.
+2. Add `0164` to the migration lists named in the file map.
 3. Run the focused commands above; expect all green. Then `just lint`, `just type`.
 
 ## Verification

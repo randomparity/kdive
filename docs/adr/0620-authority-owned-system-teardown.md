@@ -94,11 +94,11 @@ Rejected for this amendment:
 
 A `retained_quarantine` teardown receipt on the job's final attempt (`attempt >= max_attempts`)
 ends the job `failed` with `error_category = 'conflict'` and the teardown authority `retired`,
-in the receipt transaction (migration 0163). This is what the `fail` path does at exhaustion.
+in the receipt transaction (migration 0164). This is what the `fail` path does at exhaustion.
 Before, the job was requeued where no worker can claim it, and the authority was `superseded`,
 which could leave the activation with no `current` or `retired` dispatch route for the public
 teardown. A non-final attempt still requeues and supersedes. The receipt and the `retained`
-result are unchanged, and a `retired` authority cannot commit again. Migration 0163 also moves
+result are unchanged, and a `retired` authority cannot commit again. Migration 0164 also moves
 authority-marked teardown jobs that were already `queued` and exhausted, and the superseded root
 authority of their retained receipt, to the same states. Recovery is the public teardown's
 `failed` recycle defined above, so the reservation still credits once. The reconciler's

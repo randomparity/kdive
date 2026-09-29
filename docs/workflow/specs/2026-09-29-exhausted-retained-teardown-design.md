@@ -38,7 +38,7 @@ retires the authority on `fail`.
 
 ## Design
 
-Migration `0163_dead_letter_exhausted_retained_teardown.sql` does two things.
+Migration `0164_dead_letter_exhausted_retained_teardown.sql` does two things.
 
 1. **Finalizer.** It patches the finalizer with the repository's `pg_get_functiondef` +
    `replace` idiom (0149, 0160, 0161), with a shape guard that requires exactly one anchor. The
@@ -46,7 +46,8 @@ Migration `0163_dead_letter_exhausted_retained_teardown.sql` does two things.
 
    ```sql
    IF v_job.attempt >= v_job.max_attempts THEN
-       UPDATE public.jobs SET state = 'failed', error_category = 'conflict' WHERE id = p_job_id;
+       UPDATE public.jobs SET state = 'failed', error_category = 'conflict',
+           heartbeat_at = NULL, failure_context = '{}'::jsonb WHERE id = p_job_id;
        UPDATE public.external_boot_authorities
        SET state = 'retired', retired_at = clock_timestamp(), superseded_at = NULL
        WHERE id = p_authority_id;
@@ -82,14 +83,14 @@ job. The job state stays owned by the finalizer.
 1. **Actors and deployments**
    - the job worker that runs an authority-marked System teardown and calls the finalizer;
    - an operator or agent that calls `systems.teardown` through MCP;
-   - the migration runner (`kdive.db.migrate`) that applies 0163 once per database.
+   - the migration runner (`kdive.db.migrate`) that applies 0164 once per database.
 2. **Invariants and assets at stake**
    - the ready reservation credits exactly once (ADR-0620), and the authority fences (ADR-0584,
      ADR-0620) keep their current behavior;
    - a `retained_quarantine` receipt on a non-final attempt still requeues the job;
    - the dispatch route of the activation survives a final-attempt retained receipt;
-   - after 0163, no authority-marked teardown job is left `queued` with
-     `attempt >= max_attempts` by the finalizer or by rows that existed before 0163.
+   - after 0164, no authority-marked teardown job is left `queued` with
+     `attempt >= max_attempts` by the finalizer or by rows that existed before 0164.
 3. **Accepted failure classes**
    - a dead-lettered teardown stays `failed` until a public `systems.teardown` recycles it. No
      reconciler lane re-runs it. This is the recovery that ADR-0620 already defines for a failed
@@ -124,7 +125,7 @@ job. The job state stays owned by the finalizer.
   leaves `resolve_external_boot_system_teardown_dispatch_binding` with one route for the
   activation, also when no other authority of the activation is `retired`.
 - A `retained_quarantine` finalize on a non-final attempt leaves the job `queued`, as before.
-- A job that was stranded before 0163 is `failed` after 0163 is applied, and its retained
+- A job that was stranded before 0164 is `failed` after 0164 is applied, and its retained
   root authority is `retired`.
 - A public-teardown recycle of the dead-lettered job, followed by a successful attempt, credits
   the reservation once. A replayed teardown after success credits nothing more.
@@ -141,7 +142,7 @@ job. The job state stays owned by the finalizer.
   after the file-by-file apply through 0162 (the `_apply_through` pattern in
   `tests/db/test_migration_0070_resolved_cpu.py`), are `failed` and `retired` after
   `migrate.apply_migrations`; a marked non-exhausted `queued` teardown and an unmarked exhausted
-  one are unchanged. Red without 0163.
+  one are unchanged. Red without 0164.
 - `focused-test`: same file, recycle of the dead-lettered job through `queue.enqueue` with
   `FAILED_OR_LAPSED_EXHAUSTED`, then an applied finalize, gives exactly one release row; a replay
   gives no second row. The handler half of the public call (a route plus a `failed` prior with
@@ -149,4 +150,4 @@ job. The job state stays owned by the finalizer.
   `tests/mcp/lifecycle/test_systems_tools.py::test_teardown_recycles_failed_authority_job_with_identical_marker`;
   the new route assertion above closes the gap between them.
 - `focused-test`: the migration registration lists in `tests/db/test_migrate.py` and the three
-  migration-tail tests include `0163`.
+  migration-tail tests include `0164`.

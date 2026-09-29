@@ -4,13 +4,15 @@
 -- and no public teardown recycles.  The final attempt now ends the job `failed` and retires the
 -- teardown authority, as the `fail` path does at exhaustion (0122): a retired authority keeps the
 -- activation's dispatch route for the public teardown's `failed` recycle and can never commit
--- again.  A non-final attempt still requeues and supersedes.
+-- again.  A non-final attempt still requeues (with no category, 0163) and supersedes.  The failed
+-- row clears the same lease columns the 0149 retained requeue does and sets its own category.
 DO $$
 DECLARE
     v_definition text;
     v_old constant text := $old$RETURN 'retained';$old$;
     v_new constant text := $new$IF v_job.attempt >= v_job.max_attempts THEN
-            UPDATE public.jobs SET state = 'failed', error_category = 'conflict'
+            UPDATE public.jobs SET state = 'failed', error_category = 'conflict',
+                heartbeat_at = NULL, failure_context = '{}'::jsonb
             WHERE id = p_job_id;
             UPDATE public.external_boot_authorities
             SET state = 'retired', retired_at = clock_timestamp(), superseded_at = NULL
@@ -33,7 +35,8 @@ $$;
 -- Move jobs a pre-0163 retained receipt already stranded, and the superseded root authority of that
 -- receipt, to the same states.  No worker can claim such a job, so no attempt races this repair.
 WITH stranded AS (
-    UPDATE public.jobs SET state = 'failed', error_category = 'conflict'
+    UPDATE public.jobs SET state = 'failed', error_category = 'conflict',
+        heartbeat_at = NULL, failure_context = '{}'::jsonb
     WHERE kind = 'teardown' AND state = 'queued' AND attempt >= max_attempts
       AND jsonb_typeof(payload -> 'external_boot_authority_v1') = 'object'
     RETURNING id, attempt
