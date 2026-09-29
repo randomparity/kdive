@@ -164,8 +164,9 @@ sequences removed (control strings terminated by ST or BEL, CSI, and other `ESC`
 unterminated one stays in place). The crash scan uses the same stripped text, so the pre-marker
 region is still everything before the marker, and a signature an SGR sequence used to hide
 (`ESC[31mBUG:`) now matches. The marker shape is unchanged: its own token at a line start or after
-horizontal whitespace. The readiness unit now writes `\nkdive-ready\n` in one `printf`, so the
-marker starts a fresh line on images built after this change.
+horizontal whitespace. The readiness unit now writes `\nkdive-ready\n` in one write (`printf`
+piped through `dd`, because bash line-buffers `printf` into two writes), so the marker starts a
+fresh line on images built after this change.
 
 Context: `serial-getty` writes an OSC 3008 context record and a DCS XTGETTCAP query to the same
 console, each ending in `ESC \`, immediately before the unit's marker. The `\` glued to the marker

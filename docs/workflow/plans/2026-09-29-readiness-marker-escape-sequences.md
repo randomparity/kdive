@@ -122,6 +122,10 @@ Steps:
 
 ## Task 2 — readiness unit writes the marker on its own line
 
+> Branch review (2026-09-29) found bash splits this `printf` into two writes; the shipped unit
+> pipes it through `dd bs=64 iflag=fullblock status=none` and the test runs the rendered command
+> against a `SOCK_SEQPACKET` socket. The steps below record the original task.
+
 **Interfaces:** provides unchanged `readiness_unit(kdump_unit: str, console_device: str) -> str`
 from `kdive.images.families._fedora_customize`, consumed by `rootfs_build.py` and the rhel,
 debian, and suse families through `ctx.readiness_unit_path`.

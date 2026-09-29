@@ -38,10 +38,12 @@ Two independent layers, each sufficient for the observed capture.
    spans a line and never removes text that a terminal would print. The pre-marker crash region
    becomes a prefix of the stripped text, so crash-before-marker still wins.
 2. **Guest unit (covers future images).** `readiness_unit` renders
-   `ExecStart=/bin/sh -c 'printf "\nkdive-ready\n" > /dev/<console>'`. Whether systemd's
-   C-escape processing turns `\n` into a newline before the shell runs or leaves it for `printf`,
-   the output is the same one write of `\nkdive-ready\n`, which starts a fresh line. Whatever
-   another writer left on the current line stays on that line.
+   `ExecStart=/bin/sh -c 'printf "\nkdive-ready\n" | dd bs=64 iflag=fullblock status=none > /dev/<console>'`.
+   bash, the rhel-family `/bin/sh`, line-buffers its builtin `printf` and writes `\n` and
+   `kdive-ready\n` separately; `dd` with `iflag=fullblock` collects the whole line and emits it in
+   one write that starts a fresh line. Whether systemd's C-escape processing turns `\n` into a
+   newline or leaves it for `printf`, the bytes are the same. Whatever another writer left on the
+   current line stays on that line.
 
 The two layers are coupled only by the regression test that feeds the captured byte shape
 through `classify_console`.
@@ -53,7 +55,7 @@ through `classify_console`.
   (`foo\x1b[0mkdive-ready`) stay `pending` (criterion 2).
 - A crash signature before the marker still yields `crashed`, with or without escape
   sequences on the marker line (criterion 3).
-- The rendered unit writes `\nkdive-ready\n` to the arch console device (criterion 4).
+- The rendered unit writes `\nkdive-ready\n` to the arch console device in one write (criterion 4).
 - Each layer's test fails when that layer is reverted (criterion 5).
 - `test_family_guest_is_ssh_reachable_over_the_wire[rhel]` passes (a skip is a failure) on a
   Fedora 44 x86_64 lab host with `KDIVE_GUEST_IMAGE_RHEL` bound to a rhel-family image rebuilt
@@ -78,8 +80,8 @@ through `classify_console`.
      inside one, and the mid-line interleave is accepted as unreachable in practice;
    - 8-bit C1 controls are not recognised: `errors="replace"` already turns a lone `0x9B` into
      U+FFFD, and no observed writer emits them;
-   - the single-write property of `printf` depends on the image's `/bin/sh`; if a shell split the
-     write, layer 1 still classifies the line.
+   - the single write rests on GNU `dd` (`iflag=fullblock`, `status=none`), part of coreutils on
+     every family the catalog builds; if it wrote in pieces, layer 1 still classifies the line.
    - one live boot does not prove the race closed; the regression test from the captured bytes
      is the durable proof.
 4. **Covered elsewhere**
@@ -95,8 +97,8 @@ through `classify_console`.
 
 - `tests/providers/local_libvirt/test_install.py`: captured-bytes regression (`ready`); CSI-glued
   and escaped unit-name negatives (`pending`); crash-before-escaped-marker (`crashed`).
-- `tests/images/families/test_fedora_customize.py`: the unit's `ExecStart` writes
-  `\nkdive-ready\n` to `/dev/ttyS0` and `/dev/hvc0`.
+- `tests/images/families/test_fedora_customize.py`: the unit's `ExecStart`, run against a
+  `SOCK_SEQPACKET` socket, emits `\nkdive-ready\n` as one write for `ttyS0` and `hvc0`.
 - Controlled faults: revert each layer on its own and observe its test go red.
 - Live: the rhel-family SSH-reachability proof on a Fedora 44 x86_64 lab host through
   `examples/local-libvirt/demo-up.sh`.
