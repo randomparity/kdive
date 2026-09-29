@@ -1,0 +1,42 @@
+---
+# Run after handlers flush, so the checked daemon is the one the converged unit started (#2767).
+- name: Read the authority session libvirtd main PID
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - --user
+      - show
+      - --property=MainPID
+      - --value
+      - kdive-libvirtd-external-boot-authority.service
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ provider_authority_host_uid }}"
+  become: true
+  become_user: "{{ provider_authority_host_account }}"
+  register: provider_authority_host_libvirtd_pid
+  changed_when: false
+
+- name: Read the authority session libvirtd locked-memory limit
+  ansible.builtin.command:
+    argv:
+      - prlimit
+      - --memlock
+      - --noheadings
+      - --output=SOFT,HARD
+      - "--pid={{ provider_authority_host_libvirtd_pid.stdout }}"
+  register: provider_authority_host_libvirtd_memlock
+  changed_when: false
+  when: provider_authority_host_libvirtd_pid.stdout not in ["", "0"]
+
+- name: Require an unlimited authority session libvirtd memlock limit
+  ansible.builtin.assert:
+    that:
+      - provider_authority_host_libvirtd_pid.stdout not in ["", "0"]
+      - provider_authority_host_libvirtd_memlock.stdout.split() == ['unlimited', 'unlimited']
+    fail_msg: >-
+      The authority session libvirtd must run with an unlimited locked-memory limit or it cannot
+      start ppc64 guests (#2767). Check that
+      /etc/systemd/system/user@{{ provider_authority_host_uid }}.service.d/kdive-memlock.conf
+      exists, then restart user@{{ provider_authority_host_uid }}.service and
+      kdive-libvirtd-external-boot-authority.service.
+    quiet: true

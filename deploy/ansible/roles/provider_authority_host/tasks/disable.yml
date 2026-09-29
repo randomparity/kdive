@@ -48,6 +48,21 @@
   register: provider_authority_host_removed
   notify: Reload systemd after authority removal
 
+- name: Resolve the retiring authority identity for its user manager drop-in
+  ansible.builtin.getent:
+    database: passwd
+    key: kdive-provider-authority
+    fail_key: false
+
+- name: Remove the retired authority user manager memlock drop-in
+  ansible.builtin.file:
+    path: >-
+      /etc/systemd/system/user@{{ ansible_facts.getent_passwd['kdive-provider-authority'][1]
+      }}.service.d/kdive-memlock.conf
+    state: absent
+  when: ansible_facts.getent_passwd['kdive-provider-authority'] is not none
+  notify: Reload systemd after authority removal
+
 - name: Retire authority user-service boot persistence
   ansible.builtin.command:
     argv: [loginctl, disable-linger, kdive-provider-authority]
