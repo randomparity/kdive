@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, LiteralString, cast
 from uuid import uuid4
 
 import psycopg
@@ -965,6 +965,116 @@ def test_enqueue_recycle_canceled_reclaims_only_when_opted_in(migrated_url: str)
             assert reclaimed.state is JobState.QUEUED
             assert reclaimed.attempt == 0
             assert await _count_jobs(conn) == 1
+
+    asyncio.run(_run())
+
+
+_LAPSED_POLICY = queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
+
+
+async def _job_in(conn: psycopg.AsyncConnection, dedup_key: str, state_sql: LiteralString) -> Job:
+    """Enqueue under ``dedup_key``, then force the row into ``state_sql``'s SET clause."""
+    job = await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, dedup_key)
+    for worker_id in ("w-dead", "w-live", "w-retry"):
+        await _register_worker(conn, worker_id)
+    await conn.execute(
+        "UPDATE jobs SET " + state_sql + " WHERE id = %s",
+        (job.id,),
+    )
+    return job
+
+
+def test_enqueue_recycles_a_lapsed_exhausted_running_job(migrated_url: str) -> None:
+    # #2889: a final attempt whose lease lapsed on the database clock is requeued. Its attempt
+    # counter stays and its budget grows, so no (worker, attempt) of the dead attempt recurs.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job = await _job_in(
+                conn,
+                "dk-lapsed",
+                "state = 'running', attempt = 3, worker_id = 'w-dead', "
+                "lease_expires_at = clock_timestamp() - interval '1 second', "
+                "heartbeat_at = now()",
+            )
+            payload = _build_payload()
+
+            recycled = await queue.enqueue(
+                conn, JobKind.INSTALL, payload, _AUTHORIZING, "dk-lapsed", recycle=_LAPSED_POLICY
+            )
+
+            assert recycled.id == job.id
+            assert recycled.state is JobState.QUEUED
+            assert (recycled.attempt, recycled.max_attempts) == (3, 6)
+            assert (recycled.worker_id, recycled.lease_expires_at, recycled.heartbeat_at) == (
+                None,
+                None,
+                None,
+            )
+            assert recycled.payload["run_id"] == payload.run_id
+            claimed = await _dequeue(conn, "w-next")
+            assert claimed is not None and (claimed.id, claimed.attempt) == (job.id, 4)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("state_sql", "expected_state"),
+    [
+        (
+            "state = 'running', attempt = 3, worker_id = 'w-live', "
+            "lease_expires_at = clock_timestamp() + interval '5 minutes', heartbeat_at = now()",
+            JobState.RUNNING,
+        ),
+        (
+            "state = 'running', attempt = 2, worker_id = 'w-retry', "
+            "lease_expires_at = clock_timestamp() - interval '1 second', heartbeat_at = now()",
+            JobState.RUNNING,
+        ),
+        ("state = 'succeeded', attempt = 3", JobState.SUCCEEDED),
+        ("state = 'canceled', attempt = 3", JobState.CANCELED),
+        ("state = 'queued'", JobState.QUEUED),
+    ],
+    ids=["live-final-attempt", "not-exhausted", "succeeded", "canceled", "queued"],
+)
+def test_enqueue_lapsed_policy_leaves_other_rows_untouched(
+    migrated_url: str, state_sql: LiteralString, expected_state: JobState
+) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job = await _job_in(conn, "dk-kept", state_sql)
+            before = await queue.get_by_dedup_key(conn, "dk-kept")
+
+            kept = await queue.enqueue(
+                conn,
+                JobKind.INSTALL,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-kept",
+                recycle=_LAPSED_POLICY,
+            )
+
+            assert kept.id == job.id and kept.state is expected_state
+            assert kept == before
+
+    asyncio.run(_run())
+
+
+def test_enqueue_lapsed_policy_resets_a_failed_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            failed = await _terminal_failed_job(conn, "dk-failed-lapsed")
+
+            recycled = await queue.enqueue(
+                conn,
+                JobKind.INSTALL,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-failed-lapsed",
+                recycle=_LAPSED_POLICY,
+            )
+
+            assert recycled.id == failed.id and recycled.state is JobState.QUEUED
+            assert (recycled.attempt, recycled.max_attempts) == (0, failed.max_attempts)
 
     asyncio.run(_run())
 

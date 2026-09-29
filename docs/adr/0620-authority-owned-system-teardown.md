@@ -61,6 +61,35 @@ Rejected for this amendment:
 - **Recycle every terminal teardown job.** judgment: a `succeeded` teardown already credited the
   reservation, and re-running it only adds a replay path to the exactly-once rule.
 
+### Amendment (2026-09-28): an exhausted authority job does not wedge `running` (#2889)
+
+The public teardown also re-runs a `running` authority teardown job whose final attempt's lease
+has lapsed (`attempt >= max_attempts`, `lease_expires_at` before the database clock), with the
+identical marker. The lease is judged in the recycling `UPDATE` itself, so a live final attempt
+replays unchanged. That job keeps its attempt counter and gains another `max_attempts` budget
+rather than resetting to 0, because its dead attempt may still be running: a fresh attempt with
+the same number on the same incarnation would pass that attempt's heartbeat and finalize fences.
+A `succeeded` job is still never reset.
+
+The reconciler dead-letters an authority-marked non-teardown job (`failed`, `lease_expired`)
+only when it is `running`, exhausted, lease-lapsed and has no `allocating` or `current`
+authority row, checked after locking the job row (migration 0162). Every path that can commit a
+receipt needs such a row and a `running` job, and allocation and the losing-result classifier
+recheck the job under its own row lock, so no receipt can commit for it; the receipt paths keep
+sole ownership of every job they could still finish. A stray whose authority is `allocating` or
+`current` waits until a newer allocation supersedes it.
+
+Rejected for this amendment:
+
+- **Terminalize every lapsed exhausted marked job in the reconciler.** judgment: it would end
+  jobs whose `current` authority can still commit, splitting terminalization from the receipt.
+- **Cancel, then recycle `canceled`.** judgment: two public calls for one recovery, and
+  `jobs.cancel` flips a running job without any authority check.
+- **Recycle a `succeeded` teardown when the prior read showed `running`.** verified: the server
+  locks the System with a blake2b key (`db/locks.py` `_lock_key`) and the commit function with
+  `hashtextextended('kdive:system:' ...)` (migration 0122), so an old attempt can commit
+  between the read and the reset.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
