@@ -535,3 +535,21 @@ def test_host_role_shape_rejects_cluster_and_generic_role_authority(
             ),
         )
     )
+
+
+def test_authority_role_takes_the_lane_advisory_lock(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """The startup reconcile (#2793) waits on the key the head-advance function takes."""
+    system_id = str(uuid4())
+    lock = "SELECT pg_advisory_xact_lock(hashtextextended('kdive:system:' || %s::text, 2126))"
+    with (
+        psycopg.connect(migrated_url) as holder,
+        psycopg.connect(authority_role_dsns("kdive_provider_authority")) as authority,
+    ):
+        authority.execute(lock, (system_id,))
+        authority.commit()
+        holder.execute(lock, (system_id,))
+        authority.execute("SET lock_timeout = '100ms'")
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            authority.execute(lock, (system_id,))

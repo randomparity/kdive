@@ -34,6 +34,8 @@ _INITIAL_OPERATION_PHASES = frozenset(
     {JournalPhase.WATERMARK_INSTALLED, JournalPhase.TAKEOVER_SUPERSEDED, JournalPhase.ADMITTED}
 )
 DEFAULT_MAX_JOURNAL_BYTES = 64 * 1024 * 1024
+# ADR-0584 amendment (#2793): the one reserved non-lane entry of the journal directory.
+RETRACTED_DIRECTORY = "retracted"
 
 
 @dataclass(slots=True)
@@ -469,3 +471,74 @@ class FileAuthorityJournal:
         self._cache.identity = final_identity
         self._cache.tail_offset = final_identity.size - len(encoded)
         self._cache.tail_bytes = encoded
+
+    def retract(self, record: JournalRecordV1) -> None:
+        """Remove the exact final record after preserving its bytes (ADR-0584 amendment)."""
+        if self._cache is None:
+            self.load()
+        assert self._cache is not None
+        cache = self._cache
+        encoded = canonical_record_bytes(record) + b"\n"
+        if not cache.records or cache.records[-1] != record or cache.tail_bytes != encoded:
+            raise ValueError("authority journal retraction requires the final record")
+        self._validate_directory_chain()
+        descriptor = os.open(self._name, os.O_RDWR | _OPEN_BASE, dir_fd=self._parent_fd)
+        try:
+            self._validate_descriptor(descriptor)
+            status = os.fstat(descriptor)
+            path_status = os.stat(self._name, dir_fd=self._parent_fd, follow_symlinks=False)
+            if (
+                self._identity(status) != cache.identity
+                or (path_status.st_dev, path_status.st_ino) != (status.st_dev, status.st_ino)
+                or os.pread(descriptor, len(encoded), cache.tail_offset) != encoded
+            ):
+                raise ValueError("authority journal changed since validation")
+            self._preserve(record, encoded)
+            if cache.tail_offset == 0:
+                os.unlink(self._name, dir_fd=self._parent_fd)
+            else:
+                os.ftruncate(descriptor, cache.tail_offset)
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        if cache.tail_offset == 0:
+            os.fsync(self._parent_fd)
+        self.load()
+
+    def _preserve(self, record: JournalRecordV1, encoded: bytes) -> None:
+        created = False
+        try:
+            os.mkdir(RETRACTED_DIRECTORY, 0o700, dir_fd=self._parent_fd)
+            created = True
+        except FileExistsError:
+            pass
+        directory = os.open(
+            RETRACTED_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | _OPEN_BASE, dir_fd=self._parent_fd
+        )
+        try:
+            if created:
+                os.fchmod(directory, 0o700)
+                os.fsync(self._parent_fd)
+            status = os.fstat(directory)
+            if status.st_uid != self._owner_uid or stat.S_IMODE(status.st_mode) != 0o700:
+                raise PermissionError("authority journal retraction directory must be private")
+            # The name carries the record digest, so identical evidence is replaced idempotently.
+            digest = record_digest(record).removeprefix("sha256:")
+            name = f"{record.system_id}.{record.sequence}.{digest}.jsonl"
+            partial = f".{name}.partial"
+            evidence = os.open(
+                partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _OPEN_BASE, 0o600, dir_fd=directory
+            )
+            try:
+                os.fchmod(evidence, 0o600)
+                self._validate_descriptor(evidence)
+                written = 0
+                while written < len(encoded):
+                    written += os.write(evidence, encoded[written:])
+                os.fsync(evidence)
+            finally:
+                os.close(evidence)
+            os.replace(partial, name, src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
