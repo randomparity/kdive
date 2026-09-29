@@ -55,9 +55,9 @@ through `classify_console`.
   sequences on the marker line (criterion 3).
 - The rendered unit writes `\nkdive-ready\n` to the arch console device (criterion 4).
 - Each layer's test fails when that layer is reverted (criterion 5).
-- `test_family_guest_is_ssh_reachable_over_the_wire[rhel]` passes on a Fedora 44 x86_64 lab
-  host with a rhel-family image rebuilt from the branch, and the captured console shows the
-  marker on its own line (criterion 6).
+- `test_family_guest_is_ssh_reachable_over_the_wire[rhel]` passes (a skip is a failure) on a
+  Fedora 44 x86_64 lab host with `KDIVE_GUEST_IMAGE_RHEL` bound to a rhel-family image rebuilt
+  from the branch, whose `kdive-ready.service` carries the `printf` line (criterion 6).
 
 ## Failure model
 
@@ -73,8 +73,9 @@ through `classify_console`.
 3. **Accepted failure classes**
    - guest-controlled output can print the marker itself; unchanged from today and outside the
      anti-spoof goal, which only excludes incidental substrings such as unit names;
-   - text inside a complete same-line control string is dropped before the crash scan; a
-     terminal does not print control-string bodies, so a kernel crash line cannot be one;
+   - a crash literal interleaved into a control-string body before that body's terminator is
+     stripped with it; a body cannot contain LF, so a complete LF-terminated crash line is never
+     inside one, and the mid-line interleave is accepted as unreachable in practice;
    - 8-bit C1 controls are not recognised: `errors="replace"` already turns a lone `0x9B` into
      U+FFFD, and no observed writer emits them;
    - the single-write property of `printf` depends on the image's `/bin/sh`; if a shell split the

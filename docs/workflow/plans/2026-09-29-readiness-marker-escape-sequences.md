@@ -113,13 +113,12 @@ Steps:
    ```
 
 4. Rerun the step 2 command. Expect all `classify` tests to pass.
-5. Controlled faults, one at a time: restore the old first line of `_scan_console` (the step 2
-   failure returns); substitute `" "` for `""` in `_ESCAPE_SEQUENCE.sub` (the token-shape guard
-   fails on `foo\x1b[0mkdive-ready`).
-   Revert with `git checkout -- src/kdive/providers/local_libvirt/lifecycle/boot/readiness.py`
-   only after committing step 3.
-6. `just lint && just type`, then commit `fix(local-libvirt): match kdive-ready after console
+5. `just lint && just type`, then commit `fix(local-libvirt): match kdive-ready after console
    escape sequences`.
+6. Controlled faults, one at a time, each reverted with
+   `git checkout -- src/kdive/providers/local_libvirt/lifecycle/boot/readiness.py`: restore the
+   old first line of `_scan_console` (the step 2 failure returns); substitute `" "` for `""` in
+   `_ESCAPE_SEQUENCE.sub` (the token-shape guard fails on `foo\x1b[0mkdive-ready`).
 
 ## Task 2 — readiness unit writes the marker on its own line
 
@@ -160,13 +159,16 @@ Steps:
    by one ``printf`` that starts with a newline (#2907): the serial getty writes terminal escape
    sequences to the same device, and the marker must not share their line."
 4. Rerun the step 2 command. Expect all tests to pass.
-5. Controlled fault: after committing, restore the `echo` line; the new tests fail. Revert with
+5. `just lint && just type`, then commit `fix(images): write kdive-ready on its own console line`.
+6. Controlled fault: restore the `echo` line; the new tests fail. Revert with
    `git checkout -- src/kdive/images/families/_fedora_customize.py`.
-6. `just lint && just type`, then commit `fix(images): write kdive-ready on its own console line`.
 
 ## Live proof (after both tasks)
 
-On the Fedora 44 x86_64 lab host, under the campaign host lock: deploy the branch, confirm the
-deployed code contains `_ESCAPE_SEQUENCE`, rebuild a rhel-family image, run the stack through
-`scripts/demo-up.sh`, run `test_family_guest_is_ssh_reachable_over_the_wire[rhel]`, and read the
-console log bytes around the marker to confirm it starts its own line.
+On the Fedora 44 x86_64 lab host, under the campaign host lock: deploy the branch and confirm
+the deployed code contains `_ESCAPE_SEQUENCE`; rebuild a rhel-family image with
+`kdive rootfs build-fs --image <rhel-family catalog name> --dest <image>` and confirm with
+`virt-cat -a <image> /etc/systemd/system/kdive-ready.service` that it carries the `printf` line; run the stack through `scripts/demo-up.sh`; run
+`test_family_guest_is_ssh_reachable_over_the_wire[rhel]` with `KDIVE_GUEST_IMAGE_RHEL` set to that
+image. A SKIPPED result fails the proof. Read the console bytes around the marker as supporting
+evidence only.
