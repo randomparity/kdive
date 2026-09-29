@@ -3835,6 +3835,13 @@ class RecoveryMetadataStore:
         self._require_open()
         name = recovery_directory_name(recovery.recovery_ref, recovery.binding)
         tombstone = self._read_tombstone_named(name)
+        expected = CleanupTombstoneV1(
+            binding=recovery.binding,
+            recovery_point=recovery,
+            point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+        )
+        if tombstone != expected or proof.point_digest != expected.point_digest:
+            raise ValueError("cleanup tombstone does not match recovery point")
         receipt = CleanupQuarantineReceiptV1(tombstone=tombstone, proof=proof)
         directory_fd = _open_private_directory(self._root_fd, name)
         try:

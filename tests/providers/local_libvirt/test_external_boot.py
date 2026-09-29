@@ -5016,6 +5016,12 @@ def test_real_adapter_quarantine_records_without_session_or_artifact_parents(
         ports.record_cleanup_quarantine(
             point, proof.model_copy(update={"point_digest": "sha256:" + "0" * 64}), authority
         )
+    other = point.model_copy(update={"plan_identity": "sha256:" + "7" * 64})
+    with (
+        RecoveryMetadataStore(root) as store,
+        pytest.raises(ValueError, match="tombstone does not match"),
+    ):
+        store.record_cleanup_quarantine(other, _cleanup_proof_for(other))
     ports.record_cleanup_quarantine(point, proof, authority)
 
     assert session.close_attempts == 0
