@@ -540,8 +540,9 @@ class LocalExternalBootAuthorityAdapter:
         if point is not None:
             if point.binding != binding or point.plan_identity != intent.plan_identity:
                 raise AuthorityServiceError("provider_conflict")
-            self._ports.recover(point, authority)
+            # A tombstoned point already recovered and cleaned; recover() needs its intent.
             if not self._ports.cleanup_is_accounted(point, authority):
+                self._ports.recover(point, authority, restore_power=False)
                 self._ports.cleanup(point, authority)
                 self._ports.record_cleanup_quarantine(
                     point, _cleanup_proof(context, point), authority

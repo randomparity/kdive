@@ -595,9 +595,9 @@ def test_0147_retains_quarantine_without_terminalizing_system(
         assert seed.execute(
             "SELECT state FROM systems WHERE id=%s", (case.system_id,)
         ).fetchone() == ("failed",)
-        assert seed.execute("SELECT state FROM jobs WHERE id=%s", (case.job_id,)).fetchone() == (
-            "queued",
-        )
+        assert seed.execute(
+            "SELECT state, error_category FROM jobs WHERE id=%s", (case.job_id,)
+        ).fetchone() == ("queued", None)
         assert seed.execute(
             "SELECT mutation_discharged_at FROM remote_module_attempt_obligations "
             "WHERE system_id=%s AND run_id=%s AND operation_nonce=%s",

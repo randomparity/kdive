@@ -73,6 +73,17 @@ def test_from_job_failed_carries_category() -> None:
     assert resp.suggested_next_actions == []
 
 
+@pytest.mark.parametrize(
+    "state", [JobState.QUEUED, JobState.RUNNING, JobState.SUCCEEDED, JobState.CANCELED]
+)
+def test_from_job_drops_stored_category_on_non_failure_state(state: JobState) -> None:
+    job = _BUILD_JOB.model_copy(update={"state": state, "error_category": ErrorCategory.CONFLICT})
+    resp = ToolResponse.from_job(job)
+    assert resp.status == state.value
+    assert resp.error_category is None
+    assert resp.retryable is None
+
+
 def test_from_job_failed_exposes_failure_context() -> None:
     job = _BUILD_JOB.model_copy(
         update={
