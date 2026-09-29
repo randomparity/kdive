@@ -279,6 +279,11 @@ def test_migration_0164_dead_letters_stranded_retained_teardown(
         (case.job_id, authority_id),
     ).fetchone()
     assert row == ("failed", "conflict", "retired", True, True)
+    routes = pg_conn.execute(
+        "SELECT activation_id FROM resolve_external_boot_system_teardown_dispatch_binding(%s)",
+        (case.system_id,),
+    ).fetchall()
+    assert routes == [(case.activation_id,)]
     states = pg_conn.execute(
         "SELECT state FROM jobs WHERE id = ANY(%s) ORDER BY attempt", ([retrying, ordinary],)
     ).fetchall()
