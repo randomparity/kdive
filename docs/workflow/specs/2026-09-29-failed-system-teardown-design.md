@@ -9,7 +9,8 @@ the readiness-marker defect (#2907); the reconciler's orphan-teardown behaviour 
 
 The decision is recorded as a dated amendment to
 [ADR-0435](../../adr/0435-reclaim-failed-provision-artifacts.md), whose Context says a `failed`
-System can never run teardown.
+System can never run teardown. The amendment also covers ADR-0441's repetition of that premise;
+ADR-0441's overlay-absence gate does not depend on it.
 
 ## Problem
 
@@ -40,8 +41,9 @@ way it already treats a `torn_down` re-run:
    discharge. Mutation obligations on a `failed` System stay with ADR-0652's reconciler lane.
 4. The handler returns the System id, so the job ends `succeeded`.
 
-A provider fault raises the provider's own `CategorizedError`, which stays retryable; the next
-attempt re-asks the provider, because nothing in the path depends on the System leaving `failed`.
+A provider fault raises the provider's own `CategorizedError` and keeps the same category-based
+retry classification it has for any other state; a retried attempt re-asks the provider, because
+nothing in the path depends on the System leaving `failed`.
 
 ## Failure model
 
@@ -52,17 +54,25 @@ attempt re-asks the provider, because nothing in the path depends on the System 
 2. **Invariants and assets at stake**
    - a `failed` System never becomes `tearing_down` or `torn_down` (state machine unchanged);
    - the provider is asked to reclaim the failed System's domain, overlay, and baseline directory;
-   - a deterministic precondition never consumes retries or reports `infrastructure_failure`.
+   - a `failed` System's state never makes `teardown_handler` consume retries or report
+     `infrastructure_failure`.
 3. **Accepted failure classes**
    - console and sysrq artifacts of a `failed` System are reclaimed by an explicit teardown, as for
      any torn-down System; the failure reason stays on `systems.failure_category` and the job row.
    - the job reports `succeeded` while the System reads `failed`; `systems.get` already renders the
      failed envelope with its failing job, so the state is not hidden.
+   - a failed System's teardown that exhausts its attempts on provider faults is not re-run: the
+     `{id}:teardown` job is not recycled and no reconciler lane selects `failed` Systems for
+     teardown. Re-running it is the excluded ADR-0441 reconciler work; reported as a follow-up.
+     Teardown jobs that already dead-lettered on `failed` Systems before this change are in the
+     same position.
 4. **Covered elsewhere**
    - mutation-obligation discharge for `failed` Systems: ADR-0652's reconciler lane;
    - authority-owned System teardown: `execute_authority_system_job`, not this handler;
    - a restricting external-boot activation: the existing terminal `CONFLICT` fence;
-   - reprovisioning Systems' teardown: they settle to `ready` or `failed` first (not deterministic).
+   - a teardown that arrives while the System is `reprovisioning` still raises `IllegalTransition`
+     (no `reprovisioning -> tearing_down` edge); an adjacent gap outside this charter, reported as a
+     follow-up with no owner yet.
 
 ## Considered and rejected
 
@@ -73,15 +83,17 @@ attempt re-asks the provider, because nothing in the path depends on the System 
 
 ## Success
 
-- A teardown job for a `failed` System returns its id, calls provider snapshot `delete_all` and
-  `teardown` once per attempt, and leaves the System `failed` with no new audit transition.
+- A teardown job for a `failed` System returns its id, calls the provider's snapshot `delete_all`
+  (when the provider supports snapshots) and `teardown` once per attempt, and leaves the System `failed` with no new audit transition.
 - A provider fault on that path raises the provider's error with the System still `failed`, and a
   later attempt of the same job succeeds and reclaims.
 
 ## Validation
 
 - `focused-test`: `tests/adversarial/test_provider_state_races.py` — a teardown queued behind a
-  provision that fails reclaims the leftover domain and leaves the System `failed`; red on main.
+  provision that fails reclaims the leftover domain, calls a recording snapshotter's `delete_all`,
+  and leaves the System `failed`; red on main.
 - `focused-test`: same file — a failed System whose provider teardown faults once raises the
-  provider error, stays `failed`, and the retry succeeds and reclaims; red on main.
+  provider error with a retryable category, stays `failed`, and the retry succeeds and reclaims;
+  red on main.
 - `task-test-not-applicable`: the ADR-0435 amendment is documentation; `just lint` covers it.
