@@ -183,6 +183,12 @@ verified image visible to that project; a caller's access to other projects does
 An unmatched image remains usable for ordinary provisioned fixtures, but does not qualify for
 this authority carrier. Keep the persisted-row check below when using the mint script.
 
+The script stages that image at the fixed path
+`${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}/live-vm-provisioned-rootfs.qcow2`, replacing whatever
+is there. A run with an unmatched image therefore overwrites the fixture bytes the carrier
+requires, and the carrier fails admission until you restage the matching registered image's bytes
+at that path and re-verify the SHA-256.
+
 1. Select a registered `local-libvirt` catalog image visible to the System's project, with
    `arch=x86_64`, a digest, and an inspected `provenance.root_spec` (see
    [image staging](../../../examples/local-libvirt/README.md#optional-inventory-systemstoml)).
@@ -953,6 +959,17 @@ experiment's workers and logs, not the current slot identity contract.
   monitor socket lives under it and hits a 108-byte path limit) — `XDG_RUNTIME_DIR`
   is *not* the lever. The harness redirects it to a short path automatically; the
   quirk bites only code that boots a session-mode domain without the harness.
+- **Under `qemu:///system`, the rootfs parent directory's group must include the libvirt QEMU
+  user** (`libvirt-qemu` on Ubuntu, `qemu` on Enterprise Linux). The boot creates its overlay
+  beside the base image, and without that group access overlay creation fails with
+  `Permission denied` (ADR-0052 covers the read side: the qemu user must be able to read the image).
+- **A venv running `live_vm` needs the libguestfs binding without shadowing.** Expose only
+  `guestfs.py` and `libguestfsmod*.so` from the system install, for example a directory of
+  symlinks to those files placed on `PYTHONPATH`. Putting the whole system `dist-packages` on
+  `PYTHONPATH` shadows the venv's own packages, and the `live_vm` run then fails because the venv's
+  FastMCP server support no longer resolves. See
+  [platform support](../platform-support.md) for why the project's `uv` dependency set does not
+  supply the binding.
 - **Staged images need the right label on an SELinux host** — `virt_image_t` under
   system mode, `svirt_image_t` under session mode (ADR-0640), or the
   `libvirt-qemu` AppArmor profile on Ubuntu — and the rootfs's parent dir must be
