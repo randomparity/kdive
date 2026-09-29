@@ -656,3 +656,123 @@ async def test_startup_reconcile_waits_on_the_lane_advisory_lock(
 
         await host._reconcile_journal_tails(config)  # noqa: SLF001
         assert not lane.exists()
+
+
+@pytest.mark.anyio
+async def test_periodic_check_racing_an_anchor_waits_for_the_head_advance(
+    monkeypatch: pytest.MonkeyPatch,
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+) -> None:
+    """#2899: a periodic check between an anchor's fsync and its head advance does not fail."""
+    with psycopg.connect(migrated_url) as connection:
+        case = _seed_case(connection, worker_suffix="p")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        allocated = _allocate(worker, case)
+
+    with tempfile.TemporaryDirectory(prefix="kdive-authority-", dir=Path.home()) as temporary:
+        secure = Path(temporary)
+        secure.chmod(0o700)
+        root = secure / "recovery"
+        journal = secure / "journal"
+        for directory in (root, journal):
+            directory.mkdir(mode=0o700)
+        runtime_config.load(
+            {
+                "KDIVE_LIBVIRT_RECOVERY_ROOT": str(root),
+                "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "1048576",
+            }
+        )
+        config = _host_config(
+            secure, case.authority_instance, authority_role_dsns("kdive_provider_authority")
+        )
+        boundary = _HostBoundary()
+        _configure_local_composition(monkeypatch, root, boundary)
+        monkeypatch.setattr(
+            provider_composition, "object_store_from_env", lambda: cast(Any, object())
+        )
+
+        async def installed_host_fact(_config: AuthorityHostConfig) -> None:
+            return None
+
+        # The installed access boundary and the provider socket are host facts this test cannot
+        # own; the heads, the lanes and the anchor are real.
+        monkeypatch.setattr(host, "_validate_access_boundary", lambda _config: None)
+        monkeypatch.setattr(host, "_check_provider_socket", installed_host_fact)
+        takeover = AuthorityTakeoverRequestV1(
+            authority_id=allocated.authority_id,
+            generation=allocated.generation,
+            system_id=case.system_id,
+            activation_id=case.activation_id,
+            run_id=case.run_id,
+            plan_identity="sha256:" + "a" * 64,
+            purpose=cast(Any, case.purpose),
+            operation=case.operation,
+            provider_kind=case.provider_kind,
+            authority_instance=case.authority_instance,
+            operation_identity=case.operation_identity,
+            operation_digest=allocated.operation_digest,
+        )
+        boundary.prime(
+            ExternalBootActivationBinding(
+                system_id=str(case.system_id),
+                run_id=str(case.run_id),
+                activation_id=str(case.activation_id),
+            ),
+            takeover.plan_identity,
+        )
+        peer = AuthenticatedPeer(case.worker_id)
+        service = host._build_mutation_service(config)  # noqa: SLF001
+        assert service is not None
+        appended = asyncio.Event()
+        check_failed = asyncio.Event()
+        try:
+            await service.acknowledge_takeover(peer, takeover)
+            lane = journal / f"{case.system_id}.jsonl"
+            repository = cast(Any, service)._repository  # noqa: SLF001
+            advance = repository.advance
+
+            async def paused_advance(*args: Any) -> str:
+                if not appended.is_set():
+                    appended.set()
+                    await check_failed.wait()
+                return await advance(*args)
+
+            validate = host.JournalInventoryValidator.validate
+
+            async def observed(validator: Any, *args: Any) -> None:
+                try:
+                    await validate(validator, *args)
+                except host.HostReadinessError:
+                    check_failed.set()
+                    raise
+
+            monkeypatch.setattr(repository, "advance", paused_advance)
+            monkeypatch.setattr(host.JournalInventoryValidator, "validate", observed)
+            before = len(lane.read_bytes().splitlines())
+            mutation = asyncio.create_task(
+                service.execute_mutation(
+                    peer,
+                    AuthorityMutationRequestV1.model_validate(
+                        takeover.model_dump(mode="json", by_alias=True)
+                        | {
+                            "attempt_id": str(uuid4()),
+                            "expected_source_identity": _SOURCE,
+                            "intended_target_identity": _TARGET,
+                            "recovery_objects": [],
+                        }
+                    ),
+                )
+            )
+            await appended.wait()
+            assert len(lane.read_bytes().splitlines()) == before + 1
+            validator = host.JournalInventoryValidator(anchor_quiescence=service.quiesce_anchors)
+            async with asyncio.timeout(15):
+                await host._check_static_authority_host(config, validator, None)  # noqa: SLF001
+                assert check_failed.is_set()
+                assert (await mutation).category == "target"
+                await host._check_static_authority_host(config, validator, None)  # noqa: SLF001
+        finally:
+            # A failure before the check must not leave the paused anchor holding close() open.
+            check_failed.set()
+            await service.close()
