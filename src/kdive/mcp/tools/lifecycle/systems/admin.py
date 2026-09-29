@@ -19,6 +19,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import (
     IllegalTransition,
+    JobState,
     RunState,
     SystemState,
 )
@@ -29,7 +30,7 @@ from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
-from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload
+from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload, dump_payload
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -79,6 +80,7 @@ _TEARDOWN = JobKind.TEARDOWN
 # Idempotency-store kinds (the registered tool names); ADR-0193.
 _REPROVISION_KIND = "systems.reprovision"
 _TEARDOWN_KIND = "systems.teardown"
+_AUTHORITY_MARKER = "external_boot_authority_v1"
 _EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
 _SYSTEM_TEARDOWN_AUTHORITY_SQL: LiteralString = (
     "SELECT activation_id, run_id, plan_identity, provider_kind, authority_instance "
@@ -572,7 +574,7 @@ async def _enqueue_authority_teardown(
         )
     prior = await dedup_replay(conn, _teardown_dedup_key(system.id))
     if prior is not None:
-        marker = prior.payload.get("external_boot_authority_v1")
+        marker = prior.payload.get(_AUTHORITY_MARKER)
         if not isinstance(marker, dict) or marker.get("activation_id") != str(activation.id):
             return ToolResponse.failure(
                 system_id,
@@ -581,7 +583,8 @@ async def _enqueue_authority_teardown(
                 suggested_next_actions=["jobs.wait", "systems.get"],
                 data={"reason": "ordinary_teardown_fenced_by_external_boot"},
             )
-        return job_envelope(prior, "system_id", system.id)
+        if prior.state is not JobState.FAILED:
+            return job_envelope(prior, "system_id", system.id)
     operation_identity = (
         "sha256:"
         + sha256(
@@ -608,12 +611,20 @@ async def _enqueue_authority_teardown(
             suggested_next_actions=["systems.get"],
             data={"reason": "external_boot_teardown_authority_unresolved"},
         )
+    if prior is not None and (
+        dump_payload(kind, payload).get(_AUTHORITY_MARKER) != prior.payload.get(_AUTHORITY_MARKER)
+    ):
+        return job_envelope(prior, "system_id", system.id)
+    # A failed authority teardown with the identical marker is re-run as a fresh attempt
+    # (ADR-0620 amendment). The System lock is held and only a `failed` row reaches here, so
+    # `TERMINAL` resets exactly that row.
     job = await queue.enqueue(
         conn,
         kind,
         payload,
         job_authorizing(ctx, system.project),
         _teardown_dedup_key(system.id),
+        recycle=queue.JobRecyclePolicy.NEVER if prior is None else queue.JobRecyclePolicy.TERMINAL,
     )
     envelope = job_envelope(job, "system_id", system.id)
     if idempotency_key is not None:
