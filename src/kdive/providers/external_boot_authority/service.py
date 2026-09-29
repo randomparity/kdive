@@ -17,6 +17,7 @@ from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHe
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    _TAKEOVER_PHASES,
     GENESIS_DIGEST,
     AuthorityAcknowledgementV1,
     AuthorityCleanupEvidenceContextV1,
@@ -1347,8 +1348,12 @@ class ExternalBootAuthorityService:
                     records = await self._anchor(binding, journal, records, watermark)
                 lane.watermark_generation = request.generation
                 active = lane.active
+                # Takeover records can share the suspended operation's identity (a System
+                # teardown's is fixed per activation); only operation phases say it is unresolved.
                 phases_by_operation = {
-                    record.operation_identity: record.phase for record in records[:-1]
+                    record.operation_identity: record.phase
+                    for record in records[:-1]
+                    if record.phase not in _TAKEOVER_PHASES
                 }
                 unresolved_restart = any(
                     phase
@@ -1367,7 +1372,7 @@ class ExternalBootAuthorityService:
                     unresolved = next(
                         record
                         for record in reversed(records[:-1])
-                        if phases_by_operation[record.operation_identity] == record.phase
+                        if phases_by_operation.get(record.operation_identity) == record.phase
                         and record.phase
                         in {
                             JournalPhase.ADMITTED,
@@ -1408,7 +1413,11 @@ class ExternalBootAuthorityService:
                 if lane.watermark_generation != request.generation:
                     raise AuthorityServiceError("superseded")
                 records = await self._recover(binding, journal, records)
-                phases = {record.operation_identity: record.phase for record in records}
+                phases = {
+                    record.operation_identity: record.phase
+                    for record in records
+                    if record.phase not in _TAKEOVER_PHASES
+                }
                 if any(
                     phase
                     in {

@@ -501,6 +501,53 @@ async def test_teardown_takeover_recovers_and_proves_each_generation_through_rea
     assert _head_row(migrated_url, case)[:2] == (response.journal_sequence, "terminal")
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("interrupted", ["mutation-started", "provider-returned"])
+async def test_takeover_after_an_interrupted_teardown_takeover_recovers_it(
+    tmp_path: Path, migrated_url: str, authority_role_dsns: _RoleDsns, interrupted: str
+) -> None:
+    """A takeover that fails before acknowledging leaves recovery to its successor (#2884)."""
+    case = _ready_teardown_case(migrated_url, "n")
+    adapter = _ContextAdapter()
+    service = ExternalBootAuthorityService(
+        repository=_database_repository(authority_role_dsns("kdive_provider_authority")),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    peer = AuthenticatedPeer(case.worker_id)
+    try:
+        with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+            authority = _allocate(worker, case)
+        takeover = _takeover_request(case, authority)
+        await service.acknowledge_takeover(peer, takeover)
+        adapter.interrupt = interrupted == "mutation-started"
+        adapter.observe_failures = 0 if adapter.interrupt else 1
+        with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+            await service.execute_teardown(peer, _teardown_request(case, takeover))
+        assert _head_row(migrated_url, case)[1] == interrupted
+
+        case = _reclaim(migrated_url, case)
+        with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+            authority = _allocate(worker, case)
+        adapter.interrupt, adapter.observe_failures = False, 1
+        with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+            await service.acknowledge_takeover(peer, _takeover_request(case, authority))
+        assert _head_row(migrated_url, case)[1] == "watermark-installed"
+
+        case = _reclaim(migrated_url, case)
+        with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+            authority = _allocate(worker, case)
+        takeover = _takeover_request(case, authority)
+        await service.acknowledge_takeover(peer, takeover)
+        response = await service.execute_teardown(peer, _teardown_request(case, takeover))
+    finally:
+        await service.close()
+
+    assert response.proof.disposition == "complete_ready"
+    sequence, phase, suspended = _head_row(migrated_url, case)
+    assert (sequence, phase, suspended) == (response.journal_sequence, "terminal", None)
+
+
 def _make_current(
     conn: psycopg.Connection, case: _AuthorityCase, authority: Any, proof: Any, sequence: int
 ) -> str:
