@@ -149,13 +149,16 @@ def readiness_unit(kdump_unit: str, console_device: str) -> str:
     the same second). local-libvirt renders exactly one NIC under SLIRP, which always leases, so
     ``systemd-networkd-wait-online`` cannot stall on an un-leased link.
 
+    The marker is written by one ``printf`` that starts with a newline (#2907): the serial getty
+    writes terminal escape sequences to the same device, and the marker must not share their line.
+
     Args:
         kdump_unit: The family's kdump systemd unit (``kdump.service`` on ``rhel``,
             ``kdump-tools.service`` on ``debian``); a wrong/absent name silently reopens the race
             (#824).
         console_device: The arch-resolved serial console device (``ttyS0`` on x86, ``hvc0`` on
             pseries — see ``kdive.domain.platform``). The unit orders after ``dev-<device>.device``
-            and echoes the marker to ``/dev/<device>``; on pseries a ``ttyS0`` unit would order
+            and writes the marker to ``/dev/<device>``; on pseries a ``ttyS0`` unit would order
             after a device that never appears and write to a console that does not exist, so the
             marker would never reach the host serial log and provisioning would time out.
     """
@@ -166,7 +169,7 @@ Wants=dev-{console_device}.device network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo {READINESS_MARKER} > /dev/{console_device}'
+ExecStart=/bin/sh -c 'printf "\\n{READINESS_MARKER}\\n" > /dev/{console_device}'
 RemainAfterExit=yes
 
 [Install]

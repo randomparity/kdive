@@ -98,6 +98,15 @@ def test_readiness_unit_targets_the_arch_console_device() -> None:
     assert "ttyS0" not in unit
 
 
+@pytest.mark.parametrize("console_device", ["ttyS0", "hvc0"])
+def test_readiness_unit_writes_the_marker_on_its_own_line(console_device: str) -> None:
+    # #2907: one printf that starts a fresh line, so bytes another console writer (the serial
+    # getty) left on the current line cannot glue to the marker.
+    unit = readiness_unit("kdump.service", console_device)
+    expected = f"ExecStart=/bin/sh -c 'printf \"\\nkdive-ready\\n\" > /dev/{console_device}'"
+    assert expected in unit.splitlines()
+
+
 def _ci_ctx(tmp_path: Path, *, is_cloud_image: bool) -> CustomizeContext:
     return CustomizeContext(
         kind="debug",
