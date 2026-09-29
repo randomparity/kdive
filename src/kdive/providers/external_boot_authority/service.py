@@ -8,7 +8,8 @@ import json
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -482,6 +483,11 @@ class ExternalBootAuthorityService:
         self._proof_checkpoint = proof_checkpoint
         self._system_service = system_service
         self._lanes: dict[UUID, _Lane] = {}
+        self._anchors_open = asyncio.Event()
+        self._anchors_open.set()
+        self._anchors_drained = asyncio.Event()
+        self._anchors_drained.set()
+        self._anchors_in_flight = 0
         self._completion_tasks: set[asyncio.Task[object]] = set()
         self._accepting = True
         self._closed = False
@@ -521,6 +527,20 @@ class ExternalBootAuthorityService:
             self._closed = True
         if failure is not None:
             raise failure
+
+    @asynccontextmanager
+    async def quiesce_anchors(self) -> AsyncIterator[None]:
+        """Hold new anchors and wait out in-flight ones, so every lane file equals its head.
+
+        ADR-0584 amendment (#2899): only the periodic readiness check enters this, once per
+        failed check and inside its timeout; it is not reentrant.
+        """
+        self._anchors_open.clear()
+        try:
+            await self._anchors_drained.wait()
+            yield
+        finally:
+            self._anchors_open.set()
 
     def _track_completion(self, task: asyncio.Task[object]) -> None:
         self._completion_tasks.add(task)
@@ -848,6 +868,24 @@ class ExternalBootAuthorityService:
             raise AuthorityServiceError("journal_conflict")
 
     async def _anchor(
+        self,
+        binding: AuthorityBinding,
+        journal: FileAuthorityJournal,
+        records: list[JournalRecordV1],
+        record: JournalRecordV1,
+    ) -> list[JournalRecordV1]:
+        while not self._anchors_open.is_set():
+            await self._anchors_open.wait()
+        self._anchors_in_flight += 1
+        self._anchors_drained.clear()
+        try:
+            return await self._anchor_record(binding, journal, records, record)
+        finally:
+            self._anchors_in_flight -= 1
+            if self._anchors_in_flight == 0:
+                self._anchors_drained.set()
+
+    async def _anchor_record(
         self,
         binding: AuthorityBinding,
         journal: FileAuthorityJournal,
