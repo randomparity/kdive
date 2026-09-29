@@ -10,8 +10,10 @@ Spec: `docs/workflow/specs/2026-09-28-teardown-takeover-design.md`.
 
 **Tech stack:** Python 3.14, psycopg 3, PL/pgSQL, pytest with disposable Postgres.
 
-Expected implementation size: 420–560 changed lines (M) — one ~70-line migration, ~15 service
-and admin lines, and ~350 lines across four test files.
+Expected implementation size: 420–560 changed lines (M) — the design-time map: a ~70-line
+migration, ~25 service and admin lines, and ~350 test lines. The built diff is larger (about
+1,450 lines, ~860 of them tests) because the DB-backed service tests, the interrupted-takeover
+defect, and the migration-tail registrations were added during the build.
 
 ## Global Constraints
 
@@ -30,11 +32,12 @@ and admin lines, and ~350 lines across four test files.
 | File | Change | Criterion |
 |---|---|---|
 | `src/kdive/db/schema/0161_external_boot_teardown_takeover.sql` | new | 1, 2 |
-| `src/kdive/providers/external_boot_authority/service.py` | `_recovery_observation`, `_execute_teardown` filters | 5 |
+| `src/kdive/providers/external_boot_authority/service.py` | `_recovery_observation`, `_execute_teardown`, `_acknowledge_takeover_bound` filters | 5 |
 | `src/kdive/mcp/tools/lifecycle/systems/admin.py` | `_enqueue_authority_teardown` recycle | 3 |
 | `tests/db/test_migration_0161_teardown_takeover.py` | new: head, fence, service, recycle/credit | 1–5 |
 | `tests/providers/local_libvirt/test_external_boot.py` | observation idempotency | 5 |
 | `tests/mcp/lifecycle/test_systems_tools.py` | recycle behavior | 3 |
+| `tests/db/test_migrate.py`, `test_migration_0091_*`, `0102_*`, `0115_*` | register 0161 in the tail checks | 1 |
 | `docs/adr/0620-authority-owned-system-teardown.md` | amendment | 6 |
 
 ## Task 1 — Takeover exemption (migration 0161, part 1)

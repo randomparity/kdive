@@ -86,7 +86,9 @@ enqueue and compares it with the failed job's marker. If they are identical, it 
 (attempt 0, same id and `max_attempts`). The check and the recycle run in the transaction that
 holds the System advisory lock, and only a `failed` row reaches the recycle, so `succeeded` is
 never reset. Every other prior state (live, `succeeded`, `canceled`) and any marker mismatch keeps
-today's replay or conflict. No new recycle policy or queue change is needed.
+today's replay or conflict. No new recycle policy or queue change is needed. The recycle keeps the
+row's `authorizing` tuple, so the finalizer's `systems.teardown` audit row names the principal
+who first requested the teardown; the re-running caller must hold `admin` on the same project.
 
 Recycling is safe against the authority tables:
 
