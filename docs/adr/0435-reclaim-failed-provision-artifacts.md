@@ -97,3 +97,20 @@ lifetime redesign.
   is ever reprovisioned) remain the backstops.
 - **#1502 unaffected.** Re-scoping the uploaded rootfs to the investigation lifetime is deferred to
   a design session; this backstop is orthogonal to it.
+
+### Amendment (2026-09-29): teardown of a failed System reclaims without a transition (#2908)
+
+The Context above says the host artifacts a failed provision leaves behind "are reclaimed only by
+`teardown`, which a `failed` System can never run". The transition half stays true: `failed` has
+no outbound edge, and `failed -> torn_down` remains illegal. The job half no longer holds. A
+teardown job for a `failed` System (queued, for example, behind a provision that then failed) now
+skips the `tearing_down` move, runs the same idempotent provider snapshot and domain teardown and
+core reclaim a `torn_down` re-run does, leaves the System `failed`, and succeeds. Before this, it
+raised `IllegalTransition` and burned every attempt as `infrastructure_failure`.
+Mutation-obligation discharge for a `failed` System stays with ADR-0652's reconciler lane, and
+this does not make the reconciler enqueue teardown for `failed` Systems.
+[ADR-0441](0441-investigation-scoped-uploaded-rootfs.md) repeats the same premise; its
+overlay-absence gate does not depend on it and is unchanged. Rejected: a no-op teardown for
+`failed`, which would leave provider leftovers unreclaimed, and a `failed -> tearing_down` edge,
+which would widen a terminal state. Design:
+[`2026-09-29-failed-system-teardown-design.md`](../workflow/specs/2026-09-29-failed-system-teardown-design.md).
