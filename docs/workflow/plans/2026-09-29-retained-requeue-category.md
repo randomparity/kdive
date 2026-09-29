@@ -41,10 +41,10 @@ Steps:
 2. Write the migration:
 
 ```sql
--- #2916 (ADR-0483: both retry seams agree): the retained_quarantine requeue in the 0147
--- teardown finalizer kept error_category = 'conflict' on a queued job, which every other requeue
--- clears and which ToolResponse forbids on a non-failure status.  Rewrite in place (as 0149 does)
--- so 0149's ownership patch survives; attempt accounting on this path is #2917's.
+-- #2916: the retained_quarantine requeue in the 0147 teardown finalizer kept
+-- error_category = 'conflict' on a queued job.  Every other requeue clears it, and the tool
+-- envelope (ADR-0019) forbids a category on a non-failure status.  Rewrite in place (as 0149
+-- does) so 0149's ownership patch survives; attempt accounting on this path is #2917's.
 DO $$
 DECLARE
     v_definition text;
