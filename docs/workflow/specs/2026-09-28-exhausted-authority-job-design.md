@@ -25,7 +25,7 @@ Token `q2889-5dc4e3ed`; amends [ADR-0620](../../adr/0620-authority-owned-system-
   a later statement requires no authority row for the job in `allocating` or `current`, and sets
   `failed`/`lease_expired`. Every receipt path needs such a row and a `running` job, and
   allocation rechecks the job under its own row lock, so no receipt can commit after it.
-  `repair_abandoned_jobs` calls it. No Run compensation: an activate job's Run is `succeeded`.
+  `repair_abandoned_jobs` calls it; the marker's `created`/`running` Run fails with the job.
 - **Rejected:** option 3 (splits receipt ownership), option 2 (cancel, recycle `canceled`).
 
 ### Failure model
@@ -57,4 +57,4 @@ Token `q2889-5dc4e3ed`; amends [ADR-0620](../../adr/0620-authority-owned-system-
   `tests/mcp/lifecycle/test_systems_tools.py`.
 - Dead attempt, credit, 0162, grant, reconciler call — focused-test:
   `tests/db/test_exhausted_authority_job.py`.
-- Live settle — task-test-not-applicable: needs the retained lab fixture; runs after review.
+- Live settle — task-test-not-applicable: retained lab fixture, supported calls only, post-review.
