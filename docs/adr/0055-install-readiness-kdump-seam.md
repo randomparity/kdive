@@ -156,3 +156,26 @@ that never comes up stays `pending` throughout (→ `boot_timeout`). A panic lea
 - **Keep `_real_kdump_check` as a deferred `live_vm` stub.** Leaves a `MISSING_DEPENDENCY` stub
   reachable by a `crashkernel`-provisioned System. Rejected for a real, host-free gate now
   (Decisions 5–6).
+
+### Amendment (2026-09-29): terminal escape sequences before the marker (#2907)
+
+Decision 3's marker match now runs on the console text with complete 7-bit ECMA-48 escape
+sequences removed (control strings terminated by ST or BEL, CSI, and other `ESC` sequences; an
+unterminated one stays in place). The crash scan uses the same stripped text, so the pre-marker
+region is still everything before the marker. The marker shape is unchanged: its own token at a
+line start or after horizontal whitespace. The readiness unit now writes `\nkdive-ready\n` in one
+`printf`, so the marker starts a fresh line on images built after this change.
+
+Context: `serial-getty` writes an OSC 3008 context record and a DCS XTGETTCAP query to the same
+console, each ending in `ESC \`, immediately before the unit's marker. The `\` glued to the marker
+kept the verdict `pending` for the whole boot window.
+
+Considered & rejected:
+
+- **Accept an ST or BEL terminator as a marker boundary.** verified: at `25f6f9c95`,
+  `classify_console(b"\x1b[0mkdive-ready\r\n")` returns `pending`; a boundary that names only
+  the string terminators leaves a CSI such as an SGR reset glued to the marker.
+- **Fix only the readiness unit.** judgment: images already built and published keep the race;
+  the host matcher is the only layer that reaches them.
+- **Fix only the host matcher.** judgment: future images would still share a line with whatever
+  another writer printed, and depend on the matcher recognising that writer's bytes.
