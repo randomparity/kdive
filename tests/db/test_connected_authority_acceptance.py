@@ -724,13 +724,13 @@ async def test_periodic_check_racing_an_anchor_waits_for_the_head_advance(
         peer = AuthenticatedPeer(case.worker_id)
         service = host._build_mutation_service(config)  # noqa: SLF001
         assert service is not None
+        appended = asyncio.Event()
+        check_failed = asyncio.Event()
         try:
             await service.acknowledge_takeover(peer, takeover)
             lane = journal / f"{case.system_id}.jsonl"
             repository = cast(Any, service)._repository  # noqa: SLF001
             advance = repository.advance
-            appended = asyncio.Event()
-            check_failed = asyncio.Event()
 
             async def paused_advance(*args: Any) -> str:
                 if not appended.is_set():
@@ -773,4 +773,6 @@ async def test_periodic_check_racing_an_anchor_waits_for_the_head_advance(
                 assert (await mutation).category == "target"
                 await host._check_static_authority_host(config, validator, None)  # noqa: SLF001
         finally:
+            # A failure before the check must not leave the paused anchor holding close() open.
+            check_failed.set()
             await service.close()

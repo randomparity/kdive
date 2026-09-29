@@ -2367,12 +2367,15 @@ def test_periodic_check_still_refuses_a_divergence_that_persists_under_quiescenc
     monkeypatch.setattr(host, "_database_heads", heads)
     quiescence = _CountingQuiescence()
     validator = host.JournalInventoryValidator(anchor_quiescence=quiescence)
+    asyncio.run(validator.validate(config, (_head_of(records[1]),)))
+    cached = dict(validator._cache)  # noqa: SLF001
+    assert cached
 
     with pytest.raises(HostReadinessError, match=f"journal: {case}"):
         asyncio.run(validator.validate_current(config))
 
     assert (reads, quiescence.entered) == (2, 1)
-    assert validator._cache == {}  # noqa: SLF001 - no divergent view may become cached evidence
+    assert validator._cache == cached  # noqa: SLF001 - a divergent view never becomes evidence
 
 
 def test_unarmed_check_never_quiesces(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
