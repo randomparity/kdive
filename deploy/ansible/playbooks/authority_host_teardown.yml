@@ -58,7 +58,7 @@
       become_user: "{{ authority_account }}"
       register: authority_user_unit_load_state
       changed_when: false
-      when: authority_account in ansible_facts.getent_passwd
+      when: ansible_facts.getent_passwd[authority_account] | default(none) is not none
 
     - name: Stop and disable the external-boot authority service
       ansible.builtin.systemd_service:
@@ -79,7 +79,7 @@
       become: true
       become_user: "{{ authority_account }}"
       when:
-        - authority_account in ansible_facts.getent_passwd
+        - ansible_facts.getent_passwd[authority_account] | default(none) is not none
         - authority_user_unit_load_state.stdout != 'not-found'
 
     - name: Inspect the stopped external-boot authority system unit
@@ -107,7 +107,7 @@
       register: authority_user_unit_active_state
       changed_when: false
       failed_when: authority_user_unit_active_state.rc not in [0, 3, 4]
-      when: authority_account in ansible_facts.getent_passwd
+      when: ansible_facts.getent_passwd[authority_account] | default(none) is not none
 
     - name: Inspect authority-owned processes after service stop
       ansible.builtin.command:
@@ -120,17 +120,17 @@
       register: authority_owned_processes
       changed_when: false
       failed_when: authority_owned_processes.rc not in [0, 1]
-      when: authority_account in ansible_facts.getent_passwd
+      when: ansible_facts.getent_passwd[authority_account] | default(none) is not none
 
     - name: Assert authority services and processes are inactive
       ansible.builtin.assert:
         that:
           - authority_system_unit_active_state.rc != 0
           - >-
-            authority_account not in ansible_facts.getent_passwd
+            ansible_facts.getent_passwd[authority_account] | default(none) is none
             or authority_user_unit_active_state.rc != 0
           - >-
-            authority_account not in ansible_facts.getent_passwd
+            ansible_facts.getent_passwd[authority_account] | default(none) is none
             or authority_owned_processes.rc == 1
 
     - name: Remove authority unit and endpoint artifacts
@@ -167,7 +167,7 @@
           /run/user/{{ ansible_facts.getent_passwd[authority_account][1] }}
       become: true
       become_user: "{{ authority_account }}"
-      when: authority_account in ansible_facts.getent_passwd
+      when: ansible_facts.getent_passwd[authority_account] | default(none) is not none
 
     - name: Revoke the authority database LOGIN
       ansible.builtin.command:
@@ -228,6 +228,61 @@
       ansible.builtin.assert:
         that: authority_database_login_state.stdout == 'false'
         fail_msg: the authority database LOGIN must exist with LOGIN disabled after teardown
+
+    # Removing the drop-in changes only the unit's configured limit; a lingering manager keeps its
+    # unlimited ceiling until it restarts (ADR-0708). The restart stops every unit the manager
+    # runs, so it follows the service and process stops asserted above; it follows the LOGIN
+    # revocation so a failure here cannot leave the LOGIN usable.
+    - name: Read the authority user manager main PID
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemctl
+          - show
+          - --property=MainPID
+          - --value
+          - "user@{{ ansible_facts.getent_passwd[authority_account][1] }}.service"
+      register: authority_user_manager_pid
+      changed_when: false
+      when: ansible_facts.getent_passwd[authority_account] | default(none) is not none
+
+    - name: Read the authority user manager configured memlock limit
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemctl
+          - show
+          - --property=LimitMEMLOCK
+          - --value
+          - "user@{{ ansible_facts.getent_passwd[authority_account][1] }}.service"
+      register: authority_user_manager_configured_memlock
+      changed_when: false
+      when: ansible_facts.getent_passwd[authority_account] | default(none) is not none
+
+    - name: Read the authority user manager running memlock limit
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/prlimit
+          - --memlock
+          - --noheadings
+          - --output=HARD
+          - "--pid={{ authority_user_manager_pid.stdout }}"
+      environment:
+        LC_ALL: C
+      register: authority_user_manager_running_memlock
+      changed_when: false
+      when:
+        - ansible_facts.getent_passwd[authority_account] | default(none) is not none
+        - authority_user_manager_pid.stdout not in ["", "0"]
+
+    - name: Restart the authority user manager to retire its memlock ceiling
+      ansible.builtin.systemd_service:
+        name: "user@{{ ansible_facts.getent_passwd[authority_account][1] }}.service"
+        state: restarted
+      when:
+        - ansible_facts.getent_passwd[authority_account] | default(none) is not none
+        - authority_user_manager_pid.stdout not in ["", "0"]
+        - authority_user_manager_running_memlock.stdout | trim == 'unlimited'
+        - authority_user_manager_configured_memlock.stdout | trim != 'infinity'
+
 
     - name: Retire the transient proof worker incarnation
       ansible.builtin.command:

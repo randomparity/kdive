@@ -60,8 +60,66 @@
       /etc/systemd/system/user@{{ ansible_facts.getent_passwd['kdive-provider-authority'][1]
       }}.service.d/kdive-memlock.conf
     state: absent
-  when: ansible_facts.getent_passwd['kdive-provider-authority'] is not none
+  when: ansible_facts.getent_passwd['kdive-provider-authority'] | default(none) is not none
   notify: Reload systemd after authority removal
+
+# Removing the drop-in changes only the unit's configured limit; a lingering manager keeps its
+# unlimited ceiling until it restarts (ADR-0708). A re-run whose removal reports ok notifies no
+# handler, and systemctl show reports the loaded limit until a reload, so this reload is
+# unconditional. The restart precedes disabling linger, which may stop the manager instead.
+- name: Reload systemd before reading the retiring authority user manager
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Read the retiring authority user manager main PID
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - show
+      - --property=MainPID
+      - --value
+      - "user@{{ ansible_facts.getent_passwd['kdive-provider-authority'][1] }}.service"
+  register: provider_authority_host_retired_manager_pid
+  changed_when: false
+  when: ansible_facts.getent_passwd['kdive-provider-authority'] | default(none) is not none
+
+- name: Read the retiring authority user manager configured memlock limit
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - show
+      - --property=LimitMEMLOCK
+      - --value
+      - "user@{{ ansible_facts.getent_passwd['kdive-provider-authority'][1] }}.service"
+  register: provider_authority_host_retired_configured_memlock
+  changed_when: false
+  when: ansible_facts.getent_passwd['kdive-provider-authority'] | default(none) is not none
+
+- name: Read the retiring authority user manager running memlock limit
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/prlimit
+      - --memlock
+      - --noheadings
+      - --output=HARD
+      - "--pid={{ provider_authority_host_retired_manager_pid.stdout }}"
+  environment:
+    LC_ALL: C
+  register: provider_authority_host_retired_running_memlock
+  changed_when: false
+  when:
+    - ansible_facts.getent_passwd['kdive-provider-authority'] | default(none) is not none
+    - provider_authority_host_retired_manager_pid.stdout not in ["", "0"]
+
+- name: Restart the retiring authority user manager to drop its memlock ceiling
+  ansible.builtin.systemd_service:
+    name: "user@{{ ansible_facts.getent_passwd['kdive-provider-authority'][1] }}.service"
+    state: restarted
+  when:
+    - ansible_facts.getent_passwd['kdive-provider-authority'] | default(none) is not none
+    - provider_authority_host_retired_manager_pid.stdout not in ["", "0"]
+    - provider_authority_host_retired_running_memlock.stdout | trim == 'unlimited'
+    - provider_authority_host_retired_configured_memlock.stdout | trim != 'infinity'
 
 - name: Retire authority user-service boot persistence
   ansible.builtin.command:

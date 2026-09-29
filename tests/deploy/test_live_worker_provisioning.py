@@ -864,6 +864,97 @@ def test_authority_teardown_removes_the_user_manager_memlock_drop_in() -> None:
     assert tasks.index(removal) < tasks.index(inspect) < tasks.index(check)
 
 
+def _teardown_tasks() -> list[dict[str, object]]:
+    document: object = yaml.safe_load(_text(AUTHORITY_TEARDOWN))
+    assert isinstance(document, list)
+    return cast(list[dict[str, object]], cast(dict[str, object], document[0])["tasks"])
+
+
+KNOWN_AUTHORITY = "ansible_facts.getent_passwd[authority_account] | default(none) is not none"
+
+
+def test_authority_teardown_passwd_guards_tolerate_a_missing_account() -> None:
+    # getent with fail_key: false records a missing account as a None entry, so a membership
+    # test passes and indexing the entry fails on a host without the account (#2891).
+    tasks = _teardown_tasks()
+    assert " in ansible_facts.getent_passwd" not in yaml.safe_dump(tasks, width=10**6)
+    indexing = [
+        t for t in tasks if "getent_passwd[authority_account][1]" in yaml.safe_dump(t, width=10**6)
+    ]
+    assert len(indexing) >= 9
+    for task in indexing:
+        when = task["when"]
+        first = when if isinstance(when, str) else cast(list[str], when)[0]
+        assert first == KNOWN_AUTHORITY, task["name"]
+    known = Environment(undefined=StrictUndefined).compile_expression(KNOWN_AUTHORITY)
+    account = "kdive-provider-authority"
+    missing = {"getent_passwd": {account: None}}
+    assert known(authority_account=account, ansible_facts=missing) is False
+    present = {"getent_passwd": {account: ["x", "981"]}}
+    assert known(authority_account=account, ansible_facts=present) is True
+    check = next(
+        t for t in tasks if t["name"] == "Assert authority services and processes are inactive"
+    )
+    clauses = cast(list[str], cast(dict[str, object], check["ansible.builtin.assert"])["that"])
+    for clause in clauses[1:]:
+        evaluate = Environment(undefined=StrictUndefined).compile_expression(clause)
+        assert evaluate(authority_account=account, ansible_facts=missing) is True
+
+
+def test_authority_teardown_restarts_a_user_manager_holding_the_retired_ceiling() -> None:
+    # Removing the drop-in only changes the unit's configured limit; a lingering authority user
+    # manager keeps its unlimited ceiling until it restarts (ADR-0708).
+    tasks = _teardown_tasks()
+    named = {cast(str, t["name"]): t for t in tasks}
+    manager = "user@{{ ansible_facts.getent_passwd[authority_account][1] }}.service"
+    pid = named["Read the authority user manager main PID"]
+    configured = named["Read the authority user manager configured memlock limit"]
+    running = named["Read the authority user manager running memlock limit"]
+    restart = named["Restart the authority user manager to retire its memlock ceiling"]
+    show = ["/usr/bin/systemctl", "show"]
+    assert cast(dict[str, list[str]], pid["ansible.builtin.command"])["argv"] == [
+        *show,
+        "--property=MainPID",
+        "--value",
+        manager,
+    ]
+    assert cast(dict[str, list[str]], configured["ansible.builtin.command"])["argv"] == [
+        *show,
+        "--property=LimitMEMLOCK",
+        "--value",
+        manager,
+    ]
+    assert cast(dict[str, list[str]], running["ansible.builtin.command"])["argv"] == [
+        "/usr/bin/prlimit",
+        "--memlock",
+        "--noheadings",
+        "--output=HARD",
+        f"--pid={{{{ {pid['register']}.stdout }}}}",
+    ]
+    # prlimit localizes "unlimited" through gettext.
+    assert running["environment"] == {"LC_ALL": "C"}
+    assert restart["ansible.builtin.systemd_service"] == {"name": manager, "state": "restarted"}
+    running_pid = f'{pid["register"]}.stdout not in ["", "0"]'
+    assert running["when"] == [KNOWN_AUTHORITY, running_pid]
+    assert restart["when"] == [
+        KNOWN_AUTHORITY,
+        running_pid,
+        f"{running['register']}.stdout | trim == 'unlimited'",
+        f"{configured['register']}.stdout | trim != 'infinity'",
+    ]
+    order = [
+        named["Assert authority services and processes are inactive"],
+        named["Remove the authority user manager memlock drop-in"],
+        named["Reload systemd after authority unit removal"],
+        named["Assert the authority database LOGIN is revoked"],
+        pid,
+        configured,
+        running,
+        restart,
+    ]
+    assert [tasks.index(t) for t in order] == sorted(tasks.index(t) for t in order)
+
+
 def test_authority_teardown_reports_login_revocation_only_on_transition() -> None:
     document: object = yaml.safe_load(_text(AUTHORITY_TEARDOWN))
     assert isinstance(document, list)

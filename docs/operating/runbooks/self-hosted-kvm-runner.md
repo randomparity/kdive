@@ -285,8 +285,14 @@ ansible-playbook playbooks/authority_host_teardown.yml --limit <host> \
 
 Teardown fails before changing the host when the administrative DSN is absent. It stops both
 services, rejects remaining authority processes, revokes and verifies the database LOGIN, and
-removes the installed runtime. It deliberately retains the credential and journal directories for
-operator inspection; remove them only after confirming no later #2140 deployment owns them.
+removes the installed runtime and the authority user manager's memlock drop-in. A running user
+manager that still holds the unlimited memlock ceiling is then restarted, which ends anything it
+still runs; see [ADR-0708](../../adr/0708-authority-retirement-restarts-the-user-manager.md).
+The `provider_authority_host` role's disabled path does the same. Teardown also completes when the
+authority account is gone but its retained credential and journal directories remain, skipping
+the account's user-scope steps. It deliberately retains
+the credential and journal directories for operator inspection; remove them only after
+confirming no later #2140 deployment owns them.
 
 ## ppc64le runner (drop-in)
 
