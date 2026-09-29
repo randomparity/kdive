@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -29,7 +28,6 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_record_bytes,
     record_digest,
 )
-from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     ExternalBootAuthorityService,
@@ -38,6 +36,15 @@ from tests.db.external_boot_authority_support import (
     _allocate,
     _RoleDsns,
     _seed_case,
+)
+from tests.db.external_boot_journal_support import (
+    _DIGEST,
+    _advance_raw,
+    _database_repository,
+    _payload,
+    _promote,
+    _record,
+    _takeover_request,
 )
 from tests.providers.external_boot_authority.service_support import _Adapter
 
@@ -50,54 +57,6 @@ _FUNCTIONS = {
     "list_external_boot_authority_journal_heads(text)",
 }
 
-_DIGEST = "sha256:" + "d" * 64
-
-
-def _record(
-    case: Any,
-    authority: Any,
-    sequence: int,
-    previous_digest: str,
-    phase: JournalPhase,
-    **changes: object,
-) -> JournalRecordV1:
-    values: dict[str, object] = {
-        "authority_id": authority.authority_id,
-        "generation": authority.generation,
-        "system_id": case.system_id,
-        "activation_id": case.activation_id,
-        "run_id": case.run_id,
-        "plan_identity": "sha256:" + "a" * 64,
-        "purpose": case.purpose,
-        "operation": case.operation,
-        "provider_kind": case.provider_kind,
-        "authority_instance": case.authority_instance,
-        "operation_identity": case.operation_identity,
-        "operation_digest": authority.operation_digest,
-        "sequence": sequence,
-        "previous_digest": previous_digest,
-        "phase": phase,
-        "attempt_id": case.job_id,
-    }
-    if phase not in {
-        JournalPhase.WATERMARK_INSTALLED,
-        JournalPhase.TAKEOVER_SUPERSEDED,
-        JournalPhase.TAKEOVER_ACKNOWLEDGED,
-    }:
-        values |= {
-            "expected_source_identity": "source-a",
-            "intended_target_identity": "target-a",
-            "recovery_objects": (),
-        }
-    values.update(changes)
-    return JournalRecordV1.model_validate(values)
-
-
-def _payload(record: JournalRecordV1) -> dict[str, object]:
-    return record.model_dump(mode="json", by_alias=True) | {
-        "canonical_record": canonical_record_bytes(record).decode()
-    }
-
 
 def _canonicalize(payload: dict[str, object]) -> None:
     canonical = dict(payload)
@@ -105,29 +64,6 @@ def _canonicalize(payload: dict[str, object]) -> None:
     payload["canonical_record"] = json.dumps(
         canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     )
-
-
-def _advance_raw(
-    conn: psycopg.Connection,
-    case: Any,
-    authority: Any,
-    expected_sequence: int,
-    expected_digest: str,
-    payload: dict[str, object],
-) -> str:
-    row = conn.execute(
-        "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
-        (
-            case.worker_id,
-            authority.authority_id,
-            authority.generation,
-            expected_sequence,
-            expected_digest,
-            Jsonb(payload),
-        ),
-    ).fetchone()
-    assert row is not None
-    return row[0]
 
 
 def _head(conn: psycopg.Connection, case: Any, authority: Any) -> tuple[object, ...] | None:
@@ -158,35 +94,6 @@ def _seed_allocated(
     return case, authority
 
 
-def _database_repository(dsn: str) -> DatabaseAuthorityRepository:
-    @asynccontextmanager
-    async def connections():
-        connection = await psycopg.AsyncConnection.connect(dsn)
-        try:
-            yield connection
-        finally:
-            await connection.close()
-
-    return DatabaseAuthorityRepository(connections)
-
-
-def _takeover_request(case: Any, authority: Any) -> AuthorityTakeoverRequestV1:
-    return AuthorityTakeoverRequestV1(
-        authority_id=authority.authority_id,
-        generation=authority.generation,
-        system_id=case.system_id,
-        activation_id=case.activation_id,
-        run_id=case.run_id,
-        plan_identity="sha256:" + "a" * 64,
-        purpose=case.purpose,
-        operation=case.operation,
-        provider_kind=case.provider_kind,
-        authority_instance=case.authority_instance,
-        operation_identity=case.operation_identity,
-        operation_digest=authority.operation_digest,
-    )
-
-
 def _mutation_request(request: AuthorityTakeoverRequestV1) -> AuthorityMutationRequestV1:
     return AuthorityMutationRequestV1.model_validate(
         request.model_dump(mode="json", by_alias=True)
@@ -197,34 +104,6 @@ def _mutation_request(request: AuthorityTakeoverRequestV1) -> AuthorityMutationR
             "recovery_objects": [],
         }
     )
-
-
-def _promote(
-    migrated_url: str, case: Any, authority: Any, acknowledgement: JournalRecordV1
-) -> None:
-    with psycopg.connect(migrated_url) as conn:
-        conn.execute(
-            "UPDATE external_boot_authorities SET state='current', acknowledged_at=now() "
-            "WHERE id=%s",
-            (authority.authority_id,),
-        )
-        conn.execute(
-            "INSERT INTO external_boot_authority_acknowledgements "
-            "(authority_id,system_id,generation,authority_instance,operation_identity,"
-            "operation_digest,journal_sequence,journal_digest,positive_quiescence_digest) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (
-                authority.authority_id,
-                case.system_id,
-                authority.generation,
-                case.authority_instance,
-                case.operation_identity,
-                authority.operation_digest,
-                acknowledgement.sequence,
-                record_digest(acknowledgement),
-                _DIGEST,
-            ),
-        )
 
 
 def _allocate_successor(
