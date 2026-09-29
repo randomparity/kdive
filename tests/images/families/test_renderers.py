@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+
+import pytest
+
 from kdive.images.families.renderers import (
+    _write_console_marker,
     partition_steps,
     render_firstboot_script,
     render_firstboot_unit,
@@ -13,6 +19,10 @@ from kdive.images.families.steps import (
     RunCommand,
     Step,
     WriteFile,
+)
+from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
+    CustomizeVerdict,
+    classify_customization_console,
 )
 
 
@@ -53,8 +63,14 @@ def test_firstboot_script_shape() -> None:
     assert "multi-user.target.wants/kdive-customize.service" in script
     assert "/usr/local/sbin/kdive-customize" in script
     assert script.rstrip().endswith("systemctl poweroff")
-    assert 'echo kdive-customize-ok > "$console"' in script
-    assert 'echo kdive-customize-failed > "$console"' in script
+    assert (
+        'printf "\\nkdive-customize-ok\\n" | dd bs=64 iflag=fullblock status=none > "$console"'
+        in script
+    )
+    assert (
+        'printf "\\nkdive-customize-failed\\n" | dd bs=64 iflag=fullblock status=none > "$console"'
+        in script
+    )
 
 
 def test_firstboot_script_uses_the_family_install_command() -> None:
@@ -108,7 +124,12 @@ def test_firstboot_script_syncs_before_the_ok_marker() -> None:
     script = _script([InstallPackages(("drgn",))], install_command="dnf -y install")
     body = script.splitlines()
     sync_idx = body.index("sync")
-    ok_idx = next(i for i, ln in enumerate(body) if ln == 'echo kdive-customize-ok > "$console"')
+    ok_idx = next(
+        i
+        for i, ln in enumerate(body)
+        if ln
+        == 'printf "\\nkdive-customize-ok\\n" | dd bs=64 iflag=fullblock status=none > "$console"'
+    )
     assert sync_idx < ok_idx
 
 
@@ -132,3 +153,24 @@ def test_firstboot_unit_disables_the_systemd_start_timeout() -> None:
     """
     unit = render_firstboot_unit(script_path="/usr/local/sbin/kdive-customize")
     assert "TimeoutStartSec=infinity" in unit
+
+
+@pytest.mark.parametrize(
+    ("marker", "verdict"),
+    [
+        ("kdive-customize-ok", CustomizeVerdict.OK),
+        ("kdive-customize-failed", CustomizeVerdict.FAILED),
+    ],
+)
+def test_console_marker_is_one_write_on_its_own_line(
+    marker: str, verdict: CustomizeVerdict
+) -> None:
+    """A leading newline keeps the marker off a log's unterminated last line (#2922)."""
+    written = subprocess.run(
+        ["sh", "-c", _write_console_marker(marker)],
+        env={"console": "/dev/stdout", "PATH": os.environ["PATH"]},
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+    assert written == f"\n{marker}\n".encode()
+    assert classify_customization_console(b"dnf: no trailing newline" + written) is verdict
