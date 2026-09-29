@@ -328,6 +328,10 @@ class ToolResponse(BaseModel):
             status=job.state.value,
             suggested_next_actions=actions,
             refs=refs,
-            error_category=job.error_category.value if job.error_category else None,
+            error_category=(
+                job.error_category.value
+                if job.error_category and job.state is JobState.FAILED
+                else None
+            ),
             data=data,
         )
