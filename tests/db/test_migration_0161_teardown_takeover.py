@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -11,12 +13,25 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
+    AuthorityCommitContextV1,
+    AuthorityTeardownMutationRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
+from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
+    AuthorityServiceError,
+    ExternalBootAuthorityService,
+)
+from kdive.providers.external_boot_authority.teardown import (
+    AuthoritySystemTeardownFacts,
+    AuthorityTeardownReservationV1,
+)
+from kdive.providers.ports.external_boot import OpaqueProviderRef
 from tests.db.external_boot_authority_support import (
     _PLAN,
     _allocate,
@@ -27,10 +42,14 @@ from tests.db.external_boot_authority_support import (
 from tests.db.test_external_boot_authority_journal_migration import (
     _DIGEST,
     _advance_raw,
+    _database_repository,
     _payload,
     _promote,
     _record,
+    _takeover_request,
 )
+from tests.db.test_migration_0147_external_boot_system_teardown import _make_ready_prepared
+from tests.providers.external_boot_authority.service_support import _Adapter
 
 _OPERATION_PHASES = (
     JournalPhase.ADMITTED,
@@ -366,3 +385,96 @@ def test_activate_allocation_is_fenced_by_teardown(
         assert _allocation_status(authority_role_dsns, _reclaim(migrated_url, teardown)) == (
             "allocated"
         )
+
+
+class _ContextAdapter(_Adapter):
+    """Record the journal sequence of every teardown context; fail execution on demand."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupt = False
+        self.executed: list[int] = []
+        self.observed: list[int] = []
+        self.facts = AuthoritySystemTeardownFacts(
+            intent_identity="sha256:" + "a" * 64,
+            domain_absent=True,
+            overlay_absent=True,
+            baseline_absent=True,
+            recovery_absent=True,
+            quarantine_retained=False,
+            completed_at=datetime(2026, 9, 28, tzinfo=UTC),
+            reservation=AuthorityTeardownReservationV1(
+                disposition="ready",
+                store_identity=OpaqueProviderRef(ref="store/private"),
+                owner_key=OpaqueProviderRef(ref="owner/private"),
+                reserved_bytes=4096,
+            ),
+        )
+
+    async def execute_system_teardown(
+        self,
+        request: AuthorityTeardownMutationRequestV1,
+        context: AuthorityCommitContextV1,
+        reservation: AuthorityTeardownReservationV1,
+    ) -> AuthoritySystemTeardownFacts:
+        self.executed.append(context.journal_sequence)
+        if self.interrupt:
+            raise RuntimeError("injected host interruption after mutation-started")
+        return self.facts
+
+    async def observe_system_teardown(
+        self, request: AuthorityTeardownMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> AuthoritySystemTeardownFacts:
+        self.observed.append(context.journal_sequence)
+        return self.facts
+
+
+@pytest.mark.anyio
+async def test_teardown_takeover_recovers_and_proves_each_generation_through_real_cas(
+    tmp_path: Path, migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """Three generations share one teardown identity; each proof binds its own anchor."""
+    with psycopg.connect(migrated_url) as seed:
+        case = _seed_case(seed, purpose="teardown", worker_suffix="g")
+        _make_ready_prepared(seed, case)
+        seed.execute(
+            "INSERT INTO external_boot_reservations "
+            "(activation_id,store_identity,owner_key,reserved_bytes,state,ready_at) "
+            "VALUES (%s,'store/private','owner/private',4096,'ready',now())",
+            (case.activation_id,),
+        )
+    adapter = _ContextAdapter()
+    service = ExternalBootAuthorityService(
+        repository=_database_repository(authority_role_dsns("kdive_provider_authority")),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    peer = AuthenticatedPeer(case.worker_id)
+    try:
+        for generation in (1, 2, 3):
+            if generation > 1:
+                case = _reclaim(migrated_url, case)
+            with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+                authority = _allocate(worker, case)
+            takeover = _takeover_request(case, authority)
+            await service.acknowledge_takeover(peer, takeover)
+            request = AuthorityTeardownMutationRequestV1.model_validate(
+                takeover.model_dump(mode="json", by_alias=True)
+                | {
+                    "schema": "external-boot-authority-teardown-request-v1",
+                    "attempt_id": str(uuid5(NAMESPACE_URL, case.operation_identity)),
+                }
+            )
+            adapter.interrupt = generation < 3
+            if adapter.interrupt:
+                with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+                    await service.execute_teardown(peer, request)
+            else:
+                response = await service.execute_teardown(peer, request)
+    finally:
+        await service.close()
+
+    first, second, third = adapter.executed
+    assert adapter.observed == [first, second, third, third]
+    assert response.proof.disposition == "complete_ready"
+    assert _head_row(migrated_url, case)[:2] == (response.journal_sequence, "terminal")

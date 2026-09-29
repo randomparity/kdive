@@ -1168,6 +1168,8 @@ class ExternalBootAuthorityService:
         records: list[JournalRecordV1],
     ) -> AuthorityObservationV1:
         if isinstance(request, AuthorityTeardownMutationRequestV1):
+            # A teardown's attempt id is fixed per operation identity, so earlier generations
+            # of the same teardown share it; only the authority generation names this anchor.
             started = next(
                 (
                     item
@@ -1175,6 +1177,8 @@ class ExternalBootAuthorityService:
                     if item.phase is JournalPhase.MUTATION_STARTED
                     and item.operation_identity == record.operation_identity
                     and item.attempt_id == record.attempt_id
+                    and item.authority_id == record.authority_id
+                    and item.generation == record.generation
                 ),
                 None,
             )
@@ -2236,11 +2240,15 @@ class ExternalBootAuthorityService:
             records = list(journal.load())
         finally:
             journal.close()
+        # Bind this generation's own anchor: a recovered predecessor of the same teardown
+        # shares its operation identity and attempt id.
         operation_records = [
             record
             for record in records
             if record.operation_identity == request.operation_identity
             and record.attempt_id == request.attempt_id
+            and record.authority_id == request.authority_id
+            and record.generation == request.generation
         ]
         started = next(
             (
