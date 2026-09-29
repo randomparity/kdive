@@ -58,6 +58,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.mcp import systems_support
 from tests.mcp.systems_support import (
     SYSTEM_ADMIN_HANDLERS,
@@ -1525,6 +1526,90 @@ def test_teardown_does_not_recycle_authority_job(migrated_url: str, prior: str) 
         assert response.object_id == job_id
         assert before is not None and after == before
         assert response.status == before[0]
+
+    asyncio.run(_run())
+
+
+_RUNNING_JOB_COLUMNS = (
+    "SELECT state, attempt, max_attempts, worker_id, lease_expires_at, payload "
+    "FROM jobs WHERE id = %s"
+)
+
+
+async def _run_final_attempt(pool: AsyncConnectionPool, job_id: str, *, lease: str) -> None:
+    """Put ``job_id`` on its final charged attempt, held by a registered worker."""
+    worker_id = f"local:final-attempt-{uuid4()}"
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO worker_incarnations (incarnation, authority_kind, authority_binding, "
+            "fence_protocol, credential_hash) VALUES (%s, 'local', '{}'::jsonb, %s, "
+            "sha256(convert_to(%s, 'UTF8')))",
+            (worker_id, CURRENT_WORKER_FENCE_PROTOCOL, worker_id),
+        )
+        await conn.execute(
+            "UPDATE jobs SET state = 'running', attempt = max_attempts, worker_id = %s, "
+            "lease_expires_at = clock_timestamp() + %s::interval, heartbeat_at = now() "
+            "WHERE id = %s",
+            (worker_id, lease, job_id),
+        )
+
+
+def test_teardown_recycles_lapsed_final_authority_attempt(migrated_url: str) -> None:
+    """#2889: a final attempt whose lease lapsed no longer pins the public teardown."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _authority_teardown_job(pool)
+            await _run_final_attempt(pool, job_id, lease="-1 second")
+            async with pool.connection() as conn:
+                before = await (await conn.execute(_RUNNING_JOB_COLUMNS, (job_id,))).fetchone()
+            response = await _teardown(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
+            )
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_RUNNING_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.status == "queued", response.model_dump()
+        assert response.object_id == job_id
+        assert before is not None and after is not None
+        assert after == ("queued", before[1], before[1] + before[2], None, None, before[5])
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("resolver_external_boot", "lease"),
+    [(True, "5 minutes"), (False, "5 minutes"), (False, "-1 second")],
+    ids=["live-final-attempt", "live-final-attempt-unroutable", "lapsed-unroutable"],
+)
+def test_teardown_replays_final_authority_attempt_unchanged(
+    migrated_url: str, resolver_external_boot: bool, lease: str
+) -> None:
+    """#2889: a live final attempt, or one whose marker cannot be rebuilt, replays unchanged."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _authority_teardown_job(pool)
+            await _run_final_attempt(pool, job_id, lease=lease)
+            async with pool.connection() as conn:
+                before = await (await conn.execute(_RUNNING_JOB_COLUMNS, (job_id,))).fetchone()
+            response = await _teardown(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                resolver=provider_resolver(
+                    external_boot=ExternalBootOperations() if resolver_external_boot else None
+                ),
+            )
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_RUNNING_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.status == "running", response.model_dump()
+        assert response.object_id == job_id
+        assert before is not None and after == before
 
     asyncio.run(_run())
 

@@ -37,6 +37,8 @@ def _envelope(result: StoredResult) -> ToolResponse:
 # recycles nothing, so under it *every* prior row is returned unchanged — including a terminal
 # one. Derived from the same enum `enqueue` branches on, so a site cannot hand-list a narrower
 # set than its own policy implies (#2117 review: the `vmcore.fetch` probe did exactly that).
+# `FAILED_OR_LAPSED_EXHAUSTED` is absent: whether it recycles a `running` row depends on the
+# database clock at enqueue's UPDATE, which no state set can answer ahead of time (#2889).
 _RECYCLED: dict[queue.JobRecyclePolicy, frozenset[JobState]] = {
     queue.JobRecyclePolicy.NEVER: frozenset(),
     queue.JobRecyclePolicy.TERMINAL: frozenset({JobState.FAILED, JobState.SUCCEEDED}),
@@ -64,7 +66,15 @@ async def dedup_replay(
     polling stays queued and runs.
 
     Pass the same ``recycle`` the site's own ``enqueue`` passes; the states are derived from it.
+
+    Raises:
+        ValueError: ``recycle`` depends on the database clock (``FAILED_OR_LAPSED_EXHAUSTED``).
     """
+    if recycle not in _RECYCLED:
+        raise ValueError(
+            f"recycle policy {recycle.value!r} is decided on the database clock at enqueue; "
+            "read the prior row with queue.get_by_dedup_key instead"
+        )
     prior = await queue.get_by_dedup_key(conn, dedup_key)
     if prior is None or prior.state in _RECYCLED[recycle]:
         return None
