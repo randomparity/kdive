@@ -1856,6 +1856,13 @@ def test_classify_crash_before_escaped_marker_wins() -> None:
     assert classify_console(data, marker=_MARKER) == "crashed"
 
 
+def test_classify_crash_after_torn_escape_introducer_is_crashed() -> None:
+    # A torn `ESC [` directly before an untimestamped panic line would lose the `K` to the CSI
+    # final byte once stripped; the raw lines before the marker line are scanned as well.
+    data = b"\x1b[Kernel panic - not syncing: VFS\r\nkdive-ready\r\n"
+    assert classify_console(data, marker=_MARKER) == "crashed"
+
+
 def test_classify_colour_prefixed_crash_signature_is_crashed() -> None:
     # Stripping also exposes a signature an SGR sequence glued to its left: the `m` of
     # `ESC[31m` used to satisfy the `BUG:` lookbehind's letter exclusion and hide the crash.

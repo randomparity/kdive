@@ -239,11 +239,19 @@ def prepare_console_readiness_window(
 
 def _scan_console(data: bytes, marker: str) -> tuple[ConsoleVerdict, str | None]:
     """Classify a console capture and return the pre-marker crash literal it matched, if any."""
-    text = _ESCAPE_SEQUENCE.sub("", data.decode("utf-8", errors="replace"))
+    raw = data.decode("utf-8", errors="replace")
+    text = _ESCAPE_SEQUENCE.sub("", raw)
     marker_re = re.compile(rf"(?:^|[^\S\n]){re.escape(marker)}[^\S\n]*$", re.MULTILINE)
     marker_match = marker_re.search(text)
-    region = text if marker_match is None else text[: marker_match.start()]
-    crash = first_crash_signature(region)
+    if marker_match is None:
+        regions = (text, raw)
+    else:
+        # Removal never spans a line, so the marker's line number is the same in both texts. The
+        # raw lines before it are scanned too: a torn escape introducer must not eat the first
+        # letter of a crash literal that follows it.
+        marker_line = text.count("\n", 0, marker_match.start())
+        regions = (text[: marker_match.start()], "\n".join(raw.split("\n")[:marker_line]))
+    crash = next((found for r in regions if (found := first_crash_signature(r))), None)
     if crash is not None:
         return ConsoleVerdict.CRASHED, crash.group(0)
     return (ConsoleVerdict.READY if marker_match is not None else ConsoleVerdict.PENDING), None
