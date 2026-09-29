@@ -157,7 +157,8 @@ Steps:
 
    and add to the docstring, after the `network-online.target` paragraph: "The marker is written
    by one ``printf`` that starts with a newline (#2907): the serial getty writes terminal escape
-   sequences to the same device, and the marker must not share their line."
+   sequences to the same device, and the marker must not share their line." In the `console_device`
+   Args entry, change "echoes the marker" to "writes the marker".
 4. Rerun the step 2 command. Expect all tests to pass.
 5. `just lint && just type`, then commit `fix(images): write kdive-ready on its own console line`.
 6. Controlled fault: restore the `echo` line; the new tests fail. Revert with
@@ -167,8 +168,8 @@ Steps:
 
 On the Fedora 44 x86_64 lab host, under the campaign host lock: deploy the branch and confirm
 the deployed code contains `_ESCAPE_SEQUENCE`; rebuild a rhel-family image with
-`kdive rootfs build-fs --image <rhel-family catalog name> --dest <image>` and confirm with
-`virt-cat -a <image> /etc/systemd/system/kdive-ready.service` that it carries the `printf` line; run the stack through `scripts/demo-up.sh`; run
+`python -m kdive build-fs --image <rhel-family name> --workspace <dir> --dest <image>` and confirm with
+`virt-cat -a <image> /etc/systemd/system/kdive-ready.service` that it carries the `printf` line; run the stack through `examples/local-libvirt/demo-up.sh`; run
 `test_family_guest_is_ssh_reachable_over_the_wire[rhel]` with `KDIVE_GUEST_IMAGE_RHEL` set to that
 image. A SKIPPED result fails the proof. Read the console bytes around the marker as supporting
 evidence only.

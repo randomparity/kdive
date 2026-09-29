@@ -96,4 +96,4 @@ through `classify_console`.
   `\nkdive-ready\n` to `/dev/ttyS0` and `/dev/hvc0`.
 - Controlled faults: revert each layer on its own and observe its test go red.
 - Live: the rhel-family SSH-reachability proof on a Fedora 44 x86_64 lab host through
-  `scripts/demo-up.sh`.
+  `examples/local-libvirt/demo-up.sh`.
