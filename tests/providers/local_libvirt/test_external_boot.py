@@ -409,6 +409,49 @@ def test_system_teardown_observation_does_not_invent_completion_for_physical_abs
     assert list(root.iterdir()) == []
 
 
+_PARTIAL_TEARDOWN_PHASES: tuple[SystemTeardownPhase, ...] = (
+    "intent-recorded",
+    "domain-destroyed",
+    "domain-undefined",
+    "overlay-removed",
+    "baseline-removed",
+)
+
+
+@pytest.mark.parametrize("phase", _PARTIAL_TEARDOWN_PHASES)
+def test_system_teardown_observation_is_repeatable_over_a_partial_predecessor(
+    tmp_path: Path, phase: SystemTeardownPhase
+) -> None:
+    """#2884: recovery reads a predecessor's partial teardown without advancing it."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    session = _SystemTeardownSession()
+    reached = _PARTIAL_TEARDOWN_PHASES.index(phase)
+    session.domain_active = reached < 1
+    session.domain_present = reached < 2
+    session.overlay_present = reached < 3
+    session.baseline_present = reached < 4
+    intent = _teardown_intent()
+    with RecoveryMetadataStore(root) as store:
+        record = store.begin_system_teardown(intent, _SystemTeardownSession().inspect())
+        for step in _PARTIAL_TEARDOWN_PHASES[1 : reached + 1]:
+            record = store.record_system_teardown_phase(record, step)
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    io = _system_teardown_io(root, session)
+    authority = OpaqueProviderRef(ref="authority/current")
+
+    first = io.observe_system_teardown(intent, authority)
+    second = io.observe_system_teardown(intent, authority)
+
+    assert first == second
+    assert first.completed_at is None
+    assert not first.complete
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+    assert session.destroy_mutations == session.undefine_mutations == 0
+    assert session.overlay_mutations == 0
+    assert set(session.actions) <= {"inspect", "close"}
+
+
 def test_system_teardown_observation_does_not_adopt_a_successor_request(tmp_path: Path) -> None:
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
