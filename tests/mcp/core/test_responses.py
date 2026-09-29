@@ -73,6 +73,17 @@ def test_from_job_failed_carries_category() -> None:
     assert resp.suggested_next_actions == []
 
 
+def test_from_job_requeued_job_drops_stale_error_category() -> None:
+    """A requeued job may keep the category of its last failure; the envelope must not."""
+    job = _BUILD_JOB.model_copy(
+        update={"state": JobState.QUEUED, "error_category": ErrorCategory.CONFLICT}
+    )
+    resp = ToolResponse.from_job(job)
+    assert resp.status == "queued"
+    assert resp.error_category is None
+    assert resp.retryable is None
+
+
 def test_from_job_failed_exposes_failure_context() -> None:
     job = _BUILD_JOB.model_copy(
         update={

@@ -323,11 +323,14 @@ class ToolResponse(BaseModel):
             _TERMINAL_KIND_ACTIONS.get(job.kind, []) if job.state is JobState.SUCCEEDED else []
         )
         actions = list(_NEXT_ACTIONS[job.state]) + terminal_kind + list(extra_next_actions or [])
+        # A requeue leaves the last failure's category on the row; only a failed job reports one.
+        failed = job.state.value in _FAILURE_STATUSES
+        error_category = job.error_category.value if failed and job.error_category else None
         return cls(
             object_id=str(job.id),
             status=job.state.value,
             suggested_next_actions=actions,
             refs=refs,
-            error_category=job.error_category.value if job.error_category else None,
+            error_category=error_category,
             data=data,
         )
