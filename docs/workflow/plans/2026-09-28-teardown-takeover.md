@@ -266,6 +266,11 @@ from ADR-0584's same-operation rule, and generation-bound proof context.
 
 ## Deferrals
 
-None. Follow-up candidate (reported in the PR, not implemented here): a retained teardown intent
-from an older generation that never reached the recovered operation's `begin` refuses local
-observation (`provider_conflict`).
+No `docs/debt/` record: filing trackers is the campaign orchestrator's decision. Both concerns
+below go back to it as follow-up candidates, reported in the PR body:
+
+- Activate-versus-teardown policy beyond the fence: the operator-approved exclusion's owner is
+  an ADR follow-up. The concrete consequence is that a failed teardown leaves the System refusing
+  every non-teardown allocation until a public teardown re-runs it.
+- A retained teardown intent from an older generation that never reached the recovered
+  operation's `begin` refuses local observation (`provider_conflict`).
