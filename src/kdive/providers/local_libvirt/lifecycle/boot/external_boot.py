@@ -2301,6 +2301,7 @@ class _RealLocalExternalBootOperation:
             plan_identity,
             authority,
             expected_identities=(source_identity, target_identity),
+            restore_power=True,
         )
 
     def abort_system_teardown_preparation(
@@ -2309,7 +2310,10 @@ class _RealLocalExternalBootOperation:
         plan_identity: Digest,
         authority: OpaqueProviderRef,
     ) -> PartialAbortResult:
-        return self._abort_preparation(binding, plan_identity, authority, expected_identities=None)
+        # The System is being torn down, so its prior running power is not restored (#2898).
+        return self._abort_preparation(
+            binding, plan_identity, authority, expected_identities=None, restore_power=False
+        )
 
     def _abort_preparation(
         self,
@@ -2318,6 +2322,7 @@ class _RealLocalExternalBootOperation:
         authority: OpaqueProviderRef,
         *,
         expected_identities: tuple[str, str] | None,
+        restore_power: bool,
     ) -> PartialAbortResult:
         with RecoveryMetadataStore(self._recovery_root) as store:
             partial = store.inspect_abortable_partial(binding, plan_identity, authority)
@@ -2335,7 +2340,7 @@ class _RealLocalExternalBootOperation:
                 ):
                     raise ValueError("recovery partial identity conflicts with teardown request")
                 _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
-                if intent.prior_power == "running":
+                if restore_power and intent.prior_power == "running":
                     self._session.restore_power()
                     readiness = self._session.readiness()
                     if not readiness.ok:
@@ -2796,7 +2801,15 @@ class LocalLibvirtExternalBoot:
         authority: OpaqueProviderRef,
         *,
         local_timing: LocalExternalBootTimingV1 | None = None,
+        restore_power: bool = True,
     ) -> None:
+        """Resume recovery to ``recovered``, restoring prior power unless told not to.
+
+        System teardown passes ``restore_power=False`` (#2898): it destroys the domain next,
+        so a start would only boot a guest it is about to kill. ``define_source`` records
+        ``source-restored`` only over the inactive source definition, which is the state a
+        teardown needs, so that point is recorded ``recovered`` without a start.
+        """
         opening = (
             self._io.open(authority, _expected_binding(recovery.binding))
             if local_timing is None
@@ -2831,7 +2844,10 @@ class LocalLibvirtExternalBoot:
                 operation.define_source(metadata)
                 metadata = self._reopen(operation, recovery)
             if metadata.phase == "source-restored":
-                operation.restore_power(metadata)
+                if restore_power:
+                    operation.restore_power(metadata)
+                else:
+                    operation.record_phase(metadata, "recovered")
 
     def cleanup_is_accounted(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> bool:
         """Whether accounted cleanup evidence for this exact point already exists.

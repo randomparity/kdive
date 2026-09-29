@@ -2589,7 +2589,17 @@ def test_system_teardown_partial_abort_derives_identities_from_private_intent(
     )
 
     assert result == "removed"
-    assert preparation.actions == ["power", "readiness"]
+    # #2898: the System is being torn down, so its prior running power is not restored.
+    assert preparation.actions == []
+    with RecoveryMetadataStore(root) as store:
+        assert (
+            store.inspect_abortable_partial(
+                _BINDING,
+                metadata.plan_identity,
+                OpaqueProviderRef(ref="authority/current"),
+            )
+            == "absent"
+        )
 
 
 @pytest.mark.parametrize(
@@ -5068,6 +5078,31 @@ def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
     io.actions.clear()
     ports.cleanup(point, authority)
     assert io.actions == ["reopen", "cleanup"]
+
+
+@pytest.mark.parametrize("phase", ["target-defined", "module-restored", "source-restored"])
+def test_teardown_recovery_records_recovered_without_restoring_power(phase: str) -> None:
+    """#2898: a teardown settles recovery without booting the domain it will destroy."""
+    io = _ExternalIO(_metadata().model_copy(update={"phase": phase, "prior_power": "running"}))
+    ports = LocalLibvirtExternalBoot(io)
+    point = _point(io.metadata)
+
+    ports.recover(point, OpaqueProviderRef(ref="authority/current"), restore_power=False)
+
+    assert "restore-power" not in io.actions
+    assert io.actions[-1] == "phase:recovered"
+    assert io.metadata.phase == "recovered"
+
+
+def test_recovery_restores_power_by_default_from_source_restored() -> None:
+    io = _ExternalIO(
+        _metadata().model_copy(update={"phase": "source-restored", "prior_power": "running"})
+    )
+    ports = LocalLibvirtExternalBoot(io)
+
+    ports.recover(_point(io.metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert io.actions == ["reopen", "restore-power", "phase:recovered"]
 
 
 def test_reopen_rejects_complete_point_substitution_before_mutation() -> None:

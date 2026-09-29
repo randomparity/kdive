@@ -534,6 +534,45 @@ async def test_system_teardown_settles_pre_stop_intent_activation() -> None:
     adapter.close()
 
 
+@pytest.mark.parametrize(
+    "phase", ["pre-stop-intent", "target-defined", "module-restored", "source-restored"]
+)
+async def test_system_teardown_takeover_recovery_never_restores_power(
+    phase: RecoveryPhase,
+) -> None:
+    """#2898: a retained activation whose guest ran before is recovered without a start."""
+    io = _FakeIO(_metadata(phase))
+    adapter = _adapter(io)
+
+    result = await adapter.execute_system_teardown(
+        _system_teardown_request(), _context(AuthorityOperation.TEARDOWN), _TEARDOWN_RESERVATION
+    )
+
+    assert result.complete
+    assert "restore-power" not in io.actions
+    assert io.actions.index("phase:recovered") < io.actions.index("cleanup")
+    assert io.actions[-1] == "teardown-system"
+    adapter.close()
+
+
+async def test_fresh_system_teardown_reaches_no_power_seam() -> None:
+    io = _FakeIO()
+    io.recovery_absent = True
+    adapter = _adapter(io)
+
+    result = await adapter.execute_system_teardown(
+        _system_teardown_request(), _context(AuthorityOperation.TEARDOWN), _TEARDOWN_RESERVATION
+    )
+
+    assert result.complete
+    assert io.actions == [
+        "begin-system-teardown",
+        "system-teardown-recovery-absence",
+        "teardown-system",
+    ]
+    adapter.close()
+
+
 async def test_system_teardown_cancellation_waits_for_host_completion_and_releases_lease() -> None:
     scope = LocalOperationLeaseScope()
     entered = threading.Event()

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 import threading
 import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defused parse
 from contextlib import contextmanager, suppress
@@ -32,6 +33,7 @@ from pydantic import ValidationError
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    _PROJECTION_NAME,
     LocalRecoveryMetadataV1,
     TargetProjectionV1,
     _artifact_ref_parts,
@@ -429,35 +431,10 @@ class LocalPayloadCleanup:
                 projection_fd = None
             if projection_fd is not None:
                 try:
-                    try:
-                        raw_projection = _read_private_file(projection_fd, "target-projection.json")
-                    except FileNotFoundError:
-                        if os.listdir(projection_fd):
-                            raise ValueError(
-                                "target projection contains unexpected residue"
-                            ) from None
-                    else:
-                        projection = TargetProjectionV1.model_validate_json(raw_projection)
-                        if (
-                            projection.canonical_bytes() != raw_projection
-                            or projection.ownership != ownership
-                            or projection.activation_id != binding.activation_id
-                            or projection.digest.removeprefix("sha256:") != parts[4]
-                        ):
-                            raise ValueError("target projection does not match cleanup metadata")
-                finally:
-                    os.close(projection_fd)
-            for name in PAYLOAD_NAMES:
-                with suppress(FileNotFoundError):
-                    os.unlink(name, dir_fd=root_fd)
-            try:
-                projection_fd = _open_private_directory(root_fd, parts[4])
-            except FileNotFoundError:
-                projection_fd = None
-            if projection_fd is not None:
-                try:
-                    with suppress(FileNotFoundError):
-                        os.unlink("target-projection.json", dir_fd=projection_fd)
+                    self._require_owned_projection(projection_fd, parts[4], ownership, binding)
+                    for name in (*PAYLOAD_NAMES, _PROJECTION_NAME):
+                        with suppress(FileNotFoundError):
+                            os.unlink(name, dir_fd=projection_fd)
                     os.fsync(projection_fd)
                 finally:
                     os.close(projection_fd)
@@ -470,6 +447,38 @@ class LocalPayloadCleanup:
             if recovery_fd is not None:
                 os.close(recovery_fd)
         self._prune_owned_parents(root_fd, binding)
+
+    @staticmethod
+    def _require_owned_projection(
+        projection_fd: int,
+        digest: str,
+        ownership: ActivationOwnership,
+        binding: ExternalBootActivationBinding,
+    ) -> None:
+        """Refuse a digest directory holding anything but this activation's own files.
+
+        Payloads live beside the projection (`<activation>/<digest>/<name>`, as
+        `open_projection_artifact` reads them). Every entry must be the projection or a payload
+        name, and a payload must be a regular file, not a symlink, so a retry after any
+        partial removal converges while foreign state is quarantined (ADR-0600/0584).
+        """
+        entries = set(os.listdir(projection_fd))
+        if not entries <= {*PAYLOAD_NAMES, _PROJECTION_NAME} or any(
+            not stat.S_ISREG(os.stat(name, dir_fd=projection_fd, follow_symlinks=False).st_mode)
+            for name in entries & set(PAYLOAD_NAMES)
+        ):
+            raise ValueError("target projection contains unexpected residue")
+        if _PROJECTION_NAME not in entries:
+            return
+        raw_projection = _read_private_file(projection_fd, _PROJECTION_NAME)
+        projection = TargetProjectionV1.model_validate_json(raw_projection)
+        if (
+            projection.canonical_bytes() != raw_projection
+            or projection.ownership != ownership
+            or projection.activation_id != binding.activation_id
+            or projection.digest.removeprefix("sha256:") != digest
+        ):
+            raise ValueError("target projection does not match cleanup metadata")
 
     def _prune_owned_parents(
         self, activation_descriptor: int, binding: ExternalBootActivationBinding
