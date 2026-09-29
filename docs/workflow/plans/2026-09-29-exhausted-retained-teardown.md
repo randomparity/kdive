@@ -1,14 +1,16 @@
 # Exhausted retained teardown implementation plan (#2917)
 
 **Goal:** a System-teardown job whose final attempt commits a `retained_quarantine` receipt ends
-`failed`, which the public teardown recycles, instead of `queued` and unclaimable.
+`failed` with its authority `retired` (keeping the dispatch route), which the public teardown
+recycles, instead of `queued` and unclaimable.
 **Architecture:** migration 0163 patches `finalize_external_boot_authority_teardown`'s retained
 branch and repairs rows that are already stranded; spec
 [`2026-09-29-exhausted-retained-teardown-design.md`](../specs/2026-09-29-exhausted-retained-teardown-design.md).
 **Tech stack:** PostgreSQL PL/pgSQL migration, pytest DB tests (testcontainers PostgreSQL).
 
-Expected implementation size: 170–240 changed lines (M) — migration 25–35, new test file
-110–160, helper parameter 3–5, migration-list updates 6–10, ADR amendment 20–25.
+Expected implementation size: 200–290 changed lines (M) — migration 40–50, new test file
+140–200, helper parameter 3–5, migration-list updates 6–10; the ADR amendment is in the design
+set.
 
 ## Global Constraints
 
@@ -36,9 +38,10 @@ Expected implementation size: 170–240 changed lines (M) — migration 25–35,
 
 **Verification**
 
-- `Mode: focused-test` — final-attempt retained finalize dead-letters.
+- `Mode: focused-test` — final-attempt retained finalize dead-letters and keeps the route.
   `test_final_attempt_retained_teardown_is_dead_lettered`; red on main with job state
-  `queued`; green: `just test-verbose tests/db/test_exhausted_retained_teardown.py`.
+  `queued`, authority `superseded`, and an empty route; green:
+  `just test-verbose tests/db/test_exhausted_retained_teardown.py`.
 - `Mode: focused-test` — non-final retained finalize requeues.
   `test_non_final_retained_teardown_still_requeues`; passes before and after (a guard).
 - `Mode: focused-test` — stranded-row repair.
@@ -58,15 +61,25 @@ Steps:
    `_finalize`, and the `migrated_url`, `authority_role_dsns`, `pg_conn` fixtures:
    - final attempt: `UPDATE jobs SET max_attempts = attempt` before finalize; assert finalize
      returns `"retained"`, job `(state, error_category, attempt, max_attempts)` is
-     `("failed", "conflict", 1, 1)`, and the authority is `superseded`.
-   - non-final: no `max_attempts` change; finalize returns `"retained"`; job state `queued`.
-   - repair: on `pg_conn`, apply migrations through `0162` with
-     `tests.db.external_boot_authority_support._apply_through`, record them in
-     `schema_migrations` as `migrate.apply_migrations` expects (the insert pattern in
-     `tests/db/test_migration_0070_resolved_cpu.py`), seed one stranded marked teardown row, one
-     marked teardown row `queued` with `attempt < max_attempts`, and one unmarked `teardown` row
-     that is `queued` and exhausted; run `migrate.apply_migrations(pg_conn)`; assert only the first
-     row is `failed`/`conflict`.
+     `("failed", "conflict", 1, 1)`, the authority row is `("retired", superseded_at NULL,
+     retired_at NOT NULL)`, and `SELECT activation_id FROM
+     resolve_external_boot_system_teardown_dispatch_binding(%s)` (as the database owner) returns
+     exactly `[(case.activation_id,)]`. `_ready_teardown_case` seeds no other `retired`
+     authority, so this is the no-other-route case.
+   - non-final: no `max_attempts` change; finalize returns `"retained"`; job state `queued`;
+     authority `superseded`.
+   - repair: on `pg_conn`, apply migrations through `0162` file by file and record each in
+     `schema_migrations` (the `_apply_through` helper in
+     `tests/db/test_migration_0070_resolved_cpu.py`; copy it into the new file). Seed with
+     `tests.db.external_boot_authority_support._seed_case(pg_conn, purpose="teardown")`, then
+     set the job `queued`, `attempt = max_attempts = 3`, `worker_id = NULL`; insert an
+     acknowledged `superseded` teardown authority for `(job_id, job_attempt = 3)` and a
+     `retained_quarantine` `external_boot_teardown_receipts` row rooted at it (columns from
+     0147: `root_authority_id, job_id, job_attempt, journal_sequence, journal_digest,
+     proof_bytes, proof_digest, disposition, consumed`). Also insert two plain `jobs` rows of kind
+     `teardown`: one marked and `queued` with `attempt < max_attempts`, one unmarked, `queued` and
+     exhausted. Run `migrate.apply_migrations(pg_conn)`. Assert the first job is
+     `failed`/`conflict` and its authority `retired`; the other two are unchanged.
    - recycle: final-attempt retained finalize, then `queue.enqueue(..., recycle=
      JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED)` with the job's own marker gives `queued`,
      attempt 0; a successor incarnation claims attempt 1, allocates, makes current with a
@@ -95,8 +108,13 @@ Steps:
    DECLARE
        v_definition text;
        v_old constant text := $old$RETURN 'retained';$old$;
-       v_new constant text := $new$UPDATE public.jobs SET state = 'failed', error_category = 'conflict'
-           WHERE id = p_job_id AND attempt >= max_attempts;
+       v_new constant text := $new$IF v_job.attempt >= v_job.max_attempts THEN
+               UPDATE public.jobs SET state = 'failed', error_category = 'conflict'
+               WHERE id = p_job_id;
+               UPDATE public.external_boot_authorities
+               SET state = 'retired', retired_at = clock_timestamp(), superseded_at = NULL
+               WHERE id = p_authority_id;
+           END IF;
            RETURN 'retained';$new$;
    BEGIN
        SELECT pg_get_functiondef(
@@ -104,16 +122,27 @@ Steps:
            'bytea,uuid,integer,uuid,bigint,bigint,text,bytea)'::regprocedure
        ) INTO v_definition;
        IF (length(v_definition) - length(replace(v_definition, v_old, ''))) / length(v_old) <> 1
-          OR position('attempt >= max_attempts' IN v_definition) <> 0 THEN
+          OR position('v_job.attempt >= v_job.max_attempts' IN v_definition) <> 0 THEN
            RAISE EXCEPTION 'external boot System teardown retained branch shape changed';
        END IF;
        EXECUTE replace(v_definition, v_old, v_new);
    END
    $$;
 
-   UPDATE public.jobs SET state = 'failed', error_category = 'conflict'
-   WHERE kind = 'teardown' AND state = 'queued' AND attempt >= max_attempts
-     AND jsonb_typeof(payload -> 'external_boot_authority_v1') = 'object';
+   WITH stranded AS (
+       UPDATE public.jobs SET state = 'failed', error_category = 'conflict'
+       WHERE kind = 'teardown' AND state = 'queued' AND attempt >= max_attempts
+         AND jsonb_typeof(payload -> 'external_boot_authority_v1') = 'object'
+       RETURNING id, attempt
+   )
+   UPDATE public.external_boot_authorities AS authority
+   SET state = 'retired', retired_at = clock_timestamp(), superseded_at = NULL
+   FROM stranded
+   JOIN public.external_boot_teardown_receipts AS receipt
+     ON receipt.job_id = stranded.id AND receipt.job_attempt = stranded.attempt
+    AND receipt.disposition = 'retained_quarantine'
+   WHERE authority.id = receipt.root_authority_id
+     AND authority.state = 'superseded' AND authority.acknowledged_at IS NOT NULL;
    ```
 
 2. Add `0163` to the migration lists named in the file map.

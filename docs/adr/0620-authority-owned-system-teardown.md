@@ -93,20 +93,31 @@ Rejected for this amendment:
 ### Amendment (2026-09-29): an exhausted retained teardown is dead-lettered (#2917)
 
 A `retained_quarantine` teardown receipt on the job's final attempt (`attempt >= max_attempts`)
-ends the job `failed` with `error_category = 'conflict'` in the receipt transaction, instead of
-requeueing it where no worker can claim it (migration 0163). A non-final attempt still requeues.
-The receipt, the authority supersession, and the `retained` result are unchanged. Migration 0163
-also moves authority-marked teardown jobs that were already `queued` and exhausted to `failed`.
-Recovery is the public teardown's `failed` recycle defined above, so the reservation still
-credits once.
+ends the job `failed` with `error_category = 'conflict'` and the teardown authority `retired`,
+in the receipt transaction (migration 0163). This is what the `fail` path does at exhaustion.
+Before, the job was requeued where no worker can claim it, and the authority was `superseded`,
+which could leave the activation with no `current` or `retired` dispatch route for the public
+teardown. A non-final attempt still requeues and supersedes. The receipt and the `retained`
+result are unchanged, and a `retired` authority cannot commit again. Migration 0163 also moves
+authority-marked teardown jobs that were already `queued` and exhausted, and the superseded root
+authority of their retained receipt, to the same states. Recovery is the public teardown's
+`failed` recycle defined above, so the reservation still credits once.
 
 Rejected for this amendment:
 
+- **Do nothing.** verified: issue #2917 records a live job `queued` at attempt 24/24 that stayed
+  unclaimed through a worker restart; its reservation is never credited.
 - **Grant one more attempt at exhaustion, as the authority-System retained path does
   (migration 0149).** judgment: deterministic retained churn (#2901) would then retry without a
   bound and never show a terminal state.
 - **Recycle a `queued` exhausted row in the public teardown.** judgment: it widens a generic
   queue policy for a state one writer produces, and leaves the row stranded until a caller acts.
+- **A reconciler lane that dead-letters queued exhausted teardowns.** judgment: a periodic sweep
+  and a new security-definer function for a state the finalizer can prevent in its own
+  transaction.
+- **Keep the authority `superseded` and widen the dispatch route to `superseded` rows.**
+  judgment: a `superseded` row can be one that lost an allocation race, so the route would rest
+  on rows the fences already treat as dead.
 
 ## Consequences
 
