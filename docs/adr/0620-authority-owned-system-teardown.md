@@ -66,13 +66,18 @@ Rejected for this amendment:
 The public teardown also re-runs a `running` authority teardown job whose final attempt's lease
 has lapsed (`attempt >= max_attempts`, `lease_expires_at` before the database clock), with the
 identical marker. The lease is judged in the recycling `UPDATE` itself, so a live final attempt
-replays unchanged. A `succeeded` job is still never reset.
+replays unchanged. That job keeps its attempt counter and gains another `max_attempts` budget
+rather than resetting to 0, because its dead attempt may still be running: a fresh attempt with
+the same number on the same incarnation would pass that attempt's heartbeat and finalize fences.
+A `succeeded` job is still never reset.
 
 The reconciler dead-letters an authority-marked non-teardown job (`failed`, `lease_expired`)
 only when it is `running`, exhausted, lease-lapsed and has no `allocating` or `current`
 authority row, checked after locking the job row (migration 0162). Every receipt path needs
-such a row and a `running` job, so no receipt can commit for it; the receipt paths keep sole
-ownership of every job they could still finish.
+such a row and a `running` job, and allocation rechecks the job under its own row lock, so no
+receipt can commit for it; the receipt paths keep sole ownership of every job they could still
+finish. A stray whose authority is `allocating` or `current` waits until a newer allocation
+supersedes it.
 
 Rejected for this amendment:
 
