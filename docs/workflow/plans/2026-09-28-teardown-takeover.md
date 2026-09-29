@@ -225,6 +225,23 @@ Steps:
    `failed` row reaches here, so `TERMINAL` resets exactly that row.
 3. Rerun green. Commit `fix(systems): re-run a failed authority teardown job`.
 
+## Task 6 — Live settle of the retained fixture (after review approval)
+
+**Verification:**
+- Contract: criterion 7. Mode: task-test-not-applicable — the retained lab fixture and the
+  installed services exist only on the operator's lab host; the proof is the recorded evidence
+  there, not a repository test.
+
+Steps: read-only snapshot (jobs, authority rows, heads, journal file, domain, reservation,
+credits); deploy the branch to the project checkout and the authority venv, reinstalling the
+`kdive` package, and confirm a symbol only this branch adds is importable in the authority,
+worker and server interpreters and that migrations 0160 and 0161 are applied; confirm no
+activate job is live; start the authority and record the `journal/retracted/` evidence and
+readiness (#2793); start the stack; submit a public `systems.teardown`; record terminal state,
+domain absence, cleanup evidence, one credit row, and that a second `systems.teardown` adds no
+credit. No manual database or journal edits and no host reset; on failure, stop and keep the
+fixture.
+
 ## ADR amendment
 
 ADR-0620 `### Amendment (2026-09-28): an unresolved teardown owns the System (#2884)`, already
@@ -233,4 +250,6 @@ from ADR-0584's same-operation rule, and generation-bound proof context.
 
 ## Deferrals
 
-None at plan time.
+None. Follow-up candidate (reported in the PR, not implemented here): a retained teardown intent
+from an older generation that never reached the recovered operation's `begin` refuses local
+observation (`provider_conflict`).
