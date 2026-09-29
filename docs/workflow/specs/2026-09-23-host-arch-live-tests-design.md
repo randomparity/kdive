@@ -21,8 +21,10 @@ define x86_64 KVM domains or x86_64 spine profiles. The docs do not say which pr
   tests pass the arch to `build_profile` and `build_and_upload_kernel`.
 - Docs: list these proofs as host-arch; `test_local_guest_cpu_live` as skipping on POWER; the
   family-reachability and SUSE-kdump spines and gdbstub debug proofs (#2695) as x86_64-only.
-- No arch skip is added: no listed proof has an x86-only step (libvirt 12.0 maps `pvpanic` to
-  `pvpanic-pci` on `pseries`).
+- No arch skip is added: no listed proof has an x86-only step. The panic path is per-arch:
+  `pvpanic` on x86_64; on ppc64le the `pvpanic-pci` device libvirt 12.0 maps on `pseries` is
+  present but can be inert, and the panic reaches the host through the pseries firmware
+  notifier (RTAS os-term, libvirt's implicit pseries panic), proven on #2719.
 - Exclusions: `tests/mcp/debug/**` (#2695); `live_vm_tcg` changes are out of scope.
 
 ### Failure model
@@ -30,8 +32,8 @@ define x86_64 KVM domains or x86_64 spine profiles. The docs do not say which pr
 - Actors and deployments: an operator or CI job running `just test-live` or `live_stack` on a
   native x86_64 or ppc64le KVM host.
 - Invariants: x86_64 hosts keep x86_64 guests. The machine becomes the production `q35` alias.
-- Accepted: the native ppc64le arm is unrun (no POWER host); its proxy is a libvirt define of
-  the rendered ppc64le preserve XML. A POWER-only failure in a proof's own mechanism is a new
+- Accepted: the native ppc64le arm ran on a POWER9 KVM host (#2719); before that run its proxy
+  was a libvirt define of the rendered ppc64le preserve XML. A POWER-only failure in a proof's own mechanism is a new
   defect, not arch pinning.
 - Covered elsewhere: gdbstub debug tests (#2695); TCG tier (unchanged).
 
