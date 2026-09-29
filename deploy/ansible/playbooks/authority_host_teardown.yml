@@ -146,6 +146,14 @@
         - "{{ authority_runtime }}"
         - "{{ authority_install }}"
 
+    - name: Remove the authority user manager memlock drop-in
+      ansible.builtin.file:
+        path: >-
+          /etc/systemd/system/user@{{ ansible_facts.getent_passwd[authority_account][1]
+          }}.service.d/kdive-memlock.conf
+        state: absent
+      when: ansible_facts.getent_passwd[authority_account] | default(none) is not none
+
     - name: Reload systemd after authority unit removal
       ansible.builtin.systemd_service:
         daemon_reload: true
@@ -314,6 +322,20 @@
         that:
           - not item.stat.exists
       loop: "{{ removed_authority_artifacts.results }}"
+
+    - name: Inspect the removed memlock drop-in
+      ansible.builtin.stat:
+        path: >-
+          /etc/systemd/system/user@{{ ansible_facts.getent_passwd[authority_account][1]
+          }}.service.d/kdive-memlock.conf
+      register: removed_authority_memlock_drop_in
+      when: ansible_facts.getent_passwd[authority_account] | default(none) is not none
+
+    - name: Assert the memlock drop-in is absent
+      ansible.builtin.assert:
+        that:
+          - not removed_authority_memlock_drop_in.stat.exists
+      when: ansible_facts.getent_passwd[authority_account] | default(none) is not none
 
     - name: Verify the fixed-worker provider path remains usable
       ansible.builtin.command: "virsh -c {{ fixed_worker_uri }} list"
