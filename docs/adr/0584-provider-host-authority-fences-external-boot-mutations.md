@@ -294,6 +294,10 @@ the periodic check never retracts.
 
 Rejected for this amendment:
 
+- **Do nothing and let startup reconcile.** judgment: every overlap aborts the requests in
+  flight, and nothing was wrong to reconcile.
+- **Retry once after a short delay, without quiescence.** judgment: nothing makes the second
+  read land outside an anchor, so it narrows the race without closing it.
 - **Hold every lane lock during the check.** verified: `_release_lane` (`service.py`, commit
   b51e5c8c9) pops an idle lane, so a lane created during the check gets a fresh lock the check
   does not hold.
