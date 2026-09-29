@@ -71,8 +71,8 @@ nothing in the path depends on the System leaving `failed`.
    - authority-owned System teardown: `execute_authority_system_job`, not this handler;
    - a restricting external-boot activation: the existing terminal `CONFLICT` fence;
    - a teardown that arrives while the System is `reprovisioning` still raises `IllegalTransition`
-     (no `reprovisioning -> tearing_down` edge); an adjacent gap outside this charter, reported as a
-     follow-up with no owner yet.
+     (no `reprovisioning -> tearing_down` edge); an adjacent gap outside this charter, owned by the
+     campaign orchestrator as a returned follow-up candidate.
 
 ## Considered and rejected
 
