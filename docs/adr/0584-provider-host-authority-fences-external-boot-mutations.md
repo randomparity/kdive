@@ -281,6 +281,29 @@ Rejected for this amendment:
   reprovisioning every host. The campaign orchestrator selected the reserved subdirectory on
   2026-09-28.
 
+### Amendment (2026-09-28): takeover records are not operation-phase records (#2884)
+
+The same-operation integrity rule in *Mutation journal and stable ownership* refuses a record
+whose operation identity equals an unresolved head's and whose attempt id, source, target,
+operation, or recovery objects differ. It protects the operation's own phase records, `admitted`
+through `terminal`. It no longer applies to `watermark-installed`, `takeover-superseded`, or
+`takeover-acknowledged`. Those records do not continue the operation, and each keeps its own
+fence: an allocating, newest authority; the head phases a watermark may follow; the pending
+takeover and its watermark sequence and digest. A takeover record carries its own authority id
+as its attempt id. A System teardown's operation identity is fixed per activation, so a reclaimed
+or new teardown takes over with the interrupted teardown's identity. It now anchors, records the
+suspended operation, and recovers it (migration 0161).
+
+Rejected for this amendment:
+
+- **Give the takeover record the suspended operation's attempt id.** verified:
+  `AuthorityTakeoverRequestV1` has no attempt field (`protocol.py`, commit 727de823e), and the
+  worker sends the takeover before it can read the head. This would change the worker/authority
+  protocol to carry a value the database already holds.
+- **Exempt only `watermark-installed`.** judgment: `takeover-superseded` crosses the same
+  unresolved-head window when a newer takeover replaces a pending one, and would fail the same
+  way.
+
 ## Consequences
 
 - External boot gains a fence at the provider mutation boundary and a separate database fence for
