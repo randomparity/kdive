@@ -63,6 +63,14 @@ from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _log = logging.getLogger(__name__)
+
+# The worker never writes a marked job's row (ADR-0620): only a receipt commit, the public teardown
+# recycle, or the reconciler's unowned-job dead-letter can move it, so logs say so.
+_MARKED_JOB_LEFT_RUNNING = (
+    "the job row stays running; a lapsed lease re-claims it while attempts remain, then a public "
+    "systems.teardown recycles a teardown job and the reconciler dead-letters a boot job with no "
+    "allocating or current authority"
+)
 _CONTEXT_VALUE_MAX = 1000
 _CONTEXT_KEY = re.compile(r"[^a-zA-Z0-9_.-]+")
 _RUN_COMPENSATION_STATES = frozenset({RunState.CREATED, RunState.RUNNING})
@@ -538,12 +546,14 @@ class Worker:
                 else:
                     # exc_info because this is the *only* diagnostic for a marked job that failed
                     # before it could produce a binding-matching result: no `jobs` row is written,
-                    # both generic finalizers and `repair_abandoned_jobs` are fenced against a
-                    # marked payload, and the job then wedges `running`. A job id with no reason
-                    # leaves nothing to debug from.
+                    # and the generic finalizers are fenced against a marked payload. A job id
+                    # with no reason leaves nothing to debug from.
                     _log.warning(
-                        "marked external boot job %s failed without authority result: %s",
+                        "marked external boot job %s attempt %s/%s failed without authority "
+                        "result: %s; " + _MARKED_JOB_LEFT_RUNNING,
                         job.id,
+                        job.attempt,
+                        job.max_attempts,
                         exc,
                         exc_info=True,
                     )
@@ -591,7 +601,13 @@ class Worker:
             ):
                 return await self._commit_external_result(job, result_ref)
             else:
-                _log.warning("marked external boot job %s returned no authority result", job.id)
+                _log.warning(
+                    "marked external boot job %s attempt %s/%s returned no authority result; "
+                    + _MARKED_JOB_LEFT_RUNNING,
+                    job.id,
+                    job.attempt,
+                    job.max_attempts,
+                )
             return False
         if isinstance(result_ref, ExternalBootAuthorityResultV1):
             _log.warning("ordinary job %s returned an external authority result", job.id)

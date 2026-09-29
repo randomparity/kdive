@@ -304,7 +304,9 @@ def test_zombie_authority_marked_job_is_left_for_the_authority_path(migrated_url
 
     The marked job is left ``running`` with an expired lease. Migration 0150 permits a worker
     claim only for an exact acknowledged no-mutation authority proof; this deliberately malformed
-    marker has no such proof and remains fenced for authority-specific repair.
+    marker has no such proof and remains fenced for authority-specific repair. The one marked
+    shape this sweep does end, a ``boot`` job no receipt can finish (migration 0162), is proven in
+    ``tests/db/test_exhausted_authority_job.py``.
     """
 
     async def _run() -> None:
