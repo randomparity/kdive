@@ -739,6 +739,7 @@ def test_retiring_the_authority_restarts_a_user_manager_holding_the_retired_ceil
         "--output=HARD",
         f"--pid={{{{ {pid['register']}.stdout }}}}",
     ]
+    assert running["environment"] == {"LC_ALL": "C"}
     assert restart["ansible.builtin.systemd_service"] == {"name": manager, "state": "restarted"}
     running_pid = f'{pid["register"]}.stdout not in ["", "0"]'
     assert pid["when"] == configured["when"] == known

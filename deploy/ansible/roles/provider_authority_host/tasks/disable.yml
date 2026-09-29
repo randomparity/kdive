@@ -103,6 +103,8 @@
       - --noheadings
       - --output=HARD
       - "--pid={{ provider_authority_host_retired_manager_pid.stdout }}"
+  environment:
+    LC_ALL: C
   register: provider_authority_host_retired_running_memlock
   changed_when: false
   when:

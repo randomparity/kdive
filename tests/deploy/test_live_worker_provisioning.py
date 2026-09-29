@@ -931,6 +931,8 @@ def test_authority_teardown_restarts_a_user_manager_holding_the_retired_ceiling(
         "--output=HARD",
         f"--pid={{{{ {pid['register']}.stdout }}}}",
     ]
+    # prlimit localizes "unlimited" through gettext.
+    assert running["environment"] == {"LC_ALL": "C"}
     assert restart["ansible.builtin.systemd_service"] == {"name": manager, "state": "restarted"}
     running_pid = f'{pid["register"]}.stdout not in ["", "0"]'
     assert running["when"] == [KNOWN_AUTHORITY, running_pid]
@@ -944,6 +946,7 @@ def test_authority_teardown_restarts_a_user_manager_holding_the_retired_ceiling(
         named["Assert authority services and processes are inactive"],
         named["Remove the authority user manager memlock drop-in"],
         named["Reload systemd after authority unit removal"],
+        named["Assert the authority database LOGIN is revoked"],
         pid,
         configured,
         running,
