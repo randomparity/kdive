@@ -2645,6 +2645,104 @@ def test_system_teardown_abort_prunes_only_empty_activation_parents(
         assert (activation / residue).read_bytes() == b"foreign"
 
 
+def _abort_operation(
+    root: Path, metadata: LocalRecoveryMetadataV1
+) -> tuple[external_boot_module._RealLocalExternalBootOperation, _RealPreparation]:
+    preparation = _RealPreparation(metadata, root)
+    session = _RealSession(preparation)
+    session.inspection = replace(session.inspection, active=False)
+    operation = external_boot_module._RealLocalExternalBootOperation(
+        root,
+        cast(external_boot_module.LocalExternalBootMaterializer, preparation),
+        cast(RealGuestRecoveryWriter, object()),
+        cast(external_boot_module.LocalExternalBootSession, session),
+        32 * 1024**3,
+    )
+    return operation, preparation
+
+
+@pytest.mark.parametrize("system_teardown", [True, False])
+def test_teardown_abort_finishes_finalization_interrupted_before_rmdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, system_teardown: bool
+) -> None:
+    """#2927: a crash after the tombstone unlink leaves only the empty exact directory."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    proof = FinalizeCleanupProof(
+        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        binding=point.binding,
+        operation_id="00000000-0000-0000-0000-000000000004",
+        attempt_id="00000000-0000-0000-0000-000000000005",
+        journal_sequence=7,
+        journal_digest="sha256:" + "4" * 64,
+        phase="mutation-started",
+    )
+    original_rmdir = external_boot_module.os.rmdir
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        store.publish_tombstone(reference, metadata.binding, metadata, proof.point_digest)
+        name = recovery_directory_name(reference, point.binding)
+
+        def crash_before_rmdir(path: str, *, dir_fd: int) -> None:
+            if path == name:
+                raise OSError("crashed before rmdir")
+            original_rmdir(path, dir_fd=dir_fd)
+
+        monkeypatch.setattr(external_boot_module.os, "rmdir", crash_before_rmdir)
+        with pytest.raises(OSError, match="crashed before rmdir"):
+            store.finalize_tombstone(reference, point, proof)
+        monkeypatch.setattr(external_boot_module.os, "rmdir", original_rmdir)
+        with pytest.raises(FileNotFoundError):
+            store.reopen(reference, point.binding)
+        with pytest.raises(FileNotFoundError):
+            store.reopen_tombstone(reference, point.binding)
+    assert list((root / name).iterdir()) == []
+    operation, preparation = _abort_operation(root, metadata)
+    authority = OpaqueProviderRef(ref="authority/current")
+
+    if system_teardown:
+        result = operation.abort_system_teardown_preparation(
+            _BINDING, metadata.plan_identity, authority
+        )
+    else:
+        result = operation.abort_preparation(
+            _BINDING, metadata.plan_identity, metadata.source_boot, metadata.target_boot, authority
+        )
+
+    assert result == "absent"
+    assert preparation.actions == []
+    assert not (root / name).exists()
+    assert operation.recovery_is_absent(_BINDING)
+
+
+@pytest.mark.parametrize("residue", ["file", "directory"])
+def test_teardown_abort_refuses_a_nonempty_complete_recovery_directory(
+    tmp_path: Path, residue: str
+) -> None:
+    """Only an empty complete directory is interrupted finalization; any entry stays (#2927)."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    recovery = root / recovery_directory_name(_point(metadata).recovery_ref, _BINDING)
+    recovery.mkdir(mode=0o700)
+    if residue == "file":
+        (recovery / "foreign").write_bytes(b"foreign")
+    else:
+        (recovery / "foreign").mkdir(mode=0o700)
+    operation, preparation = _abort_operation(root, metadata)
+
+    result = operation.abort_system_teardown_preparation(
+        _BINDING, metadata.plan_identity, OpaqueProviderRef(ref="authority/current")
+    )
+
+    assert result == "not-partial"
+    assert preparation.actions == []
+    assert [path.name for path in recovery.iterdir()] == ["foreign"]
+    assert not operation.recovery_is_absent(_BINDING)
+
+
 @pytest.mark.parametrize(
     "interrupted_name",
     [

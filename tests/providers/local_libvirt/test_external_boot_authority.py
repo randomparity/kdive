@@ -455,11 +455,12 @@ def _adapter(io: _FakeIO) -> LocalExternalBootAuthorityAdapter:
 
 @pytest.mark.parametrize(
     ("partial", "initially_absent", "expects_abort"),
-    [("removed", False, True), ("not-partial", True, False)],
+    # "absent" after a present recovery: an interrupted finalization's empty directory (#2927).
+    [("removed", False, True), ("absent", False, True), ("not-partial", True, False)],
 )
 @pytest.mark.anyio
 async def test_system_teardown_persists_intent_before_pending_or_released_cleanup(
-    partial: Literal["removed", "not-partial"],
+    partial: Literal["removed", "absent", "not-partial"],
     initially_absent: bool,
     expects_abort: bool,
 ) -> None:
@@ -1538,10 +1539,13 @@ async def test_a_deleting_commit_point_drives_cleanup_when_ownership_is_named(
     assert io.tombstone is True
 
 
-async def test_teardown_aborts_partial_and_hands_terminal_absence_to_recovery() -> None:
+@pytest.mark.parametrize("partial", ["removed", "absent"])
+async def test_teardown_aborts_partial_and_hands_terminal_absence_to_recovery(
+    partial: Literal["removed", "absent"],
+) -> None:
     io = _FakeIO()
     io.reopen_error = FileNotFoundError("intent.json")
-    io.partial_abort_result = "removed"
+    io.partial_abort_result = partial
     io.recovery_absent = True
     request = _request(
         purpose="teardown",
