@@ -23,8 +23,8 @@ Token `q2889-5dc4e3ed`; amends [ADR-0620](../../adr/0620-authority-owned-system-
   For each `external_boot_authority_v1` `boot` job (public teardown owns `teardown` ones),
   `running`, exhausted and lease-lapsed on the database clock, it locks the row, then in
   a later statement requires no authority row for the job in `allocating` or `current`, and sets
-  `failed`/`lease_expired`. Every receipt path needs such a row and a `running` job, and
-  allocation rechecks the job under its own row lock, so no receipt can commit after it.
+  `failed`/`lease_expired`. Every path that can commit a receipt needs such a row and a
+  `running` job; allocation and the losing-result classifier recheck the job under its row lock.
   `repair_abandoned_jobs` calls it; the marker's `created`/`running` Run fails with the job.
 - **Rejected:** option 3 (splits receipt ownership), option 2 (cancel, recycle `canceled`).
 
@@ -35,11 +35,11 @@ Token `q2889-5dc4e3ed`; amends [ADR-0620](../../adr/0620-authority-owned-system-
    under the current authority generation; a live final attempt is never reset.
 3. **Accepted failure classes** — a hung old attempt keeps its authority until the recycled job
    allocates (ADR-0620 fence). A stray whose authority is `allocating` or `current` (commit has
-   no lease check) waits for a newer allocation to supersede it. `authority_system_v1` jobs are
-   untouched; their own repair owns them.
+   no lease check) waits for a newer allocation to supersede it.
 4. **Covered elsewhere** — follow-ups: `observe_system_teardown` `provider_conflict` on an older
    intent; a `queued` exhausted teardown left by `retained_quarantine`; exhausted repair-lane
-   teardown jobs. Activate-versus-teardown policy: #2887 ADR follow-up.
+   teardown jobs; exhausted `authority_system_v1` jobs without a terminal receipt.
+   Activate-versus-teardown policy: #2887 ADR follow-up.
 
 ## Success
 

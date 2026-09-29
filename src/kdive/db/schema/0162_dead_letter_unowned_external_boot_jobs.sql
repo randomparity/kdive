@@ -2,11 +2,12 @@
 -- ever finish.  repair_abandoned_jobs skips marked payloads because their receipt paths own
 -- terminalization, so a `boot` job (a marker's only kind besides `teardown`, 0122) that its
 -- authority refused (superseded, binding mismatch) stayed `running` forever once its final lease
--- lapsed.  Every receipt path needs an `allocating` or `current` authority row for the job and a
--- `running` job row, and allocation rechecks the job under its own row lock.  So the job row is
--- locked first, and a later statement (a fresh READ COMMITTED snapshot) requires that no such
--- authority row exists; nothing can then commit for the job.  Teardown jobs are left to the
--- public teardown recycle.  The reconciler cannot read authority rows, hence security definer.
+-- lapsed.  Every path that can commit a receipt needs an `allocating` or `current` authority row
+-- for the job and a `running` job row; allocation and the losing-result classifier (0128) recheck
+-- the job under its own row lock.  So the job row is locked first, and a later statement (a fresh
+-- READ COMMITTED snapshot) requires that no such authority row exists; nothing can then commit for
+-- the job.  Teardown jobs are left to the public teardown recycle.  The reconciler cannot read
+-- authority rows, hence security definer.
 CREATE FUNCTION public.dead_letter_unowned_external_boot_jobs()
 RETURNS SETOF uuid
 LANGUAGE plpgsql

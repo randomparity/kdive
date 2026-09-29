@@ -73,11 +73,11 @@ A `succeeded` job is still never reset.
 
 The reconciler dead-letters an authority-marked non-teardown job (`failed`, `lease_expired`)
 only when it is `running`, exhausted, lease-lapsed and has no `allocating` or `current`
-authority row, checked after locking the job row (migration 0162). Every receipt path needs
-such a row and a `running` job, and allocation rechecks the job under its own row lock, so no
-receipt can commit for it; the receipt paths keep sole ownership of every job they could still
-finish. A stray whose authority is `allocating` or `current` waits until a newer allocation
-supersedes it.
+authority row, checked after locking the job row (migration 0162). Every path that can commit a
+receipt needs such a row and a `running` job, and allocation and the losing-result classifier
+recheck the job under its own row lock, so no receipt can commit for it; the receipt paths keep
+sole ownership of every job they could still finish. A stray whose authority is `allocating` or
+`current` waits until a newer allocation supersedes it.
 
 Rejected for this amendment:
 
