@@ -217,26 +217,6 @@ def test_get_unknown_job_is_error_envelope(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_get_job_degrades_invariant_violating_row(
-    migrated_url: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            job_id = await _enqueue(pool, "bad-get")
-            await _mark_failed_without_category(pool, job_id)
-            caplog.set_level(logging.WARNING, logger=jobs_tools.__name__)
-            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
-        assert resp.object_id == job_id
-        assert resp.status == "error"
-        assert resp.error_category == "infrastructure_failure"
-        assert any(
-            record.exc_info is not None and f"job {job_id}" in record.message
-            for record in caplog.records
-        )
-
-    asyncio.run(_run())
-
-
 def test_get_malformed_id_is_error_envelope(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -566,26 +546,6 @@ def test_wait_zero_timeout_is_single_read(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_wait_job_degrades_invariant_violating_terminal_row(
-    migrated_url: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            job_id = await _enqueue(pool, "bad-wait")
-            await _mark_failed_without_category(pool, job_id)
-            caplog.set_level(logging.WARNING, logger=jobs_tools.__name__)
-            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0.0)
-        assert resp.object_id == job_id
-        assert resp.status == "error"
-        assert resp.error_category == "infrastructure_failure"
-        assert any(
-            record.exc_info is not None and f"job {job_id}" in record.message
-            for record in caplog.records
-        )
-
-    asyncio.run(_run())
-
-
 def test_wait_caps_sleep_to_remaining_timeout(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -702,30 +662,28 @@ def test_list_jobs_empty(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_list_jobs_isolates_invariant_violating_row(
+def test_null_category_failed_job_renders_in_list_and_wait(
     migrated_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A single producer-bug row (failed with no category) degrades to an error
-    envelope without blanking the rest of the list."""
+    """A failed row with no category (the schema admits it) degrades to
+    ``infrastructure_failure`` in both list and wait, keeping the job's data (#2931)."""
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             good_id = await _enqueue(pool, "good")
             bad_id = await _enqueue(pool, "bad")
-            # Force the bad row into a state that violates "category iff failed".
             await _mark_failed_without_category(pool, bad_id)
-            caplog.set_level(logging.WARNING, logger=jobs_tools.__name__)
-            resp = await _list_jobs(pool, VIEWER_CTX, limit=50)
-        items = resp.items
-        by_id = {r.object_id: r for r in items}
-        assert len(items) == 2  # the bad row did not blank the list
+            caplog.set_level(logging.WARNING, logger="kdive.mcp.responses")
+            listed = await _list_jobs(pool, VIEWER_CTX, limit=50)
+            waited = await jobs_tools.wait_job(pool, VIEWER_CTX, bad_id, timeout_s=0)
+        by_id = {r.object_id: r for r in listed.items}
+        assert len(listed.items) == 2  # the bad row did not blank the list
         assert by_id[good_id].status == "queued"
-        assert by_id[bad_id].status == "error"
-        assert by_id[bad_id].error_category == "infrastructure_failure"
-        assert any(
-            record.exc_info is not None and f"job {bad_id}" in record.message
-            for record in caplog.records
-        )
+        for resp in (by_id[bad_id], waited):
+            assert resp.status == "failed"
+            assert resp.error_category == "infrastructure_failure"
+            assert resp.data["kind"] == "install"
+        assert any(f"failed job {bad_id}" in record.message for record in caplog.records)
 
     asyncio.run(_run())
 
