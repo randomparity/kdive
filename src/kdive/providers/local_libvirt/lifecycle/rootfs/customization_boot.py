@@ -36,7 +36,10 @@ import libvirt
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes._build_common import run_guestfs_tool
-from kdive.providers.local_libvirt.lifecycle.boot.readiness import _domain_exit_probe
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    ESCAPE_SEQUENCE,
+    _domain_exit_probe,
+)
 from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
 from kdive.providers.local_libvirt.lifecycle.storage import _prepare_console_log
 from kdive.providers.local_libvirt.settings import (
@@ -91,26 +94,32 @@ class CustomizeVerdict(StrEnum):
 
 
 def _line_present(text: str, marker: str) -> bool:
-    marker_re = re.compile(rf"^[^\S\n]*{re.escape(marker)}[^\S\n]*$", re.MULTILINE)
+    marker_re = re.compile(rf"(?:^|[^\S\n]){re.escape(marker)}[^\S\n]*$", re.MULTILINE)
     return marker_re.search(text) is not None
 
 
 def classify_customization_console(data: bytes) -> CustomizeVerdict:
     """Classify a customization-boot console capture as ok, failed, or pending.
 
-    Order matters: the ok marker wins outright; otherwise the fail marker or a genuine
+    Getty escape sequences are stripped first and a marker may follow horizontal whitespace on
+    its line, so serial-console interleaving with the getty cannot hide it (#2922). Order
+    matters: the ok marker wins outright; otherwise the fail marker or a genuine
     kernel fault, or the observed terminal systemd manager-freeze pair means failed; otherwise
     the boot is still pending.
     """
-    text = data.decode("utf-8", errors="replace")
+    raw = data.decode("utf-8", errors="replace")
+    text = ESCAPE_SEQUENCE.sub("", raw)
     if _line_present(text, OK_MARKER):
         return CustomizeVerdict.OK
     if _line_present(text, FAIL_MARKER):
         return CustomizeVerdict.FAILED
-    if _GENUINE_FAULT.search(text):
-        return CustomizeVerdict.FAILED
-    if _MANAGER_START_FAILURE.search(text) and _MANAGER_FREEZE.search(text):
-        return CustomizeVerdict.FAILED
+    # A torn escape introducer can eat the first letter of a fault literal that follows it, so
+    # the fault scans read the raw text as well (as readiness's crash scan does).
+    for region in (text, raw):
+        if _GENUINE_FAULT.search(region):
+            return CustomizeVerdict.FAILED
+        if _MANAGER_START_FAILURE.search(region) and _MANAGER_FREEZE.search(region):
+            return CustomizeVerdict.FAILED
     return CustomizeVerdict.PENDING
 
 

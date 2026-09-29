@@ -20,7 +20,6 @@ not-found-shaped error as a missing job, so existence is not leaked (matching th
 from __future__ import annotations
 
 import asyncio
-import logging
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -74,8 +73,6 @@ from kdive.services.systems.authority_owned import (
     authority_system_binding,
     enqueue_preactivation_teardown,
 )
-
-_log = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 0.5
 
@@ -132,18 +129,6 @@ class JobsListRequest:
 
 def _error(object_id: str, category: ErrorCategory) -> ToolResponse:
     return ToolResponse.failure(object_id, category)
-
-
-def _job_response(job: Job) -> ToolResponse:
-    try:
-        return ToolResponse.from_job(job)
-    except ValueError:
-        _log.warning(
-            "job %s violates the response invariant; degraded",
-            job.id,
-            exc_info=True,
-        )
-        return _error(str(job.id), ErrorCategory.INFRASTRUCTURE_FAILURE)
 
 
 def _in_scope(job: Job, ctx: RequestContext) -> bool:
@@ -234,7 +219,7 @@ async def wait_job(
                 return denied
             now = loop.time()
             if job.state in _TERMINAL or now >= deadline:
-                return _job_response(job)
+                return ToolResponse.from_job(job)
             await sleep(min(POLL_INTERVAL_S, deadline - now))
 
 
@@ -420,7 +405,7 @@ async def list_jobs(
             if truncated and kept
             else None
         )
-        responses = [_job_response(job) for job in kept]
+        responses = [ToolResponse.from_job(job) for job in kept]
         return ToolResponse.collection(
             "jobs",
             "ok",

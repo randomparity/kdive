@@ -1538,10 +1538,13 @@ async def test_a_deleting_commit_point_drives_cleanup_when_ownership_is_named(
     assert io.tombstone is True
 
 
-async def test_teardown_aborts_partial_and_hands_terminal_absence_to_recovery() -> None:
+@pytest.mark.parametrize("partial", ["removed", "absent"])
+async def test_teardown_aborts_partial_and_hands_terminal_absence_to_recovery(
+    partial: Literal["removed", "absent"],
+) -> None:
     io = _FakeIO()
     io.reopen_error = FileNotFoundError("intent.json")
-    io.partial_abort_result = "removed"
+    io.partial_abort_result = partial
     io.recovery_absent = True
     request = _request(
         purpose="teardown",
