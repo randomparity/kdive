@@ -183,6 +183,19 @@ Steps:
    request.generation` to `operation_records`.
 4. Rerun green. Commit `fix(authority): bind teardown proof to its own generation`.
 
+## Task 3b — Recover after an interrupted takeover (discovered in-path defect)
+
+**Verification:**
+- Contract: a takeover interrupted after its watermark, or after an inherited
+  `provider-returned`, is followed by a takeover that recovers the teardown and acknowledges.
+  Mode: focused-test. `test_takeover_after_an_interrupted_teardown_takeover_recovers_it[<case>]`
+  in `tests/db/test_migration_0161_teardown_takeover.py`; red on main and on the pre-fix branch.
+
+Steps: in `_acknowledge_takeover_bound`, filter `record.phase not in _TAKEOVER_PHASES`
+(`protocol.py`) when building `phases_by_operation` and `phases`, and look up the unresolved
+record with `phases_by_operation.get(...)`. Commit
+`fix(authority): recover a teardown after an interrupted takeover`.
+
 ## Task 4 — Observation over a partial predecessor (local provider)
 
 **Verification:**

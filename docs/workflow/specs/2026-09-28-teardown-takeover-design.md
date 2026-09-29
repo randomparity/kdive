@@ -63,12 +63,20 @@ absent, replaces it, checks the result, and executes it.
   job sees `stale_handle` and retries or exhausts without writing an authority row. A teardown
   allocation is unaffected and still supersedes whatever is `allocating` or `current`.
 
-### Service (`_recovery_observation`, `_execute_teardown`)
+### Service (`_recovery_observation`, `_execute_teardown`, `_acknowledge_takeover_bound`)
 
-Both select the `mutation-started` record that belongs to the operation they prove, adding
-`authority_id` and `generation` to the existing identity and attempt-id match:
+Both proof paths select the `mutation-started` record that belongs to the operation they prove,
+adding `authority_id` and `generation` to the existing identity and attempt-id match:
 `_recovery_observation` matches the recovered record's own authority and generation, and
-`_execute_teardown` matches the request's. Nothing else in the service changes.
+`_execute_teardown` matches the request's.
+
+`_acknowledge_takeover_bound` builds its identity-keyed phase maps (whether to recover, which
+record is unresolved, and the post-recovery check) from operation-phase records only. A teardown
+takeover's records share the suspended teardown's identity, so a takeover interrupted before
+acknowledging otherwise hides the unresolved operation from its successor, which skips recovery
+and is refused `journal_conflict` at acknowledgement (a discovered in-path defect, authorized by
+the orchestrator on 2026-09-28). `_anchor`, the host, the journal and `execute_mutation` do not
+change.
 
 ### Dedup recycle (`_enqueue_authority_teardown`)
 
@@ -127,6 +135,8 @@ before the public teardown is submitted.
   a live, succeeded or canceled one or a marker mismatch.
 - `_recovery_observation` and `_execute_teardown` bind their own generation's
   `mutation-started` context when older generations of the same teardown share its identity.
+- A takeover that follows a teardown takeover interrupted after its watermark, or after an
+  inherited `provider-returned`, recovers the teardown and acknowledges.
 - The retained fixture settles live under criterion 6.
 
 ## Failure model
@@ -169,6 +179,8 @@ before the public teardown is submitted.
   the real SQL repository and head function and a fake teardown adapter. Three generations share
   one teardown identity; each takeover recovers its predecessor's `mutation-started`, and the
   recorded contexts show recovery and the final proof each bind their own generation.
+  A second test interrupts a takeover after its watermark and after an inherited
+  `provider-returned`; the next takeover recovers and the teardown completes.
 - `tests/providers/local_libvirt/test_external_boot.py`: observation is read-only and repeatable
   over each retained generation-N intent phase.
 - `tests/mcp/lifecycle/`: recycle of a failed authority teardown with an identical marker, and
