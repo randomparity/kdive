@@ -101,7 +101,10 @@ teardown. A non-final attempt still requeues and supersedes. The receipt and the
 result are unchanged, and a `retired` authority cannot commit again. Migration 0163 also moves
 authority-marked teardown jobs that were already `queued` and exhausted, and the superseded root
 authority of their retained receipt, to the same states. Recovery is the public teardown's
-`failed` recycle defined above, so the reservation still credits once.
+`failed` recycle defined above, so the reservation still credits once. The reconciler's
+external-boot repair lanes (`reconciler/repairs/external_boot.py`) now see such a job as not live,
+as they already do after a `fail` at exhaustion. A successor they enqueue serializes with a public
+recycle through the per-System lock and the authority fences.
 
 Rejected for this amendment:
 
