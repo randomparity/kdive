@@ -10,7 +10,8 @@ import socket
 import stat
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,11 +32,23 @@ from kdive.providers.external_boot_authority.host import (
 )
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityObservationV1,
     AuthorityOperation,
+    AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     canonical_record_bytes,
     record_digest,
+)
+from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
+    ExternalBootAuthorityService,
+)
+from tests.providers.external_boot_authority.service_support import (
+    _Adapter,
+    _mutation,
+    _Repository,
+    _takeover,
 )
 
 
@@ -973,6 +986,9 @@ def test_host_shares_one_mutation_service_between_listeners(
 
         async def close(self) -> None:
             self.closed = True
+
+        def quiesce_anchors(self) -> None:
+            return None
 
     service = Service()
     received: list[tuple[object | None, object | None]] = []
@@ -2195,3 +2211,239 @@ def test_startup_retraction_stops_at_its_load_deadline(tmp_path: Path) -> None:
         )
 
     assert lane.read_bytes() == before
+
+
+def _anchoring_service(
+    config: AuthorityHostConfig,
+) -> tuple[
+    ExternalBootAuthorityService, _Repository, AuthenticatedPeer, AuthorityTakeoverRequestV1
+]:
+    """A real service over the fake repository, journaling into the host's lane directory."""
+    peer = AuthenticatedPeer(uuid4())
+    request = _takeover().model_copy(update={"authority_instance": config.authority_instance})
+    repository = _Repository(peer, request)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(
+            config.journal_dir, f"{system_id}.jsonl"
+        ),
+        adapter=_Adapter(),
+    )
+    return service, repository, peer, request
+
+
+def _patch_trusted_heads(monkeypatch: pytest.MonkeyPatch, repository: _Repository) -> None:
+    async def heads(_config: AuthorityHostConfig) -> tuple[JournalHead, ...]:
+        return () if repository.head is None else (repository.head,)
+
+    monkeypatch.setattr(host, "_database_heads", heads)
+
+
+def _signal_failed_validation(
+    monkeypatch: pytest.MonkeyPatch, armed: list[object]
+) -> asyncio.Event:
+    failed = asyncio.Event()
+    validate = host.JournalInventoryValidator.validate
+
+    async def observed(
+        validator: host.JournalInventoryValidator,
+        config: AuthorityHostConfig,
+        heads: tuple[JournalHead, ...],
+    ) -> None:
+        # getattr keeps the race runnable on a build without the hook, where it must fail with
+        # journal: head-mismatch rather than here.
+        armed.append(getattr(validator, "anchor_quiescence", None))
+        try:
+            await validate(validator, config, heads)
+        except HostReadinessError:
+            failed.set()
+            raise
+
+    monkeypatch.setattr(host.JournalInventoryValidator, "validate", observed)
+    return failed
+
+
+class _Stop(Exception):
+    """Ends the host loop once the periodic check under test has run."""
+
+
+def test_periodic_check_waits_out_an_anchor_between_append_and_advance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#2899: the periodic check overlapping `_anchor` no longer exits the host."""
+    config = replace(_config(tmp_path), authority_instance="host-a")
+    armed: list[object] = []
+    periodic_checks = 0
+
+    class Listener:
+        def validate(self) -> None:
+            return None
+
+        async def start_serving(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    async def serve(*_args: object, **_kwargs: object) -> Listener:
+        return Listener()
+
+    async def healthy(*_args: object) -> None:
+        return None
+
+    async def scenario() -> None:
+        service, repository, peer, request = _anchoring_service(config)
+        failed = _signal_failed_validation(monkeypatch, armed)
+        mutation: asyncio.Task[AuthorityObservationV1] | None = None
+        sleep = asyncio.sleep
+
+        async def interval(delay: float) -> None:
+            nonlocal mutation, periodic_checks
+            if delay != host.READINESS_INTERVAL_SECONDS:
+                return await sleep(delay)
+            periodic_checks += 1
+            if periodic_checks == 2:
+                assert mutation is not None
+                assert (await mutation).category == "target"
+                raise _Stop
+            await service.acknowledge_takeover(peer, request)
+            repository.current = True
+            repository.pause_phase = JournalPhase.ADMITTED
+            repository.phase_release.clear()
+            mutation = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+            await repository.phase_entered.wait()
+
+            async def finish_anchor() -> None:
+                await failed.wait()
+                repository.phase_release.set()
+
+            asyncio.get_running_loop().create_task(finish_anchor())
+
+        monkeypatch.setattr(host.asyncio, "sleep", interval)
+        monkeypatch.setattr(host, "_build_mutation_service", lambda *_args, **_kwargs: service)
+        _patch_trusted_heads(monkeypatch, repository)
+        with pytest.raises(_Stop):
+            await run_authority_host(config)
+        # Startup is unarmed; the periodic check fails once, then passes under quiescence.
+        assert armed == [None, service.quiesce_anchors, service.quiesce_anchors]
+
+    monkeypatch.setattr(host, "_validate_access_boundary", lambda _config: None)
+    monkeypatch.setattr(host, "_check_provider_socket", healthy)
+    monkeypatch.setattr(host, "_load_system_installation", lambda _config: None)
+    monkeypatch.setattr(host, "serve_authority_transport", serve)
+    monkeypatch.setattr(host, "check_tls_health", healthy)
+    monkeypatch.setattr(host, "_notify_systemd", lambda _message: None)
+    asyncio.run(scenario())
+    assert periodic_checks == 2
+
+
+class _CountingQuiescence:
+    def __init__(self) -> None:
+        self.entered = 0
+
+    @asynccontextmanager
+    async def __call__(self) -> AsyncIterator[None]:
+        self.entered += 1
+        yield
+
+
+@pytest.mark.parametrize("case", ["head-mismatch", "inventory-mismatch"])
+def test_periodic_check_still_refuses_a_divergence_that_persists_under_quiescence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
+) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 2)
+    _write_lane(config, records)
+    trusted = (_head_of(records[0]),)
+    if case == "inventory-mismatch":
+        trusted = (_head_of(records[1]), _head(uuid4()))
+    reads = 0
+
+    async def heads(_config: AuthorityHostConfig) -> tuple[JournalHead, ...]:
+        nonlocal reads
+        reads += 1
+        return trusted
+
+    monkeypatch.setattr(host, "_database_heads", heads)
+    quiescence = _CountingQuiescence()
+    validator = host.JournalInventoryValidator(anchor_quiescence=quiescence)
+    asyncio.run(validator.validate(config, (_head_of(records[1]),)))
+    cached = dict(validator._cache)  # noqa: SLF001
+    assert cached
+
+    with pytest.raises(HostReadinessError, match=f"journal: {case}"):
+        asyncio.run(validator.validate_current(config))
+
+    assert (reads, quiescence.entered) == (2, 1)
+    assert validator._cache == cached  # noqa: SLF001 - a divergent view never becomes evidence
+
+
+def test_unarmed_check_never_quiesces(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 2)
+    _write_lane(config, records)
+    reads = 0
+
+    async def heads(_config: AuthorityHostConfig) -> tuple[JournalHead, ...]:
+        nonlocal reads
+        reads += 1
+        return (_head_of(records[0]),)
+
+    monkeypatch.setattr(host, "_database_heads", heads)
+    with pytest.raises(HostReadinessError, match="journal: head-mismatch"):
+        asyncio.run(host.JournalInventoryValidator().validate_current(config))
+    assert reads == 1
+
+
+def test_periodic_quiescence_wait_is_bounded_by_the_readiness_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = replace(_config(tmp_path), authority_instance="host-a")
+    monkeypatch.setattr(host, "READINESS_CHECK_TIMEOUT_SECONDS", 0.2)
+
+    async def scenario() -> None:
+        service, repository, peer, request = _anchoring_service(config)
+        _patch_trusted_heads(monkeypatch, repository)
+        await service.acknowledge_takeover(peer, request)
+        repository.current = True
+        repository.pause_phase = JournalPhase.ADMITTED
+        repository.phase_release.clear()
+        mutation = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+        await repository.phase_entered.wait()
+        validator = host.JournalInventoryValidator(anchor_quiescence=service.quiesce_anchors)
+
+        with pytest.raises(HostReadinessError, match="readiness: timeout"):
+            await host._bounded_readiness_check(validator.validate_current(config))  # noqa: SLF001
+
+        repository.pause_phase = None
+        repository.phase_release.set()
+        async with asyncio.timeout(5):
+            assert (await mutation).category == "target"
+            await validator.validate_current(config)
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_anchor_leaves_the_service_quiescible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = replace(_config(tmp_path), authority_instance="host-a")
+
+    async def scenario() -> None:
+        service, repository, peer, request = _anchoring_service(config)
+
+        async def unreachable(*_args: object) -> str:
+            raise OSError("injected head-advance failure")
+
+        monkeypatch.setattr(repository, "advance", unreachable)
+        with pytest.raises(OSError, match="injected"):
+            await service.acknowledge_takeover(peer, request)
+        async with asyncio.timeout(5):
+            async with service.quiesce_anchors():
+                pass
+            with pytest.raises(RuntimeError, match="inside"):
+                async with service.quiesce_anchors():
+                    raise RuntimeError("failure inside the quiesced check")
+        assert service._anchors_open.is_set()  # noqa: SLF001 - new anchors are admitted again
+
+    asyncio.run(scenario())

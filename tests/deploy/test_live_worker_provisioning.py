@@ -1866,6 +1866,20 @@ def test_local_worker_host_packages_provision_openssl_and_zlib_headers_per_famil
     assert "zlib-devel" in suse_packages
 
 
+def test_local_worker_host_packages_provision_pip_module_prerequisites_per_family() -> None:
+    """tasks/uv.yml runs ansible.builtin.pip against /usr/bin/python3, which imports both pip
+    and packaging there; python3-pip does not pull packaging in on Fedora 44 (#2906)."""
+    defaults = _yaml(DEFAULTS)
+    for family_list in (
+        "live_vm_host_packages",
+        "local_worker_host_packages_redhat",
+        "local_worker_host_packages_suse",
+    ):
+        packages = defaults[family_list]
+        assert isinstance(packages, list)
+        assert {"python3-pip", "python3-packaging"} <= set(packages), family_list
+
+
 def test_redhat_worker_provisions_python_headers_for_locked_venv() -> None:
     defaults = _yaml(DEFAULTS)
     packages = defaults["local_worker_host_packages_redhat"]
