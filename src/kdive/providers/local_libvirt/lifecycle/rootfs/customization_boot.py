@@ -107,15 +107,19 @@ def classify_customization_console(data: bytes) -> CustomizeVerdict:
     kernel fault, or the observed terminal systemd manager-freeze pair means failed; otherwise
     the boot is still pending.
     """
-    text = ESCAPE_SEQUENCE.sub("", data.decode("utf-8", errors="replace"))
+    raw = data.decode("utf-8", errors="replace")
+    text = ESCAPE_SEQUENCE.sub("", raw)
     if _line_present(text, OK_MARKER):
         return CustomizeVerdict.OK
     if _line_present(text, FAIL_MARKER):
         return CustomizeVerdict.FAILED
-    if _GENUINE_FAULT.search(text):
-        return CustomizeVerdict.FAILED
-    if _MANAGER_START_FAILURE.search(text) and _MANAGER_FREEZE.search(text):
-        return CustomizeVerdict.FAILED
+    # A torn escape introducer can eat the first letter of a fault literal that follows it, so
+    # the fault scans read the raw text as well (as readiness's crash scan does).
+    for region in (text, raw):
+        if _GENUINE_FAULT.search(region):
+            return CustomizeVerdict.FAILED
+        if _MANAGER_START_FAILURE.search(region) and _MANAGER_FREEZE.search(region):
+            return CustomizeVerdict.FAILED
     return CustomizeVerdict.PENDING
 
 

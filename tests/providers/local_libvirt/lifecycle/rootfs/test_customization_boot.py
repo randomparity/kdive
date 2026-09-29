@@ -41,6 +41,8 @@ def test_fail_marker():
         (b"login: \x1b]0;tty\x07kdive-customize-failed\n", CustomizeVerdict.FAILED),
         (b"dnf: last line, no newline kdive-customize-ok\n", CustomizeVerdict.OK),
         (b"\x1b[31mKernel panic - not syncing\x1b[0m\n", CustomizeVerdict.FAILED),
+        (b"boot\n\x1bKernel panic - not syncing: x\n", CustomizeVerdict.FAILED),
+        (b"Kernel panic\n\x1b[0m\x1b[?2004hkdive-customize-ok\n", CustomizeVerdict.OK),
     ],
 )
 def test_getty_escapes_and_partial_lines_do_not_hide_the_verdict(
