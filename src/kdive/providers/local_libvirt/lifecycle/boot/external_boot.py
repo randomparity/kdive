@@ -2315,7 +2315,7 @@ class _RealLocalExternalBootOperation:
         result = self._abort_preparation(
             binding, plan_identity, authority, expected_identities=None, restore_power=False
         )
-        if result == "absent":
+        if result in {"removed", "absent"}:
             with RecoveryMetadataStore(self._recovery_root) as store:
                 store.prune_empty_activation_parents(binding)
         return result
@@ -2939,7 +2939,8 @@ class LocalLibvirtExternalBoot:
         # No operation session, as in ``finalize_cleanup_tombstone``: this runs after
         # ``cleanup`` pruned the activation's artifact parents, and a session open re-creates
         # them through the artifact root, leaving exact recovery absence unprovable (#2898).
-        # ``authority`` is therefore unused; the store re-reads the exact tombstone.
+        # ``authority`` is therefore unused; the store re-reads the exact tombstone. The
+        # unpinned-write residual is the same as finalization's; the #2898 design records it.
         self._io.record_cleanup_quarantine(recovery, proof)
 
     def observe_object(
@@ -3794,6 +3795,7 @@ class RecoveryMetadataStore:
         except FileNotFoundError:
             # Absence is success only for the closed exact mutation-started proof
             # re-presented by #2140 for the still-current operation.
+            self.prune_empty_activation_parents(recovery.binding)
             return
         if actual != expected:
             raise ValueError("cleanup tombstone does not match recovery point")
@@ -3821,6 +3823,8 @@ class RecoveryMetadataStore:
         try:
             _open_private_directory(self._root_fd, name)
         except FileNotFoundError:
+            # A session opened after cleanup re-creates the parents it pruned (#2898).
+            self.prune_empty_activation_parents(recovery.binding)
             return
         raise ValueError("cleanup tombstone remained after finalization")
 

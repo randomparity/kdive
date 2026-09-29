@@ -23,6 +23,17 @@ destroys. Payload cleanup unlinks payloads in the activation root, but they live
   regular file, and a present projection file still validates. It then unlinks payloads and
   projection inside the digest directory, removes it, and removes the archive. Absence at
   every step is success. Unit fixtures that place payloads in the activation root move.
+- Criterion 8 (operator amendment 2026-09-29, found by the live settle): every activation
+  session open creates `<system>/<run>/<activation>` through `LocalArtifactRoot.open`, so a
+  session opened after cleanup pruned them left an empty activation directory and exact
+  recovery absence false for good. `record_cleanup_quarantine` therefore records without a
+  session. Like `finalize_cleanup_tombstone`, it is a store write bounded by the proof's
+  binding and point digest and the exact tombstone re-read, and it resolves no operation
+  lease. Finalization, and a System-teardown abort that returns `removed` or `absent`, prune
+  those parents while they are empty. The pruning is rmdir-only and stops at the first
+  non-empty directory.
+- A teardown that finds a tombstoned point (cleanup published, not finalized) skips
+  `recover`, whose intent the tombstone already unlinked, and goes straight to finalization.
 
 ### Failure model
 

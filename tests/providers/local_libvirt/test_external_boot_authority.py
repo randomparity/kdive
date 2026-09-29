@@ -519,6 +519,28 @@ async def test_system_teardown_recovers_and_cleans_owned_point_before_host_mutat
 
 
 @pytest.mark.anyio
+async def test_system_teardown_finalizes_unfinalized_tombstone_without_recover() -> None:
+    """#2898: cleanup published the tombstone, then the attempt died before finalization.
+
+    The tombstone unlinked the intent, so recovering the point again could never succeed.
+    """
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    adapter = _adapter(io)
+
+    result = await adapter.execute_system_teardown(
+        _system_teardown_request(), _context(AuthorityOperation.TEARDOWN), _TEARDOWN_RESERVATION
+    )
+
+    assert result.complete
+    assert "reopen" not in io.actions
+    assert "cleanup" not in io.actions
+    assert io.actions.index("finalize") < io.actions.index("teardown-system")
+    adapter.close()
+
+
+@pytest.mark.anyio
 async def test_system_teardown_settles_pre_stop_intent_activation() -> None:
     io = _FakeIO(_metadata("pre-stop-intent"))
     adapter = _adapter(io)
