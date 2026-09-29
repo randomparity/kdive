@@ -62,7 +62,9 @@ any unlink or postcondition failure blocks startup and names the exact paths to 
 
 Only the configured operator belongs to `kdive-live-control`. Worker accounts keep distinct
 primary groups and receive the `kdive-live-libvirt` and `kvm` supplemental groups; they never
-belong to the control, sudo, or Docker groups. The distro `kvm` authority lets every worker read
+belong to the control, sudo, or Docker groups. The installer appends those groups to an existing
+worker account, keeping memberships other provisioning added, such as the authority client group,
+and refuses an account that holds one of the forbidden groups. The distro `kvm` authority lets every worker read
 `root:kvm` mode-`0640` host kernels for libguestfs and use `/dev/kvm` without making either
 world-accessible. The witness credential and service configuration are root-only beneath
 `/etc/kdive`; per-slot state is root-owned beneath `/var/lib/kdive/live-workers`, and each slot

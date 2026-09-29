@@ -1108,7 +1108,81 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert source.index(ownership) < source.index(harden)
     assert "getent group kvm >/dev/null" in source
     assert '--groups "$libvirt_group,kvm"' in source
-    assert 'usermod -G "$libvirt_group,kvm" "$worker"' in source
+    assert 'usermod -a -G "$libvirt_group,kvm" "$worker"' in source
+    assert 'usermod -G "$libvirt_group,kvm"' not in source
+
+
+def _run_worker_account_convergence(
+    tmp_path: Path, *, existing_groups: str
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run ``_converge_worker_account`` for an existing account against stub account tools.
+
+    Returns the result and the recorded ``usermod`` invocations.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    usermod_log = tmp_path / "usermod.log"
+    stubs = {
+        "getent": "exit 0",
+        "groupadd": "exit 97",
+        "useradd": "exit 97",
+        "usermod": f'printf "%s\\n" "$*" >>{usermod_log}',
+        "id": f'[[ "$*" == "-nG kdive-worker-1" ]] || exit 97; echo "{existing_groups}"',
+    }
+    for name, body in stubs.items():
+        stub = bin_dir / name
+        stub.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
+        stub.chmod(0o755)
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            'set -euo pipefail; source "$1"; PATH="$2:$PATH"; '
+            "_converge_worker_account kdive-worker-1 kdive-live-libvirt kdive-live-control",
+            "bash",
+            str(INSTALLER),
+            str(bin_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result, usermod_log.read_text(encoding="utf-8") if usermod_log.exists() else ""
+
+
+def test_installer_keeps_an_existing_worker_authority_client_membership(tmp_path: Path) -> None:
+    """The installer appends its groups; replacing them dropped the authority client group.
+
+    The local_worker_host role adds each worker to the authority client group (ADR-0619) before
+    the playbook runs this installer, so a replacing ``usermod -G`` stripped the membership and
+    every worker attempt failed ``authority: tls-secret-unavailable`` (#2925).
+    """
+    result, usermod_calls = _run_worker_account_convergence(
+        tmp_path,
+        existing_groups="kdive-worker-1 kdive-live-libvirt kvm kdive-provider-authority-client",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert usermod_calls == "-a -G kdive-live-libvirt,kvm kdive-worker-1\n"
+
+
+@pytest.mark.parametrize("forbidden", ["kdive-live-control", "sudo", "docker"])
+def test_installer_refuses_a_worker_holding_a_forbidden_group(
+    tmp_path: Path, forbidden: str
+) -> None:
+    """Appending no longer prunes, so a forbidden membership is refused before any change.
+
+    deploy/systemd/README.md promises workers never belong to the control, sudo, or Docker
+    groups; the replacing ``usermod -G`` used to enforce that on the standalone path (#2925).
+    """
+    result, usermod_calls = _run_worker_account_convergence(
+        tmp_path, existing_groups=f"kdive-worker-1 kvm {forbidden}"
+    )
+
+    assert result.returncode != 0
+    assert usermod_calls == ""
+    assert f"kdive-worker-1 belongs to the {forbidden} group" in result.stderr
+    assert f"gpasswd -d kdive-worker-1 {forbidden}" in result.stderr
 
 
 def _run_guestfs_link(
