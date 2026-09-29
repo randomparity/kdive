@@ -11,7 +11,6 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
-from pydantic import TypeAdapter
 
 from kdive.db import migrate
 from kdive.db.external_boot_activations import (
@@ -21,13 +20,10 @@ from kdive.db.external_boot_activations import (
 from kdive.domain.external_boot_activation import (
     ExternalBootActivation,
     ExternalBootActivationState,
-    ExternalBootReleaseEvidenceV1,
     ExternalBootReservation,
     ExternalBootReservationState,
-    ExternalBootTeardownEvidenceV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
-    AuthorityTeardownProofV1,
     canonical_teardown_proof_bytes,
     teardown_proof_digest,
 )
@@ -37,36 +33,13 @@ from tests.db.external_boot_authority_support import (
     _RoleDsns,
     _seed_case,
 )
+from tests.db.external_boot_journal_support import (
+    _make_ready_prepared,
+    _proof,
+)
 
 _ACK_DIGEST = "sha256:" + "b" * 64
 _QUIESCENCE_DIGEST = "sha256:" + "c" * 64
-_PLAN_IDENTITY = "sha256:" + "a" * 64
-
-
-def _make_ready_prepared(conn: psycopg.Connection, case) -> None:
-    """Put the legacy teardown seed in a non-failed public admission state."""
-    conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (case.system_id,))
-    conn.execute("UPDATE runs SET state = 'succeeded' WHERE id = %s", (case.run_id,))
-    conn.execute(
-        "UPDATE external_boot_activations SET state = 'prepared', current_attempt_id = NULL, "
-        "pre_recovery_evidence = NULL, recovery_point = %s, terminal_evidence = NULL, "
-        "activation_readiness_deadline = NULL "
-        "WHERE id = %s",
-        (
-            Jsonb(
-                {
-                    "schema": "external-boot-recovery-v1",
-                    "binding": {
-                        "system_id": str(case.system_id),
-                        "run_id": str(case.run_id),
-                        "activation_id": str(case.activation_id),
-                    },
-                    "plan_identity": _PLAN_IDENTITY,
-                }
-            ),
-            case.activation_id,
-        ),
-    )
 
 
 def _insert_newer_terminal_activation(conn: psycopg.Connection, case) -> None:
@@ -108,60 +81,6 @@ def _insert_newer_terminal_activation(conn: psycopg.Connection, case) -> None:
             case.activation_id,
         ),
     )
-
-
-def _proof(case, disposition: str):
-    if disposition == "retained_quarantine":
-        return TypeAdapter(AuthorityTeardownProofV1).validate_python({"disposition": disposition})
-    teardown = {
-        "schema": "external-boot-teardown-evidence-v1",
-        "system_id": str(case.system_id),
-        "system_state": "torn_down",
-        "observed_at": "2026-09-06T00:00:00Z",
-    }
-    teardown_identity = ExternalBootTeardownEvidenceV1.model_validate(teardown).identity
-    if disposition == "complete_pending":
-        value = {
-            "disposition": disposition,
-            "teardown_evidence": teardown,
-            "cleanup_evidence": {
-                "schema": "external-boot-cleanup-evidence-v1",
-                "activation_id": str(case.activation_id),
-                "system_id": str(case.system_id),
-                "mode": "pending_system_teardown",
-                "teardown_identity": teardown_identity,
-                "completed_at": "2026-09-06T00:00:00Z",
-            },
-        }
-    else:
-        release = {
-            "schema": "external-boot-release-evidence-v1",
-            "activation_id": str(case.activation_id),
-            "system_id": str(case.system_id),
-            "store_identity": {"ref": "store/private"},
-            "owner_key": {"ref": "owner/private"},
-            "reserved_bytes": 4096,
-            "enumeration_complete": True,
-            "objects": [],
-            "verified_at": "2026-09-06T00:00:00Z",
-        }
-        identity = ExternalBootReleaseEvidenceV1.model_validate(release).identity
-        value = {
-            "disposition": "complete_ready",
-            "teardown_evidence": teardown,
-            "release_evidence": release,
-            "release_identity": identity,
-            "cleanup_evidence": {
-                "schema": "external-boot-cleanup-evidence-v1",
-                "activation_id": str(case.activation_id),
-                "system_id": str(case.system_id),
-                "release_identity": identity,
-                "mode": "system_teardown",
-                "teardown_identity": teardown_identity,
-                "completed_at": "2026-09-06T00:00:00Z",
-            },
-        }
-    return TypeAdapter(AuthorityTeardownProofV1).validate_python(value)
 
 
 def _current(

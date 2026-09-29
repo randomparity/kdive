@@ -44,18 +44,16 @@ from tests.db.external_boot_authority_support import (
     _RoleDsns,
     _seed_case,
 )
-from tests.db.test_external_boot_authority_journal_migration import (
+from tests.db.external_boot_journal_support import (
     _DIGEST,
     _advance_raw,
     _database_repository,
+    _make_ready_prepared,
     _payload,
     _promote,
+    _proof,
     _record,
     _takeover_request,
-)
-from tests.db.test_migration_0147_external_boot_system_teardown import (
-    _make_ready_prepared,
-    _proof,
 )
 from tests.providers.external_boot_authority.service_support import _Adapter
 
