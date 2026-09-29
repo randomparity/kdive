@@ -3963,7 +3963,19 @@ class RecoveryMetadataStore:
             pass
         else:
             os.close(complete_fd)
-            return "not-partial"
+            # A complete directory is only ever a renamed, filled partial, and only
+            # finalize_tombstone empties one, so an empty one is finalization interrupted
+            # before its rmdir (#2927). rmdir itself refuses any remaining entry.
+            try:
+                os.rmdir(name, dir_fd=self._root_fd)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                if error.errno == errno.ENOTEMPTY:
+                    return "not-partial"
+                raise
+            else:
+                os.fsync(self._root_fd)
         abort_receipt = self._read_optional_abort_receipt(abort_name)
         if abort_receipt is not None and abort_receipt != expected_abort:
             raise ValueError("partial abort receipt does not match teardown request")
