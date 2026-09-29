@@ -29,8 +29,8 @@ behaviour (operator). Decision: [ADR-0708](../../adr/0708-authority-retirement-r
   3. when the PID is not `0`, read the running hard limit with `prlimit`;
   4. restart `user@<uid>.service` when the PID is not `0`, the running limit is `unlimited`, and
      the configured limit is not `infinity`.
-- **Order.** Teardown: after the service/process assertions, the drop-in removal, and both
-  reloads. Role: after the drop-in removal, an unconditional system reload (a re-run whose removal
+- **Order.** Teardown: after the service/process assertions, the drop-in removal, both reloads,
+  and the LOGIN revocation. Role: after the drop-in removal, an unconditional system reload (a re-run whose removal
   reports `ok` notifies no handler, and `systemctl show` reports the loaded limit until a reload),
   then the four tasks, then the unchanged linger task and handler flush.
 - **Runbook.** The retirement paragraph states that teardown tolerates an absent account and
