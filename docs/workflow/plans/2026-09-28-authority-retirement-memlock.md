@@ -93,18 +93,19 @@ Files: `deploy/ansible/roles/provider_authority_host/tasks/disable.yml`,
 Verification:
 - `Mode: focused-test` — extend `test_retiring_the_authority_removes_its_memlock_drop_in`: the
   same four task names exist with the same conditions, keyed on
-  `ansible_facts.getent_passwd['kdive-provider-authority'] is not none`; order is removal <
-  `Apply authority removal before completing cleanup` < PID read < restart <
-  `Retire authority user-service boot persistence`. Red: task not found. Green:
+  `ansible_facts.getent_passwd['kdive-provider-authority'] | default(none) is not none`; order is
+  removal < `Reload systemd before reading the retiring authority user manager` (module
+  `ansible.builtin.systemd_service: {daemon_reload: true}`, no `when`) < PID read < restart <
+  `Retire authority user-service boot persistence` < `Apply authority removal before completing
+  cleanup`. Red: task not found. Green:
   `uv run python -m pytest tests/deploy/test_provider_authority_local_provisioning.py -q -k memlock`.
 
 Steps:
 1. Extend the test; expect red.
-2. Move the flush task to directly after the drop-in removal; insert the four tasks from Task 1
-   with `authority_account` replaced by `'kdive-provider-authority'` and the guard
-   `ansible_facts.getent_passwd['kdive-provider-authority'] is not none`, the command paths
-   unchanged, and register names prefixed `provider_authority_host_retired_`; the linger task
-   follows them.
+2. After the drop-in removal insert the reload task, then the four tasks from Task 1 named
+   `... retiring authority user manager ...`, with `authority_account` replaced by
+   `'kdive-provider-authority'`, the command paths unchanged, and registers prefixed
+   `provider_authority_host_retired_`; the linger task and flush follow unchanged.
 3. Green, `just lint-ansible`; commit `fix(deploy): retire the authority memlock ceiling on disable`.
 
 ## Task 3 — Runbook

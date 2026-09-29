@@ -22,17 +22,17 @@ behaviour (operator). Decision: [ADR-0708](../../adr/0708-authority-retirement-r
 - **Guard form.** Every teardown task that indexes the passwd entry uses
   `ansible_facts.getent_passwd[authority_account] | default(none) is not none`; the two assert
   clauses use `... | default(none) is none or ...`. No `in`/`not in` passwd test remains.
-- **Ceiling retirement (ADR-0708).** Four tasks, the same in both files, guarded by the known-account
-  form (`disable.yml` keeps its existing `is not none` form, valid there because its lookup always
-  sets the key):
+- **Ceiling retirement (ADR-0708).** Four tasks, the same in both files, guarded by the
+  known-account form (in `disable.yml`, keyed on `'kdive-provider-authority'`):
   1. read `MainPID` of `user@<uid>.service`;
   2. read its configured `LimitMEMLOCK`;
   3. when the PID is not `0`, read the running hard limit with `prlimit`;
   4. restart `user@<uid>.service` when the PID is not `0`, the running limit is `unlimited`, and
      the configured limit is not `infinity`.
 - **Order.** Teardown: after the service/process assertions, the drop-in removal, and both
-  reloads. Role: the existing handler flush moves up to follow the drop-in removal, then the four
-  tasks, then the unchanged linger task.
+  reloads. Role: after the drop-in removal, an unconditional system reload (a re-run whose removal
+  reports `ok` notifies no handler, and `systemctl show` reports the loaded limit until a reload),
+  then the four tasks, then the unchanged linger task and handler flush.
 - **Runbook.** The retirement paragraph states that teardown tolerates an absent account and
   restarts a user manager still holding the retired ceiling.
 
@@ -45,7 +45,9 @@ behaviour (operator). Decision: [ADR-0708](../../adr/0708-authority-retirement-r
 3. **Accepted failure classes** — an account present with no running manager: user-scope tasks
    already assume a running manager (unchanged, pre-existing). A host that grants the manager
    `infinity` by its own configuration keeps it (ADR-0708 consequence).
-4. **Covered elsewhere** — linger and account removal (operator exclusion); install-path restart
+4. **Covered elsewhere** — linger and account removal (operator exclusion), including the state
+   where the account is gone but its private unit file remains, which still fails the role's
+   existing `getent` in the endpoint-stop block; install-path restart
    (`libvirt.yml`, #2886).
 
 ## Success
