@@ -257,7 +257,8 @@ def test_no_restricting_activation_admits_every_operation(
         ),
         (_STATE.RECOVERY_CONFLICT, _OP.SYSTEM_POWER, ["runs.get", "systems.teardown"]),
         (_STATE.RECOVERY_FAILED, _OP.RUN_CREATE, ["runs.get", "systems.teardown"]),
-        (_STATE.PREPARING, _OP.RUN_BOOT, ["runs.get"]),
+        (_STATE.PREPARING, _OP.RUN_BOOT, ["runs.get", "systems.teardown"]),
+        (_STATE.ABANDONED, _OP.ALLOCATION_RELEASE, ["runs.get", "systems.teardown"]),
     ],
 )
 def test_denial_carries_the_state_s_next_actions_off_details(
@@ -268,6 +269,27 @@ def test_denial_carries_the_state_s_next_actions_off_details(
 ) -> None:
     denied = _denial(monkeypatch, state, operation)
     assert denied.next_actions == next_actions
+
+
+@pytest.mark.parametrize("state", sorted(_EVERY_RESTRICTED_STATE, key=str))
+def test_release_hint_names_teardown_only_where_the_matrix_admits_it(
+    monkeypatch: pytest.MonkeyPatch, state: ExternalBootActivationState
+) -> None:
+    denied = _denial(monkeypatch, state, _OP.ALLOCATION_RELEASE)
+    teardown_admitted = state in _ADMITTING_STATES[_OP.SYSTEM_TEARDOWN]
+    assert ("systems.teardown" in str(denied)) is teardown_admitted
+    assert ("systems.teardown" in denied.next_actions) is teardown_admitted
+    assert f"activation is {state.value}" in str(denied)
+
+
+def test_hint_omits_teardown_for_a_state_that_does_not_admit_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = {**admission_module._ADMITTED, _STATE.PREPARING: frozenset()}
+    monkeypatch.setattr(admission_module, "_ADMITTED", table)
+    denied = _denial(monkeypatch, _STATE.PREPARING, _OP.ALLOCATION_RELEASE)
+    assert "systems.teardown" not in str(denied)
+    assert denied.next_actions == ["runs.get"]
 
 
 def test_a_denial_carries_the_project_its_render_frame_filters_on() -> None:

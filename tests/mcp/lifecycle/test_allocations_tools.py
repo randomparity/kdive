@@ -1017,9 +1017,27 @@ def test_release_response_includes_service_error_details() -> None:
         details={"field": "state"},
     )
 
-    resp = _release_response(uid, outcome)
+    resp = _release_response(uid, outcome, _ctx(), "proj")
 
     assert resp.data["field"] == "state"
+
+
+def test_release_response_names_the_holding_activation_and_next_action() -> None:
+    outcome = ReleaseOutcome(
+        released=False,
+        category=ErrorCategory.CONFLICT,
+        details={"activation_id": "act-1", "activation_state": "active"},
+        detail="allocation_release is denied while external-boot activation act-1 holds System",
+        next_actions=("runs.get", "systems.teardown"),
+    )
+
+    admin = _release_response(uuid4(), outcome, _ctx(role=Role.ADMIN), "proj")
+    contributor = _release_response(uuid4(), outcome, _ctx(role=Role.CONTRIBUTOR), "proj")
+
+    assert admin.detail == outcome.detail
+    assert admin.data["activation_state"] == "active"
+    assert admin.suggested_next_actions == ["runs.get", "systems.teardown"]
+    assert contributor.suggested_next_actions == ["runs.get"]
 
 
 def test_renew_response_includes_service_error_details() -> None:
