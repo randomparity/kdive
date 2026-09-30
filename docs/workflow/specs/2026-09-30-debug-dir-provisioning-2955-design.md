@@ -21,7 +21,9 @@ worker code reads it (`rg -n DEBUG_DIR src` finds only `runtime.py`).
    the same rule as the provision directories: skip when the directory exists and the invoking
    user can write it, else `sudo install -d -o "$(id -un)" -m 0750`. The invoking user is the
    account that starts the host server. The step runs also under `--skip-libvirt`, because the
-   server needs the directory in every services bring-up.
+   server needs the directory in every services bring-up. A failed `sudo install -d` exits 1
+   with a message that names the directory and the fix (re-run the `live_vm_host` play, or
+   create the directory owned by the operator).
 3. `deploy/ansible/roles/live_vm_host/tasks/main.yml`: one `ansible.builtin.file` task creates
    `/var/lib/kdive/debug` as a directory owned by `live_vm_host_operator_user` (user and
    group), mode `0750`, `follow: false`. The operator account starts the stack on a
@@ -43,7 +45,10 @@ no other account needs to read them.
 3. **Accepted failure classes** — a non-default `KDIVE_DEBUG_DIR` on a role-provisioned host is
    not created by the role (the role uses the default path, like the fixture paths); the
    stack-services step creates it when the operator has sudo. A pre-existing directory that the
-   operator can write keeps its mode (same skip rule as the provision directories).
+   operator can write keeps its mode (same skip rule as the provision directories). A host
+   provisioned before this change, with no debug directory and no passwordless sudo, now stops
+   bring-up with the actionable message until the play is re-run; the first debug operation
+   failed on that host before this change.
 4. **Covered elsewhere** — Helm/compose volumes and the debug/crash directory layout (operator,
    ADR-0088 follow-up); moving the transcript writer to the worker (operator).
 
