@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -49,6 +50,11 @@ def test_release_refuses_an_uncleaned_activation(
 
             assert outcome.released is False
             assert outcome.category is ErrorCategory.CONFLICT
+            assert outcome.details["activation_state"] == "abandoned"
+            assert outcome.details["activation_id"] == str(seeded.activation.id)
+            assert outcome.detail is not None
+            assert "abandoned" in outcome.detail
+            assert outcome.next_actions == ("runs.get", "systems.teardown")
             state = await conn.execute(
                 "SELECT state FROM allocations WHERE id = %s", (allocation_id,)
             )
@@ -170,5 +176,86 @@ def test_expiry_without_a_restricting_activation_logs_no_denial(
             reclaims = _repair_records(caplog, logging.INFO)
             assert len(reclaims) == 1
             assert str(allocation_id) in reclaims[0].getMessage()
+
+    asyncio.run(body())
+
+
+async def _seed_clean_history(
+    conn: psycopg.AsyncConnection, seeded_activation: SeedActivation, system_state: str
+) -> UUID:
+    """Seed a completed activation, set its System's state, and return the allocation id."""
+    seeded = await seeded_activation(
+        conn, state=ExternalBootActivationState.ABANDONED, cleanup_complete=True
+    )
+    await conn.execute(
+        "UPDATE systems SET state = %s WHERE id = %s", (system_state, seeded.system_id)
+    )
+    cursor = await conn.execute(
+        "SELECT allocation_id FROM systems WHERE id = %s", (seeded.system_id,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    return row[0]
+
+
+def test_release_refuses_a_system_with_external_boot_history(
+    migrated_url: str, seeded_activation: SeedActivation
+) -> None:
+    """#2966: the authority teardown needs an active allocation, so release waits for it."""
+
+    async def body() -> None:
+        async with (
+            await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn,
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+        ):
+            allocation_id = await _seed_clean_history(conn, seeded_activation, "ready")
+
+            outcome = await release_with_backstops(
+                pool, allocation_id, project="proj", audit_writer=_noop_audit
+            )
+
+            assert outcome.released is False
+            assert outcome.category is ErrorCategory.CONFLICT
+            assert outcome.details["reason"] == "external_boot_system_teardown_required"
+            state = await conn.execute(
+                "SELECT state FROM allocations WHERE id = %s", (allocation_id,)
+            )
+            assert await state.fetchone() == ("granted",)
+
+    asyncio.run(body())
+
+
+def test_release_admits_a_torn_down_system_with_external_boot_history(
+    migrated_url: str, seeded_activation: SeedActivation
+) -> None:
+    async def body() -> None:
+        async with (
+            await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn,
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+        ):
+            allocation_id = await _seed_clean_history(conn, seeded_activation, "torn_down")
+
+            outcome = await release_with_backstops(
+                pool, allocation_id, project="proj", audit_writer=_noop_audit
+            )
+
+            assert outcome.released is True
+
+    asyncio.run(body())
+
+
+def test_reconciler_reclaim_retains_a_failed_system_with_external_boot_history(
+    migrated_url: str, seeded_activation: SeedActivation
+) -> None:
+    """#2966: the orphaned-active reaper must not end the allocation the teardown still needs."""
+
+    async def body() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            allocation_id = await _seed_clean_history(conn, seeded_activation, "failed")
+
+            outcome = await reclaim_under_lock(conn, _noop_audit, allocation_id, project="proj")
+
+            assert outcome.released is False
+            assert outcome.category is ErrorCategory.CONFLICT
 
     asyncio.run(body())

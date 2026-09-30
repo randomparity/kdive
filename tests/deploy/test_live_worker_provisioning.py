@@ -3098,3 +3098,17 @@ def test_uv_probe_harness_oracle_handles_hosts_without_system_pip(
         exec(script, {})
     expected = managed or pip_version in {"23.0.1", "25.0.1"}
     assert capsys.readouterr().out.strip() == str(expected).lower()
+
+
+def test_role_creates_the_server_debug_directory() -> None:
+    """The operator starts the host server and may lack passwordless sudo (#1293, #2955)."""
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    task = next(t for t in tasks if t["name"] == "Create the server debug transcript directory")
+    assert task["ansible.builtin.file"] == {
+        "path": "/var/lib/kdive/debug",
+        "state": "directory",
+        "owner": "{{ live_vm_host_operator_user }}",
+        "group": "{{ live_vm_host_operator_user }}",
+        "mode": "0750",
+        "follow": False,
+    }

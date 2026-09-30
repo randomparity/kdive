@@ -138,6 +138,18 @@ Two facts shape the packaging:
    helpers. Retain `migrate`, `install-fixtures`, `seed-demo`, and the live-stack
    **backend** scripts (the M2/M2.5 operator-runs depend on them to bring the backends up).
 
+### Amendment (2026-09-30): the server writes debug transcripts (#2955)
+
+This amendment qualifies decision 3, which lists the debug transcript dir (`KDIVE_DEBUG_DIR`) as
+a worker volume and says "the server and reconciler need none of them". Later evidence (#2955, a
+live spine run on a native ppc64le KVM-HV host) shows that the MCP server writes gdb-MI debug
+transcripts: `_default_transcript_dir()` in `src/kdive/mcp/tools/debug/operations/runtime.py`
+reads `KDIVE_DEBUG_DIR`, and no worker code reads it. The setting's declared process scope is now
+the server. On a live host, `scripts/live-stack/stack-services.sh` and the `live_vm_host` role
+create the directory, owned by the operator account that starts the server, with mode `0750`.
+The compose and Helm server volumes for this directory, and the layout of the debug and crash
+dirs, stay with the operator as a follow-up; `KDIVE_CRASH_DIR` is unchanged.
+
 ## Alternatives considered
 
 - **Per-process images** (a light server image, a heavy worker image). Rejected: the band
