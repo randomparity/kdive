@@ -573,6 +573,16 @@ async def _enqueue_preactivation_authority_teardown(
     return envelope
 
 
+def _is_settled_ordinary_teardown(job: Job | None) -> bool:
+    """Whether ``job`` is an unmarked teardown that ended failed or canceled."""
+    return (
+        job is not None
+        and _AUTHORITY_MARKER not in job.payload
+        and "authority_system_v1" not in job.payload
+        and job.state in {JobState.FAILED, JobState.CANCELED}
+    )
+
+
 async def _enqueue_authority_teardown(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -603,7 +613,10 @@ async def _enqueue_authority_teardown(
             data={"reason": "external_boot_teardown_authority_unresolved"},
         )
     prior = await dedup_replay(conn, _teardown_dedup_key(system.id))
-    if prior is not None:
+    # The worker refuses an ordinary teardown for external-boot history before any provider call,
+    # so a settled ordinary job is replaced by the authority teardown (ADR-0620 amendment, #2966).
+    replaces_ordinary = _is_settled_ordinary_teardown(prior)
+    if prior is not None and not replaces_ordinary:
         marker = prior.payload.get(_AUTHORITY_MARKER)
         if not isinstance(marker, dict) or marker.get("activation_id") != str(activation.id):
             return ToolResponse.failure(
@@ -646,8 +659,11 @@ async def _enqueue_authority_teardown(
             suggested_next_actions=["systems.get"],
             data={"reason": "external_boot_teardown_authority_unresolved"},
         )
-    if prior is not None and (
-        dump_payload(kind, payload).get(_AUTHORITY_MARKER) != prior.payload.get(_AUTHORITY_MARKER)
+    if (
+        prior is not None
+        and not replaces_ordinary
+        and dump_payload(kind, payload).get(_AUTHORITY_MARKER)
+        != prior.payload.get(_AUTHORITY_MARKER)
     ):
         return job_envelope(prior, "system_id", system.id)
     # A failed authority teardown, or one whose final attempt's lease lapsed, with the identical
@@ -662,6 +678,9 @@ async def _enqueue_authority_teardown(
         recycle=(
             queue.JobRecyclePolicy.NEVER
             if prior is None
+            # Entered only for a failed or canceled row read under the System lock.
+            else queue.JobRecyclePolicy.TERMINAL_OR_CANCELED
+            if replaces_ordinary
             else queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
         ),
     )
