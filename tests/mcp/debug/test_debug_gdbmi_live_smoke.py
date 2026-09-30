@@ -83,10 +83,6 @@ _UNSUPPORTED_ADVANCE_GROUPS = {
 }
 
 
-def _advance_group_skip_reason(arch: str, group: str) -> str | None:
-    return _UNSUPPORTED_ADVANCE_GROUPS.get((arch, group))
-
-
 @dataclass(frozen=True, slots=True)
 class _ModuleFixture:
     name: str
@@ -207,7 +203,7 @@ def test_live_vm_debug_advance_modes(  # pragma: no cover - live_vm
     group: str,
 ) -> None:
     arch = live_debug_surface.profile["arch"]
-    skip_reason = _advance_group_skip_reason(arch, group)
+    skip_reason = _UNSUPPORTED_ADVANCE_GROUPS.get((arch, group))
     if skip_reason is not None:
         pytest.skip(skip_reason)
     rootfs_contract = require_live_vm_throwaway("qemu:///session", session_required=True)
@@ -275,7 +271,9 @@ def test_advance_proof_reads_the_arch_pc_and_skips_only_unsupported_groups(
 ) -> None:
     """x86_64 keeps all four modes; ppc64le skips single-step naming its runtime issue (#2740)."""
     assert _PC_REGISTER[arch] == register
-    reasons = {group: _advance_group_skip_reason(arch, group) for group in _ADVANCE_MODE_GROUPS}
+    reasons = {
+        group: _UNSUPPORTED_ADVANCE_GROUPS.get((arch, group)) for group in _ADVANCE_MODE_GROUPS
+    }
     assert {group for group, reason in reasons.items() if reason is not None} == skipped_groups
     for group in skipped_groups:
         assert "#2942" in str(reasons[group])
