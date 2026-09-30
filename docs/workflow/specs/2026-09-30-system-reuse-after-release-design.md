@@ -11,8 +11,8 @@ in `ExternalBootAuthorityService.execute_mutation`
 (`src/kdive/providers/external_boot_authority/service.py`) takes the latest `terminal` record of
 the same operation with a lower generation from the whole System lane. On a reused System it finds
 the first activation's record, and `_operation_matches` fails on `activation_id`. The release-phase
-search has the same defect (`release_phase_mismatch`). The refusal sets `lane.failed`, so the lane
-refuses every later request until the authority restarts.
+search has the same defect (`release_phase_mismatch`). Each retry finds the same record, so every
+attempt fails.
 
 ## Scope
 
@@ -42,8 +42,8 @@ refuses every later request until the authority restarts.
    - a mismatching same-activation predecessor still refuses before any journal append;
    - the journal file and the database head stay equal.
 3. **Accepted failure classes**:
-   - An authority that already set a lane to failed under the old code needs a restart. The
-     refusal wrote no record, so no repair is needed.
+   - An authority that runs the old code refuses every reuse until it is upgraded. The refusal
+     wrote no record and set no lane state, so no repair is needed.
 4. **Covered elsewhere**:
    - endless acknowledged retry: #2960 (ADR-0711);
    - carrier fixture cleanup: #2965;

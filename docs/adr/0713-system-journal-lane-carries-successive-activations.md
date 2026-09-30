@@ -30,9 +30,8 @@ admits a preparation operation (`materialize`, `prepare`) or a release phase (`r
 `cleanup`). The search took the latest `terminal` record with the same operation and a lower
 generation, from any activation on the lane. On the second activation it found the first
 activation's record, `_operation_matches` failed on `activation_id`, and the service refused with
-`predecessor_operation_mismatch` (`release_phase_mismatch` for a second release). A
-`journal_conflict` also sets the lane to failed, so every later request on that System failed
-until the authority service restarted.
+`predecessor_operation_mismatch` (`release_phase_mismatch` for a second release). Each retry
+found the same record again, so every attempt failed in the same way.
 
 Predecessor adoption exists for a takeover: a later generation of the same activation, or of the
 same release, adopts the terminal result that an earlier generation recorded. A record of another
@@ -59,9 +58,10 @@ activation is history, not a predecessor.
 - A takeover of the same activation adopts its predecessor as before.
 - An activation that is not cleaned and terminal still restricts the System under ADR-0583, so a
   second activation cannot start while the first one holds the System.
-- An authority that ran the old code and refused a reuse has its lane set to failed. A restart of
-  the authority service clears that state. The journal file and the database head stay
-  consistent, because the refusal happened before any record was written.
+- The old refusal came before the `admitted` record, so it wrote no journal record and set no
+  lane state. The journal file and the database head stay equal. An authority that runs the old
+  code refuses every reuse; only an upgrade to this change removes the refusal, and a restart
+  does not.
 
 ## Considered & rejected
 

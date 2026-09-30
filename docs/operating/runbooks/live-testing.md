@@ -304,9 +304,11 @@ the allocation has external-boot history (#2966): the teardown always runs first
 
 `fixture_mode` selects how the carrier gets the authority fixture of the configured System:
 
-- `create` (the default): the carrier removes the System's old worker and authority fixture files,
-  provisions a new fixture on the private authority daemon, records its five names, and removes
-  them when the run ends ([fixture cleanup](#installed-local-authority-carrier)).
+- `create` (the default): the fixture script refuses when the System's domain still exists on
+  the private authority daemon. Otherwise it removes the System's worker domain and old fixture
+  files, provisions a new fixture on the private authority daemon, and reports its five names.
+  The carrier records them and removes them when the run ends
+  ([fixture cleanup](#installed-local-authority-carrier)).
 - `verify-existing`: the carrier only verifies, read-only, a fixture that is already present, and
   it records and removes nothing. A `create` run removes its fixture at the end, so use this mode
   only after you provision the fixture by hand with
@@ -316,7 +318,8 @@ the allocation has external-boot history (#2966): the teardown always runs first
 
 A System can carry more than one carrier run (ADR-0713). After a run whose root release finished
 (the activation is `recovered` with `cleanup_complete`), the next run on the same System, in
-either mode, opens a new activation on the same authority journal lane. Do not tear down the
+either mode, opens a new activation on the same authority journal lane. A `create` run after a
+`verify-existing` run needs the hand-provisioned fixture removed first. Do not tear down the
 System between those runs; end it only after the last run. A System whose activation did not
 finish its release stays restricted, and `runs.boot` refuses a new activation on it
 (`external_boot_restricted`).
