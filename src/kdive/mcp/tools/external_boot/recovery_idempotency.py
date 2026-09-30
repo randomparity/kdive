@@ -11,7 +11,7 @@ from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, timing_
 from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
 from kdive.jobs.payloads import RecoveryRequestV1
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import ToolResponse, validate_stored
 
 MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES = 255
 
@@ -21,7 +21,7 @@ def recovery_response(job: Job, object_key: str, object_id: str) -> ToolResponse
     data = {**response.data, object_key: object_id}
     recorded = job.payload.get("recovery_request_v1")
     if recorded is not None:
-        metadata = RecoveryRequestV1.model_validate(recorded)
+        metadata = validate_stored(RecoveryRequestV1, recorded)
         data["recovery_readiness_deadline"] = metadata.readiness_deadline.isoformat().replace(
             "+00:00", "Z"
         )
@@ -65,7 +65,7 @@ async def recovery_request(
     dedup_key = "external-boot-request:" + hashlib.sha256(key_bytes).hexdigest()
     existing = await queue.get_by_dedup_key(conn, dedup_key)
     if existing is not None:
-        metadata = RecoveryRequestV1.model_validate(existing.payload.get("recovery_request_v1"))
+        metadata = validate_stored(RecoveryRequestV1, existing.payload.get("recovery_request_v1"))
         if metadata.request_identity != identity:
             return (
                 dedup_key,

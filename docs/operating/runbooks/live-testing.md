@@ -252,6 +252,53 @@ overlay and console owner and the live private-daemon domain before any public i
 request. The configured System must be disposable; this setup is not a migration mechanism for
 ordinary worker-owned Systems.
 
+**Fixture cleanup.** In `create` mode the fixture script reports the five exact names it made for
+the configured System, and the carrier records each one in its resource ledger:
+
+- `/var/lib/kdive/provider-authority/rootfs/<uuid>-fixture-base.qcow2`
+- `/var/lib/kdive/provider-authority/rootfs/<uuid>-baseline`
+- `/var/lib/kdive/provider-authority/rootfs/<uuid>-overlay.qcow2`
+- `/var/lib/kdive/provider-authority/console/<uuid>.log`
+- the domain `kdive-<uuid>` on the private authority daemon
+
+When the rest of the run ends, whether it passed or failed and after the Investigation close
+where the carrier makes one, the carrier removes those names newest first with `provision-authority-fixture.py --remove <uuid> <name>`. The
+domain goes first. The script accepts only a name from that set, and it refuses a symlinked
+directory, a hard-linked file, or a parent that is not the authority-owned mode-`0700`
+directory. It stops at the first failed name, so a domain that did not go away keeps its files.
+`verify-existing` records and removes nothing. The authority journal lane
+`/var/lib/kdive/provider-authority/journal/<uuid>.jsonl` stays: the authority starts only when
+every lane matches its database head, so the lane is an audit record, not a fixture artifact.
+
+Removal after a failed or interrupted run does not wait for the System's in-flight jobs, so
+list the authority daemon's domains and the two authority directories afterwards. Remove the
+fixture by hand only after a failed removal, a `create` that failed part way, or a name that
+came back. Run the same exact-name mode, domain first:
+
+```sh
+uuid=<system_id>
+for name in "kdive-$uuid" \
+  "/var/lib/kdive/provider-authority/console/$uuid.log" \
+  "/var/lib/kdive/provider-authority/rootfs/$uuid-overlay.qcow2" \
+  "/var/lib/kdive/provider-authority/rootfs/$uuid-baseline" \
+  "/var/lib/kdive/provider-authority/rootfs/$uuid-fixture-base.qcow2"; do
+  sudo -n /opt/kdive-provider-authority/.venv/bin/python \
+    scripts/live-vm/provision-authority-fixture.py --remove "$uuid" "$name"
+done
+```
+
+An absent name is success, so a repeated run is safe.
+
+The carrier's order is: release the external-boot Run, close the Investigation, then remove the
+fixture. The System row stays `ready` after that. Then end the disposable System in this order:
+
+1. `systems.teardown` for the System with an `admin` token for its project, and wait for its
+   job. The fixture is already gone, so the teardown finds no domain.
+2. `allocations.release` for its allocation.
+
+This order is valid whether or not `allocations.release` refuses while a non-terminal System on
+the allocation has external-boot history (#2966): the teardown always runs first.
+
 
 ### Installed local authority carrier — ppc64le (#2152)
 
@@ -294,7 +341,8 @@ The proof is structurally identical to the x86_64 carrier's normal-operations ar
 an Investigation, creates a labeled Run on the disposable System with `arch=ppc64le` in the
 build profile, uploads the kernel through the public artifact contract, and drains the real
 install, activate, and root release jobs. Confinement, revision-coherence, and artifact-ownership
-checks all apply identically to the x86_64 carrier. The fault arms (`barrier_socket`,
+checks all apply identically to the x86_64 carrier, and so does the
+[fixture cleanup](#installed-local-authority-carrier) contract. The fault arms (`barrier_socket`,
 restart-recovery, takeover, journal-loss, stale-write) are not yet implemented for the ppc64le
 carrier; they remain separate scope.
 

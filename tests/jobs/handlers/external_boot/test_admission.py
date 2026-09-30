@@ -505,6 +505,38 @@ def test_only_teardown_admits_a_preparing_activation_without_its_plan(
     _drive(migrated_url, body)
 
 
+def test_teardown_still_refuses_a_supplied_plan_that_does_not_match(migrated_url: str) -> None:
+    """#2961: teardown needs no plan, but a plan it is given is identity-checked."""
+
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(
+            conn,
+            vehicle,
+            purpose="teardown",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+        foreign = vehicle.plan.model_copy(
+            update={"ownership": vehicle.plan.ownership.model_copy(update={"run_id": str(uuid4())})}
+        )
+
+        with pytest.raises(CategorizedError, match="plan does not match the activation"):
+            await build_external_boot_payload(
+                conn,
+                activation_id=vehicle.activation_id,
+                purpose="teardown",
+                operation="teardown",
+                provider_kind="local-libvirt",
+                authority_instance=AUTHORITY_INSTANCE,
+                operation_identity="teardown-1",
+                resolver=resolver_for(vehicle),
+                preparation_plan=foreign,
+            )
+
+    _drive(migrated_url, body)
+
+
 def test_the_built_payload_survives_dump_and_load(migrated_url: str) -> None:
     """What the helper returns must be enqueueable, so it goes through the real chokepoint."""
 

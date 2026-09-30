@@ -19,7 +19,7 @@ from kdive.domain.operations.jobs import Job
 from kdive.domain.pcie import parse_match_spec
 from kdive.jobs import queue
 from kdive.log import bind_context
-from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse, validate_stored
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -635,7 +635,7 @@ def _split_placement(row: dict[str, object]) -> tuple[System, str, str | None]:
     resource_kind = str(row.pop("resource_kind"))
     resource_id = row.pop("resource_id")
     resource_id_str = str(resource_id) if resource_id is not None else None
-    return System.model_validate(row), resource_kind, resource_id_str
+    return validate_stored(System, row), resource_kind, resource_id_str
 
 
 _SYSTEMS_LIST_TAG = "systems.list"

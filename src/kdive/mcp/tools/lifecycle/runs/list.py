@@ -18,7 +18,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.capacity.state import RunState
 from kdive.domain.lifecycle.records import Run
 from kdive.log import bind_context
-from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse, validate_stored
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -124,7 +124,7 @@ async def list_runs(
             await cur.execute(query, (*params, capped + 1))
             rows = await cur.fetchall()
         kept, truncated = _paginate(rows, capped)
-        runs = [Run.model_validate(row) for row in kept]
+        runs = [validate_stored(Run, row) for row in kept]
         build_deadlines: dict[str, str] = {}
         server_time: str | None = None
         selected = [run for run in runs if run.build_ref is not None]

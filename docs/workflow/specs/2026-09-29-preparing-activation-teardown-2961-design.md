@@ -34,8 +34,9 @@ other purpose (migration 0161).
 
 ## Design
 
-1. `admission.py`: the `preparing` plan requirement and the plan-identity check apply only when
-   `purpose != "teardown"`. Every other purpose keeps both checks unchanged.
+1. `admission.py`: the `preparing` plan requirement applies only when `purpose != "teardown"`.
+   A plan that is supplied is still identity-checked for every purpose, teardown included.
+   Every other purpose keeps both checks unchanged.
 2. `runner.py`: one predicate, `_prepares(activation, marker)`, is true when the activation is
    `preparing` and `marker.purpose != "teardown"`. `_debit_preparing`, `_materialize_preparing`,
    and the "no preparation executor" refusal use it. A teardown of a preparing activation
@@ -48,7 +49,8 @@ The authority, not the server, destroys the System and ends the reservation. The
 retires the activation or deletes the reservation on its own: that needs authority terminal and
 cleanup evidence (0147 constraints), and the System's host state is private to the authority.
 This is the deviation from the issue's "without a provider call" wording: the change makes no
-preparation call, but the System teardown call remains.
+preparation call, but the System teardown call remains, and the "credit" of a pending
+reservation is its deletion (ADR 0620). The operator approved this reading on 2026-09-30.
 
 ## Failure model
 

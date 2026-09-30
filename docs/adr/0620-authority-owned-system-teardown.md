@@ -4,6 +4,10 @@
 
 Accepted (2026-09-06)
 
+> **Amended by [ADR-0711](0711-bound-acknowledged-retry-grant-per-budget.md) (#2960):** the
+> reconciler also ends a `boot` job past the acknowledged-retry grant bound, and retires or
+> supersedes its live authority.
+
 ## Context
 
 External-boot host domains, overlays, and recovery data can be private to the
@@ -156,6 +160,59 @@ Rejected for this amendment:
   a reservation owned by another generation.
 - **Answer `superseded` for a predecessor record too.** verified: the takeover that recovers N is
   N's successor, so `superseded` would fail every takeover exactly as `provider_conflict` does.
+
+### Amendment (2026-09-30): no ordinary teardown or release strands an authority domain (#2966)
+
+The ordinary `teardown_handler` refuses an unmarked TEARDOWN job when the System has any
+external-boot activation, not only one that still restricts it. It raises the existing
+terminal `conflict` (`external_boot_teardown_not_supported`) under the System lock, before the
+`tearing_down` transition and any provider call. Before, after a clean release (`recovered`,
+`cleanup_complete`), the ordinary provisioner acted on its own libvirt URI, found no domain,
+and committed `torn_down` while the authority daemon kept the domain running (#2865 proof).
+
+`allocations.release` (and break-glass release, host drain, and the orphaned-active reaper)
+refuses with `conflict` (`external_boot_system_teardown_required`, with the `system_id`) while a
+System on the allocation that is not `torn_down` has external-boot history. The authority
+allocator admits a teardown only on an `active` allocation (`0122_external_boot_authority.sql`),
+so a released allocation would leave that System with no teardown path. This mirrors the
+pre-activation fence that already denies release for an authority-owned System (ADR-0623).
+Lease expiry still ends such an allocation; that path is tracked in #2992. It is also the only
+end for an allocation whose System the authority teardown cannot take (a pre-fix `tearing_down`
+System, or an unresolved authority route), and a platform operator outside the project cannot
+clear it, because `systems.teardown` needs the project `admin` role.
+
+The public `systems.teardown` replaces an ordinary `{system}:teardown` job in state `failed`, or
+`canceled` before any worker claimed it, with the authority-marked teardown (recycle policy
+`TERMINAL_OR_CANCELED`, entered only for those two states). An ordinary job in any other state
+still returns `ordinary_teardown_fenced_by_external_boot`. After this fence an ordinary job for
+such a System makes no provider call, so replacing it skips no mutation. The recycle keeps the
+job's `authorizing` value, so the authority commit's audit row names the principal that enqueued
+the refused job, such as the reconciler.
+
+Producers that enqueue through `enqueue_control_teardown` (the orphaned-System lane,
+investigation force-close, break-glass teardown) still enqueue an unmarked job for such a
+System; the worker refuses it until `systems.teardown` runs.
+
+Rejected for this amendment:
+
+- **Do nothing.** verified: the #2865 proof (issue #2865 comment 5903037345) committed
+  `torn_down` through the ordinary path while the authority domain kept running.
+- **Route in `enqueue_control_teardown`.** judgment: `build_external_boot_payload` needs a
+  `ProviderResolver`, which `JobOperations`, break-glass and the reconciler lane would each have
+  to carry; the worker refusal is still needed for jobs already queued.
+- **Refuse in `enqueue_control_teardown`.** judgment: the orphaned-System lane would log the
+  refusal on every pass, and investigation force-close would roll back a close whose System an
+  admin can tear down afterwards; the worker refusal is still needed for jobs already queued.
+- **Route in the worker.** verified: `ExternalBootOperations.run` reads the marker from
+  `job.payload`, and only the enqueueing server mints it under the System lock
+  (`jobs/handlers/external_boot/router.py`, `mcp/tools/lifecycle/systems/admin.py` at
+  2e0d9eae7).
+- **Refuse in the worker without the public recycle.** verified: `_enqueue_authority_teardown`
+  returns `conflict` for any ordinary prior (`admin.py` at 2e0d9eae7), and `jobs.dedup_key` is
+  unique, so the refused job would block every supported teardown.
+- **Admit an authority teardown on a released allocation.** judgment: it changes the ADR-0584
+  allocation binding in a migration; the release refusal keeps the allocation `active` for the
+  common path at no schema cost.
 
 ## Consequences
 

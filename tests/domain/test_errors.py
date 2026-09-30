@@ -69,6 +69,11 @@ DEBUG_ADDED = {
 RESTORE_ADDED = {
     "restore_incomplete",
 }
+# Reprovision limbo (#2980, ADR-0435): a `reprovisioning` System the reconciler drives to `failed`
+# because no reprovision job can finish it; its disk may be half rebuilt.
+REPROVISION_ADDED = {
+    "reprovision_incomplete",
+}
 M0_ALL = (
     M0_PORTED
     | M0_DISTRIBUTED
@@ -77,6 +82,7 @@ M0_ALL = (
     | BUILD_HOST_ADDED
     | DEBUG_ADDED
     | RESTORE_ADDED
+    | REPROVISION_ADDED
 )
 
 
