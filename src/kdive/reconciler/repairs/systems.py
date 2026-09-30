@@ -43,6 +43,13 @@ _TERMINAL_ALLOCATION_STATE_VALUES = tuple(state.value for state in _TERMINAL_ALL
 _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES = tuple(
     state.value for state in _ORPHANED_SYSTEM_TERMINAL_STATES
 )
+# A reprovisioning System has no teardown edge (#2928), so the lane leaves it to a later pass.
+# Once it settles to `ready` the lane enqueues, unless a `{uid}:teardown` row already exists: a
+# failed row is replayed, not recycled, so it needs an operator `systems.teardown`.
+_ORPHAN_TEARDOWN_SKIPPED_STATE_VALUES = (
+    *_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES,
+    SystemState.REPROVISIONING.value,
+)
 
 # Pacing with a stated limit, not a fence (ADR-0634). An operator `jobs.cancel` takes a teardown
 # job out of `queued`/`running` while its handler keeps running to completion, so job state alone
@@ -110,7 +117,7 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
             "WHERE s.state <> ALL(%s) "
             "  AND a.state = ANY(%s)",
             (
-                list(_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES),
+                list(_ORPHAN_TEARDOWN_SKIPPED_STATE_VALUES),
                 list(_TERMINAL_ALLOCATION_STATE_VALUES),
             ),
         )
@@ -124,7 +131,7 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
                 async with conn.cursor(row_factory=dict_row) as cur:
                     await cur.execute("SELECT state FROM systems WHERE id = %s", (system_id,))
                     fresh = await cur.fetchone()
-                    if fresh is None or fresh["state"] in _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES:
+                    if fresh is None or fresh["state"] in _ORPHAN_TEARDOWN_SKIPPED_STATE_VALUES:
                         continue
                     await cur.execute("SELECT 1 FROM jobs WHERE dedup_key = %s", (dedup_key,))
                     already_queued = await cur.fetchone() is not None
