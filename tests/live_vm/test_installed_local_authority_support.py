@@ -23,6 +23,7 @@ from pydantic import SecretStr
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import JsonFormatter
 from kdive.mcp.responses import ToolResponse
+from tests.db.external_boot_authority_support import _RoleDsns
 from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
 from tests.live_vm import installed_local_authority_support as carrier
@@ -43,6 +44,7 @@ from tests.live_vm.installed_local_authority_support import (
     remove_authority_fixture,
     require_authority_artifact_confinement,
     require_deployed_revision,
+    require_evidence_read_access,
     require_fault_barrier,
     require_installed_authority_routes,
     require_journal_inventory_refusal,
@@ -1421,6 +1423,50 @@ def test_completed_root_release_rejects_incomplete_or_mismatched_proof(
     asyncio.run(run())
 
 
+def test_evidence_read_preflight_accepts_the_migration_owner_dsn(migrated_url: str) -> None:
+    asyncio.run(require_evidence_read_access(migrated_url))
+
+
+def test_evidence_read_preflight_names_the_private_table_and_required_role(
+    authority_role_dsns: _RoleDsns,
+) -> None:
+    with pytest.raises(PermissionError) as raised:
+        asyncio.run(require_evidence_read_access(authority_role_dsns("kdive_server")))
+    message = str(raised.value)
+    assert "external_boot_release_cleanup_receipts" in message
+    assert "KDIVE_DATABASE_URL" in message
+    assert "migration-owner DSN" in message
+
+
+def test_fixture_provisioning_stops_before_the_script_when_the_dsn_cannot_read_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+
+    async def denied(_dsn: str) -> None:
+        raise PermissionError("cannot SELECT external_boot_release_cleanup_receipts")
+
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("the fixture script ran after a failed evidence preflight")
+
+    monkeypatch.setattr(carrier, "require_evidence_read_access", denied)
+    monkeypatch.setattr(subprocess, "run", run)
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+    with pytest.raises(PermissionError, match="external_boot_release_cleanup_receipts"):
+        asyncio.run(provision_authority_fixture("postgresql://fixture", config, ledger))
+    assert ledger.resources == ()
+
+
+async def _evidence_readable(_dsn: str) -> None:
+    return None
+
+
 @pytest.mark.parametrize("reported", [True, False])
 def test_fixture_provisioning_passes_only_durable_profile_to_exact_script(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reported: bool
@@ -1468,6 +1514,7 @@ def test_fixture_provisioning_passes_only_durable_profile_to_exact_script(
         seen.update(argv=argv, kwargs=kwargs)
         return subprocess.CompletedProcess(argv, 0, stdout, "")
 
+    monkeypatch.setattr(carrier, "require_evidence_read_access", _evidence_readable)
     monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
     monkeypatch.setattr(subprocess, "run", run)
     ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
@@ -1531,6 +1578,7 @@ def test_fixture_verification_uses_the_explicit_read_only_script_mode(
         seen.update(argv=argv, kwargs=kwargs)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
+    monkeypatch.setattr(carrier, "require_evidence_read_access", _evidence_readable)
     monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
     monkeypatch.setattr(subprocess, "run", run)
     ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
