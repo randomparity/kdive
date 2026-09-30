@@ -54,6 +54,31 @@ envelope, and the caller now receives a server-fault envelope instead of an argu
 - The translation depends on FastMCP 3.4.4's `ToolError`-from-exception wrapping; an in-process
   test through a real FastMCP app pins it, so an upgrade that changes it fails the suite.
 
+### Amendment (2026-09-29): rebuilds of stored data are server faults too (#2981)
+
+This narrows the out-of-scope consequence above. `InvalidEnvelopeError` now subclasses
+`ServerFaultError`, which is also not a `ValueError`. `validate_stored(model, value)` in
+`kdive.mcp.responses` rebuilds a model from the server's own stored data, such as a database row
+or a recorded job payload. When that rebuild fails, it raises `ServerFaultError` chained from
+the pydantic error. The middleware is renamed to `ServerFaultMiddleware`, and its constant to
+`SERVER_FAULT_DETAIL`, with the same text. It envelopes a `ToolError` caused by any
+`ServerFaultError`.
+
+The boundary is an allowlist. Only the tool-body sites that rebuild stored data use the helper.
+Those are the reads in `catalog/availability`, `catalog/images`, `catalog/image_visibility`,
+`debug/sessions/read`, `external_boot/recovery_idempotency`, `lifecycle/runs/list`,
+`lifecycle/systems/admin`, `lifecycle/systems/view`, and `ops/resources/host_ops`.
+
+The following keep their current behaviour:
+
+- Caller-input rebuilds keep FastMCP's argument-error path and `BindingErrorMiddleware`.
+- The list tools that isolate a bad row with `except ValueError` still degrade that row.
+- Every model build outside the allowlist, including rebuilds in the repository layer, keeps
+  FastMCP's argument-error path.
+
+We rejected treating every bare `ValidationError` as a fault (a denylist). judgment: it would
+relabel any unmarked caller-input rebuild as a retryable server fault.
+
 ## Considered & rejected
 
 - **Middleware alone, keyed on `ValidationError.title == "ToolResponse"`.** verified: in
