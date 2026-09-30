@@ -19,7 +19,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
 from kdive.mcp.exposure import tool_visible, visible_next_actions
-from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.responses import InvalidEnvelopeError, JsonValue, ToolResponse
 from kdive.mcp.tools._common import (
     DEFAULT_LIST_LIMIT,
     MAX_WAIT_S,
@@ -170,7 +170,7 @@ async def list_allocations(
                         Allocation.model_validate(row), ctx, server_time=server_time
                     )
                 )
-            except ValueError:
+            except ValueError, InvalidEnvelopeError:
                 _log.warning("allocation row violates the response invariant; degraded")
                 responses.append(
                     ToolResponse.failure(

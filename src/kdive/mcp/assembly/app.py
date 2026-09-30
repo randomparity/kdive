@@ -20,6 +20,7 @@ from kdive.mcp.middleware.compact import CompactResponseMiddleware
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.middleware.doc_exposure import DocExposureMiddleware
 from kdive.mcp.middleware.exposure import ToolExposureMiddleware
+from kdive.mcp.middleware.invalid_envelope import InvalidEnvelopeMiddleware
 from kdive.mcp.middleware.telemetry import TelemetryMiddleware
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
@@ -86,6 +87,7 @@ def build_app_from_assembly(
     app.add_middleware(DocExposureMiddleware())
     app.add_middleware(DenialAuditMiddleware(pool))
     app.add_middleware(BindingErrorMiddleware())
+    app.add_middleware(InvalidEnvelopeMiddleware())  # innermost (ADR-0709)
 
     assembly = AppAssembly(
         resolver=resolver,

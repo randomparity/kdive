@@ -7,6 +7,7 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import (
@@ -17,6 +18,7 @@ from kdive.domain.errors import (
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.mcp.responses import (
     MISSING_ROLES_KEY,
+    InvalidEnvelopeError,
     ResponseData,
     ToolResponse,
     current_status_data,
@@ -177,15 +179,53 @@ def test_from_job_canceled_has_no_actions() -> None:
 
 
 def test_category_without_failure_is_rejected() -> None:
-    with pytest.raises(ValueError, match="error_category"):
+    with pytest.raises(InvalidEnvelopeError, match="error_category"):
         ToolResponse(object_id="x", status="running", error_category="build_failure")
 
 
 def test_failure_without_category_is_rejected() -> None:
     # The validator treats status in {"failed", "error"} as a failure status, which
     # therefore requires a category.
-    with pytest.raises(ValueError, match="error_category"):
+    with pytest.raises(InvalidEnvelopeError, match="error_category"):
         ToolResponse(object_id="x", status="error", error_category=None)
+
+
+def test_invalid_envelope_from_model_validate() -> None:
+    # An idempotency replay rebuilds its envelope this way (#2916); it must not surface as a
+    # pydantic error, which FastMCP reports as the caller's argument error (ADR-0709).
+    with pytest.raises(InvalidEnvelopeError, match="requires an error_category"):
+        ToolResponse.model_validate({"object_id": "x", "status": "failed"})
+
+
+def test_invalid_envelope_from_wrong_field_type() -> None:
+    with pytest.raises(InvalidEnvelopeError) as info:
+        ToolResponse.model_validate({"object_id": 1, "status": "ok"})
+    assert isinstance(info.value.__cause__, ValidationError)
+
+
+def test_invalid_envelope_from_unknown_category() -> None:
+    with pytest.raises(InvalidEnvelopeError, match="unknown error_category"):
+        ToolResponse.model_validate(
+            {"object_id": "x", "status": "failed", "error_category": "bogus"}
+        )
+    with pytest.raises(InvalidEnvelopeError, match="unknown error_category"):
+        ToolResponse(object_id="x", status="error", error_category="bogus")
+
+
+def test_invalid_envelope_from_nested_item() -> None:
+    with pytest.raises(InvalidEnvelopeError, match="non-failure status"):
+        ToolResponse.model_validate(
+            {
+                "object_id": "c",
+                "status": "ok",
+                "items": [{"object_id": "i", "status": "ok", "error_category": "not_found"}],
+            }
+        )
+
+
+def test_invalid_envelope_is_not_a_value_error() -> None:
+    # A tool's `except ValueError` for caller input must not absorb a server fault (ADR-0709).
+    assert not issubclass(InvalidEnvelopeError, ValueError)
 
 
 def test_success_factory_builds_non_failure_envelope() -> None:
@@ -227,13 +267,13 @@ def test_data_accepts_nested_json_values_and_rejects_other_objects() -> None:
     )
 
     assert resp.data["rows"] == [{"id": "a", "count": 1, "enabled": True, "note": None}]
-    with pytest.raises(ValueError, match="non-JSON"):
+    with pytest.raises(InvalidEnvelopeError, match="non-JSON"):
         ToolResponse.success("bad", "ok", data=cast(ResponseData, {"when": _NOW}))
 
 
 def test_success_factory_on_failure_status_raises() -> None:
     # "failed" is a failure status; building it via success() (no category) is misuse.
-    with pytest.raises(ValueError, match="error_category"):
+    with pytest.raises(InvalidEnvelopeError, match="error_category"):
         ToolResponse.success("alloc-1", "failed")
 
 
@@ -676,12 +716,12 @@ def test_denied_rejects_missing_roles_smuggled_through_data() -> None:
     Without this the vocabulary is closed only on the `missing_roles=` path:
     ``data={"missing_roles": ["superuser"]}`` shipped raw strings on the egress seam.
     """
-    with pytest.raises(ValueError, match="missing_roles"):
+    with pytest.raises(InvalidEnvelopeError, match="missing_roles"):
         ToolResponse.denied("obj", data={MISSING_ROLES_KEY: ["superuser", "root"]})
 
 
 def test_denied_rejects_the_data_back_door_even_alongside_typed_roles() -> None:
-    with pytest.raises(ValueError, match="missing_roles"):
+    with pytest.raises(InvalidEnvelopeError, match="missing_roles"):
         ToolResponse.denied(
             "obj", missing_roles=[Role.ADMIN], data={MISSING_ROLES_KEY: ["superuser"]}
         )
