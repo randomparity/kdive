@@ -37,19 +37,17 @@ def test_live_profile_does_not_mutate_the_shared_fixed_profile() -> None:
     }
 
 
-def test_require_live_gdbstub_arch_returns_x86_64_unchanged(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
+def test_require_live_gdbstub_arch_returns_a_proven_arch_unchanged(
+    monkeypatch: pytest.MonkeyPatch, arch: str
 ) -> None:
-    monkeypatch.setattr(session_support.os, "uname", lambda: _FakeUname("x86_64"))
-    assert session_support.require_live_gdbstub_arch() == "x86_64"
-
-
-def test_require_live_gdbstub_arch_skips_with_a_reason_on_ppc64le(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(session_support.os, "uname", lambda: _FakeUname("ppc64le"))
-    with pytest.raises(pytest.skip.Exception, match="ppc64le.*#2736"):
-        session_support.require_live_gdbstub_arch()
+    """A proven arch (ppc64le since #2740) must run, so a gate skip here fails rather than skips."""
+    monkeypatch.setattr(session_support.os, "uname", lambda: _FakeUname(arch))
+    try:
+        resolved = session_support.require_live_gdbstub_arch()
+    except pytest.skip.Exception as skipped:
+        pytest.fail(f"the gate skipped the proven arch {arch!r}: {skipped}")
+    assert resolved == arch
 
 
 def test_require_live_gdbstub_arch_skips_rather_than_fails_on_an_unrelated_arch(
