@@ -57,7 +57,7 @@ arms a watchpoint that the next resume cannot insert.
 3. Accepted failure classes:
    - A System with no arch runs the op as before; its resume-time failure is #2964's.
    - A ppc64le TCG guest on a local host not re-discovered since ADR-0338 (NULL `accel`) is
-     refused; re-discovery records `tcg`.
+     refused; only a System created after re-discovery records `tcg`.
    - A ppc64le KVM-PR System is refused without proof; kdive does not record HV versus PR.
    - A second gdb client or an engine-level caller that bypasses MCP is not gated.
    - `debug.continue` from a pc with an inserted breakpoint needs a gdb step-over; that path is

@@ -25,8 +25,8 @@ software breakpoints and `advance` work.
    `("ppc64le", "kvm") -> {single_step, hw_watchpoint}`. A key that is not in the table lacks
    nothing, and an unknown arch lacks nothing.
 2. The key comes from the session's System: `provisioning_profile["arch"]` and the persisted
-   `accel` (ADR-0339). A NULL `accel` counts as `kvm`: remote-libvirt records none and renders
-   only KVM domains (`remote_libvirt/discovery.py`, `lifecycle/install.py`). The Debug-plane op
+   `accel` (ADR-0339). A NULL `accel` counts as `kvm` for this lookup only; the ADR-0339 column
+   contract does not change. Remote-libvirt records none and renders only KVM domains (`remote_libvirt/discovery.py`, `lifecycle/install.py`). The Debug-plane op
    runner makes the decision when an op declares a required capability, after the live-session
    gate and before it resolves the engine runtime, attaches, or sends any gdb/MI command.
 3. `debug.advance` modes `into`, `over` and `instruction` require `single_step`. Mode `out`
@@ -47,7 +47,8 @@ software breakpoints and `advance` work.
 - x86_64 has no row, so its behavior does not change. A ppc64le System with a known `tcg`
   accelerator has no row either: no proof covers stepping or watchpoints there.
 - A ppc64le TCG guest on a local host not re-discovered since ADR-0338 has a NULL `accel` and is
-  refused, although it can possibly step. Re-discovery records `tcg` and removes the refusal.
+  refused, although it can possibly step. `accel` is written only at System admission, so the
+  refusal clears only for a System created after re-discovery.
 - `kvm` does not tell KVM-HV from KVM-PR. The row refuses both; only KVM-HV is proven.
 - `watchpoint_unsupported` from a stub that rejects `-break-watch` keeps `debug_attach_failure`
   (ADR-0277). Readers branch on `data.code`. #2964 owns the resume-time classification.
