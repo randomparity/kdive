@@ -326,6 +326,11 @@ refuses.
 
 Rejected for this amendment:
 
+- **Do nothing.** judgment: as in the #2899 amendment, every overlap aborts the requests in
+  flight, and nothing was wrong at rest.
+- **Skip a vanished entry in the lane listing.** judgment: the listing is shared with startup and
+  the standalone check, whose reported reason for a vanished entry would then change; the
+  operator chose the retry shape on 2026-09-29.
 - **Quiesce anchors for every periodic pass.** judgment: it stalls anchors on every lane at every
   readiness interval to prevent a rare overlap the retry already absorbs.
 - **Retry every `unsafe-tree`.** judgment: a structural cause cannot be produced by an anchor,

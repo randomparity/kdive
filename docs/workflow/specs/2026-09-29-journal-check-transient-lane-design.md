@@ -2,18 +2,12 @@
 
 ## Problem
 
-The periodic readiness check loads every lane in a worker thread while `_anchor` appends,
-advances, and may retract on the event loop, with no exclusion against readers. Two views of an
-in-flight anchor fall outside the #2899 quiesced retry set (`head-mismatch`,
-`inventory-mismatch`), so the host exits:
-
-1. **Torn read.** `append` writes with a loop of `os.write`. A load that reads the final line
-   before its newline raises `ValueError("authority journal has a partial final record")`, which
-   `_restore_journal_inventory` maps to `journal: invalid-lane`. A load racing a retraction's
-   `ftruncate` fails the same way.
-2. **Vanished entry.** A refused first record is retracted by unlinking its lane. If the unlink
-   lands between `_local_lanes`' `os.listdir` and its `os.stat`, the stat raises `ENOENT`, which
-   today raises `journal: unsafe-tree`.
+The periodic readiness check loads lanes in a worker thread while `_anchor` appends, advances,
+and may retract on the event loop. An anchor can then show as a torn final line or a truncated
+read (`journal: invalid-lane`) or as a lane unlinked between `_local_lanes`' `os.listdir` and its
+`os.stat` (`journal: unsafe-tree`). Neither is in the #2899 retry set, so the host exits. The
+mechanism and why widening the retry is safe are recorded in the ADR-0584 amendment of
+2026-09-29 (#2933).
 
 ## Scope
 
@@ -23,21 +17,17 @@ This amends [ADR-0584](../../adr/0584-provider-host-authority-fences-external-bo
 
 - **Vanished entry.** `_local_lanes` raises a private `HostReadinessError` subclass,
   `_LaneVanished`, when the per-name `os.stat` fails with `FileNotFoundError`. It carries the
-  unchanged `journal: unsafe-tree` component, reason, message, and details, so logs, the
-  `check` output, and the error category do not change. Every other stat error and every
+  unchanged `journal: unsafe-tree` component, reason, message, details, category, and exit
+  code; only a logged traceback names the subclass. Every other stat error and every
   structural cause (type, owner, mode, name) still raises a plain `HostReadinessError`.
-- **Retry set.** `validate_current`'s predicate becomes `_may_be_in_flight_anchor`: the journal
-  reasons `head-mismatch`, `inventory-mismatch`, and `invalid-lane`, or a `_LaneVanished`. The
-  retry itself is unchanged: once, inside `anchor_quiescence()`, with fresh heads and lanes,
-  within `READINESS_CHECK_TIMEOUT_SECONDS`, and only when the hook is armed.
+- **Retry set.** `validate_current` uses a new predicate, `_may_be_in_flight_anchor`:
+  `_is_head_divergence(error)`, the journal reason `invalid-lane`, or a `_LaneVanished`.
+  `_is_head_divergence` stays unchanged for the startup reconcile gate in
+  `run_authority_host`. The retry itself is unchanged: once, inside `anchor_quiescence()`,
+  with fresh heads and lanes, within `READINESS_CHECK_TIMEOUT_SECONDS`, and only when armed.
 - **Not changed.** `service.py`, the journal, the startup check, `check_authority_host_once`,
   the validator cache rule (written only after every lane matches), and the per-pass cost:
   anchors stall only for a retry after a failed first pass.
-
-Why widening is now safe: under quiescence no anchor is between `append` and the end of its
-advance or retraction, so every lane file is at rest. A torn or vanished view that reappears
-then is not an anchor in progress but a real defect, and it refuses service as before. The
-retry only adds one read; it never tolerates, repairs, or retracts a lane.
 
 ## Failure model
 
@@ -46,7 +36,8 @@ retry only adds one read; it never tolerates, repairs, or retracts a lane.
    - mutation requests on its event loop; the check's loads in `asyncio.to_thread`.
 2. Invariants and assets:
    - a lane that is torn, foreign, or wrongly owned or moded at rest refuses service;
-   - the diagnostic contract `journal: <reason>` is unchanged for every failure;
+   - each cause reports the same `journal: <reason>` as before; a retried failure reports what
+     the quiesced pass observes (the #2899 rule);
    - authority availability; anchors are never lost, reordered, or retracted by the check.
 3. Accepted:
    - a persistent invalid lane costs one extra quiesced read before the host exits (bounded by
@@ -78,5 +69,5 @@ retry only adds one read; it never tolerates, repairs, or retracts a lane.
 | Success 1 | focused-test | `test_host.py` mid-append race, red on main with `journal: invalid-lane` |
 | Success 2 | focused-test | `test_host.py` mid-retraction race, red on main with `journal: unsafe-tree` |
 | Success 3, 4 | focused-test | `test_host.py`: persistent cases, heads read and quiescence entered counted |
-| Success 5 | focused-test | `test_host.py`: unarmed validator over the same race |
-| ADR-0584 amendment | task-test-not-applicable | prose record; no executable consumer reads its text; `just records` checks its shape |
+| Success 5 | focused-test | `test_host.py`: unarmed validator over a listed-but-absent lane |
+| Startup unchanged (criterion 4) | focused-test | #2899's `test_periodic_check_waits_out_an_anchor_between_append_and_advance` pins startup unarmed; the startup gate keeps calling `_is_head_divergence` |

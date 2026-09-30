@@ -12,8 +12,8 @@ and the ADR-0584 amendment.
 ## Global Constraints
 
 - No new ADR number: ADR-0584 gains a dated amendment section. No migration.
-- The reported `journal: <reason>` text, `component`/`reason` attributes, error category, and
-  details are unchanged for every failure.
+- Each cause keeps its `journal: <reason>` message, `component`/`reason` attributes, error
+  category, and details; a retried failure reports what the quiesced pass observes.
 - Do not edit `service.py`, `journal.py`, the startup check, or `check_authority_host_once`.
 - Guardrails: `just lint`, `just type`, `just records`, focused
   `just test-verbose tests/providers/external_boot_authority/test_host.py`; the pre-push hook
@@ -30,32 +30,23 @@ Interfaces: consumes the existing `host.JournalInventoryValidator(anchor_quiesce
 heads, cache, *, deadline)`, `ExternalBootAuthorityService.quiesce_anchors`, and the test helpers
 `_config`, `_chain`, `_write_lane`, `_head_of`, `_anchoring_service`, `_patch_trusted_heads`,
 `_CountingQuiescence`, `_mutation` (all present in `test_host.py` / `service_support.py` at
-c2e92102b). Adds private `host._LaneVanished` and `host._may_be_in_flight_anchor(error) -> bool`
-(replacing `_is_head_divergence`); nothing else relies on them.
+c2e92102b). Adds private `host._LaneVanished` and `host._may_be_in_flight_anchor(error) -> bool`,
+used only by `validate_current` (host.py:619). `_is_head_divergence` keeps both its body and its
+startup call site (`run_authority_host`, host.py:1798), which this task must not touch.
 
 Verification:
 
-- Contract "mid-append torn read passes after the quiesced retry" (Success 1),
-  `Mode: focused-test`: `test_periodic_check_retries_an_anchor_torn_mid_append`. It patches
-  `host.os.write` so the event-loop thread's first journal-record write stores half the bytes
-  and blocks until the check's first load (in the worker thread, gated on that half write) has
-  failed; asserts the first load failed with `journal: invalid-lane`, the check then passes, and
-  the mutation returns category `target`. Red on c2e92102b: `HostReadinessError: journal:
-  invalid-lane`.
-- Contract "a retraction racing the listing passes after the retry" (Success 2),
-  `Mode: focused-test`: `test_periodic_check_retries_a_lane_retracted_mid_listing`. It sets
-  `advance_status = "superseded"` and pauses the takeover's advance; patches `host.os.listdir`
-  so the worker thread's first listing returns and then blocks until the scenario has let the
-  refusal retract (unlink) the lane; asserts the lane is gone and the check passes. Red on
-  c2e92102b: `journal: unsafe-tree`.
-- Contract "persistent causes still refuse" (Success 3, 4, 5), `Mode: focused-test`:
-  `test_periodic_check_refuses_a_persistent_lane_fault`, parametrized over a lane torn at rest
-  (`invalid-lane`, heads read twice, quiescence entered once), a lane with mode 0644
-  (`unsafe-tree`, once, zero), and a listed-but-absent lane (`vanished`) on every listing, armed
-  (`unsafe-tree`, twice, once) and unarmed (`unsafe-tree`, once). Red on c2e92102b: the torn
-  and armed `vanished` cases read heads once instead of twice.
-- Contract "ADR-0584 amendment", `Mode: task-test-not-applicable`: prose record; no executable
-  consumer reads its text beyond `just records`' shape check.
+- Success 1, `Mode: focused-test`: `test_periodic_check_retries_an_anchor_torn_mid_append`.
+  Red on c2e92102b: `HostReadinessError: journal: invalid-lane`.
+- Success 2, `Mode: focused-test`: `test_periodic_check_retries_a_lane_retracted_mid_listing`.
+  Red on c2e92102b: `HostReadinessError: journal: unsafe-tree`.
+- Success 3–5, `Mode: focused-test`: `test_periodic_check_refuses_a_persistent_lane_fault`
+  (torn at rest, mode 0644, unarmed vanished). Red on c2e92102b: the torn case reads heads once,
+  not twice.
+- Startup unchanged, `Mode: focused-test`: the existing
+  `test_periodic_check_waits_out_an_anchor_between_append_and_advance` stays green.
+- ADR-0584 amendment, `Mode: task-test-not-applicable`: prose record; no executable consumer
+  reads its text beyond `just records`' shape check.
 
 Steps:
 
@@ -169,7 +160,6 @@ Steps:
        [
            ("torn", True, "invalid-lane", 2, 1),
            ("mode", True, "unsafe-tree", 1, 0),
-           ("vanished", True, "unsafe-tree", 2, 1),
            ("vanished", False, "unsafe-tree", 1, 0),
        ],
    )
@@ -239,27 +229,28 @@ Steps:
                raise HostReadinessError("journal", "unsafe-tree") from None
    ```
 
-   Replace `_is_head_divergence` with:
+   Below `_is_head_divergence` (left unchanged), add:
 
    ```python
    def _may_be_in_flight_anchor(error: HostReadinessError) -> bool:
        """What a lane mid-append, mid-advance, or mid-retraction shows (ADR-0584 amendments)."""
-       return isinstance(error, _LaneVanished) or (
-           error.component == "journal"
-           and error.reason in {"head-mismatch", "inventory-mismatch", "invalid-lane"}
+       return (
+           _is_head_divergence(error)
+           or isinstance(error, _LaneVanished)
+           or (error.component == "journal" and error.reason == "invalid-lane")
        )
    ```
 
-   and use it in `validate_current`, whose comment becomes "An anchor between its append and the
-   end of its advance or retraction looks exactly like this."
+   and use it in `validate_current` only, whose comment becomes "An anchor between its append
+   and the end of its advance or retraction looks exactly like this."
 4. Run the focused command from step 1; expect all pass. Run the whole file:
    `just test-verbose tests/providers/external_boot_authority/test_host.py`; expect all pass.
 5. Run `just lint`, `just type`, `just records`; expect exit 0. Commit
    `fix(authority): retry a torn or vanished lane in the periodic check`.
-6. Controlled faults (after the commit): drop `"invalid-lane"` from the set → the mid-append and
+6. Controlled faults (after the commit): drop the `invalid-lane` clause → the mid-append and
    torn-at-rest cases fail; replace `except FileNotFoundError: raise _LaneVanished` with the plain
-   error → the mid-listing and armed `vanished` cases fail; retry every `unsafe-tree` → the mode-0644
-   case fails. Restore with `git checkout -- src/kdive/providers/external_boot_authority/host.py`
+   error → the mid-listing race test fails; retry every `unsafe-tree` → the mode-0644 case
+   fails. Restore with `git checkout -- src/kdive/providers/external_boot_authority/host.py`
    after each.
 
 Rollback: revert the commit; no persisted state changes.
