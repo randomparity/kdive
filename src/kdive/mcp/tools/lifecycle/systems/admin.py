@@ -685,20 +685,20 @@ async def _enqueue_authority_teardown(
     # A failed authority teardown, or one whose final attempt's lease lapsed, with the identical
     # marker is re-run (ADR-0620 amendments). The lapse is judged only by enqueue's UPDATE on the
     # database clock, so a final attempt that is still live comes back unchanged and replays.
+    if prior is None:
+        recycle = queue.JobRecyclePolicy.NEVER
+    elif replaces_ordinary:
+        # The row is failed, or canceled and never claimed, as read under the System lock.
+        recycle = queue.JobRecyclePolicy.TERMINAL_OR_CANCELED
+    else:
+        recycle = queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
     job = await queue.enqueue(
         conn,
         kind,
         payload,
         job_authorizing(ctx, system.project),
         _teardown_dedup_key(system.id),
-        recycle=(
-            queue.JobRecyclePolicy.NEVER
-            if prior is None
-            # Entered only for a failed or canceled row read under the System lock.
-            else queue.JobRecyclePolicy.TERMINAL_OR_CANCELED
-            if replaces_ordinary
-            else queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
-        ),
+        recycle=recycle,
     )
     envelope = job_envelope(job, "system_id", system.id)
     # A key already recorded for the replaced ordinary job names this same job row; recording it
