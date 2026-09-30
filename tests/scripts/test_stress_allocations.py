@@ -62,6 +62,7 @@ def _config(**overrides: Any) -> Any:
         "call_timeout_s": 5.0,
         "drain_timeout_s": 30.0,  # hang guard: a settled drain exits early
         "profile": None,
+        "min_rounds": 5,  # enough for seed 7 to draw every scenario, however starved the run
     }
     base.update(overrides)
     return stress.Config(**base)
@@ -546,15 +547,19 @@ def _settled(stack: FakeStack) -> bool:
     return all(state in ("released", "expired") for state in stack.states.values())
 
 
+@pytest.mark.parametrize("duration_s", [0.2, 0.0], ids=["timed", "starved"])
 @pytest.mark.parametrize("provision", [False, True])
-def test_clean_stack_exits_zero(provision: bool, tmp_path: Path) -> None:
+def test_clean_stack_exits_zero(provision: bool, duration_s: float, tmp_path: Path) -> None:
     profile = None
     if provision:  # through parse_config, as the operator's file would go
         path = tmp_path / "profile.json"
         path.write_text(json.dumps(_PROFILE), encoding="utf-8")
         profile = stress.parse_config(["--provision-profile", str(path)]).profile
     stack = FakeStack()
-    code, ledger = _run(stack, _config(profile=profile))
+    # Nothing is refused, so each client's seeded draws run the same sequence however the clients
+    # interleave; the planted-defect tests keep the contended cap.
+    stack.cap = 1_000_000
+    code, ledger = _run(stack, _config(profile=profile, duration_s=duration_s))
     assert ledger.violations == []
     assert code == 0
     outcomes = {call.outcome for call in ledger.calls}
