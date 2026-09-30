@@ -196,6 +196,9 @@ Rejected for this amendment:
 - **Route in `enqueue_control_teardown`.** judgment: `build_external_boot_payload` needs a
   `ProviderResolver`, which `JobOperations`, break-glass and the reconciler lane would each have
   to carry; the worker refusal is still needed for jobs already queued.
+- **Refuse in `enqueue_control_teardown`.** judgment: the orphaned-System lane would log the
+  refusal on every pass, and investigation force-close would roll back a close whose System an
+  admin can tear down afterwards; the worker refusal is still needed for jobs already queued.
 - **Route in the worker.** verified: `ExternalBootOperations.run` reads the marker from
   `job.payload`, and only the enqueueing server mints it under the System lock
   (`jobs/handlers/external_boot/router.py`, `mcp/tools/lifecycle/systems/admin.py` at
