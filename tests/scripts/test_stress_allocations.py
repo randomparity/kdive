@@ -575,6 +575,15 @@ def test_clean_stack_exits_zero(provision: bool, duration_s: float, tmp_path: Pa
         assert stack.systems, "no System was provisioned"
 
 
+def test_contended_clean_stack_exits_zero() -> None:
+    """The full mix under the default cap: denials and queued grants, and still no violation."""
+    stack = FakeStack()
+    code, ledger = _run(stack, _config())
+    assert ledger.violations == []
+    assert code == 0
+    assert _settled(stack)
+
+
 @pytest.mark.parametrize(
     ("defect", "overrides", "expected"),
     [
@@ -648,7 +657,8 @@ def test_cancel_during_drain_reports_leftovers(capsys: pytest.CaptureFixture[str
 
 def test_dropped_sessions_still_drain_and_report(capsys: pytest.CaptureFixture[str]) -> None:
     stack = FakeStack(drop_after=60)
-    code, ledger = _run(stack, _config(invalid_ratio=0.0))
+    # Past the drop, so each client ends only by the dead-session rule, however starved the run.
+    code, ledger = _run(stack, _config(invalid_ratio=0.0, min_rounds=100))
     printed = capsys.readouterr().out
     assert code == 0, ledger.violations
     assert ledger.valid_errors["transport"] > 0
