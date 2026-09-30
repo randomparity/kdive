@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import hashlib
 import logging
 import os
 import pwd
@@ -33,6 +35,7 @@ from kdive.providers.external_boot_authority.device_identity import RemoteDevice
 from kdive.providers.external_boot_authority.journal import (
     RETRACTED_DIRECTORY,
     FileAuthorityJournal,
+    TornTail,
 )
 from kdive.providers.external_boot_authority.proof_barrier import AuthorityProofBarrier
 from kdive.providers.external_boot_authority.protocol import JournalRecordV1, record_digest
@@ -529,6 +532,15 @@ def _unanchored_tail(
     return None
 
 
+def _torn_tail_is_unanchored(
+    config: AuthorityHostConfig, records: tuple[JournalRecordV1, ...], head: JournalHead | None
+) -> bool:
+    """A torn line follows the head's own record, or is all a headless lane holds (#2983)."""
+    if head is None:
+        return not records
+    return bool(records) and _head_matches(records[-1], head, config)
+
+
 def _retract_unanchored_tail(
     config: AuthorityHostConfig,
     system_id: str,
@@ -536,13 +548,27 @@ def _retract_unanchored_tail(
     *,
     retract: bool,
     deadline: float | None = None,
-) -> JournalRecordV1 | None:
+) -> JournalRecordV1 | TornTail | None:
     journal: FileAuthorityJournal | None = None
     try:
         journal = FileAuthorityJournal(
             config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
         )
-        tail = _unanchored_tail(config, system_id, journal.load(deadline=deadline), head)
+        records, torn = journal.load_recovering(deadline=deadline)
+        if torn is not None:
+            if not _torn_tail_is_unanchored(config, records, head):
+                raise HostReadinessError("journal", "invalid-lane")
+            if retract:
+                try:
+                    journal.remove_torn_tail()
+                except OSError as error:
+                    _log.warning(
+                        "authority journal could not remove a torn final line at startup",
+                        extra={"system_id": system_id, "errno": errno.errorcode.get(error.errno)},
+                    )
+                    raise
+            return torn
+        tail = _unanchored_tail(config, system_id, records, head)
         if tail is not None and retract:
             journal.retract(tail)
         return tail
@@ -612,13 +638,13 @@ def _is_head_divergence(error: HostReadinessError) -> bool:
     return error.component == "journal" and error.reason in {"head-mismatch", "inventory-mismatch"}
 
 
+def _is_invalid_lane(error: HostReadinessError) -> bool:
+    return error.component == "journal" and error.reason == "invalid-lane"
+
+
 def _may_be_in_flight_anchor(error: HostReadinessError) -> bool:
     """What a lane mid-append, mid-advance, or mid-retraction shows (ADR-0584 amendments)."""
-    return (
-        _is_head_divergence(error)
-        or isinstance(error, _LaneVanished)
-        or (error.component == "journal" and error.reason == "invalid-lane")
-    )
+    return _is_head_divergence(error) or isinstance(error, _LaneVanished) or _is_invalid_lane(error)
 
 
 @dataclass(slots=True)
@@ -1250,7 +1276,17 @@ async def _reconcile_journal_tails(config: AuthorityHostConfig) -> None:
                     raise
                 except Exception:
                     raise HostReadinessError("journal", "reconcile-failed") from None
-                if tail is not None:
+                if isinstance(tail, TornTail):
+                    _log.warning(
+                        "authority journal removed a torn final line at startup",
+                        extra={
+                            "system_id": system_id,
+                            "offset": tail.offset,
+                            "length": len(tail.data),
+                            "sha256": hashlib.sha256(tail.data).hexdigest(),
+                        },
+                    )
+                elif tail is not None:
                     _log.warning(
                         "authority journal retracted an unanchored record at startup",
                         extra={
@@ -1814,7 +1850,7 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                 _check_static_authority_host(config, journal_validator, system_installation)
             )
         except HostReadinessError as error:
-            if not _is_head_divergence(error):
+            if not (_is_head_divergence(error) or _is_invalid_lane(error)):
                 raise
             await _bounded_readiness_check(_reconcile_journal_tails(config))
             await _bounded_readiness_check(
