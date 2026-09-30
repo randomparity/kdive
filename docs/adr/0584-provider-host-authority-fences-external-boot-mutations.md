@@ -349,12 +349,14 @@ widens the #2793 startup rule to that line, and narrows the #2933 amendment's st
 lane torn mid-append is refused at startup to the cases listed below.
 
 At startup only, under the same request-socket and advisory locks, a lane whose single defect is
-a final line with no newline, no longer than one record, is recovered when the complete records
-before it end exactly at the head, or when the lane has no head and no complete record. The
+a final line with no newline and no longer than one record is recovered when the complete records
+before it end exactly at the head, or when the lane has no head and no complete record; a
+zero-byte lane with no head (a first append that failed after creating it) is recovered too. The
 authority preserves the torn bytes in `retracted/` under a name carrying their SHA-256, then
-truncates the lane to the last complete record, or unlinks it. A startup whose first check fails
-with `journal: invalid-lane` now runs the reconcile step, which reports `invalid-lane` itself for
-every lane it cannot recover. Still refused: a torn line after an unanchored complete record (at
+truncates the lane to the last complete record, or unlinks it; recovery needs room for that
+evidence, so a lane torn by `ENOSPC` refuses until space is freed. A startup whose first check
+fails with `journal: invalid-lane` now runs the reconcile step, and a lane it cannot recover still
+refuses service. Still refused: a torn line after an unanchored complete record (at
 most one tail per lane per startup), a head that is ahead of the complete records, an oversized
 or non-final corrupt line. The periodic and standalone checks stay read-only, the append path and
 record format are unchanged, and no anchored byte is removed.
@@ -362,9 +364,10 @@ record format are unchanged, and no anchored byte is removed.
 Rejected for this amendment:
 
 - **Make the append atomic** (write a temporary lane, rename it under a per-lane lock).
-  judgment: every append then rewrites the whole lane, up to the 64 MiB maximum, and adds a lock
-  the anchor and retraction paths would both need; startup recovery closes the same outage with no
-  change to the write path. The operator excluded it on 2026-09-29.
+  verified: every append would rewrite the whole lane, bounded only by
+  `DEFAULT_MAX_JOURNAL_BYTES` (64 MiB, `journal.py`). judgment: that cost and a lock the anchor
+  and retraction paths would both need buy nothing startup recovery does not; the operator
+  excluded it on 2026-09-29.
 - **Length-prefixed or checksummed framing.** judgment: an on-disk format change with a
   migration for every existing lane, to detect a defect the newline already detects.
 - **Truncate whenever the complete prefix validates, head or not.** judgment: a torn line after

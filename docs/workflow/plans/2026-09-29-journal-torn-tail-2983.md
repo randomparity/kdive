@@ -10,8 +10,9 @@ trusted head, and `run_authority_host` also reconciles on `journal: invalid-lane
 
 Tech stack: Python 3.14, pytest, Postgres-backed `tests/db` fixtures.
 
-Expected implementation size: 190–260 changed lines (M) — about 60 in `journal.py`, 25 in
-`host.py`, 110 in the two unit test files, 10 in the connected test.
+Expected implementation size: 270–320 changed lines (M) — about 70 in `journal.py` (moving
+`retract`'s body counts twice), 45 in `host.py`, 170 in the two unit test files (the code blocks
+below), 10 in the connected test.
 
 ## Global Constraints
 
@@ -41,7 +42,9 @@ Verification:
 - Contract: removal preserves `retracted/<stem>.torn.<sha256>` (0600) then truncates or unlinks.
   Mode: focused-test — `test_remove_torn_tail_preserves_then_truncates`,
   `test_remove_torn_tail_of_a_torn_only_lane_unlinks`.
-- Contract: removal refuses a changed lane or a `TornTail` not from its own latest recovery load;
+- Contract: an existing zero-byte lane is `TornTail(0, b"")` in recovery mode and `()` in strict
+  `load`. Mode: focused-test — `test_zero_byte_lane_is_torn_only_when_recovering`.
+- Contract: removal refuses a changed lane or a journal whose latest load found no torn tail;
   append refuses after a torn recovery load. Mode: focused-test —
   `test_remove_torn_tail_refuses_a_changed_lane`, `test_remove_torn_tail_requires_its_recovery_load`,
   `test_append_refuses_after_a_torn_recovery_load`.
@@ -86,9 +89,8 @@ def test_load_recovering_refuses_every_other_defect(tmp_path: Path, defect: str)
 
 def test_remove_torn_tail_preserves_then_truncates(tmp_path: Path) -> None:
     journal, first, torn = _torn_lane(tmp_path)
-    _, tail = journal.load_recovering()
-    assert tail is not None
-    journal.remove_torn_tail(tail)
+    journal.load_recovering()
+    journal.remove_torn_tail()
     assert (tmp_path / "lane.jsonl").read_bytes() == canonical_record_bytes(first) + b"\n"
     evidence = _torn_evidence(tmp_path, torn)
     assert evidence.read_bytes() == torn
@@ -104,32 +106,42 @@ def test_remove_torn_tail_of_a_torn_only_lane_unlinks(tmp_path: Path) -> None:
     journal = FileAuthorityJournal(tmp_path, "lane.jsonl")
     records, tail = journal.load_recovering()
     assert records == () and tail == TornTail(0, torn)
-    journal.remove_torn_tail(tail)
+    journal.remove_torn_tail()
     assert not lane.exists()
     assert _torn_evidence(tmp_path, torn).read_bytes() == torn
 
 
+def test_zero_byte_lane_is_torn_only_when_recovering(tmp_path: Path) -> None:
+    lane = tmp_path / "lane.jsonl"
+    lane.write_bytes(b"")
+    lane.chmod(0o600)
+    journal = FileAuthorityJournal(tmp_path, "lane.jsonl")
+    assert journal.load() == ()
+    assert journal.load_recovering() == ((), TornTail(0, b""))
+    journal.remove_torn_tail()
+    assert not lane.exists()
+    assert _torn_evidence(tmp_path, b"").read_bytes() == b""
+
+
 def test_remove_torn_tail_refuses_a_changed_lane(tmp_path: Path) -> None:
     journal, _, _ = _torn_lane(tmp_path)
-    _, tail = journal.load_recovering()
-    assert tail is not None
+    journal.load_recovering()
     lane = tmp_path / "lane.jsonl"
     lane.write_bytes(lane.read_bytes() + b"more")
     with pytest.raises(ValueError, match="changed since validation"):
-        journal.remove_torn_tail(tail)
+        journal.remove_torn_tail()
     assert lane.read_bytes().endswith(b"more")
     assert not (tmp_path / RETRACTED_DIRECTORY).exists()
 
 
 def test_remove_torn_tail_requires_its_recovery_load(tmp_path: Path) -> None:
-    journal, first, torn = _torn_lane(tmp_path)
-    tail = TornTail(len(canonical_record_bytes(first)) + 1, torn)
+    journal, _, _ = _torn_lane(tmp_path)
     with pytest.raises(ValueError, match="recovery load"):
-        journal.remove_torn_tail(tail)
+        journal.remove_torn_tail()
     journal.load_recovering()
+    journal.remove_torn_tail()
     with pytest.raises(ValueError, match="recovery load"):
-        journal.remove_torn_tail(TornTail(tail.offset, torn[:-1]))
-    assert not (tmp_path / RETRACTED_DIRECTORY).exists()
+        journal.remove_torn_tail()
 
 
 def test_append_refuses_after_a_torn_recovery_load(tmp_path: Path) -> None:
@@ -156,12 +168,16 @@ class TornTail:
 ```
 
    Initialise `self._torn: tuple[TornTail, _FileIdentity] | None = None` in `__init__`. Rename
-   the body of `load` to `load_recovering(self, *, deadline: float | None = None) ->
+   the body of `load` to `_load(self, deadline: float | None, *, recovering: bool) ->
    tuple[tuple[JournalRecordV1, ...], TornTail | None]`, which sets `self._torn = None` first and
-   returns `((), None)` for an absent lane. Replace the partial-line check in its read loop with
+   returns `((), None)` for an absent lane. After the size check add
+   `torn = TornTail(0, b"") if recovering and size == 0 else None`. Replace the partial-line
+   check in its read loop with
 
 ```python
                     if not line.endswith(b"\n"):
+                        if not recovering:
+                            raise ValueError("authority journal has a partial final record")
                         if len(line) > MAX_MESSAGE_BYTES:
                             raise ValueError("authority journal record is empty or oversized")
                         if consumed != size:
@@ -170,18 +186,21 @@ class TornTail:
                         break
 ```
 
-   (with `torn: TornTail | None = None` before the loop). After the loop, when `torn` is not
-   None: `self._cache = None`, `self._torn = (torn, self._identity(status))`, return
-   `(tuple(records), torn)`; otherwise build the cache as today and return `(result, None)`.
-   `load` becomes:
+   After the loop, when `torn` is not None: `self._cache = None`,
+   `self._torn = (torn, self._identity(status))`, return `(tuple(records), torn)`; otherwise
+   build the cache as today and return `(result, None)`. Then:
 
 ```python
-    def load(self, *, deadline: float | None = None) -> tuple[JournalRecordV1, ...]:
-        """Load and verify exact canonical bytes, sequence, chain, lane, and ownership."""
-        records, torn = self.load_recovering(deadline=deadline)
-        if torn is not None:
-            raise ValueError("authority journal has a partial final record")
-        return records
+def load(self, *, deadline: float | None = None) -> tuple[JournalRecordV1, ...]:
+    """Load and verify exact canonical bytes, sequence, chain, lane, and ownership."""
+    return self._load(deadline, recovering=False)[0]
+
+
+def load_recovering(
+    self, *, deadline: float | None = None
+) -> tuple[tuple[JournalRecordV1, ...], TornTail | None]:
+    """Load as `load` does, but report a torn final line or empty lane (#2983)."""
+    return self._load(deadline, recovering=True)
 ```
 
 4. Move `retract`'s open/verify/preserve/truncate/unlink/fsync/reload body into
@@ -193,14 +212,15 @@ class TornTail:
    digest of the bytes. Add:
 
 ```python
-    def remove_torn_tail(self, torn: TornTail) -> None:
+    def remove_torn_tail(self) -> None:
         """Remove a torn final line after preserving its bytes (ADR-0584 amendment, #2983)."""
         observed, self._torn = self._torn, None
-        if observed is None or observed[0] != torn:
+        if observed is None:
             raise ValueError("authority journal torn-tail removal requires its recovery load")
+        torn, identity = observed
         digest = hashlib.sha256(torn.data).hexdigest()
         stem = self._name.removesuffix(".jsonl")
-        self._remove_tail(torn.offset, torn.data, observed[1], f"{stem}.torn.{digest}")
+        self._remove_tail(torn.offset, torn.data, identity, f"{stem}.torn.{digest}")
 ```
 
 5. Run the step 2 command; expect all pass (existing retract tests included). Commit
@@ -213,6 +233,11 @@ Verification:
   in a headless empty lane, and refuses every other torn shape with `journal: invalid-lane`
   without touching the lane. Mode: focused-test — `test_startup_recovers_a_torn_unanchored_tail`,
   `test_startup_refuses_every_other_torn_tail`; red: `journal: invalid-lane` on the recover cases.
+- Contract: an oversized or non-final corrupt lane refuses at the host with `journal:
+  invalid-lane`, lane and `retracted/` untouched. Mode: focused-test —
+  `test_startup_refuses_a_corrupt_lane`; red only under a fault (it passes before the change).
+- Contract: the standalone check never repairs a recoverable torn lane. Mode: focused-test —
+  `test_standalone_check_never_retracts[torn]`; red only under a fault.
 - Contract: startup reconciles after `journal: invalid-lane`. Mode: focused-test —
   `test_startup_reconciles_only_after_a_journal_head_difference` with the `invalid-lane` row
   flipped to `True`; red: `assert [] == [config]`.
@@ -223,25 +248,32 @@ Steps:
 
 ```python
 def _write_torn_lane(
-    config: AuthorityHostConfig, complete: list[JournalRecordV1], torn: JournalRecordV1
+    config: AuthorityHostConfig,
+    complete: list[JournalRecordV1],
+    torn: JournalRecordV1,
+    length: int = 40,
 ) -> tuple[Path, bytes]:
     lane = config.journal_dir / f"{torn.system_id}.jsonl"
-    partial = canonical_record_bytes(torn)[:40]
+    partial = canonical_record_bytes(torn)[:length]
     lane.write_bytes(b"".join(canonical_record_bytes(r) + b"\n" for r in complete) + partial)
     lane.chmod(0o600)
     return lane, partial
 
 
-@pytest.mark.parametrize("complete", [2, 0])
-def test_startup_recovers_a_torn_unanchored_tail(tmp_path: Path, complete: int) -> None:
+@pytest.mark.parametrize(("complete", "length"), [(2, 40), (0, 40), (0, 0)])
+def test_startup_recovers_a_torn_unanchored_tail(
+    tmp_path: Path, complete: int, length: int
+) -> None:
     config = _config(tmp_path)
     records = _chain(config, uuid4(), 3)
-    lane, partial = _write_torn_lane(config, records[:complete], records[complete])
+    lane, partial = _write_torn_lane(config, records[:complete], records[complete], length)
     head = _head_of(records[complete - 1]) if complete else None
     system_id = str(records[0].system_id)
 
     probe = host._retract_unanchored_tail(config, system_id, head, retract=False)  # noqa: SLF001
-    assert isinstance(probe, TornTail) and lane.read_bytes().endswith(partial)
+    assert isinstance(probe, TornTail)
+    assert probe.data == partial
+    assert lane.read_bytes().endswith(partial)
     tail = host._retract_unanchored_tail(config, system_id, head, retract=True)  # noqa: SLF001
 
     assert tail == probe
@@ -276,11 +308,35 @@ def test_startup_refuses_every_other_torn_tail(
 
     assert lane.read_bytes() == before
     assert not (config.journal_dir / "retracted").exists()
+
+
+@pytest.mark.parametrize("defect", [b"x" * (MAX_MESSAGE_BYTES + 1), b"{\n{"])
+def test_startup_refuses_a_corrupt_lane(tmp_path: Path, defect: bytes) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 1)
+    lane = _write_lane(config, records)
+    lane.write_bytes(lane.read_bytes() + defect)
+    before = lane.read_bytes()
+
+    with pytest.raises(HostReadinessError, match="journal: invalid-lane"):
+        host._retract_unanchored_tail(  # noqa: SLF001
+            config, str(records[0].system_id), _head_of(records[0]), retract=True
+        )
+
+    assert lane.read_bytes() == before
+    assert not (config.journal_dir / "retracted").exists()
 ```
+
+   Also parametrize the existing `test_standalone_check_never_retracts` with
+   `@pytest.mark.parametrize("torn", [False, True])`: when `torn`, append
+   `canonical_record_bytes(records[1])[:40]` to a lane holding only `records[0]` (head
+   `records[0]`), expect `journal: invalid-lane` instead of `head-mismatch`, and assert the lane
+   bytes are unchanged and `retracted/` does not exist. Import `MAX_MESSAGE_BYTES` from
+   `...protocol`.
 
 2. Run `just test-verbose tests/providers/external_boot_authority/test_host.py`; expect the
    recover cases and the flipped trigger row to fail.
-3. In `host.py` import `TornTail` and `hashlib`; add
+3. In `host.py` import `TornTail`, `errno`, and `hashlib`; add
 
 ```python
 def _is_invalid_lane(error: HostReadinessError) -> bool:
@@ -305,7 +361,14 @@ def _torn_tail_is_unanchored(
             if not _torn_tail_is_unanchored(config, records, head):
                 raise HostReadinessError("journal", "invalid-lane")
             if retract:
-                journal.remove_torn_tail(torn)
+                try:
+                    journal.remove_torn_tail()
+                except OSError as error:
+                    _log.warning(
+                        "authority journal could not remove a torn final line at startup",
+                        extra={"system_id": system_id, "errno": errno.errorcode.get(error.errno)},
+                    )
+                    raise
             return torn
         tail = _unanchored_tail(config, system_id, records, head)
 ```
@@ -336,5 +399,6 @@ Steps:
 Each arm edits one line, runs the named focused file, expects red, then `git checkout -- <file>`:
 `_torn_tail_is_unanchored` returns `True` (refusal table red); drop the `_preserve` call in
 `_remove_tail` (evidence asserts red); drop the identity comparison (changed-lane test red);
-drop the `len(line) > MAX_MESSAGE_BYTES` check (oversized case red); revert the trigger
-(flipped row red).
+drop the `len(line) > MAX_MESSAGE_BYTES` check (oversized cases red); make `load` pass
+`recovering=True` (strict-load and standalone `[torn]` tests red); revert the trigger (flipped
+row red, and `test_connected_authority_acceptance.py` `[torn]` red).

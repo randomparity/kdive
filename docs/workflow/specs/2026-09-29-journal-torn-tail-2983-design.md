@@ -22,13 +22,14 @@ already holds the request-socket lock and, for the removal, the System's advisor
    tuple[tuple[JournalRecordV1, ...], TornTail | None]`. It validates exactly as `load` does,
    with one difference: a final line without a newline, whose read ended at the size observed
    by `fstat` and whose length is at most `MAX_MESSAGE_BYTES`, is returned as `TornTail`
-   instead of raising. Every other defect raises `ValueError` as today: a longer unterminated
-   line (oversized), an empty, non-canonical, or invalid complete line anywhere, a broken chain.
-   `load` becomes the strict wrapper and keeps its message. After a recovery load that found a
-   torn tail the journal holds no append cache, so `append` and `retract` reload strictly and
-   refuse.
-2. **Journal removal.** `FileAuthorityJournal.remove_torn_tail(torn: TornTail) -> None` requires
-   the exact `TornTail` from the latest `load_recovering` on that object, and the lane's file
+   instead of raising, and so is an existing zero-byte lane (`TornTail(0, b"")`: a first
+   append that failed after creating the file). Every other defect raises `ValueError` as
+   today: a longer unterminated line (oversized), an empty, non-canonical, or invalid complete
+   line anywhere, a broken chain. `load` keeps its strict behavior and message, including `()`
+   for a zero-byte lane. After a recovery load that found a torn tail the journal holds no
+   append cache, so `append` and `retract` reload strictly and refuse.
+2. **Journal removal.** `FileAuthorityJournal.remove_torn_tail() -> None` requires a torn tail
+   found by the latest `load_recovering` on that object, and the lane's file
    identity (device, inode, size, mtime, ctime) unchanged since that load, with `pread` of the
    torn range equal to `torn.data`. It preserves the bytes in `retracted/` as
    `<lane stem>.torn.<sha256 hex of data>` through the existing `_preserve` (private temp file,
@@ -41,7 +42,8 @@ already holds the request-socket lock and, for the removal, the System's advisor
    `HostReadinessError("journal", "invalid-lane")`. A recovered torn tail is the one tail removed
    for that lane in this startup; the complete-record retraction is not also attempted. The
    function returns `JournalRecordV1 | TornTail | None`; the reconcile log line names the torn
-   tail's system, offset, length, and SHA-256.
+   tail's system, offset, length, and SHA-256. An `OSError` from the removal is logged with its
+   errno name before it is reported as `invalid-lane`, so a full disk is distinguishable.
 4. **Startup trigger.** `run_authority_host` also runs the reconcile step when the first static
    check fails with `journal: invalid-lane`. A lane that is corrupt in any other way fails the
    reconcile's first (read-only) pass with the same `invalid-lane`.
@@ -63,7 +65,9 @@ The append path, the on-disk record format, and the `retracted/` inventory rule 
    interrupted append; operator repair, excluded). A crash between preserving the evidence and
    truncating: the next startup preserves the same bytes under the same name and truncates.
    With another authority holding the socket lock, a torn lane now reports
-   `journal: reconcile-busy` instead of `invalid-lane` (still refuses).
+   `journal: reconcile-busy` instead of `invalid-lane` (still refuses). A lane torn by `ENOSPC`
+   refuses while the evidence write cannot complete, with the lane unchanged, and recovers at the
+   first startup after space is freed.
 4. **Covered elsewhere** — reader exclusion for the periodic check (#2933 amendment);
    operator repair tooling (operator, excluded); an atomic append write path (rejected in the
    amendment, excluded).
@@ -85,9 +89,11 @@ The append path, the on-disk record format, and the `retracted/` inventory rule 
 
 - A lane of complete records ending at the head, plus a torn line, starts: lane equals the
   prefix, evidence holds the torn bytes, the static check passes.
-- A headless lane holding only a torn line starts: lane unlinked, evidence preserved.
-- Each refusal case in Design 3 and the corrupt/oversized cases in Design 1 still refuse with
-  `journal: invalid-lane` and leave the lane and `retracted/` untouched.
+- A headless lane holding only a torn line, or zero bytes, starts: lane unlinked, evidence
+  preserved.
+- Each refusal case in Design 3 and the oversized and non-final corrupt cases in Design 1 still
+  refuse with `journal: invalid-lane` and leave the lane and `retracted/` untouched.
+- The standalone check leaves a recoverable torn lane and `retracted/` untouched.
 - The real startup (`run_authority_host`, Postgres-backed heads) recovers a lane whose refused
   record was torn mid-append.
 
