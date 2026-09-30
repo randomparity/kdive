@@ -37,7 +37,7 @@ of tests, a ~15-line ADR amendment.
 ## Task 1: server-fault family, helper, and middleware
 
 Interfaces (produced): `class ServerFaultError(Exception)`;
-`def validate_stored[M: BaseModel](model: type[M], value: object) -> M`;
+`validate_stored(model: type[M], value: object) -> M` (generic over `M: BaseModel`);
 `class ServerFaultMiddleware(Middleware)`; `SERVER_FAULT_DETAIL: str`.
 
 Verification:
