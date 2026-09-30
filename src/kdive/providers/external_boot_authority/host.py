@@ -122,6 +122,13 @@ class HostReadinessError(CategorizedError):
         )
 
 
+class _LaneVanished(HostReadinessError):
+    """A listed lane that no longer exists; a retraction racing the listing produces it."""
+
+    def __init__(self) -> None:
+        super().__init__("journal", "unsafe-tree")
+
+
 @dataclass(frozen=True, slots=True)
 class _SystemInstallation:
     """The System manifest and base files trusted at authority startup."""
@@ -468,6 +475,8 @@ def _local_lanes(
         system_id = name.removesuffix(".jsonl")
         try:
             status = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise _LaneVanished from None
         except OSError:
             raise HostReadinessError("journal", "unsafe-tree") from None
         if (
@@ -603,6 +612,15 @@ def _is_head_divergence(error: HostReadinessError) -> bool:
     return error.component == "journal" and error.reason in {"head-mismatch", "inventory-mismatch"}
 
 
+def _may_be_in_flight_anchor(error: HostReadinessError) -> bool:
+    """What a lane mid-append, mid-advance, or mid-retraction shows (ADR-0584 amendments)."""
+    return (
+        _is_head_divergence(error)
+        or isinstance(error, _LaneVanished)
+        or (error.component == "journal" and error.reason == "invalid-lane")
+    )
+
+
 @dataclass(slots=True)
 class JournalInventoryValidator:
     """Reuse unchanged lane evidence while keeping journal parsing off the event loop."""
@@ -616,9 +634,10 @@ class JournalInventoryValidator:
         try:
             await self.validate(config, await _database_heads(config))
         except HostReadinessError as error:
-            if self.anchor_quiescence is None or not _is_head_divergence(error):
+            if self.anchor_quiescence is None or not _may_be_in_flight_anchor(error):
                 raise
-            # An anchor between its fsynced append and its head advance looks exactly like this.
+            # An anchor between its append and the end of its advance or retraction looks exactly
+            # like this.
             async with self.anchor_quiescence():
                 await self.validate(config, await _database_heads(config))
 
