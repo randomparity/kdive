@@ -136,7 +136,16 @@ async def _retire_seed_authority(conn: AsyncConnection, case: Any) -> None:
 
 @pytest.mark.parametrize(
     "interrupt_after",
-    [None, "recover", "cleanup", "cancel-recover", "cancel-cleanup", "cancel-finalize"],
+    [
+        None,
+        "recover",
+        "cleanup",
+        "cancel-recover",
+        "cancel-cleanup",
+        "cancel-recover-in-flight",
+        "cancel-cleanup-in-flight",
+        "cancel-finalize",
+    ],
 )
 def test_public_active_release_claims_and_completes_through_worker(
     migrated_url: str,
@@ -144,7 +153,13 @@ def test_public_active_release_claims_and_completes_through_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     interrupt_after: Literal[
-        "recover", "cleanup", "cancel-recover", "cancel-cleanup", "cancel-finalize"
+        "recover",
+        "cleanup",
+        "cancel-recover",
+        "cancel-cleanup",
+        "cancel-recover-in-flight",
+        "cancel-cleanup-in-flight",
+        "cancel-finalize",
     ]
     | None,
 ) -> None:
@@ -152,8 +167,11 @@ def test_public_active_release_claims_and_completes_through_worker(
         vehicle = build_vehicle()
         adapter = _ReleaseFaultAuthorityAdapter(vehicle)
         if interrupt_after is not None and interrupt_after.startswith("cancel-"):
-            adapter.block_operation = interrupt_after.removeprefix("cancel-")
+            adapter.block_operation = interrupt_after.removeprefix("cancel-").removesuffix(
+                "-in-flight"
+            )
             adapter.release.clear()
+        in_flight = interrupt_after is not None and interrupt_after.endswith("-in-flight")
         retry_incarnation = f"docker:release-retry-{uuid4()}"
         retry_credential = f"release-retry-credential-{uuid4()}"
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
@@ -175,6 +193,32 @@ def test_public_active_release_claims_and_completes_through_worker(
                 ),
                 adapter=adapter,
             )
+            # The in-flight variants hold the cancelled attempt's terminal head advance until
+            # the retry's claim has superseded that authority, so the advance is refused and
+            # the retry's takeover must recover and adopt the completion (#2977).
+            terminal_held = asyncio.Event()
+            superseded = asyncio.Event()
+            held_advance: list[str] = []
+            original_advance = service._repository.advance
+
+            async def advance_after_supersession(
+                binding: Any, expected_sequence: int, expected_digest: str, record: Any
+            ) -> Any:
+                hold = (
+                    in_flight
+                    and not terminal_held.is_set()
+                    and record.phase.value == "terminal"
+                    and record.operation.value == adapter.block_operation
+                )
+                if hold:
+                    terminal_held.set()
+                    await superseded.wait()
+                status = await original_advance(binding, expected_sequence, expected_digest, record)
+                if hold:
+                    held_advance.append(status)
+                return status
+
+            monkeypatch.setattr(service._repository, "advance", advance_after_supersession)
 
             credentials = {
                 case.credential: case.worker_incarnation,
@@ -292,7 +336,10 @@ def test_public_active_release_claims_and_completes_through_worker(
                     completions = tuple(service._completion_tasks)
                     assert completions
                     async with asyncio.timeout(10):
-                        await asyncio.gather(*completions)
+                        if in_flight:
+                            await terminal_held.wait()
+                        else:
+                            await asyncio.gather(*completions)
                     claimed = None
                 if interrupt_after is not None and interrupt_after != "cancel-finalize":
                     if not interrupt_after.startswith("cancel-"):
@@ -360,7 +407,30 @@ def test_public_active_release_claims_and_completes_through_worker(
                             "WHERE id = %s",
                             (requested.object_id,),
                         )
-                    claimed = await retry_worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
+                    if in_flight:
+
+                        async def release_on_supersession() -> None:
+                            while True:
+                                async with seed.cursor() as cur:
+                                    await cur.execute(
+                                        "SELECT state FROM external_boot_authorities "
+                                        "WHERE job_id = %s ORDER BY generation LIMIT 1",
+                                        (requested.object_id,),
+                                    )
+                                    if await cur.fetchone() == ("superseded",):
+                                        superseded.set()
+                                        return
+                                await asyncio.sleep(0.01)
+
+                        watcher = asyncio.create_task(release_on_supersession())
+                        async with asyncio.timeout(10):
+                            claimed = await retry_worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
+                            await watcher
+                            # The refused completion ends superseded; held_advance proves it.
+                            await asyncio.gather(*completions, return_exceptions=True)
+                        assert held_advance == ["superseded"]
+                    else:
+                        claimed = await retry_worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
                     assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None
             if claimed is not None:
                 assert str(claimed.id) == requested.object_id
