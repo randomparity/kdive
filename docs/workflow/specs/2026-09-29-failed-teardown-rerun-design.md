@@ -80,3 +80,5 @@ with `infrastructure_failure` before #2913.
 - **`TERMINAL` policy.** judgment: re-enqueues a succeeded teardown on every repeat call.
 - **Read the row and pick a policy per state.** judgment: duplicates `dedup_replay` and breaks its
   "pass the same policy as `enqueue`" contract.
+- **`FAILED_OR_LAPSED_EXHAUSTED` policy.** verified: `dedup_replay` raises `ValueError` for it
+  (`_idempotency.py`, #2889), and its lapsed-`running` reset is left to `repair_abandoned_jobs` here.
