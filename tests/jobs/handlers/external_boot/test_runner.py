@@ -1347,7 +1347,7 @@ def test_every_provider_category_maps_to_a_committable_failure(
 ) -> None:
     """Enumerate the closed fault vocabulary and prove every result can be committed.
 
-    ``ErrorCategory`` has 24 members and the commit accepts 17. Copying an unaccepted one through
+    ``ErrorCategory`` has 25 members and the commit accepts 17. Copying an unaccepted one through
     raises SQLSTATE ``22023`` from inside the commit — and that call sits **outside**
     ``_finalize_handler``'s ``try/except``, so it escapes to ``_claim_loop`` and surfaces as
     ``run_once failed on lane %s`` with no job id. Nothing else catches it:

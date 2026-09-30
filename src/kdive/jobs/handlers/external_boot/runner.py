@@ -134,11 +134,11 @@ outside the set raises SQLSTATE ``22023`` from inside the commit, and that call 
 ``run_once failed on lane %s`` with no job id at all. The drift risk is real but gated:
 ``test_runner.py`` parses the migration and asserts this set equals the SQL's.
 
-``ErrorCategory`` has 24 members, so seven are **not** committable: ``conflict``, ``not_found``,
-``capacity_exhausted``, ``queue_timeout``, ``quota_exceeded``, ``restore_incomplete`` and
-``symbol_not_found``. That is not hypothetical for long — ``providers/remote_libvirt/lifecycle/
-external_boot.py`` already raises ``CONFLICT`` and ``NOT_FOUND``, and it is the module #2199/#2200
-compose.
+``ErrorCategory`` has 25 members, so eight are **not** committable: ``conflict``, ``not_found``,
+``capacity_exhausted``, ``queue_timeout``, ``quota_exceeded``, ``restore_incomplete``,
+``reprovision_incomplete`` and ``symbol_not_found``. That is not hypothetical for long —
+``providers/remote_libvirt/lifecycle/external_boot.py`` already raises ``CONFLICT`` and
+``NOT_FOUND``, and it is the module #2199/#2200 compose.
 """
 
 _UNCOMMITTABLE_SUBSTITUTE: Final = ErrorCategory.INFRASTRUCTURE_FAILURE
