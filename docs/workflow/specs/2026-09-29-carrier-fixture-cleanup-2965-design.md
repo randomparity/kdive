@@ -57,9 +57,11 @@ The fixture that one `create` run makes is this exact set of names, in creation 
    first. A nonzero exit fails that entry, and the callback then refuses every later fixture
    entry without running the script. A domain that did not go away thus keeps its backing
    files for diagnosis.
-6. **When.** Each carrier calls `remove_authority_fixture` in its cleanup path, after its
-   Investigation close attempt, whether the proof passed or failed, as the close already
-   runs. The runbook gives the manual `--remove` command for the two cases the carrier does
+6. **When.** Each carrier runs everything after the fixture `create` (the confinement probe,
+   the MCP client, the proof, and its Investigation close where the carrier makes one) inside
+   `_run_then_remove_fixture`, which calls `remove_authority_fixture` when that body ends,
+   whether it passed or failed. A removal failure after a proof failure is raised with it in
+   one `ExceptionGroup`. The runbook gives the manual `--remove` command for the two cases the carrier does
    not finish: a failed removal and a partial `create`.
 7. **Runbook.** Both carrier sections of `docs/operating/runbooks/live-testing.md` state this
    contract, the kept journal lane, and the manual command.

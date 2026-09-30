@@ -149,7 +149,7 @@ Verification:
   `test_remove_authority_fixture_stops_after_a_failed_entry` (the domain entry fails; the
   `ExceptionGroup` carries every entry; only one `subprocess.run` call). Red: missing function.
   Green: same command.
-- Contract: carriers remove the fixture after the close attempt, on success and on failure.
+- Contract: carriers remove the fixture after the proof body ends, on success and on failure.
   Mode: focused-test. Extend `test_native_carriers_supply_the_required_cleanup_summary` to
   assert one `remove_authority_fixture` call after the close, and add
   `test_native_carrier_removes_the_fixture_after_a_failed_proof` (fake

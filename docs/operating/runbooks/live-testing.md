@@ -261,8 +261,8 @@ the configured System, and the carrier records each one in its resource ledger:
 - `/var/lib/kdive/provider-authority/console/<uuid>.log`
 - the domain `kdive-<uuid>` on the private authority daemon
 
-After its Investigation close attempt, whether the proof passed or failed, the carrier removes
-those names newest first with `provision-authority-fixture.py --remove <uuid> <name>`. The
+When the rest of the run ends, whether it passed or failed and after the Investigation close
+where the carrier makes one, the carrier removes those names newest first with `provision-authority-fixture.py --remove <uuid> <name>`. The
 domain goes first. The script accepts only a name from that set, and it refuses a symlinked
 directory, a hard-linked file, or a parent that is not the authority-owned mode-`0700`
 directory. It stops at the first failed name, so a domain that did not go away keeps its files.
