@@ -40,6 +40,7 @@ from tests.live_vm.installed_local_authority_support import (
     load_config,
     provision_authority_fixture,
     release_fault_barrier,
+    remove_authority_fixture,
     require_authority_artifact_confinement,
     require_deployed_revision,
     require_fault_barrier,
@@ -107,6 +108,19 @@ def test_ledger_rejects_unowned_and_cleans_exact_reverse_order() -> None:
     removed: list[OwnedResource] = []
     ledger.cleanup(removed.append)
     assert removed == [volume, domain]
+
+
+def test_ledger_scopes_authority_fixture_entries_to_the_configured_system() -> None:
+    prefix = "kdive-2151-" + "1" * 12 + "-" + "2" * 8
+    system_id = uuid4()
+    ledger = ResourceLedger(prefix, fixture_system=system_id)
+    owned = OwnedResource(kind="authority-fixture", identity=f"kdive-{system_id}")
+    ledger.record(owned)
+    with pytest.raises(ValueError, match="outside"):
+        ledger.record(OwnedResource(kind="authority-fixture", identity=f"kdive-{uuid4()}"))
+    with pytest.raises(ValueError, match="outside"):
+        ResourceLedger(prefix).record(owned)
+    assert ledger.resources == (owned,)
 
 
 def test_missing_fault_barrier_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -975,7 +989,7 @@ def test_native_carrier_checks_deployed_builds_before_fixture_mutation(
             return "active"
         return "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1"
 
-    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+    async def provision(*_args: object) -> None:
         nonlocal fixture_called
         fixture_called = True
 
@@ -1013,7 +1027,7 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
             return "active"
         return "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1"
 
-    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+    async def provision(*_args: object) -> None:
         events.append("fixture")
 
     def probe(_config: NativeAuthorityConfig, workers: str) -> None:
@@ -1061,7 +1075,7 @@ def test_native_route_preflight_fails_before_fixture_mutation(
             return "active"
         return "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1"
 
-    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+    async def provision(*_args: object) -> None:
         nonlocal fixture_called
         fixture_called = True
 
@@ -1081,9 +1095,10 @@ def test_native_route_preflight_fails_before_fixture_mutation(
     assert not fixture_called
 
 
+@pytest.mark.parametrize("proof_fails", [False, True])
 @pytest.mark.parametrize("restart_recovery", [False, True])
 def test_native_carriers_supply_the_required_cleanup_summary(
-    monkeypatch: pytest.MonkeyPatch, restart_recovery: bool
+    monkeypatch: pytest.MonkeyPatch, restart_recovery: bool, proof_fails: bool
 ) -> None:
     config = NativeAuthorityConfig(
         installed_revision="1" * 40,
@@ -1108,16 +1123,21 @@ def test_native_carriers_supply_the_required_cleanup_summary(
             cleanup_calls.append((name, kwargs))
             return ToolResponse.success(investigation_id, "closed")
 
+    def remove_fixture(_config: NativeAuthorityConfig, ledger: ResourceLedger) -> None:
+        assert ledger.fixture_system == config.system_id
+        cleanup_calls.append(("remove-fixture", {}))
+
     class ClientFactory:
         @staticmethod
         def over_http(_base_url: str, _token: str) -> Client:
             return Client()
 
-    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+    async def provision(*_args: object) -> None:
         return None
 
     async def completed(_db_url: str, _operations: NormalOperationJobs) -> None:
-        return None
+        if proof_fails:
+            raise AssertionError("root release completion is missing")
 
     async def normal(
         _client: object, _config: NativeAuthorityConfig, ledger: ResourceLedger
@@ -1174,12 +1194,19 @@ def test_native_carriers_supply_the_required_cleanup_summary(
     monkeypatch.setattr(carrier, "restart_authority_after_fault", lambda *_args: None)
     monkeypatch.setattr(carrier, "drain_job", success)
     monkeypatch.setattr(carrier, "scalar", success)
+    monkeypatch.setattr(carrier, "remove_authority_fixture", remove_fixture)
     monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://fixture")
 
-    if restart_recovery:
-        carrier.run_installed_local_authority_restart_recovery()
+    run = (
+        carrier.run_installed_local_authority_restart_recovery
+        if restart_recovery
+        else carrier.run_installed_local_authority_normal_operations
+    )
+    if proof_fails:
+        with pytest.raises(AssertionError, match="root release completion is missing"):
+            run()
     else:
-        carrier.run_installed_local_authority_normal_operations()
+        run()
 
     assert cleanup_calls == [
         (
@@ -1188,7 +1215,8 @@ def test_native_carriers_supply_the_required_cleanup_summary(
                 "investigation_id": investigation_id,
                 "summary": "Native authority proof cleanup",
             },
-        )
+        ),
+        ("remove-fixture", {}),
     ]
     assert armed == ([(config, run_id, "activate", "after-provider")] if restart_recovery else [])
 
@@ -1350,8 +1378,9 @@ def test_completed_root_release_rejects_incomplete_or_mismatched_proof(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("reported", [True, False])
 def test_fixture_provisioning_passes_only_durable_profile_to_exact_script(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reported: bool
 ) -> None:
     config = NativeAuthorityConfig(
         installed_revision="1" * 40,
@@ -1389,19 +1418,30 @@ def test_fixture_provisioning_passes_only_durable_profile_to_exact_script(
         return Connection()
 
     seen: dict[str, object] = {}
+    created = [f"/private/{config.system_id}-overlay.qcow2", f"kdive-{config.system_id}"]
+    stdout = "provider log line\n" + (json.dumps({"created": created}) if reported else "")
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         seen.update(argv=argv, kwargs=kwargs)
-        return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
 
     monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
     monkeypatch.setattr(subprocess, "run", run)
-    asyncio.run(provision_authority_fixture("postgresql://fixture", config))
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+    if not reported:
+        with pytest.raises(RuntimeError, match="did not report its created names"):
+            asyncio.run(provision_authority_fixture("postgresql://fixture", config, ledger))
+        assert ledger.resources == ()
+        return
+    asyncio.run(provision_authority_fixture("postgresql://fixture", config, ledger))
     argv = cast(list[str], seen["argv"])
     assert argv[:3] == ["sudo", "-n", "/opt/kdive-provider-authority/.venv/bin/python"]
     assert argv[-1] == str(config.system_id)
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert json.loads(cast(str, kwargs["input"])) == {"schema_version": 1}
+    assert ledger.resources == tuple(
+        OwnedResource(kind="authority-fixture", identity=name) for name in created
+    )
 
 
 def test_fixture_verification_uses_the_explicit_read_only_script_mode(
@@ -1450,9 +1490,86 @@ def test_fixture_verification_uses_the_explicit_read_only_script_mode(
 
     monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
     monkeypatch.setattr(subprocess, "run", run)
-    asyncio.run(provision_authority_fixture("postgresql://fixture", config))
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+    asyncio.run(provision_authority_fixture("postgresql://fixture", config, ledger))
 
     assert cast(list[str], seen["argv"])[-2:] == ["--verify-existing", str(config.system_id)]
+    assert ledger.resources == ()
+
+
+def _fixture_ledger(config: NativeAuthorityConfig) -> tuple[ResourceLedger, list[str]]:
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+    names = [f"/private/{config.system_id}-overlay.qcow2", f"kdive-{config.system_id}"]
+    ledger.record(OwnedResource(kind="investigation", identity=str(uuid4())))
+    for name in names:
+        ledger.record(OwnedResource(kind="authority-fixture", identity=name))
+    return ledger, names
+
+
+def test_remove_authority_fixture_calls_exact_remove_in_reverse_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    ledger, names = _fixture_ledger(config)
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    remove_authority_fixture(config, ledger)
+
+    script = str(
+        Path(carrier.__file__).resolve().parents[2]
+        / "scripts/live-vm/provision-authority-fixture.py"
+    )
+    assert calls == [
+        [
+            "sudo",
+            "-n",
+            "/opt/kdive-provider-authority/.venv/bin/python",
+            script,
+            "--remove",
+            str(config.system_id),
+            name,
+        ]
+        for name in reversed(names)
+    ]
+
+
+def test_remove_authority_fixture_stops_after_a_failed_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    ledger, _names = _fixture_ledger(config)
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "libvirt: operation failed")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(ExceptionGroup) as raised:
+        remove_authority_fixture(config, ledger)
+
+    assert [argv[-1] for argv in calls] == [f"kdive-{config.system_id}"]
+    causes = [str(error.__cause__) for error in raised.value.exceptions]
+    assert len(causes) == 2
+    assert "libvirt: operation failed" in causes[0]
+    assert "stopped after an earlier failure" in causes[1]
 
 
 def test_fixture_subprocess_snapshots_authority_uri_and_roots_before_provider_import() -> None:
