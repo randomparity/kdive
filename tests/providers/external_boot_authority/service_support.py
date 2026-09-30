@@ -255,6 +255,7 @@ class _Repository:
                 record
                 for record in self.records
                 if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                and record.generation == request.generation
             ),
             None,
         )
@@ -360,8 +361,8 @@ class _Repository:
                 authority_instance=prior.authority_instance,
                 request_digest=prior.operation_digest,
                 phase=prior.phase.value,
-                source_identity=prior.expected_source_identity or "",
-                target_identity=prior.intended_target_identity or "",
+                source_identity=prior.expected_source_identity,
+                target_identity=prior.intended_target_identity,
                 ownership_digest="sha256:"
                 + hashlib.sha256(
                     json.dumps(

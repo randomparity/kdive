@@ -1441,6 +1441,59 @@ def test_teardown_with_external_boot_history_enqueues_authority_marker(
     asyncio.run(_run())
 
 
+def test_teardown_of_preparing_activation_enqueues_authority_marker(migrated_url: str) -> None:
+    """#2961: a preparing activation, with its activate authority still current, is torn down."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, system_id, RunState.RUNNING)
+            async with pool.connection() as conn:
+                seeded = await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.PREPARING,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+                await conn.execute(
+                    "INSERT INTO external_boot_reservations "
+                    "(activation_id, store_identity, owner_key, reserved_bytes, state) "
+                    "VALUES (%s, 'stores/main', %s, 4096, 'pending')",
+                    (seeded.activation.id, f"owners/{seeded.activation.id}"),
+                )
+                await _seed_retired_teardown_authority(
+                    conn, seeded, purpose="activate", current=True
+                )
+            response = await _teardown(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
+            )
+            assert response.status == "queued", response.model_dump()
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT kind, payload FROM jobs WHERE id = %s", (response.object_id,)
+                )
+                job = await cur.fetchone()
+                await cur.execute(
+                    "SELECT state FROM external_boot_reservations WHERE activation_id = %s",
+                    (seeded.activation.id,),
+                )
+                reservation = await cur.fetchone()
+
+        assert job is not None and job["kind"] == "teardown"
+        marker = job["payload"]["external_boot_authority_v1"]
+        assert marker["activation_id"] == str(seeded.activation.id)
+        assert (marker["purpose"], marker["operation"]) == ("teardown", "teardown")
+        assert "external_boot_plan_v1" not in job["payload"]
+        # Enqueueing credits nothing: only the authority's teardown receipt ends the reservation.
+        assert reservation == {"state": "pending"}
+
+    asyncio.run(_run())
+
+
 async def _authority_teardown_job(pool: AsyncConnectionPool) -> tuple[str, str]:
     """Enqueue one authority teardown for a fresh external-boot System; return System and job."""
     alloc_id = await granted_allocation(pool)
@@ -2450,6 +2503,98 @@ def test_reprovision_rejects_current_teardown_authority_before_mutation(
         assert response.data["reason"] == "external_boot_teardown_in_progress"
         assert system is not None and system["state"] == "ready"
         assert jobs is not None and jobs["count"] == 0
+
+    asyncio.run(_run())
+
+
+async def _seed_teardown_in_state(pool: AsyncConnectionPool, sys_id: str, state: str) -> None:
+    job = await _enqueue_teardown(pool, sys_id)
+    if state == "running":
+        await _run_final_attempt(pool, str(job.id), lease="5 minutes")
+    elif state != "queued":
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (state, job.id))
+
+
+@pytest.mark.parametrize("teardown_state", ["queued", "running"])
+def test_reprovision_refuses_under_live_teardown_job(
+    migrated_url: str, teardown_state: str
+) -> None:
+    """#2979: a live `{uid}:teardown` leaves the System `ready`, so admission must read it."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            await _seed_teardown_in_state(pool, sys_id, teardown_state)
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
+                jobs = await cur.fetchone()
+            state = await _system_state(pool, sys_id)
+            teardown = await _teardown_job_row(pool, sys_id)
+        assert resp.status == "error"
+        assert resp.error_category == "conflict"
+        assert resp.data["reason"] == "teardown_in_progress"
+        assert resp.retryable is False  # CONFLICT (ADR-0118): wait on the teardown, not a retry
+        assert resp.suggested_next_actions == ["systems.get"]
+        assert state == "ready"
+        assert jobs is not None and jobs["n"] == 0
+        assert teardown is not None and teardown[1] == teardown_state  # teardown untouched
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("teardown_state", ["failed", "succeeded", "canceled"])
+def test_reprovision_admitted_after_settled_teardown_job(
+    migrated_url: str, teardown_state: str
+) -> None:
+    """#2979: only a live teardown blocks; the handler re-checks state for a settled one."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            await _seed_teardown_in_state(pool, sys_id, teardown_state)
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
+            state = await _system_state(pool, sys_id)
+        assert resp.status == "queued"
+        assert state == "reprovisioning"
+
+    asyncio.run(_run())
+
+
+def test_reprovision_non_ready_system_under_teardown_keeps_config_error(
+    migrated_url: str,
+) -> None:
+    """#2979: a System the teardown already moved still reports its `current_status`."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.TEARING_DOWN)
+            await _seed_teardown_in_state(pool, sys_id, "running")
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
+        assert resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "tearing_down"
+
+    asyncio.run(_run())
+
+
+def test_reprovision_replay_survives_later_teardown_job(migrated_url: str) -> None:
+    """#2979: a repeat call on a `reprovisioning` System stays a poll, not a conflict."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile = _active_allocation_profile()
+            first = await _reprovision(pool, ctx(), sys_id, profile)
+            await _enqueue_teardown(pool, sys_id)
+            second = await _reprovision(pool, ctx(), sys_id, profile)
+        assert first.status == "queued"
+        assert second.status == "queued"
+        assert second.object_id == first.object_id
 
     asyncio.run(_run())
 

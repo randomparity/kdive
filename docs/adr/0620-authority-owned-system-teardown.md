@@ -122,41 +122,85 @@ Rejected for this amendment:
   judgment: a `superseded` row can be one that lost an allocation race, so the route would rest
   on rows the fences already treat as dead.
 
-### Amendment (2026-09-29): the worker refuses an unmarked teardown for any history (#2966)
+### Amendment (2026-09-29): observing another generation's teardown record (#2921)
+
+The host teardown record is keyed by activation, and a later generation of the same subject
+(`binding`, `plan_identity`, `provider_kind`, `authority_instance`) overwrites it at `begin`.
+Observing generation N against a record that does not match N's anchor now distinguishes three
+cases in both libvirt providers:
+
+- another subject, or the same generation with different anchor fields, still refuses
+  (`provider_conflict`);
+- a later generation's record means N is superseded: the provider raises
+  `SystemTeardownSupersededError` and the service answers `superseded` with no facts;
+- an earlier generation's record means N never reached `begin`: the observation reports facts
+  owned by N's anchor with no reservation and no completion time, exactly as when no record
+  exists.
+
+N therefore never credits from another generation's record. A predecessor-owned observation
+proves only `retained_quarantine`; the reservation credits once, through the generation whose
+exact anchor owns the record, provided that generation's `begin` adopts it; `begin` still
+requires an identical reservation, and a reservation that changed between generations is not
+addressed here. Observation still writes nothing. Takeover recovery of a
+generation that died between `mutation-started` and `begin` now reaches `terminal` instead of
+failing every takeover with `provider_conflict`. In recovery, a later generation's record cannot
+occur: a generation begins only after its own `takeover-acknowledged`, which requires every
+earlier teardown phase resolved. It can occur when a concurrent successor begins before the
+superseded generation's post-commit re-observation.
+
+Rejected for this amendment:
+
+- **Key the record by generation.** judgment: a persisted-format change and migration of host
+  files, to keep history nothing reads; the successor must still see its predecessor's progress.
+- **Observe with the retained record's own anchor.** judgment: N would report, and could credit,
+  a reservation owned by another generation.
+- **Answer `superseded` for a predecessor record too.** verified: the takeover that recovers N is
+  N's successor, so `superseded` would fail every takeover exactly as `provider_conflict` does.
+
+### Amendment (2026-09-30): no ordinary teardown or release strands an authority domain (#2966)
 
 The ordinary `teardown_handler` refuses an unmarked TEARDOWN job when the System has any
 external-boot activation, not only one that still restricts it. It raises the existing
 terminal `conflict` (`external_boot_teardown_not_supported`) under the System lock, before the
-`tearing_down` transition and any provider call. Before, a clean release (`recovered`,
-`cleanup_complete`) let the ordinary provisioner act on its own libvirt URI, find no domain,
-and commit `torn_down` while the authority daemon kept the domain running.
+`tearing_down` transition and any provider call. Before, after a clean release (`recovered`,
+`cleanup_complete`), the ordinary provisioner acted on its own libvirt URI, found no domain,
+and committed `torn_down` while the authority daemon kept the domain running (#2865 proof).
+
+`allocations.release` refuses with `conflict` (`external_boot_system_teardown_required`) while a
+System on the allocation that is not `torn_down` has external-boot history. The authority
+allocator admits a teardown only on an `active` allocation (`0122_external_boot_authority.sql`),
+so a released allocation would leave that System with no teardown path. This mirrors the
+pre-activation fence that already denies release for an authority-owned System (ADR-0623).
+Lease expiry still ends such an allocation; that path is tracked separately.
 
 The public `systems.teardown` replaces an ordinary `{system}:teardown` job in state `failed`
 with the authority-marked teardown (recycle policy `FAILED`). An ordinary job in any other
-state still returns `ordinary_teardown_fenced_by_external_boot`. A refused job ran no
-provider call, so replacing it does not skip a mutation in flight.
+state still returns `ordinary_teardown_fenced_by_external_boot`. A failed job holds no lease,
+so replacing it cannot race a running attempt; an ordinary job that failed after this fence
+also ran no provider call. The recycle keeps the job's `authorizing` value, so the authority
+commit's audit row names the principal that enqueued the refused job, such as the reconciler.
 
-Producers that enqueue through `enqueue_control_teardown` (the orphaned-System reconciler lane,
-investigation force-close, break-glass teardown) still enqueue an unmarked job. The worker
-refuses it, and the System stays `ready` with a failed teardown job until `systems.teardown`
-runs.
+Producers that enqueue through `enqueue_control_teardown` (the orphaned-System lane,
+investigation force-close, break-glass teardown) still enqueue an unmarked job for such a
+System; the worker refuses it until `systems.teardown` runs.
 
 Rejected for this amendment:
 
+- **Do nothing.** verified: the #2865 proof (issue #2865 comment 5903037345) committed
+  `torn_down` through the ordinary path while the authority domain kept running.
 - **Route in `enqueue_control_teardown`.** judgment: `build_external_boot_payload` needs a
-  `ProviderResolver`, which `JobOperations`, break-glass and the reconciler lane (where
-  `ReconcileConfig.provider_resolver` is optional) would each have to carry. It is the better
-  end state and stays a follow-up; the worker refusal is still needed for jobs already queued.
+  `ProviderResolver`, which `JobOperations`, break-glass and the reconciler lane would each have
+  to carry; the worker refusal is still needed for jobs already queued.
 - **Route in the worker.** verified: `ExternalBootOperations.run` reads the marker from
-  `job.payload`, and the marker is minted under the System lock by the enqueueing server
+  `job.payload`, and only the enqueueing server mints it under the System lock
   (`jobs/handlers/external_boot/router.py`, `mcp/tools/lifecycle/systems/admin.py` at
-  2e0d9eae7). A worker that minted its own would bypass that admission.
-- **Refuse in `enqueue_control_teardown` only.** judgment: a teardown already queued before the
-  change, or enqueued by `repair_stalled_tearing_down_systems`, would still reach the ordinary
-  provisioner; the reconciler lane would also log the refusal on every pass.
+  2e0d9eae7).
 - **Refuse in the worker without the public recycle.** verified: `_enqueue_authority_teardown`
   returns `conflict` for any ordinary prior (`admin.py` at 2e0d9eae7), and `jobs.dedup_key` is
-  unique, so the refused job would leave no supported teardown path.
+  unique, so the refused job would block every supported teardown.
+- **Admit an authority teardown on a released allocation.** judgment: it changes the ADR-0584
+  allocation binding in a migration; the release refusal keeps the allocation `active` for the
+  common path at no schema cost.
 
 ## Consequences
 
