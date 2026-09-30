@@ -171,7 +171,8 @@ The closed file contains `installed_revision` (the exact 40-character SHA), `sys
 pre-provisioned disposable System UUID), its `project`, `ownership_prefix`
 (`kdive-2151-<sha12>-<nonce8>`), and the literal
 `kdive-external-boot-authority.service` service name. `barrier_socket` is optional and belongs only
-to the separate deterministic fault arms.
+to the separate deterministic fault arms. `fixture_mode` is optional: `create` (the default) or
+`verify-existing`, as [fixture mode and System reuse](#fixture-mode-and-system-reuse) describes.
 It contains no credentials; the active fixed worker owns authentication.
 
 Prepare `system_id` as a disposable local-libvirt System before running the carrier:
@@ -299,6 +300,27 @@ fixture. The System row stays `ready` after that. Then end the disposable System
 This order is valid whether or not `allocations.release` refuses while a non-terminal System on
 the allocation has external-boot history (#2966): the teardown always runs first.
 
+#### Fixture mode and System reuse
+
+`fixture_mode` selects how the carrier gets the authority fixture of the configured System:
+
+- `create` (the default): the carrier removes the System's old worker and authority fixture files,
+  provisions a new fixture on the private authority daemon, records its five names, and removes
+  them when the run ends ([fixture cleanup](#installed-local-authority-carrier)).
+- `verify-existing`: the carrier only verifies, read-only, a fixture that is already present, and
+  it records and removes nothing. A `create` run removes its fixture at the end, so use this mode
+  only after you provision the fixture by hand with
+  `sudo -n /opt/kdive-provider-authority/.venv/bin/python scripts/live-vm/provision-authority-fixture.py <uuid>`
+  (the System's provisioning profile JSON on stdin). Remove that fixture by hand after the run
+  with the exact-name loop above.
+
+A System can carry more than one carrier run (ADR-0713). After a run whose root release finished
+(the activation is `recovered` with `cleanup_complete`), the next run on the same System, in
+either mode, opens a new activation on the same authority journal lane. Do not tear down the
+System between those runs; end it only after the last run. A System whose activation did not
+finish its release stays restricted, and `runs.boot` refuses a new activation on it
+(`external_boot_restricted`).
+
 
 ### Installed local authority carrier — ppc64le (#2152)
 
@@ -308,7 +330,8 @@ JSON file. The config file has the same shape as the x86_64 carrier's `KDIVE_LIV
 file: `installed_revision` (the exact 40-character SHA), `system_id` (a pre-provisioned
 disposable System UUID on the POWER host), `project`, `ownership_prefix`
 (`kdive-2151-<sha12>-<nonce8>`), and the literal `kdive-external-boot-authority.service`
-service name. `barrier_socket` is optional.
+service name. `barrier_socket` and `fixture_mode` are optional. The
+[fixture mode and System reuse](#fixture-mode-and-system-reuse) rules apply to this carrier too.
 
 Prepare the POWER host's disposable System from a registered, project-visible `local-libvirt`
 catalog image with `arch=ppc64le`, a digest, and an inspected `provenance.root_spec`. Copy its
