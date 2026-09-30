@@ -11,6 +11,7 @@ import ast
 import asyncio
 import hashlib
 import inspect
+import logging
 import os
 import stat
 import threading
@@ -66,6 +67,8 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalSystemTeardownAnchorV1,
     LocalSystemTeardownIntentV1,
     RealLocalExternalBootIO,
+    RecoveryIntentAbsentError,
+    RecoveryMetadataStore,
     RecoveryPhase,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
@@ -292,7 +295,7 @@ class _FakeIO:
             # `publish_tombstone` unlinked `intent.json`, so the real store can no longer
             # rebuild the record. Without this the double would exhibit "cleanup completed,
             # record still resolvable", which production cannot reach.
-            raise FileNotFoundError("intent.json")
+            raise RecoveryIntentAbsentError("intent.json")
         if self.reopen_fault:
             raise LookupError("libguestfs: /var/lib/kdive/secret.key unreadable")
         return self.metadata
@@ -1644,6 +1647,90 @@ async def test_restarted_recovery_classifies_tombstone_before_absence_probe() ->
 
     assert observed.category == "absent"
     assert "recovery-absence" not in io.actions
+
+
+def _error_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+async def test_absent_intent_after_accounted_cleanup_logs_no_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        observed = await _adapter(io).observe_recovery(request, _recovery_context())
+
+    assert observed.category == "absent"
+    assert _error_records(caplog) == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(ValueError("recovery intent is not canonical JSON"), id="malformed"),
+        pytest.param(PermissionError("intent.json"), id="permission"),
+        pytest.param(FileNotFoundError("preparation.json"), id="other-file-absent"),
+    ],
+)
+async def test_unreadable_intent_after_cleanup_still_logs_error(
+    caplog: pytest.LogCaptureFixture, error: BaseException
+) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.reopen_error = error
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        observed = await _adapter(io).observe_recovery(request, _recovery_context())
+
+    assert observed.category == "absent"
+    messages = [record.getMessage() for record in _error_records(caplog)]
+    assert "external-boot recovery point is unresolvable" in messages
+    assert "external-boot provider state is unreadable" in messages
+
+
+async def test_absent_intent_without_cleanup_evidence_still_logs_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.intent_present = False
+    io.recovery_absent = True
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        await _adapter(io).observe_recovery(request, _recovery_context())
+
+    messages = [record.getMessage() for record in _error_records(caplog)]
+    assert "external-boot recovery point is unresolvable" in messages
+    assert "external-boot provider state is unreadable" in messages
+
+
+def test_only_the_intent_read_carries_the_typed_absence(tmp_path: Path) -> None:
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(RecoveryIntentAbsentError):
+            RecoveryMetadataStore._read(fd)
+        with pytest.raises(FileNotFoundError) as caught:
+            RecoveryMetadataStore._read_preparation(fd)
+        assert not isinstance(caught.value, RecoveryIntentAbsentError)
+    finally:
+        os.close(fd)
 
 
 async def test_release_without_cleanup_mutates_nothing() -> None:
