@@ -2507,6 +2507,80 @@ def test_reprovision_rejects_current_teardown_authority_before_mutation(
     asyncio.run(_run())
 
 
+async def _seed_teardown_in_state(pool: AsyncConnectionPool, sys_id: str, state: str) -> None:
+    job = await _enqueue_teardown(pool, sys_id)
+    if state == "running":
+        await _run_final_attempt(pool, str(job.id), lease="5 minutes")
+    elif state != "queued":
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (state, job.id))
+
+
+@pytest.mark.parametrize("teardown_state", ["queued", "running"])
+def test_reprovision_refuses_under_live_teardown_job(
+    migrated_url: str, teardown_state: str
+) -> None:
+    """#2979: a live `{uid}:teardown` leaves the System `ready`, so admission must read it."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            await _seed_teardown_in_state(pool, sys_id, teardown_state)
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
+                jobs = await cur.fetchone()
+            state = await _system_state(pool, sys_id)
+            teardown = await _teardown_job_row(pool, sys_id)
+        assert resp.status == "error"
+        assert resp.error_category == "conflict"
+        assert resp.data["reason"] == "teardown_in_progress"
+        assert resp.suggested_next_actions == ["systems.get"]
+        assert state == "ready"
+        assert jobs is not None and jobs["n"] == 0
+        assert teardown is not None and teardown[1] == teardown_state  # teardown untouched
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("teardown_state", ["failed", "succeeded", "canceled"])
+def test_reprovision_admitted_after_settled_teardown_job(
+    migrated_url: str, teardown_state: str
+) -> None:
+    """#2979: only a live teardown blocks; the handler re-checks state for a settled one."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            await _seed_teardown_in_state(pool, sys_id, teardown_state)
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
+            state = await _system_state(pool, sys_id)
+        assert resp.status == "queued"
+        assert state == "reprovisioning"
+
+    asyncio.run(_run())
+
+
+def test_reprovision_replay_survives_later_teardown_job(migrated_url: str) -> None:
+    """#2979: a repeat call on a `reprovisioning` System stays a poll, not a conflict."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile = _active_allocation_profile()
+            first = await _reprovision(pool, ctx(), sys_id, profile)
+            await _enqueue_teardown(pool, sys_id)
+            second = await _reprovision(pool, ctx(), sys_id, profile)
+        assert first.status == "queued"
+        assert second.status == "queued"
+        assert second.object_id == first.object_id
+
+    asyncio.run(_run())
+
+
 def test_reprovision_non_ready_system_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:
