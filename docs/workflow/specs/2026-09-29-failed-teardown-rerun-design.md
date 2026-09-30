@@ -6,8 +6,10 @@ Campaign 60f31b4f6024, issue #2929, token `q2929-9d953ace`. Operator decision (2
 operator-initiated re-run through `systems.teardown`, recycling a `failed` `{uid}:teardown` row for
 any System that is not `torn_down`; no reconciler lane. Approved exclusions: a reconciler lane for
 `failed` Systems (operator); authority teardown recycle and the queued exhausted row (#2917). The
-decision is a dated amendment to [ADR-0435](../../adr/0435-reclaim-failed-provision-artifacts.md),
-reversing the #2908 amendment's "not re-run" residual.
+decision is a dated amendment to [ADR-0435](../../adr/0435-reclaim-failed-provision-artifacts.md).
+It reverses the accepted class in the #2908 design's Failure model
+([`2026-09-29-failed-system-teardown-design.md`](2026-09-29-failed-system-teardown-design.md))
+that a failed System's dead-lettered teardown is not re-run.
 
 ## Problem
 
@@ -36,7 +38,7 @@ with `infrastructure_failure` before #2913.
 
 ## Success
 
-- A `failed` or `ready` System whose `{uid}:teardown` row is `failed` with any `error_category`,
+- A System that is not `torn_down` (`failed`, `ready`, `tearing_down`) whose `{uid}:teardown` row is `failed` with any `error_category`,
   `infrastructure_failure` included, gets that same job id back as `queued` with `attempt = 0`.
 - For a `failed` System, a `queued`, `running`, `succeeded`, or `canceled` prior row replays with
   its state, attempt, and payload unchanged.
@@ -58,13 +60,18 @@ with `infrastructure_failure` before #2913.
      audit, as for the ADR-0620 authority re-run.
    - each call after a new dead-letter re-runs the job; this is bounded by operator calls and the
      handler is idempotent (#2913).
-   - a worker finalizes `running` to `failed` between the read and the UPDATE: the UPDATE
-     resets the row the caller would have seen dead, which is the intended outcome.
+   - a live row that dead-letters after the dedup read is returned in its stale live state; the
+     next call resets it. No writer moves a row out of `failed` without the System lock, so the
+     read-then-UPDATE window cannot reset anything but a `failed` row.
 4. **Covered elsewhere**
    - authority-owned and external-boot teardown: #2917 and ADR-0620;
    - an exhausted `running` row whose lease lapsed: `repair_abandoned_jobs` dead-letters it to
      `failed`, after which this path resets it;
-   - an orphaned `ready` System whose teardown dead-lettered: this tool, or the operator.
+   - an orphaned `ready` System whose teardown dead-lettered: this tool, or the operator;
+   - `ops.force_teardown` (breakglass, `enqueue_control_teardown`) keeps `NEVER` and replays a
+     dead job; a project ADMIN re-runs it through this tool (follow-up candidate);
+   - a `tearing_down` System's dead job: also reset by `repair_stalled_tearing_down_systems`
+     under the same System lock and dedup key.
 
 ## Considered and rejected
 

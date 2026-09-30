@@ -45,8 +45,9 @@ Interfaces: consumes `queue.JobRecyclePolicy.FAILED`; `dedup_replay(conn, key, *
 and `queue.enqueue(..., recycle=...)` exist with those signatures.
 
 Verification:
-- `Mode: focused-test` — contract: a `failed` row (any category) is reset for a `failed` or
-  `ready` System. Test: `test_teardown_recycles_dead_lettered_ordinary_job[failed|ready]`
+- `Mode: focused-test` — contract: a `failed` row (any category) is reset for a `failed`,
+  `ready`, or `tearing_down` System. Test:
+  `test_teardown_recycles_dead_lettered_ordinary_job[failed|ready|tearing_down]`
   (sets the row `state='failed', attempt=max_attempts, error_category='infrastructure_failure'`
   and asserts `response.status == "queued"`, same `object_id`, row `("queued", 0, payload)`).
   Red: status `"failed"`. Green:
@@ -67,8 +68,9 @@ Steps:
    `dedup_replay` and `queue.enqueue` calls; rewrite the comment above them: an unkeyed repeat
    replays a live, succeeded, or canceled job; a dead-lettered `failed` job is reset (#2929).
 3. Append to ADR-0435 `### Amendment (2026-09-29): systems.teardown re-runs a dead-lettered
-   teardown (#2929)`: the #2908 residual that such a job is not re-run no longer holds for the
-   public tool; the policy, the replayed states, no reconciler lane (ADR-0441 unchanged), and a
-   link to the spec.
+   teardown (#2929)`: the #2908 design's Failure model accepted that a failed System's
+   dead-lettered teardown is not re-run (link that spec); `systems.teardown` now re-runs it. State
+   the policy, the replayed states, that `ops.force_teardown` still replays, no reconciler lane
+   (ADR-0441 unchanged), and link this spec.
 4. Run green; controlled fault (commit first); `just records`; `just lint`; `just type`; commit
    `fix(systems): re-run a dead-lettered ordinary teardown job`.
