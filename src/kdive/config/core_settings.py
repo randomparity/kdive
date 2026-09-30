@@ -446,7 +446,7 @@ DEBUG_DIR = Setting(
     parse=_str,
     default="/var/lib/kdive/debug",
     group="debug",
-    processes=_WORKER,
+    processes=_SERVER,
     help="Directory for debug-session transcripts.",
 )
 CRASH_DIR = Setting(
