@@ -69,7 +69,12 @@ preparation call, but the System teardown call remains.
 4. **Accepted failure classes** — an incomplete authority enumeration gives
    `retained_quarantine` and requeues the teardown, as for every other state. A preparing
    activation with no `current` or `retired` authority row still gets "no unambiguous authority
-   route" from `systems.teardown` (unchanged; see follow-up candidates).
+   route" from `systems.teardown` (unchanged; see follow-up candidates). A remote-libvirt
+   `preparing` activation whose remote module attempt never opened its reap obligation (that
+   opens during preparation, `prepare_remote_module_on_authority_host`) is still refused by the
+   unchanged "remote module lifecycle has no retained PREP evidence" check in
+   `build_external_boot_payload`. This change fixes the local-libvirt exit (#2961 is labelled
+   `provider:local-libvirt`); the remote case is reported as a follow-up candidate.
 5. **Covered elsewhere** — the unbounded acknowledged-retry grant (#2960); the release denial
    hint text (#2962); reuse of a System after release (#2968); the `journal-conflict` trigger
    (#2952).
