@@ -899,6 +899,7 @@ def test_acknowledged_retry_proof_helper_is_private(migrated_url: str) -> None:
         ):
             for signature in (
                 "has_acknowledged_external_boot_retry_proof(jobs)",
+                "has_acknowledged_external_boot_no_mutation_head(jobs)",
                 "consume_acknowledged_external_boot_retry_proof(jobs)",
             ):
                 assert connection.execute(
@@ -1089,6 +1090,224 @@ def test_exhausted_job_validates_unanchored_successor_authorities(
             )
             == "advanced"
         )
+
+
+def _granted_attempt_head(
+    migrated_url: str,
+    role_dsns: _RoleDsns,
+    suffix: str,
+    *,
+    promote: bool,
+    acknowledge: bool = True,
+) -> tuple[Any, Any, JournalRecordV1]:
+    """Claim the one grant, end the granted attempt at a new head, and lapse its lease."""
+    case, _first, first_ack = _seed_exhausted_acknowledged_job(
+        migrated_url, role_dsns, suffix, promote=True
+    )
+    credential = b"g" * 32
+    worker_id = _register_worker(migrated_url, f"granted-{suffix}", credential)
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        claimed = worker.execute(
+            "SELECT id,attempt,max_attempts FROM claim_worker_job("
+            "%s,%s,interval '1 minute',ARRAY['default'])",
+            (worker_id, credential),
+        ).fetchone()
+        assert claimed == (case.job_id, 4, 4)
+        granted_case = replace(case, worker_id=worker_id, credential=credential, attempt=4)
+        granted = _allocate(worker, granted_case)
+    head = _acknowledge_successor(
+        role_dsns, granted_case, granted, first_ack, acknowledge=acknowledge
+    )
+    if acknowledge and promote:
+        _promote(migrated_url, granted_case, granted, head)
+    _lapse_lease(migrated_url, case.job_id)
+    return granted_case, granted, head
+
+
+def _acknowledge_successor(
+    role_dsns: _RoleDsns,
+    case: Any,
+    authority: Any,
+    predecessor_head: JournalRecordV1,
+    *,
+    acknowledge: bool = True,
+) -> JournalRecordV1:
+    attempt_id = str(authority.authority_id)
+    sequence = predecessor_head.sequence + 1
+    head = _record(
+        case,
+        authority,
+        sequence,
+        record_digest(predecessor_head),
+        JournalPhase.WATERMARK_INSTALLED,
+        attempt_id=attempt_id,
+    )
+    with psycopg.connect(role_dsns("kdive_provider_authority"), autocommit=True) as connection:
+        assert (
+            _advance_raw(
+                connection,
+                case,
+                authority,
+                predecessor_head.sequence,
+                record_digest(predecessor_head),
+                _payload(head),
+            )
+            == "advanced"
+        )
+        if acknowledge:
+            watermark = head
+            head = _record(
+                case,
+                authority,
+                sequence + 1,
+                record_digest(watermark),
+                JournalPhase.TAKEOVER_ACKNOWLEDGED,
+                watermark_sequence=sequence,
+                watermark_digest=record_digest(watermark),
+                attempt_id=attempt_id,
+            )
+            assert (
+                _advance_raw(
+                    connection, case, authority, sequence, record_digest(watermark), _payload(head)
+                )
+                == "advanced"
+            )
+    return head
+
+
+def _lapse_lease(migrated_url: str, job_id: UUID) -> None:
+    with psycopg.connect(migrated_url) as connection:
+        connection.execute(
+            "UPDATE jobs SET lease_expires_at=now()-interval '1 minute' WHERE id=%s", (job_id,)
+        )
+
+
+def _dead_letter_unowned(role_dsns: _RoleDsns) -> list[UUID]:
+    with psycopg.connect(role_dsns("kdive_reconciler"), autocommit=True) as reconciler:
+        rows = reconciler.execute(
+            "SELECT * FROM dead_letter_unowned_external_boot_jobs()"
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def _claimable_count(migrated_url: str, role_dsns: _RoleDsns, prefix: str) -> tuple[int, Any]:
+    credential = b"h" * 32
+    worker_id = _register_worker(migrated_url, prefix, credential)
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        count = worker.execute("SELECT count_claimable_worker_jobs(ARRAY['default'])").fetchone()
+        claimed = worker.execute(
+            "SELECT id FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+            (worker_id, credential),
+        ).fetchone()
+    assert count is not None
+    return count[0], claimed
+
+
+def _grant_predicates(migrated_url: str, job_id: UUID) -> tuple[bool, bool] | None:
+    with psycopg.connect(migrated_url) as connection:
+        return connection.execute(
+            "SELECT public.has_acknowledged_external_boot_no_mutation_head(j),"
+            "public.has_acknowledged_external_boot_retry_proof(j) "
+            "FROM public.jobs AS j WHERE j.id=%s",
+            (job_id,),
+        ).fetchone()
+
+
+@pytest.mark.parametrize("promote", [False, True])
+def test_granted_attempt_cannot_earn_a_second_grant(
+    migrated_url: str, authority_role_dsns: _RoleDsns, *, promote: bool
+) -> None:
+    """ADR-0711: the attempt a grant claimed stays exhausted despite its new acknowledged head."""
+    case, _granted, _head = _granted_attempt_head(
+        migrated_url, authority_role_dsns, "b" if promote else "c", promote=promote
+    )
+    assert _grant_predicates(migrated_url, case.job_id) == (True, False)
+    assert _claimable_count(migrated_url, authority_role_dsns, "past-the-bound") == (0, None)
+
+
+@pytest.mark.parametrize("promote", [False, True])
+def test_reconciler_dead_letters_a_job_past_the_grant_bound(
+    migrated_url: str, authority_role_dsns: _RoleDsns, *, promote: bool
+) -> None:
+    """ADR-0711: past the bound the job fails and its authority can no longer admit work."""
+    case, granted, head = _granted_attempt_head(
+        migrated_url, authority_role_dsns, "d" if promote else "e", promote=promote
+    )
+    assert _dead_letter_unowned(authority_role_dsns) == [case.job_id]
+    with psycopg.connect(migrated_url) as connection:
+        assert connection.execute(
+            "SELECT state,error_category FROM jobs WHERE id=%s", (case.job_id,)
+        ).fetchone() == ("failed", "lease_expired")
+        assert connection.execute(
+            "SELECT state FROM external_boot_authorities WHERE job_id=%s ORDER BY generation",
+            (case.job_id,),
+        ).fetchall() == [("superseded",), ("retired" if promote else "superseded",)]
+    admitted = _record(case, granted, head.sequence + 1, record_digest(head), JournalPhase.ADMITTED)
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        assert (
+            _advance_raw(
+                connection, case, granted, head.sequence, record_digest(head), _payload(admitted)
+            )
+            == "superseded"
+        )
+    assert _dead_letter_unowned(authority_role_dsns) == []
+
+
+@pytest.mark.parametrize("shape", ["unspent-grant", "unacknowledged-granted-attempt"])
+def test_dead_letter_skips_a_job_without_a_spent_grant_and_proof(
+    migrated_url: str, authority_role_dsns: _RoleDsns, shape: str
+) -> None:
+    """A live authority keeps its job unless the job is past the bound with a proof.
+
+    The unacknowledged shape pins a known residual (ADR-0711): a granted attempt that lapses
+    before its own acknowledged head stays `running`, as any exhausted job with a live authority.
+    """
+    if shape == "unspent-grant":
+        case, _authority, _ack = _seed_exhausted_acknowledged_job(
+            migrated_url, authority_role_dsns, "i", promote=True
+        )
+    else:
+        case, _authority, _ack = _granted_attempt_head(
+            migrated_url, authority_role_dsns, "j", promote=False, acknowledge=False
+        )
+    assert _dead_letter_unowned(authority_role_dsns) == []
+    with psycopg.connect(migrated_url) as connection:
+        assert connection.execute(
+            "SELECT state FROM jobs WHERE id=%s", (case.job_id,)
+        ).fetchone() == ("running",)
+
+
+def test_recycled_job_earns_a_grant_in_its_new_budget(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """ADR-0711: the bound reads only the current budget, which every recycle restarts."""
+    case, _granted, head = _granted_attempt_head(
+        migrated_url, authority_role_dsns, "k", promote=True
+    )
+    assert _dead_letter_unowned(authority_role_dsns) == [case.job_id]
+    credential = b"n" * 32
+    worker_id = _register_worker(migrated_url, "new-budget", credential)
+    with psycopg.connect(migrated_url) as connection:
+        # The queue.enqueue failed-job recycle (attempt 0, created_at reset), then the new
+        # budget's four ordinary claims.
+        connection.execute(
+            "UPDATE jobs SET state='running',attempt=4,max_attempts=4,worker_id=%s,"
+            "error_category=NULL,lease_expires_at=now()+interval '1 minute',"
+            "created_at=clock_timestamp() WHERE id=%s",
+            (worker_id, case.job_id),
+        )
+    recycled_case = replace(case, worker_id=worker_id, credential=credential)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        recycled = _allocate(worker, recycled_case)
+    _acknowledge_successor(authority_role_dsns, recycled_case, recycled, head)
+    _lapse_lease(migrated_url, case.job_id)
+    assert _grant_predicates(migrated_url, case.job_id) == (True, True)
+    assert _claimable_count(migrated_url, authority_role_dsns, "new-budget-grant") == (
+        1,
+        (case.job_id,),
+    )
 
 
 @pytest.mark.parametrize(
