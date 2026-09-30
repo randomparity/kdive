@@ -472,10 +472,14 @@ async def _teardown_locked(
                 system_id,
                 idempotency_key,
             )
-        # `{uid}:teardown` is stable and recycles nothing, so an unkeyed repeat while the teardown
-        # job is live replays it. Both replay paths stay below the current-activation safety fence:
-        # an old ordinary teardown job cannot gain authority from its replay envelope.
-        replay = await dedup_replay(conn, _teardown_dedup_key(uid))
+        # `{uid}:teardown` is stable, so an unkeyed repeat replays a live, succeeded, or canceled
+        # teardown job. A dead-lettered `failed` one is reset to a fresh attempt so provider and
+        # core reclaim run again (#2929, ADR-0435). Both replay paths stay below the
+        # current-activation safety fence: an old ordinary teardown job cannot gain authority from
+        # its replay envelope.
+        replay = await dedup_replay(
+            conn, _teardown_dedup_key(uid), recycle=queue.JobRecyclePolicy.FAILED
+        )
         if replay is not None:
             return job_envelope(replay, "system_id", uid)
         # No restricting activation exists at this exact System-locked read. Keep the matrix call
@@ -493,6 +497,7 @@ async def _teardown_locked(
             TeardownPayload(system_id=str(uid)),
             job_authorizing(ctx, system.project),
             _teardown_dedup_key(uid),
+            recycle=queue.JobRecyclePolicy.FAILED,
         )
         envelope = job_envelope(job, "system_id", uid)
         if idempotency_key is not None:

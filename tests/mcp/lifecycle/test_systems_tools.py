@@ -1614,6 +1614,68 @@ def test_teardown_replays_final_authority_attempt_unchanged(
     asyncio.run(_run())
 
 
+async def _ordinary_teardown_job(pool: AsyncConnectionPool, state: SystemState) -> tuple[str, str]:
+    """Enqueue the ordinary teardown for a fresh System in ``state``; return System and job."""
+    alloc_id = await granted_allocation(pool)
+    system_id = await _seed_teardown_system(pool, alloc_id, state)
+    first = await _teardown(pool, ctx(Role.ADMIN), system_id)
+    assert first.status == "queued", first.model_dump()
+    assert first.object_id is not None
+    return system_id, first.object_id
+
+
+@pytest.mark.parametrize("state", [SystemState.FAILED, SystemState.READY, SystemState.TEARING_DOWN])
+def test_teardown_recycles_dead_lettered_ordinary_job(
+    migrated_url: str, state: SystemState
+) -> None:
+    """#2929: a dead-lettered ordinary teardown, pre-#2913 category included, is re-run."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _ordinary_teardown_job(pool, state)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed', attempt = max_attempts, "
+                    "error_category = 'infrastructure_failure' WHERE id = %s",
+                    (job_id,),
+                )
+                before = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+            response = await _teardown(pool, ctx(Role.ADMIN), system_id)
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.status == "queued", response.model_dump()
+        assert response.object_id == job_id
+        assert before is not None and after == ("queued", 0, before[2])
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("prior", ["queued", "running", "running-lapsed", "succeeded", "canceled"])
+def test_teardown_replays_live_or_settled_ordinary_job(migrated_url: str, prior: str) -> None:
+    """#2929: only a failed ordinary teardown is re-run; live and settled jobs replay."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _ordinary_teardown_job(pool, SystemState.FAILED)
+            if prior.startswith("running"):
+                lease = "-1 minute" if prior == "running-lapsed" else "5 minutes"
+                await _run_final_attempt(pool, job_id, lease=lease)
+            async with pool.connection() as conn:
+                if prior in ("succeeded", "canceled"):
+                    await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (prior, job_id))
+                before = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+            response = await _teardown(pool, ctx(Role.ADMIN), system_id)
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.object_id == job_id
+        assert before is not None and after == before
+        assert response.status == before[0]
+
+    asyncio.run(_run())
+
+
 def test_teardown_activation_fence_preempts_keyed_ordinary_replay(migrated_url: str) -> None:
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:

@@ -114,3 +114,18 @@ overlay-absence gate does not depend on it and is unchanged. Rejected: a no-op t
 `failed`, which would leave provider leftovers unreclaimed, and a `failed -> tearing_down` edge,
 which would widen a terminal state. Design:
 [`2026-09-29-failed-system-teardown-design.md`](../workflow/specs/2026-09-29-failed-system-teardown-design.md).
+
+### Amendment (2026-09-29): `systems.teardown` re-runs a dead-lettered teardown (#2929)
+
+The #2908 design accepted that a `failed` System's teardown job, once it dead-letters, is not
+re-run ([`2026-09-29-failed-system-teardown-design.md`](../workflow/specs/2026-09-29-failed-system-teardown-design.md),
+Failure model). By operator decision the public `systems.teardown` now re-runs it. On the ordinary
+path (no external-boot activation, no authority binding, System not `torn_down`), a `failed`
+`{uid}:teardown` row, whatever its category, is reset to a fresh queued attempt under the System
+lock and behind the external-boot admission matrix (`JobRecyclePolicy.FAILED`). A `queued`,
+`running`, `succeeded`, or `canceled` row still replays. This covers teardowns that dead-lettered as
+`infrastructure_failure` before #2913. `ops.force_teardown` keeps replaying the dead row. No
+reconciler lane selects `failed` Systems, so
+[ADR-0441](0441-investigation-scoped-uploaded-rootfs.md)'s orphan-lane exclusion and overlay-absence
+gate are unchanged. Design:
+[`2026-09-29-failed-teardown-rerun-design.md`](../workflow/specs/2026-09-29-failed-teardown-rerun-design.md).

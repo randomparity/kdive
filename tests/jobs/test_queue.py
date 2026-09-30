@@ -969,6 +969,45 @@ def test_enqueue_recycle_canceled_reclaims_only_when_opted_in(migrated_url: str)
     asyncio.run(_run())
 
 
+def test_enqueue_recycle_failed_resets_only_a_failed_job(migrated_url: str) -> None:
+    # #2929: a dead-lettered job is re-run, while a succeeded or canceled one still replays.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            failed = await _terminal_failed_job(conn, "dk-failed")
+            recycled = await queue.enqueue(
+                conn,
+                JobKind.INSTALL,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-failed",
+                recycle=queue.JobRecyclePolicy.FAILED,
+            )
+            assert recycled.id == failed.id
+            assert recycled.state is JobState.QUEUED
+            assert recycled.attempt == 0
+
+            for settled in (JobState.SUCCEEDED, JobState.CANCELED):
+                dedup_key = f"dk-{settled.value}"
+                job = await queue.enqueue(
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, dedup_key
+                )
+                await conn.execute(
+                    "UPDATE jobs SET state = %s WHERE id = %s", (settled.value, job.id)
+                )
+                kept = await queue.enqueue(
+                    conn,
+                    JobKind.INSTALL,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    dedup_key,
+                    recycle=queue.JobRecyclePolicy.FAILED,
+                )
+                assert kept.id == job.id and kept.state is settled
+            assert await _count_jobs(conn) == 3
+
+    asyncio.run(_run())
+
+
 _LAPSED_POLICY = queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
 
 
