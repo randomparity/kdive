@@ -1769,6 +1769,48 @@ def test_teardown_replaces_failed_ordinary_job_for_external_boot_history(
     asyncio.run(_run())
 
 
+def test_keyed_teardown_retry_replaces_the_refused_ordinary_job(migrated_url: str) -> None:
+    """#2966: the key recorded for the ordinary job must not roll back the replacement."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            first = await teardown_system(
+                pool, ctx(Role.ADMIN), system_id, idempotency_key="teardown-refused-ordinary"
+            )
+            run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed' WHERE id = %s", (first.object_id,)
+                )
+                seeded = await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.RECOVERED,
+                    cleanup_complete=True,
+                    ready_reservation=True,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+                await _seed_retired_teardown_authority(conn, seeded)
+            retry = await teardown_system(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                idempotency_key="teardown-refused-ordinary",
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
+            )
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (first.object_id,))).fetchone()
+
+        assert retry.status == "queued", retry.model_dump()
+        assert retry.object_id == first.object_id
+        assert after is not None and after[0] == "queued"
+        assert after[2]["external_boot_authority_v1"]["activation_id"] == str(seeded.activation.id)
+
+    asyncio.run(_run())
+
+
 def test_teardown_activation_fence_preempts_keyed_ordinary_replay(migrated_url: str) -> None:
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:

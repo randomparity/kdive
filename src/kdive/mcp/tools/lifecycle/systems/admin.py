@@ -573,6 +573,15 @@ async def _enqueue_preactivation_authority_teardown(
     return envelope
 
 
+async def _key_names_job(
+    conn: AsyncConnection, ctx: RequestContext, key: str, job_id: str | None
+) -> bool:
+    stored = await resolve_envelope_replay(
+        conn, principal=ctx.principal, key=key, kind=_TEARDOWN_KIND
+    )
+    return stored is not None and stored.object_id == job_id
+
+
 def _is_settled_ordinary_teardown(job: Job | None) -> bool:
     """Whether ``job`` is an unmarked teardown that ended failed or canceled."""
     return (
@@ -685,7 +694,11 @@ async def _enqueue_authority_teardown(
         ),
     )
     envelope = job_envelope(job, "system_id", system.id)
-    if idempotency_key is not None:
+    # A key already recorded for the replaced ordinary job names this same job row; recording it
+    # again would raise and roll the replacement back behind a stale replay.
+    if idempotency_key is not None and not (
+        replaces_ordinary and await _key_names_job(conn, ctx, idempotency_key, envelope.object_id)
+    ):
         await record_envelope(
             conn,
             principal=ctx.principal,
