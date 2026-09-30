@@ -16,7 +16,8 @@ recovery absence: `recovery_point`, `cleanup_receipt`, `observe_state`, `recover
 `abort_preparation` when it finds nothing to abort. `exact_recovery_absence` returns false while
 the activation directory exists, so each read re-creates the state that makes absence unprovable.
 A non-System TEARDOWN partial abort therefore ends in `provider_conflict` (#2926). PR #2902 fixed
-the System-teardown path by keeping its calls session-free; the non-System path and
+the System-teardown path by keeping its absence and point checks session-free and pruning empty
+parents after its abort, which still opens an activation session. The non-System path and
 `observe_state` need the libvirt domain, so they cannot drop the session.
 
 ## Decision
@@ -29,8 +30,10 @@ descriptor; close releases it only if it was opened. Session operations that nev
 activation storage behind.
 
 `abort_preparation` on the non-System path also prunes still-empty activation parents after it
-returns `removed` or `absent`, as the System path already does, so directories created before this
-change or left by an interrupted materialization converge.
+returns `removed` or `absent`, as the System path already does. That converges empty parents left
+by a session opened before this change, or by a materialization interrupted between the first
+artifact open and its digest-directory `mkdir`. A materialization interrupted after that `mkdir`
+leaves unauthenticated residue, which still quarantines as `provider_conflict`.
 
 ## Consequences
 
@@ -44,13 +47,16 @@ change or left by an interrupted materialization converge.
 - The ownership snapshot passed to the opener is still the one the pin produced at open; a lazily
   opened root cannot be redirected by later changes to the caller's lease.
 - A directory that holds anything is still left for quarantine and still keeps absence false.
+- The #2898 reason for keeping `record_cleanup_quarantine` and finalization session-free no longer
+  holds. They stay session-free here; moving them under the pinned session is a separate change.
 
 ## Considered & rejected
 
 - **Make every read-only port session-free, as #2902 did.** verified:
-  `_RealLocalExternalBootOperation.observe_state` and the pre-stop branch of `_abort_preparation`
-  call `session.inspect_closed()` and `session.guest()` (`external_boot.py` at `65a31d5aa`), so
-  they need the domain session and would still re-create the directories.
+  `_RealLocalExternalBootOperation.observe_state` calls `session.inspect_closed()` and
+  `session.guest()`, and the pre-stop branch of `_abort_preparation` calls `inspect_closed()` and
+  `restore_power()` (`external_boot.py` at `65a31d5aa`), so they need the domain session and would
+  still re-create the directories.
 - **Prune after every read-only port.** judgment: five call sites repeating a write whose only
   purpose is undoing another write, and any new read port reintroduces the defect.
 - **Make `LocalArtifactRoot.open` open-only and create elsewhere.** verified: #2210 provisions only
@@ -58,4 +64,7 @@ change or left by an interrupted materialization converge.
 - **Open an existing activation directory at session open and create it only on first use.**
   judgment: a second open mode on the `OpenArtifactRoot` seam to keep an early refusal that only
   a directory tampered with between sessions can trigger, which recovery already handles.
+- **Treat an empty activation chain as absent in `exact_recovery_absence`.** judgment: weakens
+  exact absence to "no owned content" and leaves empty directories under the recovery root for
+  every read.
 - **Do nothing.** judgment: a non-System TEARDOWN of a partial preparation can never complete.

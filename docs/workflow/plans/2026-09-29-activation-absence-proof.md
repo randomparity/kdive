@@ -74,41 +74,52 @@ Steps:
    `just type`; commit `fix(local-libvirt): open the session artifact root on first use`.
 6. Controlled fault: restore the eager call in the factory; S1 goes red; revert.
 
-## Task 2 — non-System abort prunes empty parents; port-sequence regression
+## Task 2 — non-System abort prunes empty parents; authority-level regression
 
-Files: modify `external_boot.py` (`_RealLocalExternalBootOperation.abort_preparation`;
-`prune_empty_activation_parents` docstring now names pre-#2926 sessions and interrupted
-materialization as the sources); add tests to `lifecycle/boot/test_session_mechanisms.py`.
-Interfaces: consumes Task 1's lazy factory; uses existing `RealLocalExternalBootIO(root,
-materializer, writer, resolve_operation_lease, session_factory, capacity_bytes)`,
-`LocalLibvirtExternalBoot(io)`, `LocalPartialAbortReceiptV1(binding=, plan_identity=,
-authority=)`, and `RecoveryMetadataStore.exact_recovery_absence`.
+Files: modify `external_boot.py` (`_RealLocalExternalBootOperation.abort_preparation`; comments:
+`prune_empty_activation_parents` docstring names pre-#2926 sessions and a materialization
+interrupted before its digest `mkdir` as the sources; the `LocalLibvirtExternalBoot.record_cleanup_quarantine`
+comment says the session-free choice predates #2926 and stays for now; the `finalize_tombstone`
+prune comment says parents come from a pre-#2926 session); add tests to
+`test_external_boot_authority.py`.
+Interfaces: consumes Task 1's lazy factory. Uses existing names, all confirmed at `65a31d5aa`:
+`LocalExternalBootAuthorityAdapter(ports, lease_scope)`, `adapter.commit(request, context)`,
+`adapter.observe_recovery(request, context)`, `RealLocalExternalBootIO(recovery_root,
+materializer, recovery_writer, resolve_operation_lease, session_factory, capacity_bytes)`,
+`LocalLibvirtExternalBoot(io)`, `LocalOperationLeaseScope().resolve`, `LocalOperationLane().pin`,
+`LocalArtifactRoot(root).open`, `LocalPartialAbortReceiptV1(binding=, plan_identity=,
+authority=)`, `session_support.Conn/Domain/Guest/_xml`, and the authority test module's
+`_request(operation=, recovery_objects=)`, `_context(operation)`, `_owned_object()` and its
+recovery-observation-context builder.
 
 Verification:
 
-- Contract S2 "the authority's port sequence proves absence", `Mode: focused-test`. New
-  parametrized `test_non_system_partial_abort_proves_absence_through_authority_reads` over the four
-  start states (nothing; canonical `.<system>.<activation>.abort.json` receipt, mode 0600; empty
-  mode-0700 complete directory `<system>.<activation>`; empty mode-0700 `<system>/<run>/<activation>`).
-  Ports use a real factory with `LocalArtifactRoot(root).open` and a lease resolver returning
-  `LocalOperationLease(system_id, binding)` pinned by one `LocalOperationLane`. Drive:
-  `abort_preparation` (expect `removed` for the receipt, else `absent`), `recovery_is_absent`,
-  `observe_state` (raises: no metadata), `recovery_is_absent`, `recovery_point` (raises),
-  `cleanup_receipt` (`None`), `recovery_is_absent`; every `recovery_is_absent` is `True` and
-  `root/<system>` does not exist at the end. Red without Task 1 (second proof false); the
-  parent-state case is red without the prune.
-- Contract S3 "residue keeps absence false", `Mode: focused-test`. Same harness with a `kernel`
-  file in the activation directory: abort `absent`, `recovery_is_absent` false, file intact.
-- Green for both: `just test-verbose tests/providers/local_libvirt/lifecycle/boot/test_session_mechanisms.py tests/providers/local_libvirt/test_external_boot.py`.
+- Contract S2 "commit and both observe_recovery paths prove absence", `Mode: focused-test`. New
+  parametrized `test_non_system_partial_abort_absence_holds_through_commit_and_observation` over
+  four start states under a mode-0700 `tmp_path/"recovery"`: nothing; a canonical
+  `.<system>.<activation>.abort.json` receipt (mode 0600, bytes
+  `LocalPartialAbortReceiptV1(...).model_dump_json(by_alias=True)`, authority equal to the
+  adapter's `_authority_ref(request)`); an empty mode-0700 complete directory
+  `<system>.<activation>`; an empty mode-0700 `<system>/<run>/<activation>` chain. Build the real
+  stack (factory `connect` returns a `Conn` over a `Domain` whose XML uses the request's System id
+  and `overlay_path`; `open_overlay` → `/dev/null`; `fstat_overlay` → regular file). Drive
+  `commit(_request(operation=TEARDOWN, recovery_objects=(_owned_object(),)), _context(TEARDOWN))`,
+  then `observe_recovery` on the same adapter, then `observe_recovery` on a second adapter over the
+  same ports. Each returns `category == "absent"`; `root/<system>` does not exist at the end.
+  Red without Task 1: the commit raises `AuthorityServiceError("provider_conflict")`. The
+  chain case is red without the prune.
+- Contract S3 "residue keeps absence false", `Mode: focused-test`. Same stack with a `kernel` file
+  in the chain: `commit` raises `provider_conflict`; the file is intact.
+- Green for both: `just test-verbose tests/providers/local_libvirt/test_external_boot_authority.py tests/providers/local_libvirt/test_external_boot.py`.
 
 Steps:
 
-1. Write S2/S3; run; expect the parent-state case red.
+1. Write S2/S3; run; expect the listed cases red.
 2. In `abort_preparation`, assign the `_abort_preparation(...)` result, and when it is in
    `{"removed", "absent"}` open `RecoveryMetadataStore(self._recovery_root)` and call
-   `store.prune_empty_activation_parents(binding)` before returning it.
+   `store.prune_empty_activation_parents(binding)` before returning it. Edit the three comments.
 3. Green; `just lint`, `just type`; commit `fix(local-libvirt): prune activation parents after a
    partial abort`.
-4. Controlled faults: drop the prune (parent-state case red); restore Task 1's eager open (every
-   case red on the second proof). Revert each.
+4. Controlled faults: drop the prune (chain case red); restore Task 1's eager open (every case
+   red). Revert each.
 5. `just records`; run `just test-verbose` over `tests/providers/local_libvirt/`.
