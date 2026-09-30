@@ -19,41 +19,41 @@ back to `ready` with its Allocation gone and stays there silently.
 ## Design
 
 1. `enqueue_control_teardown(conn, system, authorizing, *, recycle)` takes a required
-   keyword-only `recycle: JobRecyclePolicy` and passes it to `queue.enqueue` on the ordinary
-   branch. The preactivation-authority branch ignores it (unchanged). Required, so no caller
-   inherits a policy by accident. Callers: `ops.force_teardown` → `FAILED`;
-   `jobs/service_operations.py enqueue_teardown` (investigation force-close) → `NEVER`;
-   `repair_orphaned_systems` → `NEVER`.
-2. `ops.force_teardown` (`_teardown_locked`) refuses a `reprovisioning` System under the System
+   keyword-only `recycle: JobRecyclePolicy`, so no caller inherits a policy by accident. The
+   preactivation-authority branch ignores it (unchanged). On the ordinary branch it recycles only
+   an ordinary prior row: a prior `{uid}:teardown` row whose payload carries
+   `authority_system_v1` or `external_boot_authority_v1` is enqueued with `NEVER`, because the
+   recycle UPDATE overwrites `payload` and would strip the marker the authority re-run path
+   (#2917, ADR-0620) keys on. Policies per caller are listed once, in the ADR-0435 amendment.
+2. `ops.force_teardown` passes `FAILED`, and refuses a `reprovisioning` System under the System
    lock, after the `torn_down` short-circuit and before the enqueue: `conflict`,
    `data.current_status = "reprovisioning"`, `suggested_next_actions = ["systems.get"]`, no job
    write. The break-glass audit row is already committed, as for every other outcome.
-3. `repair_orphaned_systems` does not touch a candidate whose `{uid}:teardown` row is `failed`:
-   the candidate query excludes it and the System-locked recheck skips it.
-4. New lane `report_stranded_orphan_teardowns` (catalog name `stranded_orphan_teardowns`, after
-   `abandoned_jobs`): read-only. It selects orphaned Systems (Allocation terminal) not in
-   `torn_down`/`failed`/`reprovisioning`/`tearing_down` whose `{uid}:teardown` row is `failed`.
-   `tearing_down` is excluded because `repair_stalled_tearing_down_systems` recycles that row.
-   For each System not already warned about the same failure it logs one WARNING naming the
-   System, the job, its `error_category`, and the remedy (`systems.teardown`), and returns the
-   number of such new warnings. The loop feeds that into the existing
-   `kdive.reconciler.repairs{repair_kind="stranded_orphan_teardowns"}` counter and
-   `repair_counts`, so each warning line is one counter increment.
-5. Dedupe: a module-level `dict[UUID, datetime]` maps System id → the failed row's `updated_at`
-   last warned about. Each pass replaces the dict with the current stranded set, so it holds at
-   most that set, and a System whose row is recycled and fails again (new `updated_at`) warns
-   again. No persistence.
+3. `repair_orphaned_systems` passes `NEVER`, which already leaves a `failed` row untouched; only
+   its stale comment changes.
+4. New read-only lane `report_stranded_orphan_teardowns` (catalog name
+   `stranded_orphan_teardowns`, after `abandoned_jobs`) selects orphaned Systems (Allocation
+   terminal) not in `torn_down`/`failed`/`reprovisioning`/`tearing_down` whose `{uid}:teardown`
+   row is `failed` (`tearing_down` belongs to `repair_stalled_tearing_down_systems`, which
+   recycles). Per System not already warned about the same failure it logs one WARNING with the
+   System, job, `error_category`, and remedy (`systems.teardown` for an unmarked row,
+   `systems.get` for an authority-marked one), and returns the count of new warnings, which the
+   loop adds to `kdive.reconciler.repairs{repair_kind="stranded_orphan_teardowns"}`.
+5. Dedupe: a module-level `dict[UUID, datetime]`, System id → the failed row's `updated_at` last
+   warned about, replaced each pass by the current stranded set. A row recycled and failed again
+   (new `updated_at`) warns again. No persistence.
 
 ## Success
 
-- `ops.force_teardown` on a non-`torn_down`, non-`reprovisioning` ordinary System whose row is
-  `failed` returns that job id `queued` with `attempt = 0`.
-- `ops.force_teardown` on a `reprovisioning` System returns `conflict` and leaves the row (absent,
-  `queued`, or `failed`) byte-identical.
-- For an orphaned `ready` System with a `failed` row: `repair_orphaned_systems` returns 0 and the
-  row is unchanged; the first `report_stranded_orphan_teardowns` pass returns 1 with one WARNING,
-  the second returns 0 with none; a new failure (changed `updated_at`) returns 1 again; a
-  `tearing_down` System with a `failed` row returns 0.
+- `ops.force_teardown` on a `ready` or `failed` System whose unmarked row is `failed` returns that
+  job id `queued` with `attempt = 0`; a `failed` row carrying `authority_system_v1` keeps its
+  state and payload.
+- `ops.force_teardown` on a `reprovisioning` System returns `conflict` and leaves the row (absent
+  or `failed`) unchanged.
+- For an orphaned `ready` System with a `failed` row: `repair_orphaned_systems` leaves the row
+  unchanged; one reconcile pass reports `repair_counts["stranded_orphan_teardowns"] == 1` with one
+  WARNING, the next reports 0 with none; a new failure (changed `updated_at`) reports 1 again; a
+  `tearing_down` System with a `failed` row reports 0.
 
 ## Failure model
 
@@ -72,7 +72,8 @@ back to `ready` with its Allocation gone and stays there silently.
    - `ops.force_teardown` keeps the original row's `authorizing` principal on recycle; the
      break-glass audit row records the caller (as for #2929).
 4. **Covered elsewhere**
-   - authority teardown recycle: #2917 / ADR-0620; investigation force-close: stays `NEVER`;
+   - authority teardown recycle: #2917 / ADR-0620 (break-glass never recycles a marked row);
+   - investigation force-close: stays `NEVER`;
    - `tearing_down` Systems: `repair_stalled_tearing_down_systems`;
    - a `canceled` row on an orphaned System stays an operator stop and still replays.
 
