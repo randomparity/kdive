@@ -289,8 +289,10 @@ def test_public_active_release_claims_and_completes_through_worker(
                     # record reaches the journal file before the head advance, so the file is
                     # not durable evidence: a retry started on it supersedes the in-flight
                     # advance (#2924). Wait for the completion itself.
+                    completions = tuple(service._completion_tasks)
+                    assert completions
                     async with asyncio.timeout(10):
-                        await asyncio.gather(*tuple(service._completion_tasks))
+                        await asyncio.gather(*completions)
                     claimed = None
                 if interrupt_after is not None and interrupt_after != "cancel-finalize":
                     if not interrupt_after.startswith("cancel-"):
