@@ -239,14 +239,18 @@ def _run_bounded_command(
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    """Terminate the child session and synchronously reap its leader."""
-    with suppress(ProcessLookupError):
-        os.killpg(process.pid, signal.SIGTERM)
-    with suppress(ProcessLookupError):
-        os.killpg(process.pid, signal.SIGKILL)
-    with suppress(ProcessLookupError):
-        process.kill()
-    process.wait()
+    """Terminate the child session and synchronously reap its leader.
+
+    macOS fails ``killpg`` with EPERM, not ESRCH, once every group member is a zombie.
+    """
+    try:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, sig)
+        with suppress(ProcessLookupError):
+            process.kill()
+    finally:
+        process.wait()
 
 
 def require_fault_barrier(config: RemoteAuthorityProofConfig) -> Path:
