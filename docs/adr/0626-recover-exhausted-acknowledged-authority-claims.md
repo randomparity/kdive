@@ -4,6 +4,9 @@
 
 Accepted (2026-09-06)
 
+> **Amended by [ADR-0711](0711-bound-acknowledged-retry-grant-per-budget.md) (#2960):** a claim
+> that this ADR granted cannot earn another grant in the same budget.
+
 ## Context
 
 The durable queue charges an attempt when a worker claims a job. A worker can therefore consume

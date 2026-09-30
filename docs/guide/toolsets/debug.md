@@ -37,14 +37,20 @@ is benign: the early-boot handler has already consumed the option.
   - `out` — resume until the current function returns; it needs a frame that can return.
 
 Inspect the returned stop reason and `data.timed_out` before assuming the intended stop
-was reached. End the session with `debug.end_session` when inspection is complete.
+was reached. A ppc64le guest under KVM cannot single-step: `into`, `over` and `instruction`
+return `not_implemented` with `data.code` `single_step_unsupported` and leave the guest
+halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session with
+`debug.end_session` when inspection is complete.
 
 ## Breakpoints and watchpoints
 
 - `debug.set_breakpoint` — set a breakpoint at a symbol (a bare C function or variable name; not an address).
 - `debug.list_breakpoints` — list the current breakpoints.
 - `debug.clear_breakpoint` — remove a breakpoint.
-- `debug.set_watchpoint` — trap a write to a data address.
+- `debug.set_watchpoint` — trap a write to a data address. A ppc64le guest under KVM cannot
+  insert one; the call returns `not_implemented` with `watchpoint_unsupported` and arms
+  nothing. A stub that refuses the insert itself returns the same code under
+  `debug_attach_failure`.
 - `debug.list_watchpoints` — list the current watchpoints.
 - `debug.clear_watchpoint` — remove a watchpoint.
 

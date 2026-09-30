@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import stat
 import sys
@@ -271,7 +272,7 @@ def test_main_checks_private_domain_before_worker_or_file_mutation(
         "_refuse_existing_authority_domain",
         lambda _system_id: (_ for _ in ()).throw(ValueError("existing private domain")),
     )
-    monkeypatch.setattr(script, "_undefine_worker_domain", mutation)
+    monkeypatch.setattr(script, "_undefine_domain", mutation)
     monkeypatch.setattr(script, "_remove_regular", mutation)
     monkeypatch.setattr(script, "_remove_directory", mutation)
 
@@ -527,7 +528,7 @@ def test_main_verify_existing_dispatches_no_mutation(
     )
     monkeypatch.setattr(script, "_refuse_existing_authority_domain", forbidden)
     monkeypatch.setattr(script, "_stage_fixture_base", forbidden)
-    monkeypatch.setattr(script, "_undefine_worker_domain", forbidden)
+    monkeypatch.setattr(script, "_undefine_domain", forbidden)
     monkeypatch.setattr(script, "_remove_regular", forbidden)
     monkeypatch.setattr(script, "_remove_directory", forbidden)
     monkeypatch.setattr(script.LocalLibvirtProvisioning, "from_env", forbidden)
@@ -539,3 +540,205 @@ def test_main_verify_existing_dispatches_no_mutation(
     assert args[0] == _SYSTEM_ID
     assert isinstance(args[1], Profile)
     assert kwargs == {"authority_uid": 1, "authority_gid": 2}
+
+
+def _private_owner(path: Path) -> dict[str, int]:
+    metadata = path.lstat()
+    return {"authority_uid": metadata.st_uid, "authority_gid": metadata.st_gid}
+
+
+def test_fixture_artifacts_are_exact_system_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    _profile_value, rootfs_root, _console_root, base, overlay, console = _existing_fixture(
+        script, tmp_path, monkeypatch
+    )
+
+    assert script._fixture_artifacts(_SYSTEM_ID) == (
+        str(base),
+        str(rootfs_root / f"{_SYSTEM_ID}-baseline"),
+        str(overlay),
+        str(console),
+        f"kdive-{_SYSTEM_ID}",
+    )
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        "/var/lib/kdive/provider-authority/rootfs/22222222-2222-2222-2222-222222222222-overlay.qcow2",
+        "/var/lib/kdive/provider-authority/rootfs",
+        f"/var/lib/kdive/provider-authority/rootfs/{_SYSTEM_ID}*",
+        "kdive-22222222-2222-2222-2222-222222222222",
+    ],
+)
+def test_remove_refuses_a_name_outside_the_fixture(
+    identity: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+
+    def forbidden(*_args: object) -> None:
+        raise AssertionError("a refused name must not reach a mutation")
+
+    monkeypatch.setattr(script.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        sys, "argv", ["provision-authority-fixture.py", "--remove", str(_SYSTEM_ID), identity]
+    )
+    monkeypatch.setattr(
+        script.pwd, "getpwnam", lambda _name: type("I", (), {"pw_uid": 1, "pw_gid": 2})()
+    )
+    monkeypatch.setattr(script.json, "load", forbidden)
+    monkeypatch.setattr(script, "_undefine_domain", forbidden)
+    monkeypatch.setattr(script, "_remove_regular", forbidden)
+    monkeypatch.setattr(script, "_remove_directory", forbidden)
+
+    with pytest.raises(ValueError, match="outside this System's authority fixture"):
+        script.main()
+
+
+def test_remove_deletes_one_exact_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    script = _script()
+    _profile_value, rootfs_root, console_root, base, overlay, console = _existing_fixture(
+        script, tmp_path, monkeypatch
+    )
+    baseline = rootfs_root / f"{_SYSTEM_ID}-baseline"
+    unrelated = rootfs_root / "22222222-2222-2222-2222-222222222222-overlay.qcow2"
+    unrelated.write_bytes(b"other System")
+    owner = _private_owner(rootfs_root)
+    assert owner == _private_owner(console_root)
+
+    for path in (console, overlay, baseline, base):
+        script._remove_fixture_artifact(_SYSTEM_ID, str(path), **owner)
+        assert not path.exists()
+        script._remove_fixture_artifact(_SYSTEM_ID, str(path), **owner)
+
+    assert unrelated.read_bytes() == b"other System"
+    assert sorted(entry.name for entry in rootfs_root.iterdir()) == [unrelated.name]
+
+
+def test_remove_refuses_a_non_private_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    _profile_value, rootfs_root, _console_root, _base, overlay, _console = _existing_fixture(
+        script, tmp_path, monkeypatch
+    )
+    owner = _private_owner(rootfs_root)
+    rootfs_root.chmod(0o755)
+
+    with pytest.raises(ValueError, match="owner-only private directory"):
+        script._remove_fixture_artifact(_SYSTEM_ID, str(overlay), **owner)
+    assert overlay.exists()
+
+
+def test_remove_undefines_only_the_exact_authority_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _script()
+    calls: list[str] = []
+
+    class Domain:
+        def isActive(self) -> int:
+            return 1
+
+        def destroy(self) -> None:
+            calls.append("destroy")
+
+        def undefine(self) -> None:
+            calls.append("undefine")
+
+    class Connection:
+        def lookupByName(self, name: str) -> Domain:
+            calls.append(name)
+            return Domain()
+
+        def close(self) -> None:
+            calls.append("close")
+
+    def open_connection(uri: str) -> Connection:
+        calls.append(uri)
+        return Connection()
+
+    monkeypatch.setattr(script.libvirt, "open", open_connection)
+
+    script._remove_fixture_artifact(
+        _SYSTEM_ID, f"kdive-{_SYSTEM_ID}", authority_uid=1, authority_gid=2
+    )
+
+    assert calls == [
+        script._AUTHORITY_URI,
+        f"kdive-{_SYSTEM_ID}",
+        "destroy",
+        "undefine",
+        "close",
+    ]
+
+
+def test_remove_treats_an_absent_domain_as_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    script = _script()
+
+    class Missing(script.libvirt.libvirtError):
+        def __init__(self) -> None:
+            pass
+
+        def get_error_code(self) -> int:
+            return script.libvirt.VIR_ERR_NO_DOMAIN
+
+    class Connection:
+        def lookupByName(self, _name: str) -> object:
+            raise Missing()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(script.libvirt, "open", lambda _uri: Connection())
+
+    script._remove_fixture_artifact(
+        _SYSTEM_ID, f"kdive-{_SYSTEM_ID}", authority_uid=1, authority_gid=2
+    )
+
+
+def test_create_reports_the_created_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _script()
+    profile, rootfs_root, _console_root, _base, overlay, console = _existing_fixture(
+        script, tmp_path, monkeypatch
+    )
+    identity = type(
+        "Identity", (), {"pw_uid": overlay.lstat().st_uid, "pw_gid": overlay.lstat().st_gid}
+    )()
+
+    class Provisioner:
+        def provision(self, system_id: UUID, _profile: object) -> str:
+            return f"kdive-{system_id}"
+
+    class Connection:
+        def lookupByName(self, _name: str) -> object:
+            return type("Domain", (), {"isActive": lambda self: 1})()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(script.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(sys, "argv", ["provision-authority-fixture.py", str(_SYSTEM_ID)])
+    monkeypatch.setattr(script.json, "load", lambda _stream: {})
+    monkeypatch.setattr(script.ProvisioningProfile, "model_validate", lambda _value: profile)
+    monkeypatch.setattr(script.pwd, "getpwnam", lambda _name: identity)
+    monkeypatch.setattr(script, "_refuse_existing_authority_domain", lambda _system_id: None)
+    monkeypatch.setattr(script, "_stage_fixture_base", lambda *_args, **_kwargs: profile)
+    monkeypatch.setattr(script, "_undefine_domain", lambda *_args: None)
+    monkeypatch.setattr(script, "_remove_regular", lambda _path: None)
+    monkeypatch.setattr(script, "_remove_directory", lambda _path: None)
+    monkeypatch.setattr(script.os, "initgroups", lambda *_args: None)
+    monkeypatch.setattr(script.os, "setgid", lambda _gid: None)
+    monkeypatch.setattr(script.os, "setuid", lambda _uid: None)
+    monkeypatch.setattr(script.LocalLibvirtProvisioning, "from_env", lambda: Provisioner())
+    monkeypatch.setattr(script.libvirt, "open", lambda _uri: Connection())
+
+    script.main()
+
+    last = capsys.readouterr().out.strip().splitlines()[-1]
+    assert json.loads(last) == {"created": list(script._fixture_artifacts(_SYSTEM_ID))}
+    assert str(rootfs_root) in last
