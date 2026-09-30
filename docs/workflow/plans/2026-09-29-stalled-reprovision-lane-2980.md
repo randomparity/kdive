@@ -91,9 +91,11 @@ INSERT, because the `jobs_set_updated_at` trigger overwrites an UPDATE. Run each
   `systems/reprovisioning->failed`;
 - `failed` + NULL category, age 0 → settled with the category (no window);
 - `failed` + `configuration_error` → settled, category NULL (ADR-0513 §1a);
-- parametrized over `canceled` and `failed`/`lease_expired`: at age 0 → 0 settled and still
-  `reprovisioning`, with category NULL; at age 16 min → settled (`lease_expired` → category
-  stamped);
+- `failed` + `infrastructure_failure` at `attempt = 1`, age 0 → settled (no window);
+- parametrized over `canceled`, `failed`/`lease_expired`, and `failed`/`infrastructure_failure` at
+  `attempt = 3`: at age 0 → 0 settled and still `reprovisioning`, with category NULL; at age
+  16 min → settled (`lease_expired` → category stamped). `_seed_job` takes an `attempt=1`
+  keyword;
 - parametrized over `queued` and `running` at age 16 min → untouched;
 - an old canceled job beside a fresh `running` job → untouched;
 - a `ready` System with a failed reprovision job → untouched;
@@ -105,13 +107,16 @@ INSERT, because the `jobs_set_updated_at` trigger overwrites an UPDATE. Run each
 
 Controlled faults, each run after committing and reverted by hand-editing the lane module only,
 never with `git checkout`: drop the `canceled` clause, drop the `lease_expired` clause, drop the
-locked recheck, and stamp the category unconditionally. Each must turn at least one arm red.
+`attempt > 1` clause, drop the locked recheck, and stamp the category unconditionally. Each must turn at least one arm red.
 
 Steps:
 1. Write the test file; expect `ImportError`.
 2. In `systems.py`, below `_STALLED_TEARING_DOWN_REPAIR_LIMIT`, add the lane's constants: the
-   shared `_REPROVISION_BLOCKING` `EXISTS` fragment with its six parameters (kind, active states,
-   `canceled`, `failed`, `lease_expired`, `_TEARDOWN_SETTLE`), the candidate SQL
+   shared `_REPROVISION_BLOCKING` `EXISTS` fragment
+   `j.kind = %s AND j.payload->>'system_id' = s.id::text AND (j.state = ANY(%s) OR ((j.state = %s
+   OR (j.state = %s AND (j.error_category = %s OR j.attempt > 1))) AND j.updated_at > now() - %s))`
+   with its six parameters (kind, active states, `canceled`, `failed`, `lease_expired`,
+   `_TEARDOWN_SETTLE`), the candidate SQL
    (`s.state = %s AND NOT <fragment> ORDER BY s.id LIMIT %s`), the recheck SQL
    (`SELECT s.project … WHERE s.id = %s AND s.state = %s AND NOT <fragment>`),
    `_REPROVISION_BLOCKING_PARAMS`, and `_STALLED_REPROVISIONING_REPAIR_LIMIT = 100`. Add a comment
@@ -156,10 +161,13 @@ Steps:
    the call.
 2. In `docs/guide/errors.md`, after the restore section, add `## An incomplete reprovision`.
    `reprovision_incomplete` means the reconciler found a System stuck `reprovisioning` with no
-   reprovision job able to finish it, and no more specific job category. The System is `failed`
-   with an indeterminate disk, and the category is not retryable. Recovery: `systems.teardown`
-   reclaims provider resources and leaves the System `failed`; then use `allocations.release` and
-   `allocations.request`. Run `just resources-docs`.
+   reprovision job able to finish it, and no more specific job category. The System is `failed`,
+   its disk may be indeterminate, and the category is not retryable. One cause is a
+   `systems.reprovision` with a previously applied profile, which replays that profile's old job
+   instead of running a new one. Recovery: `systems.teardown` reclaims provider resources and
+   leaves the System `failed`; then use `allocations.release` and `allocations.request`. In the
+   restore section, replace "and ordinary `systems.teardown` cannot complete from that state" with
+   the same teardown description, so the two sections agree. Run `just resources-docs`.
 3. Append `### Amendment (2026-09-29): the reconciler settles a stalled reprovision (#2980)` to
    ADR-0435. Summarize the spec's design: the blocking predicate, the category and its §1a
    precedence, why `lease_expired` gets the window, no auto-teardown, and a link to the spec.
@@ -168,5 +176,8 @@ Steps:
 
 ## Rollback
 
-Revert the commits. Migration 0165 is forward-only: a revert leaves the widened CHECKs in place,
-which is harmless because nothing else writes the value.
+Before reverting the code, run
+`UPDATE systems SET failure_category = NULL WHERE failure_category = 'reprovision_incomplete'`.
+Otherwise the reverted `ErrorCategory` cannot validate those rows, and every `SYSTEMS.get` of them
+fails. The ADR-0454 job fallback then reports them. Then revert the commits. Migration 0165 is
+forward-only, and its widened CHECKs stay in place.

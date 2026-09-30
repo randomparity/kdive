@@ -26,7 +26,7 @@ the System down.
    job. A job matches on `j.kind = 'reprovision' AND j.payload->>'system_id' = s.id::text`, because
    the dedup key `{uid}:reprovision:{digest}` is per profile. A job blocks when:
    - it is `queued` or `running`; or
-   - it is `canceled`, or `failed` with `error_category = 'lease_expired'`, and
+   - it is `canceled`, or `failed` with `error_category = 'lease_expired'` or `attempt > 1`, and
      `j.updated_at > now() - _TEARDOWN_SETTLE` (15 minutes).
 2. Per candidate, under `advisory_xact_lock(SYSTEM)`: re-run the same predicate for that one
    System, then `SYSTEMS.update_state(FAILED)`, stamp the category (item 4), and audit
@@ -43,29 +43,34 @@ the System down.
    CHECK constraints from 0086 with the new value. The served errors guide and its
    `docs/guide/errors.md` mirror gain a section.
 
-### Why the window covers `lease_expired` but not other `failed` rows
+### Which `failed` rows skip the window
 
-The worker finalizes a job only after its handler returns, so a `failed` row that the worker wrote
-means no handler is running. That row settles at once, as decision 2 intends. But
-`repair_abandoned_jobs` writes `failed`/`lease_expired` when the lease lapses. A non-capture handler
-is not cancelled when its heartbeat stops (`jobs/worker.py` `_dispatch`, `_heartbeat_loop`), so it
-may still be rebuilding the disk. That is the same exposure as `jobs.cancel`, so it gets the same
-window. The window starts at the dead-letter write (the `jobs_set_updated_at` trigger), which is at
-least one lease (5 minutes) after the last heartbeat.
+A non-capture handler is not cancelled when its heartbeat stops (`jobs/worker.py` `_dispatch`,
+`_heartbeat_loop`), so a lapsed attempt can keep rebuilding the disk. Three rows can hide one:
+
+- a `canceled` row (`jobs.cancel` leaves the handler running);
+- `failed`/`lease_expired`, which `repair_abandoned_jobs` writes over the lapsed last attempt;
+- `failed` with `attempt > 1`: `claim_worker_job` reclaims a lapsed `running` row as the next
+  attempt, and that attempt may fail terminally while the earlier one still runs.
+
+A `failed` row at `attempt = 1` without `lease_expired` was written by the worker after the only
+attempt's handler returned. It settles at once, as decision 2 intends. The window starts at the
+row's last write (the `jobs_set_updated_at` trigger).
 
 A late handler after the settle is state-safe: `_commit_reprovision_result` commits only from
-`reprovisioning`, and `_record_system_failure` logs `IllegalTransition` on a `failed` System. Only
-its provider side effect remains, and the window bounds it.
+`reprovisioning`, `_record_system_failure` logs `IllegalTransition` on a `failed` System, and a
+commit that finds `failed` reaps its own domain (`PROVISION_SUPERSEDED_SYSTEM_STATES`). Its
+provider write is what the window bounds.
 
 ## Success
 
 - A `reprovisioning` System with no blocking reprovision job (Design item 1) becomes `failed` in
   one pass, with one `reprovisioning->failed` audit row. This covers a System with no job, and one
-  whose job is `failed` without `lease_expired`, at any age.
+  whose job is `failed` at `attempt = 1` without `lease_expired`, at any age.
 - The category is `reprovision_incomplete` when no job exists, or when the newest non-active job
   carries no category or `lease_expired`. It is NULL when that job carries any other category.
-- A `canceled` or `lease_expired` job updated within 15 minutes leaves the System untouched. Past 15
-  minutes, it settles.
+- A `canceled` job, or a `failed` job with `lease_expired` or `attempt > 1`, updated within 15
+  minutes leaves the System untouched. Past 15 minutes, it settles.
 - A `queued` or `running` job leaves the System untouched at any age.
 - A blocking job that appears between candidate selection and the lock leaves the System untouched.
 - `systems.teardown` on the settled System enqueues a teardown, and that teardown succeeds.
@@ -78,16 +83,21 @@ its provider side effect remains, and the window bounds it.
    - the job worker running `reprovision_handler`; an operator calling `jobs.cancel` or
      `systems.teardown`.
 2. **Invariants and assets at stake**
-   - no settle while a reprovision handler may still write the provider disk: an active job, or a
-     canceled or lease-lapsed one inside the window;
+   - no settle while a reprovision job row shows a handler may still write the provider disk: an
+     active job, or a windowed row (Design item 1) inside the window;
    - `failed` is terminal; `reprovisioning -> failed` is a legal edge (`state.py`);
    - a category the job already recorded is not displaced (ADR-0513 §1a).
 3. **Accepted failure classes**
-   - a handler that outlives the window (at least 20 minutes after its last heartbeat) races a
-     later teardown. Accepted with the same bound ADR-0634 gives `_TEARDOWN_SETTLE`.
-   - `systems.reprovision` back to an earlier profile replays that profile's terminal job
-     (`recycle=NEVER`) and strands the System. This lane now settles that System to `failed`,
-     which is better than stranding it forever. Follow-up candidate; not fixed here.
+   - a handler that outlives the window races a later teardown. For a canceled row the window ends
+     about 15 minutes after the last heartbeat; for a lease-lapsed row, one lease (`WorkerConfig.lease`,
+     default 5 minutes) later. Accepted with the same bound ADR-0634 gives `_TEARDOWN_SETTLE`. The
+     late handler's own domain self-reap limits what it leaves behind.
+   - `systems.reprovision` with any previously applied profile of a `ready` System replays that
+     profile's terminal job (`enqueue` with `recycle=NEVER`). The caller gets the old envelope, no
+     handler runs, and before this change the System stranded in `reprovisioning`. This lane now
+     settles that healthy System to `failed` with `reprovision_incomplete`. Terminal, but no longer
+     stuck; the guide says the disk *may* be indeterminate and names this cause. The admission fix
+     is a follow-up candidate and is not built here (recycling is excluded).
 4. **Covered elsewhere**
    - tearing the settled System down: operator `systems.teardown` (#2929); not automatic (ADR-0441);
    - re-running the reprovision: excluded (operator).
@@ -96,7 +106,7 @@ its provider side effect remains, and the window bounds it.
 
 - **Settle every `failed` row at once (decision 2 read literally).** judgment: a lease-lapsed
   handler can still be running (the `_dispatch` path above), which is the hazard the window exists for.
-- **Window on every terminal row.** judgment: it delays the common worker-finalized dead-letter by
-  15 minutes and protects nothing.
+- **Window on every terminal row.** judgment: it also delays a single-attempt terminal failure,
+  where the row already proves the only handler has ended.
 - **Return to `ready`.** judgment: the disk is half rebuilt, the same reason ADR-0378 gives for
   restore.
