@@ -10,7 +10,7 @@ Architecture: `ToolResponse` translates every validation failure into `InvalidEn
 
 Tech stack: Python 3.14, pydantic 2.13.4, fastmcp-slim 3.4.4, pytest.
 
-Expected implementation size: 150–220 changed lines (M) — two source edits, one new middleware
+Expected implementation size: 200–280 changed lines (M) — four source edits, one new middleware
 module, one registration line, one doc sentence, and the tests in Tasks 1–2.
 
 ## Global Constraints
@@ -29,6 +29,10 @@ module, one registration line, one doc sentence, and the tests in Tasks 1–2.
 | `src/kdive/mcp/middleware/invalid_envelope.py` | create | `InvalidEnvelopeMiddleware`, `INVALID_ENVELOPE_DETAIL` |
 | `src/kdive/mcp/assembly/app.py` | modify | registers the middleware last |
 | `src/kdive/mcp/middleware/compact.py` | modify | probe catches `InvalidEnvelopeError` (caller migration) |
+| `src/kdive/mcp/tools/catalog/artifacts/reads.py` | modify | per-row isolator also catches `InvalidEnvelopeError` |
+| `src/kdive/mcp/tools/lifecycle/allocations/view.py` | modify | per-row isolator also catches `InvalidEnvelopeError` |
+| `tests/mcp/catalog/test_artifact_list_isolation.py` | create | artifacts row-isolation test |
+| `tests/mcp/lifecycle/test_allocation_list_isolation.py` | create | allocations row-isolation test |
 | `src/kdive/mcp/resources/_content/response-envelope.md` | modify | one sentence on the server-fault envelope |
 | `tests/mcp/core/test_responses.py` | modify | envelope-validation tests |
 | `tests/mcp/middleware/test_invalid_envelope.py` | create | end-to-end middleware + log tests |
@@ -46,6 +50,19 @@ Verification:
   `InvalidEnvelopeError`, never `ValidationError`. Mode: focused-test —
   `tests/mcp/core/test_responses.py::test_invalid_envelope_*`; red: `ImportError` for
   `InvalidEnvelopeError`; green: `just test-verbose tests/mcp/core/test_responses.py`.
+- Contract: an unknown `error_category` and the `denied` `missing_roles` guard raise
+  `InvalidEnvelopeError`. Mode: focused-test — `test_invalid_envelope_from_unknown_category`
+  and the two migrated `missing_roles` cases in the same file; red: `ValidationError` /
+  `ValueError` raised instead; green: same command.
+- Contract: the ADR-0019 per-row isolators keep isolating a bad row. Mode: focused-test —
+  `tests/mcp/catalog/test_artifact_list_isolation.py` (monkeypatch
+  `kdive.mcp.tools.catalog.artifacts.reads.ToolResponse.success` to raise
+  `InvalidEnvelopeError` for one artifact id; assert `_artifact_list_items` returns the other)
+  and `tests/mcp/lifecycle/test_allocation_list_isolation.py` (drive the row loop with a
+  monkeypatched `envelope_for_allocation` raising `InvalidEnvelopeError` for one row; assert that
+  row becomes an `infrastructure_failure` item and the other row is returned); red:
+  `InvalidEnvelopeError` escapes; green: `just test-verbose <both files>`. Read the existing
+  allocations list tests before writing the second test and reuse their fixtures.
 - Contract: compact probe still passes a non-envelope through. Mode: focused-test —
   `tests/mcp/middleware/test_compact.py::test_enabled_passes_item_with_extra_key_through_unchanged`
   (red after the responses change and before the compact change: `InvalidEnvelopeError`
@@ -77,9 +94,18 @@ Steps:
            )
 
 
+   def test_invalid_envelope_from_unknown_category() -> None:
+       with pytest.raises(InvalidEnvelopeError, match="unknown error_category"):
+           ToolResponse.model_validate(
+               {"object_id": "x", "status": "failed", "error_category": "bogus"}
+           )
+
+
    def test_invalid_envelope_is_not_a_value_error() -> None:
        assert not issubclass(InvalidEnvelopeError, ValueError)
    ```
+   Also change the two `pytest.raises(ValueError, match="missing_roles")` cases to
+   `InvalidEnvelopeError`.
    Run; expect ImportError.
 2. In `responses.py` add after the imports:
    ```python
@@ -100,18 +126,28 @@ Steps:
            raise InvalidEnvelopeError(f"status {model.status!r} requires an error_category")
        if not is_failure and model.error_category is not None:
            raise InvalidEnvelopeError(f"error_category set on non-failure status {model.status!r}")
-       model.retryable = (
-           retryable_category(ErrorCategory(model.error_category)) if is_failure else None
-       )
+       if model.error_category is None:
+           model.retryable = None
+           return model
+       try:
+           category = ErrorCategory(model.error_category)
+       except ValueError as exc:
+           raise InvalidEnvelopeError(f"unknown error_category {model.error_category!r}") from exc
+       model.retryable = retryable_category(category)
        return model
    ```
    keeping the existing docstring, amended to cite ADR-0709. Import `ModelWrapValidatorHandler`
    and `ValidationError` from `pydantic`. Update the `success()` docstring ("the model validator
-   raises `InvalidEnvelopeError`").
+   raises `InvalidEnvelopeError`"). In `denied()`, raise `InvalidEnvelopeError` instead of
+   `ValueError` for `missing_roles` in `data`, and update its `Raises:` section.
 3. Run the focused tests; expect green. Run the compact tests; expect the extra-key case red.
 4. In `compact.py` replace `from pydantic import ValidationError` and the `except ValidationError`
    with `InvalidEnvelopeError` imported from `kdive.mcp.responses`. Compact tests green.
-5. Commit: `fix(mcp): raise InvalidEnvelopeError for an invalid ToolResponse`.
+5. Write the two isolation tests; expect red. Change `except ValueError:` to
+   `except (ValueError, InvalidEnvelopeError):` in `reads.py` (`_artifact_list_items`) and
+   `view.py` (the `allocations.list` row loop; `ValueError` stays for
+   `Allocation.model_validate`). Expect green.
+6. Commit: `fix(mcp): raise InvalidEnvelopeError for an invalid ToolResponse`.
 
 ## Task 2 — server-fault envelope through the middleware
 
@@ -137,8 +173,9 @@ Steps:
    `ToolResponse(object_id="x", status="queued", error_category="not_found")`, tool `replay`
    returning `ToolResponse.model_validate({"object_id": "x", "status": "failed"})`, and tool
    `typed(n: int)` returning `ToolResponse.success("t", "ok")`. Via
-   `fastmcp.Client(app)` call each with `raise_on_error=False`, capture logs with `caplog` at
-   DEBUG (attach to the `fastmcp` logger if it does not propagate). Assert for `bad` and
+   `fastmcp.Client(app)` call each with `raise_on_error=False`. The `fastmcp` logger has
+   `propagate = False`, so a fixture adds `caplog.handler` to `logging.getLogger("fastmcp")`
+   and removes it on teardown; set `caplog.set_level(logging.DEBUG)`. Assert for `bad` and
    `replay`: not `is_error`; `structured_content["error_category"] == "infrastructure_failure"`,
    `["detail"] == INVALID_ENVELOPE_DETAIL`, `["object_id"]` is the tool name; an ERROR record
    with `exc_info`; no record containing `Invalid arguments for tool`. For `typed` with

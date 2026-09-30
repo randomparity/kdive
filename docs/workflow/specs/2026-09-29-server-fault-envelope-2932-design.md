@@ -17,8 +17,11 @@ gets `is_error` with raw validation text and no envelope. The fault is the serve
    - the category-iff-failure checks then raise `InvalidEnvelopeError` with the existing
      messages (`status 'x' requires an error_category`,
      `error_category set on non-failure status 'x'`);
+   - an `error_category` that is not an `ErrorCategory` value raises
+     `InvalidEnvelopeError("unknown error_category 'x'")`;
    - `retryable` is derived as today.
    The validator runs for `ToolResponse(...)`, every factory, and `model_validate`.
+   `ToolResponse.denied`'s `missing_roles`-in-`data` guard raises `InvalidEnvelopeError`.
 2. `src/kdive/mcp/middleware/invalid_envelope.py` adds `InvalidEnvelopeMiddleware.on_call_tool`:
    on `ToolError` whose `__cause__` is an `InvalidEnvelopeError`, return
    `ToolResult(structured_content=ToolResponse.failure(<tool name>, INFRASTRUCTURE_FAILURE,
@@ -26,8 +29,13 @@ gets `is_error` with raw validation text and no envelope. The fault is the serve
    `INVALID_ENVELOPE_DETAIL = "the server could not build this tool's response"`.
 3. `src/kdive/mcp/assembly/app.py` registers it last (innermost), after
    `BindingErrorMiddleware`, so every other middleware observes an ordinary failure envelope.
-4. `src/kdive/mcp/middleware/compact.py` catches `InvalidEnvelopeError` in its envelope probe
-   instead of `ValidationError`.
+4. Callers that catch an envelope failure on purpose migrate:
+   `src/kdive/mcp/middleware/compact.py` catches `InvalidEnvelopeError` instead of
+   `ValidationError`; the ADR-0019 per-row isolators in
+   `src/kdive/mcp/tools/catalog/artifacts/reads.py` (`_artifact_list_items`) and
+   `src/kdive/mcp/tools/lifecycle/allocations/view.py` (the `allocations.list` row loop) catch
+   `(ValueError, InvalidEnvelopeError)`. An AST scan of `src/` for `try` bodies building a
+   `ToolResponse` under `except ValueError|ValidationError|Exception` found no other site.
 5. `src/kdive/mcp/resources/_content/response-envelope.md` gains one sentence: an envelope the
    server fails to build is reported as `infrastructure_failure` with a fixed detail.
 
@@ -43,7 +51,8 @@ kdive adds no second log line.
    conversions of raw pydantic errors from non-envelope models.
 3. **Accepted failure classes** — `retryable: true` on the server-fault envelope (the
    category's fixed ADR-0118 value; a retry of a data-dependent bug repeats it, bounded by the
-   ERROR log); an invalid `ToolResponse` built outside a tool call (worker, CLI) raises
+   ERROR log; after an unkeyed mutation that committed before its envelope failed, a retry can
+   repeat the side effect, bounded by the site's dedup key); an invalid `ToolResponse` built outside a tool call (worker, CLI) raises
    `InvalidEnvelopeError` unenveloped, as it raised `ValidationError` before.
 4. **Covered elsewhere** — pydantic errors from non-`ToolResponse` models (follow-up issue per
    the approved exclusions); FastMCP's own classification of pydantic errors (upstream);
@@ -51,7 +60,8 @@ kdive adds no second log line.
 
 ## Success
 
-- A tool body raising an invalid envelope (constructor, factory, or `model_validate`) returns an
+- A tool body whose `ToolResponse` fails validation (constructor, factory, `denied` guard, or
+  `model_validate`) returns an
   `infrastructure_failure` envelope, `detail == INVALID_ENVELOPE_DETAIL`, not `is_error`.
 - For that call FastMCP emits one ERROR record with `exc_info` and no
   `Invalid arguments for tool` record.
@@ -60,8 +70,12 @@ kdive adds no second log line.
 
 ## Validation
 
-- `tests/mcp/core/test_responses.py`: invariant, field-type, nested-item, and `model_validate`
-  failures raise `InvalidEnvelopeError`; existing `pytest.raises(ValueError, ...)` cases migrate.
+- `tests/mcp/core/test_responses.py`: invariant, field-type, unknown-category, nested-item,
+  `model_validate`, and `denied` guard failures raise `InvalidEnvelopeError`; existing
+  `pytest.raises(ValueError, ...)` cases migrate.
+- `tests/mcp/catalog/test_artifact_list_isolation.py` and
+  `tests/mcp/lifecycle/test_allocation_list_isolation.py`: one row whose envelope raises
+  `InvalidEnvelopeError` is isolated and the other rows are returned.
 - `tests/mcp/middleware/test_invalid_envelope.py`: in-process FastMCP app with both middlewares
   and a real `fastmcp.Client`; asserts the envelope, the log records (caplog), and the argument
   error path.

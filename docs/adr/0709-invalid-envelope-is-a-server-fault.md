@@ -23,9 +23,11 @@ their typed payloads, so pydantic errors from other models must keep their curre
 `ToolResponse` validation never lets a pydantic `ValidationError` escape. One wrap-mode model
 validator runs the field validation, translates a `ValidationError` into
 `InvalidEnvelopeError` (a plain `Exception`, not a `ValueError`), and then checks the
-category-iff-failure invariant, raising `InvalidEnvelopeError` directly. The validator runs for
-the constructor, the factory classmethods, and `model_validate` alike, which covers an
-idempotency replay rebuilt from a stored document.
+category-iff-failure invariant and that `error_category` is an `ErrorCategory` value, raising
+`InvalidEnvelopeError` directly. The validator runs for the constructor, the factory
+classmethods, and `model_validate` alike, which covers an idempotency replay rebuilt from a
+stored document. `ToolResponse.denied`'s own guard against `missing_roles` in `data` raises
+`InvalidEnvelopeError` too.
 
 FastMCP logs any other exception from a tool at ERROR with its traceback (`logger.exception`) and
 raises `ToolError` chained from it. `InvalidEnvelopeMiddleware`, registered innermost, turns a
@@ -38,12 +40,15 @@ envelope, and the caller now receives a server-fault envelope instead of an argu
 
 ## Consequences
 
-- Code that probes `ToolResponse.model_validate` for "is this an envelope" catches
-  `InvalidEnvelopeError`, not `ValidationError` (`CompactResponseMiddleware`).
+- Code that catches an envelope failure on purpose migrates to `InvalidEnvelopeError`: the
+  `CompactResponseMiddleware` probe, and the per-row isolation ADR-0019 requires of list tools
+  (`artifacts.list`, `allocations.list`), which caught it as a `ValueError`.
 - `InvalidEnvelopeError` is not a `ValueError`, so a tool's `except ValueError` for caller input
   cannot absorb an envelope bug and relabel it as the caller's fault.
 - `infrastructure_failure` carries `retryable: true`. A retry repeats a data-dependent envelope
-  bug; the ERROR log with traceback is the operator's signal.
+  bug, and after an unkeyed mutation that committed before its envelope failed, a retry can
+  repeat the side effect; duplicate protection there rests on the site's own dedup key. The
+  ERROR log with traceback is the operator's signal.
 - Pydantic failures from models other than `ToolResponse` keep FastMCP's argument-error
   handling. Re-enveloping those is out of scope.
 - The translation depends on FastMCP 3.4.4's `ToolError`-from-exception wrapping; an in-process
