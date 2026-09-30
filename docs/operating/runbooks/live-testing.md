@@ -270,8 +270,10 @@ directory. It stops at the first failed name, so a domain that did not go away k
 `/var/lib/kdive/provider-authority/journal/<uuid>.jsonl` stays: the authority starts only when
 every lane matches its database head, so the lane is an audit record, not a fixture artifact.
 
-Remove the fixture by hand only after a failed removal or a `create` that failed part way. Run
-the same exact-name mode, domain first:
+Removal after a failed or interrupted run does not wait for the System's in-flight jobs, so
+list the authority daemon's domains and the two authority directories afterwards. Remove the
+fixture by hand only after a failed removal, a `create` that failed part way, or a name that
+came back. Run the same exact-name mode, domain first:
 
 ```sh
 uuid=<system_id>
