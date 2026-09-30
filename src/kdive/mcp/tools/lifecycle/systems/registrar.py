@@ -503,7 +503,9 @@ def _register_systems_teardown(
         `suggested_next_actions`). If this System has external-boot history, the returned teardown
         job is authority-marked and the authority destroys its private artifacts before the
         durable terminal record commits. The authority route must remain configured; otherwise the
-        tool returns `configuration_error` and enqueues no ordinary teardown job.
+        tool returns `configuration_error` and enqueues no ordinary teardown job. A System that is
+        mid-reprovision is refused with `conflict` (`current_status: reprovisioning`) and nothing
+        is enqueued; retry once the reprovision settles.
         """
         return await _teardown_system(
             pool, current_context(), system_id, idempotency_key=idempotency_key, resolver=resolver
