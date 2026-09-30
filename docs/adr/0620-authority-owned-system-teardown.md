@@ -122,6 +122,41 @@ Rejected for this amendment:
   judgment: a `superseded` row can be one that lost an allocation race, so the route would rest
   on rows the fences already treat as dead.
 
+### Amendment (2026-09-29): observing another generation's teardown record (#2921)
+
+The host teardown record is keyed by activation, and a later generation of the same subject
+(`binding`, `plan_identity`, `provider_kind`, `authority_instance`) overwrites it at `begin`.
+Observing generation N against a record that does not match N's anchor now distinguishes three
+cases in both libvirt providers:
+
+- another subject, or the same generation with different anchor fields, still refuses
+  (`provider_conflict`);
+- a later generation's record means N is superseded: the provider raises
+  `SystemTeardownSupersededError` and the service answers `superseded` with no facts;
+- an earlier generation's record means N never reached `begin`: the observation reports facts
+  owned by N's anchor with no reservation and no completion time, exactly as when no record
+  exists.
+
+N therefore never credits from another generation's record. A predecessor-owned observation
+proves only `retained_quarantine`; the reservation credits once, through the generation whose
+exact anchor owns the record, provided that generation's `begin` adopts it; `begin` still
+requires an identical reservation, and a reservation that changed between generations is not
+addressed here. Observation still writes nothing. Takeover recovery of a
+generation that died between `mutation-started` and `begin` now reaches `terminal` instead of
+failing every takeover with `provider_conflict`. In recovery, a later generation's record cannot
+occur: a generation begins only after its own `takeover-acknowledged`, which requires every
+earlier teardown phase resolved. It can occur when a concurrent successor begins before the
+superseded generation's post-commit re-observation.
+
+Rejected for this amendment:
+
+- **Key the record by generation.** judgment: a persisted-format change and migration of host
+  files, to keep history nothing reads; the successor must still see its predecessor's progress.
+- **Observe with the retained record's own anchor.** judgment: N would report, and could credit,
+  a reservation owned by another generation.
+- **Answer `superseded` for a predecessor record too.** verified: the takeover that recovers N is
+  N's successor, so `superseded` would fail every takeover exactly as `provider_conflict` does.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
