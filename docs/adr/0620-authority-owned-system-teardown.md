@@ -166,19 +166,24 @@ terminal `conflict` (`external_boot_teardown_not_supported`) under the System lo
 `cleanup_complete`), the ordinary provisioner acted on its own libvirt URI, found no domain,
 and committed `torn_down` while the authority daemon kept the domain running (#2865 proof).
 
-`allocations.release` refuses with `conflict` (`external_boot_system_teardown_required`) while a
+`allocations.release` (and break-glass release, host drain, and the orphaned-active reaper)
+refuses with `conflict` (`external_boot_system_teardown_required`, with the `system_id`) while a
 System on the allocation that is not `torn_down` has external-boot history. The authority
 allocator admits a teardown only on an `active` allocation (`0122_external_boot_authority.sql`),
 so a released allocation would leave that System with no teardown path. This mirrors the
 pre-activation fence that already denies release for an authority-owned System (ADR-0623).
-Lease expiry still ends such an allocation; that path is tracked separately.
+Lease expiry still ends such an allocation; that path is tracked separately. It is also the only
+end for an allocation whose System the authority teardown cannot take (a pre-fix `tearing_down`
+System, or an unresolved authority route), and a platform operator outside the project cannot
+clear it, because `systems.teardown` needs the project `admin` role.
 
-The public `systems.teardown` replaces an ordinary `{system}:teardown` job in state `failed`
-with the authority-marked teardown (recycle policy `FAILED`). An ordinary job in any other
-state still returns `ordinary_teardown_fenced_by_external_boot`. A failed job holds no lease,
-so replacing it cannot race a running attempt; an ordinary job that failed after this fence
-also ran no provider call. The recycle keeps the job's `authorizing` value, so the authority
-commit's audit row names the principal that enqueued the refused job, such as the reconciler.
+The public `systems.teardown` replaces an ordinary `{system}:teardown` job in state `failed` or
+`canceled` with the authority-marked teardown (recycle policy `TERMINAL_OR_CANCELED`, entered
+only for those two states). An ordinary job in any other state still returns
+`ordinary_teardown_fenced_by_external_boot`. After this fence an ordinary job for such a System
+makes no provider call, so replacing it skips no mutation. The recycle keeps the job's
+`authorizing` value, so the authority commit's audit row names the principal that enqueued the
+refused job, such as the reconciler.
 
 Producers that enqueue through `enqueue_control_teardown` (the orphaned-System lane,
 investigation force-close, break-glass teardown) still enqueue an unmarked job for such a

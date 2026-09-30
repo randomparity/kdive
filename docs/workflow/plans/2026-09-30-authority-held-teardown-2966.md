@@ -12,8 +12,8 @@ Decision: ADR-0620 amendment (2026-09-30, #2966).
 
 Tech stack: Python 3, psycopg async, pytest with the migrated Postgres fixture (`migrated_url`).
 
-Expected implementation size: 160–230 changed lines (M) — three source hunks of 10–30 lines
-and five test cases of 25–40 lines in two existing test files.
+Expected implementation size: 180–260 changed lines (M) — three source hunks of 10–30 lines
+and six test cases of 25–40 lines in two existing test files.
 
 ## Global Constraints
 
@@ -23,19 +23,18 @@ and five test cases of 25–40 lines in two existing test files.
 - Keep the worker refusal's contract: `CategorizedError`, category `conflict`, `terminal=True`,
   `details.reason == "external_boot_teardown_not_supported"`, message prefix
   `ordinary teardown is fenced by external-boot`.
-- Do not change `guard_external_boot_release`: the expiry sweep
-  (`reconciler/repairs/allocations.py`) and `reclaim_under_lock` call it, and expiry is out of
-  scope.
+- Do not change `guard_external_boot_release`: the expiry sweep's `_expire_one`
+  (`reconciler/repairs/allocations.py`) calls it directly, and expiry is out of scope.
 
 ## File map
 
 | File | Owns now | Change |
 |---|---|---|
 | `src/kdive/jobs/handlers/systems.py` | `teardown_handler`; refuses a restricting activation | refuse any activation (`get_latest_for_system`) |
-| `src/kdive/services/allocation/release.py` | `_release_locked`; release admission | new `_require_system_teardown` check after the guard |
+| `src/kdive/services/allocation/release.py` | `_release_locked`, `reclaim_under_lock`; release admission | new `_require_system_teardown` check after the guard in both |
 | `src/kdive/mcp/tools/lifecycle/systems/admin.py` | `_enqueue_authority_teardown`; conflict on any ordinary prior | recycle a `failed` ordinary prior (policy `FAILED`) |
 | `tests/mcp/lifecycle/test_systems_tools.py` | handler and public teardown tests | three cases |
-| `tests/services/external_boot/test_allocation_release.py` | release admission tests | two cases |
+| `tests/services/external_boot/test_allocation_release.py` | release admission tests | three cases |
 
 No caller migration: every changed function keeps its signature.
 
@@ -89,6 +88,9 @@ Verification:
 - Contract "release succeeds once the System is torn down". Mode: focused-test.
   `test_release_admits_a_torn_down_system_with_external_boot_history` (green before and after;
   it pins the `torn_down` exemption).
+- Contract "the orphaned-active reaper retains a failed System with history". Mode:
+  focused-test. `test_reconciler_reclaim_retains_a_failed_system_with_external_boot_history`.
+  Red: `outcome.released is True`. Green: same file command.
 - Contract "expiry is unchanged". Mode: focused-test. Existing
   `test_expiry_without_a_restricting_activation_logs_no_denial` stays green.
 
@@ -99,8 +101,10 @@ Steps:
    audit_writer=_noop_audit)` and asserts `released is False`, `CONFLICT`,
    `outcome.details["reason"] == "external_boot_system_teardown_required"`, allocation still
    `granted`. The second first runs `UPDATE systems SET state = 'torn_down'` and asserts
-   `released is True`.
-2. Run; expect the first to fail (`released is True`).
+   `released is True`. The third runs `UPDATE systems SET state = 'failed'`, then
+   `reclaim_under_lock(conn, _noop_audit, allocation_id, project="proj")`, and asserts
+   `released is False` and `CONFLICT`.
+2. Run; expect the first and third to fail (`released is True`).
 3. Add to `release.py`:
 
    ```python
@@ -125,7 +129,9 @@ Steps:
    ```
 
    and call it in `_release_locked` right after `await guard_external_boot_release(...)`, which
-   already holds every System lock of the allocation.
+   already holds every System lock of the allocation. In `reclaim_under_lock` call it inside
+   the existing `try` after `guard_external_boot_release`, so the existing `except
+   ExternalBootDenied` maps it to `ReleaseOutcome(released=False, category=CONFLICT)`.
 4. Run the file; expect pass. Commit
    `fix(allocation): refuse release while a System needs authority teardown`.
 
@@ -134,14 +140,15 @@ Steps:
 Files: `src/kdive/mcp/tools/lifecycle/systems/admin.py`; test
 `tests/mcp/lifecycle/test_systems_tools.py`.
 
-Interfaces: consumes `queue.JobRecyclePolicy.FAILED`, `_AUTHORITY_MARKER`
+Interfaces: consumes `queue.JobRecyclePolicy.TERMINAL_OR_CANCELED`, `_AUTHORITY_MARKER`
 (`"external_boot_authority_v1"`), `_ordinary_teardown_job(pool, state)`,
 `_seed_retired_teardown_authority(conn, seeded)`, `_teardown(pool, ctx, system_id, *,
 resolver)` and `_JOB_COLUMNS` from the test module.
 
 Verification:
-- Contract "a failed ordinary prior becomes the marked teardown, same job id". Mode:
-  focused-test. `test_teardown_replaces_failed_ordinary_job_for_external_boot_history`. Red:
+- Contract "a failed or canceled ordinary prior becomes the marked teardown, same job id".
+  Mode: focused-test. `test_teardown_replaces_failed_ordinary_job_for_external_boot_history`,
+  parametrized over `failed` and `canceled`. Red:
   `status == "error"`, reason `ordinary_teardown_fenced_by_external_boot`. Green:
   `uv run pytest tests/mcp/lifecycle/test_systems_tools.py -k failed_ordinary_job_for_external_boot -q`.
 - Contract "a queued ordinary prior still conflicts". Mode: focused-test. Existing
@@ -149,7 +156,7 @@ Verification:
 
 Steps:
 1. Add the test: `_ordinary_teardown_job(pool, SystemState.READY)`; `UPDATE jobs SET state =
-   'failed'`; `_seed_run`; `seed_activation(conn, state=RECOVERED, cleanup_complete=True,
+   <failed|canceled>`; `_seed_run`; `seed_activation(conn, state=RECOVERED, cleanup_complete=True,
    ready_reservation=True, system_id=..., run_id=...)`; `_seed_retired_teardown_authority(conn,
    seeded)`; `_teardown(pool, ctx(Role.ADMIN), system_id,
    resolver=provider_resolver(external_boot=ExternalBootOperations()))`. Assert `status ==
@@ -158,9 +165,10 @@ Steps:
 2. Run; expect the conflict.
 3. In `_enqueue_authority_teardown` compute `ordinary = prior is not None and
    _AUTHORITY_MARKER not in prior.payload and "authority_system_v1" not in prior.payload`. When
-   `ordinary and prior.state is JobState.FAILED`, skip the marker conflict and the
-   marker-equality replay, and enqueue with `JobRecyclePolicy.FAILED`; otherwise keep today's
-   flow.
+   `ordinary and prior.state in {JobState.FAILED, JobState.CANCELED}`, skip the marker conflict
+   and the marker-equality replay, and enqueue with `JobRecyclePolicy.TERMINAL_OR_CANCELED`
+   (the row is failed or canceled under the System lock, so `succeeded` cannot match);
+   otherwise keep today's flow.
 4. Run the focused commands and the whole file; expect pass. Commit
    `fix(mcp): replace a refused ordinary teardown with the authority route`.
 
