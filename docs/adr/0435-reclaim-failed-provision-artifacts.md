@@ -141,8 +141,8 @@ carrying `current_status: reprovisioning`, and enqueues nothing. It refuses ahea
 replay and the enqueue, so a live `{uid}:teardown` row is not replayed and a failed one is not
 recycled while the reprovision runs. A teardown job that still
 meets a `reprovisioning` System fails once with a terminal `conflict`; this is a backstop, because
-`systems.reprovision` refuses with a transient `conflict` while a `{uid}:teardown` job is `queued`
-or `running` (#2979), so a teardown queued before the reprovision no longer reaches it. Once the reprovision settles, the operator re-runs `systems.teardown`,
+`systems.reprovision` refuses a `ready` System with a `conflict` while its `{uid}:teardown` job is
+`queued` or `running` (#2979), so a teardown queued before the reprovision no longer reaches it. Once the reprovision settles, the operator re-runs `systems.teardown`,
 which recycles that failed row under the #2929 amendment above. `repair_orphaned_systems` skips
 `reprovisioning` Systems, both in its candidate query and in its System-locked recheck, and
 enqueues on a later pass once the System is `ready`. The lane replays an existing
