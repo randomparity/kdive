@@ -1075,15 +1075,19 @@
 # matches the checkout (#2532), so that state is a hard failure the play can no longer repair;
 # reinstalling each run is the cheaper half of the trade. `--reinstall-package kdive` for the same
 # reason the installer carries it: uv keys a built wheel on project name and version, so a source
-# change under an unchanged `version` can be served from cache. Measured with the project's
-# `uv_build` backend, `uv pip install` of a directory does rebuild where `uv sync --no-editable`
-# does not -- the flag makes both provisioning paths agree rather than rely on that difference.
+# change under an unchanged `version` can be served from cache.
+# The recipe is the installer's own (`install-live-worker-lifecycle.sh`): `uv sync` from the lock
+# with the `live` group, which is what supplies `drgn`. The earlier `uv pip install` of the
+# checkout resolved only the core dependencies, so a host provisioned by this role alone had no
+# `drgn` and `introspect.from_vmcore` failed with MISSING_DEPENDENCY (#2956, the #2399 gap).
 - name: Install KDIVE into the lifecycle witness venv
   ansible.builtin.command:
     cmd: >-
-      {{ live_vm_host_uv_bin }} pip install --python
-      /opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive {{ live_vm_venv }}
+      {{ live_vm_host_uv_bin }} sync --locked --no-editable --no-dev --group live
+      --reinstall-package kdive --project {{ live_vm_venv }}
+      --python /opt/kdive-live-worker-lifecycle/.venv/bin/python
   environment:
+    UV_PROJECT_ENVIRONMENT: /opt/kdive-live-worker-lifecycle/.venv
     # This populates root's `uv` cache from empty, so it is the exact build the issue reports:
     # grpcio has no ppc64le wheel and its vendored BoringSSL has no ppc64le target (#2666). Inert
     # on an arch where grpcio installs from a wheel and never compiles.
@@ -1102,6 +1106,16 @@
   loop: "{{ live_vm_host_libguestfs_files.files }}"
   loop_control:
     label: "{{ item.path }}"
+
+# `drgn` is a `live`-group dependency that ppc64le builds from the sdist (`uv.lock` carries x86_64
+# wheels only), so a missing import here means the build dependencies or the group are absent.
+- name: Verify the lifecycle witness venv imports drgn
+  ansible.builtin.command:
+    argv:
+      - /opt/kdive-live-worker-lifecycle/.venv/bin/python
+      - -c
+      - import drgn
+  changed_when: false
 
 - name: Keep the lifecycle witness environment root-owned
   ansible.builtin.file:

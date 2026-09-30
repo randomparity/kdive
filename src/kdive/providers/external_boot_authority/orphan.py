@@ -164,7 +164,9 @@ class RecoveryOrphanAuthorityService:
                 for row in rows
             )
         except KeyError, TypeError, ValueError:
-            raise AuthorityServiceError("journal_conflict") from None
+            raise AuthorityServiceError(
+                "journal_conflict", reason="orphan_selection_malformed"
+            ) from None
 
     async def _commit(
         self,
@@ -222,7 +224,7 @@ class RecoveryOrphanAuthorityService:
         selections = await self._selection(peer, request)
         system_id = selections[0].system_id
         if any(selection.system_id != system_id for selection in selections):
-            raise AuthorityServiceError("journal_conflict")
+            raise AuthorityServiceError("journal_conflict", reason="orphan_system_mismatch")
 
         async def resolve_selected() -> AuthorityRecoveryOrphanDispositionResponseV1:
             selections = await self._selection(peer, request)
@@ -235,16 +237,20 @@ class RecoveryOrphanAuthorityService:
                 authority = OpaqueProviderRef(ref=selection.authority_instance)
                 observed = await self._observe(binding, authority)
                 if observed.binding != binding:
-                    raise AuthorityServiceError("journal_conflict")
+                    raise AuthorityServiceError("journal_conflict", reason="orphan_binding_changed")
                 done = (selection.disposition == "delete" and not observed.present) or (
                     selection.disposition == "adopt" and observed.present and observed.managed
                 )
                 if not done:
                     if observed.observed_digest != selection.observed_digest:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="orphan_digest_changed"
+                        )
                     observed = await self._disposition(selection, binding, authority)
                     if observed.binding != binding:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="orphan_binding_changed_after_disposition"
+                        )
                 if (selection.disposition == "delete" and observed.present) or (
                     selection.disposition == "adopt"
                     and (not observed.present or not observed.managed)

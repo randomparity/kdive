@@ -59,7 +59,7 @@ PROFILE: dict[str, Any] = {
 
 
 # Native gdbstub debug proofs against a real domain are proven on x86_64 and ppc64le (#2740; the
-# ppc64le single-step advance modes skip inside their own proof, #2942).
+# ppc64le single-step advance modes are refused with single_step_unsupported, ADR-0712).
 _GDBSTUB_PROVEN_ARCHES = frozenset({"x86_64", "ppc64le"})
 
 
@@ -148,11 +148,13 @@ async def seed_system(
     state: SystemState,
     *,
     profile: dict[str, Any] | None = None,
+    accel: str | None = None,
 ) -> str:
     """Seed a System with the shared profile (or an explicit override) and requested state.
 
     ``profile`` defaults to the fixed x86_64 ``PROFILE``; the live gdbstub debug tests pass a
-    host-resolved profile from ``live_profile`` instead (#2695).
+    host-resolved profile from ``live_profile`` instead (#2695). ``accel`` is the System's
+    persisted accelerator, which keys the debug capability table (ADR-0712).
     """
     async with pool.connection() as conn:
         system = await SYSTEMS.insert(
@@ -167,6 +169,7 @@ async def seed_system(
                 state=state,
                 provisioning_profile=copy.deepcopy(profile if profile is not None else PROFILE),
                 domain_name="kdive-x",
+                accel=accel,
             ),
         )
     return str(system.id)
@@ -250,9 +253,17 @@ async def seed_session(
     return str(session.id)
 
 
-async def seed_live_session(pool: AsyncConnectionPool, *, state: DebugSessionState) -> str:
+async def seed_live_session(
+    pool: AsyncConnectionPool,
+    *,
+    state: DebugSessionState,
+    profile: dict[str, Any] | None = None,
+    accel: str | None = None,
+) -> str:
     """Seed the full attachable graph and return its DebugSession identifier."""
     allocation_id = await granted_allocation(pool)
-    system_id = await seed_system(pool, allocation_id, SystemState.READY)
+    system_id = await seed_system(
+        pool, allocation_id, SystemState.READY, profile=profile, accel=accel
+    )
     run_id = await seed_run(pool, system_id)
     return await seed_session(pool, run_id, state)

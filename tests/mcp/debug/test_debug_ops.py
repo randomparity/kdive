@@ -41,6 +41,7 @@ from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.debug.session_support import (
     PROFILE_POLICY,
+    live_profile,
     request_context,
     seed_live_session,
 )
@@ -1431,5 +1432,157 @@ def test_load_module_symbols_stale_is_categorized(migrated_url: str) -> None:
             )
         assert resp.error_category == "debug_attach_failure"
         assert resp.data["code"] == "stale_module_address"
+
+    asyncio.run(_run())
+
+
+# --- capability refusals (ADR-0712) ----------------------------------------------------------
+
+
+def _stopping(verb: str, reason: str) -> dict[str, list[dict[str, object]]]:
+    return {
+        verb: [
+            {"type": "result", "message": "running", "payload": None},
+            {"type": "notify", "message": "stopped", "payload": {"reason": reason}},
+        ]
+    }
+
+
+@pytest.mark.parametrize("accel", ["kvm", None])
+@pytest.mark.parametrize("mode", ["into", "over", "instruction"])
+def test_capability_refuses_single_step_advance_on_ppc64le_kvm(
+    mode: str, accel: str | None, migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pseries gdbstub under KVM never stops after a single-step (#2739), so the refusal must
+    # come before any gdb/MI command: the guest stays halted and nothing is audited as done.
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(
+                pool, state=DebugSessionState.LIVE, profile=live_profile("ppc64le"), accel=accel
+            )
+            attach = _CountingAttach()
+            resp = await _call_registered_debug_tool(
+                pool,
+                _runtime(attach),
+                tool="debug.advance",
+                arguments={"session_id": session_id, "mode": mode, "timeout_sec": 1.0},
+                ctx=request_context(),
+                monkeypatch=monkeypatch,
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert resp.status == "error"
+        assert resp.error_category == "not_implemented"
+        assert resp.retryable is False
+        assert resp.data == {
+            "code": "single_step_unsupported",
+            "arch": "ppc64le",
+            "accel": accel,
+            "mode": mode,
+        }
+        assert resp.suggested_next_actions == [
+            "debug.advance",
+            "debug.set_breakpoint",
+            "debug.continue",
+        ]
+        assert attach.calls == 0
+        assert attach.controller.written == []
+        assert rows == []
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("arch", "mode", "verb", "reason"),
+    [
+        ("ppc64le", "out", "-exec-finish", "function-finished"),
+        ("x86_64", "into", "-exec-step", "end-stepping-range"),
+        ("x86_64", "instruction", "-exec-step-instruction", "end-stepping-range"),
+    ],
+)
+def test_capability_allows_out_and_x86_64_advance(
+    arch: str,
+    mode: str,
+    verb: str,
+    reason: str,
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(
+                pool, state=DebugSessionState.LIVE, profile=live_profile(arch), accel="kvm"
+            )
+            controller = _FakeMiController(_stopping(verb, reason))
+            resp = await _call_registered_debug_tool(
+                pool,
+                _runtime(_CountingAttach(controller)),
+                tool="debug.advance",
+                arguments={"session_id": session_id, "mode": mode, "timeout_sec": 1.0},
+                ctx=request_context(),
+                monkeypatch=monkeypatch,
+            )
+        assert resp.status == "stopped", resp
+        assert resp.data["reason"] == reason
+        assert controller.written == [verb]
+
+    asyncio.run(_run())
+
+
+def test_capability_refuses_watchpoint_on_ppc64le_kvm(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(
+                pool, state=DebugSessionState.LIVE, profile=live_profile("ppc64le"), accel="kvm"
+            )
+            attach = _CountingAttach()
+            resp = await _call_registered_debug_tool(
+                pool,
+                _runtime(attach),
+                tool="debug.set_watchpoint",
+                arguments={"session_id": session_id, "address": 0x1000, "byte_count": 8},
+                ctx=request_context(),
+                monkeypatch=monkeypatch,
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "not_implemented"
+        assert resp.data == {"code": "watchpoint_unsupported", "arch": "ppc64le", "accel": "kvm"}
+        assert resp.suggested_next_actions == ["debug.set_breakpoint", "debug.continue"]
+        assert attach.controller.written == []
+
+    asyncio.run(_run())
+
+
+def test_capability_allows_watchpoint_on_x86_64_kvm(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(
+                pool, state=DebugSessionState.LIVE, profile=live_profile("x86_64"), accel="kvm"
+            )
+            command = "-break-watch *(char(*)[8])0x1000"
+            controller = _FakeMiController(
+                {
+                    command: [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {"wpt": {"number": "2", "exp": "*(char(*)[8])0x1000"}},
+                        }
+                    ]
+                }
+            )
+            resp = await _call_registered_debug_tool(
+                pool,
+                _runtime(_CountingAttach(controller)),
+                tool="debug.set_watchpoint",
+                arguments={"session_id": session_id, "address": 0x1000, "byte_count": 8},
+                ctx=request_context(),
+                monkeypatch=monkeypatch,
+            )
+        assert resp.status == "watching", resp
+        assert controller.written == [command]
 
     asyncio.run(_run())

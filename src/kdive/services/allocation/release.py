@@ -41,6 +41,8 @@ class ReleaseOutcome:
     category: ErrorCategory | None = None
     current_status: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
+    detail: str | None = None
+    next_actions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +137,14 @@ async def release_with_backstops(
                 released=False,
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 current_status=latest.state.value if latest else None,
+            )
+        except ExternalBootDenied as exc:
+            return ReleaseOutcome(
+                released=False,
+                category=exc.category,
+                details=categorized_details(exc),
+                detail=str(exc),
+                next_actions=tuple(exc.next_actions),
             )
         except CategorizedError as exc:
             return ReleaseOutcome(
