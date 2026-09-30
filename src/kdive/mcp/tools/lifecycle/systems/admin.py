@@ -462,6 +462,17 @@ async def _teardown_locked(
                 suggested_next_actions=["allocations.release", "systems.get"],
                 data={"project": system.project},
             )
+        if system.state is SystemState.REPROVISIONING:
+            # The one non-terminal state with no teardown edge (#2928, ADR-0435). Refuse before
+            # the dedup replay so a failed `{uid}:teardown` row is not recycled into a job the
+            # handler would refuse again; re-running once the reprovision settles recycles it.
+            return ToolResponse.failure(
+                system_id,
+                ErrorCategory.CONFLICT,
+                detail="System is mid-reprovision; retry systems.teardown once it settles",
+                suggested_next_actions=["systems.get"],
+                data={"current_status": system.state.value},
+            )
         authority_binding = await _authority_system_binding(conn, uid)
         if authority_binding is not None:
             return await _enqueue_preactivation_authority_teardown(

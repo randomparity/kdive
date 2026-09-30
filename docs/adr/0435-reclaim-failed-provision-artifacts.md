@@ -129,3 +129,19 @@ reconciler lane selects `failed` Systems, so
 [ADR-0441](0441-investigation-scoped-uploaded-rootfs.md)'s orphan-lane exclusion and overlay-absence
 gate are unchanged. Design:
 [`2026-09-29-failed-teardown-rerun-design.md`](../workflow/specs/2026-09-29-failed-teardown-rerun-design.md).
+
+### Amendment (2026-09-29): teardown refuses a `reprovisioning` System (#2928)
+
+`reprovisioning` is the only non-terminal System state with no teardown edge, so a teardown job
+that met one raised `IllegalTransition`, which the worker classified as retryable
+`infrastructure_failure` and re-ran until attempts ran out. By operator decision the teardown path
+refuses instead of waiting. Under the System lock, `systems.teardown` returns a `conflict` carrying
+`current_status: reprovisioning` and enqueues nothing. It refuses before the dedup replay, so a
+failed `{uid}:teardown` row is not recycled while the reprovision runs. A teardown job that still
+meets a `reprovisioning` System, for example one queued before the reprovision began, fails once
+with a terminal `conflict`. Once the reprovision settles, the operator re-runs `systems.teardown`,
+which recycles that failed row under the #2929 amendment above. `repair_orphaned_systems` skips
+`reprovisioning` Systems and picks them up on a later pass. This matches
+`investigations.close(force=True)`, which already refuses while a bound System is mid-reprovision.
+Rejected: deferring the job without charging an attempt, which needs a queue primitive the worker
+does not have.

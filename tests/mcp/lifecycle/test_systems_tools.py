@@ -2926,6 +2926,145 @@ def test_reconciler_gc_tears_down_pre_ready_orphan(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+# --- teardown of a reprovisioning System (#2928) --------------------------------------------
+
+
+async def _teardown_job_row(pool: AsyncConnectionPool, system_id: str) -> tuple[Any, ...] | None:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, state, attempt, error_category FROM jobs WHERE dedup_key = %s",
+            (f"{system_id}:teardown",),
+        )
+        return await cur.fetchone()
+
+
+async def _system_state(pool: AsyncConnectionPool, system_id: str) -> str:
+    async with pool.connection() as conn:
+        system = await SYSTEMS.get(conn, UUID(system_id))
+    assert system is not None
+    return system.state.value
+
+
+async def _dead_letter(pool: AsyncConnectionPool, job_id: UUID, category: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE jobs SET state = 'failed', attempt = 1, error_category = %s WHERE id = %s",
+            (category, job_id),
+        )
+
+
+@pytest.mark.parametrize("prior", [None, "conflict", "infrastructure_failure"])
+def test_teardown_refuses_reprovisioning_system(migrated_url: str, prior: str | None) -> None:
+    """#2928: no teardown is enqueued, and no failed one recycled, while a reprovision runs."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.REPROVISIONING)
+            if prior is not None:
+                await _dead_letter(pool, (await _enqueue_teardown(pool, sys_id)).id, prior)
+            before = await _teardown_job_row(pool, sys_id)
+            resp = await _teardown(pool, ctx(Role.ADMIN), sys_id)
+            after = await _teardown_job_row(pool, sys_id)
+            state = await _system_state(pool, sys_id)
+        assert resp.status == "error"
+        assert resp.error_category == "conflict"
+        assert resp.data["current_status"] == "reprovisioning"
+        assert "systems.get" in resp.suggested_next_actions
+        assert after == before
+        assert state == "reprovisioning"
+
+    asyncio.run(_run())
+
+
+def test_teardown_handler_refuses_reprovisioning_system_terminally(migrated_url: str) -> None:
+    """#2928: a teardown that races a reprovision fails once as a terminal conflict.
+
+    ``reprovisioning -> tearing_down`` is not a legal edge; the handler must not attempt it and
+    raise ``IllegalTransition``, which the worker would classify as retryable
+    ``infrastructure_failure`` and re-run until attempts ran out.
+    """
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.REPROVISIONING)
+            job = await _enqueue_teardown(pool, sys_id)
+            prov = FakeProvisioning()
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as excinfo:
+                    await systems_handlers.teardown_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(provisioner=prov),
+                        artifact_store=INERT_OBJECT_STORE,
+                    )
+            state = await _system_state(pool, sys_id)
+        assert excinfo.value.category is ErrorCategory.CONFLICT
+        assert excinfo.value.terminal is True
+        assert excinfo.value.details["current_status"] == "reprovisioning"
+        assert state == "reprovisioning"
+        assert prov.torn_down == []
+
+    asyncio.run(_run())
+
+
+def test_reconciler_orphan_lane_skips_reprovisioning_system(migrated_url: str) -> None:
+    """#2928: the orphan lane waits for a reprovision to settle instead of queueing a teardown."""
+    from kdive.reconciler.loop import _repair_orphaned_systems
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.REPROVISIONING)
+            async with pool.connection() as conn:
+                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
+                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASED)
+                skipped = await _repair_orphaned_systems(conn)
+                assert await _teardown_job_row(pool, sys_id) is None
+                await SYSTEMS.update_state(conn, UUID(sys_id), SystemState.READY)
+                enqueued = await _repair_orphaned_systems(conn)
+        assert skipped == 0
+        assert enqueued == 1
+
+    asyncio.run(_run())
+
+
+def test_teardown_rerun_after_reprovision_settles_recycles_refused_job(
+    migrated_url: str,
+) -> None:
+    """#2928: the operator's re-run recycles the conflict-failed row (#2929) and tears down."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.REPROVISIONING)
+            raced = await _enqueue_teardown(pool, sys_id)
+            prov = FakeProvisioning()
+            resolver = provider_resolver(provisioner=prov)
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError):
+                    await systems_handlers.teardown_handler(
+                        conn, raced, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                    )
+                await _dead_letter(pool, raced.id, "conflict")
+                await SYSTEMS.update_state(conn, UUID(sys_id), SystemState.READY)
+            resp = await _teardown(pool, ctx(Role.ADMIN), sys_id)
+            assert resp.status == "queued", resp.model_dump()
+            assert resp.object_id == str(raced.id)
+            async with pool.connection() as conn:
+                job = await queue.get_by_dedup_key(conn, f"{sys_id}:teardown")
+                assert job is not None
+                await systems_handlers.teardown_handler(
+                    conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
+            state = await _system_state(pool, sys_id)
+        assert state == "torn_down"
+        assert prov.torn_down == [f"kdive-{sys_id}"]
+
+    asyncio.run(_run())
+
+
 # --- M1.4 shape-sized provisioning (#161): size flows from the snapshot into the profile ----
 
 
