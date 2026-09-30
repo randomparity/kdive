@@ -141,7 +141,8 @@ def test_single_attempt_failure_settles_without_the_window(
 
 _WINDOWED = [
     pytest.param(JobState.CANCELED.value, None, 1, _INCOMPLETE, id="canceled"),
-    pytest.param(JobState.FAILED.value, _LEASE_EXPIRED, 3, _INCOMPLETE, id="lease-expired"),
+    # attempt 1 (a `max_attempts = 1` job), so only the `lease_expired` clause can hold it.
+    pytest.param(JobState.FAILED.value, _LEASE_EXPIRED, 1, _INCOMPLETE, id="lease-expired"),
     pytest.param(JobState.FAILED.value, _INFRA, 3, None, id="reclaimed-attempt"),
 ]
 
