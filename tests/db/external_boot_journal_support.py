@@ -252,7 +252,13 @@ def _ready_teardown_case(migrated_url: str, suffix: str) -> _AuthorityCase:
 
 
 def _make_current(
-    conn: psycopg.Connection, case: _AuthorityCase, authority: Any, proof: Any, sequence: int
+    conn: psycopg.Connection,
+    case: _AuthorityCase,
+    authority: Any,
+    proof: Any,
+    sequence: int,
+    *,
+    category: str = "absent",
 ) -> str:
     """Acknowledge ``authority`` and point the head at its terminal teardown record."""
     digest = "sha256:" + f"{sequence:x}" * 64
@@ -296,7 +302,7 @@ def _make_current(
             Jsonb(
                 {
                     "observation": {
-                        "category": "absent",
+                        "category": category,
                         "composite_state": teardown_proof_digest(proof),
                     }
                 }
