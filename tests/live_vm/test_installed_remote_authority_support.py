@@ -280,3 +280,15 @@ def test_bounded_command_timeout_terminates_and_reaps_the_process_group(
     parent, child = (int(value) for value in pid_file.read_text(encoding="utf-8").split())
     _wait_for_process_exit(parent)
     _wait_for_process_exit(child)
+
+
+def test_terminate_process_group_reaps_a_zombie_only_group() -> None:
+    process = subprocess.Popen(
+        (sys.executable, "-c", "pass"),
+        start_new_session=True,
+    )
+    os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+
+    carrier._terminate_process_group(process)
+
+    assert process.returncode is not None
