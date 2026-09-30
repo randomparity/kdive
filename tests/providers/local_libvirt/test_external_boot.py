@@ -25,6 +25,7 @@ from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
     ProviderRecoveryRefusal,
+    SystemTeardownSupersededError,
 )
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
@@ -38,6 +39,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalObservedState,
     LocalPreStopIntentV1,
     LocalRecoveryMetadataV1,
+    LocalSystemTeardownAnchorV1,
     LocalSystemTeardownIntentV1,
     LocalSystemTeardownRecordV1,
     ModuleLayout,
@@ -452,7 +454,61 @@ def test_system_teardown_observation_is_repeatable_over_a_partial_predecessor(
     assert set(session.actions) <= {"inspect", "close"}
 
 
-def test_system_teardown_observation_does_not_adopt_a_successor_request(tmp_path: Path) -> None:
+def _teardown_anchor(intent: LocalSystemTeardownIntentV1) -> LocalSystemTeardownAnchorV1:
+    return LocalSystemTeardownAnchorV1.model_validate(
+        intent.model_dump(exclude={"schema_", "reservation"})
+    )
+
+
+def test_system_teardown_observation_of_a_generation_that_never_began_is_anchor_owned(
+    tmp_path: Path,
+) -> None:
+    """#2921: an earlier generation's completed record is neither adopted nor credited."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    authority = OpaqueProviderRef(ref="authority/current")
+    assert io.teardown_system(_teardown_intent(), authority).complete
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    session.actions.clear()
+    anchor = _teardown_anchor(_teardown_intent(generation=8))
+
+    observed = io.observe_system_teardown(anchor, OpaqueProviderRef(ref="authority/successor"))
+
+    assert observed.intent_identity == anchor.identity
+    assert observed.reservation is None
+    assert observed.completed_at is None
+    assert not observed.complete
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+    assert set(session.actions) <= {"inspect", "close"}
+
+
+def test_system_teardown_observation_under_a_successor_record_is_superseded(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    with RecoveryMetadataStore(root) as store:
+        store.begin_system_teardown(_teardown_intent(), session.inspect())
+        store.begin_system_teardown(_teardown_intent(generation=8), session.inspect())
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+
+    with pytest.raises(SystemTeardownSupersededError):
+        io.observe_system_teardown(
+            _teardown_anchor(_teardown_intent()), OpaqueProviderRef(ref="authority/current")
+        )
+
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+    assert set(session.actions) <= {"inspect", "close"}
+
+
+@pytest.mark.parametrize("generation", [6, 7, 8])
+def test_system_teardown_observation_refuses_another_subjects_record_at_any_generation(
+    tmp_path: Path, generation: int
+) -> None:
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
     session = _SystemTeardownSession()
@@ -460,11 +516,17 @@ def test_system_teardown_observation_does_not_adopt_a_successor_request(tmp_path
     with RecoveryMetadataStore(root) as store:
         store.begin_system_teardown(_teardown_intent(), session.inspect())
     before = {path.name: path.read_bytes() for path in root.iterdir()}
+    foreign = _teardown_intent(generation=generation, plan_identity="sha256:" + "d" * 64)
+    same_generation = _teardown_intent().model_copy(update={"attempt_id": UUID(int=99)})
+    other_activation = _teardown_intent(generation=generation).model_copy(
+        update={"binding": _BINDING.model_copy(update={"activation_id": str(UUID(int=77))})}
+    )
 
-    with pytest.raises(ValueError, match="conflicts"):
-        io.observe_system_teardown(
-            _teardown_intent(generation=8), OpaqueProviderRef(ref="authority/successor")
-        )
+    for intent in (foreign, same_generation, other_activation):
+        with pytest.raises(ValueError, match="conflicts|owner-bound"):
+            io.observe_system_teardown(
+                _teardown_anchor(intent), OpaqueProviderRef(ref="authority/current")
+            )
 
     assert {path.name: path.read_bytes() for path in root.iterdir()} == before
     assert "destroy" not in session.actions
