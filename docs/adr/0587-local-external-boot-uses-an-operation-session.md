@@ -60,6 +60,15 @@ again. Failure to close
 one resource does not skip later cleanup; the original operation failure remains primary and any
 close error is reported after pin release.
 
+### Amendment (2026-09-29): the artifact root opens on first use (#2926)
+
+This amends the Decision's claim that construction "opens an injected owner-bound artifact-root
+directory descriptor". [ADR-0710](0710-local-external-boot-session-opens-its-artifact-root-on-first-use.md)
+supersedes that one claim: construction retains the pinned ownership snapshot and opens the
+artifact root on the first artifact use, so read-only session operations create no activation
+storage. Every other clause here, including the reverse-order close, is unchanged; close releases
+the artifact-root descriptor only when it was opened.
+
 ## Consequences
 
 Provider-local orchestration can keep all privileged observations and mutations inside one
