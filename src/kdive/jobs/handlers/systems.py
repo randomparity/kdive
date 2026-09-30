@@ -709,7 +709,10 @@ async def teardown_handler(
     A terminal System (``torn_down`` or ``failed``) takes no state transition: its provider and
     core reclaim re-run idempotently and it keeps its state, so a teardown queued behind a
     provision that failed reclaims the leftovers instead of attempting the illegal
-    ``failed -> tearing_down`` move (ADR-0435 amendment, #2908).
+    ``failed -> tearing_down`` move (ADR-0435 amendment, #2908). A ``reprovisioning`` System has
+    no teardown edge either, so a teardown that races a reprovision fails once as a terminal
+    ``conflict`` rather than burning attempts; ``systems.teardown`` re-runs it after the
+    reprovision settles (#2928).
     """
     system_id = UUID(load_payload(job, TeardownPayload).system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
@@ -727,6 +730,14 @@ async def teardown_handler(
                     "activation_id": str(activation.id),
                     "activation_state": activation.state.value,
                 },
+                terminal=True,
+            )
+        if system.state is SystemState.REPROVISIONING:
+            raise CategorizedError(
+                "teardown refused: the System is mid-reprovision and has no teardown transition; "
+                "re-run systems.teardown once it is ready or failed",
+                category=ErrorCategory.CONFLICT,
+                details={"current_status": system.state.value},
                 terminal=True,
             )
         domain_name = system.domain_name or domain_name_for(system_id)
