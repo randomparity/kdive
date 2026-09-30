@@ -79,8 +79,9 @@ System becomes `failed`; its disk may be indeterminate, partly rebuilt from the 
 profile. The category is non-retryable. Other failed reprovisions can retain their
 original job category.
 
-The reconciler waits up to 15 minutes after a reprovision job was canceled or lost its
-worker lease before it settles the System, because the job's handler can still be running.
+The reconciler waits at least 15 minutes after a reprovision job was canceled, lost its
+worker lease, or failed on a retried attempt before it settles the System, because the
+job's handler can still be running.
 One known cause is `systems.reprovision` with a profile the System already applied earlier:
 that call replays the earlier job instead of running a new one, and the System settles to
 `failed` although its guest may be healthy.
