@@ -40,9 +40,9 @@ daemon. Three gaps allow it:
    it directly, keeps its behavior.
 3. **Public recycle.** `_enqueue_authority_teardown` treats a prior job with neither
    `external_boot_authority_v1` nor `authority_system_v1` in its payload as *ordinary*. An
-   ordinary prior in state `failed` or `canceled` is replaced by the authority-marked teardown
-   with recycle policy `TERMINAL_OR_CANCELED`, entered only for those two states. An ordinary
-   prior in any other state keeps the existing conflict.
+   ordinary prior in state `failed`, or `canceled` before any worker claimed it, is replaced by
+   the authority-marked teardown with recycle policy `TERMINAL_OR_CANCELED`, entered only for
+   those two states. An ordinary prior in any other state keeps the existing conflict.
 4. **No change** to `enqueue_control_teardown` or the reconciler lanes.
 
 ## Failure model

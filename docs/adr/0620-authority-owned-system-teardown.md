@@ -177,13 +177,13 @@ end for an allocation whose System the authority teardown cannot take (a pre-fix
 System, or an unresolved authority route), and a platform operator outside the project cannot
 clear it, because `systems.teardown` needs the project `admin` role.
 
-The public `systems.teardown` replaces an ordinary `{system}:teardown` job in state `failed` or
-`canceled` with the authority-marked teardown (recycle policy `TERMINAL_OR_CANCELED`, entered
-only for those two states). An ordinary job in any other state still returns
-`ordinary_teardown_fenced_by_external_boot`. After this fence an ordinary job for such a System
-makes no provider call, so replacing it skips no mutation. The recycle keeps the job's
-`authorizing` value, so the authority commit's audit row names the principal that enqueued the
-refused job, such as the reconciler.
+The public `systems.teardown` replaces an ordinary `{system}:teardown` job in state `failed`, or
+`canceled` before any worker claimed it, with the authority-marked teardown (recycle policy
+`TERMINAL_OR_CANCELED`, entered only for those two states). An ordinary job in any other state
+still returns `ordinary_teardown_fenced_by_external_boot`. After this fence an ordinary job for
+such a System makes no provider call, so replacing it skips no mutation. The recycle keeps the
+job's `authorizing` value, so the authority commit's audit row names the principal that enqueued
+the refused job, such as the reconciler.
 
 Producers that enqueue through `enqueue_control_teardown` (the orphaned-System lane,
 investigation force-close, break-glass teardown) still enqueue an unmarked job for such a

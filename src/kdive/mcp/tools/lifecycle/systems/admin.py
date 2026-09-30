@@ -583,12 +583,19 @@ async def _key_names_job(
 
 
 def _is_settled_ordinary_teardown(job: Job | None) -> bool:
-    """Whether ``job`` is an unmarked teardown that ended failed or canceled."""
+    """Whether ``job`` is an unmarked teardown no worker attempt can still be running.
+
+    A canceled row qualifies only if no worker ever claimed it: `jobs.cancel` is cooperative, and
+    a recycled row restarts at attempt 1, which a still-running canceled attempt would match.
+    """
     return (
         job is not None
         and _AUTHORITY_MARKER not in job.payload
         and "authority_system_v1" not in job.payload
-        and job.state in {JobState.FAILED, JobState.CANCELED}
+        and (
+            job.state is JobState.FAILED
+            or (job.state is JobState.CANCELED and job.worker_id is None)
+        )
     )
 
 

@@ -1731,9 +1731,12 @@ def test_teardown_replays_live_or_settled_ordinary_job(migrated_url: str, prior:
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("prior", ["failed", "canceled"])
+@pytest.mark.parametrize(
+    ("prior", "worker", "replaced"),
+    [("failed", None, True), ("canceled", None, True), ("canceled", "worker-live", False)],
+)
 def test_teardown_replaces_failed_ordinary_job_for_external_boot_history(
-    migrated_url: str, prior: str
+    migrated_url: str, prior: str, worker: str | None, replaced: bool
 ) -> None:
     """#2966: the worker refuses an ordinary job for history, so the public route replaces it."""
 
@@ -1742,7 +1745,10 @@ def test_teardown_replaces_failed_ordinary_job_for_external_boot_history(
             system_id, job_id = await _ordinary_teardown_job(pool, SystemState.READY)
             run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
             async with pool.connection() as conn:
-                await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (prior, job_id))
+                await conn.execute(
+                    "UPDATE jobs SET state = %s, worker_id = %s WHERE id = %s",
+                    (prior, worker, job_id),
+                )
                 seeded = await seed_activation(
                     conn,
                     state=ExternalBootActivationState.RECOVERED,
@@ -1761,6 +1767,11 @@ def test_teardown_replaces_failed_ordinary_job_for_external_boot_history(
             async with pool.connection() as conn:
                 after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
 
+        if not replaced:
+            # A claimed canceled attempt may still be running, so it keeps the conflict.
+            assert response.data["reason"] == "ordinary_teardown_fenced_by_external_boot"
+            assert after is not None and after[0] == prior
+            return
         assert response.status == "queued", response.model_dump()
         assert response.object_id == job_id
         assert after is not None and after[0] == "queued"
