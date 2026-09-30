@@ -33,6 +33,7 @@ from pydantic import ValidationError
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    _OWNED_TEMPORARY_NAMES,
     _PROJECTION_NAME,
     LocalRecoveryMetadataV1,
     TargetProjectionV1,
@@ -432,7 +433,7 @@ class LocalPayloadCleanup:
             if projection_fd is not None:
                 try:
                     self._require_owned_projection(projection_fd, parts[4], ownership, binding)
-                    for name in (*PAYLOAD_NAMES, _PROJECTION_NAME):
+                    for name in (*PAYLOAD_NAMES, *sorted(_OWNED_TEMPORARY_NAMES), _PROJECTION_NAME):
                         with suppress(FileNotFoundError):
                             os.unlink(name, dir_fd=projection_fd)
                     os.fsync(projection_fd)
@@ -458,16 +459,18 @@ class LocalPayloadCleanup:
         """Refuse a digest directory holding anything but this activation's own files.
 
         Payloads live beside the projection (`<activation>/<digest>/<name>`, as
-        `open_projection_artifact` reads them). Every entry must be the projection or a payload
-        name, and a payload must be a regular file, not a symlink, so a retry after any
+        `open_projection_artifact` reads them). Every entry must be the projection, a payload
+        name, or a temporary an interrupted materialization left; a payload must be a regular
+        file, not a symlink, and a temporary a private regular file, so a retry after any
         partial removal converges while foreign state is quarantined (ADR-0600/0584).
         """
         entries = set(os.listdir(projection_fd))
-        if not entries <= {*PAYLOAD_NAMES, _PROJECTION_NAME} or any(
-            not stat.S_ISREG(os.stat(name, dir_fd=projection_fd, follow_symlinks=False).st_mode)
-            for name in entries & set(PAYLOAD_NAMES)
-        ):
+        if not entries <= {*PAYLOAD_NAMES, *_OWNED_TEMPORARY_NAMES, _PROJECTION_NAME}:
             raise ValueError("target projection contains unexpected residue")
+        for name in entries - {_PROJECTION_NAME}:
+            mode = os.stat(name, dir_fd=projection_fd, follow_symlinks=False).st_mode
+            if not stat.S_ISREG(mode) or (name in _OWNED_TEMPORARY_NAMES and mode & 0o077):
+                raise ValueError("target projection contains unexpected residue")
         if _PROJECTION_NAME not in entries:
             return
         raw_projection = _read_private_file(projection_fd, _PROJECTION_NAME)
