@@ -35,7 +35,10 @@ gets `is_error` with raw validation text and no envelope. The fault is the serve
    `src/kdive/mcp/tools/catalog/artifacts/reads.py` (`_artifact_list_items`) and
    `src/kdive/mcp/tools/lifecycle/allocations/view.py` (the `allocations.list` row loop) catch
    `(ValueError, InvalidEnvelopeError)`. An AST scan of `src/` for `try` bodies building a
-   `ToolResponse` under `except ValueError|ValidationError|Exception` found no other site.
+   `ToolResponse` under `except ValueError|ValidationError|Exception` found no other migrating
+   site. `accounting.estimate` (`src/kdive/mcp/tools/accounting/estimate.py`) catches
+   `ValueError` around a helper that builds its envelope and reports `configuration_error`; it
+   needs no change, and an envelope fault there now becomes `infrastructure_failure`.
 5. `src/kdive/mcp/resources/_content/response-envelope.md` gains one sentence: an envelope the
    server fails to build is reported as `infrastructure_failure` with a fixed detail.
 
@@ -74,7 +77,7 @@ kdive adds no second log line.
   `model_validate`, and `denied` guard failures raise `InvalidEnvelopeError`; existing
   `pytest.raises(ValueError, ...)` cases migrate.
 - `tests/mcp/catalog/test_artifact_list_isolation.py` and
-  `tests/mcp/lifecycle/test_allocation_list_isolation.py`: one row whose envelope raises
+  `tests/mcp/lifecycle/test_allocations_tools.py::test_list_allocations_isolates_a_row_whose_envelope_is_invalid`: one row whose envelope raises
   `InvalidEnvelopeError` is isolated and the other rows are returned.
 - `tests/mcp/middleware/test_invalid_envelope.py`: in-process FastMCP app with both middlewares
   and a real `fastmcp.Client`; asserts the envelope, the log records (caplog), and the argument

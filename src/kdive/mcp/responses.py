@@ -174,7 +174,7 @@ class ToolResponse(BaseModel):
         try:
             model = handler(data)
         except ValidationError as exc:
-            raise InvalidEnvelopeError(str(exc)) from exc
+            raise InvalidEnvelopeError(f"invalid ToolResponse: {exc}") from exc
         is_failure = model.status in _FAILURE_STATUSES
         if is_failure and model.error_category is None:
             raise InvalidEnvelopeError(f"status {model.status!r} requires an error_category")

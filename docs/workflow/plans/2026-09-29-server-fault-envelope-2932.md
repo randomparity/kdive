@@ -32,7 +32,7 @@ module, one registration line, one doc sentence, and the tests in Tasks 1–2.
 | `src/kdive/mcp/tools/catalog/artifacts/reads.py` | modify | per-row isolator also catches `InvalidEnvelopeError` |
 | `src/kdive/mcp/tools/lifecycle/allocations/view.py` | modify | per-row isolator also catches `InvalidEnvelopeError` |
 | `tests/mcp/catalog/test_artifact_list_isolation.py` | create | artifacts row-isolation test |
-| `tests/mcp/lifecycle/test_allocation_list_isolation.py` | create | allocations row-isolation test |
+| `tests/mcp/lifecycle/test_allocations_tools.py` | modify | allocations row-isolation test |
 | `src/kdive/mcp/resources/_content/response-envelope.md` | modify | one sentence on the server-fault envelope |
 | `tests/mcp/core/test_responses.py` | modify | envelope-validation tests |
 | `tests/mcp/middleware/test_invalid_envelope.py` | create | end-to-end middleware + log tests |
@@ -58,7 +58,7 @@ Verification:
   `tests/mcp/catalog/test_artifact_list_isolation.py` (monkeypatch
   `kdive.mcp.tools.catalog.artifacts.reads.ToolResponse.success` to raise
   `InvalidEnvelopeError` for one artifact id; assert `_artifact_list_items` returns the other)
-  and `tests/mcp/lifecycle/test_allocation_list_isolation.py` (drive the row loop with a
+  and `tests/mcp/lifecycle/test_allocations_tools.py::test_list_allocations_isolates_a_row_whose_envelope_is_invalid` (drive the row loop with a
   monkeypatched `envelope_for_allocation` raising `InvalidEnvelopeError` for one row; assert that
   row becomes an `infrastructure_failure` item and the other row is returned); red:
   `InvalidEnvelopeError` escapes; green: `just test-verbose <both files>`. Read the existing
