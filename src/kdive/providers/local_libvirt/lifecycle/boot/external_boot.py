@@ -2302,13 +2302,17 @@ class _RealLocalExternalBootOperation:
         target_identity: str,
         authority: OpaqueProviderRef,
     ) -> PartialAbortResult:
-        return self._abort_preparation(
+        result = self._abort_preparation(
             binding,
             plan_identity,
             authority,
             expected_identities=(source_identity, target_identity),
             restore_power=True,
         )
+        if result in {"removed", "absent"}:
+            with RecoveryMetadataStore(self._recovery_root) as store:
+                store.prune_empty_activation_parents(binding)
+        return result
 
     def abort_system_teardown_preparation(
         self,
@@ -2942,8 +2946,9 @@ class LocalLibvirtExternalBoot:
         if proof.binding != recovery.binding or proof.point_digest != self.point_digest(recovery):
             raise ValueError("external-boot cleanup proof does not match recovery point")
         # No operation session, as in ``finalize_cleanup_tombstone``: this runs after
-        # ``cleanup`` pruned the activation's artifact parents, and a session open re-creates
-        # them through the artifact root, leaving exact recovery absence unprovable (#2898).
+        # ``cleanup`` pruned the activation's artifact parents, and a session open used to
+        # re-create them, leaving exact recovery absence unprovable (#2898). Since ADR-0710 a
+        # session creates them only on artifact use; the session-free shape stays for now.
         # ``authority`` is therefore unused; the store re-reads the exact tombstone. The
         # unpinned-write residual is the same as finalization's; the #2898 design's Scope
         # (criterion 8) records it.
@@ -3829,7 +3834,7 @@ class RecoveryMetadataStore:
         try:
             _open_private_directory(self._root_fd, name)
         except FileNotFoundError:
-            # A session opened after cleanup re-creates the parents it pruned (#2898).
+            # A session opened before ADR-0710 re-created the parents cleanup pruned (#2898).
             self.prune_empty_activation_parents(recovery.binding)
             return
         raise ValueError("cleanup tombstone remained after finalization")
@@ -4157,9 +4162,10 @@ class RecoveryMetadataStore:
     def prune_empty_activation_parents(self, binding: ExternalBootActivationBinding) -> None:
         """Remove the activation's `<system>/<run>/<activation>` directories only while empty.
 
-        An activation-scoped session open creates them, so a session opened after cleanup
-        leaves them behind with nothing to own, and exact recovery absence stays false for
-        good (#2898). Anything inside stops the walk: residue stays for quarantine.
+        A session opened before ADR-0710 created them on open, and a materialization
+        interrupted between its first artifact use and its digest `mkdir` leaves them; either
+        way they own nothing, yet exact recovery absence stays false while they exist (#2898,
+        #2926). Anything inside stops the walk: residue stays for quarantine.
         """
         chain = (binding.system_id, binding.run_id, binding.activation_id)
         descriptors = [self._root_fd]

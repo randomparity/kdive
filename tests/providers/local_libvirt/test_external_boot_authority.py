@@ -11,6 +11,8 @@ import ast
 import asyncio
 import hashlib
 import inspect
+import os
+import stat
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,18 +56,27 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     CleanupQuarantineReceiptV1,
     CleanupTombstoneV1,
     FinalizeCleanupProof,
+    GuestRecoveryWriter,
     LocalExternalBootIO,
+    LocalExternalBootMaterializer,
     LocalLibvirtExternalBoot,
     LocalObservedState,
+    LocalPartialAbortReceiptV1,
     LocalRecoveryMetadataV1,
     LocalSystemTeardownAnchorV1,
     LocalSystemTeardownIntentV1,
+    RealLocalExternalBootIO,
     RecoveryPhase,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    LocalExternalBootSessionFactory,
     LocalExternalBootTimingConfigurationError,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalOperationLeaseScope
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    LocalArtifactRoot,
+    LocalOperationLane,
+    LocalOperationLeaseScope,
+)
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
@@ -83,7 +94,10 @@ from kdive.providers.ports.external_boot import (
 # The authority service's own repository double. Reused rather than reimplemented here:
 # a second implementation of `AuthorityRepository` in this package could drift from the
 # contract the service is actually tested against, which is the thing these tests rely on.
+from kdive.providers.shared.runtime_paths import overlay_path
 from tests.providers.external_boot_authority.service_support import _Repository
+from tests.providers.local_libvirt.lifecycle.boot.session_support import Conn, Domain, Guest
+from tests.providers.local_libvirt.lifecycle.boot.session_support import _xml as _session_xml
 from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
 
 pytestmark = pytest.mark.anyio
@@ -2043,3 +2057,106 @@ async def test_a_cleanup_commit_finishes_an_interrupted_tombstone_without_reclea
 
     assert "cleanup" not in io.actions
     assert io.actions.count("finalize") == 1
+
+
+def _real_teardown_adapter(root: Path) -> LocalExternalBootAuthorityAdapter:
+    """The production adapter stack over a real recovery root; only libvirt is faked."""
+    events: list[str] = []
+    domain = Domain(events, _session_xml(overlay=overlay_path(SYSTEM_ID), system_id=SYSTEM_ID))
+    factory = LocalExternalBootSessionFactory(
+        connect=lambda: Conn(events, domain),
+        pin_lease=LocalOperationLane().pin,
+        open_artifact_root=LocalArtifactRoot(root).open,
+        open_guest=lambda: Guest(events),
+        worker_pid=4242,
+        open_overlay=lambda _path: os.open(os.devnull, os.O_RDONLY),
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=os.close,
+    )
+    scope = LocalOperationLeaseScope()
+    io = RealLocalExternalBootIO(
+        root,
+        cast(LocalExternalBootMaterializer, object()),
+        cast(GuestRecoveryWriter, object()),
+        scope.resolve,
+        factory,
+        32 * 1024**3,
+    )
+    return LocalExternalBootAuthorityAdapter(LocalLibvirtExternalBoot(io), scope)
+
+
+def _private_directory(path: Path) -> Path:
+    path.mkdir(mode=0o700)
+    path.chmod(0o700)
+    return path
+
+
+@pytest.mark.parametrize("start", ["nothing", "abort-receipt", "empty-complete", "empty-parents"])
+async def test_non_system_partial_abort_absence_holds_through_commit_and_observation(
+    tmp_path: Path, start: str
+) -> None:
+    """#2926: proving absence must not re-create the activation storage it checks for.
+
+    Every activation port opens a session; a session that created `<system>/<run>/<activation>`
+    made exact absence false, so this TEARDOWN ended in `provider_conflict`.
+    """
+    root = _private_directory(tmp_path / "recovery")
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+    recovery_name = f"{SYSTEM_ID}.{ACTIVATION_ID}"
+    if start == "abort-receipt":
+        receipt = LocalPartialAbortReceiptV1(
+            binding=_BINDING,
+            plan_identity=PLAN_IDENTITY,
+            authority=adapter_module._authority_ref(request),
+        )
+        path = root / f".{recovery_name}.abort.json"
+        path.write_bytes(receipt.model_dump_json(by_alias=True).encode())
+        path.chmod(0o600)
+    elif start == "empty-complete":
+        # #2927: finalization interrupted before its rmdir leaves this.
+        _private_directory(root / recovery_name)
+    elif start == "empty-parents":
+        # Left by a session opened before #2926.
+        for part in (
+            str(SYSTEM_ID),
+            f"{SYSTEM_ID}/{RUN_ID}",
+            f"{SYSTEM_ID}/{RUN_ID}/{ACTIVATION_ID}",
+        ):
+            _private_directory(root / part)
+    adapter = _real_teardown_adapter(root)
+
+    committed = await adapter.commit(request, _context(AuthorityOperation.TEARDOWN))
+    pending = await adapter.observe_recovery(request, _recovery_context())
+    fresh = _real_teardown_adapter(root)
+    observed = await fresh.observe_recovery(request, _recovery_context())
+
+    assert [committed.category, pending.category, observed.category] == ["absent"] * 3
+    assert list(root.iterdir()) == []
+    adapter.close()
+    fresh.close()
+
+
+async def test_non_system_partial_abort_keeps_activation_residue_quarantined(
+    tmp_path: Path,
+) -> None:
+    root = _private_directory(tmp_path / "recovery")
+    activation = root
+    for part in (SYSTEM_ID, RUN_ID, ACTIVATION_ID):
+        activation = _private_directory(activation / str(part))
+    (activation / "kernel").write_bytes(b"unauthenticated")
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+    adapter = _real_teardown_adapter(root)
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.commit(request, _context(AuthorityOperation.TEARDOWN))
+
+    assert (activation / "kernel").read_bytes() == b"unauthenticated"
+    adapter.close()

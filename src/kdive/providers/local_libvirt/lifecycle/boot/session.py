@@ -834,7 +834,7 @@ class _ConcreteSession:
         pin: LocalExternalBootOperationPin,
         connection: _Connection,
         domain: _Domain,
-        artifact_fd: int,
+        open_artifact_root: Callable[[], int],
         overlay: _BoundOverlay,
         open_guest: OpenGuest,
         fstat_overlay: Callable[[int], tuple[int, int, int]],
@@ -861,7 +861,8 @@ class _ConcreteSession:
         self._pin: LocalExternalBootOperationPin | None = pin
         self._connection: _Connection | None = connection
         self._domain: _Domain | None = domain
-        self._artifact_fd: int | None = artifact_fd
+        self._open_artifact_root = open_artifact_root
+        self._artifact_fd: int | None = None
         self._overlay = overlay
         self._open_guest = open_guest
         self._fstat_overlay = fstat_overlay
@@ -905,18 +906,18 @@ class _ConcreteSession:
             or projection.activation_id != self._binding.activation_id
         ):
             raise ValueError("target projection does not match session ownership")
-        assert self._artifact_fd is not None
+        artifact_fd = self._artifact_root()
         digest_name = projection.digest.removeprefix("sha256:")
-        entries = os.listdir(self._artifact_fd)
+        entries = os.listdir(artifact_fd)
         if any(entry != digest_name for entry in entries):
             raise ValueError("activation already contains a different target projection")
         try:
-            os.mkdir(digest_name, mode=0o700, dir_fd=self._artifact_fd)
-            self._fsync_descriptor(self._artifact_fd)
+            os.mkdir(digest_name, mode=0o700, dir_fd=artifact_fd)
+            self._fsync_descriptor(artifact_fd)
         except FileExistsError:
             pass
         descriptor = self._open_relative(
-            self._artifact_fd,
+            artifact_fd,
             digest_name,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
             0,
@@ -945,9 +946,8 @@ class _ConcreteSession:
         reference = artifact
         owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
         parts = _artifact_ref_parts(reference, owner, self._binding.activation_id)
-        assert self._artifact_fd is not None
         descriptor = self._open_relative(
-            self._artifact_fd,
+            self._artifact_root(),
             parts[4],
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
             0,
@@ -976,8 +976,7 @@ class _ConcreteSession:
         ):
             raise ValueError("target projection does not match session ownership")
         self._require_open_domain()
-        assert self._artifact_fd is not None
-        activation = os.readlink(f"/proc/self/fd/{self._artifact_fd}")
+        activation = os.readlink(f"/proc/self/fd/{self._artifact_root()}")
         return os.path.join(activation, projection.digest.removeprefix("sha256:"), name)
 
     def boot_identity(self, xml: str) -> str:
@@ -1021,8 +1020,7 @@ class _ConcreteSession:
 
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int:
         self._require_open_domain()
-        assert self._artifact_fd is not None
-        return self._open_relative(self._artifact_fd, _relative_name(name), flags, mode)
+        return self._open_relative(self._artifact_root(), _relative_name(name), flags, mode)
 
     def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
         """Open one payload inside its owner-checked projection digest directory."""
@@ -1034,9 +1032,8 @@ class _ConcreteSession:
         self._require_open_domain()
         owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
         parts = _artifact_ref_parts(artifact, owner, self._binding.activation_id)
-        assert self._artifact_fd is not None
         directory = self._open_relative(
-            self._artifact_fd, parts[4], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, 0
+            self._artifact_root(), parts[4], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, 0
         )
         try:
             return self._open_relative(directory, parts[5], flags, 0)
@@ -1045,8 +1042,7 @@ class _ConcreteSession:
 
     def unlink_artifact(self, name: str) -> None:
         self._require_open_domain()
-        assert self._artifact_fd is not None
-        self._unlink_relative(self._artifact_fd, _relative_name(name))
+        self._unlink_relative(self._artifact_root(), _relative_name(name))
 
     def guest(self) -> _GuestContext:
         self._require_open_domain()
@@ -1091,10 +1087,21 @@ class _ConcreteSession:
 
     def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
         self._require_open_domain()
-        assert self._artifact_fd is not None
         if metadata.binding != self._binding:
             raise ValueError("cleanup metadata does not match session ownership")
-        self._cleanup_payloads(self._artifact_fd, metadata)
+        self._cleanup_payloads(self._artifact_root(), metadata)
+
+    def _artifact_root(self) -> int:
+        """Open the activation artifact root on first use, which creates it (ADR-0710).
+
+        Session open does not, so a session that never touches an artifact leaves no
+        `<system>/<run>/<activation>` behind to defeat exact recovery absence (#2926).
+        """
+        with self._lifecycle_lock:
+            self._require_open_domain()
+            if self._artifact_fd is None:
+                self._artifact_fd = self._open_artifact_root()
+            return self._artifact_fd
 
     def _start_domain(self) -> None:
         prior, self._readiness_window = self._readiness_window, None
@@ -1207,17 +1214,15 @@ class _ConcreteSession:
             self._fsync_descriptor(descriptor)
             closing, descriptor = descriptor, None
             self._close_transfer_descriptor(closing)
-            assert self._artifact_fd is not None
-            self._replace_relative(self._artifact_fd, temporary_name, final_name)
+            self._replace_relative(self._artifact_root(), temporary_name, final_name)
         except BaseException as exc:
             if descriptor is not None:
                 try:
                     self._close_transfer_descriptor(descriptor)
                 except Exception as close_error:
                     exc.add_note(f"cleanup failed: {close_error!r}")
-            assert self._artifact_fd is not None
             try:
-                self._unlink_relative(self._artifact_fd, temporary_name)
+                self._unlink_relative(self._artifact_root(), temporary_name)
             except FileNotFoundError:
                 pass
             except Exception as unlink_error:
@@ -1400,7 +1405,6 @@ class LocalExternalBootSessionFactory:
         connection: _Connection | None = None
         domain: _Domain | None = None
         overlay_fd: int | None = None
-        artifact_fd: int | None = None
         try:
             connection = self._connect()
             expected_name = domain_name_for(system_id)
@@ -1443,14 +1447,13 @@ class LocalExternalBootSessionFactory:
             if not stat.S_ISREG(mode):
                 raise ValueError("System overlay descriptor is not a regular file")
             overlay = _BoundOverlay(device, inode, expected_overlay, overlay_fd)
-            artifact_fd = self._open_artifact_root(facts)
             return _ConcreteSession(
                 system_id=system_id,
                 binding=binding,
                 pin=pin,
                 connection=connection,
                 domain=domain,
-                artifact_fd=artifact_fd,
+                open_artifact_root=lambda: self._open_artifact_root(facts),
                 overlay=overlay,
                 open_guest=self._open_guest,
                 fstat_overlay=self._fstat_overlay,
@@ -1477,7 +1480,6 @@ class LocalExternalBootSessionFactory:
         except BaseException as exc:
             errors: list[Exception] = []
             for closer in (
-                (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
                 (
                     lambda: (
                         self._close_overlay_descriptor(overlay_fd)
