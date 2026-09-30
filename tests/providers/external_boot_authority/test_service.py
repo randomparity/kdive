@@ -1819,6 +1819,7 @@ async def test_a_head_disagreeing_under_the_same_operation_identity_refuses_the_
         await service.execute_mutation(peer, _mutation(request))
 
     assert caught.value.category == "journal_conflict"
+    assert caught.value.reason == "head_unanchored_commit"
     assert adapter.commit_contexts == []
     assert not any(call.startswith("commit:") for call in adapter.calls)
 
@@ -1854,7 +1855,10 @@ class _FailingRetractJournal(FileAuthorityJournal):
     ("status", "category"), [("superseded", "superseded"), ("conflict", "journal_conflict")]
 )
 async def test_refused_anchor_retracts_its_record(
-    tmp_path: Path, status: Literal["superseded", "conflict"], category: str
+    tmp_path: Path,
+    status: Literal["superseded", "conflict"],
+    category: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     service, repository, adapter, peer, takeover = _service(tmp_path)
     await service.acknowledge_takeover(peer, takeover)
@@ -1863,9 +1867,14 @@ async def test_refused_anchor_retracts_its_record(
     anchored = lane.read_bytes()
     repository.advance_status = status
 
-    with pytest.raises(AuthorityServiceError, match=category):
+    with caplog.at_level("WARNING"), pytest.raises(AuthorityServiceError, match=category):
         await service.execute_mutation(peer, _mutation(takeover))
 
+    (rejected,) = [r for r in caplog.records if r.message == "authority request rejected"]
+    assert rejected.__dict__["category"] == category
+    assert rejected.__dict__["reason"] == ("checkpoint_refused" if status == "conflict" else None)
+    labels = (takeover.provider_kind, takeover.authority_instance, category)
+    assert set(service.metrics.rejections) == {labels}
     assert lane.read_bytes() == anchored
     assert adapter.calls == []
     assert [path.name.split(".")[1] for path in (tmp_path / "retracted").iterdir()] == [

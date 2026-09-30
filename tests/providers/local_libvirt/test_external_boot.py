@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import io
 import itertools
@@ -5803,11 +5804,9 @@ def test_partial_abort_receipt_rejects_foreign_request_after_last_owned_unlink(
     assert (root / partial_name).is_dir()
 
 
-def test_authenticated_partial_abort_removes_activation_artifacts_before_absence(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "recovery"
-    root.mkdir(mode=0o700)
+def _abortable_activation(
+    root: Path,
+) -> tuple[TargetProjectionV1, ExternalBootMaterialization, OpaqueProviderRef]:
     projection = _projection()
     with TargetProjectionStore(root) as projections:
         kernel = projections.publish(projection)
@@ -5840,10 +5839,110 @@ def test_authenticated_partial_abort_removes_activation_artifacts_before_absence
             _BINDING, projection.plan_identity, request.authority
         )
         assert not isinstance(partial, str) and partial.materialization is not None
+    return projection, materialization, request.authority
+
+
+def test_authenticated_partial_abort_removes_activation_artifacts_before_absence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    projection, materialization, authority = _abortable_activation(root)
+    with RecoveryMetadataStore(root) as store:
         store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
         assert not store.exact_recovery_absence(_BINDING)
-        store.remove_abortable_partial(_BINDING, projection.plan_identity, request.authority)
+        store.remove_abortable_partial(_BINDING, projection.plan_identity, authority)
         assert store.exact_recovery_absence(_BINDING)
+
+
+@pytest.mark.parametrize(
+    ("sibling", "parent_steps"),
+    [
+        (
+            Path(_BINDING.system_id) / _BINDING.run_id / str(UUID(int=0xA11)),
+            [
+                ("rmdir", _BINDING.activation_id, True),
+                ("fsync",),
+                ("rmdir", _BINDING.run_id, False),
+            ],
+        ),
+        (
+            Path(_BINDING.system_id) / str(UUID(int=0xB22)),
+            [
+                ("rmdir", _BINDING.activation_id, True),
+                ("fsync",),
+                ("rmdir", _BINDING.run_id, True),
+                ("fsync",),
+                ("rmdir", _BINDING.system_id, False),
+            ],
+        ),
+        (
+            Path(_BINDING.system_id) / _BINDING.run_id / _BINDING.activation_id / "residue",
+            [("rmdir", _BINDING.activation_id, False)],
+        ),
+    ],
+    ids=["activation-under-shared-run", "run-under-shared-system", "residue-in-activation"],
+)
+def test_partial_abort_leaves_a_shared_parent_holding_a_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sibling: Path,
+    parent_steps: list[tuple[object, ...]],
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    projection, materialization, authority = _abortable_activation(root)
+    (root / sibling).mkdir(mode=0o700)
+    (root / sibling / "kernel").write_bytes(b"sibling")
+    steps: list[tuple[object, ...]] = []
+    real_rmdir, real_fsync = os.rmdir, os.fsync
+
+    def tracking_rmdir(path: str, *, dir_fd: int) -> None:
+        try:
+            real_rmdir(path, dir_fd=dir_fd)
+        except OSError:
+            steps.append(("rmdir", path, False))
+            raise
+        steps.append(("rmdir", path, True))
+
+    def tracking_fsync(descriptor: int) -> None:
+        real_fsync(descriptor)
+        steps.append(("fsync",))
+
+    with RecoveryMetadataStore(root) as store:
+        monkeypatch.setattr(os, "rmdir", tracking_rmdir)
+        monkeypatch.setattr(os, "fsync", tracking_fsync)
+        store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
+        monkeypatch.undo()
+        # A parent is fsynced only after its child's rmdir succeeded, never after the stop.
+        first = next(
+            i for i, step in enumerate(steps) if step[:2] == ("rmdir", _BINDING.activation_id)
+        )
+        assert steps[first:] == parent_steps
+        store.remove_abortable_partial(_BINDING, projection.plan_identity, authority)
+        # Residue the activation does not own stays behind for quarantine (ADR-0710).
+        residue_in_activation = _BINDING.activation_id in sibling.parts
+        assert store.exact_recovery_absence(_BINDING) is not residue_in_activation
+    assert (root / sibling / "kernel").read_bytes() == b"sibling"
+
+
+def test_partial_abort_propagates_a_parent_rmdir_failure_other_than_not_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    projection, materialization, _ = _abortable_activation(root)
+    real_rmdir = os.rmdir
+
+    def refuse_run_rmdir(path: str, *, dir_fd: int) -> None:
+        if path == _BINDING.run_id:
+            raise PermissionError(errno.EACCES, "injected run rmdir refusal")
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "rmdir", refuse_run_rmdir)
+    with RecoveryMetadataStore(root) as store, pytest.raises(PermissionError, match="injected"):
+        store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
+    assert (root / _BINDING.system_id / _BINDING.run_id).is_dir()
 
 
 def _phase_authority(generation: int, attempt: int) -> OpaqueProviderRef:
