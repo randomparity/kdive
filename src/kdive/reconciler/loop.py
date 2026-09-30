@@ -157,6 +157,7 @@ _repair_leaked_mutation_obligations = system_repairs.repair_leaked_mutation_obli
 _repair_stalled_tearing_down_systems = system_repairs.repair_stalled_tearing_down_systems
 _repair_stalled_crashing_systems = system_repairs.repair_stalled_crashing_systems
 _repair_stalled_restoring_systems = system_repairs.repair_stalled_restoring_systems
+_repair_stalled_reprovisioning_systems = system_repairs.repair_stalled_reprovisioning_systems
 _repair_stalled_creating_snapshots = system_repairs.repair_stalled_creating_snapshots
 _sweep_expired_allocations = allocation_repairs.sweep_expired_allocations
 _sweep_console_rotation = console_rotation_repairs.sweep_console_rotation
@@ -624,6 +625,12 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     # job (ADR-0378): a stranded RESTORING System -> failed, a stranded creating snapshot -> failed.
     _RepairCatalogEntry(
         "stalled_restoring_systems", lambda _r, _c, _g: _repair_stalled_restoring_systems
+    ),
+    # Also after `abandoned_jobs` (#2980): a stranded REPROVISIONING System -> failed once no
+    # reprovision job can still write its disk.
+    _RepairCatalogEntry(
+        "stalled_reprovisioning_systems",
+        lambda _r, _c, _g: _repair_stalled_reprovisioning_systems,
     ),
     _RepairCatalogEntry(
         "stalled_creating_snapshots", lambda _r, _c, _g: _repair_stalled_creating_snapshots
