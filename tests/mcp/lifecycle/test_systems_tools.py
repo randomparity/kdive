@@ -1926,6 +1926,52 @@ def test_queued_ordinary_teardown_refuses_activation_created_before_claim(
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize(
+    "state", [ExternalBootActivationState.RECOVERED, ExternalBootActivationState.ABANDONED]
+)
+def test_ordinary_teardown_refuses_completed_external_boot_history(
+    migrated_url: str, state: ExternalBootActivationState
+) -> None:
+    """#2966: a clean release leaves the domain with the authority, so no ordinary teardown runs."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await seed_system(pool, alloc_id, SystemState.READY)
+            job = await _enqueue_teardown(pool, system_id)
+            run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                await seed_activation(
+                    conn,
+                    state=state,
+                    cleanup_complete=True,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+            provisioner = FakeProvisioning()
+            async with pool.connection() as conn:
+                with pytest.raises(
+                    CategorizedError, match="ordinary teardown is fenced by external-boot"
+                ) as raised:
+                    await systems_handlers.teardown_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(provisioner=provisioner),
+                        artifact_store=INERT_OBJECT_STORE,
+                    )
+            async with pool.connection() as conn:
+                system = await SYSTEMS.get(conn, UUID(system_id))
+
+        assert raised.value.category is ErrorCategory.CONFLICT
+        assert raised.value.terminal
+        assert raised.value.details["reason"] == "external_boot_teardown_not_supported"
+        assert raised.value.details["activation_state"] == state.value
+        assert system is not None and system.state is SystemState.READY
+        assert provisioner.torn_down == []
+
+    asyncio.run(_run())
+
+
 async def _open_teardown_obligation(
     pool: AsyncConnectionPool, system_id: str
 ) -> tuple[RemoteModuleAttemptObligationRepository, ModuleAttempt]:
