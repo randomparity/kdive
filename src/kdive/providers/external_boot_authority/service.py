@@ -1637,6 +1637,7 @@ class ExternalBootAuthorityService:
                                 for record in reversed(records)
                                 if record.phase is JournalPhase.TERMINAL
                                 and record.operation == request.operation
+                                and record.activation_id == request.activation_id
                                 and record.generation < request.generation
                             ),
                             None,
@@ -1683,6 +1684,7 @@ class ExternalBootAuthorityService:
                                 for record in reversed(records)
                                 if record.phase is JournalPhase.TERMINAL
                                 and record.operation == request.operation
+                                and record.activation_id == request.activation_id
                                 and record.generation < request.generation
                             ),
                             None,
