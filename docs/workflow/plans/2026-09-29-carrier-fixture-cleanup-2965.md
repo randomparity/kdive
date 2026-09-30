@@ -187,7 +187,7 @@ Steps:
        lines = result.stdout.strip().splitlines()
        try:
            created = json.loads(lines[-1])["created"]
-       except (IndexError, ValueError, KeyError, TypeError):
+       except IndexError, ValueError, KeyError, TypeError:
            created = None
        if not isinstance(created, list) or not all(isinstance(n, str) for n in created):
            raise RuntimeError("authority fixture create did not report its created names")
