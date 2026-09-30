@@ -25,7 +25,7 @@ import asyncio
 import contextlib
 import threading
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
@@ -33,6 +33,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import DEBUG_DIR
+from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import DebugSession
@@ -50,8 +51,13 @@ from kdive.providers.ports.debug import (
     GdbMiEngine,
 )
 from kdive.providers.ports.lifecycle import TransportHandleData
+from kdive.providers.shared.debug_common.gdbmi.policy.capabilities import (
+    DebugCapability,
+    supports,
+)
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
+from kdive.serialization import JsonValue
 
 _EngineOp = Callable[[GdbMiEngine, GdbMiAttachment], ToolResponse]
 
@@ -63,6 +69,17 @@ class _OpAudit:
     tool: str
     transition: str
     args: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class CapabilityRequirement:
+    """A debug capability an op needs, and the refusal to return without it (ADR-0712)."""
+
+    capability: DebugCapability
+    code: str
+    detail: str
+    next_actions: tuple[str, ...]
+    data: Mapping[str, JsonValue] = field(default_factory=dict)
 
 
 # The Debug-plane ops that write an audit_log row on success: state-mutating engine ops
@@ -260,13 +277,16 @@ async def run_engine_op_with_resolver(
     op: _EngineOp,
     *,
     audit: _OpAudit | None = None,
+    requires: CapabilityRequirement | None = None,
 ) -> ToolResponse:
     """Run a Debug-plane op after resolving the session's provider debug runtime."""
 
     async def _runtime_for_session(session: DebugSession) -> DebugEngineRuntime | ToolResponse:
         return await runtime_resolver.runtime_for_session(pool, session.id)
 
-    return await _run_engine_op(pool, ctx, session_id, _runtime_for_session, op, audit=audit)
+    return await _run_engine_op(
+        pool, ctx, session_id, _runtime_for_session, op, audit=audit, requires=requires
+    )
 
 
 async def _run_engine_op(
@@ -277,6 +297,7 @@ async def _run_engine_op(
     op: _EngineOp,
     *,
     audit: _OpAudit | None = None,
+    requires: CapabilityRequirement | None = None,
 ) -> ToolResponse:
     """Gate the session, take the per-session lock, attach-or-reuse, and run ``op`` off-loop.
 
@@ -288,12 +309,19 @@ async def _run_engine_op(
     caller against the session (ADR-0006). The op already ran (an external engine call cannot be
     rolled back), so this is a post-hoc attribution written after the engine lock is released; a
     gate failure or op error returns before it, writing nothing.
+
+    When ``requires`` is set and the session's System lacks that capability, the refusal returns
+    before the runtime lookup, so no gdb/MI command reaches the target (ADR-0712).
     """
     with bind_context(principal=ctx.principal):
         gated = await _live_session(pool, ctx, session_id)
         if isinstance(gated, ToolResponse):
             return gated
         session = gated
+        if requires is not None:
+            refusal = await _capability_refusal(pool, session, requires)
+            if refusal is not None:
+                return refusal
         resolved_runtime = await runtime_for_session(session)
         if isinstance(resolved_runtime, ToolResponse):
             return resolved_runtime
@@ -305,6 +333,35 @@ async def _run_engine_op(
         if audit is not None and result.error_category is None:
             await _record_op_audit(pool, ctx, session, audit)
         return result
+
+
+async def _target_platform(
+    pool: AsyncConnectionPool, session: DebugSession
+) -> tuple[str | None, str | None]:
+    """Return the ``(arch, accel)`` of the System the session's Run is bound to."""
+    async with pool.connection() as conn:
+        run = await RUNS.get(conn, session.run_id)
+        system_id = None if run is None else run.system_id
+        system = None if system_id is None else await SYSTEMS.get(conn, system_id)
+    if system is None:
+        return None, None
+    arch = system.provisioning_profile.get("arch")
+    return (arch if isinstance(arch, str) else None), system.accel
+
+
+async def _capability_refusal(
+    pool: AsyncConnectionPool, session: DebugSession, requires: CapabilityRequirement
+) -> ToolResponse | None:
+    arch, accel = await _target_platform(pool, session)
+    if supports(arch, accel, requires.capability):
+        return None
+    return ToolResponse.failure(
+        str(session.id),
+        ErrorCategory.NOT_IMPLEMENTED,
+        detail=requires.detail,
+        suggested_next_actions=list(requires.next_actions),
+        data={"code": requires.code, "arch": arch, "accel": accel, **requires.data},
+    )
 
 
 async def _record_op_audit(
