@@ -380,8 +380,10 @@ Rejected for this amendment:
 
 When takeover recovers a suspended operation, it rebuilds that operation from its last journal
 record and anchors the remaining `provider-returned`, `observed`, and `terminal` records from the
-rebuilt request. The rebuilt request carries every field of the recorded mutation, so each record
-recovery anchors equals, field for field, the one the original attempt would have written. Before
+rebuilt request. The rebuilt request carries every mutation field of the recorded operation
+(binding, attempt, `local_timing`, identities, recovery objects), so each record recovery anchors
+carries the mutation fields the original attempt would have written; its sequence, chain, and a
+fresh observation still differ. Before
 this amendment the rebuild dropped the ADR-0684 `local_timing` snapshot. The recovered `terminal`
 then no longer matched a successor's release-phase request, and a retry that superseded a
 completion still in flight failed with `journal_conflict` (`release_phase_mismatch`) instead of
