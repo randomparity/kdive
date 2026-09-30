@@ -195,10 +195,22 @@ def test_teardown_uses_its_recovery_free_request_before_preparation(
     _drive(migrated_url, body)
 
 
+@pytest.mark.parametrize(
+    ("reservation", "mode", "releases"),
+    [("pending", "pending_system_teardown", 0), ("ready", "system_teardown", 1)],
+)
 def test_teardown_of_a_preparing_activation_skips_preparation(
-    migrated_url: str, authority_role_dsns: Callable[[str], str]
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    reservation: str,
+    mode: str,
+    releases: int,
 ) -> None:
-    """#2961: teardown neither debits nor prepares; its pending reservation ends uncredited."""
+    """#2961: teardown neither debits nor prepares.
+
+    A pending reservation ends uncredited. A ready one — the activate job debited it before the
+    teardown took over — is released and credited exactly once.
+    """
 
     async def body(seed: AsyncConnection) -> None:
         vehicle = build_vehicle()
@@ -210,6 +222,7 @@ def test_teardown_of_a_preparing_activation_skips_preparation(
             activation_state="preparing",
             with_materialization=False,
             with_recovery_point=False,
+            with_reservation=reservation == "ready",
         )
 
         await _dispatch(authority_role_dsns, seed, case, "teardown", vehicle)
@@ -231,10 +244,10 @@ def test_teardown_of_a_preparing_activation_skips_preparation(
         assert row == {
             "state": "torn_down",
             "materialization": None,
-            "mode": "pending_system_teardown",
+            "mode": mode,
             "system_state": "torn_down",
             "reservations": 0,
-            "releases": 0,
+            "releases": releases,
         }
 
     _drive(migrated_url, body)
