@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any, cast
@@ -1273,6 +1274,60 @@ def test_dead_letter_skips_a_job_without_a_spent_grant_and_proof(
             migrated_url, authority_role_dsns, "j", promote=False, acknowledge=False
         )
     assert _dead_letter_unowned(authority_role_dsns) == []
+    with psycopg.connect(migrated_url) as connection:
+        assert connection.execute(
+            "SELECT state FROM jobs WHERE id=%s", (case.job_id,)
+        ).fetchone() == ("running",)
+
+
+def test_dead_letter_skips_while_a_commit_holds_the_authority_row(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """ADR-0711: NOWAIT skips a job whose authority row a commit holds; the next pass ends it."""
+    case, granted, _head = _granted_attempt_head(
+        migrated_url, authority_role_dsns, "m", promote=True
+    )
+    with psycopg.connect(migrated_url) as holder:
+        holder.execute(
+            "SELECT 1 FROM external_boot_authorities WHERE id=%s FOR UPDATE",
+            (granted.authority_id,),
+        )
+        assert _dead_letter_unowned(authority_role_dsns) == []
+    assert _dead_letter_unowned(authority_role_dsns) == [case.job_id]
+
+
+def test_dead_letter_rechecks_the_head_after_the_journal_lock(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """ADR-0711: an advance to `admitted` that holds the journal-head lock wins the race."""
+    case, granted, head = _granted_attempt_head(
+        migrated_url, authority_role_dsns, "p", promote=True
+    )
+    admitted = _record(case, granted, head.sequence + 1, record_digest(head), JournalPhase.ADMITTED)
+    with (
+        psycopg.connect(authority_role_dsns("kdive_provider_authority")) as advancer,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        assert (
+            _advance_raw(
+                advancer, case, granted, head.sequence, record_digest(head), _payload(admitted)
+            )
+            == "advanced"
+        )
+        pending = executor.submit(_dead_letter_unowned, authority_role_dsns)
+        with psycopg.connect(migrated_url, autocommit=True) as observer:
+            for _ in range(100):
+                waiting = observer.execute(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE wait_event_type='Lock' AND wait_event='advisory' "
+                    "AND query LIKE '%%dead_letter_unowned_external_boot_jobs%%'"
+                ).fetchone()
+                if waiting == (1,):
+                    break
+                time.sleep(0.05)
+            assert waiting == (1,)
+        advancer.commit()
+        assert pending.result(timeout=30) == []
     with psycopg.connect(migrated_url) as connection:
         assert connection.execute(
             "SELECT state FROM jobs WHERE id=%s", (case.job_id,)
