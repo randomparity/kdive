@@ -5,8 +5,8 @@ Goal: no unmarked teardown reports success for a System with external-boot histo
 and `systems.teardown` can replace a refused ordinary job with the authority-marked teardown.
 
 Architecture: widen the worker fence in `teardown_handler` from "restricting activation" to
-"any activation"; add one release-only check in `_release_locked`; let the public
-authority-teardown route recycle a `failed` ordinary prior.
+"any activation"; add one release check in `_release_locked` and `reclaim_under_lock`; let the
+public authority-teardown route recycle a `failed` or `canceled` ordinary prior.
 Spec: `docs/workflow/specs/2026-09-30-authority-held-teardown-2966-design.md`.
 Decision: ADR-0620 amendment (2026-09-30, #2966).
 
@@ -32,7 +32,7 @@ and six test cases of 25–40 lines in two existing test files.
 |---|---|---|
 | `src/kdive/jobs/handlers/systems.py` | `teardown_handler`; refuses a restricting activation | refuse any activation (`get_latest_for_system`) |
 | `src/kdive/services/allocation/release.py` | `_release_locked`, `reclaim_under_lock`; release admission | new `_require_system_teardown` check after the guard in both |
-| `src/kdive/mcp/tools/lifecycle/systems/admin.py` | `_enqueue_authority_teardown`; conflict on any ordinary prior | recycle a `failed` ordinary prior (policy `FAILED`) |
+| `src/kdive/mcp/tools/lifecycle/systems/admin.py` | `_enqueue_authority_teardown`; conflict on any ordinary prior | recycle a `failed` or `canceled` ordinary prior (policy `TERMINAL_OR_CANCELED`) |
 | `tests/mcp/lifecycle/test_systems_tools.py` | handler and public teardown tests | three cases |
 | `tests/services/external_boot/test_allocation_release.py` | release admission tests | three cases |
 
