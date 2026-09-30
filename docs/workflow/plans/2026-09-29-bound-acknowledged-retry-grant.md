@@ -200,9 +200,9 @@ Steps:
    - after the 0164 tuple (near line 364), add
      `("0165", "0165_bound_acknowledged_retry_grant.sql"),`.
    Add the same tuple after the 0164 tuple in the 0091, 0102, and 0115 test files.
-2. In the `## Status` section of ADR-0626, after the date, add a blockquote line:
-   `**Amended by [ADR-0711](0711-bound-acknowledged-retry-grant-per-budget.md) (#2960):** a
-   claim that this ADR granted cannot earn another grant in the same budget.`
+2. In the `## Status` section of ADR-0626, after the date, add an `Amended by` blockquote that
+   links ADR-0711 and cites #2960: a claim that this ADR granted cannot earn another grant in
+   the same budget. Add the matching banner to ADR-0620.
 3. Run the registration command. Then run these gates, and confirm that each one exits 0:
    - `git fetch origin main`, then `just records`;
    - `just schema-guard`;
