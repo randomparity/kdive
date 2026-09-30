@@ -315,8 +315,9 @@ two more views: a final line read before its newline, or a lane truncated mid-re
 the lane listing and its stat fails as `journal: unsafe-tree`. The #2899 amendment deliberately
 left both out of the retry set. The periodic check now also retries once under quiescence on
 `invalid-lane`, and on an `unsafe-tree` whose only cause is that a listed entry no longer exists.
-A wrong type, owner, mode, or name is still refused at once. The reported component and reason
-are unchanged.
+A wrong type, owner, mode, or name found by the lane listing is still refused at once; one found
+only when the journal opens the lane reports `invalid-lane` and is refused after the one retry.
+The reported component and reason are unchanged.
 
 Widening is safe because the retry runs with every anchor drained: no lane is mid-append,
 mid-advance, or mid-retraction, so a torn or missing lane seen then is at rest and refuses
