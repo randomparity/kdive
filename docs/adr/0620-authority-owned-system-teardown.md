@@ -90,6 +90,38 @@ Rejected for this amendment:
   `hashtextextended('kdive:system:' ...)` (migration 0122), so an old attempt can commit
   between the read and the reset.
 
+### Amendment (2026-09-29): an exhausted retained teardown is dead-lettered (#2917)
+
+A `retained_quarantine` teardown receipt on the job's final attempt (`attempt >= max_attempts`)
+ends the job `failed` with `error_category = 'conflict'` and the teardown authority `retired`,
+in the receipt transaction (migration 0164). This is what the `fail` path does at exhaustion.
+Before, the job was requeued where no worker can claim it, and the authority was `superseded`,
+which could leave the activation with no `current` or `retired` dispatch route for the public
+teardown. A non-final attempt still requeues and supersedes. The receipt and the `retained`
+result are unchanged, and a `retired` authority cannot commit again. Migration 0164 also moves
+authority-marked teardown jobs that were already `queued` and exhausted, and the superseded root
+authority of their retained receipt, to the same states. Recovery is the public teardown's
+`failed` recycle defined above, so the reservation still credits once. The reconciler's
+external-boot repair lanes (`reconciler/repairs/external_boot.py`) now see such a job as not live,
+as they already do after a `fail` at exhaustion. A successor they enqueue serializes with a public
+recycle through the per-System lock and the authority fences.
+
+Rejected for this amendment:
+
+- **Do nothing.** verified: issue #2917 records a live job `queued` at attempt 24/24 that stayed
+  unclaimed through a worker restart; its reservation is never credited.
+- **Grant one more attempt at exhaustion, as the authority-System retained path does
+  (migration 0149).** judgment: deterministic retained churn (#2901) would then retry without a
+  bound and never show a terminal state.
+- **Recycle a `queued` exhausted row in the public teardown.** judgment: it widens a generic
+  queue policy for a state one writer produces, and leaves the row stranded until a caller acts.
+- **A reconciler lane that dead-letters queued exhausted teardowns.** judgment: a periodic sweep
+  and a new security-definer function for a state the finalizer can prevent in its own
+  transaction.
+- **Keep the authority `superseded` and widen the dispatch route to `superseded` rows.**
+  judgment: a `superseded` row can be one that lost an allocation race, so the route would rest
+  on rows the fences already treat as dead.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
