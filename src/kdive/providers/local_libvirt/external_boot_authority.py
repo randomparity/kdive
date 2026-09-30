@@ -42,6 +42,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalObservedState,
     LocalSystemTeardownAnchorV1,
     LocalSystemTeardownIntentV1,
+    RecoveryIntentAbsentError,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootTimingConfigurationError,
@@ -666,7 +667,7 @@ class LocalExternalBootAuthorityAdapter:
             and point is not None
             and self._ports.cleanup_is_accounted(point, authority)
         ):
-            observed = self._read_state(binding, authority)
+            observed = self._read_state(binding, authority, cleanup_accounted=True)
             composite_state = self._composite_state(request, observed)
             return AuthorityObservationV1(
                 observation_id=self._observation_id(request, composite_state, "absent"),
@@ -725,19 +726,37 @@ class LocalExternalBootAuthorityAdapter:
         *,
         allow_cleanup_receipt: bool,
     ) -> RecoveryPoint | None:
+        absent: RecoveryIntentAbsentError | None = None
         try:
             return self._ports.recovery_point(binding, authority)
+        except RecoveryIntentAbsentError as error:
+            absent = error
         except Exception:  # noqa: BLE001 - an unresolvable point is an unreadable state
             # Logged in full inside the authority, where the diagnostic is allowed to
             # exist; only the bounded category ever crosses the boundary.
             logger.exception("external-boot recovery point is unresolvable")
         if not allow_cleanup_receipt:
+            self._log_absent_intent(absent, cleanup_accounted=False)
             return None
         try:
-            return self._ports.cleanup_receipt(binding, authority)
+            receipt = self._ports.cleanup_receipt(binding, authority)
         except Exception:  # noqa: BLE001 - malformed or unreadable receipt fails closed
             logger.exception("external-boot cleanup receipt is unresolvable")
-            return None
+            receipt = None
+        self._log_absent_intent(absent, cleanup_accounted=receipt is not None)
+        return receipt
+
+    @staticmethod
+    def _log_absent_intent(
+        absent: RecoveryIntentAbsentError | None, *, cleanup_accounted: bool
+    ) -> None:
+        """Cleanup deletes the intent by design; absent without cleanup evidence is an error."""
+        if absent is None:
+            return
+        if cleanup_accounted:
+            logger.debug("external-boot recovery intent is absent after accounted cleanup")
+        else:
+            logger.error("external-boot recovery point is unresolvable", exc_info=absent)
 
     @staticmethod
     def _require_matching_identities(
@@ -775,10 +794,18 @@ class LocalExternalBootAuthorityAdapter:
         )
 
     def _read_state(
-        self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
+        self,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+        *,
+        cleanup_accounted: bool = False,
     ) -> LocalObservedState:
         try:
             return self._ports.observe_state(binding, authority)
+        except RecoveryIntentAbsentError:
+            if not cleanup_accounted:
+                logger.exception("external-boot provider state is unreadable")
+            return LocalObservedState(definition=None, modules=None, active=None)
         except Exception:  # noqa: BLE001 - a failed read is the unreadable classification
             logger.exception("external-boot provider state is unreadable")
             return LocalObservedState(definition=None, modules=None, active=None)
