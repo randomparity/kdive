@@ -28,6 +28,9 @@ The model requires an error category for `error` and `failed`, and rejects one o
 statuses. It derives `retryable` from the category. `failure()` produces `error`; a failed job
 rendered by `from_job()` carries `failed`. Inspect each envelope, including nested items.
 
+If the server fails to build a valid envelope, the call returns `infrastructure_failure` with a
+fixed `detail`. That is a server fault, not an error in the call's arguments.
+
 No error category means **no classified failure in that envelope**, not that the requested work
 has completed. A job can be `queued` or `running`, and a `canceled` job also has no error category.
 An outer collection can be `ok` while a nested item reports a failure. Tool-specific results can
