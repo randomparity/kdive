@@ -307,6 +307,32 @@ Rejected for this amendment:
 - **Serialize every anchor behind one service lock.** judgment: it trades a rare readiness retry
   for serialized head advances on all lanes during normal operation.
 
+### Amendment (2026-09-29): the periodic retry also covers a torn or vanished lane (#2933)
+
+The check's lane loads run beside an anchor with no reader exclusion, so an in-flight anchor has
+two more views: a final line read before its newline, or a lane truncated mid-read, fails as
+`journal: invalid-lane`; and a single-record lane that a refusal's retraction unlinks between
+the lane listing and its stat fails as `journal: unsafe-tree`. The #2899 amendment deliberately
+left both out of the retry set. The periodic check now also retries once under quiescence on
+`invalid-lane`, and on an `unsafe-tree` whose only cause is that a listed entry no longer exists.
+A wrong type, owner, mode, or name is still refused at once. The reported component and reason
+are unchanged.
+
+Widening is safe because the retry runs with every anchor drained: no lane is mid-append,
+mid-advance, or mid-retraction, so a torn or missing lane seen then is at rest and refuses
+service as before. The retry never tolerates, repairs, or retracts a lane. Startup and the
+standalone check are unchanged, and a crash mid-append still leaves a torn lane that startup
+refuses.
+
+Rejected for this amendment:
+
+- **Quiesce anchors for every periodic pass.** judgment: it stalls anchors on every lane at every
+  readiness interval to prevent a rare overlap the retry already absorbs.
+- **Retry every `unsafe-tree`.** judgment: a structural cause cannot be produced by an anchor,
+  and retrying it only delays the refusal of a foreign or wrongly owned entry.
+- **Make the append atomic to readers.** judgment: it changes the journal write path the operator
+  kept out of this scope, and still leaves the retraction race.
+
 ## Consequences
 
 - External boot gains a fence at the provider mutation boundary and a separate database fence for
