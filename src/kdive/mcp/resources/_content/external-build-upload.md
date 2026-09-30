@@ -80,6 +80,9 @@ results. Upload success does not claim boot, module loading or debugger behavior
 which Kconfig symbols are enabled before you upload — a debug kernel is one you built with the
 debug options turned on. The validator constrains only the artifacts' **structure** (bzImage
 magic, gzip layout, a `lib/modules` member); it never rejects a build over your `.config`.
+For the native POWER live-stack spine, use the
+[spine kernel configuration](runbooks/live-testing.md#native-power-spine-kernel-configuration)
+before building the tree used as `KDIVE_KERNEL_SRC`.
 There is no allowed-config allowlist and no required-symbol gate: enable what the
 investigation needs. Two non-blocking exceptions read an uploaded `effective_config`; the RHEL-family
 kdump one is described with its symbol set below. The first: if the config does not
