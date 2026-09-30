@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -22,6 +23,7 @@ from kdive.components.references import (
     ComponentRef,
     LocalComponentRef,
 )
+from kdive.db.locks import LockScope
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
     RemoteModuleAttemptObligationRepository,
@@ -2953,7 +2955,7 @@ async def _dead_letter(pool: AsyncConnectionPool, job_id: UUID, category: str) -
         )
 
 
-@pytest.mark.parametrize("prior", [None, "conflict", "infrastructure_failure"])
+@pytest.mark.parametrize("prior", [None, "queued", "conflict", "infrastructure_failure"])
 def test_teardown_refuses_reprovisioning_system(migrated_url: str, prior: str | None) -> None:
     """#2928: no teardown is enqueued, and no failed one recycled, while a reprovision runs."""
 
@@ -2962,7 +2964,9 @@ def test_teardown_refuses_reprovisioning_system(migrated_url: str, prior: str | 
             alloc_id = await granted_allocation(pool)
             sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.REPROVISIONING)
             if prior is not None:
-                await _dead_letter(pool, (await _enqueue_teardown(pool, sys_id)).id, prior)
+                job = await _enqueue_teardown(pool, sys_id)
+                if prior != "queued":
+                    await _dead_letter(pool, job.id, prior)
             before = await _teardown_job_row(pool, sys_id)
             resp = await _teardown(pool, ctx(Role.ADMIN), sys_id)
             after = await _teardown_job_row(pool, sys_id)
@@ -3026,6 +3030,39 @@ def test_reconciler_orphan_lane_skips_reprovisioning_system(migrated_url: str) -
                 enqueued = await _repair_orphaned_systems(conn)
         assert skipped == 0
         assert enqueued == 1
+
+    asyncio.run(_run())
+
+
+def test_reconciler_orphan_recheck_skips_system_that_began_reprovisioning(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2928: a reprovision admitted between the candidate read and the System lock is skipped."""
+    from kdive.reconciler.loop import _repair_orphaned_systems
+    from kdive.reconciler.repairs import systems as system_repairs
+
+    real_lock = system_repairs.advisory_xact_lock
+
+    @asynccontextmanager
+    async def _reprovision_then_lock(
+        conn: psycopg.AsyncConnection, scope: LockScope, key: UUID
+    ) -> AsyncIterator[None]:
+        await SYSTEMS.update_state(conn, key, SystemState.REPROVISIONING)
+        async with real_lock(conn, scope, key):
+            yield
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            async with pool.connection() as conn:
+                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
+                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASED)
+                monkeypatch.setattr(system_repairs, "advisory_xact_lock", _reprovision_then_lock)
+                enqueued = await _repair_orphaned_systems(conn)
+            assert enqueued == 0
+            assert await _teardown_job_row(pool, sys_id) is None
+            assert await _system_state(pool, sys_id) == "reprovisioning"
 
     asyncio.run(_run())
 

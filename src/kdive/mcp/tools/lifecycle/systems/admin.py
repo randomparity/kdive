@@ -463,9 +463,10 @@ async def _teardown_locked(
                 data={"project": system.project},
             )
         if system.state is SystemState.REPROVISIONING:
-            # The one non-terminal state with no teardown edge (#2928, ADR-0435). Refuse before
-            # the dedup replay so a failed `{uid}:teardown` row is not recycled into a job the
-            # handler would refuse again; re-running once the reprovision settles recycles it.
+            # The one non-terminal state with no teardown edge (#2928, ADR-0435). Refuse ahead of
+            # the dedup replay and the enqueue: a live `{uid}:teardown` row is not replayed and a
+            # failed one is not recycled into a job the handler would refuse again. Re-running
+            # once the reprovision settles recycles a failed row.
             return ToolResponse.failure(
                 system_id,
                 ErrorCategory.CONFLICT,

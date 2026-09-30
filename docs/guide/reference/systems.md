@@ -425,9 +425,9 @@ completed job and the already-`torn_down` replay both name it in
 `suggested_next_actions`). If this System has external-boot history, the returned teardown
 job is authority-marked and the authority destroys its private artifacts before the
 durable terminal record commits. The authority route must remain configured; otherwise the
-tool returns `configuration_error` and enqueues no ordinary teardown job. A System that is
-mid-reprovision is refused with `conflict` (`current_status: reprovisioning`) and nothing
-is enqueued; retry once the reprovision settles.
+tool returns `configuration_error` and enqueues no ordinary teardown job. A System without
+external-boot history that is mid-reprovision is refused with `conflict`
+(`current_status: reprovisioning`) and nothing is enqueued; retry once it settles.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

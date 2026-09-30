@@ -135,13 +135,18 @@ gate are unchanged. Design:
 `reprovisioning` is the only non-terminal System state with no teardown edge, so a teardown job
 that met one raised `IllegalTransition`, which the worker classified as retryable
 `infrastructure_failure` and re-ran until attempts ran out. By operator decision the teardown path
-refuses instead of waiting. Under the System lock, `systems.teardown` returns a `conflict` carrying
-`current_status: reprovisioning` and enqueues nothing. It refuses before the dedup replay, so a
-failed `{uid}:teardown` row is not recycled while the reprovision runs. A teardown job that still
+refuses instead of waiting. On the ordinary path (no external-boot activation history, which
+routes to authority teardown first), `systems.teardown` returns a `conflict` under the System lock,
+carrying `current_status: reprovisioning`, and enqueues nothing. It refuses ahead of the dedup
+replay and the enqueue, so a live `{uid}:teardown` row is not replayed and a failed one is not
+recycled while the reprovision runs. A teardown job that still
 meets a `reprovisioning` System, for example one queued before the reprovision began, fails once
 with a terminal `conflict`. Once the reprovision settles, the operator re-runs `systems.teardown`,
 which recycles that failed row under the #2929 amendment above. `repair_orphaned_systems` skips
-`reprovisioning` Systems and picks them up on a later pass. This matches
+`reprovisioning` Systems, both in its candidate query and in its System-locked recheck, and
+enqueues on a later pass once the System is `ready`. The lane replays an existing
+`{uid}:teardown` row rather than recycling it, so a row that already failed this way needs the
+operator's `systems.teardown` as well. This matches
 `investigations.close(force=True)`, which already refuses while a bound System is mid-reprovision.
 Rejected: deferring the job without charging an attempt, which needs a queue primitive the worker
 does not have.

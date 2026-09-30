@@ -43,8 +43,9 @@ _TERMINAL_ALLOCATION_STATE_VALUES = tuple(state.value for state in _TERMINAL_ALL
 _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES = tuple(
     state.value for state in _ORPHANED_SYSTEM_TERMINAL_STATES
 )
-# A reprovisioning System has no teardown edge (#2928); the orphan lane picks it up on a later
-# pass, once the reprovision settles to `ready` (teardown) or `failed` (terminal, skipped).
+# A reprovisioning System has no teardown edge (#2928), so the lane leaves it to a later pass.
+# Once it settles to `ready` the lane enqueues, unless a `{uid}:teardown` row already exists: a
+# failed row is replayed, not recycled, so it needs an operator `systems.teardown`.
 _ORPHAN_TEARDOWN_SKIPPED_STATE_VALUES = (
     *_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES,
     SystemState.REPROVISIONING.value,
