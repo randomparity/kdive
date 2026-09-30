@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -176,7 +177,7 @@ def test_expiry_without_a_restricting_activation_logs_no_denial(
 
 async def _seed_clean_history(
     conn: psycopg.AsyncConnection, seeded_activation: SeedActivation, system_state: str
-) -> object:
+) -> UUID:
     """Seed a completed activation, set its System's state, and return the allocation id."""
     seeded = await seeded_activation(
         conn, state=ExternalBootActivationState.ABANDONED, cleanup_complete=True
