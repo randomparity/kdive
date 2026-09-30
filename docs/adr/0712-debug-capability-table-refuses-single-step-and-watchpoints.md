@@ -1,11 +1,13 @@
-# ADR-0712: a per-arch and accelerator table refuses single-step and watchpoints before resume (#2963)
+# 0712 — A per-arch and accelerator table refuses single-step and watchpoints before resume
 
-- Status: Accepted
-- Date: 2026-09-29
-- Amends: [ADR-0379](0379-gdb-source-and-instruction-stepping.md),
-  [ADR-0277](0277-gdb-watchpoints.md). Cites: [ADR-0463](0463-consolidate-debug-step-variants.md).
+## Status
+
+Accepted (2026-09-29)
 
 ## Context
+
+Issue #2963. This record amends [ADR-0379](0379-gdb-source-and-instruction-stepping.md) and
+[ADR-0277](0277-gdb-watchpoints.md), and cites [ADR-0463](0463-consolidate-debug-step-variants.md).
 
 ADR-0379 added source and instruction stepping, and ADR-0463 folded the step verbs into
 `debug.advance` modes `into`, `over`, `instruction` and `out`. ADR-0277 added hardware write
