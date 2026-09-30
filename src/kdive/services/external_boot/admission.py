@@ -121,18 +121,34 @@ _OWNING_RUN_SCOPED = frozenset(
 
 # `systems.teardown` rides alongside the release in `active` because, until #2118 installs the
 # recovery executor, `runs.release_external_boot` refuses every call — steering a denied caller
-# at it alone is a breadcrumb to a tool that changes nothing. Teardown is in `_ALWAYS_ADMITTED`,
-# so it is the one exit that works in every restricting state.
+# at it alone is a breadcrumb to a tool that changes nothing. Every state's teardown exit comes
+# from the matrix row itself (`_teardown_exits`).
 _STATE_NEXT_ACTIONS: Mapping[ExternalBootActivationState, tuple[str, ...]] = {
-    ExternalBootActivationState.ACTIVE: ("runs.release_external_boot", "systems.teardown"),
-    ExternalBootActivationState.RECOVERY_CONFLICT: ("systems.teardown",),
-    ExternalBootActivationState.RECOVERY_FAILED: ("systems.teardown",),
+    ExternalBootActivationState.ACTIVE: ("runs.release_external_boot",),
 }
 
-# `systems.teardown` is project ADMIN, so ADR-0261 filtering strips it from a CONTRIBUTOR's
-# breadcrumbs and leaves a bare `runs.get` — a denial with no reachable next action and no hint
-# that escalation is what is missing. The detail says so in words, which no filter removes.
-_ESCALATION_HINT = "systems.teardown is admitted in every restricting state and needs project ADMIN"
+
+def _teardown_exits(state: ExternalBootActivationState) -> tuple[str, ...]:
+    """The teardown exit for `state`, empty where the matrix does not admit it."""
+    if ExternalBootOperation.SYSTEM_TEARDOWN in _ADMITTED[state]:
+        return ("systems.teardown",)
+    return ()
+
+
+def _escalation_hint(state: ExternalBootActivationState) -> str:
+    """Say in words what breadcrumb filtering hides from a caller without project ADMIN.
+
+    `systems.teardown` is project ADMIN, so ADR-0261 filtering strips it from a CONTRIBUTOR's
+    breadcrumbs and leaves a bare `runs.get`. The detail names teardown only for a state whose
+    matrix row admits it.
+    """
+    if not _teardown_exits(state):
+        return f"no exit is admitted while the activation is {state.value}"
+    return (
+        f"systems.teardown is admitted while the activation is {state.value} "
+        "and needs project ADMIN"
+    )
+
 
 # The `data.reason` every matrix denial carries, matching the convention the recovery contracts
 # set (`no_active_activation`, `system_job_active`, `debug_session_active`, ...). A bounded
@@ -186,10 +202,14 @@ async def check_external_boot_admission(
         operation not in _OWNING_RUN_SCOPED or run_id == activation.run_id
     ):
         return
-    next_actions = _STATE_NEXT_ACTIONS.get(activation.state, ())
+    next_actions = (
+        *_STATE_NEXT_ACTIONS.get(activation.state, ()),
+        *_teardown_exits(activation.state),
+    )
     raise ExternalBootDenied(
         f"{operation.value} is denied while external-boot activation {activation.id} "
-        f"holds System {system_id} in {activation.state.value}; {_ESCALATION_HINT}",
+        f"holds System {system_id} in {activation.state.value}; "
+        f"{_escalation_hint(activation.state)}",
         details={
             "reason": DENIAL_REASON,
             "activation_id": str(activation.id),
