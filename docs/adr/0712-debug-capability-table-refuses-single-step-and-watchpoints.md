@@ -59,6 +59,25 @@ software breakpoints and `advance` work.
   breakpoint before it advances.
 - A new row needs native proof evidence, the same as the #2739 record.
 
+### Amendment (2026-09-30): Resume-time watchpoint insert failures and step-verb stalls (#2964)
+
+This amendment qualifies the claims above that #2964 owns the resume-time classification and
+the reclassification after a resume. It records what #2964 decided for each.
+
+- A resume (`-exec-*`) that gdb rejects with `Could not insert hardware watchpoint N.` keeps
+  category `debug_attach_failure` and adds `data.code` `watchpoint_insert_failed`, `data.verb`
+  and `data.watchpoint` (N). The detail names both causes and tells the caller to remove a
+  watchpoint with `debug.clear_watchpoint`, then retry. The code is not `watchpoint_unsupported`:
+  x86 debug-register exhaustion gives the same text (ADR-0277, Consequences), so the text cannot
+  tell a stub refusal from too many armed watchpoints. The category stays, so the x86 result
+  changes only by the added fields.
+- A step verb that does not stop keeps `transport_stall` or `timed_out: True`. The wire evidence
+  does not allow a truthful distinct code. An interrupt with no stop is the same on the wire as
+  a real RSP stall. An interrupt with a stop proves a live link, but `-exec-step` and
+  `-exec-next` can time out on x86 for a line that calls a blocking function, and QEMU steps
+  with interrupts blocked, so an x86 `stepi` over `hlt` can also not complete. The engine does
+  not know the guest arch or accelerator. The table above is the only step-verb control.
+
 ## Considered & rejected
 
 - **Probe single-step at attach.** verified: the only observable single-step probe is a step. On
