@@ -48,6 +48,7 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
     AuthorityTeardownSnapshot,
     ProviderRecoveryRefusal,
+    SystemTeardownSupersededError,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootPreparationObservation,
@@ -2249,7 +2250,11 @@ class ExternalBootAuthorityService:
     ) -> AuthoritySystemTeardownFacts:
         if not isinstance(self._adapter, AuthoritySystemTeardownAdapter):
             raise AuthorityServiceError("provider_conflict")
-        facts = await self._adapter.observe_system_teardown(request, context)
+        try:
+            facts = await self._adapter.observe_system_teardown(request, context)
+        except SystemTeardownSupersededError:
+            # ADR-0620 (#2921): a later generation owns the host record; this one proves nothing.
+            raise AuthorityServiceError("superseded") from None
         if not isinstance(facts, AuthoritySystemTeardownFacts):
             raise AuthorityServiceError("provider_conflict")
         try:
