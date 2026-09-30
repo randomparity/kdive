@@ -114,6 +114,7 @@ Steps:
        "ORDER BY s.id LIMIT 1"
    )
 
+
    async def _require_system_teardown(conn, allocation_id, *, project) -> None:
        """Keep the allocation until the authority tears down each System with history (#2966)."""
        row = await (await conn.execute(_UNTORN_EXTERNAL_BOOT_SYSTEM_SQL, (allocation_id,))).fetchone()
