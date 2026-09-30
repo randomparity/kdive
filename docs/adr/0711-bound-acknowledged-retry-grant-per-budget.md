@@ -24,23 +24,25 @@ that still has an `allocating` or `current` authority, because that authority co
 
 ## Decision
 
-1. **Bound.** An attempt that a grant claimed cannot earn another grant. The proof predicate
-   `has_acknowledged_external_boot_retry_proof(job)` is false when a consumption row has
-   `claimed_attempt = job.attempt`. Claim, queue depth (`count_claimable_worker_jobs`), and the
-   consume function already call that predicate, so all three apply the same bound. The
-   evidence part of the old predicate stays as the private function
-   `has_acknowledged_external_boot_no_mutation_head(job)`.
+1. **Bound.** An attempt that a grant claimed in the current budget cannot earn another grant.
+   The proof predicate `has_acknowledged_external_boot_retry_proof(job)` is false when a
+   consumption row has `claimed_attempt = job.attempt` and `consumed_at >= job.created_at`.
+   Every recycle in `queue.enqueue` resets `created_at`, so the check reads only the current
+   budget. Claim, queue depth (`count_claimable_worker_jobs`), and the consume function already
+   call that predicate, so all three apply the same bound. The evidence part of the old predicate
+   stays as the private function `has_acknowledged_external_boot_no_mutation_head(job)`.
 2. **Terminal state.** The reconciler's `dead_letter_unowned_external_boot_jobs` also ends a
    `boot` job that is `running`, exhausted, lease-lapsed, and past the bound, when its latest
    authority still carries an exact acknowledged no-mutation head. Under the job-row lock it
    takes the System's journal-head lock (`hashtextextended('kdive:system:' || system_id, 2126)`,
-   the lock every journal-head advance takes). It then checks the head again, sets the job's
-   `allocating` or `current` authority to `superseded`, and fails the job and its open Run with
-   `lease_expired`, as migration 0162 does.
-3. **Scope of the bound.** The bound applies per budget, not per job lifetime. A public teardown
-   recycle adds a new ordinary budget (ADR-0620), and the last attempt of that budget is an
-   ordinary claim that can earn one grant. A `teardown` job past the bound stays `running` for
-   that public recycle, as before; migration 0162 does not dead-letter teardown jobs.
+   the lock every journal-head advance takes) and checks the head again. It then locks the job's
+   live authority rows with `NOWAIT`, and skips the job until the next pass if a commit holds one.
+   It retires a `current` authority, supersedes an `allocating` one, and fails the job and its open
+   Run with `lease_expired`, as migrations 0162 and 0164 do.
+3. **Scope of the bound.** The bound applies per budget, not per job lifetime. A recycle (the
+   public teardown recycle of ADR-0620, or a forced step re-run) starts a new budget, and the last
+   attempt of that budget is an ordinary claim that can earn one grant. A `teardown` job past the
+   bound stays `running` for that public recycle, as before; 0162 does not dead-letter teardown.
 4. **One limit for #2901.** An external-boot job allocates at most `max_attempts` authority
    generations per budget, plus at most one generation from this grant. The fix for deterministic
    `provider-conflict` churn (#2901) must stay inside that limit. It can make a job spend fewer of
@@ -49,26 +51,34 @@ that still has an `allocating` or `current` authority, because that authority co
 
 ## Consequences
 
-- The #2865 trigger ends after at most one grant: the job becomes `failed` (`lease_expired`) at
-  the next reconciler pass after its granted attempt lapses. A job looping at deploy time, whose
-  current attempt came from a grant, stops at its next lapse.
-- A worker crash after acknowledgement still gets its one replacement claim (ADR-0626). If that
-  replacement also stops at a new acknowledged no-mutation head, the job now fails instead of
-  claiming again.
-- After supersession, no receipt can commit for the job: every commit needs an `allocating` or
-  `current` authority and a `running` job. The authority service cannot admit a mutation either,
-  because `resolve_current_external_boot_authority` requires `current` and a journal-head advance
-  under a non-`current` authority returns `superseded`. The journal head stays at the acknowledged
-  record. The next allocation for the System starts from that head, just as it would after an
-  ADR-0626 successor.
+- The #2865 trigger ends after at most one grant: when the granted attempt also stops at its own
+  acknowledged head, the job becomes `failed` (`lease_expired`) at the next reconciler pass after
+  the lease lapses. A job looping at deploy time, whose current attempt came from a grant, stops
+  at its next lapse.
+- A granted attempt that lapses before its own acknowledged head (no allocation, or a watermark
+  only) gets no grant and stays `running`, like any exhausted job whose authority is still live
+  (ADR-0620). It cannot loop.
+- A worker crash after acknowledgement still gets its one replacement claim (ADR-0626).
+- After the terminal update, no receipt can commit for the job: every commit needs an
+  `allocating` or `current` authority and a `running` job. The authority service cannot admit a
+  mutation either: `resolve_current_external_boot_authority` requires `current`, and a
+  journal-head advance under a non-`current` authority returns `superseded`.
+- A retired authority keeps the activation's dispatch route: the teardown, release, and quarantine
+  resolvers (migrations 0147, 0140, and `db/external_boot_recovery_quarantine.py`) select the
+  newest `current` or `retired` authority. When the latest authority was `allocating`, no route
+  existed before this change either.
 - The activation is not changed. A `preparing` activation that never recorded a preparation plan
   still has no release path until #2961.
 
 ## Considered & rejected
 
-- **Bound grants per job lifetime (`count(*) < 1`).** judgment: a recycled teardown budget could
-  never recover from a crash at acknowledgement. The per-budget bound is also finite, because
-  only an operator's public teardown adds a budget.
+- **Bound grants per job lifetime (`count(*) < 1`).** judgment: a recycled budget could never
+  recover from a crash at acknowledgement. The per-budget bound is also finite, because only an
+  operator action adds a budget.
+- **Key the bound on the attempt number alone.** verified: `queue.enqueue` recycles a `failed`
+  job with `attempt = 0` and an unchanged `max_attempts` (`src/kdive/jobs/queue.py`, recycle
+  `UPDATE`), so an old consumption row would match the new budget's last attempt and deny its
+  grant.
 - **Limit grants with a small fixed cap greater than one.** judgment: every extra grant against a
   deterministic refusal only adds another generation. No evidence shows two crashes in a row at
   acknowledgement are common enough to need a second grant.
@@ -76,10 +86,13 @@ that still has an `allocating` or `current` authority, because that authority co
   (`dead_letter_unowned_external_boot_jobs`) skips any job with an `allocating` or `current`
   authority, and the #2865 job's latest authority was `current`. The job would stay `running`
   forever, which fails the terminal-state criterion of #2960.
-- **Retire the authority instead of superseding it.** judgment: `retired` means the authority
-  finished its operation (ADR-0620). `superseded` is the state an ADR-0626 successor allocation
-  would leave, so readers of the chain see a shape they already handle.
+- **Supersede every live authority.** verified: `resolve_external_boot_system_teardown_dispatch_binding`
+  (migration 0147) joins only `current` or `retired` authorities, so superseding the `current`
+  one would remove the route `systems.teardown` needs. Migration 0164 retires for the same reason.
 - **Dead-letter without the journal-head lock.** verified: `advance_external_boot_authority_journal_head`
   (migration 0123) takes that lock and checks the authority state before it writes the next
   record, and it does not lock the job row. Without the lock, the check of the head and the
-  supersession could interleave with an advance to `admitted`.
+  update could interleave with an advance to `admitted`.
+- **Wait for the authority row lock.** verified: the worker commit functions lock the authority
+  row before the job row (migrations 0135 and 0143), and the reconciler holds the job row first.
+  A wait could deadlock and roll back every dead-letter in the reconciler's pass.
