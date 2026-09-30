@@ -62,6 +62,7 @@ def _config(**overrides: Any) -> Any:
         "call_timeout_s": 5.0,
         "drain_timeout_s": 30.0,  # hang guard: a settled drain exits early
         "profile": None,
+        "min_rounds": 5,  # enough for seed 7 to draw every scenario, however starved the run
     }
     base.update(overrides)
     return stress.Config(**base)
@@ -546,15 +547,19 @@ def _settled(stack: FakeStack) -> bool:
     return all(state in ("released", "expired") for state in stack.states.values())
 
 
+@pytest.mark.parametrize("duration_s", [0.2, 0.0], ids=["timed", "starved"])
 @pytest.mark.parametrize("provision", [False, True])
-def test_clean_stack_exits_zero(provision: bool, tmp_path: Path) -> None:
+def test_clean_stack_exits_zero(provision: bool, duration_s: float, tmp_path: Path) -> None:
     profile = None
     if provision:  # through parse_config, as the operator's file would go
         path = tmp_path / "profile.json"
         path.write_text(json.dumps(_PROFILE), encoding="utf-8")
         profile = stress.parse_config(["--provision-profile", str(path)]).profile
     stack = FakeStack()
-    code, ledger = _run(stack, _config(profile=profile))
+    # Nothing is refused, so each client's seeded draws run the same sequence however the clients
+    # interleave; the planted-defect tests keep the contended cap.
+    stack.cap = 1_000_000
+    code, ledger = _run(stack, _config(profile=profile, duration_s=duration_s))
     assert ledger.violations == []
     assert code == 0
     outcomes = {call.outcome for call in ledger.calls}
@@ -568,6 +573,15 @@ def test_clean_stack_exits_zero(provision: bool, tmp_path: Path) -> None:
     assert any(len(ids) == 3 for ids in stack.key_sessions.values()), "no shared-key race across 3"
     if profile is not None:
         assert stack.systems, "no System was provisioned"
+
+
+def test_contended_clean_stack_exits_zero() -> None:
+    """The full mix under the default cap: denials and queued grants, and still no violation."""
+    stack = FakeStack()
+    code, ledger = _run(stack, _config())
+    assert ledger.violations == []
+    assert code == 0
+    assert _settled(stack)
 
 
 @pytest.mark.parametrize(
@@ -643,7 +657,8 @@ def test_cancel_during_drain_reports_leftovers(capsys: pytest.CaptureFixture[str
 
 def test_dropped_sessions_still_drain_and_report(capsys: pytest.CaptureFixture[str]) -> None:
     stack = FakeStack(drop_after=60)
-    code, ledger = _run(stack, _config(invalid_ratio=0.0))
+    # Past the drop, so each client ends only by the dead-session rule, however starved the run.
+    code, ledger = _run(stack, _config(invalid_ratio=0.0, min_rounds=100))
     printed = capsys.readouterr().out
     assert code == 0, ledger.violations
     assert ledger.valid_errors["transport"] > 0
