@@ -3322,6 +3322,15 @@ def _system_teardown_name(binding: ExternalBootActivationBinding) -> str:
     return f"{_SYSTEM_TEARDOWN_PREFIX}{binding.system_id}.json"
 
 
+class RecoveryIntentAbsentError(FileNotFoundError):
+    """The recovery directory exists but holds no ``intent.json``.
+
+    Cleanup deletes the intent by design, so a caller holding cleanup evidence may treat
+    this as an expected observation. Other absent files in the directory stay plain
+    ``FileNotFoundError``.
+    """
+
+
 def _read_private_file(directory_fd: int, name: str, *, sync: bool = False) -> bytes:
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
     try:
@@ -4332,7 +4341,10 @@ class RecoveryMetadataStore:
 
     @staticmethod
     def _read(directory_fd: int) -> LocalRecoveryMetadataV1:
-        data = _read_private_file(directory_fd, _INTENT_NAME)
+        try:
+            data = _read_private_file(directory_fd, _INTENT_NAME)
+        except FileNotFoundError as error:
+            raise RecoveryIntentAbsentError(_INTENT_NAME) from error
         metadata = LocalRecoveryMetadataV1.model_validate_json(data)
         if _metadata_bytes(metadata) != data:
             raise ValueError("recovery intent is not canonical JSON")
