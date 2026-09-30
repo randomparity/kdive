@@ -252,6 +252,42 @@ overlay and console owner and the live private-daemon domain before any public i
 request. The configured System must be disposable; this setup is not a migration mechanism for
 ordinary worker-owned Systems.
 
+**Fixture cleanup.** In `create` mode the fixture script reports the five exact names it made for
+the configured System, and the carrier records each one in its resource ledger:
+
+- `/var/lib/kdive/provider-authority/rootfs/<uuid>-fixture-base.qcow2`
+- `/var/lib/kdive/provider-authority/rootfs/<uuid>-baseline`
+- `/var/lib/kdive/provider-authority/rootfs/<uuid>-overlay.qcow2`
+- `/var/lib/kdive/provider-authority/console/<uuid>.log`
+- the domain `kdive-<uuid>` on the private authority daemon
+
+After its Investigation close attempt, whether the proof passed or failed, the carrier removes
+those names newest first with `provision-authority-fixture.py --remove <uuid> <name>`. The
+domain goes first. The script accepts only a name from that set, and it refuses a symlinked
+directory, a hard-linked file, or a parent that is not the authority-owned mode-`0700`
+directory. It stops at the first failed name, so a domain that did not go away keeps its files.
+`verify-existing` records and removes nothing. The authority journal lane
+`/var/lib/kdive/provider-authority/journal/<uuid>.jsonl` stays: the authority starts only when
+every lane matches its database head, so the lane is an audit record, not a fixture artifact.
+
+Remove the fixture by hand only after a failed removal or a `create` that failed part way. Run
+the same exact-name mode, domain first:
+
+```sh
+uuid=<system_id>
+for name in "kdive-$uuid" \
+  "/var/lib/kdive/provider-authority/console/$uuid.log" \
+  "/var/lib/kdive/provider-authority/rootfs/$uuid-overlay.qcow2" \
+  "/var/lib/kdive/provider-authority/rootfs/$uuid-baseline" \
+  "/var/lib/kdive/provider-authority/rootfs/$uuid-fixture-base.qcow2"; do
+  sudo -n /opt/kdive-provider-authority/.venv/bin/python \
+    scripts/live-vm/provision-authority-fixture.py --remove "$uuid" "$name"
+done
+```
+
+An absent name is success, so a repeated run is safe. The System row stays `ready`; release its
+allocation as for any disposable System.
+
 
 ### Installed local authority carrier — ppc64le (#2152)
 
@@ -294,7 +330,8 @@ The proof is structurally identical to the x86_64 carrier's normal-operations ar
 an Investigation, creates a labeled Run on the disposable System with `arch=ppc64le` in the
 build profile, uploads the kernel through the public artifact contract, and drains the real
 install, activate, and root release jobs. Confinement, revision-coherence, and artifact-ownership
-checks all apply identically to the x86_64 carrier. The fault arms (`barrier_socket`,
+checks all apply identically to the x86_64 carrier, and so does the
+[fixture cleanup](#installed-local-authority-carrier) contract. The fault arms (`barrier_socket`,
 restart-recovery, takeover, journal-loss, stale-write) are not yet implemented for the ppc64le
 carrier; they remain separate scope.
 
