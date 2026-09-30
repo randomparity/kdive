@@ -242,17 +242,6 @@ async def _reprovision_in_lock(
             suggested_next_actions=["systems.get"],
             data={"reason": "external_boot_teardown_in_progress"},
         )
-    # An ordinary teardown enqueue leaves the System `ready`, so only its job row shows it is
-    # pending (#2979). A settled row is safe: the teardown handler re-checks state under this lock.
-    teardown = await _job_for_dedup_key(conn, _teardown_dedup_key(system_id))
-    if teardown is not None and teardown.state in _LIVE_JOB_STATES:
-        return ToolResponse.failure(
-            str(system_id),
-            ErrorCategory.CONFLICT,
-            detail="System teardown is queued or running; retry once it settles",
-            suggested_next_actions=["systems.get"],
-            data={"reason": "teardown_in_progress"},
-        )
     # Below the `REPROVISIONING` replay return above: a repeat call that finds the live dedup job
     # enqueues nothing and returns it unchanged, so it is a poll rather than fresh work, and an
     # activation that appeared since must not turn it into a `conflict` while that job stays
@@ -265,6 +254,18 @@ async def _reprovision_in_lock(
         return _external_boot_denial(str(system_id), exc, ctx)
     if system.state is not SystemState.READY:
         return _config_error(str(system_id), data={"current_status": system.state.value})
+    # An ordinary teardown enqueue leaves the System `ready`, so only its job row shows it is
+    # pending (#2979). A settled row is safe: the teardown handler re-checks state under this lock.
+    # Below the READY check, so a System the teardown already moved keeps its `current_status`.
+    teardown = await _job_for_dedup_key(conn, _teardown_dedup_key(system_id))
+    if teardown is not None and teardown.state in _LIVE_JOB_STATES:
+        return ToolResponse.failure(
+            str(system_id),
+            ErrorCategory.CONFLICT,
+            detail="System teardown is queued or running; check systems.get before reprovisioning",
+            suggested_next_actions=["systems.get"],
+            data={"reason": "teardown_in_progress"},
+        )
     if await _has_live_run(conn, system_id):
         return _stale_handle(str(system_id), current_status=system.state.value)
     try:

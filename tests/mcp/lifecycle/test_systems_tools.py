@@ -2536,6 +2536,7 @@ def test_reprovision_refuses_under_live_teardown_job(
         assert resp.status == "error"
         assert resp.error_category == "conflict"
         assert resp.data["reason"] == "teardown_in_progress"
+        assert resp.retryable is False  # CONFLICT (ADR-0118): wait on the teardown, not a retry
         assert resp.suggested_next_actions == ["systems.get"]
         assert state == "ready"
         assert jobs is not None and jobs["n"] == 0
@@ -2559,6 +2560,23 @@ def test_reprovision_admitted_after_settled_teardown_job(
             state = await _system_state(pool, sys_id)
         assert resp.status == "queued"
         assert state == "reprovisioning"
+
+    asyncio.run(_run())
+
+
+def test_reprovision_non_ready_system_under_teardown_keeps_config_error(
+    migrated_url: str,
+) -> None:
+    """#2979: a System the teardown already moved still reports its `current_status`."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.TEARING_DOWN)
+            await _seed_teardown_in_state(pool, sys_id, "running")
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
+        assert resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "tearing_down"
 
     asyncio.run(_run())
 
