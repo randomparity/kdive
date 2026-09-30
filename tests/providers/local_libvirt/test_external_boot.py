@@ -362,6 +362,29 @@ def test_system_teardown_resumes_after_mutation_before_checkpoint_without_repeat
     assert sibling.read_bytes() == b"keep"
 
 
+def test_system_teardown_completes_when_domain_and_artifacts_are_already_gone(
+    tmp_path: Path,
+) -> None:
+    """#2966: a domain removed before the authority teardown leaves nothing to destroy."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    session = _SystemTeardownSession()
+    session.domain_present = False
+    session.domain_active = False
+    session.overlay_present = False
+    session.baseline_present = False
+    io = _system_teardown_io(root, session)
+    authority = OpaqueProviderRef(ref="authority/current")
+
+    result = io.teardown_system(_teardown_intent(), authority)
+
+    assert result.complete
+    assert result.domain_absent
+    assert result.reservation == _TEARDOWN_RESERVATION
+    assert (session.destroy_mutations, session.undefine_mutations) == (0, 0)
+    assert session.overlay_mutations == 0
+
+
 def test_system_teardown_observation_is_read_only_and_recovery_residue_retains_quarantine(
     tmp_path: Path,
 ) -> None:
