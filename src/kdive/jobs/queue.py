@@ -56,11 +56,13 @@ DEFAULT_DISPATCH_LANES = (DEFAULT_JOB_DISPATCH_LANE,)
 class JobRecyclePolicy(StrEnum):
     """Rows an enqueue may reset under an existing deduplication key.
 
+    ``FAILED`` resets only a ``failed`` row, so a ``succeeded`` job still replays (#2929).
     ``FAILED_OR_LAPSED_EXHAUSTED`` resets a ``failed`` row, or requeues a ``running`` row whose
     final charged attempt's lease lapsed on the database clock (ADR-0620, #2889).
     """
 
     NEVER = "never"
+    FAILED = "failed"
     TERMINAL = "terminal"
     TERMINAL_OR_CANCELED = "terminal_or_canceled"
     FAILED_OR_LAPSED_EXHAUSTED = "failed_or_lapsed_exhausted"
@@ -153,7 +155,7 @@ async def enqueue_with_status(
         inserted = await cur.fetchone() is not None
         if recycle is not JobRecyclePolicy.NEVER:
             recyclable = [JobState.FAILED.value]
-            if recycle is not JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED:
+            if recycle in (JobRecyclePolicy.TERMINAL, JobRecyclePolicy.TERMINAL_OR_CANCELED):
                 recyclable.append(JobState.SUCCEEDED.value)
             if recycle is JobRecyclePolicy.TERMINAL_OR_CANCELED:
                 recyclable.append(JobState.CANCELED.value)
