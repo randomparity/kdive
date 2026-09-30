@@ -1,4 +1,4 @@
-"""An invalid envelope built in a tool body is a server fault, not an argument error (ADR-0709).
+"""A server fault in a tool body is reported as one, not as an argument error (ADR-0709).
 
 Driven through a real in-process FastMCP app, because the misreport this guards against is
 FastMCP's own: it logs an escaping pydantic ``ValidationError`` as ``Invalid arguments for tool``
@@ -14,16 +14,18 @@ from typing import Any
 
 import pytest
 from fastmcp import Client, FastMCP
+from pydantic import BaseModel
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
-from kdive.mcp.middleware.invalid_envelope import (
-    INVALID_ENVELOPE_DETAIL,
-    InvalidEnvelopeMiddleware,
-)
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.middleware.server_fault import SERVER_FAULT_DETAIL, ServerFaultMiddleware
+from kdive.mcp.responses import ToolResponse, validate_stored
 
 _ARGUMENT_ERROR_LOG = "Invalid arguments for tool"
+
+
+class _Row(BaseModel):
+    profile: int
 
 
 @pytest.fixture
@@ -42,7 +44,7 @@ def _app() -> FastMCP:
     # Async bodies, as every kdive tool is: FastMCP runs them on a different path than sync ones.
     app: FastMCP = FastMCP("t")
     app.add_middleware(BindingErrorMiddleware())
-    app.add_middleware(InvalidEnvelopeMiddleware())
+    app.add_middleware(ServerFaultMiddleware())
 
     @app.tool(name="bad")
     async def bad() -> ToolResponse:
@@ -51,6 +53,17 @@ def _app() -> FastMCP:
     @app.tool(name="replay")
     async def replay() -> ToolResponse:
         return ToolResponse.model_validate({"object_id": "x", "status": "failed"})
+
+    @app.tool(name="stored")
+    async def stored() -> ToolResponse:
+        row = validate_stored(_Row, {"profile": "not-an-int"})
+        return ToolResponse.success(str(row.profile), "ok")
+
+    # A caller-input rebuild in a tool BindingErrorMiddleware converts (#2981 keeps its path).
+    @app.tool(name="systems.provision")
+    async def provision(allocation_id: str) -> ToolResponse:
+        _Row.model_validate({"profile": "not-an-int"})
+        return ToolResponse.success(allocation_id, "ok")
 
     @app.tool(name="typed")
     async def typed(n: int) -> ToolResponse:
@@ -67,8 +80,8 @@ def _call(name: str, arguments: dict[str, Any]) -> Any:
     return asyncio.run(_run())
 
 
-@pytest.mark.parametrize("tool", ["bad", "replay"])
-def test_invalid_envelope_returns_a_server_fault_envelope(
+@pytest.mark.parametrize("tool", ["bad", "replay", "stored"])
+def test_server_fault_returns_a_server_fault_envelope(
     tool: str, fastmcp_log: pytest.LogCaptureFixture
 ) -> None:
     result = _call(tool, {})
@@ -78,11 +91,23 @@ def test_invalid_envelope_returns_a_server_fault_envelope(
     assert envelope["object_id"] == tool
     assert envelope["status"] == "error"
     assert envelope["error_category"] == ErrorCategory.INFRASTRUCTURE_FAILURE.value
-    assert envelope["detail"] == INVALID_ENVELOPE_DETAIL
+    assert envelope["detail"] == SERVER_FAULT_DETAIL
     errors = [r for r in fastmcp_log.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     assert errors[0].exc_info is not None
     assert not [r for r in fastmcp_log.records if _ARGUMENT_ERROR_LOG in r.getMessage()]
+
+
+def test_caller_input_rebuild_keeps_binding_envelope(
+    fastmcp_log: pytest.LogCaptureFixture,
+) -> None:
+    result = _call("systems.provision", {"allocation_id": "a-1"})
+
+    assert not result.is_error
+    envelope = result.structured_content
+    assert envelope["object_id"] == "a-1"
+    assert envelope["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert not [r for r in fastmcp_log.records if r.levelno == logging.ERROR]
 
 
 def test_argument_error_is_still_reported_as_one(fastmcp_log: pytest.LogCaptureFixture) -> None:

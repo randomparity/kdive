@@ -226,13 +226,13 @@ def test_binding_error_middleware_is_registered_innermost() -> None:
     assert order.index(DenialAuditMiddleware.__name__) > order.index(TelemetryMiddleware.__name__)
 
 
-def test_invalid_envelope_middleware_is_registered_innermost() -> None:
+def test_server_fault_middleware_is_registered_innermost() -> None:
     # Innermost, so every other middleware observes an ordinary failure envelope (ADR-0709).
-    from kdive.mcp.middleware.invalid_envelope import InvalidEnvelopeMiddleware
+    from kdive.mcp.middleware.server_fault import ServerFaultMiddleware
 
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
-    assert type(app.middleware[-1]) is InvalidEnvelopeMiddleware
+    assert type(app.middleware[-1]) is ServerFaultMiddleware
 
 
 def test_build_app_produces_a_streamable_http_asgi_app() -> None:
