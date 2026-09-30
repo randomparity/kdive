@@ -100,12 +100,13 @@ async def build_external_boot_payload(
             "has no external_boot port and authority_instance does not match the fixed server "
             "route"
         )
-    if activation.state.value == "preparing" and purpose != "teardown":
+    if activation.state.value == "preparing":
         # System teardown ends a preparing activation without preparing it (#2961), so only the
-        # purposes the worker prepares under carry the plan.
+        # purposes the worker prepares under must carry the plan; any plan supplied is checked.
         if preparation_plan is None:
-            raise _refuse("a preparing activation requires its durable preparation plan")
-        if (
+            if purpose != "teardown":
+                raise _refuse("a preparing activation requires its durable preparation plan")
+        elif (
             preparation_plan.identity != activation.plan_identity
             or preparation_plan.ownership.system_id != str(activation.system_id)
             or preparation_plan.ownership.run_id != str(activation.run_id)

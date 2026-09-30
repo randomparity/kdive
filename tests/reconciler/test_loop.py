@@ -205,10 +205,10 @@ def test_orphaned_system_failure_does_not_starve_sibling(
             )
         original = system_repairs.enqueue_control_teardown
 
-        async def _enqueue(conn: psycopg.AsyncConnection, system, authorizing):
+        async def _enqueue(conn: psycopg.AsyncConnection, system, authorizing, **kwargs):
             if system.id == failed_id:
                 raise RuntimeError("injected admission failure")
-            return await original(conn, system, authorizing)
+            return await original(conn, system, authorizing, **kwargs)
 
         monkeypatch.setattr(system_repairs, "enqueue_control_teardown", _enqueue)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:

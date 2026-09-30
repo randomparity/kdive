@@ -159,3 +159,68 @@ queued before the reprovision began was reachable. `systems.reprovision` now rea
 (`reason: teardown_in_progress`) while that row is `queued` or `running`, writing nothing. A settled
 row does not block. The teardown handler's terminal `conflict` on a `reprovisioning` System stays as
 a backstop.
+
+### Amendment (2026-09-30): recycle policy of every ordinary teardown enqueuer (#2978)
+
+`enqueue_control_teardown` now takes a required `recycle` policy, so no path that enqueues an
+ordinary `{uid}:teardown` row inherits one silently. On its ordinary branch a prior row carrying
+`authority_system_v1` or `external_boot_authority_v1` always replays, because a recycle rewrites
+the payload and the authority re-run path ([ADR-0620](0620-authority-owned-system-teardown.md),
+#2917) keys on that marker. The preactivation-authority branch is unchanged. By operator decision:
+
+- `systems.teardown` (`mcp/tools/lifecycle/systems/admin.py`): `FAILED`, per the #2929 amendment.
+- `ops.force_teardown` (`mcp/tools/ops/security/breakglass.py`): `FAILED`, so the break-glass path
+  re-runs a dead-lettered unmarked row. This replaces the #2929 amendment's "`ops.force_teardown`
+  keeps replaying the dead row". It also refuses a `reprovisioning` System with a `conflict`
+  (`current_status: reprovisioning`) under the System lock and writes no job, as
+  `systems.teardown` does under the #2928 amendment.
+- `enqueue_teardown` (`jobs/service_operations.py`, investigation force-close): `NEVER`; a
+  dead-lettered row replays.
+- `repair_orphaned_systems`: `NEVER`, and it never recycles a failed row. A new read-only lane,
+  `stranded_orphan_teardowns`, logs one WARNING per orphaned System per failure (keyed on the
+  failed row's `updated_at`, in process memory) naming the remedy: `systems.teardown`, or
+  `systems.get` for an authority-marked row. Its count feeds
+  `kdive.reconciler.repairs{repair_kind="stranded_orphan_teardowns"}`. `tearing_down` Systems are
+  excluded from it.
+- `repair_stalled_tearing_down_systems`: `TERMINAL` (unchanged), for a `tearing_down` System.
+
+No reconciler lane re-runs a teardown for a `failed` System; ADR-0441's exclusion stands.
+Rejected: a bounded recycle in the orphan lane, which would re-run a teardown the handler already
+refused with no new evidence; persisting the warning dedupe, which costs a migration for a
+log-noise bound the counter already covers. Design:
+[`2026-09-30-teardown-recycle-policy-2978-design.md`](../workflow/specs/2026-09-30-teardown-recycle-policy-2978-design.md).
+
+### Amendment (2026-09-30): the reconciler settles a stalled reprovision (#2980)
+
+`reprovisioning` leaves only through the reprovision handler, so a reprovision job that
+dead-lettered, was canceled, or is absent stranded the System: the #2928 amendment refuses its
+teardown and the orphan lane skips it. The reconciler lane `stalled_reprovisioning_systems`, run
+after `abandoned_jobs`, now moves such a System to `failed` under the System lock. It writes a
+`reprovisioning->failed` audit row (tool `systems.reprovision`, reconciler principal). A
+half-rebuilt disk is indeterminate, so the lane never returns the System to `ready`. Once the
+System is `failed`, `systems.teardown` reclaims it under the #2908 and #2929 amendments. The lane
+does not tear the System down itself (ADR-0441) and does not recycle the reprovision job.
+
+Reprovision jobs match on `kind` and `payload->>'system_id'`, because the dedup key is per
+profile. A `queued` or `running` job blocks at any age. A non-capture handler is not cancelled when
+its heartbeat stops (`jobs/worker.py` `_dispatch`, `_heartbeat_loop`), so three terminal rows can
+hide a running handler and block for 15 minutes after their last write, the `_TEARDOWN_SETTLE`
+bound of ADR-0634:
+
+- `canceled`, since `jobs.cancel` leaves the handler running;
+- `failed` with `lease_expired`, which `repair_abandoned_jobs` writes over a lapsed attempt;
+- `failed` at `attempt > 1`, because `claim_worker_job` reclaims a lapsed `running` row as the next
+  attempt, which can fail while the earlier handler still runs.
+
+A `failed` row at `attempt = 1` without `lease_expired` was written after the only handler returned,
+so it settles at once. A handler that outlives the window finds the System `failed`: its commit
+applies only from `reprovisioning`, and it reaps its own domain.
+
+The lane records the new non-retryable `reprovision_incomplete` category (migration 0166) under
+ADR-0513 §1a precedence: only when the newest terminal reprovision job has no category or
+`lease_expired`. Otherwise the column stays NULL and the ADR-0454 job fallback answers.
+
+Known consequence: `systems.reprovision` with a profile the System already applied replays that
+profile's terminal job (`recycle=NEVER`), so no handler runs. Such a System now settles to
+`failed` instead of staying `reprovisioning`. The admission fix is not part of this amendment.
+Spec: [`../workflow/specs/2026-09-29-stalled-reprovision-lane-2980-design.md`](../workflow/specs/2026-09-29-stalled-reprovision-lane-2980-design.md).

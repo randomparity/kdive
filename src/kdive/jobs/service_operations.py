@@ -52,7 +52,10 @@ class JobOperations:
             system = await SYSTEMS.get(conn, system_id)
             if system is None:
                 raise ObjectNotFound("system", system_id)
-            return await enqueue_control_teardown(conn, system, authorizing(ctx, project))
+            # Investigation force-close replays a dead-lettered teardown by decision (#2978).
+            return await enqueue_control_teardown(
+                conn, system, authorizing(ctx, project), recycle=queue.JobRecyclePolicy.NEVER
+            )
 
     async def find_by_dedup_key(self, conn: AsyncConnection, dedup_key: str) -> Job | None:
         return await queue.get_by_dedup_key(conn, dedup_key)
