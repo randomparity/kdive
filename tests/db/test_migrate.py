@@ -289,6 +289,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0163",
         "0164",
         "0165",
+        "0166",
     ]
     assert second == []
 
@@ -363,7 +364,8 @@ def test_investigation_build_migration_tail_is_unique_and_monotonic() -> None:
         ("0162", "0162_dead_letter_unowned_external_boot_jobs.sql"),
         ("0163", "0163_retained_teardown_requeue_clears_category.sql"),
         ("0164", "0164_dead_letter_exhausted_retained_teardown.sql"),
-        ("0165", "0165_reprovision_incomplete_category.sql"),
+        ("0165", "0165_bound_acknowledged_retry_grant.sql"),
+        ("0166", "0166_reprovision_incomplete_category.sql"),
     ]
 
 
@@ -1113,6 +1115,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0163",
         "0164",
         "0165",
+        "0166",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1552,6 +1555,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0163",
         "0164",
         "0165",
+        "0166",
     ]
 
 

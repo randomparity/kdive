@@ -39,7 +39,7 @@ the System down.
    `kind` has no category or `lease_expired`, and otherwise leave the column NULL. The reprovision
    lane passes `REPROVISION` and `REPROVISION_INCOMPLETE`.
 5. `ErrorCategory.REPROVISION_INCOMPLETE = "reprovision_incomplete"`, set `False` in
-   `RETRYABLE_BY_CATEGORY`. Migration `0165_reprovision_incomplete_category.sql` rebuilds the four
+   `RETRYABLE_BY_CATEGORY`. Migration `0166_reprovision_incomplete_category.sql` rebuilds the four
    CHECK constraints from 0086 with the new value. The served errors guide and its
    `docs/guide/errors.md` mirror gain a section.
 

@@ -1,5 +1,5 @@
--- 0165_reprovision_incomplete_category.sql — reprovision limbo failure category (#2980, ADR-0435).
--- Additive to 0164 (forward-only, ADR-0015). Widens all four ErrorCategory CHECKs —
+-- 0166_reprovision_incomplete_category.sql — reprovision limbo failure category (#2980, ADR-0435).
+-- Additive to 0165 (forward-only, ADR-0015). Widens all four ErrorCategory CHECKs —
 -- runs.failure_category, jobs.error_category, allocations.failure_category and
 -- systems.failure_category — to admit `reprovision_incomplete`, the category
 -- repair_stalled_reprovisioning_systems stamps when it drives a stalled `reprovisioning` System

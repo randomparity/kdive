@@ -6,7 +6,7 @@ Spec: [`../specs/2026-09-29-stalled-reprovision-lane-2980-design.md`](../specs/2
 
 Architecture: this is a fifth stalled-state lane in `reconciler/repairs/systems.py`. It is shaped
 like `repair_stalled_restoring_systems` and uses the `_TEARDOWN_SETTLE` window. A new
-`ErrorCategory` member ships with migration 0165.
+`ErrorCategory` member ships with migration 0166.
 Tech stack: Python 3.14, psycopg 3 async, PostgreSQL, pytest.
 
 Expected implementation size: 220–300 changed lines (M) — two new test modules of about 150
@@ -14,7 +14,7 @@ lines, 70 lines of lane code, 60 lines of migration, and one-line edits to seven
 
 ## Global Constraints
 
-- Migration number `0165` is reserved for this change. It is forward-only (ADR-0015) and drops and
+- Migration number `0166` is reserved for this change. It is forward-only (ADR-0015) and drops and
   recreates the constraints under their existing names.
 - ADR sections are append-only. The amendment is appended to ADR-0435 (`just records`).
 - Guardrails: `just lint`, `just type`, `just test-verbose <paths>`, `just records`,
@@ -26,30 +26,30 @@ lines, 70 lines of lane code, 60 lines of migration, and one-line edits to seven
 | File | Change | Criterion |
 |---|---|---|
 | `src/kdive/domain/errors.py` | `REPROVISION_INCOMPLETE` + retryable `False` | category |
-| `src/kdive/db/schema/0165_reprovision_incomplete_category.sql` | widen the four CHECKs | category |
+| `src/kdive/db/schema/0166_reprovision_incomplete_category.sql` | widen the four CHECKs | category |
 | `src/kdive/jobs/handlers/external_boot/runner.py` | docstring counts 24→25, 7→8 uncommittable | category |
 | `src/kdive/reconciler/repairs/systems.py` | lane + `_limbo_category` generalization | lane |
 | `src/kdive/reconciler/loop.py` | alias + catalog entry after `stalled_restoring_systems` | lane |
 | `docs/guide/errors.md` → `just resources-docs` | new section | category |
 | `docs/adr/0435-reclaim-failed-provision-artifacts.md` | appended amendment | record |
 | `tests/domain/test_errors.py`, `tests/mcp/core/test_responses.py` | enum + retryable pins | category |
-| `tests/db/test_migrate.py` + three `test_migration_0091/0102/0115_*.py` | `0165` in tail lists | migration |
+| `tests/db/test_migrate.py` + three `test_migration_0091/0102/0115_*.py` | `0166` in tail lists | migration |
 | `tests/reconciler/test_stalled_reprovision_recovery.py` (new) | lane arms | lane |
 | `tests/mcp/lifecycle/test_systems_tools.py` | settle → teardown end to end | teardown reachable |
 
-## Task 1 — `reprovision_incomplete` category and migration 0165
+## Task 1 — `reprovision_incomplete` category and migration 0166
 
 **Verification**
 - `Mode: focused-test`. Contract: every CHECK admits the whole `ErrorCategory`
   (`tests/db/test_migrate.py::test_check_constraint_covers_every_enum_value`, parametrized over `CHECK_ENUMS`).
-  Red: after the enum is added but before 0165 exists, the four cases fail. Green:
+  Red: after the enum is added but before 0166 exists, the four cases fail. Green:
   `just test-verbose tests/db/test_migrate.py`.
 - `Mode: focused-test`. Contract: the category is non-retryable. Red: add
   `test_reprovision_incomplete_is_not_retryable` to `tests/mcp/core/test_responses.py` (a copy of
   `test_restore_incomplete_is_not_retryable`) and add the entry to the expected table; both fail
   until `errors.py` changes. Green: `just test-verbose tests/mcp/core/test_responses.py
   tests/domain/test_errors.py`.
-- `Mode: focused-test`. Contract: the migration tails list 0165. Green:
+- `Mode: focused-test`. Contract: the migration tails list 0166. Green:
   `just test-verbose tests/db/test_migrate.py tests/db/test_migration_0091_system_object_sweep_cursors.py
   tests/db/test_migration_0102_build_gc_cursors.py tests/db/test_migration_0115_capture_reap_state.py`.
 
@@ -60,11 +60,11 @@ Steps:
 2. In `errors.py`, after `RESTORE_INCOMPLETE`, add a comment citing #2980 and ADR-0435, then
    `REPROVISION_INCOMPLETE = "reprovision_incomplete"`, and add
    `ErrorCategory.REPROVISION_INCOMPLETE: False` to `RETRYABLE_BY_CATEGORY`.
-3. Create `0165_reprovision_incomplete_category.sql`. Copy the header and four `DROP`/`ADD` pairs
+3. Create `0166_reprovision_incomplete_category.sql`. Copy the header and four `DROP`/`ADD` pairs
    from `0086_restore_incomplete_category.sql` exactly, and append `'reprovision_incomplete'` after
    `'restore_incomplete'` in each list. The header names #2980 and ADR-0435 and says only
    `systems` can hold the value.
-4. Append `"0165"` / `("0165", "0165_reprovision_incomplete_category.sql")` after every `0164`
+4. Append `"0166"` / `("0166", "0166_reprovision_incomplete_category.sql")` after every `0165`
    entry in `tests/db/test_migrate.py` (four lists) and in the three `test_migration_0*` tails.
 5. Change the `runner.py` docstring: `ErrorCategory` has 25 members, eight are not committable,
    and `reprovision_incomplete` joins the list. Make the matching count change in the
@@ -179,5 +179,5 @@ Steps:
 Before reverting the code, run
 `UPDATE systems SET failure_category = NULL WHERE failure_category = 'reprovision_incomplete'`.
 Otherwise the reverted `ErrorCategory` cannot validate those rows, and every `SYSTEMS.get` of them
-fails. The ADR-0454 job fallback then reports them. Then revert the commits. Migration 0165 is
+fails. The ADR-0454 job fallback then reports them. Then revert the commits. Migration 0166 is
 forward-only, and its widened CHECKs stay in place.

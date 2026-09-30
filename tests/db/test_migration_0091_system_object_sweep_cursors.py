@@ -73,7 +73,8 @@ def test_latest_migrations_are_discovered_in_order() -> None:
         ("0162", "0162_dead_letter_unowned_external_boot_jobs.sql"),
         ("0163", "0163_retained_teardown_requeue_clears_category.sql"),
         ("0164", "0164_dead_letter_exhausted_retained_teardown.sql"),
-        ("0165", "0165_reprovision_incomplete_category.sql"),
+        ("0165", "0165_bound_acknowledged_retry_grant.sql"),
+        ("0166", "0166_reprovision_incomplete_category.sql"),
     ]
 
 

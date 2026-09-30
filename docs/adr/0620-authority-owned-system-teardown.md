@@ -4,6 +4,10 @@
 
 Accepted (2026-09-06)
 
+> **Amended by [ADR-0711](0711-bound-acknowledged-retry-grant-per-budget.md) (#2960):** the
+> reconciler also ends a `boot` job past the acknowledged-retry grant bound, and retires or
+> supersedes its live authority.
+
 ## Context
 
 External-boot host domains, overlays, and recovery data can be private to the

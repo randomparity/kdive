@@ -186,7 +186,7 @@ A `failed` row at `attempt = 1` without `lease_expired` was written after the on
 so it settles at once. A handler that outlives the window finds the System `failed`: its commit
 applies only from `reprovisioning`, and it reaps its own domain.
 
-The lane records the new non-retryable `reprovision_incomplete` category (migration 0165) under
+The lane records the new non-retryable `reprovision_incomplete` category (migration 0166) under
 ADR-0513 §1a precedence: only when the newest terminal reprovision job has no category or
 `lease_expired`. Otherwise the column stays NULL and the ADR-0454 job fallback answers.
 
