@@ -673,6 +673,42 @@ def test_authority_group_verification_tracks_local_mutation_kvm_requirement() ->
 
 
 @pytest.mark.parametrize(
+    ("extra_group", "expected_failure"),
+    [
+        (None, False),
+        ("kdive-live-control", True),
+        ("sudo", True),
+        ("wheel", True),
+        ("docker", True),
+    ],
+)
+def test_worker_group_verification_refuses_installer_refused_groups(
+    extra_group: str | None, expected_failure: bool
+) -> None:
+    tasks = yaml.safe_load(_text(VERIFY_TASKS))
+    task = next(
+        item for item in tasks if item.get("name") == "Read every fixed worker account's groups"
+    )
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["bool"] = bool
+    failed = environment.compile_expression(task["failed_when"])
+    groups = ["kdive-live-libvirt", "kvm", "kdive-provider-authority-client"]
+    if extra_group is not None:
+        groups.append(extra_group)
+
+    assert (
+        failed(
+            live_vm_host_worker_group_results={"stdout": " ".join(groups)},
+            live_vm_host_worker_libvirt_group="kdive-live-libvirt",
+            live_vm_host_worker_control_group="kdive-live-control",
+            live_vm_host_worker_authority_enabled=True,
+            live_vm_host_authority_client_group="kdive-provider-authority-client",
+        )
+        is expected_failure
+    )
+
+
+@pytest.mark.parametrize(
     ("local_mutation", "result", "expected_failure"),
     [
         (False, {"rc": 0, "stdout": ""}, False),
