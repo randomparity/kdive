@@ -39,7 +39,8 @@ is benign: the early-boot handler has already consumed the option.
 Inspect the returned stop reason and `data.timed_out` before assuming the intended stop
 was reached. A ppc64le guest under KVM cannot single-step: `into`, `over` and `instruction`
 return `not_implemented` with `data.code` `single_step_unsupported` and leave the guest
-halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session with `debug.end_session` when inspection is complete.
+halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session with
+`debug.end_session` when inspection is complete.
 
 ## Breakpoints and watchpoints
 
