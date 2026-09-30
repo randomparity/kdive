@@ -2086,7 +2086,7 @@ def _real_teardown_adapter(root: Path) -> LocalExternalBootAuthorityAdapter:
 
 
 def _private_directory(path: Path) -> Path:
-    path.mkdir(mode=0o700, parents=True)
+    path.mkdir(mode=0o700)
     path.chmod(0o700)
     return path
 
@@ -2144,8 +2144,9 @@ async def test_non_system_partial_abort_keeps_activation_residue_quarantined(
     tmp_path: Path,
 ) -> None:
     root = _private_directory(tmp_path / "recovery")
-    activation = _private_directory(root / str(SYSTEM_ID) / str(RUN_ID) / str(ACTIVATION_ID))
-    (root / str(SYSTEM_ID)).chmod(0o700)
+    activation = root
+    for part in (SYSTEM_ID, RUN_ID, ACTIVATION_ID):
+        activation = _private_directory(activation / str(part))
     (activation / "kernel").write_bytes(b"unauthenticated")
     request = _request(
         purpose="teardown",
