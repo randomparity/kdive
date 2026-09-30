@@ -48,7 +48,8 @@ no other account needs to read them.
    operator can write keeps its mode (same skip rule as the provision directories). A host
    provisioned before this change, with no debug directory and no passwordless sudo, now stops
    bring-up with the actionable message until the play is re-run; the first debug operation
-   failed on that host before this change.
+   failed on that host before this change. Rollout: re-run the `live_vm_host` play on the
+   self-hosted live runners (`.github/workflows/live.yml` native jobs) that lack passwordless sudo.
 4. **Covered elsewhere** — Helm/compose volumes and the debug/crash directory layout (operator,
    ADR-0088 follow-up); moving the transcript writer to the worker (operator).
 

@@ -114,7 +114,7 @@ records` checks the record shape.
 
 ## Task 5 — live proof (no commit)
 
-On the lease-held ppc64le host: stop the stack; `sudo mv` any existing `/var/lib/kdive/debug`
+On the lease-held ppc64le host: confirm `sudo -n true` (else prove through the play and say so); stop the stack; `sudo mv` any existing `/var/lib/kdive/debug`
 into `~/kdive-2955-proof` (old transcripts are kept there, not restored); show it absent; run
 `stack-services.sh` from a detached worktree at the branch HEAD; `stat -c '%U %a'` the directory;
 run `uv run pytest "tests/integration/test_live_stack.py::test_spine_over_the_wire" -m live_stack`
