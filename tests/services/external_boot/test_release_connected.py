@@ -285,21 +285,12 @@ def test_public_active_release_claims_and_completes_through_worker(
                     with pytest.raises(asyncio.CancelledError):
                         await dispatch
                     adapter.release.set()
-                    # Completion includes database IO and fsync; event-loop turns are not time.
+                    # The cancelled attempt's completion outlives its dispatch. Its terminal
+                    # record reaches the journal file before the head advance, so the file is
+                    # not durable evidence: a retry started on it supersedes the in-flight
+                    # advance (#2924). Wait for the completion itself.
                     async with asyncio.timeout(10):
-                        while True:
-                            journal = FileAuthorityJournal(tmp_path, f"{vehicle.system_id}.journal")
-                            try:
-                                records = list(journal.load())
-                            finally:
-                                journal.close()
-                            if any(
-                                record.phase.value == "terminal"
-                                and record.operation == adapter.block_operation
-                                for record in records
-                            ):
-                                break
-                            await asyncio.sleep(0.01)
+                        await asyncio.gather(*tuple(service._completion_tasks))
                     claimed = None
                 if interrupt_after is not None and interrupt_after != "cancel-finalize":
                     if not interrupt_after.startswith("cancel-"):
