@@ -89,6 +89,9 @@ class Config:
     call_timeout_s: float
     drain_timeout_s: float
     profile: dict[str, Any] | None
+    # Rounds each client runs even past the deadline, so a CPU-starved test run still covers
+    # every scenario its seed draws; the operator CLI bounds load by --duration alone.
+    min_rounds: int = 0
 
 
 @dataclass(frozen=True)
@@ -586,7 +589,9 @@ class Stress:
 
     async def client_loop(self, seat: Seat, index: int, deadline: float) -> None:
         cfg = self.cfg
-        while time.monotonic() < deadline:
+        rounds = 0
+        while time.monotonic() < deadline or rounds < cfg.min_rounds:
+            rounds += 1
             if self.transport_streak.get(id(seat.client), 0) >= DEAD_SESSION_FAILURES:
                 self.ledger.notes.append(
                     f"client {index} stopped after {DEAD_SESSION_FAILURES} transport failures "
