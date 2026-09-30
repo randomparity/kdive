@@ -122,6 +122,42 @@ Rejected for this amendment:
   judgment: a `superseded` row can be one that lost an allocation race, so the route would rest
   on rows the fences already treat as dead.
 
+### Amendment (2026-09-29): the worker refuses an unmarked teardown for any history (#2966)
+
+The ordinary `teardown_handler` refuses an unmarked TEARDOWN job when the System has any
+external-boot activation, not only one that still restricts it. It raises the existing
+terminal `conflict` (`external_boot_teardown_not_supported`) under the System lock, before the
+`tearing_down` transition and any provider call. Before, a clean release (`recovered`,
+`cleanup_complete`) let the ordinary provisioner act on its own libvirt URI, find no domain,
+and commit `torn_down` while the authority daemon kept the domain running.
+
+The public `systems.teardown` replaces an ordinary `{system}:teardown` job in state `failed`
+with the authority-marked teardown (recycle policy `FAILED`). An ordinary job in any other
+state still returns `ordinary_teardown_fenced_by_external_boot`. A refused job ran no
+provider call, so replacing it does not skip a mutation in flight.
+
+Producers that enqueue through `enqueue_control_teardown` (the orphaned-System reconciler lane,
+investigation force-close, break-glass teardown) still enqueue an unmarked job. The worker
+refuses it, and the System stays `ready` with a failed teardown job until `systems.teardown`
+runs.
+
+Rejected for this amendment:
+
+- **Route in `enqueue_control_teardown`.** judgment: `build_external_boot_payload` needs a
+  `ProviderResolver`, which `JobOperations`, break-glass and the reconciler lane (where
+  `ReconcileConfig.provider_resolver` is optional) would each have to carry. It is the better
+  end state and stays a follow-up; the worker refusal is still needed for jobs already queued.
+- **Route in the worker.** verified: `ExternalBootOperations.run` reads the marker from
+  `job.payload`, and the marker is minted under the System lock by the enqueueing server
+  (`jobs/handlers/external_boot/router.py`, `mcp/tools/lifecycle/systems/admin.py` at
+  2e0d9eae7). A worker that minted its own would bypass that admission.
+- **Refuse in `enqueue_control_teardown` only.** judgment: a teardown already queued before the
+  change, or enqueued by `repair_stalled_tearing_down_systems`, would still reach the ordinary
+  provisioner; the reconciler lane would also log the refusal on every pass.
+- **Refuse in the worker without the public recycle.** verified: `_enqueue_authority_teardown`
+  returns `conflict` for any ordinary prior (`admin.py` at 2e0d9eae7), and `jobs.dedup_key` is
+  unique, so the refused job would leave no supported teardown path.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
