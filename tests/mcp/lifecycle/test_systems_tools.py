@@ -1441,6 +1441,59 @@ def test_teardown_with_external_boot_history_enqueues_authority_marker(
     asyncio.run(_run())
 
 
+def test_teardown_of_preparing_activation_enqueues_authority_marker(migrated_url: str) -> None:
+    """#2961: a preparing activation, with its activate authority still current, is torn down."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, system_id, RunState.RUNNING)
+            async with pool.connection() as conn:
+                seeded = await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.PREPARING,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+                await conn.execute(
+                    "INSERT INTO external_boot_reservations "
+                    "(activation_id, store_identity, owner_key, reserved_bytes, state) "
+                    "VALUES (%s, 'stores/main', %s, 4096, 'pending')",
+                    (seeded.activation.id, f"owners/{seeded.activation.id}"),
+                )
+                await _seed_retired_teardown_authority(
+                    conn, seeded, purpose="activate", current=True
+                )
+            response = await _teardown(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
+            )
+            assert response.status == "queued", response.model_dump()
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT kind, payload FROM jobs WHERE id = %s", (response.object_id,)
+                )
+                job = await cur.fetchone()
+                await cur.execute(
+                    "SELECT state FROM external_boot_reservations WHERE activation_id = %s",
+                    (seeded.activation.id,),
+                )
+                reservation = await cur.fetchone()
+
+        assert job is not None and job["kind"] == "teardown"
+        marker = job["payload"]["external_boot_authority_v1"]
+        assert marker["activation_id"] == str(seeded.activation.id)
+        assert (marker["purpose"], marker["operation"]) == ("teardown", "teardown")
+        assert "external_boot_plan_v1" not in job["payload"]
+        # Enqueueing credits nothing: only the authority's teardown receipt ends the reservation.
+        assert reservation == {"state": "pending"}
+
+    asyncio.run(_run())
+
+
 async def _authority_teardown_job(pool: AsyncConnectionPool) -> tuple[str, str]:
     """Enqueue one authority teardown for a fresh external-boot System; return System and job."""
     alloc_id = await granted_allocation(pool)
