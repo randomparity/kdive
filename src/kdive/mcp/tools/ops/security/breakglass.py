@@ -32,6 +32,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import ErrorCategory
+from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
@@ -254,7 +255,23 @@ async def _teardown_locked(
                 suggested_next_actions=["systems.get"],
                 data={"project": system.project},
             )
-        job = await enqueue_control_teardown(conn, system, job_authorizing(ctx, system.project))
+        if system.state is SystemState.REPROVISIONING:
+            # No teardown edge while reprovisioning (#2928): refuse ahead of the enqueue, as
+            # `systems.teardown` does, so a failed row is not recycled into a doomed job (#2978).
+            return ToolResponse.failure(
+                str(uid),
+                ErrorCategory.CONFLICT,
+                detail="System is mid-reprovision; retry ops.force_teardown once it settles",
+                suggested_next_actions=["systems.get"],
+                data={"current_status": system.state.value},
+            )
+        # A dead-lettered ordinary teardown is re-run, matching `systems.teardown` (#2978).
+        job = await enqueue_control_teardown(
+            conn,
+            system,
+            job_authorizing(ctx, system.project),
+            recycle=queue.JobRecyclePolicy.FAILED,
+        )
     return job_envelope(job, "system_id", uid)
 
 

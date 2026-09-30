@@ -4290,13 +4290,53 @@ def test_services_stage_reconciles_the_app_tier(tmp_path: Path) -> None:
     symptom is a 401 that reads as an auth bug. The run fails later on the fake checkout's absent
     worker-lifecycle.sh; what is asserted is what reached `docker` before that.
     """
-    _, log = _run_stack_services(tmp_path, "--stage", "services", "--skip-libvirt")
+    _, log = _run_stack_services(
+        tmp_path,
+        "--stage",
+        "services",
+        "--skip-libvirt",
+        env_extra={"KDIVE_DEBUG_DIR": str(tmp_path)},
+    )
     recorded = log.read_text()
     assert "rm -sf migrate server worker reconciler" in recorded
     # The reconcile is the contract; this is the guard on the harness itself. --skip-libvirt is
     # legal under --stage services (only --stage backends rejects it), so the stage gate is still
     # exercised while the privileged block stays unreached.
     assert "REFUSED" not in recorded, f"bring-up attempted a privileged call: {recorded}"
+
+
+def _services_up_to_host_processes(tmp_path: Path, debug_dir: Path) -> str:
+    """Run `--skip-libvirt` bring-up and stop at `restart_host_processes`' first line.
+
+    `KDIVE_WORKER_COUNT=bad` fails `configured_worker_count` before any process is touched, so the
+    run ends right after the debug-dir step. Returns the recorded invocation log.
+    """
+    _, log = _run_stack_services(
+        tmp_path,
+        "--skip-libvirt",
+        env_extra={
+            "KDIVE_SKIP_OBS": "1",
+            "KDIVE_DEBUG_DIR": str(debug_dir),
+            "KDIVE_WORKER_COUNT": "bad",
+        },
+    )
+    return log.read_text()
+
+
+def test_services_bring_up_creates_the_debug_dir(tmp_path: Path) -> None:
+    """The host server writes debug transcripts there and nothing else creates it (#2955)."""
+    user = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    debug_dir = tmp_path / "debug"
+    recorded = _services_up_to_host_processes(tmp_path, debug_dir)
+    assert f"REFUSED sudo install -d -o {user} -m 0750 {debug_dir}\n" in recorded, recorded
+
+
+def test_services_bring_up_skips_a_writable_debug_dir(tmp_path: Path) -> None:
+    """A pre-provisioned operator-owned dir needs no sudo, which the account may lack (#1293)."""
+    debug_dir = tmp_path / "debug"
+    debug_dir.mkdir()
+    recorded = _services_up_to_host_processes(tmp_path, debug_dir)
+    assert str(debug_dir) not in recorded, recorded
 
 
 @pytest.mark.parametrize("operation", ("status", "stop", "diagnostics", "recover"))

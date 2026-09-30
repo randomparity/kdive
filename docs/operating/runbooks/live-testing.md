@@ -205,9 +205,19 @@ at that path and re-verify the SHA-256.
    carrier config. A missing row makes the authority-routed install fail with
    `root_provenance_missing`; stage the verified image and provision a new disposable System.
 
+**Carrier DSN.** The carrier reads authority-private tables for its evidence, for example
+`external_boot_release_cleanup_receipts`. The migrations revoke these tables from `PUBLIC` and
+give no read grant to `kdive_server`. Thus the server DSN that the other live tiers use cannot
+read them. Set `KDIVE_DATABASE_URL` to the migration-owner DSN, which is
+`KDIVE_MIGRATION_DATABASE_URL` in the
+[live-stack DSN table](live-stack.md#2-review-the-host-process-env). Before it provisions the
+fixture, the carrier checks that its DSN can `SELECT` each table that it reads. If the DSN
+cannot, the carrier fails before any mutation. The error names each table and the required DSN.
+
 Run only the focused carrier after provisioning and backend bring-up:
 
 ```sh
+KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL" \
 KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG=/protected/local-authority-carrier.json \
   uv run python -m pytest tests/live_vm/test_installed_local_authority.py -q
 ```
@@ -359,9 +369,14 @@ and provision a new disposable System; otherwise authority-routed install fails 
 Run only the focused carrier after provisioning and backend bring-up on the POWER host:
 
 ```sh
+KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL" \
 KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG=/protected/power-authority-carrier.json \
   uv run python -m pytest tests/live_vm/test_installed_local_authority_ppc64le.py -q
 ```
+
+This carrier also needs the migration-owner DSN in `KDIVE_DATABASE_URL`, and it does the same
+DSN check before any mutation. See the **Carrier DSN** paragraph in
+[Installed local authority carrier](#installed-local-authority-carrier).
 
 The proof is structurally identical to the x86_64 carrier's normal-operations arm: it opens
 an Investigation, creates a labeled Run on the disposable System with `arch=ppc64le` in the

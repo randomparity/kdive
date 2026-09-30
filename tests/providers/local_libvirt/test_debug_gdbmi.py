@@ -980,6 +980,46 @@ def test_step_raises_on_missing_function_bounds(tmp_path: Path) -> None:
         _engine().step(_attachment(controller, tmp_path), timeout_sec=1)
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
     assert controller.read_timeouts == []
+    # Only a watchpoint insert failure is coded on resume; any other ^error passes through.
+    assert str(exc.value) == "gdb/MI command failed: -exec-step"
+    assert "code" not in exc.value.details
+
+
+# gdb's resume-time insert failure text (#2739 proof record section 3; gdb breakpoint.c). The
+# same text comes from a stub that cannot insert one and from exhausted x86 debug registers.
+_WATCH_INSERT_FAILED_MSG = (
+    "Warning:\nCould not insert hardware watchpoint 2.\n"
+    "Could not insert hardware breakpoints:\n"
+    "You may have requested too many hardware breakpoints/watchpoints.\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("method", "verb"),
+    [("continue_", "-exec-continue"), ("step_instruction", "-exec-step-instruction")],
+)
+def test_resume_classifies_watchpoint_insert_failure(
+    method: str, verb: str, tmp_path: Path
+) -> None:
+    controller = _FakeMiController(
+        responses={
+            verb: [
+                {"type": "result", "message": "error", "payload": {"msg": _WATCH_INSERT_FAILED_MSG}}
+            ]
+        },
+    )
+    with pytest.raises(CategorizedError) as exc:
+        getattr(_engine(), method)(_attachment(controller, tmp_path), timeout_sec=1)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "watchpoint_insert_failed"
+    assert exc.value.details["verb"] == verb
+    assert exc.value.details["watchpoint"] == "2"
+    assert exc.value.details["command"] == verb
+    assert "debug.clear_watchpoint" in str(exc.value)
+    assert "too many are armed" in str(exc.value)
+    # The failed resume never ran the target, so there is nothing to wait for or interrupt.
+    assert controller.written == [verb]
+    assert controller.read_timeouts == []
 
 
 def test_finish_interrupts_on_timeout(tmp_path: Path) -> None:
@@ -1000,7 +1040,14 @@ def test_finish_interrupts_on_timeout(tmp_path: Path) -> None:
     assert "-exec-interrupt" in controller.written
 
 
-@pytest.mark.parametrize(("method", "verb"), [("step", "-exec-step"), ("next", "-exec-next")])
+@pytest.mark.parametrize(
+    ("method", "verb"),
+    [
+        ("step", "-exec-step"),
+        ("next", "-exec-next"),
+        ("step_instruction", "-exec-step-instruction"),
+    ],
+)
 def test_step_interrupts_on_timeout(method: str, verb: str, tmp_path: Path) -> None:
     # Symbol-poor sub-case (a) (ADR-0379): with function bounds but no line table, gdb
     # single-steps until a line with info; over such code it can run past the bounded wait, so
@@ -1019,7 +1066,35 @@ def test_step_interrupts_on_timeout(method: str, verb: str, tmp_path: Path) -> N
     )
     stop = getattr(_engine(), method)(_attachment(controller, tmp_path), timeout_sec=1)
     assert stop.timed_out is True
+    assert stop.reason == "signal-received"
     assert "-exec-interrupt" in controller.written
+
+
+@pytest.mark.parametrize(
+    ("method", "verb"),
+    [
+        ("step", "-exec-step"),
+        ("next", "-exec-next"),
+        ("step_instruction", "-exec-step-instruction"),
+    ],
+)
+def test_step_verb_without_interrupt_stop_keeps_transport_stall(
+    method: str, verb: str, tmp_path: Path
+) -> None:
+    # #2739 proof record section 4: on ppc64le KVM-HV the step verb resumed and neither the step
+    # nor the interrupt stopped the vCPU. That is the same on the wire as a real RSP stall, so it
+    # keeps transport_stall (ADR 0712 amendment of 2026-09-30).
+    controller = _FakeMiController(
+        responses={
+            verb: [{"type": "result", "message": "running", "payload": None}],
+            "-exec-interrupt": [{"type": "result", "message": "done", "payload": None}],
+        },
+    )
+    with pytest.raises(CategorizedError) as exc:
+        getattr(_engine(), method)(_attachment(controller, tmp_path), timeout_sec=1)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"code": "transport_stall", "verb": verb}
+    assert controller.written == [verb, "-exec-interrupt"]
 
 
 @pytest.mark.parametrize("timeout_sec", [-1.0, math.inf, math.nan])

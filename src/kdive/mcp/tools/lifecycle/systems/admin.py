@@ -32,7 +32,7 @@ from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload, dump_payload
 from kdive.log import bind_context
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import ToolResponse, validate_stored
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import authz_denied as _authz_denied
@@ -334,7 +334,7 @@ async def _job_for_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | Non
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
-    return Job.model_validate(row) if row else None
+    return validate_stored(Job, row) if row else None
 
 
 async def _authority_system_binding(
@@ -573,6 +573,32 @@ async def _enqueue_preactivation_authority_teardown(
     return envelope
 
 
+async def _key_names_job(
+    conn: AsyncConnection, ctx: RequestContext, key: str, job_id: str | None
+) -> bool:
+    stored = await resolve_envelope_replay(
+        conn, principal=ctx.principal, key=key, kind=_TEARDOWN_KIND
+    )
+    return stored is not None and stored.object_id == job_id
+
+
+def _is_settled_ordinary_teardown(job: Job | None) -> bool:
+    """Whether ``job`` is an unmarked teardown no worker attempt can still be running.
+
+    A canceled row qualifies only if no worker ever claimed it: `jobs.cancel` is cooperative, and
+    a recycled row restarts at attempt 1, which a still-running canceled attempt would match.
+    """
+    return (
+        job is not None
+        and _AUTHORITY_MARKER not in job.payload
+        and "authority_system_v1" not in job.payload
+        and (
+            job.state is JobState.FAILED
+            or (job.state is JobState.CANCELED and job.worker_id is None)
+        )
+    )
+
+
 async def _enqueue_authority_teardown(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -603,7 +629,10 @@ async def _enqueue_authority_teardown(
             data={"reason": "external_boot_teardown_authority_unresolved"},
         )
     prior = await dedup_replay(conn, _teardown_dedup_key(system.id))
-    if prior is not None:
+    # The worker refuses an ordinary teardown for external-boot history before any provider call,
+    # so a settled ordinary job is replaced by the authority teardown (ADR-0620 amendment, #2966).
+    replaces_ordinary = _is_settled_ordinary_teardown(prior)
+    if prior is not None and not replaces_ordinary:
         marker = prior.payload.get(_AUTHORITY_MARKER)
         if not isinstance(marker, dict) or marker.get("activation_id") != str(activation.id):
             return ToolResponse.failure(
@@ -646,27 +675,37 @@ async def _enqueue_authority_teardown(
             suggested_next_actions=["systems.get"],
             data={"reason": "external_boot_teardown_authority_unresolved"},
         )
-    if prior is not None and (
-        dump_payload(kind, payload).get(_AUTHORITY_MARKER) != prior.payload.get(_AUTHORITY_MARKER)
+    if (
+        prior is not None
+        and not replaces_ordinary
+        and dump_payload(kind, payload).get(_AUTHORITY_MARKER)
+        != prior.payload.get(_AUTHORITY_MARKER)
     ):
         return job_envelope(prior, "system_id", system.id)
     # A failed authority teardown, or one whose final attempt's lease lapsed, with the identical
     # marker is re-run (ADR-0620 amendments). The lapse is judged only by enqueue's UPDATE on the
     # database clock, so a final attempt that is still live comes back unchanged and replays.
+    if prior is None:
+        recycle = queue.JobRecyclePolicy.NEVER
+    elif replaces_ordinary:
+        # The row is failed, or canceled and never claimed, as read under the System lock.
+        recycle = queue.JobRecyclePolicy.TERMINAL_OR_CANCELED
+    else:
+        recycle = queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
     job = await queue.enqueue(
         conn,
         kind,
         payload,
         job_authorizing(ctx, system.project),
         _teardown_dedup_key(system.id),
-        recycle=(
-            queue.JobRecyclePolicy.NEVER
-            if prior is None
-            else queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
-        ),
+        recycle=recycle,
     )
     envelope = job_envelope(job, "system_id", system.id)
-    if idempotency_key is not None:
+    # A key already recorded for the replaced ordinary job names this same job row; recording it
+    # again would raise and roll the replacement back behind a stale replay.
+    if idempotency_key is not None and not (
+        replaces_ordinary and await _key_names_job(conn, ctx, idempotency_key, envelope.object_id)
+    ):
         await record_envelope(
             conn,
             principal=ctx.principal,

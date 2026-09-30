@@ -431,7 +431,7 @@ def test_conflict_resolution_conflicts_when_no_activation_restricts_the_system(
     [
         (_STATE.RECOVERY_CONFLICT, _CONFLICT_ACTIONS),
         (_STATE.RECOVERY_FAILED, _CONFLICT_ACTIONS),
-        (_STATE.PREPARING, ["runs.get"]),
+        (_STATE.PREPARING, _CONFLICT_ACTIONS),
     ],
 )
 def test_release_is_denied_outside_the_active_state(

@@ -1144,7 +1144,9 @@ class ExternalBootAuthorityService:
                 AuthorityMutationRequestV1,
                 AuthorityPreparationMutationRequestV1.model_validate(values),
             )
-        return AuthorityMutationRequestV1.model_validate(values)
+        return AuthorityMutationRequestV1.model_validate(
+            values | {"local_timing": record.local_timing}
+        )
 
     async def _recover_suspended(
         self,
