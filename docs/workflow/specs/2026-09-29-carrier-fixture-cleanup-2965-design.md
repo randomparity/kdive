@@ -57,9 +57,10 @@ The fixture that one `create` run makes is this exact set of names, in creation 
    first. A nonzero exit fails that entry, and the callback then refuses every later fixture
    entry without running the script. A domain that did not go away thus keeps its backing
    files for diagnosis.
-6. **When.** Each carrier calls `remove_authority_fixture` after its Investigation close, and
-   only when the proof body and the close both raised no exception. A failed run keeps the
-   fixture for diagnosis. The runbook gives the manual `--remove` command for that case.
+6. **When.** Each carrier calls `remove_authority_fixture` in its cleanup path, after its
+   Investigation close attempt, whether the proof passed or failed, as the close already
+   runs. The runbook gives the manual `--remove` command for the two cases the carrier does
+   not finish: a failed removal and a partial `create`.
 7. **Runbook.** Both carrier sections of `docs/operating/runbooks/live-testing.md` state this
    contract, the kept journal lane, and the manual command.
 
@@ -82,10 +83,13 @@ the carrier's orchestrator.
    - Root deletes only the five exact names of the configured System. It never deletes a
      prefix, a glob, a caller path outside the set, or a symlink target.
    - The authority journal lane and the database rows stay intact.
-   - A failed proof keeps its fixture for diagnosis.
 3. **Accepted failure classes**
-   - A `create` that fails part way leaves the names it made. Accepted: the run failed, the
-     diagnosis needs them, and the runbook gives the manual command.
+   - A `create` that fails part way leaves the names it made, because the script prints them
+     only after success. Accepted: this run did not create a complete fixture, recording
+     names before a mutation could record a same-UUID object that a prior run left, and the
+     runbook gives the manual command. It is the only failed-run case left to the operator.
+   - Cleanup after a failed proof removes the domain that a diagnosis could inspect.
+     Accepted: the outcome requires no manual step for a run that created its fixture.
    - The authority identity can race a path check against the unlink. Accepted: that identity
      owns the directories and is the trusted actor for them.
    - The System row stays `ready` after the domain is removed. Accepted: the operator releases
@@ -110,7 +114,8 @@ the carrier's orchestrator.
 
 ## Success
 
-- After a passing `create`-mode carrier run, the five names in the table are absent. `virsh`
+- After a `create`-mode carrier run whose `create` step completed, passing or failing, and
+  whose removal calls all exited 0, the five names in the table are absent. `virsh`
   on the authority daemon lists no `kdive-<uuid>`. The journal lane and the other Systems'
   files are unchanged.
 - `--remove` with a value outside the derived set exits nonzero before any mutation.

@@ -149,12 +149,12 @@ Verification:
   `test_remove_authority_fixture_stops_after_a_failed_entry` (the domain entry fails; the
   `ExceptionGroup` carries every entry; only one `subprocess.run` call). Red: missing function.
   Green: same command.
-- Contract: carriers remove the fixture only after a proof body and close with no exception. Mode:
-  focused-test. Extend `test_native_carriers_supply_the_required_cleanup_summary` to assert one
-  `remove_authority_fixture` call, and add
-  `test_native_carrier_keeps_the_fixture_after_a_failed_proof`, parametrized over a raising
-  `assert_root_release_completion` and a `failed` close envelope (the error propagates; no
-  removal call). Red: no call recorded. Green: same command.
+- Contract: carriers remove the fixture after the close attempt, on success and on failure.
+  Mode: focused-test. Extend `test_native_carriers_supply_the_required_cleanup_summary` to
+  assert one `remove_authority_fixture` call after the close, and add
+  `test_native_carrier_removes_the_fixture_after_a_failed_proof` (fake
+  `assert_root_release_completion` raises; that error propagates; one removal call). Red: no
+  call recorded. Green: same command.
 
 Steps:
 
@@ -209,16 +209,15 @@ Steps:
    `ledger` to `provision_authority_fixture`, and after the Investigation close add
 
    ```python
-   if primary is None and not cleanup_failures:
-       try:
-           remove_authority_fixture(config, ledger)
-       except Exception as exc:
-           cleanup_failures.append(exc)
+   try:
+       remove_authority_fixture(config, ledger)
+   except Exception as exc:
+       cleanup_failures.append(exc)
    ```
 
-   (the journal-restore carrier tests and appends to `failures`; the takeover carrier, which has no
-   `primary`, calls `remove_authority_fixture(config, ledger)` after its close assertion inside
-   the `try`).
+   (the journal-restore carrier appends to `failures` in its `finally`; the takeover carrier,
+   which has no `primary`, calls `remove_authority_fixture(config, ledger)` as the last
+   statement of its `finally`, after the worker hold is released).
 8. Run the focused command; expect pass. Run `just lint`, `just type`; expect exit 0. Commit
    `fix(live-vm): record and remove the carrier's authority fixture`.
 
@@ -235,9 +234,10 @@ Verification:
 Steps:
 
 1. In the x86_64 section, after the re-provision paragraph, add a paragraph: in `create` mode
-   the carrier records the five exact names; after a proof and close with no exception it removes them
-   in reverse order through `provision-authority-fixture.py --remove <uuid> <name>`; a failed
-   proof keeps them for diagnosis; the journal lane `journal/<uuid>.jsonl` stays because the
+   the carrier records the five exact names; after its Investigation close attempt, on success
+   and on failure, it removes them in reverse order through
+   `provision-authority-fixture.py --remove <uuid> <name>` and stops at the first failed name;
+   a partial `create` and a failed removal are the manual cases; the journal lane `journal/<uuid>.jsonl` stays because the
    authority requires every lane to match its database head; `verify-existing` removes nothing.
    Give the manual command as a loop over the five names.
 2. In the ppc64le section, add one sentence that the same fixture cleanup contract applies.
