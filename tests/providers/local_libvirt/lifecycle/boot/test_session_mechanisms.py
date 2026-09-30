@@ -27,6 +27,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     ModuleArchiveCapture,
     RecoveryMetadataStore,
     TargetProjectionV1,
+    _cleanup_uncommitted_payloads,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
@@ -647,6 +648,18 @@ class TestArtifactRoot:
         assert not (recovery_root.parent / "escape").exists()
 
 
+_OWNED_TEMPORARIES = (
+    ".bundle.next",
+    ".bundle.verify",
+    ".kernel.next",
+    ".kernel.next.part",
+    ".modules.next",
+    ".initrd.next",
+    ".initrd.verify",
+    ".target-projection.next",
+)
+
+
 class TestPayloadCleanup:
     def test_cleanup_prunes_one_activation_and_preserves_same_run_sibling(
         self, recovery_root: Path
@@ -742,6 +755,71 @@ class TestPayloadCleanup:
         assert sorted(os.listdir(digest)) == before
         assert outside.read_bytes() == b"not owned"
         assert (recovery / "modules.tar").exists()
+
+    @pytest.mark.parametrize("projection", [True, False])
+    @pytest.mark.parametrize("temporary", _OWNED_TEMPORARIES)
+    def test_cleanup_removes_an_interrupted_materialization_temporary(
+        self, recovery_root: Path, tmp_path: Path, projection: bool, temporary: str
+    ) -> None:
+        # #2920: a killed materialize, verify or publish leaves its own private temporary in the
+        # digest directory, beside a committed projection or none; cleanup owns and removes it.
+        artifacts = _private_dir(tmp_path / "artifacts")
+        digest = _stage(artifacts, ("kernel", "modules"))
+        if not projection:
+            (digest / "target-projection.json").unlink()
+        (digest / temporary).write_bytes(b"partial")
+        (digest / temporary).chmod(0o600)
+        recovery = _archive_directory(recovery_root)
+
+        _cleanup(recovery_root, artifacts)
+        _cleanup(recovery_root, artifacts)
+
+        assert os.listdir(artifacts) == []
+        assert not (recovery / "modules.tar").exists()
+
+    @pytest.mark.parametrize("temporary", _OWNED_TEMPORARIES)
+    @pytest.mark.parametrize("residue", ["symlink", "group-readable", "directory"])
+    def test_cleanup_refuses_an_unowned_shape_under_a_temporary_name(
+        self, recovery_root: Path, tmp_path: Path, temporary: str, residue: str
+    ) -> None:
+        # The name alone is not ownership: only a private regular file is the temporary.
+        artifacts = _private_dir(tmp_path / "artifacts")
+        digest = _stage(artifacts, ("kernel", "modules"))
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"not owned")
+        if residue == "symlink":
+            os.symlink(outside, digest / temporary)
+        elif residue == "group-readable":
+            (digest / temporary).write_bytes(b"partial")
+            (digest / temporary).chmod(0o640)
+        else:
+            _private_dir(digest / temporary)
+        before = sorted(os.listdir(digest))
+        recovery = _archive_directory(recovery_root)
+
+        with pytest.raises(ValueError, match="unexpected residue"):
+            _cleanup(recovery_root, artifacts)
+
+        assert sorted(os.listdir(digest)) == before
+        assert outside.read_bytes() == b"not owned"
+        assert (recovery / "modules.tar").exists()
+
+    def test_uncommitted_cleanup_removes_an_interrupted_projection_temporary(
+        self, tmp_path: Path
+    ) -> None:
+        digest = _private_dir(tmp_path / "digest")
+        for name in ("kernel", ".target-projection.next"):
+            (digest / name).write_bytes(b"partial")
+            (digest / name).chmod(0o600)
+        primary = RuntimeError("publish interrupted")
+        descriptor = os.open(digest, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            _cleanup_uncommitted_payloads(descriptor, primary)
+        finally:
+            os.close(descriptor)
+
+        assert os.listdir(digest) == []
+        assert getattr(primary, "__notes__", []) == []
 
     def test_cleanup_refuses_a_projection_owned_by_another_activation(
         self, recovery_root: Path, tmp_path: Path

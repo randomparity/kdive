@@ -415,6 +415,21 @@ class TargetProjectionV1(_ClosedValue):
 
 _PROJECTION_NAME = "target-projection.json"
 _PROJECTION_TEMPORARY_NAME = ".target-projection.next"
+# Every temporary the materialize, verify and projection-publish paths write into a digest
+# directory. A killed process leaves them behind; cleanup owns exactly these names (#2920).
+_OWNED_TEMPORARY_NAMES = frozenset(
+    {
+        ".bundle.next",
+        ".bundle.verify",
+        ".kernel.next",
+        # `extract_kernel_bundle` stages `.kernel.next` through `write_staged_bytes`.
+        ".kernel.next.part",
+        ".modules.next",
+        ".initrd.next",
+        ".initrd.verify",
+        _PROJECTION_TEMPORARY_NAME,
+    }
+)
 _MAX_PROJECTION_BYTES = 16_384
 _MAX_RECOVERY_METADATA_BYTES = 65_536
 
@@ -1596,17 +1611,7 @@ def _cleanup_uncommitted_payloads(directory_fd: int, primary: BaseException) -> 
         primary.add_note("uncommitted payload cleanup refused: projection is committed")
         return
     entries = set(os.listdir(directory_fd))
-    allowed = {
-        "kernel",
-        "modules",
-        "initrd",
-        ".bundle.next",
-        ".bundle.verify",
-        ".kernel.next",
-        ".modules.next",
-        ".initrd.next",
-        ".initrd.verify",
-    }
+    allowed = {"kernel", "modules", "initrd", *_OWNED_TEMPORARY_NAMES}
     if not entries <= allowed:
         primary.add_note("uncommitted payload cleanup refused: projection has unknown entries")
         return
