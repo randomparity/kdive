@@ -189,3 +189,38 @@ Rejected: a bounded recycle in the orphan lane, which would re-run a teardown th
 refused with no new evidence; persisting the warning dedupe, which costs a migration for a
 log-noise bound the counter already covers. Design:
 [`2026-09-30-teardown-recycle-policy-2978-design.md`](../workflow/specs/2026-09-30-teardown-recycle-policy-2978-design.md).
+
+### Amendment (2026-09-30): the reconciler settles a stalled reprovision (#2980)
+
+`reprovisioning` leaves only through the reprovision handler, so a reprovision job that
+dead-lettered, was canceled, or is absent stranded the System: the #2928 amendment refuses its
+teardown and the orphan lane skips it. The reconciler lane `stalled_reprovisioning_systems`, run
+after `abandoned_jobs`, now moves such a System to `failed` under the System lock. It writes a
+`reprovisioning->failed` audit row (tool `systems.reprovision`, reconciler principal). A
+half-rebuilt disk is indeterminate, so the lane never returns the System to `ready`. Once the
+System is `failed`, `systems.teardown` reclaims it under the #2908 and #2929 amendments. The lane
+does not tear the System down itself (ADR-0441) and does not recycle the reprovision job.
+
+Reprovision jobs match on `kind` and `payload->>'system_id'`, because the dedup key is per
+profile. A `queued` or `running` job blocks at any age. A non-capture handler is not cancelled when
+its heartbeat stops (`jobs/worker.py` `_dispatch`, `_heartbeat_loop`), so three terminal rows can
+hide a running handler and block for 15 minutes after their last write, the `_TEARDOWN_SETTLE`
+bound of ADR-0634:
+
+- `canceled`, since `jobs.cancel` leaves the handler running;
+- `failed` with `lease_expired`, which `repair_abandoned_jobs` writes over a lapsed attempt;
+- `failed` at `attempt > 1`, because `claim_worker_job` reclaims a lapsed `running` row as the next
+  attempt, which can fail while the earlier handler still runs.
+
+A `failed` row at `attempt = 1` without `lease_expired` was written after the only handler returned,
+so it settles at once. A handler that outlives the window finds the System `failed`: its commit
+applies only from `reprovisioning`, and it reaps its own domain.
+
+The lane records the new non-retryable `reprovision_incomplete` category (migration 0166) under
+ADR-0513 §1a precedence: only when the newest terminal reprovision job has no category or
+`lease_expired`. Otherwise the column stays NULL and the ADR-0454 job fallback answers.
+
+Known consequence: `systems.reprovision` with a profile the System already applied replays that
+profile's terminal job (`recycle=NEVER`), so no handler runs. Such a System now settles to
+`failed` instead of staying `reprovisioning`. The admission fix is not part of this amendment.
+Spec: [`../workflow/specs/2026-09-29-stalled-reprovision-lane-2980-design.md`](../workflow/specs/2026-09-29-stalled-reprovision-lane-2980-design.md).

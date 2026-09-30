@@ -3384,6 +3384,49 @@ def test_teardown_rerun_after_reprovision_settles_recycles_refused_job(
     asyncio.run(_run())
 
 
+def test_teardown_after_stalled_reprovision_settles(migrated_url: str) -> None:
+    """#2980: the reconciler settles a stranded reprovision to `failed`; teardown then works."""
+    from kdive.reconciler.repairs.systems import repair_stalled_reprovisioning_systems
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.REPROVISIONING)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, authorizing, "
+                    "    dedup_key, error_category) "
+                    "VALUES ('reprovision', %s, 'failed', 1, 3, %s, %s, NULL)",
+                    (
+                        Jsonb({"system_id": sys_id, "profile_digest": "d"}),
+                        Jsonb({"principal": "alice", "agent_session": None, "project": "proj"}),
+                        f"{sys_id}:reprovision:d",
+                    ),
+                )
+            refused = await _teardown(pool, ctx(Role.ADMIN), sys_id)
+            assert refused.error_category == "conflict"
+            async with pool.connection() as conn:
+                assert await repair_stalled_reprovisioning_systems(conn) == 1
+            assert await _system_state(pool, sys_id) == "failed"
+            resp = await _teardown(pool, ctx(Role.ADMIN), sys_id)
+            assert resp.status == "queued", resp.model_dump()
+            prov = FakeProvisioning()
+            async with pool.connection() as conn:
+                job = await queue.get_by_dedup_key(conn, f"{sys_id}:teardown")
+                assert job is not None
+                await systems_handlers.teardown_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(provisioner=prov),
+                    artifact_store=INERT_OBJECT_STORE,
+                )
+            state = await _system_state(pool, sys_id)
+        assert state == "failed"
+        assert prov.torn_down == [f"kdive-{sys_id}"]
+
+    asyncio.run(_run())
+
+
 # --- M1.4 shape-sized provisioning (#161): size flows from the snapshot into the profile ----
 
 

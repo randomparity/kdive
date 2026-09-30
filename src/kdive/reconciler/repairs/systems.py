@@ -87,6 +87,44 @@ _TEARDOWN_IN_FLIGHT = "(j.state = ANY(%s) OR j.updated_at > now() - %s)"
 # all. `ORDER BY` is what makes each pass a stable prefix instead of an arbitrary subset.
 _LEAKED_MUTATION_REPAIR_LIMIT = 100
 _STALLED_TEARING_DOWN_REPAIR_LIMIT = 100
+_STALLED_REPROVISIONING_REPAIR_LIMIT = 100
+# A reprovision job row blocks the stalled-reprovisioning lane while a handler may still write the
+# provider disk behind it (#2980, ADR-0435). `queued`/`running` block at any age. A non-capture
+# handler is not cancelled when its heartbeat stops (`jobs/worker.py` `_dispatch`), so three
+# terminal rows can hide a live one and block for `_TEARDOWN_SETTLE` after their last write: a
+# `canceled` row (`jobs.cancel` leaves the handler running), `failed`/`lease_expired` (written by
+# `repair_abandoned_jobs` over a lapsed attempt), and `failed` at `attempt > 1` (a reclaimed
+# attempt that failed while the lapsed one may still run). A `failed` row at `attempt = 1` without
+# `lease_expired` was written after the only handler returned, so it settles at once. Matched on
+# kind and payload because the dedup key `{uid}:reprovision:{digest}` is per profile.
+_REPROVISION_BLOCKING = (
+    "EXISTS ( "
+    "    SELECT 1 FROM jobs j "
+    "    WHERE j.kind = %s "
+    "      AND j.payload->>'system_id' = s.id::text "
+    "      AND (j.state = ANY(%s) "
+    "           OR ((j.state = %s OR (j.state = %s AND (j.error_category = %s OR j.attempt > 1))) "
+    "               AND j.updated_at > now() - %s)) "
+    "  )"
+)
+_REPROVISION_BLOCKING_PARAMS = (
+    JobKind.REPROVISION.value,
+    list(_ACTIVE_JOB_STATE_VALUES),
+    JobState.CANCELED.value,
+    JobState.FAILED.value,
+    ErrorCategory.LEASE_EXPIRED.value,
+    _TEARDOWN_SETTLE,
+)
+_STALLED_REPROVISIONING_CANDIDATES_SQL = (
+    "SELECT s.id FROM systems s "
+    f"WHERE s.state = %s AND NOT {_REPROVISION_BLOCKING} "
+    "ORDER BY s.id "
+    "LIMIT %s"
+)
+_STALLED_REPROVISIONING_RECHECK_SQL = (
+    "SELECT s.project FROM systems s "
+    f"WHERE s.id = %s AND s.state = %s AND NOT {_REPROVISION_BLOCKING}"
+)
 # An activation that is neither terminal-and-cleaned nor absent still owns a recovery path. This
 # exact predicate matches `ExternalBootActivationRepository.get_restricting_for_system`; repair
 # must not discharge the remote-module mutation while that owner remains (ADR-0652).
@@ -427,7 +465,7 @@ async def repair_stalled_restoring_systems(conn: AsyncConnection) -> int:
     `infrastructure_failure` default — and its `retryable: true`, which invites an agent to
     re-drive a System whose disk is indeterminate and which is fenced from every lifecycle op
     anyway. It is stamped only when the restore job explains nothing itself; see
-    `_restore_limbo_category`.
+    `_limbo_category`.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -449,7 +487,9 @@ async def repair_stalled_restoring_systems(conn: AsyncConnection) -> int:
             if system is None or system.state is not SystemState.RESTORING:
                 continue
             await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
-            category = await _restore_limbo_category(conn, system_id)
+            category = await _limbo_category(
+                conn, system_id, JobKind.RESTORE, ErrorCategory.RESTORE_INCOMPLETE
+            )
             if category is not None:
                 await record_system_failure_category(conn, system_id, category)
             await audit.record_system(
@@ -469,24 +509,93 @@ async def repair_stalled_restoring_systems(conn: AsyncConnection) -> int:
     return recovered
 
 
-async def _restore_limbo_category(conn: AsyncConnection, system_id: UUID) -> ErrorCategory | None:
-    """Return the verdict to record for a stalled restore, or ``None`` to record none (ADR-0513).
+async def repair_stalled_reprovisioning_systems(conn: AsyncConnection) -> int:
+    """Settle a `reprovisioning` System no reprovision job can finish -> `failed` (#2980).
 
-    This repair's evidence is an **absence** — no `restore` job can run again — so unlike the job
-    handler, which classifies a caught exception, it can be holding strictly weaker information
-    than the job row. `_resolve_failure_verdict` gives a recorded category precedence over the
-    job's, so stamping unconditionally would let `restore_incomplete` displace a real reason. Two
+    `reprovisioning` leaves only through the reprovision handler, and since #2928
+    `systems.teardown` refuses it and `repair_orphaned_systems` skips it, so a dead-lettered,
+    canceled, or absent job strands the System. A half-rebuilt disk is indeterminate, so the
+    System goes to `failed` (never back to `ready`), which makes `systems.teardown` reachable.
+    `_REPROVISION_BLOCKING` defines which job rows still defer it. The category follows the
+    restore lane's ADR-0513 §1a rule (`_limbo_category`). Runs after `repair_abandoned_jobs`.
+    """
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _STALLED_REPROVISIONING_CANDIDATES_SQL,
+            (
+                SystemState.REPROVISIONING.value,
+                *_REPROVISION_BLOCKING_PARAMS,
+                _STALLED_REPROVISIONING_REPAIR_LIMIT,
+            ),
+        )
+        candidates: list[UUID] = [row["id"] for row in await cur.fetchall()]
+    settled = 0
+    for system_id in candidates:
+        try:
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute(
+                        _STALLED_REPROVISIONING_RECHECK_SQL,
+                        (
+                            system_id,
+                            SystemState.REPROVISIONING.value,
+                            *_REPROVISION_BLOCKING_PARAMS,
+                        ),
+                    )
+                    row = await cur.fetchone()
+                if row is None:
+                    continue
+                await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
+                category = await _limbo_category(
+                    conn, system_id, JobKind.REPROVISION, ErrorCategory.REPROVISION_INCOMPLETE
+                )
+                if category is not None:
+                    await record_system_failure_category(conn, system_id, category)
+                await audit.record_system(
+                    conn,
+                    principal=SYSTEM_RECONCILER_PRINCIPAL,
+                    event=audit.AuditEvent(
+                        tool="systems.reprovision",
+                        object_kind="systems",
+                        object_id=system_id,
+                        transition="reprovisioning->failed",
+                        args={"system_id": str(system_id)},
+                        project=row["project"],
+                    ),
+                )
+        except Exception:  # noqa: BLE001 - one stuck System must not starve the repair lane
+            _log.warning(
+                "reconciler: stalled reprovision settle failed for system %s; retrying next pass",
+                system_id,
+                exc_info=True,
+            )
+            continue
+        settled += 1
+        _log.info("reconciler: stalled reprovisioning system %s -> failed", system_id)
+    return settled
+
+
+async def _limbo_category(
+    conn: AsyncConnection, system_id: UUID, kind: JobKind, verdict: ErrorCategory
+) -> ErrorCategory | None:
+    """Return the verdict to record for a stalled System, or ``None`` to record none (ADR-0513).
+
+    A stalled-state repair's evidence is an **absence** — no `kind` job can run again — so unlike
+    the job handler, which classifies a caught exception, it can be holding strictly weaker
+    information than the job row. `_resolve_failure_verdict` gives a recorded category precedence
+    over the job's, so stamping unconditionally would let `verdict` displace a real reason. Two
     live paths produce one: `restore_handler` binds its snapshotter (and loads its payload)
     *before* the `try` that routes `restoring -> failed`, so a `CategorizedError` there dead-letters
-    the job with its own category and never touches System state; and `_record_system_failure` is
-    best-effort, so a swallowed write leaves the System `restoring` beside a job holding both the
-    category and the redacted message.
+    the job with its own category and never touches System state (`reprovision_handler` resolves
+    its binding the same way); and `_record_system_failure` is best-effort, so a swallowed write
+    leaves the System in its fenced state beside a job holding both the category and the redacted
+    message.
 
-    So record `restore_incomplete` only when the newest terminal `restore` job explains nothing:
-    absent, or carrying no category, or carrying `lease_expired` — which `repair_abandoned_jobs`
-    stamps unconditionally over a job that never recorded a reason of its own, and is a statement
-    about the lease rather than about the guest. Otherwise return ``None`` and leave the column
-    NULL, which is exactly the ADR-0454 job fallback this repair should defer to.
+    So record `verdict` only when the newest terminal `kind` job explains nothing: absent, or
+    carrying no category, or carrying `lease_expired` — which `repair_abandoned_jobs` stamps
+    unconditionally over a job that never recorded a reason of its own, and is a statement about
+    the lease rather than about the guest. Otherwise return ``None`` and leave the column NULL,
+    which is exactly the ADR-0454 job fallback this repair should defer to.
 
     The lookup is keyed by the ``jobs.payload->>'system_id'`` expression index (migration 0082) and
     runs once per System actually recovered, inside the transaction that already holds its lock.
@@ -498,18 +607,19 @@ async def _restore_limbo_category(conn: AsyncConnection, system_id: UUID) -> Err
             "  AND j.payload->>'system_id' = %s "
             "  AND j.state <> ALL(%s) "
             "ORDER BY j.created_at DESC, j.id DESC LIMIT 1",
-            (JobKind.RESTORE.value, str(system_id), list(_ACTIVE_JOB_STATE_VALUES)),
+            (kind.value, str(system_id), list(_ACTIVE_JOB_STATE_VALUES)),
         )
         row = await cur.fetchone()
     recorded = row["error_category"] if row is not None else None
     if recorded is not None and recorded != ErrorCategory.LEASE_EXPIRED.value:
         _log.info(
-            "reconciler: stalled restoring system %s has a job category (%s); recording none",
+            "reconciler: stalled %s system %s has a job category (%s); recording none",
+            kind.value,
             system_id,
             recorded,
         )
         return None
-    return ErrorCategory.RESTORE_INCOMPLETE
+    return verdict
 
 
 async def repair_stalled_creating_snapshots(conn: AsyncConnection) -> int:
