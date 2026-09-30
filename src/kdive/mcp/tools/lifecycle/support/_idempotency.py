@@ -41,6 +41,7 @@ def _envelope(result: StoredResult) -> ToolResponse:
 # database clock at enqueue's UPDATE, which no state set can answer ahead of time (#2889).
 _RECYCLED: dict[queue.JobRecyclePolicy, frozenset[JobState]] = {
     queue.JobRecyclePolicy.NEVER: frozenset(),
+    queue.JobRecyclePolicy.FAILED: frozenset({JobState.FAILED}),
     queue.JobRecyclePolicy.TERMINAL: frozenset({JobState.FAILED, JobState.SUCCEEDED}),
     queue.JobRecyclePolicy.TERMINAL_OR_CANCELED: frozenset(
         {JobState.FAILED, JobState.SUCCEEDED, JobState.CANCELED}
