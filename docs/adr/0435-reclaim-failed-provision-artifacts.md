@@ -150,3 +150,12 @@ operator's `systems.teardown` as well. This matches
 `investigations.close(force=True)`, which already refuses while a bound System is mid-reprovision.
 Rejected: deferring the job without charging an attempt, which needs a queue primitive the worker
 does not have.
+
+### Amendment (2026-09-29): reprovision refuses under a live teardown job (#2979)
+
+An ordinary teardown enqueue leaves the System `ready`, so the #2928 amendment's case of a teardown
+queued before the reprovision began was reachable. `systems.reprovision` now reads the
+`{uid}:teardown` row under the System lock and refuses a `ready` System with a `conflict`
+(`reason: teardown_in_progress`) while that row is `queued` or `running`, writing nothing. A settled
+row does not block. The teardown handler's terminal `conflict` on a `reprovisioning` System stays as
+a backstop.

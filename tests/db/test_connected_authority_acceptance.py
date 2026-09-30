@@ -465,12 +465,17 @@ class _Ready(Exception):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("torn", [False, True], ids=["record", "torn"])
 async def test_host_startup_retracts_a_refused_anchor_left_by_a_failed_retraction(
     monkeypatch: pytest.MonkeyPatch,
     migrated_url: str,
     authority_role_dsns: _RoleDsns,
+    torn: bool,
 ) -> None:
-    """#2793: one refused anchor no longer restart-loops the host on journal: head-mismatch."""
+    """#2793: one refused anchor no longer restart-loops the host on journal: head-mismatch.
+
+    #2983: nor does that anchor torn mid-append, which fails startup's check as invalid-lane.
+    """
     with psycopg.connect(migrated_url) as connection:
         case = _seed_case(connection, worker_suffix="r")
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
@@ -577,6 +582,9 @@ async def test_host_startup_retracts_a_refused_anchor_left_by_a_failed_retractio
         unanchored = lane.read_bytes()
         assert unanchored.startswith(anchored)
         assert len(unanchored.splitlines()) == len(anchored.splitlines()) + 1
+        if torn:
+            unanchored = unanchored[:-10]
+            lane.write_bytes(unanchored)
         monkeypatch.undo()
         _configure_local_composition(monkeypatch, root, boundary)
         monkeypatch.setattr(

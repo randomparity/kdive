@@ -40,7 +40,10 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalPhase,
     JournalRecordV1,
 )
-from kdive.providers.external_boot_authority.teardown import AuthorityTeardownReservationV1
+from kdive.providers.external_boot_authority.teardown import (
+    AuthorityTeardownReservationV1,
+    SystemTeardownSupersededError,
+)
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -2719,6 +2722,133 @@ async def test_remote_system_teardown_restarts_after_lost_storage_response(
     assert calls == ["validate", "destroy", "undefine", "remove", "remove"]
     restarted.close()
     restarted_store.close()
+
+
+class _CompletingTeardownOperations:
+    """Remote teardown host that completes, recording every call it receives."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.present = True
+
+    def validate_system_teardown(self, _state: object) -> None:
+        self.calls.append("validate")
+
+    def destroy_system_domain(self, _state: object) -> None:
+        self.calls.append("destroy")
+
+    def undefine_system_domain(self, _state: object) -> None:
+        self.calls.append("undefine")
+        self.present = False
+
+    def remove_system_artifacts(self, _state: object) -> None:
+        self.calls.append("remove")
+
+    def inspect_system_teardown(
+        self, _state: object, *, domain_validated: bool
+    ) -> RemoteSystemTeardownInspection:
+        self.calls.append("inspect")
+        return RemoteSystemTeardownInspection(
+            domain_absent=not self.present,
+            overlay_absent=not self.present,
+            baseline_absent=not self.present,
+            recovery_absent=True,
+        )
+
+
+def _completing_teardown_adapter(
+    store: RemoteModuleVolumePreparationStore, operations: _CompletingTeardownOperations
+) -> RemoteExternalBootAuthorityAdapter:
+    return RemoteExternalBootAuthorityAdapter(
+        cast(Any, object()),
+        RemoteExternalBootCoordinator(cast(Any, operations), store, lambda: 300.0),
+        RemoteModulePreparationExecutor(),
+        teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
+    )
+
+
+_REMOTE_TEARDOWN_RESERVATION = AuthorityTeardownReservationV1(
+    disposition="ready",
+    store_identity=OpaqueProviderRef(ref="stores/private"),
+    owner_key=OpaqueProviderRef(ref="owners/private"),
+    reserved_bytes=4096,
+)
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_observation_across_generations_is_bounded(
+    tmp_path: Path,
+) -> None:
+    """#2921: an earlier record is not the anchor's own; a later one supersedes it."""
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    operations = _CompletingTeardownOperations()
+    adapter = _completing_teardown_adapter(store, operations)
+    first = _remote_teardown_request()
+    completed = await adapter.execute_system_teardown(
+        first, _remote_teardown_context(first), _REMOTE_TEARDOWN_RESERVATION
+    )
+    assert completed.complete
+    teardown_files = sorted(tmp_path.rglob("*.teardown"))
+    before = {path: path.read_bytes() for path in teardown_files}
+    operations.calls.clear()
+    never_began = _remote_teardown_request(generation=8)
+
+    observed = await adapter.observe_system_teardown(
+        never_began, _remote_teardown_context(never_began)
+    )
+
+    anchor = adapter._teardown_anchor(never_began, _remote_teardown_context(never_began))
+    assert observed.intent_identity == anchor.identity
+    assert observed.reservation is None
+    assert observed.completed_at is None
+    assert not observed.complete
+    assert {path: path.read_bytes() for path in teardown_files} == before
+
+    successor = _remote_teardown_request(generation=9)
+    adopted = await adapter.execute_system_teardown(
+        successor, _remote_teardown_context(successor), _REMOTE_TEARDOWN_RESERVATION
+    )
+    assert adopted.complete
+    after_successor = {path: path.read_bytes() for path in teardown_files}
+    operations.calls.clear()
+    for superseded in (first, never_began):
+        with pytest.raises(SystemTeardownSupersededError):
+            await adapter.observe_system_teardown(superseded, _remote_teardown_context(superseded))
+    assert {path: path.read_bytes() for path in teardown_files} == after_successor
+    assert operations.calls == []
+    adapter.close()
+    store.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("generation", [6, 7, 8])
+async def test_remote_system_teardown_observation_refuses_another_subject_at_any_generation(
+    tmp_path: Path, generation: int
+) -> None:
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    operations = _CompletingTeardownOperations()
+    adapter = _completing_teardown_adapter(store, operations)
+    retained = _remote_teardown_request()
+    await adapter.execute_system_teardown(
+        retained, _remote_teardown_context(retained), _REMOTE_TEARDOWN_RESERVATION
+    )
+    teardown_files = sorted(tmp_path.rglob("*.teardown"))
+    before = {path: path.read_bytes() for path in teardown_files}
+    operations.calls.clear()
+    at_generation = _remote_teardown_request(generation=generation)
+
+    for changed in (
+        at_generation.model_copy(update={"plan_identity": "sha256:" + "8" * 64}),
+        at_generation.model_copy(update={"activation_id": uuid4()}),
+        retained.model_copy(update={"operation_digest": "sha256:" + "7" * 64}),
+    ):
+        with pytest.raises(ValueError, match="conflicts with retained intent"):
+            await adapter.observe_system_teardown(changed, _remote_teardown_context(changed))
+
+    assert {path: path.read_bytes() for path in teardown_files} == before
+    assert operations.calls == []
+    adapter.close()
+    store.close()
 
 
 @pytest.mark.anyio

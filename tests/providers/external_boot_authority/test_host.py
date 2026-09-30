@@ -30,8 +30,9 @@ from kdive.providers.external_boot_authority.host import (
     run_authority_host,
     validate_credential_paths,
 )
-from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.journal import FileAuthorityJournal, TornTail
 from kdive.providers.external_boot_authority.protocol import (
+    MAX_MESSAGE_BYTES,
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityTakeoverRequestV1,
@@ -2078,6 +2079,86 @@ def test_startup_keeps_every_other_file_head_difference(tmp_path: Path, case: st
             restore_journal_inventory(config, (head,) if head is not None else ())
 
 
+def _write_torn_lane(
+    config: AuthorityHostConfig,
+    complete: list[JournalRecordV1],
+    torn: JournalRecordV1,
+    length: int = 40,
+) -> tuple[Path, bytes]:
+    lane = config.journal_dir / f"{torn.system_id}.jsonl"
+    partial = canonical_record_bytes(torn)[:length]
+    lane.write_bytes(b"".join(canonical_record_bytes(r) + b"\n" for r in complete) + partial)
+    lane.chmod(0o600)
+    return lane, partial
+
+
+@pytest.mark.parametrize(("complete", "length"), [(2, 40), (0, 40), (0, 0)])
+def test_startup_recovers_a_torn_unanchored_tail(
+    tmp_path: Path, complete: int, length: int
+) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 3)
+    lane, partial = _write_torn_lane(config, records[:complete], records[complete], length)
+    head = _head_of(records[complete - 1]) if complete else None
+    system_id = str(records[0].system_id)
+
+    probe = host._retract_unanchored_tail(config, system_id, head, retract=False)  # noqa: SLF001
+    assert isinstance(probe, TornTail)
+    assert probe.data == partial
+    assert lane.read_bytes().endswith(partial)
+    tail = host._retract_unanchored_tail(config, system_id, head, retract=True)  # noqa: SLF001
+
+    assert tail == probe
+    assert next((config.journal_dir / "retracted").iterdir()).read_bytes() == partial
+    if head is not None:
+        restore_journal_inventory(config, (head,))
+    else:
+        assert not lane.exists()
+        restore_journal_inventory(config, ())
+
+
+@pytest.mark.parametrize(
+    ("complete", "anchored", "moved"),
+    [(2, 1, False), (1, 2, False), (1, 0, False), (0, 1, False), (2, 2, True)],
+    ids=["after-unanchored-record", "head-ahead", "headless-record", "head-no-record", "moved"],
+)
+def test_startup_refuses_every_other_torn_tail(
+    tmp_path: Path, complete: int, anchored: int, moved: bool
+) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 3)
+    lane, _ = _write_torn_lane(config, records[:complete], records[complete])
+    head = _head_of(records[anchored - 1]) if anchored else None
+    if moved and head is not None:
+        head = replace(head, digest="sha256:" + "9" * 64)
+    before = lane.read_bytes()
+
+    with pytest.raises(HostReadinessError, match="journal: invalid-lane"):
+        host._retract_unanchored_tail(  # noqa: SLF001
+            config, str(records[0].system_id), head, retract=True
+        )
+
+    assert lane.read_bytes() == before
+    assert not (config.journal_dir / "retracted").exists()
+
+
+@pytest.mark.parametrize("defect", [b"x" * (MAX_MESSAGE_BYTES + 1), b"{\n{"])
+def test_startup_refuses_a_corrupt_lane(tmp_path: Path, defect: bytes) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 1)
+    lane = _write_lane(config, records)
+    lane.write_bytes(lane.read_bytes() + defect)
+    before = lane.read_bytes()
+
+    with pytest.raises(HostReadinessError, match="journal: invalid-lane"):
+        host._retract_unanchored_tail(  # noqa: SLF001
+            config, str(records[0].system_id), _head_of(records[0]), retract=True
+        )
+
+    assert lane.read_bytes() == before
+    assert not (config.journal_dir / "retracted").exists()
+
+
 def test_reconcile_refuses_while_another_authority_holds_the_socket_lock(
     tmp_path: Path,
 ) -> None:
@@ -2098,7 +2179,7 @@ def test_reconcile_refuses_while_another_authority_holds_the_socket_lock(
     [
         (HostReadinessError("journal", "head-mismatch"), True),
         (HostReadinessError("journal", "inventory-mismatch"), True),
-        (HostReadinessError("journal", "invalid-lane"), False),
+        (HostReadinessError("journal", "invalid-lane"), True),
         (HostReadinessError("database", "connection-failed"), False),
     ],
 )
@@ -2132,10 +2213,16 @@ def test_startup_reconciles_only_after_a_journal_head_difference(
     assert caught.value.reason == ("after-reconcile" if reconciles else failure.reason)
 
 
-def test_standalone_check_never_retracts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("torn", [False, True], ids=["record", "torn"])
+def test_standalone_check_never_retracts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, torn: bool
+) -> None:
     config = _config(tmp_path)
     records = _chain(config, uuid4(), 2)
-    lane = _write_lane(config, records)
+    if torn:
+        lane, _ = _write_torn_lane(config, records[:1], records[1])
+    else:
+        lane = _write_lane(config, records)
     before = lane.read_bytes()
     config.request_socket.parent.mkdir(mode=0o700)
 
@@ -2147,10 +2234,12 @@ def test_standalone_check_never_retracts(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(host, "_load_system_installation", lambda _config: None)
     monkeypatch.setattr(host, "validate_socket_parent", lambda *_args: None)
 
-    with pytest.raises(HostReadinessError, match="journal: head-mismatch"):
+    reason = "invalid-lane" if torn else "head-mismatch"
+    with pytest.raises(HostReadinessError, match=f"journal: {reason}"):
         asyncio.run(host.check_authority_host_once(config))
 
     assert lane.read_bytes() == before
+    assert not (config.journal_dir / "retracted").exists()
 
 
 def test_lane_inventory_admits_the_reserved_evidence_directory(tmp_path: Path) -> None:
