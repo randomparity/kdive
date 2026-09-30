@@ -293,6 +293,7 @@ def test_witness_venv_install_pins_grpc_system_openssl_and_zlib() -> None:
         task for task in tasks if task["name"] == "Install KDIVE into the lifecycle witness venv"
     )
     assert install["environment"] == {
+        "UV_PROJECT_ENVIRONMENT": "/opt/kdive-live-worker-lifecycle/.venv",
         "GRPC_PYTHON_BUILD_SYSTEM_OPENSSL": "1",
         "GRPC_PYTHON_BUILD_SYSTEM_ZLIB": "1",
     }
@@ -1040,9 +1041,9 @@ def test_ansible_installs_witness_venv_in_clean_host_order() -> None:
         "/opt/kdive-live-worker-lifecycle/.venv"
     )
     install = (
-        "{{ live_vm_host_uv_bin }} pip install --python "
-        "/opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive "
-        "{{ live_vm_venv }}"
+        "{{ live_vm_host_uv_bin }} sync --locked --no-editable --no-dev --group live "
+        "--reinstall-package kdive --project {{ live_vm_venv }} "
+        "--python /opt/kdive-live-worker-lifecycle/.venv/bin/python"
     )
     assert commands.index(create) < commands.index(install)
     assert "path: /opt/kdive-live-worker-lifecycle" in tasks
@@ -1052,6 +1053,25 @@ def test_ansible_installs_witness_venv_in_clean_host_order() -> None:
     assert "dest: /opt/kdive-live-worker-lifecycle/revision" in tasks
     assert 'mode: "0444"' in tasks
     assert "Symlink the libguestfs binding into the lifecycle worker venv" in tasks
+
+
+def test_witness_venv_is_built_with_the_live_group_and_verified_to_import_drgn() -> None:
+    """`drgn` lives only in the `live` dependency group; the role once omitted it (#2956)."""
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    names = [task["name"] for task in tasks]
+    install = tasks[names.index("Install KDIVE into the lifecycle witness venv")]
+    assert "--group live" in install["ansible.builtin.command"]["cmd"]
+    assert "--locked" in install["ansible.builtin.command"]["cmd"]
+
+    verify = tasks[names.index("Verify the lifecycle witness venv imports drgn")]
+    assert verify["ansible.builtin.command"]["argv"] == [
+        "/opt/kdive-live-worker-lifecycle/.venv/bin/python",
+        "-c",
+        "import drgn",
+    ]
+    assert names.index("Install KDIVE into the lifecycle witness venv") < names.index(
+        "Verify the lifecycle witness venv imports drgn"
+    )
 
 
 def test_ansible_bakes_checkout_identity_before_installing_fixed_worker_runtime() -> None:
