@@ -121,5 +121,7 @@ Steps:
 3. Green; `just lint`, `just type`; commit `fix(local-libvirt): prune activation parents after a
    partial abort`.
 4. Controlled faults: drop the prune (chain case red); restore Task 1's eager open (every case
+   red); make `exact_recovery_absence` return `True` when the activation directory opens (S3
    red). Revert each.
-5. `just records`; run `just test-verbose` over `tests/providers/local_libvirt/`.
+5. Set ADR-0710's status to `Accepted (<merge-date>)` in this PR, since it implements the record;
+   `just records`; run `just test-verbose` over `tests/providers/local_libvirt/`.
