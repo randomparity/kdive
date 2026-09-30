@@ -422,6 +422,8 @@ _OWNED_TEMPORARY_NAMES = frozenset(
         ".bundle.next",
         ".bundle.verify",
         ".kernel.next",
+        # `extract_kernel_bundle` stages `.kernel.next` through `write_staged_bytes`.
+        ".kernel.next.part",
         ".modules.next",
         ".initrd.next",
         ".initrd.verify",

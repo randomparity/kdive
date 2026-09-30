@@ -652,6 +652,7 @@ _OWNED_TEMPORARIES = (
     ".bundle.next",
     ".bundle.verify",
     ".kernel.next",
+    ".kernel.next.part",
     ".modules.next",
     ".initrd.next",
     ".initrd.verify",
