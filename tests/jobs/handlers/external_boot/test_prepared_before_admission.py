@@ -195,6 +195,64 @@ def test_teardown_uses_its_recovery_free_request_before_preparation(
     _drive(migrated_url, body)
 
 
+@pytest.mark.parametrize(
+    ("reservation", "mode", "releases"),
+    [("pending", "pending_system_teardown", 0), ("ready", "system_teardown", 1)],
+)
+def test_teardown_of_a_preparing_activation_skips_preparation(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    reservation: str,
+    mode: str,
+    releases: int,
+) -> None:
+    """#2961: teardown neither debits nor prepares.
+
+    A pending reservation ends uncredited. A ready one — the activate job debited it before the
+    teardown took over — is released and credited exactly once.
+    """
+
+    async def body(seed: AsyncConnection) -> None:
+        vehicle = build_vehicle()
+        case = await seed_case(
+            seed,
+            vehicle,
+            purpose="teardown",
+            operation="teardown",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+            with_reservation=reservation == "ready",
+        )
+
+        await _dispatch(authority_role_dsns, seed, case, "teardown", vehicle)
+
+        assert vehicle.port.calls == ["authority-teardown"]
+        async with seed.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT a.state, a.materialization, a.cleanup_evidence->>'mode' AS mode, "
+                "s.state AS system_state, "
+                "(SELECT count(*) FROM external_boot_reservations r "
+                " WHERE r.activation_id = a.id) AS reservations, "
+                "(SELECT count(*) FROM external_boot_reservation_releases r "
+                " WHERE r.activation_id = a.id) AS releases "
+                "FROM external_boot_activations a JOIN systems s ON s.id = a.system_id "
+                "WHERE a.id = %s",
+                (vehicle.activation_id,),
+            )
+            row = await cur.fetchone()
+        assert row == {
+            "state": "torn_down",
+            "materialization": None,
+            "mode": mode,
+            "system_state": "torn_down",
+            "reservations": 0,
+            "releases": releases,
+        }
+
+    _drive(migrated_url, body)
+
+
 def test_an_activating_activation_cannot_hold_null_evidence_at_all(migrated_url: str) -> None:
     """Why there is no ``activate``-with-NULL-evidence handler case: the row is unconstructible.
 
