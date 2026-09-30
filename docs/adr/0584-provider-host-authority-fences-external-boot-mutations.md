@@ -376,6 +376,29 @@ Rejected for this amendment:
 - **Do nothing; the operator repairs.** judgment: every interrupted append then takes the host out
   of service until someone edits the lane, although nothing anchored was lost.
 
+### Amendment (2026-09-30): takeover recovery preserves the recorded mutation (#2977)
+
+When takeover recovers a suspended operation, it rebuilds that operation from its last journal
+record and anchors the remaining `provider-returned`, `observed`, and `terminal` records from the
+rebuilt request. The rebuilt request carries every field of the recorded mutation, so each record
+recovery anchors equals, field for field, the one the original attempt would have written. Before
+this amendment the rebuild dropped the ADR-0684 `local_timing` snapshot. The recovered `terminal`
+then no longer matched a successor's release-phase request, and a retry that superseded a
+completion still in flight failed with `journal_conflict` (`release_phase_mismatch`) instead of
+adopting it. A refused `terminal` is still retracted and recovered as the #2793 amendment
+describes; only the rebuilt fields change. The record format, the adoption check, and takeover
+ordering are unchanged.
+
+Rejected for this amendment:
+
+- **Serialize takeover against an in-flight anchor for the same lane.** verified: the refused
+  `terminal` is already recovered and anchored under the successor's watermark, so waiting for
+  it adds nothing once the rebuilt record matches. The operator dropped this option on
+  2026-09-30.
+- **Leave `local_timing` out of the adoption match.** judgment: the match binds the timing
+  snapshot so that a replay or adoption cannot run under different deadlines than the recorded
+  attempt.
+
 ## Consequences
 
 - External boot gains a fence at the provider mutation boundary and a separate database fence for
