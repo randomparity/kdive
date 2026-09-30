@@ -256,6 +256,10 @@ rebuilt guest's first boot writes its readiness marker to the console — minute
 longer on an emulated arch. A guest that crashes or never writes it ends `failed` with
 `provisioning_failure`.
 
+A System whose teardown job is queued or running is refused with `conflict`
+(`reason: teardown_in_progress`) and left unchanged; retry once `systems.get` shows the
+teardown settled.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |

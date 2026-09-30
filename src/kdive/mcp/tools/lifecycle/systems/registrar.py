@@ -543,6 +543,10 @@ def _register_systems_reprovision(
         rebuilt guest's first boot writes its readiness marker to the console — minutes on KVM,
         longer on an emulated arch. A guest that crashes or never writes it ends `failed` with
         `provisioning_failure`.
+
+        A System whose teardown job is queued or running is refused with `conflict`
+        (`reason: teardown_in_progress`) and left unchanged; retry once `systems.get` shows the
+        teardown settled.
         """
         ctx = current_context()
         try:
