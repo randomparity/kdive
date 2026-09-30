@@ -339,6 +339,40 @@ Rejected for this amendment:
 - **Make the append atomic to readers.** judgment: it changes the journal write path the operator
   kept out of this scope, and still leaves the retraction race.
 
+### Amendment (2026-09-29): startup removes a torn unanchored tail (#2983)
+
+An append is an `os.write` loop and an `fsync` on an `O_APPEND` descriptor. A crash, power loss,
+or write error part-way through leaves a final line with no newline; issuing a single `write` would
+not change that, because a write is not guaranteed atomic across a crash or power loss. The anchor
+order (local append, then head advance) means such a line was never anchored. This amendment
+widens the #2793 startup rule to that line, and narrows the #2933 amendment's statement that a
+lane torn mid-append is refused at startup to the cases listed below.
+
+At startup only, under the same request-socket and advisory locks, a lane whose single defect is
+a final line with no newline, no longer than one record, is recovered when the complete records
+before it end exactly at the head, or when the lane has no head and no complete record. The
+authority preserves the torn bytes in `retracted/` under a name carrying their SHA-256, then
+truncates the lane to the last complete record, or unlinks it. A startup whose first check fails
+with `journal: invalid-lane` now runs the reconcile step, which reports `invalid-lane` itself for
+every lane it cannot recover. Still refused: a torn line after an unanchored complete record (at
+most one tail per lane per startup), a head that is ahead of the complete records, an oversized
+or non-final corrupt line. The periodic and standalone checks stay read-only, the append path and
+record format are unchanged, and no anchored byte is removed.
+
+Rejected for this amendment:
+
+- **Make the append atomic** (write a temporary lane, rename it under a per-lane lock).
+  judgment: every append then rewrites the whole lane, up to the 64 MiB maximum, and adds a lock
+  the anchor and retraction paths would both need; startup recovery closes the same outage with no
+  change to the write path. The operator excluded it on 2026-09-29.
+- **Length-prefixed or checksummed framing.** judgment: an on-disk format change with a
+  migration for every existing lane, to detect a defect the newline already detects.
+- **Truncate whenever the complete prefix validates, head or not.** judgment: a torn line after
+  an unanchored complete record would then combine with the #2793 retraction and remove two tails
+  in one startup, and a head ahead of the journal would pass as recoverable.
+- **Do nothing; the operator repairs.** judgment: every interrupted append then takes the host out
+  of service until someone edits the lane, although nothing anchored was lost.
+
 ## Consequences
 
 - External boot gains a fence at the provider mutation boundary and a separate database fence for
