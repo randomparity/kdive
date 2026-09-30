@@ -115,7 +115,8 @@ def _register_debug_set_watchpoint(
         Watchpoints are hardware (debug-register) watchpoints: the stub may accept one yet never
         trap, surfacing as a debug.continue timeout rather than an error. Where the gdbstub
         cannot insert one (ppc64le under KVM), the call returns not_implemented with code
-        watchpoint_unsupported and arms nothing. Requires contributor.
+        watchpoint_unsupported and arms nothing. A stub that refuses the insert itself returns
+        the same code under debug_attach_failure. Requires contributor.
         """
         return await run_engine_op_with_resolver(
             pool,

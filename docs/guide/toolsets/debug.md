@@ -47,7 +47,9 @@ halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session 
 - `debug.list_breakpoints` — list the current breakpoints.
 - `debug.clear_breakpoint` — remove a breakpoint.
 - `debug.set_watchpoint` — trap a write to a data address. A ppc64le guest under KVM cannot
-  insert one; the call returns `watchpoint_unsupported` and arms nothing.
+  insert one; the call returns `not_implemented` with `watchpoint_unsupported` and arms
+  nothing. A stub that refuses the insert itself returns the same code under
+  `debug_attach_failure`.
 - `debug.list_watchpoints` — list the current watchpoints.
 - `debug.clear_watchpoint` — remove a watchpoint.
 
