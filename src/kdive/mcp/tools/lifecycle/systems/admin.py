@@ -32,7 +32,7 @@ from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload, dump_payload
 from kdive.log import bind_context
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import ToolResponse, validate_stored
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import authz_denied as _authz_denied
@@ -321,7 +321,7 @@ async def _job_for_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | Non
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
-    return Job.model_validate(row) if row else None
+    return validate_stored(Job, row) if row else None
 
 
 async def _authority_system_binding(

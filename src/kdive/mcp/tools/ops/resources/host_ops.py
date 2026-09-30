@@ -25,7 +25,7 @@ from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import ToolResponse, validate_stored
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
@@ -146,7 +146,7 @@ async def _apply_cordon(conn: AsyncConnection, uid: UUID, *, cordoned: bool) -> 
             (cordoned, uid),
         )
         row = await cur.fetchone()
-    return Resource.model_validate(row) if row is not None else None
+    return validate_stored(Resource, row) if row is not None else None
 
 
 async def set_resource_scheduling(
@@ -202,7 +202,7 @@ async def _live_allocations(conn: AsyncConnection, resource_id: UUID) -> list[Al
             (resource_id, [s.value for s in _DRAINABLE]),
         )
         rows = await cur.fetchall()
-    return [Allocation.model_validate(row) for row in rows]
+    return [validate_stored(Allocation, row) for row in rows]
 
 
 async def _force_release_allocations(

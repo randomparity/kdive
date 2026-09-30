@@ -36,7 +36,7 @@ from kdive.images.kdump_support import (
 from kdive.images.planes.base import PROVENANCE_OS_RELEASE
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import ToolResponse, validate_stored
 from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor, _short_id
@@ -220,7 +220,7 @@ async def list_images(
             await cur.execute(_LIST_SQL[request.scope], params)
             rows = await cur.fetchall()
     kept, truncated = _paginate(rows, capped)
-    items = [_row_envelope(ImageCatalogEntry.model_validate(row)) for row in kept]
+    items = [_row_envelope(validate_stored(ImageCatalogEntry, row)) for row in kept]
     next_cursor = (
         _encode_cursor(_LIST_TAG, (kept[-1]["provider"], kept[-1]["name"], kept[-1]["arch"]))
         if truncated and kept
