@@ -140,11 +140,9 @@ routes to authority teardown first), `systems.teardown` returns a `conflict` und
 carrying `current_status: reprovisioning`, and enqueues nothing. It refuses ahead of the dedup
 replay and the enqueue, so a live `{uid}:teardown` row is not replayed and a failed one is not
 recycled while the reprovision runs. A teardown job that still
-meets a `reprovisioning` System fails once with a terminal `conflict`; this is a backstop, because
-`systems.reprovision` refuses a `ready` System with a `conflict` while its `{uid}:teardown` job is
-`queued` or `running` (#2979), so a teardown queued before the reprovision no longer reaches it.
-Once the reprovision settles, the operator re-runs `systems.teardown`, which recycles that failed
-row under the #2929 amendment above. `repair_orphaned_systems` skips
+meets a `reprovisioning` System, for example one queued before the reprovision began, fails once
+with a terminal `conflict`. Once the reprovision settles, the operator re-runs `systems.teardown`,
+which recycles that failed row under the #2929 amendment above. `repair_orphaned_systems` skips
 `reprovisioning` Systems, both in its candidate query and in its System-locked recheck, and
 enqueues on a later pass once the System is `ready`. The lane replays an existing
 `{uid}:teardown` row rather than recycling it, so a row that already failed this way needs the
@@ -152,3 +150,12 @@ operator's `systems.teardown` as well. This matches
 `investigations.close(force=True)`, which already refuses while a bound System is mid-reprovision.
 Rejected: deferring the job without charging an attempt, which needs a queue primitive the worker
 does not have.
+
+### Amendment (2026-09-29): reprovision refuses under a live teardown job (#2979)
+
+An ordinary teardown enqueue leaves the System `ready`, so the #2928 amendment's case of a teardown
+queued before the reprovision began was reachable. `systems.reprovision` now reads the
+`{uid}:teardown` row under the System lock and refuses a `ready` System with a `conflict`
+(`reason: teardown_in_progress`) while that row is `queued` or `running`, writing nothing. A settled
+row does not block. The teardown handler's terminal `conflict` on a `reprovisioning` System stays as
+a backstop.
