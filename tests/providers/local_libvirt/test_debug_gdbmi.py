@@ -980,6 +980,46 @@ def test_step_raises_on_missing_function_bounds(tmp_path: Path) -> None:
         _engine().step(_attachment(controller, tmp_path), timeout_sec=1)
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
     assert controller.read_timeouts == []
+    # Only a watchpoint insert failure is coded on resume; any other ^error passes through.
+    assert str(exc.value) == "gdb/MI command failed: -exec-step"
+    assert "code" not in exc.value.details
+
+
+# gdb's resume-time insert failure text (#2739 proof record section 3; gdb breakpoint.c). The
+# same text comes from a stub that cannot insert one and from exhausted x86 debug registers.
+_WATCH_INSERT_FAILED_MSG = (
+    "Warning:\nCould not insert hardware watchpoint 2.\n"
+    "Could not insert hardware breakpoints:\n"
+    "You may have requested too many hardware breakpoints/watchpoints.\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("method", "verb"),
+    [("continue_", "-exec-continue"), ("step_instruction", "-exec-step-instruction")],
+)
+def test_resume_classifies_watchpoint_insert_failure(
+    method: str, verb: str, tmp_path: Path
+) -> None:
+    controller = _FakeMiController(
+        responses={
+            verb: [
+                {"type": "result", "message": "error", "payload": {"msg": _WATCH_INSERT_FAILED_MSG}}
+            ]
+        },
+    )
+    with pytest.raises(CategorizedError) as exc:
+        getattr(_engine(), method)(_attachment(controller, tmp_path), timeout_sec=1)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "watchpoint_insert_failed"
+    assert exc.value.details["verb"] == verb
+    assert exc.value.details["watchpoint"] == "2"
+    assert exc.value.details["command"] == verb
+    assert "debug.clear_watchpoint" in str(exc.value)
+    assert "too many are armed" in str(exc.value)
+    # The failed resume never ran the target, so there is nothing to wait for or interrupt.
+    assert controller.written == [verb]
+    assert controller.read_timeouts == []
 
 
 def test_finish_interrupts_on_timeout(tmp_path: Path) -> None:
