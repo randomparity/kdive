@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -17,7 +17,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, TeardownPayload
+from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY, Authorizing, TeardownPayload
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 from kdive.security import audit
 from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
@@ -44,12 +44,30 @@ _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES = tuple(
     state.value for state in _ORPHANED_SYSTEM_TERMINAL_STATES
 )
 # A reprovisioning System has no teardown edge (#2928), so the lane leaves it to a later pass.
-# Once it settles to `ready` the lane enqueues, unless a `{uid}:teardown` row already exists: a
-# failed row is replayed, not recycled, so it needs an operator `systems.teardown`.
+# Once it settles to `ready` the lane enqueues, unless a `{uid}:teardown` row already exists. The
+# lane never recycles (`NEVER`): a failed row is left alone for an operator `systems.teardown`,
+# and `report_stranded_orphan_teardowns` warns about it once per failure (#2978).
 _ORPHAN_TEARDOWN_SKIPPED_STATE_VALUES = (
     *_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES,
     SystemState.REPROVISIONING.value,
 )
+
+# `tearing_down` is left to `repair_stalled_tearing_down_systems`, which recycles its failed row.
+_STRANDED_TEARDOWN_EXCLUDED_STATE_VALUES = (
+    *_ORPHAN_TEARDOWN_SKIPPED_STATE_VALUES,
+    SystemState.TEARING_DOWN.value,
+)
+_STRANDED_TEARDOWN_SQL = (
+    "SELECT s.id, j.id AS job_id, j.error_category, j.updated_at, "
+    "       (j.payload ? 'authority_system_v1' OR j.payload ? %s) AS authority_marked "
+    "FROM systems s "
+    "JOIN allocations a ON a.id = s.allocation_id "
+    "JOIN jobs j ON j.dedup_key = s.id::text || ':teardown' "
+    "WHERE s.state <> ALL(%s) AND a.state = ANY(%s) AND j.state = %s"
+)
+# System id -> the failed row's `updated_at` last warned about, so each failure warns once per
+# process. Replaced every pass by the current stranded set, so it never outgrows that set.
+_warned_stranded_teardowns: dict[UUID, datetime] = {}
 
 # Pacing with a stated limit, not a fence (ADR-0634). An operator `jobs.cancel` takes a teardown
 # job out of `queued`/`running` while its handler keeps running to completion, so job state alone
@@ -180,7 +198,9 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
                 )
                 system = await SYSTEMS.get(conn, system_id)
                 if system is not None:
-                    await enqueue_control_teardown(conn, system, authorizing)
+                    await enqueue_control_teardown(
+                        conn, system, authorizing, recycle=queue.JobRecyclePolicy.NEVER
+                    )
         except Exception:  # noqa: BLE001 - one malformed System must not starve sibling cleanup
             _log.warning(
                 "reconciler: orphaned system teardown admission failed",
@@ -192,6 +212,41 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
             enqueued += 1
             _log.info("reconciler: orphaned system %s -> teardown job enqueued", system_id)
     return enqueued
+
+
+async def report_stranded_orphan_teardowns(conn: AsyncConnection) -> int:
+    """Warn once per failure about an orphaned System whose teardown dead-lettered (#2978).
+
+    `repair_orphaned_systems` never recycles a failed `{uid}:teardown` row, so without this the
+    System would sit with its Allocation gone and no log line. Read-only: the remedy is the
+    operator's `systems.teardown` (or `systems.get` for an authority-marked row, whose re-run
+    belongs to the authority path). Returns the number of new warnings, which the loop feeds to
+    the repairs counter.
+    """
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _STRANDED_TEARDOWN_SQL,
+            (
+                EXTERNAL_BOOT_AUTHORITY_MARKER_KEY,
+                list(_STRANDED_TEARDOWN_EXCLUDED_STATE_VALUES),
+                list(_TERMINAL_ALLOCATION_STATE_VALUES),
+                JobState.FAILED.value,
+            ),
+        )
+        rows = await cur.fetchall()
+    new = [row for row in rows if _warned_stranded_teardowns.get(row["id"]) != row["updated_at"]]
+    _warned_stranded_teardowns.clear()
+    _warned_stranded_teardowns.update({row["id"]: row["updated_at"] for row in rows})
+    for row in new:
+        _log.warning(
+            "reconciler: orphaned system %s has a failed teardown job %s (%s); "
+            "it needs an operator %s",
+            row["id"],
+            row["job_id"],
+            row["error_category"],
+            "systems.get" if row["authority_marked"] else "systems.teardown",
+        )
+    return len(new)
 
 
 async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:

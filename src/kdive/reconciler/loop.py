@@ -155,6 +155,7 @@ _repair_dead_sessions = debug_session_repairs.repair_dead_sessions
 _repair_orphaned_systems = system_repairs.repair_orphaned_systems
 _repair_leaked_mutation_obligations = system_repairs.repair_leaked_mutation_obligations
 _repair_stalled_tearing_down_systems = system_repairs.repair_stalled_tearing_down_systems
+_report_stranded_orphan_teardowns = system_repairs.report_stranded_orphan_teardowns
 _repair_stalled_crashing_systems = system_repairs.repair_stalled_crashing_systems
 _repair_stalled_restoring_systems = system_repairs.repair_stalled_restoring_systems
 _repair_stalled_reprovisioning_systems = system_repairs.repair_stalled_reprovisioning_systems
@@ -572,6 +573,11 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         "abandoned_jobs",
         lambda _r, _c, _g: _repair_abandoned_jobs,
         report_field="abandoned_jobs",
+    ),
+    # After abandoned_jobs, which may dead-letter an orphan's teardown this pass (#2978). The count
+    # is new warnings, one per System per failure; no report field.
+    _RepairCatalogEntry(
+        "stranded_orphan_teardowns", lambda _r, _c, _g: _report_stranded_orphan_teardowns
     ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed teardown job — and a teardown
     # job that is active or recently terminal is what defers this repair's candidate (ADR-0634,

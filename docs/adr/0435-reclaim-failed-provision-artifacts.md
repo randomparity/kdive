@@ -160,6 +160,36 @@ queued before the reprovision began was reachable. `systems.reprovision` now rea
 row does not block. The teardown handler's terminal `conflict` on a `reprovisioning` System stays as
 a backstop.
 
+### Amendment (2026-09-30): recycle policy of every ordinary teardown enqueuer (#2978)
+
+`enqueue_control_teardown` now takes a required `recycle` policy, so no path that enqueues an
+ordinary `{uid}:teardown` row inherits one silently. On its ordinary branch a prior row carrying
+`authority_system_v1` or `external_boot_authority_v1` always replays, because a recycle rewrites
+the payload and the authority re-run path ([ADR-0620](0620-authority-owned-system-teardown.md),
+#2917) keys on that marker. The preactivation-authority branch is unchanged. By operator decision:
+
+- `systems.teardown` (`mcp/tools/lifecycle/systems/admin.py`): `FAILED`, per the #2929 amendment.
+- `ops.force_teardown` (`mcp/tools/ops/security/breakglass.py`): `FAILED`, so the break-glass path
+  re-runs a dead-lettered unmarked row. This replaces the #2929 amendment's "`ops.force_teardown`
+  keeps replaying the dead row". It also refuses a `reprovisioning` System with a `conflict`
+  (`current_status: reprovisioning`) under the System lock and writes no job, as
+  `systems.teardown` does under the #2928 amendment.
+- `enqueue_teardown` (`jobs/service_operations.py`, investigation force-close): `NEVER`; a
+  dead-lettered row replays.
+- `repair_orphaned_systems`: `NEVER`, and it never recycles a failed row. A new read-only lane,
+  `stranded_orphan_teardowns`, logs one WARNING per orphaned System per failure (keyed on the
+  failed row's `updated_at`, in process memory) naming the remedy: `systems.teardown`, or
+  `systems.get` for an authority-marked row. Its count feeds
+  `kdive.reconciler.repairs{repair_kind="stranded_orphan_teardowns"}`. `tearing_down` Systems are
+  excluded from it.
+- `repair_stalled_tearing_down_systems`: `TERMINAL` (unchanged), for a `tearing_down` System.
+
+No reconciler lane re-runs a teardown for a `failed` System; ADR-0441's exclusion stands.
+Rejected: a bounded recycle in the orphan lane, which would re-run a teardown the handler already
+refused with no new evidence; persisting the warning dedupe, which costs a migration for a
+log-noise bound the counter already covers. Design:
+[`2026-09-30-teardown-recycle-policy-2978-design.md`](../workflow/specs/2026-09-30-teardown-recycle-policy-2978-design.md).
+
 ### Amendment (2026-09-30): the reconciler settles a stalled reprovision (#2980)
 
 `reprovisioning` leaves only through the reprovision handler, so a reprovision job that
