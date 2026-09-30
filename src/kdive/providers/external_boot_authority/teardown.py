@@ -32,6 +32,10 @@ class ProviderRecoveryRefusal(ValueError):
         super().__init__(reason)
 
 
+class SystemTeardownSupersededError(Exception):
+    """The retained teardown record belongs to a later generation of the same subject (#2921)."""
+
+
 class AuthorityTeardownReservationV1(BaseModel):
     """Exact reservation ownership retained before authority-owned host mutation."""
 

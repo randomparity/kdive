@@ -76,6 +76,7 @@ from kdive.services.systems.validation import (
 )
 
 _NON_TERMINAL_RUN = frozenset({RunState.CREATED, RunState.RUNNING})
+_LIVE_JOB_STATES = frozenset({JobState.QUEUED, JobState.RUNNING})
 _TEARDOWN = JobKind.TEARDOWN
 # Idempotency-store kinds (the registered tool names); ADR-0193.
 _REPROVISION_KIND = "systems.reprovision"
@@ -253,6 +254,18 @@ async def _reprovision_in_lock(
         return _external_boot_denial(str(system_id), exc, ctx)
     if system.state is not SystemState.READY:
         return _config_error(str(system_id), data={"current_status": system.state.value})
+    # An ordinary teardown enqueue leaves the System `ready`, so only its job row shows it is
+    # pending (#2979). A settled row is safe: the teardown handler re-checks state under this lock.
+    # Below the READY check, so a System the teardown already moved keeps its `current_status`.
+    teardown = await _job_for_dedup_key(conn, _teardown_dedup_key(system_id))
+    if teardown is not None and teardown.state in _LIVE_JOB_STATES:
+        return ToolResponse.failure(
+            str(system_id),
+            ErrorCategory.CONFLICT,
+            detail="System teardown is queued or running; check systems.get before reprovisioning",
+            suggested_next_actions=["systems.get"],
+            data={"reason": "teardown_in_progress"},
+        )
     if await _has_live_run(conn, system_id):
         return _stale_handle(str(system_id), current_status=system.state.value)
     try:

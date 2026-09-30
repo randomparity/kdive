@@ -29,6 +29,7 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
     ProviderRecoveryRefusal,
+    SystemTeardownSupersededError,
 )
 from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
@@ -289,6 +290,15 @@ class LocalSystemTeardownIntentV1(LocalSystemTeardownAnchorV1):
             anchor.journal_sequence,
             anchor.journal_digest,
         )
+
+    def anchor_subject_matches(self, anchor: LocalSystemTeardownAnchorV1) -> bool:
+        """Compare the subject fields an anchor carries; it has no reservation (#2921)."""
+        return (
+            self.binding,
+            self.plan_identity,
+            self.provider_kind,
+            self.authority_instance,
+        ) == (anchor.binding, anchor.plan_identity, anchor.provider_kind, anchor.authority_instance)
 
     def same_subject(self, other: LocalSystemTeardownIntentV1) -> bool:
         """Allow a fresh authority generation only for the exact same teardown subject."""
@@ -1766,7 +1776,18 @@ class RealLocalExternalBootIO:
             with RecoveryMetadataStore(self._recovery_root) as store:
                 retained = store.read_system_teardown(anchor.binding)
                 if retained is not None and not retained.intent.matches_anchor(anchor):
-                    raise ValueError("System teardown observation conflicts with retained intent")
+                    if (
+                        not retained.intent.anchor_subject_matches(anchor)
+                        or retained.intent.generation == anchor.generation
+                    ):
+                        raise ValueError(
+                            "System teardown observation conflicts with retained intent"
+                        )
+                    if retained.intent.generation > anchor.generation:
+                        raise SystemTeardownSupersededError
+                    # ADR-0620 (#2921): this generation never reached `begin`; the earlier
+                    # generation's record is not its own, so it observes as if absent.
+                    retained = None
                 recovery_absent = store.exact_recovery_absence(anchor.binding)
             completed_at = (
                 retained.completed_at
@@ -4154,19 +4175,12 @@ class RecoveryMetadataStore:
                         os.fsync(activation_fd)
                 finally:
                     os.close(activation_fd)
-                with suppress(FileNotFoundError):
-                    os.rmdir(binding.activation_id, dir_fd=run_fd)
-                    os.fsync(run_fd)
             finally:
                 os.close(run_fd)
-            with suppress(FileNotFoundError):
-                os.rmdir(binding.run_id, dir_fd=system_fd)
-                os.fsync(system_fd)
         finally:
             os.close(system_fd)
-        with suppress(FileNotFoundError):
-            os.rmdir(binding.system_id, dir_fd=self._root_fd)
-            os.fsync(self._root_fd)
+        # Another activation or run may still share these parents (#2982).
+        self.prune_empty_activation_parents(binding)
 
     def prune_empty_activation_parents(self, binding: ExternalBootActivationBinding) -> None:
         """Remove the activation's `<system>/<run>/<activation>` directories only while empty.

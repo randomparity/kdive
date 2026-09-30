@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import time
@@ -72,6 +73,14 @@ class _FileIdentity:
     ctime_ns: int
 
 
+@dataclass(frozen=True, slots=True)
+class TornTail:
+    """A final line with no newline that an interrupted append left (ADR-0584, #2983)."""
+
+    offset: int
+    data: bytes
+
+
 @dataclass(slots=True)
 class _JournalCache:
     records: list[JournalRecordV1]
@@ -105,6 +114,7 @@ class FileAuthorityJournal:
         self._owner_uid = os.geteuid() if owner_uid is None else owner_uid
         self._max_bytes = max_bytes
         self._cache: _JournalCache | None = None
+        self._torn: tuple[TornTail, _FileIdentity] | None = None
         descriptors: list[int] = []
         try:
             root_fd = os.open(trusted_root, os.O_RDONLY | os.O_DIRECTORY | _OPEN_BASE)
@@ -376,11 +386,23 @@ class FileAuthorityJournal:
 
     def load(self, *, deadline: float | None = None) -> tuple[JournalRecordV1, ...]:
         """Load and verify exact canonical bytes, sequence, chain, lane, and ownership."""
+        return self._load(deadline, recovering=False)[0]
+
+    def load_recovering(
+        self, *, deadline: float | None = None
+    ) -> tuple[tuple[JournalRecordV1, ...], TornTail | None]:
+        """Load as `load` does, but report a torn final line or empty lane (#2983)."""
+        return self._load(deadline, recovering=True)
+
+    def _load(
+        self, deadline: float | None, *, recovering: bool
+    ) -> tuple[tuple[JournalRecordV1, ...], TornTail | None]:
+        self._torn = None
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("authority journal validation deadline exceeded")
         if self._entry_status() is None:
             self._cache = _JournalCache([], _ValidationState(), None, 0, b"")
-            return ()
+            return (), None
         descriptor = self._open_read()
         try:
             with os.fdopen(descriptor, "rb", closefd=False) as stream:
@@ -388,6 +410,8 @@ class FileAuthorityJournal:
                 size = status.st_size
                 if size > self._max_bytes:
                     raise ValueError("authority journal exceeds configured byte maximum")
+                # A first append that failed after creating the lane leaves it empty.
+                torn = TornTail(0, b"") if recovering and size == 0 else None
                 records: list[JournalRecordV1] = []
                 state = _ValidationState()
                 consumed = 0
@@ -398,7 +422,14 @@ class FileAuthorityJournal:
                     if consumed > self._max_bytes:
                         raise ValueError("authority journal exceeds configured byte maximum")
                     if not line.endswith(b"\n"):
-                        raise ValueError("authority journal has a partial final record")
+                        if not recovering:
+                            raise ValueError("authority journal has a partial final record")
+                        if len(line) > MAX_MESSAGE_BYTES:
+                            raise ValueError("authority journal record is empty or oversized")
+                        if consumed != size:
+                            raise ValueError("authority journal changed during validation")
+                        torn = TornTail(consumed - len(line), line)
+                        break
                     payload = line[:-1]
                     if not payload or len(payload) > MAX_MESSAGE_BYTES:
                         raise ValueError("authority journal record is empty or oversized")
@@ -410,11 +441,16 @@ class FileAuthorityJournal:
         finally:
             os.close(descriptor)
         result = tuple(records)
+        if torn is not None:
+            # No append cache: an append after the torn line would bury it mid-lane.
+            self._cache = None
+            self._torn = (torn, self._identity(status))
+            return result, torn
         tail_bytes = canonical_record_bytes(result[-1]) + b"\n" if result else b""
         self._cache = _JournalCache(
             records, state, self._identity(status), size - len(tail_bytes), tail_bytes
         )
-        return result
+        return result, None
 
     def append(self, record: JournalRecordV1) -> None:
         """Append one record, fsyncing file and newly created parent entry before return."""
@@ -481,6 +517,27 @@ class FileAuthorityJournal:
         encoded = canonical_record_bytes(record) + b"\n"
         if not cache.records or cache.records[-1] != record or cache.tail_bytes != encoded:
             raise ValueError("authority journal retraction requires the final record")
+        digest = record_digest(record).removeprefix("sha256:")
+        self._remove_tail(
+            cache.tail_offset,
+            encoded,
+            cache.identity,
+            f"{record.system_id}.{record.sequence}.{digest}.jsonl",
+        )
+
+    def remove_torn_tail(self) -> None:
+        """Remove a torn final line after preserving its bytes (ADR-0584 amendment, #2983)."""
+        observed, self._torn = self._torn, None
+        if observed is None:
+            raise ValueError("authority journal torn-tail removal requires its recovery load")
+        torn, identity = observed
+        digest = hashlib.sha256(torn.data).hexdigest()
+        stem = self._name.removesuffix(".jsonl")
+        self._remove_tail(torn.offset, torn.data, identity, f"{stem}.torn.{digest}")
+
+    def _remove_tail(
+        self, offset: int, data: bytes, identity: _FileIdentity | None, evidence: str
+    ) -> None:
         self._validate_directory_chain()
         descriptor = os.open(self._name, os.O_RDWR | _OPEN_BASE, dir_fd=self._parent_fd)
         try:
@@ -488,24 +545,24 @@ class FileAuthorityJournal:
             status = os.fstat(descriptor)
             path_status = os.stat(self._name, dir_fd=self._parent_fd, follow_symlinks=False)
             if (
-                self._identity(status) != cache.identity
+                self._identity(status) != identity
                 or (path_status.st_dev, path_status.st_ino) != (status.st_dev, status.st_ino)
-                or os.pread(descriptor, len(encoded), cache.tail_offset) != encoded
+                or os.pread(descriptor, len(data), offset) != data
             ):
                 raise ValueError("authority journal changed since validation")
-            self._preserve(record, encoded)
-            if cache.tail_offset == 0:
+            self._preserve(evidence, data)
+            if offset == 0:
                 os.unlink(self._name, dir_fd=self._parent_fd)
             else:
-                os.ftruncate(descriptor, cache.tail_offset)
+                os.ftruncate(descriptor, offset)
                 os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        if cache.tail_offset == 0:
+        if offset == 0:
             os.fsync(self._parent_fd)
         self.load()
 
-    def _preserve(self, record: JournalRecordV1, encoded: bytes) -> None:
+    def _preserve(self, name: str, data: bytes) -> None:
         created = False
         try:
             os.mkdir(RETRACTED_DIRECTORY, 0o700, dir_fd=self._parent_fd)
@@ -522,9 +579,7 @@ class FileAuthorityJournal:
             status = os.fstat(directory)
             if status.st_uid != self._owner_uid or stat.S_IMODE(status.st_mode) != 0o700:
                 raise PermissionError("authority journal retraction directory must be private")
-            # The name carries the record digest, so identical evidence is replaced idempotently.
-            digest = record_digest(record).removeprefix("sha256:")
-            name = f"{record.system_id}.{record.sequence}.{digest}.jsonl"
+            # The name carries a digest of the bytes, so identical evidence is replaced in place.
             partial = f".{name}.partial"
             evidence = os.open(
                 partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _OPEN_BASE, 0o600, dir_fd=directory
@@ -533,8 +588,8 @@ class FileAuthorityJournal:
                 os.fchmod(evidence, 0o600)
                 self._validate_descriptor(evidence)
                 written = 0
-                while written < len(encoded):
-                    written += os.write(evidence, encoded[written:])
+                while written < len(data):
+                    written += os.write(evidence, data[written:])
                 os.fsync(evidence)
             finally:
                 os.close(evidence)

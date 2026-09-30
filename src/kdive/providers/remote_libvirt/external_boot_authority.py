@@ -32,6 +32,7 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
+    SystemTeardownSupersededError,
 )
 from kdive.providers.ports.external_boot import (
     Digest,
@@ -123,6 +124,15 @@ class RemoteSystemTeardownIntentV1(RemoteSystemTeardownAnchorV1):
         left = self.model_dump(exclude={"schema_", "reservation"})
         right = anchor.model_dump(exclude={"schema_"})
         return left == right
+
+    def anchor_subject_matches(self, anchor: RemoteSystemTeardownAnchorV1) -> bool:
+        """Compare the subject fields an anchor carries; it has no reservation (#2921)."""
+        return (
+            self.binding,
+            self.plan_identity,
+            self.provider_kind,
+            self.authority_instance,
+        ) == (anchor.binding, anchor.plan_identity, anchor.provider_kind, anchor.authority_instance)
 
     def same_subject(self, other: RemoteSystemTeardownIntentV1) -> bool:
         return (
@@ -818,14 +828,26 @@ class RemoteModuleVolumePreparationStore:
     def reopen_system_teardown(
         self, anchor: RemoteSystemTeardownAnchorV1
     ) -> RemoteSystemTeardownRecordV1 | None:
+        """Reopen the record this anchor owns; ``None`` when it never reached ``begin``.
+
+        ADR-0620 (#2921): an earlier generation's record of the same subject is not this
+        anchor's, so it reopens as absent; a later generation's means this one is superseded.
+        """
         name = f"{self._system_teardown_key(anchor.binding)}.teardown"
         data = self._read(name)
         if data is None:
             return None
         record = RemoteSystemTeardownRecordV1.from_canonical_json(data)
-        if not record.intent.matches_anchor(anchor):
+        if record.intent.matches_anchor(anchor):
+            return record
+        if (
+            not record.intent.anchor_subject_matches(anchor)
+            or record.intent.generation == anchor.generation
+        ):
             raise ValueError("remote System teardown observation conflicts with retained intent")
-        return record
+        if record.intent.generation > anchor.generation:
+            raise SystemTeardownSupersededError
+        return None
 
     def checkpoint_system_teardown(
         self,
