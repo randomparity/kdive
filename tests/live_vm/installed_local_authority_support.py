@@ -10,7 +10,7 @@ import re
 import stat
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -771,8 +771,7 @@ def run_installed_local_authority_normal_operations() -> None:
     )
     ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
 
-    async def run() -> None:
-        await provision_authority_fixture(db_url, config, ledger)
+    async def proof() -> None:
         require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(base_url, token)
         async with client:
@@ -795,16 +794,16 @@ def run_installed_local_authority_normal_operations() -> None:
                     assert closed.status not in {"error", "failed"}
                 except Exception as exc:
                     cleanup_failures.append(exc)
-            try:
-                remove_authority_fixture(config, ledger)
-            except Exception as exc:
-                cleanup_failures.append(exc)
             if primary is not None:
                 cleanup_failures.insert(0, primary)
             if len(cleanup_failures) == 1:
                 raise cleanup_failures[0]
             if cleanup_failures:
                 raise ExceptionGroup("native carrier and cleanup failures", cleanup_failures)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config, ledger)
+        await _run_then_remove_fixture(config, ledger, proof())
 
     asyncio.run(run())
 
@@ -871,8 +870,7 @@ def run_installed_local_authority_ppc64le_normal_operations() -> None:
     )
     ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
 
-    async def run() -> None:
-        await provision_authority_fixture(db_url, config, ledger)
+    async def proof() -> None:
         require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(base_url, token)
         async with client:
@@ -897,10 +895,6 @@ def run_installed_local_authority_ppc64le_normal_operations() -> None:
                     assert closed.status not in {"error", "failed"}
                 except Exception as exc:
                     cleanup_failures.append(exc)
-            try:
-                remove_authority_fixture(config, ledger)
-            except Exception as exc:
-                cleanup_failures.append(exc)
             if primary is not None:
                 cleanup_failures.insert(0, primary)
             if len(cleanup_failures) == 1:
@@ -909,6 +903,10 @@ def run_installed_local_authority_ppc64le_normal_operations() -> None:
                 raise ExceptionGroup(
                     "ppc64le native carrier and cleanup failures", cleanup_failures
                 )
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config, ledger)
+        await _run_then_remove_fixture(config, ledger, proof())
 
     asyncio.run(run())
 
@@ -947,8 +945,7 @@ def run_installed_local_authority_restart_recovery() -> None:
     )
     ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
 
-    async def run() -> None:
-        await provision_authority_fixture(db_url, config, ledger)
+    async def proof() -> None:
         require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(base_url, token)
         async with client:
@@ -996,16 +993,16 @@ def run_installed_local_authority_restart_recovery() -> None:
                     assert closed.status not in {"error", "failed"}
                 except Exception as exc:
                     cleanup_failures.append(exc)
-            try:
-                remove_authority_fixture(config, ledger)
-            except Exception as exc:
-                cleanup_failures.append(exc)
             if primary is not None:
                 cleanup_failures.insert(0, primary)
             if len(cleanup_failures) == 1:
                 raise cleanup_failures[0]
             if cleanup_failures:
                 raise ExceptionGroup("native carrier and cleanup failures", cleanup_failures)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config, ledger)
+        await _run_then_remove_fixture(config, ledger, proof())
 
     asyncio.run(run())
 
@@ -1033,8 +1030,7 @@ def run_installed_local_authority_unresolved_call_takeover() -> None:
     )
     ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
 
-    async def run() -> None:
-        await provision_authority_fixture(db_url, config, ledger)
+    async def proof() -> None:
         require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(require_stack(), token)
         async with client:
@@ -1101,7 +1097,10 @@ def run_installed_local_authority_unresolved_call_takeover() -> None:
             finally:
                 if held is not None:
                     set_exact_worker_hold(held, "continue")
-                remove_authority_fixture(config, ledger)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config, ledger)
+        await _run_then_remove_fixture(config, ledger, proof())
 
     asyncio.run(run())
 
@@ -1762,8 +1761,7 @@ def run_installed_local_authority_journal_restore_recovery() -> None:
     )
     ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
 
-    async def run() -> None:
-        await provision_authority_fixture(db_url, config, ledger)
+    async def proof() -> None:
         require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(require_stack(), token)
         async with client:
@@ -1815,14 +1813,14 @@ def run_installed_local_authority_journal_restore_recovery() -> None:
                         }
                     except Exception as exc:
                         failures.append(exc)
-                try:
-                    remove_authority_fixture(config, ledger)
-                except Exception as exc:
-                    failures.append(exc)
                 if len(failures) == 1:
                     raise failures[0]
                 if failures:
                     raise ExceptionGroup("native carrier and cleanup failures", failures)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config, ledger)
+        await _run_then_remove_fixture(config, ledger, proof())
 
     asyncio.run(run())
 
@@ -1960,6 +1958,23 @@ async def provision_authority_fixture(
             raise RuntimeError("authority fixture create did not report its created names")
         for identity in created:
             ledger.record(OwnedResource(kind="authority-fixture", identity=identity))
+
+
+async def _run_then_remove_fixture(
+    config: NativeAuthorityConfig, ledger: ResourceLedger, proof: Awaitable[None]
+) -> None:
+    """Await the carrier's proof, then remove its recorded fixture whether or not it raised."""
+    try:
+        await proof
+    except Exception as primary:
+        try:
+            remove_authority_fixture(config, ledger)
+        except Exception as cleanup:
+            raise ExceptionGroup(
+                "native carrier and fixture cleanup failures", [primary, cleanup]
+            ) from None
+        raise
+    remove_authority_fixture(config, ledger)
 
 
 def remove_authority_fixture(config: NativeAuthorityConfig, ledger: ResourceLedger) -> None:

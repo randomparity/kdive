@@ -1050,10 +1050,39 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
     monkeypatch.setattr(carrier, "require_authority_artifact_confinement", probe)
     monkeypatch.setattr(carrier, "LiveStackClient", StopBeforeMcpClient)
     monkeypatch.setattr(carrier, "mint_role_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(
+        carrier, "remove_authority_fixture", lambda *_args: events.append("remove-fixture")
+    )
     monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://fixture")
 
     with pytest.raises(RuntimeError, match="stop before public MCP mutation"):
         carrier.run_installed_local_authority_normal_operations()
+    assert events == ["fixture", "identity-probe", "remove-fixture"]
+
+
+def test_fixture_cleanup_failure_is_reported_with_the_proof_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+
+    async def failed_proof() -> None:
+        raise AssertionError("proof failed")
+
+    def failed_removal(*_args: object) -> None:
+        raise RuntimeError("remove failed")
+
+    monkeypatch.setattr(carrier, "remove_authority_fixture", failed_removal)
+    with pytest.raises(ExceptionGroup) as raised:
+        asyncio.run(carrier._run_then_remove_fixture(config, ledger, failed_proof()))
+
+    assert [str(error) for error in raised.value.exceptions] == ["proof failed", "remove failed"]
 
 
 def test_native_route_preflight_fails_before_fixture_mutation(
