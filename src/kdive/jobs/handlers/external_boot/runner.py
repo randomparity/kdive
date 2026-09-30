@@ -222,7 +222,7 @@ def _prepares(activation: ExternalBootActivation, marker: ExternalBootAuthorityM
     """A PREPARING activation is debited and prepared first, except by System teardown (#2961).
 
     Teardown ends the activation, so preparing it would debit capacity and create provider state
-    only to destroy them; its pending reservation is ended uncredited by the teardown receipt.
+    only to destroy them. The teardown receipt ends the reservation in whatever state it holds.
     """
     return (
         activation.state is ExternalBootActivationState.PREPARING and marker.purpose != "teardown"
