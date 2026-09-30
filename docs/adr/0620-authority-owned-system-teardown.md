@@ -139,7 +139,9 @@ cases in both libvirt providers:
 
 N therefore never credits from another generation's record. A predecessor-owned observation
 proves only `retained_quarantine`; the reservation credits once, through the generation whose
-exact anchor owns the record. Observation still writes nothing. Takeover recovery of a
+exact anchor owns the record, provided that generation's `begin` adopts it; `begin` still
+requires an identical reservation, and a reservation that changed between generations is not
+addressed here. Observation still writes nothing. Takeover recovery of a
 generation that died between `mutation-started` and `begin` now reaches `terminal` instead of
 failing every takeover with `provider_conflict`. In recovery, a later generation's record cannot
 occur: a generation begins only after its own `takeover-acknowledged`, which requires every

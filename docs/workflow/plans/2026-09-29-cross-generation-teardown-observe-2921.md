@@ -22,7 +22,8 @@ Decision: ADR 0620 amendment 2026-09-29 (#2921).
 | `docs/adr/0620-authority-owned-system-teardown.md` | dated amendment |
 | `tests/providers/local_libvirt/test_external_boot.py` | predecessor, successor, foreign cases |
 | `tests/providers/remote_libvirt/test_external_boot_authority.py` | predecessor, successor, foreign cases |
-| `tests/db/test_migration_0161_teardown_takeover.py` | takeover over a predecessor-owned record converges; superseded mapping |
+| `tests/providers/external_boot_authority/test_service_teardown.py` | takeover over a predecessor-owned record converges (real remote adapter); superseded mapping |
+| `tests/providers/external_boot_authority/service_support.py` | fake repository: per-generation acknowledgement; `None` identities kept |
 
 ## Task 1 — shared signal and local classification
 
@@ -39,7 +40,7 @@ moves into the predecessor case); run red; add the error and `anchor_subject_mat
 
 ## Task 2 — remote classification
 
-Contract: the same three outcomes through `RemoteLibvirtExternalBootAuthority`'s
+Contract: the same three outcomes through `RemoteExternalBootAuthorityAdapter`'s
 `observe_system_teardown` / the store's `reopen_system_teardown`, with the teardown file
 byte-identical after each call.
 
@@ -49,12 +50,14 @@ Steps: tests red; implement in `reopen_system_teardown`; green.
 
 Contract: `_system_teardown_facts` turns `SystemTeardownSupersededError` into
 `AuthorityServiceError("superseded")`, so neither recovery nor `_execute_teardown` reports
-`provider_conflict` for it. With real CAS: a teardown generation interrupted after
-`mutation-started`, whose observation returns anchor-owned facts with no reservation, is recovered
-by the next takeover to a `terminal` `conflict` observation, and that takeover acknowledges and
-completes its own teardown with exactly one `complete_ready` proof.
+`provider_conflict` for it. Over the real remote adapter and store: generation 1 begins and
+fails, generation 2 dies after `mutation-started` before `begin`, and generation 3's takeover
+recovers 2 to a `terminal` `conflict` observation, then completes its own teardown with the only
+`complete_ready` proof. A post-commit re-observation under a successor record answers
+`superseded` with the terminal record already anchored.
 
-Steps: tests red (superseded case reports `provider_conflict`); implement; green.
+Steps: tests red (unmodified remote classification gives `provider_conflict`; removing the
+mapping gives an unmapped error); implement; green.
 
 ## Task 4 — ADR amendment and guardrails
 

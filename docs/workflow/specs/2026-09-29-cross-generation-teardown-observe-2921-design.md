@@ -6,7 +6,8 @@ Decision record: [ADR 0620](../../adr/0620-authority-owned-system-teardown.md), 
 ## Problem
 
 A System's retained teardown record is keyed by activation binding, not by authority generation.
-`begin_system_teardown` (local `RecoveryMetadataStore`, remote `_RemoteExternalBootStore`) lets a
+`begin_system_teardown` (local `RecoveryMetadataStore`, remote
+`RemoteModuleVolumePreparationStore`) lets a
 later generation of the same subject overwrite it in place. Observation of generation N rebuilds
 N's anchor from N's `mutation-started` record and requires the retained intent to match it
 exactly (`matches_anchor`, generation included). When the record holds another generation's
@@ -27,7 +28,9 @@ Two shapes produce the mismatch:
 - **Shape 2 is reachable in takeover recovery.** `execute_system_teardown` (both providers)
   writes the record inside the provider call, after the service anchors `mutation-started`
   (`service.py` `execute_mutation`). A process death between the two leaves N's
-  `mutation-started` unresolved over generation N−1's record. Every later takeover recovers N
+  `mutation-started` unresolved over generation N−1's record. So does a failed
+  `_resolve_confirmed` recheck after `mutation-started`, which answers `superseded` before the
+  provider is called, with no crash. Every later takeover recovers N
   (`_acknowledge_takeover_bound` → `_recover_suspended` → `_finish_recovery` →
   `_recovery_observation`), gets `provider_conflict`, and never reaches
   `takeover-acknowledged`, so the System can never be torn down.
@@ -53,15 +56,18 @@ Two shapes produce the mismatch:
 2. Each provider intent (`LocalSystemTeardownIntentV1`, `RemoteSystemTeardownIntentV1`) adds
    `anchor_subject_matches(anchor) -> bool`, comparing `binding`, `plan_identity`,
    `provider_kind`, `authority_instance`: `same_subject` minus `reservation`, which the anchor
-   does not carry. `authority_id`, `operation_identity` and `attempt_id` are per-generation and
-   excluded, as in `begin`'s successor rule.
+   does not carry. `authority_id`, `operation_digest` and the journal fields change per
+   generation; `operation_identity` and `attempt_id` are fixed per activation but, as in
+   `begin`'s successor rule, are not part of the subject (`binding` already names the
+   activation).
 3. Observation classifies a retained record that does not `matches_anchor(anchor)`:
    - different subject, or same generation → unchanged `ValueError` (→ `provider_conflict`);
    - retained generation > anchor generation → raise `SystemTeardownSupersededError`;
    - retained generation < anchor generation → treat the record as absent for this anchor.
    Local: in `RealLocalExternalBootIO.observe_system_teardown`, the predecessor case sets
    `retained = None`, so facts are anchor-owned with `reservation=None` and `completed_at=None`.
-   Remote: `_RemoteExternalBootStore.reopen_system_teardown` returns `None` for the predecessor,
+   Remote: `RemoteModuleVolumePreparationStore.reopen_system_teardown` returns `None` for the
+   predecessor (documented on the method; its only caller is the adapter's observation),
    so `observe_system_teardown` builds anchor-owned facts with `domain_validated=False`.
 4. `service.py` `_system_teardown_facts` maps `SystemTeardownSupersededError` to
    `AuthorityServiceError("superseded")`. `_finish_recovery` already re-raises an
@@ -86,8 +92,8 @@ No persisted format, migration, journal phase, protocol field or transport categ
    and no proof for N; the successor that overwrote the record credits under its own exact
    anchor (its `begin` adopted the record, keeping phase and `completed_at`).
 4. **Accepted failure classes** — a successor-owned record in takeover recovery (unreachable
-   above) returns `superseded` and the takeover does not converge until a newer takeover; that is
-   the bounded answer for an inconsistency, not a retry path. A record whose subject fields match
+   above) returns `superseded` on every takeover; it needs operator reconciliation, like an
+   unreconcilable `journal_conflict`, and is a bounded answer, not a retry path. A record whose subject fields match
    but whose reservation differs is classified by generation, not refused: `begin` never writes
    such a record, and both outcomes (quarantine without credit, `superseded`) fail closed.
 5. **Covered elsewhere** — exhausted retained requeue (#2917), generation churn (#2901), payload
@@ -107,8 +113,17 @@ No persisted format, migration, journal phase, protocol field or transport categ
 
 ## Validation
 
-Focused tests in `tests/providers/local_libvirt/test_external_boot.py`,
-`tests/providers/remote_libvirt/test_external_boot_authority.py`,
-`tests/providers/external_boot_authority/test_service_teardown.py`, each shown red against the
-unmodified classification (controlled fault), then `just lint`, `just type`, `just records`,
-`just ci`.
+Focused tests, each shown red under a controlled fault:
+
+- `tests/providers/local_libvirt/test_external_boot.py` and
+  `tests/providers/remote_libvirt/test_external_boot_authority.py`: predecessor-owned,
+  successor-owned, and another subject (different plan, different activation, same generation
+  with a different anchor field) at retained generations N−1, N and N+1.
+- `tests/providers/external_boot_authority/test_service_teardown.py`: the service over the real
+  remote adapter and store recovers a generation that died before `begin` through the next
+  takeover (red on the unmodified provider with `provider_conflict`); a post-commit
+  re-observation under a successor record answers `superseded`. The shared fake repository in
+  `service_support.py` gains a per-generation acknowledgement lookup and keeps a `None`
+  source/target identity as `None`, which multi-generation teardown recovery needs.
+
+Then `just lint`, `just type`, `just records`, `just ci`.
