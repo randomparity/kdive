@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
@@ -516,6 +517,97 @@ def test_force_teardown_twice_dedups_to_one_job(migrated_url: str) -> None:
         assert await _job_count(migrated_url, f"{sys_id}:teardown") == 1
         # Both attempts are audited (the accountability row records each break-glass call).
         assert await _count_platform_audit(migrated_url) == 2
+
+    asyncio.run(_run())
+
+
+_JOB_ROW = "SELECT id, state, attempt, payload FROM jobs WHERE dedup_key = %s"
+
+
+async def _dead_lettered_teardown(pool: AsyncConnectionPool, sys_id: UUID, payload: str) -> None:
+    """Enqueue the ordinary teardown, then dead-letter it with ``payload`` merged in (#2978)."""
+    resp = await breakglass.force_teardown(pool, _admin_ctx(), system_id=str(sys_id), reason="x")
+    assert resp.status == "queued", resp.model_dump()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE jobs SET state = 'failed', attempt = max_attempts, error_category = 'conflict',"
+            " payload = payload || %s::jsonb WHERE dedup_key = %s",
+            (payload, f"{sys_id}:teardown"),
+        )
+
+
+async def _teardown_row(pool: AsyncConnectionPool, sys_id: UUID) -> tuple[object, ...] | None:
+    async with pool.connection() as conn:
+        return await (await conn.execute(_JOB_ROW, (f"{sys_id}:teardown",))).fetchone()
+
+
+@pytest.mark.parametrize("state", [SystemState.READY, SystemState.FAILED])
+def test_force_teardown_recycles_dead_lettered_job(migrated_url: str, state: SystemState) -> None:
+    """#2978: break-glass re-runs a dead-lettered ordinary teardown, as systems.teardown does."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _system(pool, state=SystemState.READY)
+            await _dead_lettered_teardown(pool, sys_id, "{}")
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE systems SET state = %s WHERE id = %s", (state.value, sys_id)
+                )
+            dead = await _teardown_row(pool, sys_id)
+            resp = await breakglass.force_teardown(
+                pool, _admin_ctx(), system_id=str(sys_id), reason="re-run"
+            )
+            after = await _teardown_row(pool, sys_id)
+        assert dead is not None and dead[1] == "failed"
+        assert resp.status == "queued", resp.model_dump()
+        assert resp.object_id == str(dead[0])
+        assert after is not None and after[1:3] == ("queued", 0)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("marker", ["authority_system_v1", "external_boot_authority_v1"])
+def test_force_teardown_keeps_failed_authority_marked_row(migrated_url: str, marker: str) -> None:
+    """#2978: recycling overwrites the payload, so a marked row keeps replaying (#2917)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _system(pool, state=SystemState.READY)
+            await _dead_lettered_teardown(pool, sys_id, f'{{"{marker}": {{"marked": true}}}}')
+            before = await _teardown_row(pool, sys_id)
+            await breakglass.force_teardown(
+                pool, _admin_ctx(), system_id=str(sys_id), reason="re-run"
+            )
+            after = await _teardown_row(pool, sys_id)
+        assert before is not None and before[1] == "failed"
+        assert after == before
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("prior", [None, "failed"])
+def test_force_teardown_refuses_reprovisioning(migrated_url: str, prior: str | None) -> None:
+    """#2978: no teardown is enqueued, and no failed one recycled, while a reprovision runs."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _system(pool, state=SystemState.READY)
+            if prior is not None:
+                await _dead_lettered_teardown(pool, sys_id, "{}")
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE systems SET state = 'reprovisioning' WHERE id = %s", (sys_id,)
+                )
+            before = await _teardown_row(pool, sys_id)
+            resp = await breakglass.force_teardown(
+                pool, _admin_ctx(), system_id=str(sys_id), reason="stuck"
+            )
+            after = await _teardown_row(pool, sys_id)
+        assert resp.status == "error"
+        assert resp.error_category == "conflict"
+        assert resp.data["current_status"] == "reprovisioning"
+        assert resp.suggested_next_actions == ["systems.get"]
+        assert after == before
 
     asyncio.run(_run())
 
