@@ -404,6 +404,38 @@ async def test_post_commit_reobservation_under_a_successor_record_is_superseded(
     await service.close()
 
 
+@pytest.mark.anyio
+async def test_takeover_recovery_under_a_successor_record_answers_superseded(
+    tmp_path: Path,
+) -> None:
+    """#2921: the unreachable recovery shape gets `superseded`, never `provider_conflict`."""
+    service, repository, adapter, peer, request = await _ready(tmp_path)
+    adapter.lose_completion_reply = True
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_teardown(peer, request)
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+    await service.close()
+
+    class _Superseded(_TeardownAdapter):
+        async def observe_system_teardown(
+            self, request: AuthorityTeardownMutationRequestV1, context: AuthorityCommitContextV1
+        ) -> AuthoritySystemTeardownFacts:
+            raise SystemTeardownSupersededError
+
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        adapter=_Superseded(),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+    )
+    successor = repository.request.model_copy(update={"authority_id": uuid4(), "generation": 2})
+    repository.allocating_request = successor
+    for _attempt in range(2):
+        with pytest.raises(AuthorityServiceError, match="superseded"):
+            await restarted.acknowledge_takeover(peer, successor)
+    assert not any(record.phase is JournalPhase.TERMINAL for record in repository.records)
+    await restarted.close()
+
+
 class _RemoteTeardownHost:
     """Remote host whose first destroy is lost; later calls complete."""
 
