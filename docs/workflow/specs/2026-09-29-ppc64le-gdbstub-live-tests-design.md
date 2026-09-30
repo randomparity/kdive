@@ -17,7 +17,8 @@ Tests only; no `src/` change and no ownership change. Part of #2736.
   `ppc64le: pc`) and `_ADVANCE_MODE_GROUPS` (`single-step`: `into`, `over`, `instruction`;
   `finish`: `out`). Parametrize `test_live_vm_debug_advance_modes` over the groups; each boots
   its own guest and asserts audit transitions for its own modes. On ppc64le the `single-step`
-  group skips, naming #2942, before any preflight or boot. Arch comes from the surface profile.
+  group skips, naming #2942, before any live_vm preflight or guest boot. Arch comes from the
+  surface profile.
 - `test_live_stack.py`: `_SPINE_PC_REGISTER["ppc64le"]` and its unit parameter become `pc`.
   Only when the ppc64le spine reaches and passes its attach phase live: provision the gdbstub
   on both arches, delete the x86-only attach branch and `_SPINE_GDBSTUB_GAP`, and assert
