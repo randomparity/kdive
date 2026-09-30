@@ -195,6 +195,51 @@ def test_teardown_uses_its_recovery_free_request_before_preparation(
     _drive(migrated_url, body)
 
 
+def test_teardown_of_a_preparing_activation_skips_preparation(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """#2961: teardown neither debits nor prepares; its pending reservation ends uncredited."""
+
+    async def body(seed: AsyncConnection) -> None:
+        vehicle = build_vehicle()
+        case = await seed_case(
+            seed,
+            vehicle,
+            purpose="teardown",
+            operation="teardown",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+
+        await _dispatch(authority_role_dsns, seed, case, "teardown", vehicle)
+
+        assert vehicle.port.calls == ["authority-teardown"]
+        async with seed.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT a.state, a.materialization, a.cleanup_evidence->>'mode' AS mode, "
+                "s.state AS system_state, "
+                "(SELECT count(*) FROM external_boot_reservations r "
+                " WHERE r.activation_id = a.id) AS reservations, "
+                "(SELECT count(*) FROM external_boot_reservation_releases r "
+                " WHERE r.activation_id = a.id) AS releases "
+                "FROM external_boot_activations a JOIN systems s ON s.id = a.system_id "
+                "WHERE a.id = %s",
+                (vehicle.activation_id,),
+            )
+            row = await cur.fetchone()
+        assert row == {
+            "state": "torn_down",
+            "materialization": None,
+            "mode": "pending_system_teardown",
+            "system_state": "torn_down",
+            "reservations": 0,
+            "releases": 0,
+        }
+
+    _drive(migrated_url, body)
+
+
 def test_an_activating_activation_cannot_hold_null_evidence_at_all(migrated_url: str) -> None:
     """Why there is no ``activate``-with-NULL-evidence handler case: the row is unconstructible.
 

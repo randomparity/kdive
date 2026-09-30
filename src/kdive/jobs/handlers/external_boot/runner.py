@@ -218,10 +218,21 @@ def _phase_binding(context: OperationContext, operation: str) -> tuple[str, str]
     return "sha256:" + identity, "sha256:" + digest
 
 
+def _prepares(activation: ExternalBootActivation, marker: ExternalBootAuthorityMarkerV1) -> bool:
+    """A PREPARING activation is debited and prepared first, except by System teardown (#2961).
+
+    Teardown ends the activation, so preparing it would debit capacity and create provider state
+    only to destroy them; its pending reservation is ended uncredited by the teardown receipt.
+    """
+    return (
+        activation.state is ExternalBootActivationState.PREPARING and marker.purpose != "teardown"
+    )
+
+
 async def _materialize_preparing(
     conn: AsyncConnection, context: OperationContext, ports: ExternalBootHandlerPorts
 ) -> ExternalBootActivation:
-    if context.activation.state is not ExternalBootActivationState.PREPARING:
+    if not _prepares(context.activation, context.marker):
         return context.activation
     executor = ports.preparation_executor
     if executor is None:
@@ -306,7 +317,7 @@ async def _materialize_preparing(
 async def _debit_preparing(
     conn: AsyncConnection, context: OperationContext, ports: ExternalBootHandlerPorts
 ) -> ExternalBootActivation:
-    if context.activation.state is not ExternalBootActivationState.PREPARING:
+    if not _prepares(context.activation, context.marker):
         return context.activation
     geometry = (
         ports.reservation_geometry(context.binding)
@@ -687,10 +698,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     prerequisites = await require_preconditions(conn, activation, marker)
     if ports.authority_client_factory is not None:
         prerequisites = dict(prerequisites) | {"authority_executor": ports.authority_executor}
-    if (
-        activation.state is ExternalBootActivationState.PREPARING
-        and ports.preparation_executor is None
-    ):
+    if _prepares(activation, marker) and ports.preparation_executor is None:
         raise _refuse("no external-boot authority preparation executor is configured")
     if marker.operation == "teardown" and ports.teardown_executor is None:
         raise _refuse("no external-boot authority teardown executor is configured")
