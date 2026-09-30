@@ -172,7 +172,7 @@ System on the allocation that is not `torn_down` has external-boot history. The 
 allocator admits a teardown only on an `active` allocation (`0122_external_boot_authority.sql`),
 so a released allocation would leave that System with no teardown path. This mirrors the
 pre-activation fence that already denies release for an authority-owned System (ADR-0623).
-Lease expiry still ends such an allocation; that path is tracked separately. It is also the only
+Lease expiry still ends such an allocation; that path is tracked in #2992. It is also the only
 end for an allocation whose System the authority teardown cannot take (a pre-fix `tearing_down`
 System, or an unresolved authority route), and a platform operator outside the project cannot
 clear it, because `systems.teardown` needs the project `admin` role.

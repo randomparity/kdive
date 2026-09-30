@@ -68,8 +68,8 @@ daemon. Three gaps allow it:
      names the enqueuer of the refused job (for example the reconciler), not the admin.
    - A System reprovisioned after an activation still counts as history. ADR-0620 already routes
      it this way in `systems.teardown`.
-4. **Covered elsewhere** — lease expiry of an allocation whose System has history: separate
-   issue filed by the orchestrator. Carrier ledger, fixture removal, runbook: #2965. Reuse after
+4. **Covered elsewhere** — lease expiry of an allocation whose System has history: #2992.
+   Carrier ledger, fixture removal, runbook: #2965. Reuse after
    release: #2968. Plan-less preparing teardown: #2961. Pre-activation authority-owned Systems:
    already routed and release-fenced (ADR-0623).
 
