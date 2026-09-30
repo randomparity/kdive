@@ -4154,19 +4154,12 @@ class RecoveryMetadataStore:
                         os.fsync(activation_fd)
                 finally:
                     os.close(activation_fd)
-                with suppress(FileNotFoundError):
-                    os.rmdir(binding.activation_id, dir_fd=run_fd)
-                    os.fsync(run_fd)
             finally:
                 os.close(run_fd)
-            with suppress(FileNotFoundError):
-                os.rmdir(binding.run_id, dir_fd=system_fd)
-                os.fsync(system_fd)
         finally:
             os.close(system_fd)
-        with suppress(FileNotFoundError):
-            os.rmdir(binding.system_id, dir_fd=self._root_fd)
-            os.fsync(self._root_fd)
+        # Another activation or run may still share these parents (#2982).
+        self.prune_empty_activation_parents(binding)
 
     def prune_empty_activation_parents(self, binding: ExternalBootActivationBinding) -> None:
         """Remove the activation's `<system>/<run>/<activation>` directories only while empty.
