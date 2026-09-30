@@ -78,8 +78,8 @@ the reclassification after a resume. It records what #2964 decided for each.
 - A step verb that does not stop keeps `transport_stall` or `timed_out: True`. The wire evidence
   does not allow a truthful distinct code. An interrupt with no stop is the same on the wire as
   a real RSP stall. An interrupt with a stop proves a live link, but `-exec-step` and
-  `-exec-next` can time out on x86 for a line that calls a blocking function (`debug.advance`
-  documents `timed_out=True` for this). By inference from QEMU's default single-step flags
+  `-exec-next` can time out on x86 in code with no line table (ADR-0379; `debug.advance`
+  documents `timed_out=True` for it, and `test_step_interrupts_on_timeout` pins it). By inference from QEMU's default single-step flags
   (`SSTEP_NOIRQ`, `qqemu.sstep`), an x86 `stepi` over `hlt` can also not complete. The engine does
   not know the guest arch or accelerator. The table above is the only step-verb control.
 

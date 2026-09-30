@@ -40,7 +40,7 @@ allows it". The wire evidence does not allow it (see Design 3).
    - an interrupt that gets no stop is the same on the wire as a real RSP stall, which must
      keep `transport_stall`;
    - an interrupt that gets a stop proves a live link, but `-exec-step` and `-exec-next` can
-     time out on x86 (a line that calls a blocking function), and QEMU steps with interrupts
+     time out on x86 (code with no line table, ADR-0379), and QEMU steps with interrupts
      blocked, so an x86 `stepi` over `hlt` can also not complete;
    - `ExecutionControl` does not know the guest arch or accelerator.
 
