@@ -65,6 +65,11 @@ class ErrorCategory(StrEnum):
     # (an unclassified fault in the layer below, and retryable).
     RESTORE_INCOMPLETE = "restore_incomplete"
 
+    # Reprovision limbo (#2980, ADR-0435 amendment). A `reprovisioning` System whose reprovision
+    # job can never finish — dead-lettered, canceled, or absent — is driven to `failed` by the
+    # reconciler. Its disk may be half rebuilt, so it is non-retryable like `restore_incomplete`.
+    REPROVISION_INCOMPLETE = "reprovision_incomplete"
+
 
 # Categories whose human-readable reason must never reach a client (ADR-0123): a denial or a
 # by-id lookup miss carries a fixed constant so no raise site — even one whose message embeds a
@@ -122,6 +127,7 @@ RETRYABLE_BY_CATEGORY: dict[ErrorCategory, bool] = {
     ErrorCategory.NOT_FOUND: False,
     ErrorCategory.SYMBOL_NOT_FOUND: False,
     ErrorCategory.RESTORE_INCOMPLETE: False,
+    ErrorCategory.REPROVISION_INCOMPLETE: False,
     ErrorCategory.CONFLICT: False,
     ErrorCategory.AUTHORIZATION_DENIED: False,
     ErrorCategory.QUOTA_EXCEEDED: False,

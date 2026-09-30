@@ -61,8 +61,8 @@ category, so this is not the only error a restore can report.
 
 Inspect `systems.get`, any cited job, and the allocation with `allocations.wait`.
 The current System state machine has no outgoing transition from `failed`: retrying the
-restore cannot recover it, and ordinary `systems.teardown` cannot complete from that state.
-Failed-System responses instead suggest `allocations.release` and `allocations.request`;
+restore cannot recover it. `systems.teardown` reclaims the System's provider resources and
+leaves it `failed`. Failed-System responses suggest `allocations.release` and `allocations.request`;
 follow their [preconditions and returned state](reference/allocations.md) before provisioning
 a replacement. A terminal allocation may already be unavailable for release.
 
@@ -70,3 +70,23 @@ Releasing the allocation does not establish that the failed guest or provider da
 cleaned up. Preserve needed evidence and ask an operator to triage residual resources;
 do not assume they were reclaimed. Snapshots belong to the original System and cannot
 be restored onto its replacement. Create new snapshots after rebuilding the guest.
+
+## An incomplete reprovision
+
+`reprovision_incomplete` means the reconciler found a System stuck reprovisioning with no
+reprovision job able to finish it and no more specific retained failure category. The
+System becomes `failed`; its disk may be indeterminate, partly rebuilt from the new
+profile. The category is non-retryable. Other failed reprovisions can retain their
+original job category.
+
+The reconciler waits at least 15 minutes after a reprovision job was canceled, lost its
+worker lease, or failed on a retried attempt before it settles the System, because the
+job's handler can still be running.
+One known cause is `systems.reprovision` with a profile the System already applied earlier:
+that call replays the earlier job instead of running a new one, and the System settles to
+`failed` although its guest may be healthy.
+
+Inspect `systems.get` and any cited job. `systems.teardown` reclaims the System's provider
+resources and leaves it `failed`. To rebuild, use `allocations.release` and
+`allocations.request`, following their [preconditions and returned
+state](reference/allocations.md).
