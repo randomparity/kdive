@@ -11,8 +11,8 @@ ADR 0712 amendment of 2026-09-30.
 
 Tech stack: Python 3.14, pytest.
 
-Expected implementation size: 110–160 changed lines (M) — one helper and regex (~35), a
-five-line wrap in `resume`, and five unit tests (~100).
+Expected implementation size: 90–140 changed lines (M) — one helper and regex (~35), a
+five-line wrap in `resume`, two new tests and two extended tests (~80).
 
 ## Global Constraints
 
@@ -28,7 +28,7 @@ five-line wrap in `resume`, and five unit tests (~100).
 |---|---|---|
 | `src/kdive/providers/shared/debug_common/gdbmi/commands/watchpoints.py` | modify | `_INSERT_FAILED_RE`, `watchpoint_insert_failure` |
 | `src/kdive/providers/shared/debug_common/gdbmi/core/execution.py` | modify | `resume` maps the resume `^error` through `watchpoint_insert_failure` |
-| `tests/providers/local_libvirt/test_debug_gdbmi.py` | modify | the five tests below |
+| `tests/providers/local_libvirt/test_debug_gdbmi.py` | modify | the tests below |
 
 No caller migration: `continue_`, `step`, `next`, `step_instruction`, `finish` in
 `core/engine.py` already call `ExecutionControl.resume`.
@@ -50,11 +50,11 @@ Verification:
   `verb`, `watchpoint == "2"`, `command` kept; message contains `debug.clear_watchpoint`; no
   `-exec-interrupt` written. Red: `KeyError: 'code'`. Green:
   `just test-verbose tests/providers/local_libvirt/test_debug_gdbmi.py -k watchpoint_insert`.
-- Contract: other resume errors pass through. Mode: focused-test.
-  `test_resume_passes_other_errors_through`: msg `Cannot find bounds of current function`
-  on `-exec-next`; expect the same message `gdb/MI command failed: -exec-next` and no `code`
-  key. Red: fails only if the wrap swallows or rewrites it (write it first; it must pass
-  before and after, which proves no regression). Green: same command with `-k other_errors`.
+- Contract: other resume errors pass through. Mode: focused-test. Extend the existing
+  `test_step_raises_on_missing_function_bounds` (msg `Cannot find bounds of current function`
+  on `-exec-step`) to assert `str(exc.value) == "gdb/MI command failed: -exec-step"` and
+  `"code" not in exc.value.details`. Red (controlled fault): make the helper match any msg;
+  see the test fail; revert. Green: same command with `-k missing_function_bounds`.
 
 Steps:
 1. Add the tests above; run them; see the first red.
@@ -114,18 +114,17 @@ Interfaces: `GdbMiEngine.step_instruction`, `GdbMiEngine.next` (`core/engine.py`
 Verification:
 - Contract: a step verb whose interrupt gets no stop keeps `transport_stall`. Mode: focused-test.
   `test_step_verb_without_interrupt_stop_keeps_transport_stall` (parametrized
-  `step_instruction` / `-exec-step-instruction`, `next` / `-exec-next`): verb replies
+  `step` / `-exec-step`, `step_instruction` / `-exec-step-instruction`, `next` / `-exec-next`): verb replies
   `^running`, no reads. Expect `INFRASTRUCTURE_FAILURE`, `code == "transport_stall"`, `verb`.
   Red (controlled fault): temporarily change the stall code in `execution.py` and see it fail;
   revert. Green: `just test-verbose tests/providers/local_libvirt/test_debug_gdbmi.py -k step_verb`.
 - Contract: a step verb whose interrupt gets a stop keeps `timed_out: True`. Mode: focused-test.
-  `test_step_verb_with_interrupt_stop_returns_timed_out`: `-exec-step-instruction` replies
-  `^running`; the reads return nothing for the wait slices, then `*stopped,reason="signal-received"`
-  after `-exec-interrupt`. Expect `timed_out is True`, `reason == "signal-received"`. Use
-  `timeout_sec=1` so the wait takes 3 empty slices; script 3 empty reads then the stop.
-  Red (controlled fault): drop `timed_out` update temporarily; revert.
+  Extend the existing `test_step_interrupts_on_timeout` parametrization with
+  `("step_instruction", "-exec-step-instruction")` and assert `stop.reason ==
+  "signal-received"`. Red (controlled fault): drop the `timed_out` update in `resume`
+  temporarily; revert. Green: `just test-verbose tests/providers/local_libvirt/test_debug_gdbmi.py -k step_interrupts`.
 
 Steps:
-1. Add both tests; run the green command; expect pass.
+1. Add the new test and the extension; run both green commands; expect pass.
 2. Apply each controlled fault, see red, revert, rerun green.
 3. Commit `test(debug): pin step-verb stall and timeout results (#2964)`.

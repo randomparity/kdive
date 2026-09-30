@@ -55,21 +55,26 @@ allows it". The wire evidence does not allow it (see Design 3).
    and `retryable` stay `debug_attach_failure` / true on x86 and ppc64le; a real transport stall
    keeps `transport_stall`; no x86 result changes except the added `data.code`, `data.verb`,
    `data.watchpoint` and the new detail (operator-approved).
-3. **Accepted failure classes** — a gdb that reports the insert failure asynchronously (after
-   `^running`, as a log line with a reason-less `*stopped`) keeps today's result: no MI
-   transcript shows that shape, so matching it is speculative. Several failed watchpoints report
+3. **Accepted failure classes** — no MI transcript shows either shape of the failure. The
+   design matches the synchronous `^error`, because gdb's `proceed()` inserts breakpoints
+   before it resumes (gdb `infrun.c`, `breakpoint.c`). A gdb that reports the failure
+   asynchronously (after `^running`) keeps today's result. Several failed watchpoints report
    only the first number: the next actions are the same.
 4. **Covered elsewhere** — the pre-resume refusal on ppc64le KVM (ADR 0712, #2963); a
-   distinct step-verb code needs the guest arch on the attachment (follow-up candidate).
+   distinct step-verb code needs the guest arch on the attachment (follow-up candidate). The
+   `debug.set_watchpoint` docstring and `toolsets-debug.md` do not name
+   `watchpoint_insert_failed`; their "stub that refuses the insert" sentence means the
+   set-time `-break-watch` refusal (follow-up candidate, outside this surface).
 
 ## Success
 
 - A resume `^error` whose msg contains `Could not insert hardware watchpoint 2.` raises
   `debug_attach_failure` with `code: watchpoint_insert_failed`, `verb`, `watchpoint: "2"`.
 - A resume `^error` with any other msg raises the original error unchanged.
-- `-exec-step-instruction` and `-exec-next` with no stop and no interrupt stop still raise
-  `transport_stall`; with an interrupt stop (`signal-received`) they still return
-  `timed_out: True`.
+- `-exec-step`, `-exec-next` and `-exec-step-instruction` with no stop and no interrupt stop
+  still raise `transport_stall`. `-exec-step-instruction` with an interrupt stop
+  (`signal-received`) still returns `timed_out: True`; `test_step_interrupts_on_timeout`
+  already pins this for `-exec-step`.
 
 ## Validation
 

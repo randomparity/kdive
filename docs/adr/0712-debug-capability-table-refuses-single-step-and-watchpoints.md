@@ -70,12 +70,17 @@ the reclassification after a resume. It records what #2964 decided for each.
   watchpoint with `debug.clear_watchpoint`, then retry. The code is not `watchpoint_unsupported`:
   x86 debug-register exhaustion gives the same text (ADR-0277, Consequences), so the text cannot
   tell a stub refusal from too many armed watchpoints. The category stays, so the x86 result
-  changes only by the added fields.
+  changes only by the added fields and the new detail. The design assumes gdb reports the failure
+  as the resume command's `^error`: gdb's `proceed()` calls `insert_breakpoints()` before it
+  resumes the target (gdb `infrun.c`, `breakpoint.c` `insert_breakpoint_locations`). No MI
+  transcript records it. Where gdb does return `^error`, the ADR-0277 expectation that
+  exhaustion surfaces as `timed_out=True` does not hold.
 - A step verb that does not stop keeps `transport_stall` or `timed_out: True`. The wire evidence
   does not allow a truthful distinct code. An interrupt with no stop is the same on the wire as
   a real RSP stall. An interrupt with a stop proves a live link, but `-exec-step` and
-  `-exec-next` can time out on x86 for a line that calls a blocking function, and QEMU steps
-  with interrupts blocked, so an x86 `stepi` over `hlt` can also not complete. The engine does
+  `-exec-next` can time out on x86 for a line that calls a blocking function (`debug.advance`
+  documents `timed_out=True` for this). By inference from QEMU's default single-step flags
+  (`SSTEP_NOIRQ`, `qqemu.sstep`), an x86 `stepi` over `hlt` can also not complete. The engine does
   not know the guest arch or accelerator. The table above is the only step-verb control.
 
 ## Considered & rejected
