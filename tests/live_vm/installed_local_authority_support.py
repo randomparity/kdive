@@ -10,7 +10,7 @@ import re
 import stat
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +45,10 @@ _AUTHORITY_ARTIFACT_ROOTS = (
     Path("/var/lib/kdive/provider-authority/console"),
 )
 _IDENTITY_PYTHON = "/usr/bin/python3"
+_AUTHORITY_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
+_FIXTURE_SCRIPT = (
+    Path(__file__).resolve().parents[2] / "scripts/live-vm/provision-authority-fixture.py"
+)
 _FAULT_BARRIER_MAX_BYTES = 1024
 _FAULT_BARRIER_SOCKET = Path("/run/kdive/provider-authority/proof-control/control.sock")
 _JOURNAL_ROOT = Path("/var/lib/kdive/provider-authority/journal")
@@ -765,10 +769,9 @@ def run_installed_local_authority_normal_operations() -> None:
         agent_session=config.ownership_prefix,
         role="admin",
     )
-    ledger = ResourceLedger(config.ownership_prefix)
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
 
-    async def run() -> None:
-        await provision_authority_fixture(db_url, config)
+    async def proof() -> None:
         require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(base_url, token)
         async with client:
@@ -797,6 +800,10 @@ def run_installed_local_authority_normal_operations() -> None:
                 raise cleanup_failures[0]
             if cleanup_failures:
                 raise ExceptionGroup("native carrier and cleanup failures", cleanup_failures)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config, ledger)
+        await _run_then_remove_fixture(config, ledger, proof())
 
     asyncio.run(run())
 
@@ -861,10 +868,9 @@ def run_installed_local_authority_ppc64le_normal_operations() -> None:
         agent_session=config.ownership_prefix,
         role="admin",
     )
-    ledger = ResourceLedger(config.ownership_prefix)
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
 
-    async def run() -> None:
-        await provision_authority_fixture(db_url, config)
+    async def proof() -> None:
         require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(base_url, token)
         async with client:
@@ -897,6 +903,10 @@ def run_installed_local_authority_ppc64le_normal_operations() -> None:
                 raise ExceptionGroup(
                     "ppc64le native carrier and cleanup failures", cleanup_failures
                 )
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config, ledger)
+        await _run_then_remove_fixture(config, ledger, proof())
 
     asyncio.run(run())
 
@@ -933,10 +943,9 @@ def run_installed_local_authority_restart_recovery() -> None:
         agent_session=config.ownership_prefix,
         role="admin",
     )
-    ledger = ResourceLedger(config.ownership_prefix)
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
 
-    async def run() -> None:
-        await provision_authority_fixture(db_url, config)
+    async def proof() -> None:
         require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(base_url, token)
         async with client:
@@ -991,6 +1000,10 @@ def run_installed_local_authority_restart_recovery() -> None:
             if cleanup_failures:
                 raise ExceptionGroup("native carrier and cleanup failures", cleanup_failures)
 
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config, ledger)
+        await _run_then_remove_fixture(config, ledger, proof())
+
     asyncio.run(run())
 
 
@@ -1015,10 +1028,9 @@ def run_installed_local_authority_unresolved_call_takeover() -> None:
         agent_session=config.ownership_prefix,
         role="admin",
     )
-    ledger = ResourceLedger(config.ownership_prefix)
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
 
-    async def run() -> None:
-        await provision_authority_fixture(db_url, config)
+    async def proof() -> None:
         require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(require_stack(), token)
         async with client:
@@ -1085,6 +1097,10 @@ def run_installed_local_authority_unresolved_call_takeover() -> None:
             finally:
                 if held is not None:
                     set_exact_worker_hold(held, "continue")
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config, ledger)
+        await _run_then_remove_fixture(config, ledger, proof())
 
     asyncio.run(run())
 
@@ -1262,7 +1278,15 @@ class OwnedResource(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     kind: Literal[
-        "domain", "volume", "object", "journal", "recovery", "investigation", "run", "activation"
+        "domain",
+        "volume",
+        "object",
+        "journal",
+        "recovery",
+        "investigation",
+        "run",
+        "activation",
+        "authority-fixture",
     ]
     identity: Annotated[str, Field(min_length=1, max_length=1024)]
 
@@ -1270,10 +1294,11 @@ class OwnedResource(BaseModel):
 class ResourceLedger:
     """Attempt exact cleanup in reverse creation order without inferred targets."""
 
-    def __init__(self, prefix: str) -> None:
+    def __init__(self, prefix: str, *, fixture_system: UUID | None = None) -> None:
         if _PREFIX.fullmatch(prefix) is None:
             raise ValueError("invalid ownership prefix")
         self.prefix = prefix
+        self.fixture_system = fixture_system
         self._resources: list[OwnedResource] = []
 
     @property
@@ -1283,7 +1308,10 @@ class ResourceLedger:
     def record(self, resource: OwnedResource) -> None:
         if resource in self._resources:
             raise ValueError("owned resource was recorded twice")
-        if self.prefix not in resource.identity and resource.kind not in {
+        if resource.kind == "authority-fixture":
+            if self.fixture_system is None or str(self.fixture_system) not in resource.identity:
+                raise ValueError("authority fixture identity is outside the configured System")
+        elif self.prefix not in resource.identity and resource.kind not in {
             "investigation",
             "run",
             "activation",
@@ -1731,10 +1759,9 @@ def run_installed_local_authority_journal_restore_recovery() -> None:
     token = mint_role_token(
         issuer, project=config.project, agent_session=config.ownership_prefix, role="admin"
     )
-    ledger = ResourceLedger(config.ownership_prefix)
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
 
-    async def run() -> None:
-        await provision_authority_fixture(db_url, config)
+    async def proof() -> None:
         require_authority_artifact_confinement(config, running_workers)
         client = LiveStackClient.over_http(require_stack(), token)
         async with client:
@@ -1790,6 +1817,10 @@ def run_installed_local_authority_journal_restore_recovery() -> None:
                     raise failures[0]
                 if failures:
                     raise ExceptionGroup("native carrier and cleanup failures", failures)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config, ledger)
+        await _run_then_remove_fixture(config, ledger, proof())
 
     asyncio.run(run())
 
@@ -1885,8 +1916,14 @@ async def assert_root_release_completion(db_url: str, operations: NormalOperatio
             )
 
 
-async def provision_authority_fixture(db_url: str, config: NativeAuthorityConfig) -> None:
-    """Create or read-only verify only the selected disposable authority fixture."""
+async def provision_authority_fixture(
+    db_url: str, config: NativeAuthorityConfig, ledger: ResourceLedger
+) -> None:
+    """Create or read-only verify only the selected disposable authority fixture.
+
+    ``create`` records each name the script reports as an ``authority-fixture`` ledger entry;
+    ``verify-existing`` records nothing, because that run did not create the fixture.
+    """
     async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
         await cur.execute(
             "SELECT provisioning_profile FROM systems WHERE id = %s AND project = %s",
@@ -1897,13 +1934,7 @@ async def provision_authority_fixture(db_url: str, config: NativeAuthorityConfig
         raise ValueError(
             "selected authority fixture System is absent or belongs to another project"
         )
-    script = Path(__file__).resolve().parents[2] / "scripts/live-vm/provision-authority-fixture.py"
-    arguments = [
-        "sudo",
-        "-n",
-        "/opt/kdive-provider-authority/.venv/bin/python",
-        str(script),
-    ]
+    arguments = ["sudo", "-n", _AUTHORITY_PYTHON, str(_FIXTURE_SCRIPT)]
     if config.fixture_mode == "verify-existing":
         arguments.append("--verify-existing")
     arguments.append(str(config.system_id))
@@ -1917,6 +1948,72 @@ async def provision_authority_fixture(db_url: str, config: NativeAuthorityConfig
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-1000:]
         raise RuntimeError(f"authority fixture {config.fixture_mode} failed: {detail}")
+    if config.fixture_mode == "create":
+        lines = result.stdout.strip().splitlines()
+        try:
+            created = json.loads(lines[-1])["created"]
+        except IndexError, ValueError, KeyError, TypeError:
+            created = None
+        if not isinstance(created, list) or not all(isinstance(name, str) for name in created):
+            raise RuntimeError("authority fixture create did not report its created names")
+        for identity in created:
+            ledger.record(OwnedResource(kind="authority-fixture", identity=identity))
+
+
+async def _run_then_remove_fixture(
+    config: NativeAuthorityConfig, ledger: ResourceLedger, proof: Awaitable[None]
+) -> None:
+    """Await the carrier's proof, then remove its recorded fixture whether or not it raised."""
+    try:
+        await proof
+    except Exception as primary:
+        try:
+            remove_authority_fixture(config, ledger)
+        except Exception as cleanup:
+            raise ExceptionGroup(
+                "native carrier and fixture cleanup failures", [primary, cleanup]
+            ) from None
+        raise
+    except BaseException:
+        remove_authority_fixture(config, ledger)
+        raise
+    remove_authority_fixture(config, ledger)
+
+
+def remove_authority_fixture(config: NativeAuthorityConfig, ledger: ResourceLedger) -> None:
+    """Remove each recorded fixture name, newest first, through the script's exact-name mode.
+
+    The first failed name stops the rest, so a domain that did not go away keeps its backing
+    files. Entries of other kinds are left to their own cleanup.
+    """
+    failed = False
+
+    def remove(resource: OwnedResource) -> None:
+        nonlocal failed
+        if resource.kind != "authority-fixture":
+            return
+        if failed:
+            raise RuntimeError("authority fixture removal stopped after an earlier failure")
+        result = subprocess.run(
+            [
+                "sudo",
+                "-n",
+                _AUTHORITY_PYTHON,
+                str(_FIXTURE_SCRIPT),
+                "--remove",
+                str(config.system_id),
+                resource.identity,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            failed = True
+            detail = (result.stderr or result.stdout).strip()[-1000:]
+            raise RuntimeError(f"authority fixture remove failed for {resource.identity}: {detail}")
+
+    ledger.cleanup(remove)
 
 
 _RELEASE_ADMISSION_ATTEMPTS = 3

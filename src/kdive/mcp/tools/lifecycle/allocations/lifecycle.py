@@ -46,22 +46,25 @@ async def release_allocation(
         outcome = await release_with_backstops(
             pool, uid, project=alloc.project, audit_writer=ctx_audit_writer(ctx)
         )
-        return _release_response(uid, outcome)
+        return _release_response(uid, outcome, ctx, alloc.project)
 
 
-def _release_response(uid: UUID, outcome: ReleaseOutcome) -> ToolResponse:
+def _release_response(
+    uid: UUID, outcome: ReleaseOutcome, ctx: RequestContext, project: str
+) -> ToolResponse:
     if outcome.released:
         return ToolResponse.success(str(uid), "released")
     data: dict[str, Any] = dict(outcome.details)
     if outcome.current_status:
         data["current_status"] = outcome.current_status
     category = outcome.category or ErrorCategory.CONFIGURATION_ERROR
+    next_actions = ["allocations.wait"] if category is ErrorCategory.STALE_HANDLE else []
+    next_actions += visible_next_actions(outcome.next_actions, ctx, project)
     return ToolResponse.failure(
         str(uid),
         category,
-        suggested_next_actions=["allocations.wait"]
-        if category is ErrorCategory.STALE_HANDLE
-        else [],
+        detail=outcome.detail,
+        suggested_next_actions=next_actions,
         data=data,
     )
 

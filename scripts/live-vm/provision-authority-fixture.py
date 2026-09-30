@@ -125,6 +125,17 @@ def _fixture_base_destination(
     return private_root / f"{system_id}-fixture-base.qcow2"
 
 
+def _fixture_artifacts(system_id: UUID) -> tuple[str, ...]:
+    """The exact names one create run makes for ``system_id``, in creation order."""
+    return (
+        str(_AUTHORITY_ROOTFS_ROOT / f"{system_id}-fixture-base.qcow2"),
+        baseline_dir(system_id),
+        overlay_path(system_id),
+        str(console_log_path(system_id)),
+        domain_name_for(system_id),
+    )
+
+
 def _stage_fixture_base(
     system_id: UUID,
     profile: ProvisioningProfile,
@@ -264,10 +275,10 @@ def _refuse_existing_authority_domain(system_id: UUID) -> None:
         conn.close()
 
 
-def _undefine_worker_domain(system_id: UUID) -> None:
-    conn = libvirt.open(_WORKER_URI)
+def _undefine_domain(uri: str, system_id: UUID) -> None:
+    conn = libvirt.open(uri)
     if conn is None:
-        raise RuntimeError("worker fixture daemon connection returned no handle")
+        raise RuntimeError("fixture daemon connection returned no handle")
     try:
         try:
             domain = conn.lookupByName(domain_name_for(system_id))
@@ -309,6 +320,23 @@ def _require_private_regular(
     ):
         raise ValueError(f"authority fixture path is not the expected private regular file: {path}")
     return metadata
+
+
+def _remove_fixture_artifact(
+    system_id: UUID, identity: str, *, authority_uid: int, authority_gid: int
+) -> None:
+    """Remove one exact name of this System's fixture; refuse every other value."""
+    if identity not in _fixture_artifacts(system_id):
+        raise ValueError("refusing a name outside this System's authority fixture")
+    if identity == domain_name_for(system_id):
+        _undefine_domain(_AUTHORITY_URI, system_id)
+        return
+    path = Path(identity)
+    _require_private_directory(path.parent, authority_uid, authority_gid)
+    if identity == baseline_dir(system_id):
+        _remove_directory(path)
+    else:
+        _remove_regular(path)
 
 
 def _validate_overlay_backing(overlay: Path, base: Path) -> None:
@@ -410,15 +438,24 @@ def _verify_existing_authority_fixture(
 
 
 def main() -> None:
-    verify_existing = sys.argv[1:2] == ["--verify-existing"]
-    expected_args = 3 if verify_existing else 2
+    mode = sys.argv[1] if sys.argv[1:2] in (["--verify-existing"], ["--remove"]) else None
+    expected_args = {None: 2, "--verify-existing": 3, "--remove": 4}[mode]
     if os.geteuid() != 0 or len(sys.argv) != expected_args:
-        raise SystemExit("run as root with one exact System UUID")
-    system_id = UUID(sys.argv[2] if verify_existing else sys.argv[1])
+        raise SystemExit("run as root with one exact System UUID (and one name with --remove)")
+    system_id = UUID(sys.argv[1] if mode is None else sys.argv[2])
+    if mode == "--remove":
+        identity = pwd.getpwnam(_AUTHORITY)
+        _remove_fixture_artifact(
+            system_id,
+            sys.argv[3],
+            authority_uid=identity.pw_uid,
+            authority_gid=identity.pw_gid,
+        )
+        return
     profile = ProvisioningProfile.model_validate(json.load(sys.stdin))
     if profile.provider.local_libvirt_section is None:
         raise ValueError("authority fixture requires a local-libvirt profile")
-    if verify_existing:
+    if mode == "--verify-existing":
         identity = pwd.getpwnam(_AUTHORITY)
         _verify_existing_authority_fixture(
             system_id,
@@ -435,7 +472,7 @@ def main() -> None:
         authority_uid=identity.pw_uid,
         authority_gid=identity.pw_gid,
     )
-    _undefine_worker_domain(system_id)
+    _undefine_domain(_WORKER_URI, system_id)
     _remove_regular(Path("/var/lib/kdive/rootfs") / overlay_name(system_id))
     _remove_regular(Path("/var/lib/kdive/console") / f"{system_id}.log")
     legacy_baseline = Path("/var/lib/kdive/rootfs") / f"{system_id}-baseline"
@@ -462,6 +499,7 @@ def main() -> None:
             raise RuntimeError("authority fixture domain is not running on the private daemon")
     finally:
         conn.close()
+    print(json.dumps({"created": list(_fixture_artifacts(system_id))}))
 
 
 if __name__ == "__main__":

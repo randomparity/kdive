@@ -50,6 +50,11 @@ def test_release_refuses_an_uncleaned_activation(
 
             assert outcome.released is False
             assert outcome.category is ErrorCategory.CONFLICT
+            assert outcome.details["activation_state"] == "abandoned"
+            assert outcome.details["activation_id"] == str(seeded.activation.id)
+            assert outcome.detail is not None
+            assert "abandoned" in outcome.detail
+            assert outcome.next_actions == ("runs.get", "systems.teardown")
             state = await conn.execute(
                 "SELECT state FROM allocations WHERE id = %s", (allocation_id,)
             )
