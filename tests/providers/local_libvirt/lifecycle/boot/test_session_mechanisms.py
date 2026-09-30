@@ -1068,6 +1068,56 @@ def _session(
     return factory.open(lease, expected)
 
 
+def test_artifact_root_is_created_on_first_artifact_use_only(recovery_root: Path) -> None:
+    """A session that never touches an artifact leaves no activation storage behind (#2926).
+
+    Exact recovery absence is false while `<system>/<run>/<activation>` exists, so a read-only
+    session that created it would make absence unprovable for the activation it checked.
+    """
+    opened: list[OperationOwnership] = []
+    artifact_root = LocalArtifactRoot(recovery_root)
+
+    def open_root(ownership: OperationOwnership) -> int:
+        opened.append(ownership)
+        return artifact_root.open(ownership)
+
+    events: list[str] = []
+    system_id = UUID(_BINDING.system_id)
+    factory = LocalExternalBootSessionFactory(
+        connect=lambda: Conn(
+            events, Domain(events, _xml(overlay=overlay_path(system_id), system_id=system_id))
+        ),
+        pin_lease=LocalOperationLane().pin,
+        open_artifact_root=open_root,
+        open_guest=lambda: Guest(events),
+        worker_pid=4242,
+        open_overlay=lambda _path: os.open(os.devnull, os.O_RDONLY),
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=os.close,
+    )
+    lease = LocalOperationLease(system_id=system_id, binding=_BINDING)
+    expected = ExpectedOperationOwnership(
+        system_id, UUID(_BINDING.run_id), UUID(_BINDING.activation_id)
+    )
+
+    session = factory.open(lease, expected)
+    session.inspect_closed()
+    session.close()
+    assert opened == []
+    assert list(recovery_root.iterdir()) == []
+
+    session = factory.open(lease, expected)
+    try:
+        for _use in range(2):
+            os.close(session.open_artifact("kernel", os.O_WRONLY | os.O_CREAT))
+    finally:
+        session.close()
+    assert opened == [OperationOwnership(system_id, _BINDING)]
+    activation = recovery_root / _BINDING.system_id / _BINDING.run_id / _BINDING.activation_id
+    assert stat.S_IMODE(activation.stat().st_mode) == 0o700
+    assert (activation / "kernel").is_file()
+
+
 def _recovery_directory(recovery_root: Path) -> Path:
     return recovery_root / f"{_BINDING.system_id}.{_BINDING.activation_id}"
 
