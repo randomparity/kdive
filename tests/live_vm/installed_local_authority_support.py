@@ -1916,14 +1916,51 @@ async def assert_root_release_completion(db_url: str, operations: NormalOperatio
             )
 
 
+# Every table the carriers read directly. Several are authority-private: the migrations revoke
+# them from PUBLIC and grant no read to kdive_server, so only the migration owner can read them.
+_CARRIER_READ_TABLES = (
+    "systems",
+    "jobs",
+    "external_boot_activations",
+    "external_boot_reservations",
+    "external_boot_reservation_releases",
+    "external_boot_recovery_attempts",
+    "external_boot_release_cleanup_receipts",
+    "external_boot_authorities",
+    "external_boot_authority_journal_heads",
+)
+
+
+async def require_evidence_read_access(db_url: str) -> None:
+    """Fail before any mutation when the carrier DSN cannot read a table the carrier reads."""
+    async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT current_user, coalesce(array_agg(name ORDER BY position) FILTER "
+            "(WHERE NOT has_table_privilege('public.' || name, 'SELECT')), '{}') "
+            "FROM unnest(%s::text[]) WITH ORDINALITY AS t(name, position)",
+            (list(_CARRIER_READ_TABLES),),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    role, denied = row
+    if denied:
+        raise PermissionError(
+            f"KDIVE_DATABASE_URL role {role!r} cannot SELECT {', '.join(denied)}; the carrier "
+            "reads authority-private evidence tables, so set KDIVE_DATABASE_URL to the "
+            "migration-owner DSN (KDIVE_MIGRATION_DATABASE_URL), not the server DSN"
+        )
+
+
 async def provision_authority_fixture(
     db_url: str, config: NativeAuthorityConfig, ledger: ResourceLedger
 ) -> None:
     """Create or read-only verify only the selected disposable authority fixture.
 
     ``create`` records each name the script reports as an ``authority-fixture`` ledger entry;
-    ``verify-existing`` records nothing, because that run did not create the fixture.
+    ``verify-existing`` records nothing, because that run did not create the fixture. The DSN
+    read preflight runs first, so a DSN that cannot read the evidence creates nothing.
     """
+    await require_evidence_read_access(db_url)
     async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
         await cur.execute(
             "SELECT provisioning_profile FROM systems WHERE id = %s AND project = %s",
