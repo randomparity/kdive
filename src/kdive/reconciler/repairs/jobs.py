@@ -138,10 +138,11 @@ async def repair_abandoned_jobs(conn: AsyncConnection) -> int:
 
     Authority-marked jobs are skipped because their receipt-specific SQL commit or repair path
     exclusively owns terminalization. Writing one here would split the job transition from its
-    authority ownership and receipt consumption. The one exception is an external-boot job no
-    receipt can ever finish — a non-teardown job with no `allocating` or `current` authority —
-    which `dead_letter_unowned_external_boot_jobs` (migration 0162, ADR-0620) ends under the
-    job-row lock the receipt paths also take.
+    authority ownership and receipt consumption. The exception is an external-boot job no
+    receipt can ever finish — a non-teardown job with no `allocating` or `current` authority, or
+    one past the acknowledged-retry grant bound whose head proves no mutation, whose authority it
+    retires or supersedes first — which `dead_letter_unowned_external_boot_jobs` (migrations 0162
+    and 0165, ADR-0620, ADR-0711) ends under the job-row lock the receipt paths also take.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -200,5 +201,5 @@ async def repair_abandoned_jobs(conn: AsyncConnection) -> int:
         await cur.execute("SELECT * FROM dead_letter_unowned_external_boot_jobs() AS job(id)")
         unowned_ids = [row["id"] for row in await cur.fetchall()]
     for job_id in unowned_ids:
-        _log.info("reconciler: unowned external-boot job %s -> failed (lease_expired)", job_id)
+        _log.info("reconciler: external-boot job %s -> failed (lease_expired)", job_id)
     return swept + len(unowned_ids)
