@@ -71,6 +71,21 @@ from tests.mcp.debug.session_support import (
 from tests.mcp.systems_support import provider_resolver
 from tests.support.domain_ownership import drop_ownership_metadata
 
+# gdb's program-counter register per native guest arch: POWER gdb has ``pc``, not ``nip`` (#2739).
+_PC_REGISTER = {"x86_64": "rip", "ppc64le": "pc"}
+# ``debug.advance`` modes grouped by what the vCPU must do: single-step, or run to a return.
+_ADVANCE_MODE_GROUPS = {"single-step": ("into", "over", "instruction"), "finish": ("out",)}
+_UNSUPPORTED_ADVANCE_GROUPS = {
+    ("ppc64le", "single-step"): (
+        "the ppc64le KVM-HV vCPU does not stop after a single-step (#2739 proof record); "
+        "the single-step debug.advance contract is tracked by #2942"
+    ),
+}
+
+
+def _advance_group_skip_reason(arch: str, group: str) -> str | None:
+    return _UNSUPPORTED_ADVANCE_GROUPS.get((arch, group))
+
 
 @dataclass(frozen=True, slots=True)
 class _ModuleFixture:
@@ -186,9 +201,15 @@ def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
 
 @pytest.mark.live_vm
 @pytest.mark.live_vm_throwaway
+@pytest.mark.parametrize("group", list(_ADVANCE_MODE_GROUPS))
 def test_live_vm_debug_advance_modes(  # pragma: no cover - live_vm
     live_debug_surface: _LiveDebugSurface,
+    group: str,
 ) -> None:
+    arch = live_debug_surface.profile["arch"]
+    skip_reason = _advance_group_skip_reason(arch, group)
+    if skip_reason is not None:
+        pytest.skip(skip_reason)
     rootfs_contract = require_live_vm_throwaway("qemu:///session", session_required=True)
     bzimage_contract = require_live_vm_bzimage()
     vmlinux = require_live_vm_vmlinux().vmlinux
@@ -212,7 +233,15 @@ def test_live_vm_debug_advance_modes(  # pragma: no cover - live_vm
             ssh_port=ssh_port,
             wait_timeout_s=180.0,
         ):
-            asyncio.run(_drive_advance_modes(live_debug_surface, vmlinux, ssh_port))
+            asyncio.run(
+                _drive_advance_modes(
+                    live_debug_surface,
+                    vmlinux,
+                    ssh_port,
+                    modes=_ADVANCE_MODE_GROUPS[group],
+                    pc_register=_PC_REGISTER[arch],
+                )
+            )
 
 
 def _stepping_domain_xml(tmp_path: Path) -> str:
@@ -230,6 +259,26 @@ def _panicking_domain_xml(tmp_path: Path) -> str:
         disk=tmp_path / "garbage.qcow2",
         console=tmp_path / "console.log",
     )
+
+
+def test_advance_mode_groups_cover_each_mode_once() -> None:
+    modes = [mode for group in _ADVANCE_MODE_GROUPS.values() for mode in group]
+    assert sorted(modes) == sorted(["into", "over", "instruction", "out"])
+
+
+@pytest.mark.parametrize(
+    ("arch", "register", "skipped_groups"),
+    [("x86_64", "rip", set()), ("ppc64le", "pc", {"single-step"})],
+)
+def test_advance_proof_reads_the_arch_pc_and_skips_only_unsupported_groups(
+    arch: str, register: str, skipped_groups: set[str]
+) -> None:
+    """x86_64 keeps all four modes; ppc64le skips single-step naming its runtime issue (#2740)."""
+    assert _PC_REGISTER[arch] == register
+    reasons = {group: _advance_group_skip_reason(arch, group) for group in _ADVANCE_MODE_GROUPS}
+    assert {group for group, reason in reasons.items() if reason is not None} == skipped_groups
+    for group in skipped_groups:
+        assert "#2942" in str(reasons[group])
 
 
 @pytest.mark.parametrize("render", [_stepping_domain_xml, _panicking_domain_xml])
@@ -446,19 +495,24 @@ async def _drive_gdbmi_smoke(
         await _load_module_symbols_when_configured(client, session_id, modules, module_fixture)
 
 
-async def _drive_advance_modes(surface: _LiveDebugSurface, vmlinux: Path, ssh_port: int) -> None:
+async def _drive_advance_modes(
+    surface: _LiveDebugSurface,
+    vmlinux: Path,
+    ssh_port: int,
+    *,
+    modes: tuple[str, ...],
+    pc_register: str,
+) -> None:
     async with surface.session(vmlinux=vmlinux) as live:
-        for mode in ("into", "over", "instruction", "out"):
-            await _exercise_advance_mode(live.client, live.session_id, mode, ssh_port)
+        for mode in modes:
+            await _exercise_advance_mode(live.client, live.session_id, mode, ssh_port, pc_register)
 
         transitions = await _advance_audit_transitions(live.pool, live.session_id)
-        assert sorted(transitions) == sorted(
-            ["advance:into", "advance:over", "advance:instruction", "advance:out"]
-        )
+        assert sorted(transitions) == sorted(f"advance:{mode}" for mode in modes)
 
 
 async def _exercise_advance_mode(
-    client: Client[Any], session_id: str, mode: str, ssh_port: int
+    client: Client[Any], session_id: str, mode: str, ssh_port: int, pc_register: str
 ) -> None:
     breakpoint_number: str | None = None
     try:
@@ -481,7 +535,7 @@ async def _exercise_advance_mode(
         assert cleared.status == "cleared", cleared
         breakpoint_number = None
 
-        before = await _read_instruction_pointer(client, session_id)
+        before = await _read_instruction_pointer(client, session_id, pc_register)
         advanced = await _call_tool(
             client,
             "debug.advance",
@@ -495,8 +549,8 @@ async def _exercise_advance_mode(
             "debug.advance",
             "debug.continue",
         ]
-        after = await _read_instruction_pointer(client, session_id)
-        assert after != before, f"mode={mode} did not advance rip ({before} -> {after})"
+        after = await _read_instruction_pointer(client, session_id, pc_register)
+        assert after != before, f"mode={mode} did not advance {pc_register} ({before} -> {after})"
         if mode == "out":
             assert advanced.data["reason"] == "function-finished", advanced
     finally:
@@ -559,14 +613,14 @@ def _assert_nonterminal_stop(response: ToolResponse) -> None:
     assert not reason.startswith("exited"), response
 
 
-async def _read_instruction_pointer(client: Client[Any], session_id: str) -> str:
+async def _read_instruction_pointer(client: Client[Any], session_id: str, register: str) -> str:
     response = await _call_tool(
         client,
         "debug.read_registers",
-        {"session_id": session_id, "registers": ["rip"]},
+        {"session_id": session_id, "registers": [register]},
     )
     assert response.status == "read", response
-    instruction_pointer = response.data.get("rip")
+    instruction_pointer = response.data.get(register)
     assert isinstance(instruction_pointer, str) and instruction_pointer, response
     return instruction_pointer
 

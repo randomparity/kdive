@@ -221,11 +221,11 @@ def _provision_profile(arch: str, *, gdbstub: bool = False) -> dict[str, object]
     return profile
 
 
-_SPINE_PC_REGISTER = {"x86_64": "rip", "ppc64le": "nip"}
+_SPINE_PC_REGISTER = {"x86_64": "rip", "ppc64le": "pc"}
 _SPINE_GDBSTUB_GAP = "attach skipped: ppc64le gdbstub support tracked by #2736"
 
 
-@pytest.mark.parametrize("arch, register", [("x86_64", "rip"), ("ppc64le", "nip")])
+@pytest.mark.parametrize("arch, register", [("x86_64", "rip"), ("ppc64le", "pc")])
 def test_spine_gdbstub_profile_and_register(
     monkeypatch: pytest.MonkeyPatch, arch: str, register: str
 ) -> None:
