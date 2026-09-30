@@ -191,6 +191,33 @@ async def guard_external_boot_release(
             )
 
 
+# The authority allocator admits a teardown only on an `active` allocation (0122), so ending the
+# allocation first would strand a domain the authority still owns (ADR-0620 amendment, #2966).
+_SYSTEM_AWAITING_AUTHORITY_TEARDOWN_SQL = (
+    "SELECT s.id FROM systems s "
+    "WHERE s.allocation_id = %s AND s.state <> 'torn_down' "
+    "  AND EXISTS (SELECT 1 FROM external_boot_activations e WHERE e.system_id = s.id) "
+    "ORDER BY s.id LIMIT 1"
+)
+
+
+async def _require_system_teardown(
+    conn: AsyncConnection, allocation_id: UUID, *, project: str
+) -> None:
+    """Keep the allocation until each System with external-boot history is torn down."""
+    cursor = await conn.execute(_SYSTEM_AWAITING_AUTHORITY_TEARDOWN_SQL, (allocation_id,))
+    row = await cursor.fetchone()
+    if row is None:
+        return
+    raise ExternalBootDenied(
+        f"allocations.release is denied while System {row[0]} has external-boot history and is "
+        "not torn down; run systems.teardown first (ADR-0620)",
+        details={"reason": "external_boot_system_teardown_required", "system_id": str(row[0])},
+        next_actions=["systems.teardown", "systems.get"],
+        project=project,
+    )
+
+
 async def reclaim_under_lock(
     conn: AsyncConnection,
     audit_writer: AuditWriter,
@@ -239,6 +266,7 @@ async def reclaim_under_lock(
             return ReleaseOutcome(released=False, current_status=current.state.value)
         try:
             await guard_external_boot_release(conn, uid, project=project)
+            await _require_system_teardown(conn, uid, project=project)
         except ExternalBootDenied:
             return ReleaseOutcome(
                 released=False,
@@ -306,6 +334,7 @@ async def _release_locked(
                 current_status=current.state.value,
             )
         await guard_external_boot_release(conn, uid, project=project)
+        await _require_system_teardown(conn, uid, project=project)
         if current.state in _RELEASABLE:
             await _transition_and_audit(
                 conn, audit_writer, uid, current.state, AllocationState.RELEASING, project=project
