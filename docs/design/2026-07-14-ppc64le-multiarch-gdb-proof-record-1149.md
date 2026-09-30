@@ -57,7 +57,18 @@ Proves, over real RSP from the x86_64 host to a ppc64le target:
 - **Arch is correct, not a misread** — the live `-data-list-register-names` set is the ppc64le
   register file (`r0/r1/r31`, `pc`, `lr`, `ctr` present) with **no** x86 names (`rax`/`rip`/`rsp`),
   the arch-discriminating signal AC5 requires. `read_registers` returned real values (`pc =
-  0x1000000000000`, the pseries reset entry).
+  0x1000000000000`; see the correction below for what that value means).
+
+> **Correction (2026-09-30).** This record first called `pc = 0x1000000000000` the pseries reset
+> entry. That is wrong. The value is the 64-bit byte swap of `0x100`. At reset the vCPU runs
+> big-endian SLOF firmware and the gdbstub sends registers in the vCPU's current byte order. gdb
+> follows the little-endian vmlinux and reads them byte-swapped. The
+> [#2739 record](2026-09-29-ppc64le-gdbstub-proof-record-2739.md), section "3. Early boot and
+> execution control", shows the same value and reads `pc 0x100` after `set endian big`. That
+> record ran under KVM-HV on a native ppc64le (POWER9) host. This proof ran under TCG on an
+> x86_64 host, so the same explanation is inferred from the identical byte-swapped value and was
+> not re-run. The transcript above is unchanged. The AC5 result stands, because it depends on
+> the register names, not their values.
 
 ## Scope / notes
 
