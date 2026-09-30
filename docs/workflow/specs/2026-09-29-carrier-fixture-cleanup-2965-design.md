@@ -54,10 +54,12 @@ The fixture that one `create` run makes is this exact set of names, in creation 
 5. **Removal.** A new `remove_authority_fixture(config, ledger)` calls `ledger.cleanup`. The
    callback runs `sudo -n <authority python> <script> --remove <uuid> <identity>` for each
    `authority-fixture` entry and ignores the other kinds. Reverse order removes the domain
-   first. A nonzero exit fails that entry, and `cleanup` continues with the other entries.
+   first. A nonzero exit fails that entry, and the callback then refuses every later fixture
+   entry without running the script. A domain that did not go away thus keeps its backing
+   files for diagnosis.
 6. **When.** Each carrier calls `remove_authority_fixture` after its Investigation close, and
-   only when the proof body raised no exception. A failed run keeps the fixture for diagnosis.
-   The runbook gives the manual `--remove` command for that case.
+   only when the proof body and the close both raised no exception. A failed run keeps the
+   fixture for diagnosis. The runbook gives the manual `--remove` command for that case.
 7. **Runbook.** Both carrier sections of `docs/operating/runbooks/live-testing.md` state this
    contract, the kept journal lane, and the manual command.
 
