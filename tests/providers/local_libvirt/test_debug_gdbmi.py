@@ -1040,7 +1040,14 @@ def test_finish_interrupts_on_timeout(tmp_path: Path) -> None:
     assert "-exec-interrupt" in controller.written
 
 
-@pytest.mark.parametrize(("method", "verb"), [("step", "-exec-step"), ("next", "-exec-next")])
+@pytest.mark.parametrize(
+    ("method", "verb"),
+    [
+        ("step", "-exec-step"),
+        ("next", "-exec-next"),
+        ("step_instruction", "-exec-step-instruction"),
+    ],
+)
 def test_step_interrupts_on_timeout(method: str, verb: str, tmp_path: Path) -> None:
     # Symbol-poor sub-case (a) (ADR-0379): with function bounds but no line table, gdb
     # single-steps until a line with info; over such code it can run past the bounded wait, so
@@ -1059,7 +1066,35 @@ def test_step_interrupts_on_timeout(method: str, verb: str, tmp_path: Path) -> N
     )
     stop = getattr(_engine(), method)(_attachment(controller, tmp_path), timeout_sec=1)
     assert stop.timed_out is True
+    assert stop.reason == "signal-received"
     assert "-exec-interrupt" in controller.written
+
+
+@pytest.mark.parametrize(
+    ("method", "verb"),
+    [
+        ("step", "-exec-step"),
+        ("next", "-exec-next"),
+        ("step_instruction", "-exec-step-instruction"),
+    ],
+)
+def test_step_verb_without_interrupt_stop_keeps_transport_stall(
+    method: str, verb: str, tmp_path: Path
+) -> None:
+    # #2739 proof record section 4: on ppc64le KVM-HV the step verb resumed and neither the step
+    # nor the interrupt stopped the vCPU. That is the same on the wire as a real RSP stall, so it
+    # keeps transport_stall (ADR 0712 amendment of 2026-09-30).
+    controller = _FakeMiController(
+        responses={
+            verb: [{"type": "result", "message": "running", "payload": None}],
+            "-exec-interrupt": [{"type": "result", "message": "done", "payload": None}],
+        },
+    )
+    with pytest.raises(CategorizedError) as exc:
+        getattr(_engine(), method)(_attachment(controller, tmp_path), timeout_sec=1)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"code": "transport_stall", "verb": verb}
+    assert controller.written == [verb, "-exec-interrupt"]
 
 
 @pytest.mark.parametrize("timeout_sec", [-1.0, math.inf, math.nan])
