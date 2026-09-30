@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -17,6 +18,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
@@ -1430,12 +1432,22 @@ def test_evidence_read_preflight_accepts_the_migration_owner_dsn(migrated_url: s
 def test_evidence_read_preflight_names_the_private_table_and_required_role(
     authority_role_dsns: _RoleDsns,
 ) -> None:
+    server_dsn = authority_role_dsns("kdive_server")
     with pytest.raises(PermissionError) as raised:
-        asyncio.run(require_evidence_read_access(authority_role_dsns("kdive_server")))
+        asyncio.run(require_evidence_read_access(server_dsn))
     message = str(raised.value)
-    assert "external_boot_release_cleanup_receipts" in message
+    denied = set(message.split("cannot SELECT ", 1)[1].split(";", 1)[0].split(", "))
+    assert "external_boot_release_cleanup_receipts" in denied
+    assert denied.isdisjoint({"systems", "jobs", "external_boot_activations"})
+    assert repr(conninfo_to_dict(server_dsn)["user"]) in message
     assert "KDIVE_DATABASE_URL" in message
     assert "migration-owner DSN" in message
+
+
+def test_evidence_read_preflight_covers_every_table_the_carrier_sql_reads() -> None:
+    source = Path(carrier.__file__).read_text(encoding="utf-8")
+    read = set(re.findall(r"\b(?:FROM|JOIN) ([a-z_]+)\b", source)) - {"unnest"}
+    assert read == set(carrier._CARRIER_READ_TABLES)
 
 
 def test_fixture_provisioning_stops_before_the_script_when_the_dsn_cannot_read_evidence(

@@ -349,7 +349,8 @@ KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG=/protected/power-authority-carrier.json \
 ```
 
 This carrier also needs the migration-owner DSN in `KDIVE_DATABASE_URL`, and it does the same
-DSN check before any mutation (see [Carrier DSN](#installed-local-authority-carrier)).
+DSN check before any mutation. See the **Carrier DSN** paragraph in
+[Installed local authority carrier](#installed-local-authority-carrier).
 
 The proof is structurally identical to the x86_64 carrier's normal-operations arm: it opens
 an Investigation, creates a labeled Run on the disposable System with `arch=ppc64le` in the
