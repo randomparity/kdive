@@ -32,7 +32,6 @@ import os
 import platform
 import subprocess
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -222,7 +221,6 @@ def _provision_profile(arch: str, *, gdbstub: bool = False) -> dict[str, object]
 
 
 _SPINE_PC_REGISTER = {"x86_64": "rip", "ppc64le": "pc"}
-_SPINE_GDBSTUB_GAP = "attach skipped: ppc64le gdbstub support tracked by #2736"
 
 
 @pytest.mark.parametrize("arch, register", [("x86_64", "rip"), ("ppc64le", "pc")])
@@ -231,9 +229,9 @@ def test_spine_gdbstub_profile_and_register(
 ) -> None:
     monkeypatch.setenv(_KERNEL_TREE_ENV, "/nonexistent/kernel-src")
     monkeypatch.setenv(_GUEST_IMAGE_ENV, "/nonexistent/guest-image.qcow2")
-    profile = _provision_profile(arch, gdbstub=arch == "x86_64")
+    profile = _provision_profile(arch, gdbstub=True)
     parsed = ProvisioningProfile.parse(profile)
-    assert LocalLibvirtProfilePolicy().gdbstub_provisioned(parsed) is (arch == "x86_64")
+    assert LocalLibvirtProfilePolicy().gdbstub_provisioned(parsed) is True
     assert _SPINE_PC_REGISTER[arch] == register
 
 
@@ -400,9 +398,7 @@ def test_report_all_projects_denied_to_project_token() -> None:
 
 
 @pytest.mark.live_stack
-def test_spine_over_the_wire(
-    record_testsuite_property: Callable[[str, object], None],
-) -> None:
+def test_spine_over_the_wire() -> None:
     """Drive allocate → … → teardown over HTTP; assert #1/#2/#3/#5; name the failing phase."""
     issuer, base_url, db_url = _spine_preflight()
     arch = require_native_guest_arch()
@@ -445,7 +441,7 @@ def test_spine_over_the_wire(
                             op,
                             "systems.provision",
                             allocation_id=allocation_id,
-                            profile=_provision_profile(arch, gdbstub=arch == "x86_64"),
+                            profile=_provision_profile(arch, gdbstub=True),
                         ),
                         "provision",
                     )
@@ -487,27 +483,22 @@ def test_spine_over_the_wire(
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
                         await drain_job(op, step, env.object_id)
-                if arch == "x86_64":
-                    async with phase("attach"):
-                        env = ok(
-                            await scalar(
-                                op, "debug.start_session", run_id=run_id, transport="gdbstub"
-                            ),
-                            "attach",
-                        )
-                        session_id = env.object_id
-                        ok(
-                            await scalar(
-                                op,
-                                "debug.read_registers",
-                                session_id=session_id,
-                                registers=[_SPINE_PC_REGISTER[arch]],
-                            ),
-                            "attach",
-                        )
-                        ok(await scalar(op, "debug.end_session", session_id=session_id), "attach")
-                else:
-                    record_testsuite_property("spine_attach", _SPINE_GDBSTUB_GAP)
+                async with phase("attach"):
+                    env = ok(
+                        await scalar(op, "debug.start_session", run_id=run_id, transport="gdbstub"),
+                        "attach",
+                    )
+                    session_id = env.object_id
+                    ok(
+                        await scalar(
+                            op,
+                            "debug.read_registers",
+                            session_id=session_id,
+                            registers=[_SPINE_PC_REGISTER[arch]],
+                        ),
+                        "attach",
+                    )
+                    ok(await scalar(op, "debug.end_session", session_id=session_id), "attach")
                 async with phase("crash-rbac-negative"):
                     denied = await scalar(op, "control.force_crash", system_id=system_id)
                     if denied.status != "error" or denied.error_category != "authorization_denied":
