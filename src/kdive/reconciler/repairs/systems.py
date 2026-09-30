@@ -44,8 +44,9 @@ _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES = tuple(
     state.value for state in _ORPHANED_SYSTEM_TERMINAL_STATES
 )
 # A reprovisioning System has no teardown edge (#2928), so the lane leaves it to a later pass.
-# Once it settles to `ready` the lane enqueues, unless a `{uid}:teardown` row already exists: a
-# failed row is replayed, not recycled, so it needs an operator `systems.teardown`.
+# Once it settles to `ready` the lane enqueues, unless a `{uid}:teardown` row already exists. The
+# lane never recycles (`NEVER`): a failed row is left alone for an operator `systems.teardown`,
+# and `report_stranded_orphan_teardowns` warns about it once per failure (#2978).
 _ORPHAN_TEARDOWN_SKIPPED_STATE_VALUES = (
     *_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES,
     SystemState.REPROVISIONING.value,
@@ -142,7 +143,9 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
                 )
                 system = await SYSTEMS.get(conn, system_id)
                 if system is not None:
-                    await enqueue_control_teardown(conn, system, authorizing)
+                    await enqueue_control_teardown(
+                        conn, system, authorizing, recycle=queue.JobRecyclePolicy.NEVER
+                    )
         except Exception:  # noqa: BLE001 - one malformed System must not starve sibling cleanup
             _log.warning(
                 "reconciler: orphaned system teardown admission failed",
