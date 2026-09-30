@@ -5,7 +5,9 @@
 Accepted (2026-09-29)
 
 Amends [ADR-0626](0626-recover-exhausted-acknowledged-authority-claims.md): a replacement claim
-that ADR-0626 granted cannot earn another one.
+that ADR-0626 granted cannot earn another one. Amends the #2889 amendment of
+[ADR-0620](0620-authority-owned-system-teardown.md): the reconciler ends one more kind of job that
+still has an `allocating` or `current` authority, the job past this bound.
 
 ## Context
 
@@ -46,8 +48,8 @@ that still has an `allocating` or `current` authority, because that authority co
 4. **One limit for #2901.** An external-boot job allocates at most `max_attempts` authority
    generations per budget, plus at most one generation from this grant. The fix for deterministic
    `provider-conflict` churn (#2901) must stay inside that limit. It can make a job spend fewer of
-   those attempts, for example by making a repeated identical `provider-conflict` terminal. It
-   must not add a second retry counter or another grant.
+   those attempts, for example by making a repeated identical `provider-conflict` terminal or by
+   stopping on no progress. It must not raise `max_attempts` or add another grant.
 
 ## Consequences
 

@@ -34,7 +34,7 @@ migration about 95, new tests about 170, registration lists 8, docstring 6, ADR-
 | `tests/db/test_external_boot_authority_journal_migration.py` | modify | the ADR-0626/0711 claim and dead-letter proofs |
 | `src/kdive/reconciler/repairs/jobs.py` | modify docstring and log text | the description of `repair_abandoned_jobs` |
 | `tests/db/test_migrate.py`, `tests/db/test_migration_0091_system_object_sweep_cursors.py`, `tests/db/test_migration_0102_build_gc_cursors.py`, `tests/db/test_migration_0115_capture_reap_state.py` | modify | the pinned migration lists |
-| `docs/adr/0626-recover-exhausted-acknowledged-authority-claims.md` | modify the Status section only | the `Amended by` banner |
+| `docs/adr/0626-recover-exhausted-acknowledged-authority-claims.md`, `docs/adr/0620-authority-owned-system-teardown.md` | modify the Status section only | the `Amended by` banners |
 
 ## Task 1 — The bound and the terminal path
 
