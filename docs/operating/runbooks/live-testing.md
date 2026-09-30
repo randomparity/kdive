@@ -287,8 +287,17 @@ for name in "kdive-$uuid" \
 done
 ```
 
-An absent name is success, so a repeated run is safe. The System row stays `ready`; release its
-allocation as for any disposable System.
+An absent name is success, so a repeated run is safe.
+
+The carrier's order is: release the external-boot Run, close the Investigation, then remove the
+fixture. The System row stays `ready` after that. Then end the disposable System in this order:
+
+1. `systems.teardown` for the System, and wait for its job. The fixture is already gone, so
+   the teardown finds no domain.
+2. `allocations.release` for its allocation.
+
+This order is valid whether or not `allocations.release` refuses while a non-terminal System on
+the allocation has external-boot history (#2966): the teardown always runs first.
 
 
 ### Installed local authority carrier — ppc64le (#2152)
