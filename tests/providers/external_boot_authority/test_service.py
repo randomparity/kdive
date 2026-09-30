@@ -51,6 +51,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
     RemoteModuleOperationV1,
 )
 from tests.providers.external_boot_authority.service_support import (
+    _DIGEST_A,
     _DIGEST_B,
     _Adapter,
     _FailingAppendJournal,
@@ -1690,6 +1691,82 @@ async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: 
             if record.phase is JournalPhase.TERMINAL
         )
         assert terminal.outcome == ("never-began" if phase is JournalPhase.ADMITTED else "target")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("operation", "category"),
+    [(AuthorityOperation.RECOVER, "source"), (AuthorityOperation.CLEANUP, "absent")],
+)
+async def test_takeover_recovered_local_timed_release_phase_is_adopted_by_successor(
+    tmp_path: Path,
+    operation: AuthorityOperation,
+    category: Literal["source", "absent"],
+) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    root = _takeover().model_copy(
+        update={"purpose": "release", "operation": AuthorityOperation.RELEASE}
+    )
+    repository = _Repository(peer, root)
+
+    class ReleaseAdapter(_Adapter):
+        async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+            await super().observe(request)
+            return AuthorityObservationV1(
+                observation_id=uuid4(), category=category, composite_state=_DIGEST_A
+            )
+
+    adapter = ReleaseAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, root)
+    repository.current = True
+    timing = LocalExternalBootTimingV1(accel="tcg", console_window_s=900, deadline_budget_s=1200)
+    first = _mutation(root).model_copy(
+        update={
+            "operation": operation,
+            "operation_identity": f"release-{operation.value}-1",
+            "local_timing": timing,
+        }
+    )
+    adapter.fail_commit = True
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, first)
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+    successor = root.model_copy(
+        update={"authority_id": uuid4(), "generation": 2, "operation_identity": "takeover-b"}
+    )
+    repository.allocating_request = successor
+    repository.current = False
+    await service.acknowledge_takeover(peer, successor)
+    recovered = next(
+        record
+        for record in reversed(repository.records)
+        if record.phase is JournalPhase.TERMINAL
+        and record.operation_identity == first.operation_identity
+    )
+    assert recovered.local_timing == timing
+
+    repository.request = successor
+    repository.current = True
+    adapter.fail_commit = False
+    retry = first.model_copy(
+        update={
+            "authority_id": successor.authority_id,
+            "generation": 2,
+            "attempt_id": uuid4(),
+            "operation_identity": f"release-{operation.value}-2",
+            "operation_digest": _DIGEST_A,
+        }
+    )
+    observation = await service.execute_mutation(peer, retry)
+
+    assert observation == recovered.observation
+    assert adapter.calls.count(f"commit:{operation.value}") == 1
 
 
 @pytest.mark.anyio
