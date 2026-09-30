@@ -10,7 +10,7 @@ caused by a `ServerFaultError`; allowlisted sites call the helper.
 Tech stack: Python 3.14, pydantic 2.x, FastMCP 3.4.4 (`fastmcp-slim`), pytest.
 
 Expected implementation size: 120–180 changed lines (M) — derived from the file map: ~25 lines
-in `responses.py`, a ~10-line middleware rename, 12 one-line site edits plus imports, ~60 lines
+in `responses.py`, a ~10-line middleware rename, 11 one-line site edits plus imports, ~75 lines
 of tests, a ~15-line ADR amendment.
 
 ## Global Constraints
@@ -94,11 +94,18 @@ def validate_stored[M: BaseModel](model: type[M], value: object) -> M:
 Interfaces (consumed): `validate_stored` from Task 1.
 
 Verification:
-- Site substitution — Mode: task-test-not-applicable. Surface: the twelve call sites in the spec
-  table. Reason: each rebuilds a database row or stored job payload whose invalid shape the
-  schema's constraints prevent seeding through the DB-backed tool tests; the behaviour lives in
-  `validate_stored`, covered by Task 1, and the unchanged existing tool suites prove valid rows
-  still rebuild.
+- Recorded-payload site — Mode: focused-test. `tests/mcp/core/test_responses.py`
+  `test_recovery_response_with_malformed_recorded_payload_is_a_server_fault`: build a `Job` whose
+  `payload` holds `{"recovery_request_v1": {"bogus": 1}}` and call
+  `kdive.mcp.tools.external_boot.recovery_idempotency.recovery_response(job, "run_id", "r")`;
+  expect `ServerFaultError`. Red: `ValidationError` raised instead; green:
+  `just test-verbose tests/mcp/core/test_responses.py`.
+- The other ten substitutions — Mode: task-test-not-applicable. Surface: the remaining sites in
+  the spec table. Reason: each is the same one-line substitution inside a DB-backed read; seeding
+  a malformed row per site through the testcontainer suites is disproportionate when the
+  behaviour lives in `validate_stored` (Task 1) and the recorded-payload test proves the wiring
+  once. Diff review against the spec table is the accepted Success 2 proof; the unchanged existing
+  tool suites prove valid rows still rebuild.
 
 Steps:
 1. In each allowlisted function replace `X.model_validate(v)` with `validate_stored(X, v)` and

@@ -39,6 +39,10 @@ Operator-approved design (option a): translate at an allowlist of verified serve
   | `lifecycle/systems/view.py` `_split_placement` | `System` | `systems` rows |
   | `ops/resources/host_ops.py` `_apply_cordon`, `_live_allocations` | `Resource`, `Allocation` | rows |
 
+- Tools reached through these helpers: `resources.availability`, `images.list`,
+  `images.describe`, `images.kernel_config`, `debug.list_sessions`, the external-boot recovery
+  tools, `runs.list`, `systems.reprovision`, `systems.list`, `resources.set_scheduling`, and
+  `resources.drain`.
 - Left untouched: `catalog/shapes.py` (validates caller request fields — caller input);
   `catalog/resources.py` and `lifecycle/allocations/view.py` (already isolate a bad row per row
   with `except ValueError` and degrade it; translating would break that isolation);
@@ -81,7 +85,8 @@ Operator-approved design (option a): translate at an allowlist of verified serve
 - Success 1, 3: in-process FastMCP tests in `tests/mcp/middleware/test_server_fault.py`
   (renamed from `test_invalid_envelope.py`).
 - Success 4: unit tests in `tests/mcp/core/test_responses.py`.
-- Success 2: review of the diff against the table; the per-site rebuilds are DB-backed and the
-  helper carries the behaviour.
+- Success 2: a unit test drives the recorded-payload site (`recovery_response`) end to end; the
+  other ten sites are the same one-line substitution in DB-backed reads, proved by diff review
+  against the table.
 - Controlled fault: revert the middleware's `ServerFaultError` check to `InvalidEnvelopeError`
   and observe Success 1 go red.
