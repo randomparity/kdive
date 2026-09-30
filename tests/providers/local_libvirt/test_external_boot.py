@@ -5794,23 +5794,62 @@ def test_authenticated_partial_abort_removes_activation_artifacts_before_absence
 
 
 @pytest.mark.parametrize(
-    "sibling",
+    ("sibling", "parent_steps"),
     [
-        Path(_BINDING.system_id) / _BINDING.run_id / str(UUID(int=0xA11)),
-        Path(_BINDING.system_id) / str(UUID(int=0xB22)),
+        (
+            Path(_BINDING.system_id) / _BINDING.run_id / str(UUID(int=0xA11)),
+            [
+                ("rmdir", _BINDING.activation_id, True),
+                ("fsync",),
+                ("rmdir", _BINDING.run_id, False),
+            ],
+        ),
+        (
+            Path(_BINDING.system_id) / str(UUID(int=0xB22)),
+            [
+                ("rmdir", _BINDING.activation_id, True),
+                ("fsync",),
+                ("rmdir", _BINDING.run_id, True),
+                ("fsync",),
+                ("rmdir", _BINDING.system_id, False),
+            ],
+        ),
     ],
     ids=["activation-under-shared-run", "run-under-shared-system"],
 )
 def test_partial_abort_leaves_a_shared_parent_holding_a_sibling(
-    tmp_path: Path, sibling: Path
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sibling: Path,
+    parent_steps: list[tuple[object, ...]],
 ) -> None:
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
     projection, materialization, authority = _abortable_activation(root)
     (root / sibling).mkdir(mode=0o700)
     (root / sibling / "kernel").write_bytes(b"sibling")
+    steps: list[tuple[object, ...]] = []
+    real_rmdir, real_fsync = os.rmdir, os.fsync
+
+    def tracking_rmdir(path: str, *, dir_fd: int) -> None:
+        try:
+            real_rmdir(path, dir_fd=dir_fd)
+        except OSError:
+            steps.append(("rmdir", path, False))
+            raise
+        steps.append(("rmdir", path, True))
+
+    def tracking_fsync(descriptor: int) -> None:
+        real_fsync(descriptor)
+        steps.append(("fsync",))
+
     with RecoveryMetadataStore(root) as store:
+        monkeypatch.setattr(os, "rmdir", tracking_rmdir)
+        monkeypatch.setattr(os, "fsync", tracking_fsync)
         store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
+        monkeypatch.undo()
+        # A parent is fsynced only after its child's rmdir succeeded, never after the stop.
+        assert steps[steps.index(("rmdir", _BINDING.activation_id, True)) :] == parent_steps
         store.remove_abortable_partial(_BINDING, projection.plan_identity, authority)
         assert store.exact_recovery_absence(_BINDING)
     assert (root / sibling / "kernel").read_bytes() == b"sibling"
