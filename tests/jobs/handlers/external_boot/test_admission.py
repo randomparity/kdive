@@ -31,6 +31,7 @@ from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import BootPayload, TeardownPayload, dump_payload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.external_boot_authority.protocol import Purpose
 from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 from tests.db.remote_module_attempt_obligations_support import _evidence
 from tests.jobs.handlers.external_boot.conftest import resolver_for
@@ -459,6 +460,45 @@ def test_the_teardown_purpose_is_the_only_one_that_yields_the_teardown_kind(
             resolver=resolver_for(vehicle),
         )
 
+        assert kind is JobKind.TEARDOWN
+        assert isinstance(payload, TeardownPayload)
+
+    _drive(migrated_url, body)
+
+
+@pytest.mark.parametrize("purpose", ["activate", "teardown"])
+def test_only_teardown_admits_a_preparing_activation_without_its_plan(
+    migrated_url: str, purpose: Purpose
+) -> None:
+    """#2961: teardown never prepares, so it has no preparation plan to carry."""
+
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(
+            conn,
+            vehicle,
+            purpose=purpose,
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+
+        async def build() -> tuple[JobKind, BootPayload | TeardownPayload]:
+            return await build_external_boot_payload(
+                conn,
+                activation_id=vehicle.activation_id,
+                purpose=purpose,
+                operation=purpose,
+                provider_kind="local-libvirt",
+                authority_instance=AUTHORITY_INSTANCE,
+                operation_identity=f"{purpose}-1",
+                resolver=resolver_for(vehicle),
+            )
+
+        if purpose == "activate":
+            with pytest.raises(CategorizedError, match="requires its durable preparation plan"):
+                await build()
+            return
+        kind, payload = await build()
         assert kind is JobKind.TEARDOWN
         assert isinstance(payload, TeardownPayload)
 
