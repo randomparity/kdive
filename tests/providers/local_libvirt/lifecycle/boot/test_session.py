@@ -53,6 +53,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ExpectedOperationOwnership,
     LocalExternalBootOperationLease,
+    LocalExternalBootSession,
     LocalExternalBootSessionFactory,
     LocalExternalBootTimingConfigurationError,
     OpenArtifactRoot,
@@ -691,8 +692,18 @@ def _stream_session(
         close_overlay_descriptor=lambda _fd: events.append("overlay.close"),
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
-    session = cast(_ConcreteSession, factory.open(selected_lease, _expected()))
+    session = _with_artifact_root(factory.open(selected_lease, _expected()))
     return session, selected_lease
+
+
+def _with_artifact_root(session: LocalExternalBootSession) -> _ConcreteSession:
+    """Open the artifact root a session otherwise opens on first artifact use (ADR-0710).
+
+    For tests about the root's ownership snapshot or its place in the close order.
+    """
+    concrete = cast(_ConcreteSession, session)
+    concrete._artifact_root()
+    return concrete
 
 
 def _recording_pin_lease(
@@ -3238,7 +3249,7 @@ def test_only_one_guest_context_and_power_start_reject_while_open() -> None:
 def test_close_poisons_wrappers_and_releases_pin_last() -> None:
     events: list[str] = []
     lease = _lease()
-    session = _factory(events).open(lease, _expected())
+    session = _with_artifact_root(_factory(events).open(lease, _expected()))
     retained = session.guest()
     guest = retained.__enter__()
     session.close()
@@ -3279,7 +3290,7 @@ def test_close_faults_do_not_skip_cleanup_or_pin_release() -> None:
         close_overlay_descriptor=fault_overlay_close,
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
-    session = factory.open(lease, _expected())
+    session = _with_artifact_root(factory.open(lease, _expected()))
     with pytest.raises(ExceptionGroup) as raised:
         session.close()
     assert len(raised.value.exceptions) == 2
@@ -3528,7 +3539,7 @@ def test_pinner_mutation_cannot_change_atomic_ownership_snapshot() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(lease, _expected())
+    session = _with_artifact_root(factory.open(lease, _expected()))
     assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
     assert events.count(f"domain.open:kdive-{SYSTEM_ID}") == 1
     assert events.count(f"artifact-owner:{SYSTEM_ID}:{BINDING.activation_id}") == 1
@@ -3560,7 +3571,7 @@ def test_artifact_callback_cannot_redirect_snapshot_by_mutating_caller_lease() -
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(lease, _expected())
+    session = _with_artifact_root(factory.open(lease, _expected()))
     assert received[0].system_id == SYSTEM_ID
     assert received[0].binding == BINDING
     assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
@@ -3590,7 +3601,7 @@ def test_artifact_callback_type_is_pin_free_and_cannot_release_lane() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(lease, _expected())
+    session = _with_artifact_root(factory.open(lease, _expected()))
     assert received == [OperationOwnership(SYSTEM_ID, BINDING)]
     with pytest.raises(RuntimeError, match="pinned"):
         lease.release()
@@ -3620,7 +3631,7 @@ def test_guest_and_descriptor_close_faults_still_release_pin_last() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=fault_descriptor,
     )
-    session = factory.open(lease, _expected())
+    session = _with_artifact_root(factory.open(lease, _expected()))
     retained = session.guest()
     retained.__enter__()
     with pytest.raises(ExceptionGroup) as raised:

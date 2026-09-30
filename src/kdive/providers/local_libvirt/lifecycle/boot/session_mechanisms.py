@@ -366,7 +366,8 @@ class LocalArtifactRoot:
     open-only walk would fail closed on every first activation. Creation carries the same
     guards as opening: `_open_or_create_private_child` creates mode 0700 and then delegates to
     `_open_private_directory`, so `O_NOFOLLOW` and the mode and euid checks apply either way.
-    Nothing here reclaims the created directories; that is #2212's.
+    Nothing here reclaims the created directories; that is #2212's. A session calls this on its
+    first artifact use, not when it opens (ADR-0710), so a read-only session creates nothing.
     """
 
     def __init__(self, recovery_root: Path) -> None:
