@@ -1060,6 +1060,20 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
     assert events == ["fixture", "identity-probe", "remove-fixture"]
 
 
+def test_interrupted_proof_still_removes_the_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    removed: list[object] = []
+
+    async def interrupted() -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(carrier, "remove_authority_fixture", lambda *args: removed.append(args))
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(
+            carrier._run_then_remove_fixture(cast(Any, None), cast(Any, None), interrupted())
+        )
+    assert len(removed) == 1
+
+
 def test_fixture_cleanup_failure_is_reported_with_the_proof_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1974,6 +1974,9 @@ async def _run_then_remove_fixture(
                 "native carrier and fixture cleanup failures", [primary, cleanup]
             ) from None
         raise
+    except BaseException:
+        remove_authority_fixture(config, ledger)
+        raise
     remove_authority_fixture(config, ledger)
 
 
