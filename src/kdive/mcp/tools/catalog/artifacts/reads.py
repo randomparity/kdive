@@ -23,7 +23,7 @@ from kdive.config.core_settings import (
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
 from kdive.log import bind_context
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import InvalidEnvelopeError, ToolResponse
 from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import InvalidCursor as _InvalidCursor
@@ -230,7 +230,7 @@ def _artifact_list_items(artifacts: list[RedactedArtifact]) -> list[ToolResponse
                     refs={"object": artifact.object_key},
                 )
             )
-        except ValueError:
+        except ValueError, InvalidEnvelopeError:
             _log.warning("artifact %s violates the envelope invariant; degraded", artifact.id)
     return responses
 

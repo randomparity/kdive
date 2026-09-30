@@ -15,16 +15,15 @@ from typing import Any
 
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools.base import ToolResult
-from pydantic import ValidationError
 
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import InvalidEnvelopeError, ToolResponse
 from kdive.mcp.verbosity import compact_responses_enabled
 
 # The exact set of top-level envelope keys, used as a cheap fast-path: a dict carrying any other
 # key is not an envelope dump, so skip the model_validate round-trip and pass it through. The
 # actual correctness guard is ToolResponse's extra="forbid" (responses.py), which makes a superset
-# at any depth (top level or an items row) raise ValidationError; this set only avoids paying that
-# exception for the common non-envelope dict.
+# at any depth (top level or an items row) raise InvalidEnvelopeError; this set only avoids paying
+# that exception for the common non-envelope dict.
 _ENVELOPE_FIELDS = frozenset(ToolResponse.model_fields)
 
 
@@ -64,7 +63,7 @@ def _compact_result(result: Any) -> Any:
         return result
     try:
         envelope = ToolResponse.model_validate(sc)
-    except ValidationError:
+    except InvalidEnvelopeError:
         return result
     compact = envelope.model_dump(mode="json", exclude_defaults=True)
     return ToolResult(structured_content=compact, meta=result.meta, is_error=result.is_error)

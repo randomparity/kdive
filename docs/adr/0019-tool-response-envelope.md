@@ -82,6 +82,15 @@ time, so "category iff failed" is enforced once here rather than per tool.
   (one envelope per job); a paginated list envelope is deferred until a plane
   needs cursors.~~
 
+### Amendment (2026-09-29): an invalid envelope in a tool body is a server fault (#2932)
+
+This qualifies the "category iff failed" consequence above, which says only that constructing
+an invalid envelope raises. [ADR-0709](0709-invalid-envelope-is-a-server-fault.md) keeps the
+fail-fast refusal but changes how it reaches a caller: `ToolResponse` validation raises
+`InvalidEnvelopeError` instead of a pydantic `ValidationError`, and a tool that builds an
+invalid envelope returns an `infrastructure_failure` envelope with a fixed `detail` rather than
+an argument error.
+
 ## Alternatives considered
 
 - **No shared model; each tool returns a plain `dict`.** Rejected: the uniform
