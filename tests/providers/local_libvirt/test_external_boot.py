@@ -5814,8 +5814,12 @@ def test_authenticated_partial_abort_removes_activation_artifacts_before_absence
                 ("rmdir", _BINDING.system_id, False),
             ],
         ),
+        (
+            Path(_BINDING.system_id) / _BINDING.run_id / _BINDING.activation_id / "residue",
+            [("rmdir", _BINDING.activation_id, False)],
+        ),
     ],
-    ids=["activation-under-shared-run", "run-under-shared-system"],
+    ids=["activation-under-shared-run", "run-under-shared-system", "residue-in-activation"],
 )
 def test_partial_abort_leaves_a_shared_parent_holding_a_sibling(
     tmp_path: Path,
@@ -5849,11 +5853,15 @@ def test_partial_abort_leaves_a_shared_parent_holding_a_sibling(
         store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
         monkeypatch.undo()
         # A parent is fsynced only after its child's rmdir succeeded, never after the stop.
-        assert steps[steps.index(("rmdir", _BINDING.activation_id, True)) :] == parent_steps
+        first = next(
+            i for i, step in enumerate(steps) if step[:2] == ("rmdir", _BINDING.activation_id)
+        )
+        assert steps[first:] == parent_steps
         store.remove_abortable_partial(_BINDING, projection.plan_identity, authority)
-        assert store.exact_recovery_absence(_BINDING)
+        # Residue the activation does not own stays behind for quarantine (ADR-0710).
+        residue_in_activation = _BINDING.activation_id in sibling.parts
+        assert store.exact_recovery_absence(_BINDING) is not residue_in_activation
     assert (root / sibling / "kernel").read_bytes() == b"sibling"
-    assert not (root / _BINDING.system_id / _BINDING.run_id / _BINDING.activation_id).exists()
 
 
 def test_partial_abort_propagates_a_parent_rmdir_failure_other_than_not_empty(
