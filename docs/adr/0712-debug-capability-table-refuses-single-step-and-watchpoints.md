@@ -70,7 +70,7 @@ software breakpoints and `advance` work.
 - **Infer the accelerator in the engine (native arch means KVM).** judgment: a native guest
   without `/dev/kvm` runs under TCG, and the System's persisted `accel` is already the authority.
 - **Key a NULL `accel` on the provider kind.** judgment: extra plumbing of the binding into the op
-  runner to spare only an un-refreshed local host, which re-discovery already fixes.
+  runner to spare only a System on an un-refreshed local host, which a new System avoids.
 - **Category `debug_attach_failure`.** verified: `RETRYABLE_BY_CATEGORY` maps it to `True`
   (`src/kdive/domain/errors.py` at `e914b66f4`), and a retry of the same mode cannot succeed.
 - **Category `configuration_error`.** judgment: the request is valid; the target lacks the
