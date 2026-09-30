@@ -39,20 +39,21 @@ def fastmcp_log(caplog: pytest.LogCaptureFixture) -> Iterator[pytest.LogCaptureF
 
 
 def _app() -> FastMCP:
+    # Async bodies, as every kdive tool is: FastMCP runs them on a different path than sync ones.
     app: FastMCP = FastMCP("t")
     app.add_middleware(BindingErrorMiddleware())
     app.add_middleware(InvalidEnvelopeMiddleware())
 
     @app.tool(name="bad")
-    def bad() -> ToolResponse:
+    async def bad() -> ToolResponse:
         return ToolResponse(object_id="x", status="queued", error_category="not_found")
 
     @app.tool(name="replay")
-    def replay() -> ToolResponse:
+    async def replay() -> ToolResponse:
         return ToolResponse.model_validate({"object_id": "x", "status": "failed"})
 
     @app.tool(name="typed")
-    def typed(n: int) -> ToolResponse:
+    async def typed(n: int) -> ToolResponse:
         return ToolResponse.success(str(n), "ok")
 
     return app
