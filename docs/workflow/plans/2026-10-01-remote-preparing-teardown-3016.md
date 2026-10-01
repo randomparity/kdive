@@ -153,17 +153,19 @@ Files: test `tests/jobs/handlers/external_boot/test_prepared_before_admission.py
 change.
 
 Interfaces: `_job(case)` and `_dispatch(dsns, conn, case, operation, vehicle)` in that file gain
-keyword `marker: dict[str, Any] | None = None` (default `case.marker`); `_dispatch` also gains
+keywords `marker: dict[str, Any] | None = None` (default `case.marker`) and
+`extra: dict[str, Any] | None = None` (merged into the job payload); `_dispatch` also gains
 `resolver: ProviderResolver | None = None` (default `resolver_for(vehicle)`). Uses
+`RemoteModuleAttemptObligationRepository` and `ModuleAttempt` as in Task 1, and
 `AuthorityCapability(authority_instance, geometry=None, sender=None, modules=None)` from
 `kdive.providers.ports.authority`.
 
 Verification:
 
-- Contract: a remote-libvirt teardown of a `preparing` activation whose payload has no
-  `remote_module_attempt_v1` ends `torn_down` and ends the reservation exactly once. Mode:
-  focused-test. Test
-  `test_teardown_of_a_preparing_activation_skips_preparation[remote-libvirt-*]`. It passes on
+- Contract: a remote-libvirt teardown of a `preparing` activation ends `torn_down` and ends the
+  reservation exactly once, both without a PREP receipt and with a retained one carried.
+  Mode: focused-test. Test
+  `test_teardown_of_a_preparing_activation_skips_preparation[remote*-*]`. It passes on
   main because no source change is needed. Controlled fault (the regression the
   spec rules out): insert `await _execute(context)` as the first statement of `complete` in
   `teardown_handler`; expect red (refused, activation not `torn_down`).
@@ -177,20 +179,25 @@ Steps:
 1. Let `_job` and `_dispatch` take the override:
 
 ```python
-def _job(case: SeededCase, marker: dict[str, Any] | None = None) -> Job:
+def _job(
+    case: SeededCase, marker: dict[str, Any] | None = None, extra: dict[str, Any] | None = None
+) -> Job:
     kind = JobKind.TEARDOWN if case.purpose == "teardown" else JobKind.BOOT
     key = "system_id" if kind is JobKind.TEARDOWN else "run_id"
     value = case.vehicle.system_id if kind is JobKind.TEARDOWN else case.vehicle.run_id
     payload = {key: str(value), "external_boot_authority_v1": marker or case.marker}
+    payload |= extra or {}
     return build_job(kind, payload).model_copy(update={"id": case.job_id, "attempt": case.attempt})
 ```
 
    In `_dispatch`, add `*, resolver: ProviderResolver | None = None, marker: dict[str, Any] |
-   None = None` after `vehicle`; pass `resolver=resolver or resolver_for(vehicle)` to
-   `ExternalBootHandlerPorts`; call
-   `handler(worker, _job(case, marker), ExternalBootAuthorityMarkerV1.model_validate(marker or case.marker))`.
-2. Add a `provider_kind` parameter, `["local-libvirt", "remote-libvirt"]`, to
-   `test_teardown_of_a_preparing_activation_skips_preparation`. Pass `marker_overrides={"provider_kind": provider_kind}` to `seed_case`, and replace the
+   None = None, extra: dict[str, Any] | None = None` after `vehicle`; pass
+   `resolver=resolver or resolver_for(vehicle)` to `ExternalBootHandlerPorts`; call
+   `handler(worker, _job(case, marker, extra), ExternalBootAuthorityMarkerV1.model_validate(marker or case.marker))`.
+2. Add a `provider` parameter, `["local", "remote", "remote-receipt"]`, to
+   `test_teardown_of_a_preparing_activation_skips_preparation`. Set
+   `provider_kind = "local-libvirt" if provider == "local" else "remote-libvirt"`, pass
+   `marker_overrides={"provider_kind": provider_kind}` to `seed_case`, and replace the
    `_dispatch` call with:
 
 ```python
@@ -211,19 +218,39 @@ if provider_kind == "remote-libvirt":
         authority_instance=case.marker["authority_instance"], modules=cast(Any, object())
     )
     resolver = ProviderResolver({ResourceKind.REMOTE_LIBVIRT: replace(local, authority=modules)})
+extra = None
+if provider == "remote-receipt":
+    attempt = ModuleAttempt(vehicle.system_id, vehicle.run_id, "1" * 32)
+    repository = RemoteModuleAttemptObligationRepository()
+    await repository.open_mutation_obligation(seed, attempt)
+    await repository.record_terminal_evidence(seed, attempt, _evidence(attempt))
+    await repository.open_reap_obligation(seed, attempt)
+    receipt = await repository.read_reap_preparation(seed, vehicle.system_id, vehicle.run_id)
+    assert receipt is not None
+    extra = {"remote_module_attempt_v1": receipt.model_dump(mode="json", by_alias=True)}
 marker = case.marker | {"provider_kind": provider_kind}
 await _dispatch(
-    authority_role_dsns, seed, case, "teardown", vehicle, resolver=resolver, marker=marker
+    authority_role_dsns,
+    seed,
+    case,
+    "teardown",
+    vehicle,
+    resolver=resolver,
+    marker=marker,
+    extra=extra,
 )
 ```
 
    Add the imports `from dataclasses import replace`, `from typing import cast`,
    `from kdive.domain.catalog.resources import ResourceKind`,
-   `from kdive.providers.core.resolver import ProviderResolver`, and
-   `from kdive.providers.ports.authority import AuthorityCapability`. Add "#3016: remote-libvirt
+   `from kdive.providers.core.resolver import ProviderResolver`,
+   `from kdive.providers.ports.authority import AuthorityCapability`,
+   `from kdive.db.remote_module_attempt_obligations import ModuleAttempt,
+   RemoteModuleAttemptObligationRepository`, and
+   `from tests.db.remote_module_attempt_obligations_support import _evidence`. Add "#3016: remote-libvirt
    reads no PREP receipt" to the docstring. The existing row assertion (`torn_down`, mode,
    reservations 0, releases 0 or 1) then covers both providers unchanged.
-3. Run the green command; expect four cases to pass. A runner refusal of the remote binding is
+3. Run the green command; expect six cases to pass. A runner refusal of the remote binding is
    fixed in the test binding only.
 4. Apply the controlled fault, expect red, revert, expect green.
 5. `just lint`, `just type` (exit 0); commit
@@ -296,6 +323,6 @@ host, and Tasks 1–3 cover the code contracts.
 |---|---|
 | receipt-less preparing teardown admitted; one carried; two ambiguous | 1 |
 | non-preparing teardown and release still refuse | 1 (and the existing release test) |
-| handler ends `torn_down`, reservation once, no module lifecycle | 2 |
+| handler ends `torn_down`, reservation once, with and without a receipt | 2 |
 | `systems.teardown` returns `queued` with no receipt | 3 |
 | ADR amendment, records gate | design set, 4 |

@@ -102,8 +102,8 @@ Not changed:
   retained receipt it carries that receipt. With two it refuses as ambiguous.
 - For a remote-libvirt activation with no receipt, it still refuses `teardown` of a
   `recovery_failed` activation and `release` of a `recovered` activation.
-- The remote-libvirt teardown handler, given that payload and a module capability that fails
-  if called, ends with the activation and System `torn_down`. A pending reservation ends with
+- The remote-libvirt teardown handler, given that payload (and, separately, one carrying a
+  retained receipt) with a module capability bound, ends with the activation and System `torn_down`. A pending reservation ends with
   no reservation row and no release row. A ready reservation ends with exactly one release row.
 - `systems.teardown` on a remote-libvirt System whose newest activation is `preparing` with no
   receipt returns `queued`. The authority-marked teardown job has no `remote_module_attempt_v1`.
@@ -113,7 +113,8 @@ Not changed:
 - Admission tests in `tests/jobs/handlers/external_boot/test_admission.py`, against the
   migrated database.
 - Handler test in `tests/jobs/handlers/external_boot/test_prepared_before_admission.py`, with
-  the remote runtime. The module lifecycle entry point is patched to fail if reached.
+  a module capability bound under the remote-libvirt kind (local runtime; the real remote
+  adapter is exercised only by the live tier).
 - MCP test in `tests/mcp/lifecycle/test_systems_tools.py`.
 - `just lint`, `just type`, and `just records`. `just ci` runs at push.
 - Remote-libvirt live tier, if a lab host can run it. Otherwise the PR states that only the
