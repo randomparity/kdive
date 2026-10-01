@@ -214,6 +214,15 @@ Rejected for this amendment:
   allocation binding in a migration; the release refusal keeps the allocation `active` for the
   common path at no schema cost.
 
+### Amendment (2026-10-01): the stalled `tearing_down` lane skips external-boot history (#3015)
+
+`repair_stalled_tearing_down_systems` reads the System's latest external-boot activation under
+the System lock. A System with any activation row is skipped: the lane enqueues nothing and
+logs one WARNING per System per process, naming the activation. This replaces the re-enqueue
+the #2966 amendment accepted for such Systems, which wrote a failed attempt every pass. A prior
+`{system}:teardown` row carrying an authority marker is never recycled by this lane, so an
+unmarked payload cannot overwrite it. The supported exit for such a System is tracked in #3026.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
