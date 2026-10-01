@@ -220,3 +220,4 @@ kernel = true
 "systems.snapshot" = "supports_snapshots"
 
 [implementations]
+"host-install" = "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"

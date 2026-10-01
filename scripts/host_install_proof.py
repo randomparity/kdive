@@ -574,7 +574,7 @@ def bundle(fixture: Path, baseline: str, output: Path) -> dict[str, object]:
     return manifest
 
 
-def _bundle_inputs(bundle_dir: Path) -> tuple[dict[str, Any], str]:
+def bundle_inputs(bundle_dir: Path) -> tuple[dict[str, Any], str]:
     """Check a bundle's own consistency and return its manifest and boot-member digest."""
     manifest = json.loads((bundle_dir / "manifest.json").read_text())
     artifacts = manifest.get("artifacts") if isinstance(manifest, dict) else None
@@ -588,6 +588,17 @@ def _bundle_inputs(bundle_dir: Path) -> tuple[dict[str, Any], str]:
     return manifest, kernel_member_digest(bundle_dir / "kernel.tar.gz")
 
 
+def kernel_fields(manifest: dict[str, Any], kernel_sha256: str) -> dict[str, str]:
+    """The six-input kernel identity a bundle binds; the node observes the same fields."""
+    return {
+        "kernel_sha256": kernel_sha256,
+        "kernel_source_sha": manifest["source"]["commit"],
+        "kernel_config_sha256": manifest["artifacts"][".config"],
+        "compiler_id": kernel_fixtures.identity(manifest["toolchain"]),
+        "kernel_build_id": manifest["build_id"],
+    }
+
+
 def _binding(
     host: HostFacts, row_os: str, arch: str, manifest: dict[str, Any], kernel_sha256: str
 ) -> Context:
@@ -598,11 +609,7 @@ def _binding(
             "guest_os": row_os,
             "guest_arch": arch,
             "accelerator": ARCH_LANE[arch][0],
-            "kernel_sha256": kernel_sha256,
-            "kernel_source_sha": manifest["source"]["commit"],
-            "kernel_config_sha256": manifest["artifacts"][".config"],
-            "compiler_id": kernel_fixtures.identity(manifest["toolchain"]),
-            "kernel_build_id": manifest["build_id"],
+            **kernel_fields(manifest, kernel_sha256),
         }
     )
 
@@ -664,7 +671,7 @@ def run(args: argparse.Namespace) -> int:
     target = validate_target(args.target)
     image = validate_name(args.guest_image)
     candidate = _checked_candidate(args.candidate)
-    manifest, kernel_sha256 = _bundle_inputs(args.bundle)
+    manifest, kernel_sha256 = bundle_inputs(args.bundle)
     arch = str(manifest["arch"])
     row = load_rootfs_catalog().get(image)
     if row is None or row.arch != arch:

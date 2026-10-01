@@ -59,7 +59,12 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     contract = build_contract(inventory=inventory)
     assert contract.cells
     assert all(c.owner > 0 and c.observation and c.assertions for c in contract.cells)
-    assert all(c.node_id is None for c in contract.cells)
+    assert all(c.node_id is None for c in contract.cells if c.scenario_id != "host-install")
+    host_install = [c for c in contract.cells if c.scenario_id == "host-install"]
+    assert len(host_install) == 6
+    assert {c.node_id for c in host_install} == {
+        "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
+    }
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
     assert recovery and {c.configuration for c in recovery} == {"recovery"}
