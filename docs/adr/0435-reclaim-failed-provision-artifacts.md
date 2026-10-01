@@ -224,3 +224,25 @@ Known consequence: `systems.reprovision` with a profile the System already appli
 profile's terminal job (`recycle=NEVER`), so no handler runs. Such a System now settles to
 `failed` instead of staying `reprovisioning`. The admission fix is not part of this amendment.
 Spec: [`../workflow/specs/2026-09-29-stalled-reprovision-lane-2980-design.md`](../workflow/specs/2026-09-29-stalled-reprovision-lane-2980-design.md).
+
+### Amendment (2026-10-01): reprovision recycles a settled same-profile job (#3008)
+
+This replaces the #2980 amendment's known consequence. `systems.reprovision` on a `ready` System
+now enqueues `{uid}:reprovision:{digest}` with `TERMINAL_OR_CANCELED`, so re-applying a profile
+the System applied before resets that profile's settled row to a fresh queued attempt and its
+handler runs. The `reprovisioning` poll-replay branch is unchanged.
+
+A recycle resets the attempt counter, so a handler still running behind the old row would pass
+the new attempt's heartbeat and finalize fences. Before any write, under the System lock, the
+admission therefore refuses with a `conflict` (`reason: reprovision_job_settling`, `job_id`) while
+that row is `queued` or `running`, or for 15 minutes (ADR-0634's settle bound) after a write that
+can hide a running handler: `canceled`, `lease_expired`, or any terminal state at `attempt > 1`.
+This is the stalled-reprovision lane's set plus `succeeded` at `attempt > 1`, which matters only
+when a row is reused. The lane itself is unchanged: a recycled row is `queued` and defers it.
+The window is ADR-0634 pacing, not a fence. A handler that outlives it behind a recycled row
+finds the System `reprovisioning` again, not `failed`, so the #2980 backstop does not cover it;
+that residual is accepted.
+
+The recycled row keeps its original authorizing principal, as every `JobRecyclePolicy` recycle
+does; the admission audit row names the caller. Rejected: refusing every terminal same-profile
+row, which would force an edited profile to re-apply one in place.

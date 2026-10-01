@@ -68,3 +68,33 @@ leaves unauthenticated residue, which still quarantines as `provider_conflict`.
   exact absence to "no owned content" and leaves empty directories under the recovery root for
   every read.
 - **Do nothing.** judgment: a non-System TEARDOWN of a partial preparation can never complete.
+
+### Amendment (2026-09-30): cleanup quarantine and finalization run under the session (#3012)
+
+This amendment replaces the last Consequences bullet's "They stay session-free here".
+`LocalLibvirtExternalBoot.record_cleanup_quarantine` and `finalize_cleanup_tombstone` now check
+the proof, then open `self._io.open(authority, _expected_binding(recovery.binding))` and make the
+store write inside it, like the other activation ports. Because session open creates nothing, the
+pinned shape leaves exact recovery absence provable after cleanup.
+
+The added precondition is session open itself (lane pin, owned domain, overlay), not the lease:
+the authority adapter issues one lease for each offloaded call. On an operation's first
+execution, every production caller has just opened a session on the same binding while the
+authority's System lane is active: `cleanup` before quarantine (and `recover` and `cleanup` before
+System-teardown quarantine); `cleanup_is_accounted` before System-teardown finalization, which
+precedes `teardown_system`; and `cleanup_receipt`, or the commit's `cleanup` and the `observe`
+after it, before `finalize`. ADR-0586's post-delete replay of an absent tombstone still succeeds
+while the System exists, because the store branch is unchanged and finalization does not touch
+the domain. A missing owned domain or overlay, or a failed libvirt connection or definition read
+at the open, now makes the write fail closed as
+`provider_conflict` instead of succeeding without a pin. That includes a terminal replay holding
+only `lane.lock` that pops a pending point which outlived its request, after a System teardown has
+destroyed the domain. After any authority restart, the same replay already fails through
+`cleanup_receipt`.
+
+- **Pin only when the lease resolves, otherwise write without a session.** verified: the
+  production lease cannot fail to resolve inside an offloaded call (`LocalOperationLeaseScope.issue`
+  in `LocalExternalBootAuthorityAdapter._offload`, `external_boot_authority.py` at `b1a8cd8c6`), so the
+  fallback guards nothing reachable and would only reintroduce the unpinned write.
+- **Keep both writes session-free.** judgment: the #2898 reason no longer holds, and the unpinned
+  write was a recorded residual, not a required property.

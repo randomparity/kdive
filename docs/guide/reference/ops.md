@@ -83,6 +83,9 @@ Break-glass release of a stuck cross-project Allocation. Requires platform_admin
 
 Break-glass teardown of a stuck cross-project System. Requires platform_admin.
 
+A System with external-boot activation history gets the authority-marked teardown that
+systems.teardown enqueues, never an ordinary job the worker would refuse.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `reason` | string | yes | Mandatory non-blank break-glass justification (audited). |
