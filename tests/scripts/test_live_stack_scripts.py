@@ -4328,7 +4328,8 @@ def test_services_bring_up_creates_the_debug_dir(tmp_path: Path) -> None:
     user = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
     debug_dir = tmp_path / "debug"
     recorded = _services_up_to_host_processes(tmp_path, debug_dir)
-    assert f"REFUSED sudo install -d -o {user} -m 0750 {debug_dir}\n" in recorded, recorded
+    expected = f"REFUSED sudo install -d -o {user} -g {user} -m 0750 {debug_dir}\n"
+    assert expected in recorded, recorded
 
 
 def test_services_bring_up_skips_a_writable_debug_dir(tmp_path: Path) -> None:
