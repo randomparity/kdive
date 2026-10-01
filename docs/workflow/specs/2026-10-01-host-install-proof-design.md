@@ -15,7 +15,9 @@ exists, and `[implementations]` binds no node.
 ## Goals
 
 1. A reusable, host-agnostic producer that turns one exclusive clean host into one version-1
-   result for its family cell. It must also run unchanged on native ppc64le hosts for #2818.
+   result for its family cell. Its x86_64 path is proven here. Its ppc64le path (a native
+   `bundle` on the POWER build host, `kvm-hv` binding, ELF boot member) is covered by focused
+   tests here and proven live by #2818.
 2. Live clean and repeat runs on one x86_64 representative per family: Ubuntu 26.04, Fedora 44
    and Rocky 10. Each cell is recorded honestly. A failed or blocked cell links a defect issue.
 3. A committed, sanitized proof record, plus operator and qualification docs that match what ran.
@@ -29,45 +31,65 @@ non-goal); release gating (#2819); and fixing product defects (separate linked i
 
 ### Runner — `scripts/host_install_proof.py`
 
+The runner has three subcommands. `bundle` cuts the kernel bundle where the fixture lives, `run`
+proves one host, and `merge` combines runs.
+
+`bundle --fixture DIR [--baseline longterm] --output BUNDLE` must run on a host where
+`kernel_fixtures.verify` accepts the fixture in place. That is the fixture's native build host,
+because the fixture Makefile records its own path; for ppc64le it is the POWER build host. It
+uses the documented recipe: `make modules_install INSTALL_MOD_STRIP=1` into scratch space, a
+native `strip` of the ppc64le boot member, then a tar that lists the boot member first as
+`boot/vmlinuz` followed by `lib/modules`, excluding `build` and `source`. The resulting
+directory holds `kernel.tar.gz`, `effective_config` (the fixture `.config`) and
+`manifest.json`. The cut duplicates `combined_kernel_tar` in the live-stack spine, because
+`scripts/` does not import test modules.
+
 `uv run python -m scripts.host_install_proof run` takes these inputs:
 
-- `--target USER@HOST` and `--known-hosts FILE`. Strict host-key checking is used and
-  `BatchMode` is on.
+- `--target USER@HOST` and `--known-hosts FILE`. Every `ssh` and `scp` call shares one option
+  list: `BatchMode=yes`, `StrictHostKeyChecking=yes`, `UserKnownHostsFile=FILE`,
+  `ConnectTimeout=30`, `ServerAliveInterval=30` and `ServerAliveCountMax=4`.
 - `--family {debian,fedora,enterprise}`.
 - `--candidate SHA`. It must equal the controller checkout's clean `HEAD`, because the matrix is
   built from that checkout.
-- `--fixture DIR`, a pinned kernel fixture checked by `kernel_fixtures.verify`.
-- `--baseline`, which defaults to `longterm`.
+- `--bundle BUNDLE`, from `bundle`. `run` checks that every manifest field it binds is present,
+  that the `effective_config` digest equals `artifacts[".config"]`, and that the manifest
+  architecture equals the guest image row's.
 - `--guest-image NAME`, an x86_64 or ppc64le catalog row.
 - An optional `--operator-prerequisites FILE`.
 - `--output DIR`, which must be new.
 
 It runs these steps in order. Every step is a separate `ssh` invocation, and therefore a new
-login session. A step is a fixed `bash -l` script whose only interpolated values are
-shell-quoted.
+login session. A step is a fixed script sent as the remote command `bash -lc <quoted script>`,
+with ssh's stdin at `/dev/null`, so no command can consume the script. Its only interpolated
+values are validated and shell-quoted. Each step has a wall-clock limit (`STEP_TIMEOUT_S`, 3 h
+for the setup and image steps and 1 h for the rest). A step that hits its limit is a failed
+step whose exit code is recorded as `timeout`.
 
 | # | Step | What runs on the target |
 |---|---|---|
-| 1 | `observe-host` | Read `/etc/os-release` (`ID:VERSION_ID`), `uname -m`, SELinux or AppArmor mode, `/dev/kvm`, and `sudo -n true`. Check the clean markers: no `~/kdive`, `/opt/kdive-live-worker-lifecycle`, `/var/lib/kdive` or `kdive-live-worker*` units. |
+| 1 | `observe-host` | Read `/etc/os-release` (`ID:VERSION_ID`), `uname -m`, the confinement mode, `/dev/kvm`, and `sudo -n true`. Confinement is `getenforce` for SELinux, or `/sys/module/apparmor/parameters/enabled` for AppArmor. Check the clean markers: no `~/kdive`, `/opt/kdive-live-worker-lifecycle`, `/var/lib/kdive` or `kdive-live-worker*` units. The runner then stops with exit 2, before any mutation, when the observed distribution's catalog family (`image_family`) differs from `--family` or the architecture differs from the bundle's. |
 | 2 | `operator-prerequisites` | The supplied file, if given. This covers the documented operator duties: a Docker engine and access where the distribution has no known package, the EL CRB and source repositories, and POWER Rust. |
-| 3 | `bootstrap` | Git through the distribution package manager when absent, the documented `uv` installer, then `uv tool install rust-just`. |
+| 3 | `bootstrap` | Git through the distribution package manager when absent, then the documented `uv` installer. |
+| 3a | `just` | `uv tool install rust-just`, in a new login, so the `~/.local/bin` the installer created is on `PATH`. |
 | 4 | `clone` | Clone a `git bundle` of the candidate (copied by `scp`) to `~/kdive`, detached at the candidate, with `origin` set to the public URL. |
 | 5 | `setup` | `just setup` |
 | 6 | `prepare` | `just prepare-local-libvirt-host`, with the documented local witness DSN exported and an empty line on stdin for the become prompt. |
 | 7 | `preflight` | `just check-local-libvirt` |
 | 8 | `stack` | `examples/local-libvirt/demo-up.sh`, with `KDIVE_DEMO_WORKSPACE=~/kdive-demo` |
 | 9 | `guest-image` | `examples/local-libvirt/build-image.sh <guest-image>`, then `sha256sum` of the published image, which becomes the binding's `image_sha256`. |
-| 10 | `first-boot` | Copy the kernel bundle, then run the node with `HOST_INSTALL_PHASE=first-boot`. |
+| 10 | `first-boot` | Copy the kernel bundle, then run the node with `HOST_INSTALL_PHASE=first-boot` and `HOST_INSTALL_OUTPUT` set to a new per-phase directory that must not already exist. |
 | 11–14 | `repeat-*` | Steps 5–8 again. |
 | 15 | `second-boot` | The node again, with `HOST_INSTALL_PHASE=second-boot`. |
 
-Each step's transcript, exit code and duration go to a private `steps/` directory. Phase records
-are fetched with `scp`.
+Each step's transcript, exit code and duration go to a private `steps/` directory.
+`summary.json` lists each step's `name`, `exit_code` and `seconds`, plus the `outcome`. Phase
+records are fetched with `scp`.
 
-After step 1 succeeds, the runner writes the binding (`binding.json`) for that cell from three
-sources. The host platform comes from step 1. The guest OS and architecture come from the
+After step 1 identifies the host, the runner writes the binding (`binding.json`) for that cell
+from three sources. The host platform comes from step 1. The guest OS and architecture come from the
 catalog row. The accelerator is `kvm` on x86_64 and `kvm-hv` on ppc64le. The kernel inputs come
-from the verified fixture:
+from the checked bundle manifest:
 
 - `kernel_source_sha` is the manifest `source.commit`.
 - `kernel_config_sha256` is the manifest `artifacts[".config"]`.
@@ -77,17 +99,14 @@ from the verified fixture:
 
 `image_sha256` is added after step 9 and before step 10.
 
-The runner cuts the bundle on the controller with the documented recipe: `make modules_install
-INSTALL_MOD_STRIP=1` into scratch space, then a tar that lists the boot member first as
-`boot/vmlinuz`. On ppc64le a stripped copy of the boot member is used. The bundle directory holds
-`kernel.tar.gz`, `effective_config` and `manifest.json`.
-
 `compose(...)` then writes `result.json`, a one-element `Evidence` array:
 
 - `node_id` and `scenario_id` come from `build_contract()` for the cell, and
   `input_sha256 = digest(binding)`.
 - `deployed_roles` contains each role that both phases reported as the same full SHA.
-- `context` is the phase-reported context when both phases agree, and the binding otherwise.
+- `context` is the first phase's observed context. It is the binding only when no phase record
+  exists. Any other phase context stays visible in its own phase artifact.
+- A phase record whose `phase` differs from its slot counts as absent.
 - Each of the six assertions maps to the SHA-256 of a canonical JSON artifact stored as
   `artifacts/<sha256>.json`.
 - `duration_seconds` is the wall time of the whole run.
@@ -98,20 +117,23 @@ INSTALL_MOD_STRIP=1` into scratch space, then a tar that lists the boot member f
 | `first-boot` | The first phase record | The phase passed. |
 | `repeat-setup` | Steps 11–14 | Every listed step exits 0. |
 | `second-boot` | The second phase record | The phase passed. |
-| `confinement` | Host mode at step 1 and in each phase, plus the guest process labels | The host enforces in all three samples, and each phase observed a confined qemu process. |
+| `confinement` | Host mode at step 1 and in each phase, plus the guest process labels | The host enforces in all three samples (`Enforcing`, or AppArmor enabled `Y`), and each phase observed a confined qemu process. |
 | `cleanup` | Cleanup observations from both phases | Each phase saw its system `torn_down` and its domain absent. |
 
 The outcome is decided in this order:
 
-1. `blocked`, with `impediments: ["missing-prerequisite"]`, when the target is unreachable (ssh
-   exit 255), step 1 finds a non-clean host, non-interactive sudo is missing, or `/dev/kvm` is
-   missing.
-2. Otherwise `failure` if any assertion does not hold, a role is missing or not the candidate,
+1. No result at all when step 1 cannot identify the host: ssh exits 255, or `/etc/os-release` or
+   `uname -m` falls outside the evidence schema. The runner writes `summary.json` and exits 3,
+   and the cell qualifies `not-run`. The proof record reports it as blocked.
+2. `blocked`, with `impediments: ["missing-prerequisite"]` and the binding as context, when an
+   identified host is not clean, lacks non-interactive sudo, or lacks `/dev/kvm`.
+3. Otherwise `failure` if any assertion does not hold, a role is missing or not the candidate,
    or the phase contexts differ from each other or from the binding.
-3. Otherwise `success`.
+4. Otherwise `success`.
 
-A failed step stops the run, and the result still lists only what ran. `run` exits 0 on
-`success` and 1 otherwise.
+A failed or timed-out step stops the run, and the result still lists only what ran. `run`
+exits 0 on `success`, 1 on `failure`, 3 on `blocked` or an unidentified host, and 2 on invalid
+input. Exit 3 is the signal a reset wrapper retries on.
 
 `merge --output DIR RUN...` combines run directories into `inputs.json` and `results.json` for
 `coverage_campaign qualify`. Two runs that bind the same cell, or carry different candidates or
@@ -141,8 +163,10 @@ are set. It runs from `~/kdive`, with `examples/local-libvirt/env.sh` sourced, a
   `Linux version <manifest release>`.
 - **Confinement.** While the guest runs, the node reads the security label of the qemu process
   whose command line names the system's domain (`ps -eo label,args`). The label must contain
-  `svirt_t` under SELinux, or name an AppArmor profile other than `unconfined`. The host mode is
-  re-read as well.
+  `svirt_t` under SELinux. Under AppArmor it must be the per-domain `libvirt-<domain uuid>`
+  profile in enforce mode, matched against the UUID in the domain XML. The host mode is
+  re-read as well. If session-mode qemu turns out not to be confined this way, the cell fails
+  and a defect is linked; the rule is not loosened.
 - **Cleanup.** The node runs `allocations.release` and waits for `systems.get` to report
   `torn_down`. `virsh -c $KDIVE_LIBVIRT_URI list --all --name` must not contain the domain.
   A `finally` block releases the allocation on any failure path.
@@ -164,7 +188,10 @@ failures. The node asserts `passed`. A missing `phase.json` counts as a failed p
 ### Wiring
 
 - `obligations.toml` gets one additive line in `[implementations]`, mapping `"host-install"` to
-  the node.
+  the node. Implementations bind by scenario, so all six host-install cells gain the node: the
+  three x86_64 cells here, and the three ppc64le cells #2818 owns, which move from
+  `pending-implementation` to `missing-result`. The existing contract test's "no cell is bound"
+  assertion narrows to the cells outside this scenario.
 - The docs gain the runner usage and output contract (coverage qualification), the unattended
   become behaviour (install), and the proven family status (local-libvirt).
 - The proof record is `docs/design/2026-10-01-host-install-proof-record-2807.md`.
@@ -211,12 +238,17 @@ failures. The node asserts `passed`. A missing `phase.json` counts as a failed p
 
 - A unit suite proves the runner's pure parts. They compose an evidence record that `qualify`
   accepts for a synthetic all-pass run. They yield `failure` for a failed step, a missing phase,
-  a role mismatch or a context mismatch. They yield `blocked` for a non-clean host. They emit
-  only quoted values in step scripts.
+  a role mismatch, a context mismatch or a phase record in the wrong slot. They yield `blocked`
+  for a non-clean host. The ssh and scp argv carry the shared options, stdin is `/dev/null`,
+  step scripts contain only quoted values, and both architectures get the right accelerator and
+  boot member.
 - `coverage-check` passes with the node bound.
 - Each of the three families has a run directory whose cell verdict under `qualify` is
   `success`, or `failure`/`blocked` with a linked issue. The proof record holds the per-cell
-  outcomes, step durations and the sanitized identities.
+  outcomes, step durations and the sanitized identities. It also quotes each family's operator
+  prerequisite file verbatim (sanitized) next to its digest. Each line of that file cites the
+  install or local-libvirt passage that makes it an operator duty. A line with no such citation
+  is an undeclared prerequisite: the cell is recorded as `failure` with a linked issue.
 
 ## Validation
 

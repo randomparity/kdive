@@ -45,9 +45,10 @@ the same producer on a different host architecture.
    binding before either boot phase. That binding takes kernel identities from the verified
    pinned fixture (ADR-0693), the guest platform from the catalog row, and the host platform
    from the pre-install observation.
-4. **The kernel comes from the pinned external fixture.** The runner cuts the documented
-   combined `kernel` tar on the controller and copies it to the host. Kernel compilation stays
-   outside KDIVE (ADR-0316).
+4. **The kernel comes from the pinned external fixture.** A separate `bundle` subcommand cuts
+   the documented combined `kernel` tar on the host where the fixture verifies in place, which is
+   its native build host. `run` checks that bundle and copies it to the target. Kernel
+   compilation stays outside KDIVE (ADR-0316).
 
 ## Consequences
 
@@ -58,10 +59,18 @@ the same producer on a different host architecture.
   missing input, yields `blocked` with `missing-prerequisite`. No partial run yields `success`.
 - Lab reset stays outside KDIVE. The lab repository's reset target consumes the runner CLI and
   output directory; this repository never restores or recreates hosts.
+- The bundle cut repeats the spine's `combined_kernel_tar`, because `scripts/` does not import
+  test modules. Consolidation is follow-up work.
 - The deployed-revision helper is local to this node. A sibling helper for catalog smoke
   (#2808) may duplicate it; consolidation is follow-up work.
 
 ## Considered & rejected
+
+- **Leave the cells pending (do nothing), or record a manual proof.** judgment: fit. Epic
+  #2803 requires clean-host evidence, and #2818 needs a producer it can rerun.
+- **Run the runner on the target after bootstrap.** judgment: fit. Nothing on a clean host can
+  run it before the bootstrap, and the evidence must cover that bootstrap. The kernel-tar
+  portability it would fix is solved by cutting the bundle on the fixture's own host.
 
 - **One pytest node that drives the whole installation remotely.** verified: `readyz_urls` in
   `tests/integration/live_stack/skew.py` documents the aux listener as loopback/pod-local
