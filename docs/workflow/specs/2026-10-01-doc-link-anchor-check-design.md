@@ -40,10 +40,12 @@ names containing tabs, quotes or backslashes literal, as the existing tests requ
 - A leading YAML front-matter block (`---` on line 1 through the next `---`) is skipped.
 - ATX headings: 0-3 spaces, 1-6 `#`, then a space/tab or end of line; a closing `#` run
   preceded by whitespace is dropped.
-- Heading text is reduced to rendered text: `[text](url)` and `![alt](url)` become their text,
-  HTML tags and backticks are removed.
+- Heading text is reduced to rendered text: inline links and images become their link text;
+  outside code spans, HTML tags are removed and HTML entities decoded; code-span contents
+  stay literal.
 - Slug, following GitHub's `github-slugger`: lowercase; keep characters whose Unicode category
-  is a letter, mark, number or connector punctuation (`_`), plus space and `-`; drop the rest;
+  is a letter (`L*`), mark (`M*`), decimal or letter number (`Nd`, `Nl`) or connector
+  punctuation (`Pc`, which holds `_`), plus space and `-`; drop the rest (`No` such as `①` too);
   each space becomes `-`. Duplicates take `-1`, `-2`, ... using the slugger's occurrence loop.
 - Explicit anchors: `id` or `name` attributes of `<a ...>` tags, outside fences.
 
@@ -51,9 +53,9 @@ names containing tabs, quotes or backslashes literal, as the existing tests requ
 set (GitHub lowercases heading slugs; anchors are compared lowercased too).
 
 **Output and exit.** The helper prints `broken anchor: <source> -> <link>` to stderr for each
-miss and exits 1, or exits 0. Any other exit (missing `python3`, an unreadable target, bad
-input) makes the script print `cannot check markdown anchors; check python3 diagnostics above`
-and exit 1, so a failed anchor stage cannot certify the links. The script's final status and
+miss and exits 3, or exits 0. Any other exit (missing `python3`, an unreadable target, bad
+input, or 1 from an uncaught Python exception) makes the script print
+`cannot check markdown anchors; check python3 diagnostics above` and exit 1, so a failed anchor stage cannot certify the links. The script's final status and
 messages are otherwise unchanged; the header comment drops the anchor exemption.
 
 **`check-served-doc-links.sh` does not share the check** and is not changed. It flags every
@@ -86,6 +88,12 @@ covered there.
      such a heading fails loudly. None exist today.
    - Headings inside raw HTML blocks or indented code blocks are treated as text lines by the
      rules above; bounded to extra or missing anchors on such pages.
+   - Reference links (`[t][ref]`) and autolinks in a heading are not rendered, and Python's
+     Unicode database is newer than github-slugger's; a link to an affected heading fails
+     loudly. None exist in the scanned tree's links today.
+   - Link extraction keeps its column-0 backtick fence rule, while anchor collection also
+     honours indented and tilde fences; a link inside an indented or tilde fence is still
+     checked, as its existence already is.
 4. Covered elsewhere: external URLs (operator exclusion); served-doc `resource://` routing
    (`check-served-doc-links.sh`); excluded trees (`docs/archive/**` and the rest) keep their
    exemption as link sources.
@@ -96,7 +104,8 @@ covered there.
   with `broken anchor: <source> -> <link>` on stderr.
 - Links to existing headings (including duplicates, inline code, punctuation and `—`), to
   `<a id>`/`<a name>` anchors, and fragments on non-`.md` targets pass.
-- A failing or missing `python3` makes the gate exit non-zero without `markdown links resolve`.
-- `just docs-links` passes on the tree; every existing test in
-  `tests/scripts/test_check_doc_links.py` still passes, except the pure-anchor case, which now
-  needs a matching heading.
+- A failing, crashing or missing `python3` makes the gate exit non-zero without `markdown links resolve`.
+- `just docs-links` passes on the tree, this design set included. Every existing test in
+  `tests/scripts/test_check_doc_links.py` still passes, except
+  `test_external_and_anchor_only_links_ignored` and the `#here` case of `test_no_matches_pass`,
+  whose pure-anchor links now need a matching heading.
