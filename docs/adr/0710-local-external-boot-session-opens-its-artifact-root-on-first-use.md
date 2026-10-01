@@ -98,3 +98,26 @@ destroyed the domain. After any authority restart, the same replay already fails
   fallback guards nothing reachable and would only reintroduce the unpinned write.
 - **Keep both writes session-free.** judgment: the #2898 reason no longer holds, and the unpinned
   write was a recorded residual, not a required property.
+
+### Amendment (2026-10-01): recovery-object delete and adopt write under the session (#3045)
+
+`LocalLibvirtExternalBoot.delete_recovery_object` and `adopt_object` keep `observe_object` and its
+digest comparison first. They then re-read the quarantine receipt and make their store write
+(`finalize_tombstone` or `adopt_cleanup_quarantine`) inside
+`self._io.open(authority, _expected_binding(binding.binding))`, like the cleanup ports above. The
+final `observe_object` still runs after that session closes.
+
+The added open adds no new precondition. The orphan service observes the object before calling
+either port, and inside the port `observe_object` opens a session on the same binding, under the
+same lease and System lane, both before and after the write. The port succeeds only if the last
+open does. A missing domain or overlay therefore already fails the call; a replay after a System
+teardown fails at the service's first observation and never reaches the write. The one changed
+outcome is an open failure confined to the write session: the port now fails without writing,
+and the next disposition attempt replays against the unchanged receipt.
+
+- **Pin only when the session opens, otherwise write without one.** verified: every successful
+  call already opens sessions before and after the write (`orphan.py` `resolve_selected`,
+  `external_boot.py` `delete_recovery_object` and `adopt_object` at `780a4bfd8`), so the fallback
+  guards nothing reachable.
+- **Move the observation into the write session.** judgment: one session instead of three, but it
+  changes `observe_object`, which this change does not own.
