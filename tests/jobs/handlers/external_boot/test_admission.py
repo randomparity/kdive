@@ -562,3 +562,76 @@ def test_the_built_payload_survives_dump_and_load(migrated_url: str) -> None:
         assert decoded == payload
 
     _drive(migrated_url, body)
+
+
+@pytest.mark.parametrize(
+    ("activation_state", "receipts", "refusal"),
+    [
+        ("preparing", 0, None),
+        ("preparing", 1, None),
+        ("preparing", 2, "PREP evidence is ambiguous"),
+        ("recovery_failed", 0, "no retained PREP evidence"),
+    ],
+    ids=["none", "one", "two", "recovery-failed"],
+)
+def test_remote_preparing_teardown_prep_receipt(
+    migrated_url: str, activation_state: str, receipts: int, refusal: str | None
+) -> None:
+    """#3016: only a preparing activation's teardown may lack the PREP receipt."""
+
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        preparing = activation_state == "preparing"
+        await seed_case(
+            conn,
+            vehicle,
+            purpose="teardown",
+            activation_state=activation_state,
+            attempt_state="recovering" if preparing else "failed",
+            with_materialization=not preparing,
+            with_recovery_point=not preparing,
+        )
+        await conn.execute(
+            "UPDATE resources SET kind='remote-libvirt' WHERE id=("
+            "SELECT a.resource_id FROM systems s JOIN allocations a ON a.id=s.allocation_id "
+            "WHERE s.id=%s)",
+            (vehicle.system_id,),
+        )
+        await conn.execute(
+            "UPDATE runs SET target_kind='remote-libvirt' WHERE id=%s", (vehicle.run_id,)
+        )
+        repository = RemoteModuleAttemptObligationRepository()
+        for nonce in ("1" * 32, "2" * 32)[:receipts]:
+            attempt = ModuleAttempt(vehicle.system_id, vehicle.run_id, nonce)
+            await repository.open_mutation_obligation(conn, attempt)
+            await repository.record_terminal_evidence(conn, attempt, _evidence(attempt))
+            await repository.open_reap_obligation(conn, attempt)
+        local = resolver_for(vehicle).resolve(ResourceKind.LOCAL_LIBVIRT)
+
+        async def build() -> tuple[JobKind, BootPayload | TeardownPayload]:
+            return await build_external_boot_payload(
+                conn,
+                activation_id=vehicle.activation_id,
+                purpose="teardown",
+                operation="teardown",
+                provider_kind="remote-libvirt",
+                authority_instance=AUTHORITY_INSTANCE,
+                operation_identity="teardown-remote",
+                resolver=ProviderResolver({ResourceKind.REMOTE_LIBVIRT: local}),
+            )
+
+        if refusal is not None:
+            with pytest.raises(CategorizedError, match=refusal):
+                await build()
+            return
+        kind, payload = await build()
+        assert kind is JobKind.TEARDOWN
+        assert isinstance(payload, TeardownPayload)
+        if receipts == 0:
+            assert payload.remote_module_attempt_v1 is None
+        else:
+            assert payload.remote_module_attempt_v1 is not None
+            assert payload.remote_module_attempt_v1.module_attempt_obligation.operation_nonce == (
+                "1" * 32
+            )
+
+    _drive(migrated_url, body)
