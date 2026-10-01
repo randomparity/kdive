@@ -1062,6 +1062,16 @@ _TEARDOWN_REQUIRED = ReleaseOutcome(
             "break-glass release is denied before authority-owned System sys-4's first "
             "activation; run ops.force_teardown",
         ),
+        (
+            ReleaseOutcome(
+                released=False,
+                category=ErrorCategory.CONFLICT,
+                details={"reason": "some_future_reason"},
+                detail="allocations.release is denied ...; run systems.teardown",
+                next_actions=("systems.teardown",),
+            ),
+            "break-glass release is denied by external-boot admission (some_future_reason)",
+        ),
     ],
 )
 def test_classify_breakglass_denial_names_breakglass_exit(
