@@ -209,6 +209,7 @@ _SYSTEM_AWAITING_AUTHORITY_TEARDOWN_SQL = (
     "  AND EXISTS (SELECT 1 FROM external_boot_activations e WHERE e.system_id = s.id) "
     "ORDER BY s.id LIMIT 1"
 )
+SYSTEM_TEARDOWN_REQUIRED_REASON = "external_boot_system_teardown_required"
 
 
 async def _require_system_teardown(
@@ -222,7 +223,7 @@ async def _require_system_teardown(
     raise ExternalBootDenied(
         f"allocations.release is denied while System {row[0]} has external-boot history and is "
         "not torn down; run systems.teardown first (ADR-0620)",
-        details={"reason": "external_boot_system_teardown_required", "system_id": str(row[0])},
+        details={"reason": SYSTEM_TEARDOWN_REQUIRED_REASON, "system_id": str(row[0])},
         next_actions=["systems.teardown", "systems.get"],
         project=project,
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
@@ -23,11 +24,16 @@ from kdive.mcp.tools.lifecycle.allocations.common import (
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.allocation.release import (
+    SYSTEM_TEARDOWN_REQUIRED_REASON,
     ReleaseOutcome,
     ctx_audit_writer,
     release_with_backstops,
 )
 from kdive.services.allocation.renew import RenewOutcome, renew
+from kdive.services.external_boot.admission import (
+    AUTHORITY_PREACTIVATION_DENIAL_REASON,
+    DENIAL_REASON,
+)
 
 
 async def release_allocation(
@@ -57,6 +63,38 @@ def _release_response(
     return release_failure(str(uid), outcome, ctx, project)
 
 
+_BREAKGLASS_TEARDOWN = "ops.force_teardown"
+
+
+def _breakglass_detail(details: Mapping[str, Any], suggested: tuple[str, ...]) -> str:
+    """Say why a break-glass release was refused, naming only an exit its caller can invoke."""
+    reason = details.get("reason")
+    if reason == SYSTEM_TEARDOWN_REQUIRED_REASON:
+        return (
+            f"break-glass release is denied while System {details.get('system_id')} has "
+            f"external-boot history and is not torn down; run {_BREAKGLASS_TEARDOWN} first "
+            "(ADR-0620)"
+        )
+    if reason == DENIAL_REASON:
+        state = details.get("activation_state")
+        exit_hint = (
+            f"{_BREAKGLASS_TEARDOWN} is admitted"
+            if _BREAKGLASS_TEARDOWN in suggested
+            else "no exit is admitted"
+        )
+        return (
+            "break-glass release is denied while external-boot activation "
+            f"{details.get('activation_id')} holds its System in {state}; "
+            f"{exit_hint} while the activation is {state}"
+        )
+    if reason == AUTHORITY_PREACTIVATION_DENIAL_REASON:
+        return (
+            "break-glass release is denied before the authority-owned System's first "
+            f"activation; run {_BREAKGLASS_TEARDOWN}"
+        )
+    return f"break-glass release is denied by external-boot admission ({reason})"
+
+
 def release_failure(
     object_id: str,
     outcome: ReleaseOutcome,
@@ -70,23 +108,27 @@ def release_failure(
     ``breakglass`` names ``ops.force_teardown`` where the service suggests ``systems.teardown``:
     a platform admin acting on a project it is not a member of cannot call the project tool,
     and the break-glass teardown takes the same authority route for external-boot Systems.
-    The service-owned ``detail`` text still names ``systems.teardown``.
+    The service's ``detail`` names those project tools, so a break-glass refusal renders its
+    own from the denial's structured data (#3047); ``allocations.release`` keeps the service's.
     """
     data: dict[str, Any] = dict(outcome.details)
     if outcome.current_status:
         data["current_status"] = outcome.current_status
     category = outcome.category or ErrorCategory.CONFIGURATION_ERROR
     suggested = outcome.next_actions
+    detail = outcome.detail
     if breakglass:
         suggested = tuple(
-            "ops.force_teardown" if action == "systems.teardown" else action for action in suggested
+            _BREAKGLASS_TEARDOWN if action == "systems.teardown" else action for action in suggested
         )
+        if detail is not None:
+            detail = _breakglass_detail(outcome.details, suggested)
     if category is ErrorCategory.STALE_HANDLE:
         suggested = ("allocations.wait", *suggested)
     return ToolResponse.failure(
         object_id,
         category,
-        detail=outcome.detail,
+        detail=detail,
         suggested_next_actions=visible_next_actions(suggested, ctx, project),
         data=data,
     )

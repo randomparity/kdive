@@ -26,6 +26,7 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware.server_fault import SERVER_FAULT_DETAIL, ServerFaultMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
+from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_failure
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.resource_registration import register_discovered_resource
@@ -991,6 +992,86 @@ def test_classify_failed_without_status_omits_current_status() -> None:
     assert item.status == "error"
     assert item.error_category == "configuration_error"
     assert "current_status" not in item.data
+
+
+_TEARDOWN_REQUIRED = ReleaseOutcome(
+    released=False,
+    category=ErrorCategory.CONFLICT,
+    details={"reason": "external_boot_system_teardown_required", "system_id": "sys-1"},
+    detail=(
+        "allocations.release is denied while System sys-1 has external-boot history and is "
+        "not torn down; run systems.teardown first (ADR-0620)"
+    ),
+    next_actions=("systems.teardown", "systems.get"),
+)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (
+            _TEARDOWN_REQUIRED,
+            "break-glass release is denied while System sys-1 has external-boot history and "
+            "is not torn down; run ops.force_teardown first (ADR-0620)",
+        ),
+        (
+            ReleaseOutcome(
+                released=False,
+                category=ErrorCategory.CONFLICT,
+                details={
+                    "reason": "external_boot_restricted",
+                    "activation_id": "act-1",
+                    "activation_state": "active",
+                    "owning_run_id": "run-1",
+                },
+                detail="allocations.release is denied ...; systems.teardown is admitted ...",
+                next_actions=("runs.get", "runs.release_external_boot", "systems.teardown"),
+            ),
+            "break-glass release is denied while external-boot activation act-1 holds its "
+            "System in active; ops.force_teardown is admitted while the activation is active",
+        ),
+        (
+            ReleaseOutcome(
+                released=False,
+                category=ErrorCategory.CONFLICT,
+                details={
+                    "reason": "external_boot_restricted",
+                    "activation_id": "act-2",
+                    "activation_state": "recovering",
+                    "owning_run_id": "run-2",
+                },
+                detail="allocations.release is denied ...; no exit is admitted ...",
+                next_actions=("runs.get",),
+            ),
+            "break-glass release is denied while external-boot activation act-2 holds its "
+            "System in recovering; no exit is admitted while the activation is recovering",
+        ),
+        (
+            ReleaseOutcome(
+                released=False,
+                category=ErrorCategory.CONFLICT,
+                details={"reason": "authority_system_preactivation_mutation_fenced"},
+                detail="allocations.release is denied before the authority-owned System's ...",
+                next_actions=("systems.get", "systems.teardown"),
+            ),
+            "break-glass release is denied before the authority-owned System's first "
+            "activation; run ops.force_teardown",
+        ),
+    ],
+)
+def test_classify_breakglass_denial_names_breakglass_exit(
+    outcome: ReleaseOutcome, expected: str
+) -> None:
+    """#3047: the detail names the exit the break-glass caller can invoke, as next actions do."""
+    item = resources_tools._classify_drain_release("a-5", outcome, _ADMIN, "proj")
+    assert item.error_category == "conflict"
+    assert item.detail == expected
+
+
+def test_project_release_failure_keeps_service_detail() -> None:
+    """#3047: only the break-glass render rewrites the detail; allocations.release keeps it."""
+    resp = release_failure("a-6", _TEARDOWN_REQUIRED, _ADMIN, "proj")
+    assert resp.detail == _TEARDOWN_REQUIRED.detail
 
 
 # ---- resources.drain: handler (DB-backed) ------------------------------------------
