@@ -3360,13 +3360,10 @@ def _unlink_owned_temporaries(directory_fd: int) -> None:
     removed = False
     for name in sorted(_OWNED_TEMPORARY_NAMES):
         try:
-            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            # lstat, not open: a FIFO or symlink under an owned name must not block or be followed.
+            status = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         except FileNotFoundError:
             continue
-        try:
-            status = os.fstat(descriptor)
-        finally:
-            os.close(descriptor)
         if not stat.S_ISREG(status.st_mode) or status.st_mode & 0o077:
             raise ValueError(f"owned temporary {name!r} is not a private regular file")
         with suppress(FileNotFoundError):

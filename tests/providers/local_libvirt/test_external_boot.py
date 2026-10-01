@@ -5940,6 +5940,19 @@ def test_partial_abort_refuses_an_owned_temporary_that_is_not_private(tmp_path: 
     assert (digest / ".initrd.verify").read_bytes() == b"shared"
 
 
+def test_partial_abort_does_not_open_a_fifo_under_an_owned_temporary_name(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    projection, materialization, _ = _abortable_activation(root)
+    digest = _digest_directory(root, projection)
+    os.mkfifo(digest / ".bundle.next", 0o600)
+    with (
+        RecoveryMetadataStore(root) as store,
+        pytest.raises(ValueError, match="not a private regular file"),
+    ):
+        store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
+
+
 @pytest.mark.parametrize(
     ("sibling", "parent_steps"),
     [
