@@ -575,10 +575,13 @@ adr-status-check:
 # Run the same decision-record shape/anti-erasure gate the `records` workflow runs in CI
 # (ADR-0504), so an ADR number collision or malformed record is caught before pushing rather
 # than only in CI. CI passes the PR's base commit; locally the default origin/main is the
-# closest stand-in, same convention as `schema-guard`.
+# closest stand-in, same convention as `schema-guard`. Offline by design: it never fetches, and
+# an unresolvable base fails here because check-records.sh treats an empty BASE_SHA outside CI as
+# "validate shape only" and would pass, hiding an E-REWRITE.
 records base_ref="origin/main":
-    BASE_SHA="$(git merge-base {{base_ref}} HEAD)" RECORD_PROFILES="adr debt" \
-        ./.github/scripts/check-records.sh
+    base="$(git merge-base {{base_ref}} HEAD)" || { \
+        echo "records: no merge-base between '{{base_ref}}' and HEAD — run 'git fetch origin main' or pass a reachable ref" >&2; exit 1; }; \
+    BASE_SHA="$base" RECORD_PROFILES="adr debt" ./.github/scripts/check-records.sh
 
 # Audit runtime dependencies for known vulnerabilities. The script retries only a run that
 # produced no verdict (unreachable PyPI), never a run that found something — pip-audit exits 1
@@ -769,4 +772,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full local gate, including checks beyond the separate PR CI recipe list.
-ci: lint type coverage-check lock-check lint-shell lint-ansible test-ansible lint-workflows docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
+ci: lint type coverage-check lock-check lint-shell lint-ansible test-ansible lint-workflows docs-links docs-paths served-doc-links adr-status-check records docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
