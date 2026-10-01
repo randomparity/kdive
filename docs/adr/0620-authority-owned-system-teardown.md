@@ -223,6 +223,11 @@ the #2966 amendment accepted for such Systems, which wrote a failed attempt ever
 `{system}:teardown` row carrying an authority marker is never recycled by this lane, so an
 unmarked payload cannot overwrite it. The supported exit for such a System is tracked in #3026.
 
+A skipped System stays in the lane's candidate set, so it spends one slot of the per-pass limit
+each pass. The set is the finite residue of pre-fix ordinary teardowns (no new System reaches
+`tearing_down` with history), and the in-lock visit is what emits the warning, so the candidate
+query does not exclude it. Only 100 or more such Systems would crowd out a recoverable one.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
