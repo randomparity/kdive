@@ -27,8 +27,9 @@ records only `result_requeued`.
 1. The bound failure context gains `authority_reason: "provider-conflict"` when the authority sent
    that reason. The worker sets it from the sender error's details. The wire protocol is
    unchanged.
-2. `commit_external_boot_authority_result` stores the `fail` result's `failure_context` on its
-   audit row, in a new nullable column.
+2. `commit_external_boot_authority_result` stores a `fail` result's `failure_context` on its
+   audit row, in a new nullable column, only when the context carries `authority_reason`. The
+   immutable audit row keeps nothing more than the repeat check reads.
 3. A `fail` whose context carries `authority_reason` is terminal when the job's previous attempt in
    the current budget (`job_attempt = attempt - 1`, audit `created_at >=` job `created_at`)
    was requeued with an equal `failure_context`. The commit function makes this decision under
@@ -37,8 +38,8 @@ records only `result_requeued`.
 
 ## Consequences
 
-- A deterministic provider fault costs at most two generations per budget instead of
-  `max_attempts`. The job ends `failed` with `infrastructure_failure`, and its failure context
+- A deterministic provider fault that surfaces through the bound failure (the provider-call and
+  commit phases) costs at most two generations per budget instead of `max_attempts`. The job ends `failed` with `infrastructure_failure`, and its failure context
   (`phase`, `authority_reason`) shows in `jobs.get`. A teardown job reaches the same end state as
   exhaustion, and the operator recycles it the same way.
 - Two consecutive transient provider faults at the same phase end the job one or more attempts
@@ -48,7 +49,14 @@ records only `result_requeued`.
   categories, and a repeat at a different phase.
 - Audit rows from before the migration have no context. The first repeat after deploy therefore
   needs one more attempt.
-- Generic job retry (`fail_worker_job`) is unchanged.
+- A provider-conflict raised during preparation, or during takeover acknowledgement, is raised
+  before any bound failure exists and writes no `fail`. Its job still churns at lease-lapse pace,
+  up to `max_attempts` plus the ADR-0711 grant (ADR-0593 wedge path). Covering it would need the
+  activate `fail` precondition to admit a `preparing` activation, which is a fence change.
+- Generic job retry (`fail_worker_job`) is unchanged. A generic job failure caused by this sender
+  error now also shows `failure_detail_authority_reason` in its failure context.
+- A worker running this code before the migration has its marked `fail` refused (`22023`). The
+  job then stays `running` until reclaim, which is no worse than the churn before this change.
 
 ## Considered & rejected
 
@@ -67,6 +75,9 @@ records only `result_requeued`.
   `SELECT has_table_privilege('kdive_worker','public.external_boot_authority_audit','SELECT')`
   returns `f` on a database migrated through 0168 (`postgres:17`, main `ccc8b4329`). A read
   outside the commit's job-row lock could also race a concurrent commit.
+- **General no-progress detection across attempts.** judgment: the commit function has no
+  per-attempt progress signal. Building one means reading journal heads or admitted mutations
+  under the job-row lock, which is a larger change than comparing two bounded failure contexts.
 - **Remember failures in the authority service process.** judgment: the memory would be lost on a
   restart and not shared across authority instances. Sending its verdict would also add a new wire
   reason.
