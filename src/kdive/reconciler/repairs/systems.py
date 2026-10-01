@@ -9,6 +9,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.db.repositories import SNAPSHOTS, SYSTEMS, record_system_failure_category
@@ -68,6 +69,12 @@ _STRANDED_TEARDOWN_SQL = (
 # System id -> the failed or canceled row's `updated_at` last warned about, so each stop warns once
 # per process. Replaced every pass by the current stranded set, so it never outgrows that set.
 _warned_stranded_teardowns: dict[UUID, datetime] = {}
+# Systems already warned about for a stalled `tearing_down` with external-boot history (#3015).
+_warned_stalled_teardown_history: set[UUID] = set()
+_EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
+_AUTHORITY_TEARDOWN_PAYLOAD_KEYS = frozenset(
+    {"authority_system_v1", EXTERNAL_BOOT_AUTHORITY_MARKER_KEY}
+)
 
 # Pacing with a stated limit, not a fence (ADR-0634). An operator `jobs.cancel` takes a teardown
 # job out of `queued`/`running` while its handler keeps running to completion, so job state alone
@@ -334,6 +341,19 @@ def gone_system_state_values() -> tuple[str, ...]:
     return _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES
 
 
+def _warn_stalled_teardown_history(system_id: UUID, activation_id: UUID) -> None:
+    if system_id in _warned_stalled_teardown_history:
+        return
+    _warned_stalled_teardown_history.add(system_id)
+    _log.warning(
+        "reconciler: system %s is stuck in tearing_down with external-boot activation %s; the "
+        "ordinary teardown is refused (external_boot_teardown_not_supported), so no job is "
+        "requeued and the System needs operator recovery",
+        system_id,
+        activation_id,
+    )
+
+
 async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
     """Requeue ordinary teardown when its durable fence outlives its retryable job.
 
@@ -341,6 +361,11 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
     mutation obligations, and commits `torn_down` in one transaction. A failed or missing job
     would otherwise strand that marker on a live Allocation. Recycle only terminal jobs; a canceled
     job is an operator stop, and queued/running jobs remain owned by the normal worker retry path.
+
+    A System with external-boot activation history is skipped: the ordinary worker refuses its
+    unmarked teardown as a terminal conflict, so a recycle only writes a failed attempt each pass,
+    and an authority-marked prior row is never overwritten (#3015, ADR-0620). The skip logs one
+    WARNING per System per process; the supported exit is tracked in #3026.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -373,6 +398,15 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
                     JobState.RUNNING,
                     JobState.CANCELED,
                 }:
+                    continue
+                if (
+                    existing is not None
+                    and _AUTHORITY_TEARDOWN_PAYLOAD_KEYS & existing.payload.keys()
+                ):
+                    continue
+                activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system_id)
+                if activation is not None:
+                    _warn_stalled_teardown_history(system_id, activation.id)
                     continue
                 _, admitted = await queue.enqueue_with_status(
                     conn,

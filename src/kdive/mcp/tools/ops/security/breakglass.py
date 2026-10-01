@@ -7,7 +7,8 @@ when break-glass is needed. Authority comes solely from ``require_platform_role(
 + a non-blank ``reason`` + an always-written ``platform_audit_log`` row.
 
 These reuse the per-project tools' teardown/release **mechanics** (`release_with_backstops`
-for the release transition; the `JobKind.TEARDOWN` enqueue for teardown) but not their
+for the release transition; `systems.teardown`'s routing and `JobKind.TEARDOWN` enqueue for
+teardown, including the external-boot authority teardown, #3007) but not their
 authorization or audit attribution: `audit.record` enforces project membership and a
 break-glass admin is never a member, so the release path writes its per-allocation audit rows
 through the guard-exempt `audit.record_system` writer, recording the platform principal against
@@ -52,6 +53,10 @@ from kdive.mcp.tools.external_boot.recovery_requests import (
 from kdive.mcp.tools.external_boot.recovery_requests import (
     resolve_recovery_orphan as _resolve_recovery_orphan,
 )
+from kdive.mcp.tools.lifecycle.systems.admin import (
+    ordinary_teardown_denial,
+    route_external_boot_teardown,
+)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -61,7 +66,10 @@ from kdive.services.allocation.release import (
     ReleaseOutcome,
     breakglass_release_allocation,
 )
-from kdive.services.systems.authority_owned import enqueue_control_teardown
+from kdive.services.systems.authority_owned import (
+    enqueue_control_teardown,
+    ordinary_mutation_is_fenced,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -182,14 +190,16 @@ async def force_teardown(
     *,
     system_id: str,
     reason: str,
+    resolver: ProviderResolver | None = None,
 ) -> ToolResponse:
     """Break-glass teardown of a stuck cross-project System (``platform_admin``).
 
     Bypasses the project destructive gate entirely. Authority = platform_admin + a
     non-blank ``reason`` + the always-written ``platform_audit_log`` row. Enqueues the same
     idempotent ``JobKind.TEARDOWN`` job as ``systems.teardown`` (same dedup key) under an
-    authorizing context bound to the target's project; a terminal System returns success
-    idempotently.
+    authorizing context bound to the target's project; a System with external-boot activation
+    history gets the authority-marked teardown, which needs ``resolver`` (#3007). A terminal
+    System returns success idempotently.
     """
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
@@ -226,11 +236,14 @@ async def force_teardown(
             system.project,
             ctx.principal,
         )
-        return await _teardown_locked(pool, ctx, uid)
+        return await _teardown_locked(pool, ctx, uid, resolver)
 
 
 async def _teardown_locked(
-    pool: AsyncConnectionPool, ctx: RequestContext, uid: UUID
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    uid: UUID,
+    resolver: ProviderResolver | None,
 ) -> ToolResponse:
     """Read state, short-circuit `torn_down`, and enqueue — all under the System lock.
 
@@ -265,6 +278,19 @@ async def _teardown_locked(
                 suggested_next_actions=["systems.get"],
                 data={"current_status": system.state.value},
             )
+        # External-boot history takes `systems.teardown`'s authority route: the worker refuses an
+        # ordinary job for it (#2966, #3007). No idempotency key: break-glass takes none.
+        routed = await route_external_boot_teardown(conn, ctx, system, str(uid), None, resolver)
+        if routed is not None:
+            return routed
+        # The matrix refuses SYSTEM_TEARDOWN before an authority System's first activation, so a
+        # preactivation System skips it, as in `systems.teardown`. Unlike there, the matrix runs
+        # before the dedup replay inside `enqueue_control_teardown`; it admits every ordinary
+        # teardown today, so the order changes no outcome.
+        if not await ordinary_mutation_is_fenced(conn, uid):
+            denial = await ordinary_teardown_denial(conn, ctx, system, str(uid))
+            if denial is not None:
+                return denial
         # A dead-lettered ordinary teardown is re-run, matching `systems.teardown` (#2978).
         job = await enqueue_control_teardown(
             conn,
@@ -309,8 +335,14 @@ def register(
             str, Field(description="Mandatory non-blank break-glass justification (audited).")
         ],
     ) -> ToolResponse:
-        """Break-glass teardown of a stuck cross-project System. Requires platform_admin."""
-        return await force_teardown(pool, current_context(), system_id=system_id, reason=reason)
+        """Break-glass teardown of a stuck cross-project System. Requires platform_admin.
+
+        A System with external-boot activation history gets the authority-marked teardown that
+        systems.teardown enqueues, never an ordinary job the worker would refuse.
+        """
+        return await force_teardown(
+            pool, current_context(), system_id=system_id, reason=reason, resolver=resolver
+        )
 
     @app.tool(
         name="ops.resolve_recovery_orphan",
