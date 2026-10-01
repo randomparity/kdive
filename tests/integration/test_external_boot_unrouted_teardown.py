@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -195,5 +195,61 @@ def test_routed_teardown_completes_and_releases(
         }
         assert provider.phases == []
         assert released.status == "released", released.model_dump()
+
+    asyncio.run(body())
+
+
+async def _seed_authority(conn: AsyncConnection, job_id: str, state: str) -> None:
+    """Persist an activate authority row for the job's activation, as the allocator would."""
+    worker = f"worker-{uuid4()}"
+    await conn.execute(
+        "INSERT INTO worker_incarnations "
+        "(incarnation, authority_kind, authority_binding, credential_hash, fence_protocol) "
+        "VALUES (%s, 'docker', '{}'::jsonb, %s, 4)",
+        (worker, b"1" * 32),
+    )
+    await conn.execute(
+        "INSERT INTO external_boot_authorities "
+        "(system_id, allocation_id, activation_id, run_id, plan_identity, job_id, job_attempt, "
+        "purpose, provider_kind, authority_instance, worker_incarnation, operation, "
+        "operation_identity, operation_digest, generation, state, superseded_at) "
+        "SELECT e.system_id, s.allocation_id, e.id, e.run_id, e.plan_identity, j.id, 1, "
+        "'activate', j.payload #>> '{external_boot_authority_v1,provider_kind}', "
+        "j.payload #>> '{external_boot_authority_v1,authority_instance}', %s, 'activate', "
+        "'seeded-activate', %s, 1, %s, CASE WHEN %s = 'superseded' THEN now() END "
+        "FROM jobs j "
+        "JOIN external_boot_activations e "
+        "  ON e.id = (j.payload #>> '{external_boot_authority_v1,activation_id}')::uuid "
+        "JOIN systems s ON s.id = e.system_id WHERE j.id = %s",
+        (worker, "sha256:" + "2" * 64, state, state, UUID(job_id)),
+    )
+
+
+@pytest.mark.parametrize("blocker", ["second_activate_job", "allocating", "superseded"])
+def test_teardown_still_refuses_an_ambiguous_or_authorized_activation(
+    migrated_url: str, blocker: str
+) -> None:
+    async def body() -> None:
+        configure_external_boot()
+        resolver = provider_resolver(external_boot=PreparingProvider())
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=6) as pool:
+            system_id, job_id = await _boot(pool, resolver)
+            canceled = await cancel_job(pool, runs_support.ctx(), job_id)
+            assert canceled.status == "canceled", canceled.model_dump()
+            async with pool.connection() as conn:
+                if blocker == "second_activate_job":
+                    await conn.execute(
+                        "INSERT INTO jobs "
+                        "(id, kind, payload, state, max_attempts, authorizing, dedup_key) "
+                        "SELECT %s, kind, payload, 'canceled', max_attempts, authorizing, %s "
+                        "FROM jobs WHERE id = %s",
+                        (uuid4(), f"copy-{job_id}", UUID(job_id)),
+                    )
+                else:
+                    await _seed_authority(conn, job_id, blocker)
+            response = await _teardown(pool, system_id, resolver)
+
+        assert response.status == "error", response.model_dump()
+        assert response.data["reason"] == "external_boot_teardown_authority_unresolved"
 
     asyncio.run(body())
