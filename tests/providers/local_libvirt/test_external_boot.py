@@ -5104,23 +5104,49 @@ def test_real_adapter_cleanup_complete_still_validates_authority(
     assert session.close_attempts == 0
 
 
+class _WriteObservingIO(RealLocalExternalBootIO):
+    """Records how many session closes preceded each cleanup store write."""
+
+    def __init__(
+        self,
+        session: _RealSession,
+        root: Path,
+        host: _RealPreparation,
+        resolve: Callable[[OpaqueProviderRef], LocalExternalBootOperationLease],
+        factory: _RealSessionFactory,
+    ) -> None:
+        super().__init__(
+            root,
+            host,
+            _RecordingRecoveryWriter(host),
+            resolve,
+            cast(LocalExternalBootSessionFactory, factory),
+            32 * 1024**3,
+        )
+        self.session = session
+        self.closes_at_write: list[int] = []
+
+    def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
+        self.closes_at_write.append(self.session.close_attempts)
+        super().finalize_tombstone(recovery, proof)
+
+    def record_cleanup_quarantine(
+        self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
+    ) -> None:
+        self.closes_at_write.append(self.session.close_attempts)
+        super().record_cleanup_quarantine(recovery, proof)
+
+
 def _resolving_io(
     root: Path, host: _RealPreparation, session: _RealSession, resolutions: list[str]
-) -> tuple[RealLocalExternalBootIO, _RealSessionFactory]:
+) -> tuple[_WriteObservingIO, _RealSessionFactory]:
     factory = _RealSessionFactory(session)
 
     def resolve(reference: OpaqueProviderRef) -> LocalExternalBootOperationLease:
         resolutions.append(reference.ref)
         return cast(LocalExternalBootOperationLease, object())
 
-    io = RealLocalExternalBootIO(
-        root,
-        host,
-        _RecordingRecoveryWriter(host),
-        resolve,
-        cast(LocalExternalBootSessionFactory, factory),
-        32 * 1024**3,
-    )
+    io = _WriteObservingIO(session, root, host, resolve, factory)
     return io, factory
 
 
@@ -5155,6 +5181,7 @@ def test_real_adapter_finalization_replays_exact_proof_under_session(tmp_path: P
 
     assert resolutions == [authority.ref] * 2
     assert factory.expected == [_EXPECTED_OWNERSHIP] * 2
+    assert io.closes_at_write == [0, 1]
     assert session.close_attempts == 2
     assert not (root / recovery_directory_name(point.recovery_ref, point.binding)).exists()
 
@@ -5220,6 +5247,7 @@ def test_real_adapter_quarantine_records_under_session_without_artifact_parents(
 
     assert resolutions == [authority.ref]
     assert factory.expected == [_EXPECTED_OWNERSHIP]
+    assert io.closes_at_write == [0]
     assert session.close_attempts == 1
     assert not (root / metadata.binding.system_id).exists()
     with RecoveryMetadataStore(root) as store:
