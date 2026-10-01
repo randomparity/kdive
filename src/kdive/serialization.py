@@ -1,10 +1,12 @@
-"""Shared JSON value contracts for database and MCP serialization boundaries."""
+"""Shared JSON value and stored-data fault contracts for the database and MCP boundaries."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
 from typing import cast
+
+from pydantic import BaseModel, ValidationError
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
@@ -118,3 +120,25 @@ def safe_error_details(details: Mapping[str, object]) -> dict[str, JsonValue]:
         if scalar is not None:
             safe[key] = scalar
     return safe
+
+
+class ServerFaultError(Exception):
+    """A value the server built failed validation — a server fault, not a caller error (ADR-0709).
+
+    Deliberately not a ``ValueError``: pydantic would re-wrap one raised from a nested model into a
+    ``ValidationError``, which FastMCP reports as the caller's argument error, and a tool's
+    ``except ValueError`` for caller input could absorb it. Lives below the MCP layer so the
+    repository layer can raise it (#3009).
+    """
+
+
+def validate_stored[M: BaseModel](model: type[M], value: object) -> M:
+    """Rebuild ``model`` from the server's own stored data (a database row, a recorded payload).
+
+    Only for values the call's arguments did not supply: a failure is the server's fault and
+    raises :class:`ServerFaultError` chained from the pydantic error (ADR-0709, #2981, #3009).
+    """
+    try:
+        return model.model_validate(value)
+    except ValidationError as exc:
+        raise ServerFaultError(f"stored {model.__name__} failed validation") from exc

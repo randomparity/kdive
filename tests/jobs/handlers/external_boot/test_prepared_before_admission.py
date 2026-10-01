@@ -23,7 +23,7 @@ import psycopg
 import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
@@ -42,6 +42,7 @@ from kdive.providers.external_boot_authority.protocol import (
 )
 from kdive.providers.ports.authority import AuthorityCapability
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.serialization import ServerFaultError
 from tests.db.remote_module_attempt_obligations_support import _evidence
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
@@ -430,8 +431,11 @@ def test_a_recovery_point_without_a_materialization_cannot_decode_at_all(
             with_reservation=True,
         )
 
-        with pytest.raises(ValidationError, match="recovery point ownership"):
+        with pytest.raises(
+            ServerFaultError, match="stored ExternalBootActivation failed validation"
+        ) as raised:
             await _dispatch(authority_role_dsns, seed, case, "release", vehicle)
+        assert "recovery point ownership" in str(raised.value.__cause__)
 
         assert vehicle.port.calls == []
         assert await _authority_count(seed) == 0

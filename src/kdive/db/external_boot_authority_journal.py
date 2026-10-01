@@ -21,6 +21,7 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_record_bytes,
 )
 from kdive.providers.ports.external_boot import ExternalBootPlan
+from kdive.serialization import validate_stored
 
 if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.service import AuthenticatedPeer
@@ -137,7 +138,7 @@ def _binding(row: dict[str, Any] | None) -> AuthorityBinding | None:
         operation_digest=_bounded(row["operation_digest"]),
         state=row["state"],
         preparation_plan=(
-            ExternalBootPlan.model_validate(row["preparation_plan"])
+            validate_stored(ExternalBootPlan, row["preparation_plan"])
             if row.get("preparation_plan") is not None
             else None
         ),
