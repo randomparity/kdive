@@ -119,5 +119,8 @@ and the next disposition attempt replays against the unchanged receipt.
   call already opens sessions before and after the write (`orphan.py` `resolve_selected`,
   `external_boot.py` `delete_recovery_object` and `adopt_object` at `780a4bfd8`), so the fallback
   guards nothing reachable.
+- **Keep both writes unpinned.** judgment: the write would keep running outside the ownership
+  snapshot, the residual #3012 recorded; failing closed on a transient open that the next
+  disposition attempt replays costs less.
 - **Move the observation into the write session.** judgment: one session instead of three, but it
   changes `observe_object`, which this change does not own.

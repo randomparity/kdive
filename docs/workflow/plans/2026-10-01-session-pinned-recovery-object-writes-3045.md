@@ -36,14 +36,17 @@ Interfaces (existing at `780a4bfd8`):
 
 - S1 and S3. Mode: focused-test. `test_recovery_object_writes_run_under_one_session`,
   parametrized over delete and adopt. `_WriteObservingIO` records the number of open sessions
-  (opens minus closes) at each `finalize_tombstone` and `adopt_cleanup_quarantine`. A digest
-  mismatch call records no write; the valid call records exactly one write with one session open,
-  the fourth of five opens, all with `_EXPECTED_OWNERSHIP`. Red before the source edit: the write
-  records zero open sessions and four resolutions in total, not five.
+  (opens minus closes) at each `finalize_tombstone` and `adopt_cleanup_quarantine`. The setup
+  seeds through the store and takes the expected digest from `_quarantine_observation`, so it
+  opens nothing. A digest mismatch call opens one session (its observation) and records no write.
+  The valid call opens three, all with `_EXPECTED_OWNERSHIP`, and records exactly one write,
+  during its second open with one session open. Red before the source edit: the valid call opens
+  two and the write records zero open sessions.
 - S2. Mode: focused-test. `test_recovery_object_writes_refuse_when_the_write_session_cannot_open`,
-  parametrized: lease resolution fails on its second call (the write session). The port raises and
-  the stored receipt equals the original, unmanaged, with the tombstone present. Red before the
-  edit: the unpinned write lands and the store comparison fails.
+  parametrized over delete and adopt and over two failure points on the second session (the write
+  session): lease resolution raising, and the session factory's `open` raising after the lease
+  resolves. The port raises and the stored receipt equals the original, unmanaged, with the
+  tombstone present. Red before the edit: the unpinned write lands and the store comparison fails.
 - S4. Mode: focused-test. `test_session_pinned_recovery_object_writes_with_the_production_factory`:
   the production factory stack, one `scope.issue` per port call; delete then `observe_object`
   absent, empty root, `exact_recovery_absence`; adopt leaves the receipt managed; three
