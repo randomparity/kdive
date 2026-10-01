@@ -3351,6 +3351,28 @@ def _read_private_file(directory_fd: int, name: str, *, sync: bool = False) -> b
         os.close(fd)
 
 
+def _unlink_owned_temporaries(directory_fd: int) -> None:
+    """Unlink the interrupted materialize/verify temporaries a digest directory may hold (#3011).
+
+    Only `_OWNED_TEMPORARY_NAMES` that are private regular files go; anything else is left so the
+    caller's `rmdir` stops and the entry is quarantined (ADR-0710).
+    """
+    removed = False
+    for name in sorted(_OWNED_TEMPORARY_NAMES):
+        try:
+            # lstat, not open: a FIFO or symlink under an owned name must not block or be followed.
+            status = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(status.st_mode) or status.st_mode & 0o077:
+            raise ValueError(f"owned temporary {name!r} is not a private regular file")
+        with suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=directory_fd)
+            removed = True
+    if removed:
+        os.fsync(directory_fd)
+
+
 class RecoveryMetadataStore:
     """Descriptor-relative publisher for one provider-owned recovery root."""
 
@@ -4164,6 +4186,7 @@ class RecoveryMetadataStore:
                                     )
                                 os.unlink(_PROJECTION_NAME, dir_fd=digest_fd)
                                 os.fsync(digest_fd)
+                            _unlink_owned_temporaries(digest_fd)
                         finally:
                             os.close(digest_fd)
                     for item in parts:

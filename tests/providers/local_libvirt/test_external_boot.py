@@ -5878,6 +5878,81 @@ def test_authenticated_partial_abort_removes_activation_artifacts_before_absence
         assert store.exact_recovery_absence(_BINDING)
 
 
+def _digest_directory(root: Path, projection: TargetProjectionV1) -> Path:
+    return (
+        root
+        / _BINDING.system_id
+        / _BINDING.run_id
+        / _BINDING.activation_id
+        / projection.digest.removeprefix("sha256:")
+    )
+
+
+@pytest.mark.parametrize("projection_present", [True, False], ids=["projection", "no-projection"])
+def test_partial_abort_removes_interrupted_temporaries_in_the_digest_directory(
+    tmp_path: Path, projection_present: bool
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    projection, materialization, authority = _abortable_activation(root)
+    digest = _digest_directory(root, projection)
+    if not projection_present:
+        (digest / "target-projection.json").unlink()
+    for name in (".bundle.verify", ".kernel.next.part"):
+        (digest / name).write_bytes(b"interrupted")
+        (digest / name).chmod(0o600)
+    with RecoveryMetadataStore(root) as store:
+        store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
+        store.remove_abortable_partial(_BINDING, projection.plan_identity, authority)
+        assert store.exact_recovery_absence(_BINDING)
+    assert not digest.exists()
+
+
+def test_partial_abort_leaves_an_unowned_digest_entry_for_quarantine(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    projection, materialization, _ = _abortable_activation(root)
+    digest = _digest_directory(root, projection)
+    (digest / ".bundle.verify").write_bytes(b"interrupted")
+    (digest / ".bundle.verify").chmod(0o600)
+    (digest / "residue").write_bytes(b"unowned")
+    with (
+        RecoveryMetadataStore(root) as store,
+        pytest.raises(OSError, match="not empty") as refused,
+    ):
+        store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
+    assert refused.value.errno == errno.ENOTEMPTY
+    assert (digest / "residue").read_bytes() == b"unowned"
+
+
+def test_partial_abort_refuses_an_owned_temporary_that_is_not_private(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    projection, materialization, _ = _abortable_activation(root)
+    digest = _digest_directory(root, projection)
+    (digest / ".initrd.verify").write_bytes(b"shared")
+    (digest / ".initrd.verify").chmod(0o644)
+    with (
+        RecoveryMetadataStore(root) as store,
+        pytest.raises(ValueError, match="not a private regular file"),
+    ):
+        store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
+    assert (digest / ".initrd.verify").read_bytes() == b"shared"
+
+
+def test_partial_abort_does_not_open_a_fifo_under_an_owned_temporary_name(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    projection, materialization, _ = _abortable_activation(root)
+    digest = _digest_directory(root, projection)
+    os.mkfifo(digest / ".bundle.next", 0o600)
+    with (
+        RecoveryMetadataStore(root) as store,
+        pytest.raises(ValueError, match="not a private regular file"),
+    ):
+        store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
+
+
 @pytest.mark.parametrize(
     ("sibling", "parent_steps"),
     [
