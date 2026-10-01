@@ -519,6 +519,12 @@ def _bound_failure(
         reason,
     )
     failure_context: dict[str, object] = {"phase": phase}
+    if (
+        category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        and isinstance(exc, CategorizedError)
+        and exc.details.get("authority_reason") == "provider-conflict"
+    ):
+        failure_context["authority_reason"] = "provider-conflict"
     if mismatch is not None:
         redactor = Redactor(registry=context.secret_registry)
         failure_context["cmdline_mismatch"] = {
