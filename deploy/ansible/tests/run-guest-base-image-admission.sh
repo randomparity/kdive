@@ -20,7 +20,7 @@
 # so the failure is the intended assert and not an unrelated error.
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../../.." && pwd)"
 playbook="$here/guest_base_image_admission.yml"
 

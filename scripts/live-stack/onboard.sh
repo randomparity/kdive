@@ -34,7 +34,7 @@
 #   examples/local-libvirt/demo-up.sh runs, whose first-run workstation case expects 'advisory'.
 set -euo pipefail
 
-here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${here}/../.." && pwd)"
 # shellcheck source=scripts/live-stack/env.sh disable=SC1091
 source "${here}/env.sh"

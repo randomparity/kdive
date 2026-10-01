@@ -6,7 +6,7 @@
 # (gitignored) file cannot affect the porcelain check.
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target="$repo_root/src/kdive/_buildinfo.py"
 
 # COMMIT: an explicit KDIVE_BUILDINFO_COMMIT wins (the container build has no .git and no git

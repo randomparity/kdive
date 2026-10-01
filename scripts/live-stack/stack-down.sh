@@ -16,7 +16,7 @@
 #   scripts/live-stack/stack-down.sh --wipe --yes   skip the confirmation prompt
 set -euo pipefail
 
-here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Teardown needs libvirt only for --wipe's reap, and this is a tool an operator reaches for
 # precisely when the host is broken — so it declares itself libvirt-free and lets a broken
 # published contract degrade rather than abort at source time (ADR-0659). EXPORTED, because the

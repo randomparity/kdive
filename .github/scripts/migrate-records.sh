@@ -35,7 +35,7 @@
 
 set -euo pipefail
 
-SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+SELF_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
 # The gate itself, sourced rather than copied. `canonicalise` is the single definition of
 # what counts as a marker and `marker_only_change` is the predicate the gate will judge this

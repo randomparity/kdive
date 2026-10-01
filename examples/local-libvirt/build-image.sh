@@ -13,7 +13,7 @@
 # the reconcile step. The catalog names come from fixtures/local-libvirt/rootfs_catalog.toml.
 set -euo pipefail
 
-example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+example_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${example_dir}/../.." && pwd)"
 # shellcheck source=examples/local-libvirt/env.sh disable=SC1091
 source "${example_dir}/env.sh"
