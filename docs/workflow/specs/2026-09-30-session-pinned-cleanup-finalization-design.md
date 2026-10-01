@@ -89,7 +89,8 @@ state; the ADR-0710 amendment records that rejection with its evidence.
    - A missing owned domain or overlay at the write makes it fail as `provider_conflict` and
      leaves the operation unresolved. This covers an out-of-band removal between the caller's
      preceding session and this one, and the stale-pending terminal replay after a System
-     teardown described above. Accepted because the same state already fails that way through
+     teardown described above. A libvirt connection or definition read failing at the open
+     ends the same way. Accepted because the same state already fails that way through
      the preceding port, or through `cleanup_receipt` after any authority restart. Pinning the
      write to an owned domain is the point of the change.
    - Session close failing after a durable write raises after the write. Both writes are

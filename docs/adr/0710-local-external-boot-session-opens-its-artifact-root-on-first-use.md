@@ -85,7 +85,8 @@ System-teardown quarantine); `cleanup_is_accounted` before System-teardown final
 precedes `teardown_system`; and `cleanup_receipt`, or the commit's `cleanup` and the `observe`
 after it, before `finalize`. ADR-0586's post-delete replay of an absent tombstone still succeeds
 while the System exists, because the store branch is unchanged and finalization does not touch
-the domain. A missing owned domain or overlay now makes the write fail closed as
+the domain. A missing owned domain or overlay, or a failed libvirt connection or definition read
+at the open, now makes the write fail closed as
 `provider_conflict` instead of succeeding without a pin. That includes a terminal replay holding
 only `lane.lock` that pops a pending point which outlived its request, after a System teardown has
 destroyed the domain. After any authority restart, the same replay already fails through
