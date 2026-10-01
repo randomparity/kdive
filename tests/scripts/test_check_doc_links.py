@@ -316,7 +316,7 @@ def test_missing_anchor_fails_and_names_link(tmp_path: Path, same_file: bool) ->
         ("## A &amp; B", "a--b"),
         ('<a id="custom-spot"></a>', "custom-spot"),
         ('<a name="Legacy"></a>', "legacy"),
-        ("## KDIVE_FOO setting", "KDIVE_FOO-setting"),
+        ("## SOME_FOO setting", "SOME_FOO-setting"),
         ("---\ntitle: x\n# note\n---\n# note", "note"),
     ],
 )
