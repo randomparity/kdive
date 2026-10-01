@@ -14,7 +14,7 @@ The reconciler logs one WARNING per System and cause:
 ```text
 reconciler: system <system-id> is stuck in tearing_down with external-boot activation
 <activation-id>; the ordinary teardown is refused (external_boot_teardown_not_supported), so no
-job is requeued; run systems.teardown while its Allocation is active (<runbook>)
+job is requeued; run systems.teardown (<runbook>)
 
 reconciler: system <system-id> is stuck in tearing_down behind authority-marked teardown job
 <job-id> (<state>); this lane never replaces it, so re-run systems.teardown (<runbook>)
@@ -22,10 +22,6 @@ reconciler: system <system-id> is stuck in tearing_down behind authority-marked 
 reconciler: system <system-id> is stuck in tearing_down behind authority-marked teardown job
 <job-id> (<state>); no supported exit exists for it (<runbook>)
 ```
-
-The first message predates migration 0169. Since then the authority teardown also runs on an
-`expired` or `released` Allocation, so the "while its Allocation is active" clause no longer
-applies.
 
 The reconciler does not log a System whose teardown job is `queued`, `running`, or `canceled`.
 Use the queries below to find one.

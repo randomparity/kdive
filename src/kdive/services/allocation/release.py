@@ -209,8 +209,8 @@ async def guard_external_boot_release(
                 raise
 
 
-# The authority allocator admits a teardown only on an `active` allocation (0122), so ending the
-# allocation first would strand a domain the authority still owns (ADR-0620 amendment, #2966).
+# Ending the allocation first would strand a domain the authority still owns, so release is
+# refused until the System is torn down (ADR-0620 amendment, #2966).
 _SYSTEM_AWAITING_AUTHORITY_TEARDOWN_SQL = (
     "SELECT s.id FROM systems s "
     "WHERE s.allocation_id = %s AND s.state <> 'torn_down' "
