@@ -33,19 +33,19 @@ from kdive.providers.external_boot_authority.service import (
 from kdive.providers.external_boot_authority.transport import _dispatch
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.integration.test_external_boot_job_lifecycle import (
+from tests.integration.external_boot_support import (
     CREDENTIAL,
-    _configure_external_boot,
-    _one,
-    _PreparingProvider,
-    _register_incarnation,
-    _seed_public_external_boot,
+    PreparingProvider,
+    configure_external_boot,
+    fetch_one,
+    register_incarnation,
+    seed_public_external_boot,
 )
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import provider_resolver
 
 
-class _ReleasingProvider(_PreparingProvider):
+class _ReleasingProvider(PreparingProvider):
     """Add the recover and cleanup ports a root release reaches; the journal is what is proved."""
 
     def recover(self, recovery: Any, authority: Any, *, local_timing: Any = None) -> None:
@@ -93,7 +93,7 @@ def test_second_activation_after_completed_release(
     migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
 ) -> None:
     async def body() -> None:
-        _configure_external_boot()
+        configure_external_boot()
         provider = _ReleasingProvider()
         resolver = provider_resolver(external_boot=provider)
         authority_dsn = authority_role_dsns("kdive_provider_authority")
@@ -138,7 +138,7 @@ def test_second_activation_after_completed_release(
         registry = HandlerRegistry()
         registry.register(JobKind.BOOT, route_marked(operations, must_not_run))
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=6) as pool:
-            await _register_incarnation(pool, worker_id)
+            await register_incarnation(pool, worker_id)
             worker = Worker(
                 pool,
                 registry,
@@ -150,10 +150,12 @@ def test_second_activation_after_completed_release(
             async def drain(job_id: UUID) -> None:
                 async with pool.connection() as conn:
                     lane = (
-                        await _one(conn, "SELECT dispatch_lane FROM jobs WHERE id=%s", (job_id,))
+                        await fetch_one(
+                            conn, "SELECT dispatch_lane FROM jobs WHERE id=%s", (job_id,)
+                        )
                     )["dispatch_lane"]
                     assert await worker.run_once(lane) is not None
-                    job = await _one(conn, "SELECT state FROM jobs WHERE id=%s", (job_id,))
+                    job = await fetch_one(conn, "SELECT state FROM jobs WHERE id=%s", (job_id,))
                 assert job["state"] == "succeeded", job
 
             async def activate_then_release(run_id: str) -> None:
@@ -167,7 +169,7 @@ def test_second_activation_after_completed_release(
                 await drain(UUID(released.object_id))
 
             try:
-                first_run, system_id = await _seed_public_external_boot(pool)
+                first_run, system_id = await seed_public_external_boot(pool)
                 await activate_then_release(first_run)
                 await activate_then_release(await _second_run(pool, first_run))
             finally:
