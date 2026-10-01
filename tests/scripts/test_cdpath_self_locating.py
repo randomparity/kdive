@@ -17,6 +17,7 @@ from tests.host_capabilities import requires_bash
 ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash")
 SELF_LOCATING = re.compile(r"\bcd\b[^#\n]*dirname")
+SHELL_SHEBANG = re.compile(rb"#!.*\b(ba)?sh\b")
 
 pytestmark = requires_bash(3, 2, "CDPATH self-location guard")
 
@@ -34,7 +35,7 @@ def _tracked_shell_scripts() -> list[str]:
         path = ROOT / name
         if not path.is_file():
             continue
-        if name.endswith(".sh") or path.open("rb").read(64).startswith(b"#!/usr/bin/env bash"):
+        if name.endswith(".sh") or SHELL_SHEBANG.match(path.open("rb").readline()):
             scripts.append(name)
     return scripts
 
