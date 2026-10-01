@@ -6,25 +6,41 @@ The activate job's marker is the durable route (migration 0167, ADR-0620 amendme
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
+import psycopg
 import pytest
+from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.handlers.external_boot.registrar import build_operations
+from kdive.jobs.handlers.external_boot.router import route_marked
+from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.worker import Worker
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.jobs import cancel_job
+from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_allocation
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
 from kdive.security.authz.rbac import Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration.external_boot_support import (
+    CREDENTIAL,
     PreparingProvider,
     configure_external_boot,
     fetch_one,
+    register_incarnation,
     seed_public_external_boot,
 )
+from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger
+from tests.jobs.handlers.external_boot.support import RecordingTeardownExecutor
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import provider_resolver
+from tests.support.object_store import INERT_OBJECT_STORE
 
 _MARKER = "external_boot_authority_v1"
 
@@ -76,5 +92,108 @@ def test_teardown_routes_by_the_activate_marker(migrated_url: str, activate_job:
         assert (teardown["purpose"], teardown["operation"]) == ("teardown", "teardown")
         # Enqueueing credits nothing: only the authority's teardown receipt ends the reservation.
         assert reservation == {"state": "pending"}
+
+    asyncio.run(body())
+
+
+def _worker(
+    pool: AsyncConnectionPool,
+    resolver: Any,
+    authority_dsn: str,
+    teardown_executor: RecordingTeardownExecutor,
+    worker_id: str,
+) -> Worker:
+    """A real worker whose marked jobs reach only the external-boot operations registry."""
+
+    async def must_not_run(_conn: AsyncConnection, job: Job) -> str:
+        raise AssertionError(f"a marked {job.kind.value} job reached the ordinary handler")
+
+    operations = build_operations(
+        ExternalBootHandlerPorts(
+            resolver=resolver,
+            incarnation_credential=CREDENTIAL,
+            secret_registry=SecretRegistry(),
+            acknowledger=RecordingAcknowledger(authority_dsn),
+            teardown_executor=teardown_executor,
+            artifact_store=INERT_OBJECT_STORE,
+        )
+    )
+    registry = HandlerRegistry()
+    registry.register(JobKind.TEARDOWN, route_marked(operations, must_not_run))
+    return Worker(
+        pool,
+        registry,
+        worker_id=worker_id,
+        incarnation_credential=CREDENTIAL,
+        secret_registry=SecretRegistry(),
+    )
+
+
+async def _run_job(worker: Worker, conn: AsyncConnection, job_id: str) -> None:
+    lane = (await fetch_one(conn, "SELECT dispatch_lane FROM jobs WHERE id = %s", (UUID(job_id),)))[
+        "dispatch_lane"
+    ]
+    claimed = await worker.run_once(lane)
+    assert claimed is not None and str(claimed.id) == job_id
+
+
+_OUTCOME_SQL = (
+    "SELECT e.state, s.state AS system_state, "
+    "(SELECT count(*) FROM external_boot_reservations r WHERE r.activation_id = e.id) "
+    "  AS reservations, "
+    "(SELECT count(*) FROM external_boot_reservation_releases r WHERE r.activation_id = e.id) "
+    "  AS releases, "
+    "(SELECT array_agg(a.purpose ORDER BY a.generation) FROM external_boot_authorities a "
+    "  WHERE a.activation_id = e.id) AS authorities "
+    "FROM external_boot_activations e JOIN systems s ON s.id = e.system_id "
+    "WHERE e.system_id = %s"
+)
+
+
+def test_routed_teardown_completes_and_releases(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body() -> None:
+        configure_external_boot()
+        provider = PreparingProvider()
+        resolver = provider_resolver(external_boot=provider)
+        worker_id = "local:unrouted-teardown"
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=2, max_size=6) as pool,
+            await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed,
+        ):
+            await register_incarnation(pool, worker_id)
+            executor = RecordingTeardownExecutor(seed)
+            worker = _worker(
+                pool, resolver, authority_role_dsns("kdive_provider_authority"), executor, worker_id
+            )
+            system_id, job_id = await _boot(pool, resolver)
+            canceled = await cancel_job(pool, runs_support.ctx(), job_id)
+            assert canceled.status == "canceled", canceled.model_dump()
+            response = await _teardown(pool, system_id, resolver)
+            assert response.status == "queued", response.model_dump()
+            await _run_job(worker, seed, response.object_id)
+            outcome = await fetch_one(seed, _OUTCOME_SQL, (UUID(system_id),))
+            teardown_job = await fetch_one(
+                seed, "SELECT state FROM jobs WHERE id = %s", (UUID(response.object_id),)
+            )
+            allocation_id = (
+                await fetch_one(
+                    seed, "SELECT allocation_id FROM systems WHERE id = %s", (UUID(system_id),)
+                )
+            )["allocation_id"]
+            released = await release_allocation(pool, runs_support.ctx(), str(allocation_id))
+
+        assert teardown_job == {"state": "succeeded"}
+        assert len(executor.calls) == 1
+        assert outcome == {
+            "state": "torn_down",
+            "system_state": "torn_down",
+            "reservations": 0,
+            "releases": 0,
+            "authorities": ["teardown"],
+        }
+        assert provider.phases == []
+        assert released.status == "released", released.model_dump()
 
     asyncio.run(body())
