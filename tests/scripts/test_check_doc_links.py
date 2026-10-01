@@ -49,8 +49,8 @@ def test_broken_link_fails_and_names_target(tmp_path: Path) -> None:
     assert "a.md" in result.stderr
 
 
-def test_external_and_anchor_only_links_ignored(tmp_path: Path) -> None:
-    (tmp_path / "a.md").write_text("[x](https://example.com) [y](#section)\n")
+def test_external_links_ignored(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("[x](https://example.com) [y](#section)\n## Section\n")
     result = _run(tmp_path)
     assert result.returncode == 0, result.stderr
 
@@ -208,7 +208,7 @@ def test_source_filename_is_literal(tmp_path: Path, tracked: bool, name: str) ->
     assert f"broken link: {name} -> missing.md" in result.stderr
 
 
-@pytest.mark.parametrize("text", ["", "No links\n", "[empty]() [anchor](#here)\n"])
+@pytest.mark.parametrize("text", ["", "No links\n", "[empty]() [anchor](#here)\n# Here\n"])
 def test_no_matches_pass(tmp_path: Path, text: str) -> None:
     (tmp_path / "a.md").write_text(text)
     result = _run(tmp_path)
@@ -287,4 +287,82 @@ def test_converter_failure_is_not_git_discovery(
     assert result.returncode != 0
     assert "injected-converter-failure" in result.stderr
     assert "cannot enumerate" in result.stderr
+    assert "markdown links resolve" not in result.stdout
+
+
+@pytest.mark.parametrize("same_file", [False, True], ids=["cross-file", "same-file"])
+def test_missing_anchor_fails_and_names_link(tmp_path: Path, same_file: bool) -> None:
+    (tmp_path / "b.md").write_text("## Real heading\n")
+    link = "#no-such-anchor" if same_file else "b.md#no-such-anchor"
+    (tmp_path / "a.md").write_text(f"## Real heading\n[x](b.md#real-heading) [y]({link})\n")
+    result = _run(tmp_path)
+    assert result.returncode == 1
+    assert f"broken anchor: a.md -> {link}\n" in result.stderr
+    assert "markdown links resolve" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("heading", "fragment"),
+    [
+        ("## Real heading", "real-heading"),
+        ("## `just ci` — the gate", "just-ci--the-gate"),
+        ("## Foo\n\n## Foo", "foo-1"),
+        ("### Step 2: run (fast)!", "step-2-run-fast"),
+        ("## [Linked](a.md) text", "linked-text"),
+        ("## Closing hashes ##", "closing-hashes"),
+        ("## Café §3 → next", "caf%C3%A9-3--next"),
+        ("## Issue ① — X", "issue---x"),
+        ("## zero `<token>.ready`", "zero-tokenready"),
+        ("## A &amp; B", "a--b"),
+        ('<a id="custom-spot"></a>', "custom-spot"),
+        ('<a name="Legacy"></a>', "legacy"),
+        ("## KDIVE_FOO setting", "KDIVE_FOO-setting"),
+        ("---\ntitle: x\n# note\n---\n# note", "note"),
+    ],
+)
+def test_heading_anchor_resolves(tmp_path: Path, heading: str, fragment: str) -> None:
+    (tmp_path / "b.md").write_text(f"{heading}\n")
+    (tmp_path / "a.md").write_text(f"[x](b.md#{fragment})\n")
+    result = _run(tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("text", "fragment"),
+    [
+        ("\x60\x60\x60\n## Hidden\n\x60\x60\x60\n", "hidden"),
+        ("~~~~\n## Hidden\n~~~\n~~~~\n", "hidden"),
+        ("---\ntitle: x\n# note\n---\n# note\n", "note-1"),
+    ],
+    ids=["backtick-fence", "tilde-fence", "front-matter"],
+)
+def test_non_heading_lines_are_not_anchors(tmp_path: Path, text: str, fragment: str) -> None:
+    (tmp_path / "b.md").write_text(text)
+    (tmp_path / "a.md").write_text(f"[x](b.md#{fragment})\n")
+    result = _run(tmp_path)
+    assert result.returncode == 1
+    assert f"broken anchor: a.md -> b.md#{fragment}" in result.stderr
+
+
+def test_fragment_on_non_markdown_target_ignored(tmp_path: Path) -> None:
+    (tmp_path / "tool.py").write_text("pass\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "a.md").write_text("[x](tool.py#L1) [y](docs/#z) [z](b.md#)\n")
+    (tmp_path / "b.md").write_text("hi\n")
+    result = _run(tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("status", [1, 23])
+@pytest.mark.parametrize("partial", [False, True], ids=["empty", "partial"])
+def test_anchor_stage_failure_cannot_certify_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, partial: bool
+) -> None:
+    (tmp_path / "a.md").write_text("# Here\n[x](#here)\n")
+    output = "echo 'broken anchor: x' >&2\n" if partial else ""
+    _tool_stub(tmp_path, monkeypatch, "python3", f"{output}echo injected >&2\nexit {status}")
+    result = _run(tmp_path)
+    assert result.returncode != 0
+    assert "injected" in result.stderr
+    assert "cannot check markdown anchors" in result.stderr
     assert "markdown links resolve" not in result.stdout

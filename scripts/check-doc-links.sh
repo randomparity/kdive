@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Resolve relative markdown links in tracked *.md files against the filesystem.
-# Reports only; exits 1 if any relative link target is missing. External (scheme://,
-# mailto:) and pure-anchor (#...) links are ignored — only on-disk targets are checked.
+# Reports only; exits 1 if a relative link target is missing, or if a link's #fragment
+# (same-file, or into a .md target) matches no heading or <a id|name> anchor there, using
+# GitHub's heading slugs (scripts/check_doc_anchors.py). External (scheme://, mailto:) links
+# are ignored.
 # The current architecture, docs/design/top-level-design.md, is checked.
 # NOT scanned: docs/archive/** (frozen history), other docs/design/** (narrative specs), the
 # vendored agent-tooling dirs .claude/**, .agents/**, .codex/** (not project docs), and the
@@ -13,6 +15,8 @@
 # Usage: check-doc-links.sh [ROOT]   (ROOT defaults to the repo root / cwd)
 set -euo pipefail
 
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SELF_DIR
 readonly ROOT="${1:-.}"
 cd "${ROOT}"
 
@@ -53,6 +57,7 @@ if [[ -z "$files" ]]; then
 fi
 
 broken=0
+anchored=()
 while IFS= read -r f; do
   [[ -n "$f" ]] || continue
   dir="$(dirname "./$f")"
@@ -73,18 +78,38 @@ while IFS= read -r f; do
   while IFS= read -r target; do
     [[ -z "$target" ]] && continue
     case "$target" in
-    *"://"* | mailto:* | "#"*) continue ;;
+    *"://"* | mailto:*) continue ;;
     esac
     # strip a trailing CommonMark title:  [t](dest "title")  -> dest
     target="${target%% *}"
-    target="${target%%#*}"
-    [[ -z "$target" ]] && continue
-    if [[ ! -e "${dir}/${target}" ]]; then
-      printf "broken link: %s -> %s\n" "$f" "$target" >&2
+    path="${target%%#*}"
+    fragment="${target#"$path"}"
+    if [[ -n "$path" && ! -e "${dir}/${path}" ]]; then
+      printf "broken link: %s -> %s\n" "$f" "$path" >&2
       broken=1
+      continue
+    fi
+    ((${#fragment} > 1)) || continue
+    anchor_file="${dir}/${path}"
+    [[ -n "$path" ]] || anchor_file="$f"
+    if [[ "$anchor_file" == *.md && -f "$anchor_file" ]]; then
+      anchored+=("$f" "$anchor_file" "$target")
     fi
   done <<<"$targets"
 done <<<"$files"
+
+if ((${#anchored[@]})); then
+  anchor_status=0
+  printf '%s\0' "${anchored[@]}" | python3 "${SELF_DIR}/check_doc_anchors.py" || anchor_status=$?
+  case "$anchor_status" in
+  0) ;;
+  3) broken=1 ;;
+  *)
+    printf 'cannot check markdown anchors; check python3 diagnostics above\n' >&2
+    exit 1
+    ;;
+  esac
+fi
 
 if ((broken)); then
   printf "\nmarkdown link check failed\n" >&2
