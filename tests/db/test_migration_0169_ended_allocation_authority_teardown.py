@@ -54,7 +54,7 @@ def _end(migrated_url: str, case: _AuthorityCase, state: str) -> None:
 def _try_allocate(role_dsns: _RoleDsns, case: _AuthorityCase) -> str:
     with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
         row = worker.execute(
-            f"SELECT status FROM {_ALLOCATE_SIGNATURE.split('(')[0]}"
+            "SELECT status FROM allocate_external_boot_authority"
             "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 case.credential,
@@ -77,7 +77,7 @@ def _try_allocate(role_dsns: _RoleDsns, case: _AuthorityCase) -> str:
 def _acknowledge(role_dsns: _RoleDsns, case: _AuthorityCase, authority: _Allocated) -> str:
     with psycopg.connect(role_dsns("kdive_provider_authority"), autocommit=True) as host:
         row = host.execute(
-            f"SELECT status FROM {_ACKNOWLEDGE_SIGNATURE.split('(')[0]}"
+            "SELECT status FROM acknowledge_external_boot_authority"
             "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 authority.authority_id,
@@ -110,7 +110,7 @@ def _commit_failure(
 ) -> tuple[str, str | None]:
     with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
         row = worker.execute(
-            f"SELECT status, job_state FROM {_COMMIT_SIGNATURE.split('(')[0]}"
+            "SELECT status, job_state FROM commit_external_boot_authority_result"
             "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 case.credential,
