@@ -96,9 +96,12 @@ Verification:
 - Contract S1/S2/S6: Mode: focused-test — parametrize
   `test_teardown_replaces_failed_ordinary_job_for_external_boot_history` with
   `via in ("systems.teardown", "ops.force_teardown")`; the break-glass arm calls
-  `breakglass.force_teardown(pool, platform_admin_ctx, system_id=..., reason="stuck",
-  resolver=provider_resolver(external_boot=ExternalBootOperations()))` and asserts one
-  `platform_audit_log` row. Red before Task 2: the break-glass arm fails with `TypeError`
+  `breakglass.force_teardown(pool, admin, system_id=..., reason="stuck",
+  resolver=provider_resolver(external_boot=ExternalBootOperations()))` with `admin =
+  RequestContext(principal="ops-admin", agent_session="s", projects=(), roles={},
+  platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}))` built inline, and asserts
+  `SELECT count(*) FROM platform_audit_log WHERE tool = 'ops.force_teardown'` is 1. Import
+  `from kdive.mcp.tools.ops.security import breakglass`. Red before Task 2: the break-glass arm fails with `TypeError`
   (no `resolver` kwarg), and with the kwarg ignored it returns the recycled ordinary job without
   `external_boot_authority_v1`.
 - Contract S3: Mode: focused-test — `test_force_teardown_external_boot_history_needs_resolver`:
@@ -108,7 +111,7 @@ Verification:
 - Contract S4: Mode: focused-test — `test_force_teardown_ordinary_path_runs_admission_matrix`:
   no activation; monkeypatch `admin.check_external_boot_admission` to raise
   `ExternalBootDenied("denied", details={"reason": "x"}, next_actions=[], project="proj")`
-  → failure, no `{uid}:teardown` row. Red before: a job is enqueued.
+  → failure, no `{uid}:teardown` row, one audit row. Red before: a job is enqueued.
 - Contract S5: existing `tests/mcp/ops/test_breakglass.py` green.
 - Command: `just test-verbose tests/mcp/lifecycle/test_systems_tools.py tests/mcp/ops/test_breakglass.py`.
 
@@ -122,11 +125,14 @@ Steps:
         routed = await route_external_boot_teardown(conn, ctx, system, str(uid), None, resolver)
         if routed is not None:
             return routed
-        denial = await ordinary_teardown_denial(conn, ctx, system, str(uid))
-        if denial is not None:
-            return denial
+        if not await ordinary_mutation_is_fenced(conn, uid):
+            denial = await ordinary_teardown_denial(conn, ctx, system, str(uid))
+            if denial is not None:
+                return denial
 ```
-   then the existing `enqueue_control_teardown(..., recycle=FAILED)`.
+   then the existing `enqueue_control_teardown(..., recycle=FAILED)`. `ordinary_mutation_is_fenced`
+   is imported from `kdive.services.systems.authority_owned`; a preactivation System must skip
+   the matrix, which refuses it (existing `test_force_teardown_routes_preactivation_authority_system`).
 4. `register`: `force_teardown(..., resolver=resolver)`. Wrapper docstring: add "A System with
    external-boot history gets the authority-marked teardown that systems.teardown enqueues."
    Update the `force_teardown` and module docstrings to match.

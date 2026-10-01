@@ -35,9 +35,13 @@ operator's last-resort tool therefore cannot tear down a System the project tool
 2. Break-glass `_teardown_locked`, under the same System advisory lock and transaction, keeps its
    existing order: stale-handle `config_error`, `torn_down` idempotent success, `reprovisioning`
    `conflict`. Then it calls `route_external_boot_teardown(conn, ctx, system, str(uid), None,
-   resolver)` and returns its envelope when non-`None`. Otherwise it calls
-   `ordinary_teardown_denial` and returns a denial, then calls `enqueue_control_teardown(...,
-   recycle=FAILED)` as today (preactivation-authority and ordinary rows unchanged).
+   resolver)` and returns its envelope when non-`None`. Otherwise, when
+   `ordinary_mutation_is_fenced(conn, uid)` is false (no preactivation authority binding), it calls
+   `ordinary_teardown_denial` and returns a denial. Then it calls `enqueue_control_teardown(...,
+   recycle=FAILED)` as today. The fence check keeps `systems.teardown`'s order: the matrix refuses
+   `SYSTEM_TEARDOWN` before an authority System's first activation, so a preactivation System goes
+   straight to its preactivation teardown, as `test_force_teardown_routes_preactivation_authority_system`
+   requires.
 3. `force_teardown` gains a keyword `resolver: ProviderResolver | None = None`; `register()` passes
    its existing `resolver` through. A `None` resolver on the activation route returns the existing
    typed `configuration_error` (`external_boot_teardown_authority_unresolved`); it never falls back
@@ -86,7 +90,9 @@ Route in `enqueue_control_teardown` — ADR-0620 (#2966 amendment) rejected it b
 3. Accepted classes: an activation created after the locked read is outside this change — the
    activation is created under the same System lock, and the worker refusal still covers a queued
    ordinary job (ADR-0620 #2966 amendment). A torn-down System with history returns `torn_down`
-   success before the route, as today.
+   success before the route, as today. A `reprovisioning` System with history returns break-glass's
+   existing `conflict` before the route, where `systems.teardown` would route it; the operator
+   retries once the reprovision settles, and that retry routes.
 4. Covered elsewhere: investigation force-close and the orphaned-System lane still enqueue
    unmarked jobs (#3025, worker refusal); `tearing_down` residue (#3015); canceled orphans (#3006).
 
