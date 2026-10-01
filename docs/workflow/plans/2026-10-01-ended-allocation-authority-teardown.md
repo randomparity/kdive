@@ -7,14 +7,14 @@ Spec: [2026-10-01-ended-allocation-authority-teardown-design.md](../specs/2026-1
 
 Architecture: forward-only migration `0169` rewrites one literal in three security-definer
 functions with the 0168 `pg_get_functiondef` replace pattern. The DB suite proves both arms per
-function; one integration arm proves the public route end to end. ADR-0584 and ADR-0620 get
+function; a local, uncommitted integration run checks the public route end to end. ADR-0584 and ADR-0620 get
 dated amendments; the runbook loses its "no exit after expiry" limit.
 
 Tech stack: Postgres plpgsql, Python 3.14, psycopg 3, pytest.
 
 Expected implementation size: 300–360 changed lines (M) — gross insertions plus deletions from
 the file map: migration ~30, 0169 tests ~180, helper move ~100 (cut and paste), `_make_current`
-keyword ~8, 0168 test removal ~40, window lists ~10, integration arm ~25, ADR amendments ~40,
+keyword ~8, 0168 test removal ~40, window lists ~10, ADR amendments ~40,
 runbook ~15.
 
 ## Global Constraints
@@ -160,23 +160,22 @@ $$;
    file, observe each of the three `*_keeps_fence_for_other_purposes` tests red on its expired
    arm; `git checkout -- src/kdive/db/schema/0169_*.sql`.
 
-## Task 2: the public route on an expired Allocation
+## Task 2: end-to-end check of the public route (not committed)
 
-Files: modify `tests/integration/test_external_boot_unrouted_teardown.py`.
+`tests/integration/` is outside the frozen surface (scope audit F4), so the end-to-end arm is a
+local verification run, not a committed test; criterion 3 is proven in the committed suite by
+`test_0169_teardown_completes_on_ended_allocation`.
 
 Verification:
 - Contract: `systems.teardown` on a System whose Allocation is `expired` queues the authority
-  teardown and one worker pass leaves System and activation `torn_down`. Mode: focused-test.
-  Add `"expired"` to the `residue` parametrization of `test_routed_teardown_completes_and_releases`:
-  after the activate job is canceled, `UPDATE allocations SET state = 'expired'`; expect the
-  same outcome, and the final `release_allocation` call to not report `released` (skip that
-  assertion for this arm, asserting the Allocation stays `expired`). Red with the 0169 file
-  removed: the job does not succeed. Green:
-  `just test-verbose tests/integration/test_external_boot_unrouted_teardown.py`.
-
-Steps: add the arm; move `src/kdive/db/schema/0169_ended_allocation_authority_teardown.sql` to
-the scratchpad, run the file and record the failure on the `expired` arm, move it back; run
-green; commit.
+  teardown and one worker pass leaves System and activation `torn_down`. Mode:
+  task-test-not-applicable for the committed diff — the observation runs as a temporary
+  `"expired"` arm of `test_routed_teardown_completes_and_releases` in
+  `tests/integration/test_external_boot_unrouted_teardown.py` (after the activate job is
+  canceled, `UPDATE allocations SET state = 'expired'`; skip the final `released` assertion),
+  run once with and once without the 0169 file, then reverted with
+  `git checkout -- tests/integration/test_external_boot_unrouted_teardown.py`. Record both
+  results in the PR body.
 
 ## Task 3: decision record and runbook
 
@@ -194,8 +193,11 @@ Steps:
    — purpose `teardown` is allocated, acknowledged, and committed on an Allocation in any state;
    every other purpose keeps the `active` requirement; migration 0169; rejected alternatives
    (do nothing; admit only `released`/`expired`; relax only the allocator).
-2. ADR-0620: a short amendment pointing to the ADR-0584 amendment and superseding the #3026
-   amendment's "still answers `superseded`" sentence for this case.
+2. ADR-0620: a short amendment pointing to the ADR-0584 amendment. It states that it supersedes,
+   for lease expiry and release, the #2966 amendment's "the authority allocator admits a teardown
+   only on an `active` allocation" and its rejected alternative "Admit an authority teardown on a
+   released allocation" (lease expiry is the path #2966 left to #2992), and the #3026
+   amendment's "still answers `superseded`" sentence.
 3. Runbook: keep the quoted reconciler WARNING verbatim (its "while its Allocation is active"
    text lives in `src/kdive/reconciler/repairs/systems.py`, outside this surface) and add a
    sentence that the condition no longer applies since 0169; drop "runs only on an `active` Allocation", the `allocations.renew` step, and the

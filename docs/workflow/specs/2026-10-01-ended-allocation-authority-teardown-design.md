@@ -91,7 +91,10 @@ reads the Allocation state: `route_external_boot_teardown` and `_teardown_prereq
 - The 0168 test that pinned `superseded` on an `expired` Allocation is removed; its inverse is in
   the 0169 suite.
 - End to end, `systems.teardown` on a System whose Allocation is `expired` queues the authority
-  teardown, one worker pass succeeds it, and the System and activation are `torn_down`.
+  teardown, one worker pass succeeds it, and the System and activation are `torn_down` (a local
+  verification run; `tests/integration/` is outside the surface).
+- The issue's native ppc64le proof (Proposed 4) is neither run nor claimed by this change: the
+  change is architecture-independent PL/pgSQL, proven on real Postgres.
 
 ## Validation
 
