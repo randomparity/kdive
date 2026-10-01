@@ -27,13 +27,20 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
-from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
+from kdive.domain.capacity.state import (
+    AllocationState,
+    ExternalBootActivationState,
+    ResourceStatus,
+    SystemState,
+)
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools.ops.resources import host_ops
 from kdive.mcp.tools.ops.security import breakglass
 from kdive.security.authz.rbac import PlatformRole
+from tests.services.external_boot.conftest import SeededActivation, seed_activation
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _TARGET_PROJECT = "tenant-x"
@@ -403,6 +410,95 @@ def test_force_release_missing_allocation_unaudited(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert await _count_platform_audit(migrated_url) == 0
+
+    asyncio.run(_run())
+
+
+async def _seed_denied_allocation(
+    url: str, *, cleanup_complete: bool
+) -> tuple[SeededActivation, UUID, UUID]:
+    """An abandoned activation on a granted allocation's System: (seed, allocation, resource).
+
+    Uncleaned, the activation itself refuses the release; cleaned, the System's external-boot
+    history still does until the System is torn down (ADR-0620).
+    """
+    async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
+        seeded = await seed_activation(
+            conn,
+            state=ExternalBootActivationState.ABANDONED,
+            cleanup_complete=cleanup_complete,
+            ready_reservation=True,
+        )
+        cursor = await conn.execute(
+            "SELECT a.id, a.resource_id FROM systems s JOIN allocations a "
+            "ON a.id = s.allocation_id WHERE s.id = %s",
+            (seeded.system_id,),
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    return seeded, row[0], row[1]
+
+
+def test_force_release_external_boot_denial_carries_detail_and_next_action(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        seeded, alloc_id, _ = await _seed_denied_allocation(migrated_url, cleanup_complete=False)
+        async with _pool(migrated_url) as pool:
+            resp = await breakglass.force_release(
+                pool, _admin_ctx(), allocation_id=str(alloc_id), reason="stuck"
+            )
+        assert resp.error_category == "conflict"
+        assert resp.detail is not None
+        assert str(seeded.activation.id) in resp.detail
+        assert resp.data["reason"] == "external_boot_restricted"
+        assert resp.data["activation_id"] == str(seeded.activation.id)
+        assert resp.data["activation_state"] == "abandoned"
+        assert resp.data["owning_run_id"] == str(seeded.run_id)
+        # The admin holds no project role, so `runs.get` is filtered out and the project
+        # teardown is named by its break-glass counterpart.
+        assert resp.suggested_next_actions == ["ops.force_teardown"]
+        assert await _alloc_state(migrated_url, alloc_id) == "granted"
+
+    asyncio.run(_run())
+
+
+def test_force_release_teardown_required_names_the_system(migrated_url: str) -> None:
+    async def _run() -> None:
+        seeded, alloc_id, _ = await _seed_denied_allocation(migrated_url, cleanup_complete=True)
+        async with _pool(migrated_url) as pool:
+            resp = await breakglass.force_release(
+                pool, _admin_ctx(), allocation_id=str(alloc_id), reason="stuck"
+            )
+        assert resp.error_category == "conflict"
+        assert resp.detail is not None
+        assert resp.data["reason"] == "external_boot_system_teardown_required"
+        assert resp.data["system_id"] == str(seeded.system_id)
+        assert resp.suggested_next_actions == ["ops.force_teardown"]
+
+    asyncio.run(_run())
+
+
+def test_drain_force_release_item_carries_external_boot_denial(migrated_url: str) -> None:
+    async def _run() -> None:
+        seeded, alloc_id, resource_id = await _seed_denied_allocation(
+            migrated_url, cleanup_complete=False
+        )
+        async with _pool(migrated_url) as pool:
+            resp = await host_ops.drain_resource(
+                pool,
+                _admin_ctx(),
+                resource_id=str(resource_id),
+                mode="force_release",
+                reason="maintenance",
+            )
+        assert [item.object_id for item in resp.items] == [str(alloc_id)]
+        item = resp.items[0]
+        assert item.error_category == "conflict"
+        assert item.detail is not None
+        assert item.data["activation_id"] == str(seeded.activation.id)
+        assert item.data["activation_state"] == "abandoned"
+        assert item.suggested_next_actions == ["ops.force_teardown"]
 
     asyncio.run(_run())
 

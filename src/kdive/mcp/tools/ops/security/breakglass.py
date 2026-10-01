@@ -53,6 +53,7 @@ from kdive.mcp.tools.external_boot.recovery_requests import (
 from kdive.mcp.tools.external_boot.recovery_requests import (
     resolve_recovery_orphan as _resolve_recovery_orphan,
 )
+from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_failure
 from kdive.mcp.tools.lifecycle.systems.admin import (
     ordinary_teardown_denial,
     route_external_boot_teardown,
@@ -165,23 +166,16 @@ async def force_release(
                 actor=actor_for(ctx),
             ),
         )
-        return _force_release_response(uid, outcome)
+        return _force_release_response(uid, outcome, ctx, alloc.project)
 
 
-def _force_release_response(uid: UUID, outcome: ReleaseOutcome) -> ToolResponse:
+def _force_release_response(
+    uid: UUID, outcome: ReleaseOutcome, ctx: RequestContext, project: str
+) -> ToolResponse:
     """Map release service outcome to the break-glass MCP envelope."""
     if outcome.released:
         return ToolResponse.success(str(uid), "released")
-    data = {"current_status": outcome.current_status} if outcome.current_status else {}
-    category = outcome.category or ErrorCategory.CONFIGURATION_ERROR
-    return ToolResponse.failure(
-        str(uid),
-        category,
-        suggested_next_actions=["allocations.wait"]
-        if category is ErrorCategory.STALE_HANDLE
-        else [],
-        data=data,
-    )
+    return release_failure(str(uid), outcome, ctx, project, breakglass=True)
 
 
 async def force_teardown(

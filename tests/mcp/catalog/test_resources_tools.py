@@ -939,7 +939,9 @@ def test_set_scheduling_denied_for_auditor_is_audited(migrated_url: str) -> None
 
 
 def test_classify_released_is_released_status() -> None:
-    item = resources_tools._classify_drain_release("a-1", ReleaseOutcome(released=True))
+    item = resources_tools._classify_drain_release(
+        "a-1", ReleaseOutcome(released=True), _ADMIN, "proj"
+    )
     assert item.object_id == "a-1"
     assert item.status == "released"
     assert item.error_category is None
@@ -955,6 +957,8 @@ def test_classify_stale_handle_is_skipped_with_status() -> None:
         ReleaseOutcome(
             released=False, category=ErrorCategory.STALE_HANDLE, current_status="expired"
         ),
+        _ADMIN,
+        "proj",
     )
     assert item.status == "skipped"
     assert item.error_category is None
@@ -967,6 +971,8 @@ def test_classify_failed_with_status_carries_current_status() -> None:
         ReleaseOutcome(
             released=False, category=ErrorCategory.CONFIGURATION_ERROR, current_status="active"
         ),
+        _ADMIN,
+        "proj",
     )
     assert item.status == "error"
     assert item.error_category == "configuration_error"
@@ -979,6 +985,8 @@ def test_classify_failed_without_status_omits_current_status() -> None:
     item = resources_tools._classify_drain_release(
         "a-4",
         ReleaseOutcome(released=False, category=ErrorCategory.CONFIGURATION_ERROR),
+        _ADMIN,
+        "proj",
     )
     assert item.status == "error"
     assert item.error_category == "configuration_error"
