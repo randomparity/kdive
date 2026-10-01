@@ -2,7 +2,7 @@
 # Resolve the real role's package and daemon expressions without changing the host.
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export LIBVIRT_STACK_ROLE="$here/../roles/libvirt_stack"
 
 python3 - <<'PY'

@@ -4,7 +4,7 @@
 # beyond that. Consumers source env.sh themselves when they need the KDIVE_* runtime config.
 
 # scripts/live-stack/ -> repo root is two levels up (matches the other scripts in this directory).
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 # KDIVE_PYTHON overrides the interpreter (the #1293 self-hosted CI job points it at /opt/kdive's
 # libguestfs venv); unset, it stays the workspace .venv so operator use is unchanged.
 py="${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"

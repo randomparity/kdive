@@ -42,7 +42,7 @@
 set -euo pipefail
 
 # Captured before the cd to the repository root, so a relative invocation still resolves.
-SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+SELF_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 SELF_FILE="$SELF_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 failed=0

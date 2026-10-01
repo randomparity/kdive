@@ -8,7 +8,7 @@
 #
 # Every value is overridable from the caller's environment.
 
-example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+example_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${example_dir}/../.." && pwd)"
 
 # install-host.sh installs uv under ~/.local/bin, and the live-stack scripts this example wraps

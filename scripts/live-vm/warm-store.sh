@@ -10,7 +10,7 @@ set -euo pipefail
 # Linux host this script targets has; it is unusable on macOS's bash 3.2 regardless (libguestfs).
 shopt -s inherit_errexit
 
-here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/live-vm/lib.sh
 source "${here}/lib.sh"
 

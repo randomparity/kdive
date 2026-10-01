@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CHECKER="$SCRIPT_DIR/check-records.sh"
 # Whether the scratch tree is this script's to delete. A caller who names one owns it, and
 # gets it back either way; the default one is ours and is cleaned up on a green run.

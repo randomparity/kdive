@@ -16,7 +16,7 @@
 # Usage: check-served-doc-links.sh [ROOT]
 set -euo pipefail
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SELF_DIR
 readonly REPO_ROOT="${SELF_DIR}/.."
 readonly ROOT="${1:-.}"

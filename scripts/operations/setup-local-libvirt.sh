@@ -16,7 +16,7 @@
 #   KDIVE_MAX_SYS (4); KDIVE_SETUP_AUDITED, KDIVE_MCP_BASE, KDIVE_TOKEN for the audited path.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 
 # kdive/fastmcp live in the project venv, not the system python3. Prefer the repo's .venv when
