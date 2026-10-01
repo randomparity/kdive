@@ -261,6 +261,11 @@ A `ready` System whose teardown job is queued or running is refused with `confli
 System; reprovision only if `systems.get` shows it still `ready` after the teardown job
 failed or was canceled.
 
+Re-applying a profile the System applied before runs a fresh attempt of that
+profile's job. While that job is queued or running, or for 15 minutes after it ended
+canceled, lease-lapsed, or on a retried attempt, the call is refused with `conflict`
+(`reason: reprovision_job_settling`, `job_id`) and the System stays `ready`.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |

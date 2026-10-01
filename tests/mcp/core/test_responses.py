@@ -242,6 +242,15 @@ def test_validate_stored_failure_is_a_server_fault() -> None:
     assert not isinstance(info.value, ValueError)
 
 
+def test_stored_fault_names_are_owned_below_mcp() -> None:
+    # kdive.db raises these, and it may not import kdive.mcp (#3009).
+    import kdive.serialization as owner
+    from kdive.mcp import responses
+
+    assert responses.ServerFaultError is owner.ServerFaultError
+    assert responses.validate_stored is owner.validate_stored
+
+
 def test_recovery_response_with_malformed_recorded_payload_is_a_server_fault() -> None:
     from kdive.mcp.tools.external_boot.recovery_idempotency import recovery_response
 

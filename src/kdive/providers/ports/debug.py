@@ -149,6 +149,7 @@ class GdbMiAttachment:
     records: list[object] = field(default_factory=list)
     run_id: str = ""
     loaded_modules: set[str] = field(default_factory=set)
+    guest_arch: str | None = None
 
 
 class GdbMiEngine(Protocol):
