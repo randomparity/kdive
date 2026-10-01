@@ -1,7 +1,7 @@
 """Report a server fault in a tool body as one, not as an argument error (ADR-0709).
 
 An invalid ``ToolResponse`` and a failed rebuild of stored data raise
-:class:`~kdive.mcp.responses.ServerFaultError` rather than a pydantic ``ValidationError``, so
+:class:`~kdive.serialization.ServerFaultError` rather than a pydantic ``ValidationError``, so
 FastMCP logs it at ERROR with its traceback — the server-side record — and re-raises it as a
 ``ToolError`` chained from it. This middleware turns that ``ToolError`` into an
 ``infrastructure_failure`` envelope whose ``detail`` is a fixed constant, so nothing about the
