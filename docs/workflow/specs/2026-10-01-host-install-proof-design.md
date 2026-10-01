@@ -73,6 +73,7 @@ step whose exit code is recorded as `timeout`.
 | 3 | `bootstrap` | Git through the distribution package manager when absent, then the documented `uv` installer. |
 | 3a | `just` | `uv tool install rust-just`, in a new login, so the `~/.local/bin` the installer created is on `PATH`. |
 | 4 | `clone` | Clone a `git bundle` of the candidate (copied by `scp`) to `~/kdive`, detached at the candidate, with `origin` set to the public URL and `origin/main` fetched, as a documented clone has it (the setup hooks read it). |
+| 4a | `kernel-source` | `scripts/fetch-kernel-tree.sh ~/src/linux` at the bundle's source commit. The example README lists a kernel tree at `KDIVE_KERNEL_SRC` as a prerequisite, and host preparation grants workers traversal only to a tree that already exists. |
 | 5 | `setup` | `just setup` |
 | 6 | `prepare` | `just prepare-local-libvirt-host`, with the documented local witness DSN exported and an empty line on stdin for the become prompt. |
 | 7 | `preflight` | `just check-local-libvirt` |

@@ -55,6 +55,7 @@ CLEAN_STEPS = (
     "just",
     "copy-source",
     "clone",
+    "kernel-source",
     "setup",
     "prepare",
     "preflight",
@@ -134,6 +135,12 @@ git remote set-url origin {origin}
 git fetch --quiet origin main
 rm -f "$HOME/kdive-candidate.bundle"
 git rev-parse HEAD
+"""
+# examples/local-libvirt/README.md lists a kernel tree at KDIVE_KERNEL_SRC (default ~/src/linux)
+# as a prerequisite; host preparation grants workers traversal only to a tree that exists.
+_KERNEL_SOURCE = """set -euo pipefail
+cd "$HOME/kdive"
+KDIVE_KERNEL_REF={commit} scripts/fetch-kernel-tree.sh "$HOME/src/linux"
 """
 _SETUP = 'set -euo pipefail\ncd "$HOME/kdive"\njust setup\n'
 _PREPARE = """set -euo pipefail
@@ -743,6 +750,7 @@ def _drive(
 ) -> Context:
     """Run the documented sequence; stop at the first failed step. Returns the final binding."""
     run_id = uuid.uuid4().hex[:12]
+    kernel_commit = binding.kernel_source_sha or ""
     host_dir = f"{remote.target}:host-install-{run_id}"
     if (
         operator is not None
@@ -771,7 +779,9 @@ def _drive(
         ("preflight", _PREFLIGHT, SHORT_STEP_S),
         ("stack", _STACK, SHORT_STEP_S),
     ]
-    if not _run_sequence(remote, [("clone", clone, SHORT_STEP_S), *setup]):
+    kernel = step_script(_KERNEL_SOURCE, commit=kernel_commit)
+    first = [("clone", clone, SHORT_STEP_S), ("kernel-source", kernel, SHORT_STEP_S)]
+    if not _run_sequence(remote, [*first, *setup]):
         return binding
     built = remote.step(
         "guest-image", _in_run(step_script(_IMAGE, image=image), run_id), LONG_STEP_S
