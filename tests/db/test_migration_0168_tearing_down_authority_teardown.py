@@ -105,6 +105,9 @@ def test_0168_expired_allocation_still_supersedes(
     assert row == ("superseded",)
     with psycopg.connect(migrated_url) as conn:
         assert conn.execute(
-            "SELECT count(*) FROM external_boot_authorities WHERE system_id = %s",
+            "SELECT s.state, e.state, "
+            "(SELECT count(*) FROM external_boot_authorities a WHERE a.system_id = s.id) "
+            "FROM systems s JOIN external_boot_activations e ON e.system_id = s.id "
+            "WHERE s.id = %s",
             (case.system_id,),
-        ).fetchone() == (0,)
+        ).fetchone() == ("tearing_down", "prepared", 0)
