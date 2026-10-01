@@ -5,7 +5,8 @@ Wires the ADR-0286/#957 computed kdump signal
 admission path: a kdump/fadump capture on a booted rootfs image whose computed kdump capability
 is confidently negative is refused before a worker job is enqueued, instead of failing opaquely
 deep in the capture. Every resolution uncertainty passes (fail open, ADR-0361) — the gate can
-only *refuse* on a confident negative.
+only *refuse* on a confident negative. A corrupt catalog row is not one of ADR-0361's resolution
+gaps: its ``ServerFaultError`` propagates (ADR-0709, #3044).
 """
 
 from __future__ import annotations
@@ -37,6 +38,10 @@ async def refusing_kdump_capability(
     is a confident negative; returns ``None`` — the caller then admits — on every resolution gap
     (unparsable profile, non-local-libvirt provider, non-catalog rootfs, no visible registered row)
     and on a ``capable``/``unverified`` status.
+
+    A corrupt catalog row is not a gap. The resolver's ``ServerFaultError`` propagates, so the call
+    reports a server fault instead of admitting a capture over a catalog record the server cannot
+    read (ADR-0709, #3044).
     """
     entry = await resolve_system_catalog_rootfs(conn, system)
     if entry is None:
