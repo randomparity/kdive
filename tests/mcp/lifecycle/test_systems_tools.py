@@ -6,7 +6,7 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -2525,6 +2525,162 @@ def test_reprovision_different_profile_is_new_job(migrated_url: str) -> None:
                 await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
                 n = await cur.fetchone()
         assert n is not None and n["n"] == 2
+
+    asyncio.run(_run())
+
+
+async def _settle_reprovision_job(
+    pool: AsyncConnectionPool,
+    job_id: str,
+    state: str,
+    *,
+    error_category: str | None = None,
+    attempt: int = 1,
+    ago: timedelta | None = None,
+) -> None:
+    """Leave the System `ready` behind its reprovision job in ``state``, as a worker would."""
+    if state == "running":
+        await _run_final_attempt(pool, job_id, lease="5 minutes")
+    async with pool.connection() as conn:
+        if state != "running":
+            await conn.execute(
+                "UPDATE jobs SET state = %s, error_category = %s, attempt = %s WHERE id = %s",
+                (state, error_category, attempt, job_id),
+            )
+        await conn.execute(
+            "UPDATE systems SET state = 'ready' WHERE id = "
+            "(SELECT (payload->>'system_id')::uuid FROM jobs WHERE id = %s)",
+            (job_id,),
+        )
+        if ago is not None:
+            await conn.execute("ALTER TABLE jobs DISABLE TRIGGER jobs_set_updated_at")
+            try:
+                await conn.execute(
+                    "UPDATE jobs SET updated_at = now() - %s WHERE id = %s", (ago, job_id)
+                )
+            finally:
+                await conn.execute("ALTER TABLE jobs ENABLE TRIGGER jobs_set_updated_at")
+
+
+async def _job_row(pool: AsyncConnectionPool, job_id: str) -> dict[str, Any]:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    return row
+
+
+def test_reprovision_back_to_applied_profile_runs_fresh_attempt(migrated_url: str) -> None:
+    """#3008: A -> B -> A recycles A's settled job, so the third handler runs."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile_a = _active_allocation_profile()
+            profile_b = {**profile_a, "memory_mb": 8192}
+            prov = FakeProvisioning()
+            resolver = provider_resolver(provisioner=prov)
+            job_ids: list[str] = []
+            for profile in (profile_a, profile_b, profile_a):
+                resp = await _reprovision(pool, ctx(), sys_id, profile)
+                assert resp.status == "queued"
+                row = await _job_row(pool, resp.object_id)
+                assert row["state"] == "queued" and row["attempt"] == 0  # a fresh attempt
+                async with pool.connection() as conn:
+                    await systems_handlers.reprovision_handler(
+                        conn, Job.model_validate(row), resolver=resolver
+                    )
+                await _settle_reprovision_job(pool, resp.object_id, "succeeded")
+                job_ids.append(resp.object_id)
+            state = await _system_state(pool, sys_id)
+        assert prov.reprovisioned == [UUID(sys_id)] * 3  # the third handler ran
+        assert job_ids[2] == job_ids[0]  # A's dedup row, recycled
+        assert state == "ready"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("job_state", "error_category", "attempt", "ago"),
+    [
+        ("succeeded", None, 1, None),
+        ("failed", None, 1, None),  # the only handler returned before this write
+        ("canceled", None, 1, timedelta(minutes=16)),
+        ("failed", "lease_expired", 1, timedelta(minutes=16)),
+        ("failed", None, 2, timedelta(minutes=16)),
+        ("succeeded", None, 2, timedelta(minutes=16)),
+    ],
+)
+def test_reprovision_recycles_settled_same_profile_job(
+    migrated_url: str,
+    job_state: str,
+    error_category: str | None,
+    attempt: int,
+    ago: timedelta | None,
+) -> None:
+    """#3008: a same-profile row with no handler left behind it is reset to a fresh attempt."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile = _active_allocation_profile()
+            first = await _reprovision(pool, ctx(), sys_id, profile)
+            await _settle_reprovision_job(
+                pool,
+                first.object_id,
+                job_state,
+                error_category=error_category,
+                attempt=attempt,
+                ago=ago,
+            )
+            again = await _reprovision(pool, ctx(), sys_id, profile)
+            row = await _job_row(pool, first.object_id)
+            state = await _system_state(pool, sys_id)
+        assert again.status == "queued"
+        assert again.object_id == first.object_id
+        assert row["state"] == "queued" and row["attempt"] == 0 and row["error_category"] is None
+        assert state == "reprovisioning"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("job_state", "error_category", "attempt"),
+    [
+        ("queued", None, 0),
+        ("running", None, 3),
+        ("canceled", None, 1),  # `jobs.cancel` leaves the handler running
+        ("failed", "lease_expired", 1),  # written over a lapsed attempt
+        ("failed", None, 2),  # a reclaimed attempt; the lapsed one may still run
+        ("succeeded", None, 2),
+    ],
+)
+def test_reprovision_refuses_while_same_profile_handler_may_run(
+    migrated_url: str, job_state: str, error_category: str | None, attempt: int
+) -> None:
+    """#3008: a recycle resets the attempt counter, so a row that may hide a handler blocks."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile = _active_allocation_profile()
+            first = await _reprovision(pool, ctx(), sys_id, profile)
+            await _settle_reprovision_job(
+                pool, first.object_id, job_state, error_category=error_category, attempt=attempt
+            )
+            before = await _job_row(pool, first.object_id)
+            resp = await _reprovision(pool, ctx(), sys_id, profile)
+            after = await _job_row(pool, first.object_id)
+            state = await _system_state(pool, sys_id)
+        assert resp.status == "error"
+        assert resp.error_category == "conflict"
+        assert resp.data == {"reason": "reprovision_job_settling", "job_id": first.object_id}
+        assert resp.suggested_next_actions == ["systems.get"]
+        assert state == "ready"
+        assert after == before  # the job row is untouched
 
     asyncio.run(_run())
 
