@@ -55,6 +55,9 @@ reads the Allocation state: `route_external_boot_teardown` and `_teardown_prereq
    - A project admin (`systems.teardown`) or platform admin (`ops.force_teardown`) over MCP; the
      worker running the marked TEARDOWN job; the provider-host authority acknowledging it. Local
      and remote libvirt (ADR-0584).
+   - The reconciler `cleanup` lane (`src/kdive/reconciler/repairs/external_boot.py`), which
+     enqueues purpose-`teardown` jobs with no Allocation-state filter. On an ended Allocation
+     those jobs were `superseded`; after 0169 they complete the teardown, which is intended.
 2. Invariants and assets at stake
    - Purposes `activate`, `recover`, `resolve-conflict`, and `release` keep the `active` fence at
      all three functions.
@@ -70,6 +73,9 @@ reads the Allocation state: `route_external_boot_teardown` and `_teardown_prereq
 4. Covered elsewhere
    - `allocations.release` refusal: operator (approved exclusion).
    - `authority_system_v1` teardown with no activation and the 0149 fence: operator.
+   - Text outside the surface that still says the allocator needs an `active` Allocation: the
+     reconciler WARNING in `src/kdive/reconciler/repairs/systems.py` and the comment in
+     `src/kdive/services/allocation/release.py`. Reported as follow-up candidates.
 
 ## Success
 

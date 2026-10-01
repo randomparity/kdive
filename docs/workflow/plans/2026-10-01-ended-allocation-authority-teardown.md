@@ -12,9 +12,10 @@ dated amendments; the runbook loses its "no exit after expiry" limit.
 
 Tech stack: Postgres plpgsql, Python 3.14, psycopg 3, pytest.
 
-Expected implementation size: 230–300 changed lines (M) — from the file map: migration ~30,
-0169 tests ~150, helper move ~5 net, 0168 test removal ~-40, window lists ~10, integration arm
-~25, ADR amendments ~40, runbook ~-10.
+Expected implementation size: 300–360 changed lines (M) — gross insertions plus deletions from
+the file map: migration ~30, 0169 tests ~180, helper move ~100 (cut and paste), `_make_current`
+keyword ~8, 0168 test removal ~40, window lists ~10, integration arm ~25, ADR amendments ~40,
+runbook ~15.
 
 ## Global Constraints
 
@@ -45,7 +46,9 @@ Files:
 Interfaces: consumes `_seed_case`, `_allocate`, `_apply_through`, `_AuthorityCase`, `_Allocated`,
 `_PLAN`, `_JOURNAL`, `_QUIESCENCE`, the three `_*_SIGNATURE` constants
 (`tests/db/external_boot_authority_support.py`); `_ready_teardown_case`, `_proof`,
-`_make_current`, `_finalize` (`tests/db/external_boot_journal_support.py`); fixtures
+`_make_current`, `_finalize` (`tests/db/external_boot_journal_support.py`). `_make_current`
+gains a keyword `acknowledge: bool = True`; with `False` it writes only the journal head (no
+authority update, no acknowledgement insert), so it can follow the real acknowledgement. Fixtures
 `pg_conn`, `migrated_url`, `authority_role_dsns`.
 
 Verification:
@@ -55,12 +58,17 @@ Verification:
   exists: allocate returns `superseded` (`_allocate` assertion fails). Green:
   `just test-verbose tests/db/test_migration_0169_ended_allocation_authority_teardown.py`.
 - Contract: every non-teardown purpose (`activate`, `recover`, `resolve-conflict`, `release`)
-  keeps the fence at all three functions. Mode: focused-test.
-  `test_0169_other_purposes_keep_the_allocation_fence`; red under a controlled fault that drops
-  `AND p_purpose <> 'teardown'` from the replacement: allocate returns `allocated`.
+  keeps the fence at each of the three functions. Mode: focused-test. Three independent tests,
+  each parametrized by purpose, in which only the Allocation state differs from an admitted case:
+  `test_0169_allocate_keeps_fence_for_other_purposes`,
+  `test_0169_acknowledge_keeps_fence_for_other_purposes`,
+  `test_0169_commit_keeps_fence_for_other_purposes`. Red under a controlled fault that relaxes
+  the fence for every purpose (`v_new` = `(v_allocation.state <> 'active' AND false)`): each of
+  the three tests fails on its own call.
 - Contract: the migration refuses a changed function shape. Mode: focused-test.
-  `test_0169_patch_target_exists_once` asserts the literal occurs exactly once in each function
-  migrated through 0168, and the replacement is absent.
+  `test_0169_patch_target_exists_once` reads `v_old`/`v_new` from the migration SQL (as
+  `test_0168_patch_targets_exist_once` does) and asserts `v_old` occurs exactly once and `v_new`
+  is absent in each function migrated through 0168.
 - Contract: migration-window lists include 0169. Mode: focused-test. The four list tests fail
   red as soon as the file exists; green after the list edits.
 
@@ -74,36 +82,45 @@ Steps:
 ```text
 """Real-Postgres proofs that the authority teardown runs on an ended Allocation (#2992)."""
 
-_FENCE = "v_allocation.state <> 'active'"
-_RELAXED = "(v_allocation.state <> 'active' AND p_purpose <> 'teardown')"
-
 def _end(conn, case, state): UPDATE allocations SET state = state WHERE id = case.allocation_id
 
 def test_0169_patch_target_exists_once(pg_conn):
-    _apply_through(pg_conn, "0168")
+    _apply_through(pg_conn, "0168"); v_old, v_new read from the 0169 SQL by regex
     for each of _ALLOCATE/_ACKNOWLEDGE/_COMMIT_SIGNATURE:
-        definition.count(_FENCE) == 1 and _RELAXED not in definition
+        definition.count(v_old) == 1 and v_new not in definition
 
 @pytest.mark.parametrize("allocation_state", ["released", "expired"])
 def test_0169_teardown_completes_on_ended_allocation(...):
     case = _ready_teardown_case(migrated_url, suffix); _end(case, allocation_state)
-    authority = _allocate(worker, case)                      # allocated
-    _acknowledge(provider-authority role, case, authority) == "applied"   # real function
-    then _make_current(...) for the head; finalize twice == "applied"
-    system 'torn_down', one release row, no reservation row
+    authority = _allocate(worker, case)                                    # allocated
+    real acknowledge as kdive_provider_authority, journal sequence 1 == "applied"
+    digest = _make_current(conn, case, authority, proof, 2, acknowledge=False)
+    finalize twice == "applied"; System 'torn_down', one release row, no reservation row
 
 @pytest.mark.parametrize("allocation_state", ["released", "expired"])
 def test_0169_teardown_failure_commits_on_ended_allocation(...):
-    seed as test_0160 `_admitted` (teardown, activation 'prepared', ready reservation);
-    end the Allocation after allocate+acknowledge; failure commit == ("applied", "queued")
+    seed as test_0160 `_admitted` (teardown, activation 'prepared', System 'ready', ready
+    reservation); allocate + real acknowledge on the active Allocation; then end it;
+    failure commit == ("applied", "queued")
 
 @pytest.mark.parametrize("purpose", ["activate", "recover", "resolve-conflict", "release"])
-def test_0169_other_purposes_keep_the_allocation_fence(...):
-    seed + _prepare_purpose_state on an active Allocation; allocate; acknowledge; then expire.
-    a second allocate (attempt unchanged) == "superseded" and writes no authority row;
-    acknowledging a fresh allocation made before expiry == "superseded", no ack row;
-    commit of a `fail` result == ("authority_superseded", "failed"), activation and System
-    state unchanged.
+@pytest.mark.parametrize("allocation_state", ["active", "expired"])
+def test_0169_allocate_keeps_fence_for_other_purposes(...):
+    _seed_case + _prepare_purpose_state; _end(state); allocate status ==
+    ("allocated" if active else "superseded"); authority rows == (1 if active else 0)
+
+@pytest.mark.parametrize("purpose", [the four])
+@pytest.mark.parametrize("allocation_state", ["active", "expired"])
+def test_0169_acknowledge_keeps_fence_for_other_purposes(...):
+    seed + prep on active; authority = _allocate; _end(state); real acknowledge ==
+    ("applied" if active else "superseded"); ack rows == (1 if active else 0)
+
+@pytest.mark.parametrize("purpose", [the four])
+def test_0169_commit_keeps_fence_for_other_purposes(...):
+    seed + prep on active; allocate; real acknowledge == "applied"; expire;
+    commit of a `fail` result (admitted operation = case.operation) for that same current,
+    acknowledged authority == ("authority_superseded", "failed"); activation and System
+    state unchanged
 ```
 
    The acknowledgement helper calls `acknowledge_external_boot_authority` with the 19 arguments
@@ -139,8 +156,9 @@ $$;
 5. Update the four window-list tests and remove the 0168 expired test.
 6. Run `just test-verbose` on the 0169, 0168, 0160, authority-migration, and the four list test
    files; expect all green. Commit.
-7. Controlled fault: drop `AND p_purpose <> 'teardown'` from `v_new`, run the 0169 file, observe
-   the other-purposes case red; `git checkout -- src/kdive/db/schema/0169_*.sql`.
+7. Controlled fault: set `v_new` to `(v_allocation.state <> 'active' AND false)`, run the 0169
+   file, observe each of the three `*_keeps_fence_for_other_purposes` tests red on its expired
+   arm; `git checkout -- src/kdive/db/schema/0169_*.sql`.
 
 ## Task 2: the public route on an expired Allocation
 
@@ -156,7 +174,9 @@ Verification:
   removed: the job does not succeed. Green:
   `just test-verbose tests/integration/test_external_boot_unrouted_teardown.py`.
 
-Steps: add the arm, run red (stash the migration), restore, run green, commit.
+Steps: add the arm; move `src/kdive/db/schema/0169_ended_allocation_authority_teardown.sql` to
+the scratchpad, run the file and record the failure on the `expired` arm, move it back; run
+green; commit.
 
 ## Task 3: decision record and runbook
 
@@ -176,7 +196,9 @@ Steps:
    (do nothing; admit only `released`/`expired`; relax only the allocator).
 2. ADR-0620: a short amendment pointing to the ADR-0584 amendment and superseding the #3026
    amendment's "still answers `superseded`" sentence for this case.
-3. Runbook: drop "runs only on an `active` Allocation", the `allocations.renew` step, and the
+3. Runbook: keep the quoted reconciler WARNING verbatim (its "while its Allocation is active"
+   text lives in `src/kdive/reconciler/repairs/systems.py`, outside this surface) and add a
+   sentence that the condition no longer applies since 0169; drop "runs only on an `active` Allocation", the `allocations.renew` step, and the
    expired/released limit; make the release step conditional on the Allocation still being
    `active`.
 4. Run `just docs-links`, `just docs-paths`, `just records`; commit.
