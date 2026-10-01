@@ -256,6 +256,33 @@ Rejected for this amendment:
   with a live activate job is already ordered by the teardown fence (migration 0161, #2884
   amendment above) and the 0147 receipt, which credits a pending or ready reservation once.
 
+### Amendment (2026-10-01): a remote-libvirt preparing teardown needs no PREP receipt (#3016)
+
+A remote-libvirt activation opens its remote module reap obligation only during preparation. A
+`preparing` activation that stopped before then has no retained PREP receipt, and
+`build_external_boot_payload` refused its teardown with "remote module lifecycle has no retained
+PREP evidence". The payload builder now admits purpose `teardown` on a `preparing` activation
+without a receipt. The payload carries no `remote_module_attempt_v1`. A retained receipt is still
+carried, two retained receipts still refuse as ambiguous, and every other remote module lifecycle
+operation, and teardown of any other activation state, still requires one.
+
+The teardown performs no worker-side module reap that the receipt would bind. `teardown_handler`
+completes in its `before_port` hook, so the runner never calls `_execute` or
+`_execute_remote_module_lifecycle` for purpose `teardown`. The authority host reaps module
+volumes at System teardown from its own provider-private records. It quarantines an unfinished
+preparation it cannot prove absent, and the 0147 receipt then requeues the job as
+`retained_quarantine`.
+
+Rejected for this amendment:
+
+- **Drop the receipt requirement for every teardown.** judgment: the same reasoning holds, but
+  the operator kept the requirement for non-`preparing` activations out of this change's scope.
+- **Open a reap obligation or synthesize a receipt at admission.** judgment: it would write
+  durable module state for an attempt that never ran, and nothing on the teardown path reads it.
+- **Relax the check in the worker executor.** verified: `lifecycle.py` at b3316923c shows that
+  `teardown_handler` passes `before_port=complete`. `run_operation` (`runner.py:739-744`) returns
+  that result before `call_port`, so the executor's receipt check is never reached on teardown.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
