@@ -78,14 +78,18 @@ store write inside it, like the other activation ports. Because session open cre
 pinned shape leaves exact recovery absence provable after cleanup.
 
 The added precondition is session open itself (lane pin, owned domain, overlay), not the lease:
-the authority adapter issues one lease for each offloaded call. Every production caller opens a
-session on the same binding just before these writes, while the authority's System lane stays
-active: `cleanup` before quarantine; `cleanup_is_accounted` before System-teardown finalization
-(which precedes `teardown_system`); and `cleanup_receipt`, or the commit's `cleanup` and the
-`observe` that follows it, before `finalize`. ADR-0586's post-delete replay of an absent
-tombstone still succeeds, because the store branch is unchanged and finalization does not touch
-the domain. If a domain or overlay is removed out of band between those two opens, the write now
-fails closed as `provider_conflict` instead of writing without a pin.
+the authority adapter issues one lease for each offloaded call. On an operation's first
+execution, every production caller has just opened a session on the same binding while the
+authority's System lane is active: `cleanup` before quarantine (and `recover` and `cleanup` before
+System-teardown quarantine); `cleanup_is_accounted` before System-teardown finalization, which
+precedes `teardown_system`; and `cleanup_receipt`, or the commit's `cleanup` and the `observe`
+after it, before `finalize`. ADR-0586's post-delete replay of an absent tombstone still succeeds
+while the System exists, because the store branch is unchanged and finalization does not touch
+the domain. A missing owned domain or overlay now makes the write fail closed as
+`provider_conflict` instead of succeeding without a pin. That includes a terminal replay holding
+only `lane.lock` that pops a pending point which outlived its request, after a System teardown has
+destroyed the domain. After any authority restart, the same replay already fails through
+`cleanup_receipt`.
 
 - **Pin only when the lease resolves, otherwise write without a session.** verified: the
   production lease cannot fail to resolve inside an offloaded call (`LocalOperationLeaseScope.issue`

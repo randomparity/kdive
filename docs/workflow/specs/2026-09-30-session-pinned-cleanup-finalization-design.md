@@ -26,21 +26,30 @@ This was settled before any code was written.
   `LocalOperationLeaseScope.issue(authority, binding)`, so `resolve` cannot fail inside a call. A
   restart replay is a new call and gets a new lease. No replay depends on a lease that is gone.
 - **Session open** (`LocalExternalBootSessionFactory.open`: lane pin, libvirt connect, owned
-  domain lookup and XML ownership, overlay open) is the precondition this change adds. Each
-  production caller already opens a session on the same binding immediately before, with the
-  authority's System lane active (`service.py` `lane.active`), so no other mutation of that
-  System runs between them:
+  domain lookup and XML ownership, overlay open) is the precondition this change adds. On the
+  first execution of an operation, each production caller has just opened a session on the same
+  binding, with the authority's System lane active (`service.py` `lane.active`), so no other
+  mutation of that System runs in between:
   1. `_apply` (DELETE): `cleanup_is_accounted` and `cleanup` open sessions, then
      `record_cleanup_quarantine` runs.
   2. `_prepare_system_teardown_recovery`: `cleanup_is_accounted` opens a session before
-     `finalize_cleanup_tombstone`. This runs before `teardown_system` destroys the domain.
-     `teardown_system` runs only after absence is proven, and a replay that finds absence
-     returns before reaching finalization.
-  3. `finalize`: the point comes from `cleanup_receipt` (opens a session), or from the
-     in-process pending map that `_apply` filled in the same request, after which `_observe` ran
-     `cleanup_is_accounted` (opens a session). Terminal replay comes through the same method.
+     `finalize_cleanup_tombstone`. When cleanup is not yet accounted, `recover` and `cleanup` open
+     sessions before its `record_cleanup_quarantine`. All of this runs before `teardown_system`
+     destroys the domain. `teardown_system` runs only after absence is proven, and a replay that
+     finds absence returns before reaching either write.
+  3. `finalize`: the point comes from `cleanup_receipt` (opens a session), or from the pending map
+     that `_apply` filled, after which `_observe` ran `cleanup_is_accounted` (opens a session).
+- **Terminal replay** holds `lane.lock` but not `lane.active`. The pending map is in-process and
+  can carry a point across requests: a TERMINAL anchor that fails after its durable write skips
+  `finalize` and leaves the entry behind. If a System teardown then finalizes the same tombstone
+  and destroys the domain, a later terminal replay of the DELETE pops that stale point. Today the
+  session-free write takes ADR-0586's absent branch and succeeds. Pinned, the session open fails
+  and the replay ends in `provider_conflict`. This is the only replay this change turns from
+  success into failure. After any authority restart the same state already fails this way,
+  because the replay goes through `cleanup_receipt`. Failure model class 1 accepts it.
 - **Post-delete replay of an absent tombstone** (ADR-0586) keeps its store branch. Finalization
-  never touches the domain or overlay, so a replay opens its session in the same way.
+  never touches the domain or overlay, so while the System exists a replay opens its session in
+  the same way.
 
 Conclusion: make the full change. A narrower "pin only when resolvable" form guards no reachable
 state; the ADR-0710 amendment records that rejection with its evidence.
@@ -76,10 +85,12 @@ state; the ADR-0710 amendment records that rejection with its evidence.
    - Finalization stays idempotent for ADR-0586's absent-tombstone replay.
    - Recovery-root writes made by activation ports run under the pinned ownership snapshot.
 3. **Accepted failure classes**
-   - An out-of-band removal of the owned domain or overlay between the caller's preceding session
-     and this one makes the write fail as `provider_conflict`, leaving the operation unresolved.
-     Accepted because the preceding port already fails the same way in that state, and pinning
-     is the point of the change.
+   - A missing owned domain or overlay at the write makes it fail as `provider_conflict` and
+     leaves the operation unresolved. This covers an out-of-band removal between the caller's
+     preceding session and this one, and the stale-pending terminal replay after a System
+     teardown described above. Accepted because the same state already fails that way through
+     the preceding port, or through `cleanup_receipt` after any authority restart. Pinning the
+     write to an owned domain is the point of the change.
    - Session close failing after a durable write raises after the write. Both writes are
      idempotent on retry: quarantine replaces identical bytes, and finalization takes the absent
      branch.

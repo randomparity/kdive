@@ -55,8 +55,9 @@ Interfaces (existing, confirmed at `b1a8cd8c6`):
 - Contract S2 (no write when lease or session open fails). Mode: focused-test.
   `test_cleanup_writes_refuse_without_an_operation_session`. Red before the edit: `pytest.raises`
   reports DID NOT RAISE. Green: the same `-k` command with `session_refuses`.
-- Contract S3 (a malformed proof opens no session). Mode: focused-test. The quarantine test keeps
-  its mismatched-proof `pytest.raises`, then asserts `resolutions == []` before the valid call.
+- Contract S3 (a malformed proof opens no session). Mode: focused-test. Both revised tests make a
+  mismatched-proof call under `pytest.raises` and then assert `resolutions == []` before the valid
+  call: the quarantine test keeps its existing one, and the finalization test adds one.
   It is green before and after the edit; it guards the order of check and open.
 - Contract S4 (absence after quarantine, finalization and replay with the production factory).
   Mode: focused-test. `test_session_pinned_cleanup_writes_keep_exact_recovery_absence`. Red
@@ -98,6 +99,11 @@ def test_real_adapter_finalization_replays_exact_proof_under_session(tmp_path: P
         store.publish_tombstone(reference, metadata.binding, metadata, proof.point_digest)
 
     authority = OpaqueProviderRef(ref="authority/authenticated-by-2140")
+    with pytest.raises(ValueError, match="cleanup proof does not match"):
+        ports.finalize_cleanup_tombstone(
+            point, proof.model_copy(update={"point_digest": "sha256:" + "0" * 64}), authority
+        )
+    assert resolutions == []
     ports.finalize_cleanup_tombstone(point, proof, authority)
     ports.finalize_cleanup_tombstone(point, proof, authority)
 
@@ -236,11 +242,16 @@ def test_session_pinned_cleanup_writes_keep_exact_recovery_absence(tmp_path: Pat
 
 8. Re-run the step-5 command. Expected: all pass.
 9. Run `just test-verbose tests/providers/local_libvirt/test_external_boot.py`. Expected: pass.
-   A coordinator test whose fake IO (`_ExternalIO`, `_FakeIO`) now records an extra `open` is a
-   consequence of this contract. Update its expected count or sequence. Do not change the fake
+   A coordinator test in this file whose fake IO (`_ExternalIO`) now records an extra `open` is
+   a consequence of this contract. Update its expected count or sequence. Do not change the fake
    to hide the open.
-10. Run `just lint`, `just type`, `just test-changed`. Expected: exit 0 each.
-11. Commit: `fix(local-libvirt): pin cleanup quarantine and finalization to the session`.
+10. Run `just test-verbose tests/providers/local_libvirt/test_external_boot_authority.py` as a
+    read-only gate. It drives `_apply`, `finalize` and `_prepare_system_teardown_recovery`, including
+    the `_real_teardown_adapter` production-factory tests, over the pinned ports. This is the
+    executable evidence for the spec's caller enumeration. Expected: pass. If a test there fails,
+    stop and report: that file is outside the charter's surface (its `_FakeIO` lives there).
+11. Run `just lint`, `just type`, `just test-changed`. Expected: exit 0 each.
+12. Commit: `fix(local-libvirt): pin cleanup quarantine and finalization to the session`.
 
 Acceptance: S1–S4 tests green; no remaining comment says these ports are session-free; the diff
 touches only the two files named in Global Constraints.
