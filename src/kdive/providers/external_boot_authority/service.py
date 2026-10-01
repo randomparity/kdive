@@ -637,11 +637,25 @@ class ExternalBootAuthorityService:
     async def _resolve_recovery_orphan(
         self, peer: AuthenticatedPeer, request: AuthorityRecoveryOrphanDispositionRequestV1
     ) -> AuthorityRecoveryOrphanDispositionResponseV1:
-        if self._recovery_orphans is None:
-            raise AuthorityServiceError("superseded")
-        if peer is None or not isinstance(peer.incarnation_id, UUID | str):
-            raise AuthorityServiceError("unauthenticated")
-        return await self._recovery_orphans.resolve_recovery_orphan(peer, request)
+        try:
+            if self._recovery_orphans is None:
+                raise AuthorityServiceError("superseded")
+            if peer is None or not isinstance(peer.incarnation_id, UUID | str):
+                raise AuthorityServiceError("unauthenticated")
+            return await self._recovery_orphans.resolve_recovery_orphan(peer, request)
+        except AuthorityServiceError as error:
+            if not error.telemetry_recorded:
+                labels = self._trusted_labels(None)
+                self._logger.warning(
+                    "authority recovery orphan rejected",
+                    extra={
+                        "provider_kind": labels[0],
+                        "authority_instance": labels[1],
+                        "category": error.category,
+                        "reason": error.reason,
+                    },
+                )
+            raise
 
     def _lane_journal(
         self, system_id: UUID, lane: _Lane
@@ -1050,11 +1064,18 @@ class ExternalBootAuthorityService:
             trusted_labels = self._trusted_labels(binding)
             journal = self._journal_factory(request.system_id)
             records = await self._recover(binding, journal)
-        except AuthorityServiceError, OSError, ValueError:
+        except (AuthorityServiceError, OSError, ValueError) as error:
             self.metrics.recovery_failed_labels(trusted_labels)
+            # OSError/ValueError text can carry paths or payload fragments, so those log
+            # their class name alone.
+            category, reason = (
+                (error.category, error.reason)
+                if isinstance(error, AuthorityServiceError)
+                else (type(error).__name__, None)
+            )
             self._logger.warning(
                 "authority recovery rejected",
-                extra={"category": "journal_conflict"},
+                extra={"category": category, "reason": reason},
             )
             return False
         finally:

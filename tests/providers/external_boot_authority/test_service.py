@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -23,6 +24,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
@@ -1218,6 +1220,79 @@ async def test_readiness_requires_exact_local_and_trusted_head(
     )
     assert "provider_kind" not in rejection.__dict__
     assert "authority_instance" not in rejection.__dict__
+
+
+def _rejection_records(caplog: pytest.LogCaptureFixture, message: str) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.message == message]
+
+
+@pytest.mark.anyio
+async def test_readiness_rejection_logs_category_and_bounded_reason(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, repository, _, peer, request = _service(tmp_path)
+    repository.head = None
+    await service.acknowledge_takeover(peer, request)
+
+    async def refuse(*_: Any) -> Any:
+        raise AuthorityServiceError("journal_conflict", reason="orphan_digest_changed")
+
+    monkeypatch.setattr(service, "_recover", refuse)
+    assert not await service.readiness(peer, request)
+
+    (record,) = _rejection_records(caplog, "authority recovery rejected")
+    assert (record.__dict__["category"], record.__dict__["reason"]) == (
+        "journal_conflict",
+        "orphan_digest_changed",
+    )
+
+
+@pytest.mark.anyio
+async def test_readiness_oserror_logs_class_name_never_message(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _, peer, request = _service(tmp_path)
+
+    async def fail(*_: Any) -> Any:
+        raise OSError("/secret/path/payload")
+
+    monkeypatch.setattr(service, "_recover", fail)
+    assert not await service.readiness(peer, request)
+
+    (record,) = _rejection_records(caplog, "authority recovery rejected")
+    assert (record.__dict__["category"], record.__dict__["reason"]) == ("OSError", None)
+    assert "/secret/path" not in repr(record.__dict__)
+
+
+class _RefusingOrphans:
+    def set_serializer(self, serializer: Any) -> None:
+        pass
+
+    async def resolve_recovery_orphan(self, peer: Any, request: Any) -> Any:
+        raise AuthorityServiceError("journal_conflict", reason="orphan_system_mismatch")
+
+
+@pytest.mark.anyio
+async def test_refused_orphan_disposition_logs_category_and_reason_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _, _, peer, _ = _service(tmp_path)
+    service._recovery_orphans = _RefusingOrphans()  # type: ignore[assignment]  # noqa: SLF001
+    orphan_request = AuthorityRecoveryOrphanDispositionRequestV1(
+        request_id=uuid4(), job_id=uuid4(), job_attempt=1
+    )
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await service.resolve_recovery_orphan(peer, orphan_request)
+
+    (record,) = _rejection_records(caplog, "authority recovery orphan rejected")
+    assert (record.__dict__["category"], record.__dict__["reason"]) == (
+        "journal_conflict",
+        "orphan_system_mismatch",
+    )
+    assert (record.__dict__["provider_kind"], record.__dict__["authority_instance"]) == (
+        "untrusted",
+        "unresolved",
+    )
 
 
 @pytest.mark.anyio
