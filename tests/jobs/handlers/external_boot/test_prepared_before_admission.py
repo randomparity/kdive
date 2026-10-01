@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any
+from dataclasses import replace
+from typing import Any, cast
 from uuid import uuid4
 
 import psycopg
@@ -24,16 +25,24 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from pydantic import SecretStr, ValidationError
 
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttempt,
+    RemoteModuleAttemptObligationRepository,
+)
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
 )
+from kdive.providers.ports.authority import AuthorityCapability
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.db.remote_module_attempt_obligations_support import _evidence
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
 from tests.jobs.handlers.external_boot.support import CASES, RecordingTeardownExecutor, build_job
@@ -54,13 +63,15 @@ NULL_RECOVERY_POINT_CASES: dict[str, dict[str, Any]] = {
 }
 
 
-def _job(case: SeededCase) -> Job:
+def _job(
+    case: SeededCase, marker: dict[str, Any] | None = None, extra: dict[str, Any] | None = None
+) -> Job:
     kind = JobKind.TEARDOWN if case.purpose == "teardown" else JobKind.BOOT
     key = "system_id" if kind is JobKind.TEARDOWN else "run_id"
     value = case.vehicle.system_id if kind is JobKind.TEARDOWN else case.vehicle.run_id
-    return build_job(kind, {key: str(value), "external_boot_authority_v1": case.marker}).model_copy(
-        update={"id": case.job_id, "attempt": case.attempt}
-    )
+    payload = {key: str(value), "external_boot_authority_v1": marker or case.marker}
+    payload |= extra or {}
+    return build_job(kind, payload).model_copy(update={"id": case.job_id, "attempt": case.attempt})
 
 
 async def _authority_count(conn: AsyncConnection) -> int:
@@ -77,6 +88,10 @@ async def _dispatch(
     case: SeededCase,
     operation: str,
     vehicle: Vehicle,
+    *,
+    resolver: ProviderResolver | None = None,
+    marker: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     class Executor:
         async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
@@ -102,7 +117,7 @@ async def _dispatch(
 
     teardown_executor = RecordingTeardownExecutor(conn) if operation == "teardown" else None
     ports = ExternalBootHandlerPorts(
-        resolver=resolver_for(vehicle),
+        resolver=resolver or resolver_for(vehicle),
         incarnation_credential=SecretStr(case.credential),
         secret_registry=SecretRegistry(),
         acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
@@ -113,7 +128,11 @@ async def _dispatch(
     handler = build_operations(ports).get(operation)
     assert handler is not None
     async with await role_connection(dsns("kdive_worker")) as worker:
-        await handler(worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker))
+        await handler(
+            worker,
+            _job(case, marker, extra),
+            ExternalBootAuthorityMarkerV1.model_validate(marker or case.marker),
+        )
     if teardown_executor is not None:
         assert len(teardown_executor.calls) == 1
         vehicle.port.calls.append("authority-teardown")
@@ -195,6 +214,43 @@ def test_teardown_uses_its_recovery_free_request_before_preparation(
     _drive(migrated_url, body)
 
 
+async def _bind_remote(
+    seed: AsyncConnection, case: SeededCase, vehicle: Vehicle, *, receipt: bool
+) -> tuple[ProviderResolver, dict[str, Any] | None]:
+    """Rebind the System to remote-libvirt with a module capability, optionally retaining PREP.
+
+    The bound module capability is what makes the worker module lifecycle reachable, so a teardown
+    that routed through it would fail rather than skip it.
+    """
+    await seed.execute(
+        "UPDATE resources SET kind='remote-libvirt' WHERE id=("
+        "SELECT a.resource_id FROM systems s JOIN allocations a ON a.id=s.allocation_id "
+        "WHERE s.id=%s)",
+        (vehicle.system_id,),
+    )
+    await seed.execute(
+        "UPDATE runs SET target_kind='remote-libvirt' WHERE id=%s", (vehicle.run_id,)
+    )
+    local = resolver_for(vehicle).resolve(ResourceKind.LOCAL_LIBVIRT)
+    modules = AuthorityCapability(
+        authority_instance=case.marker["authority_instance"], modules=cast(Any, object())
+    )
+    resolver = ProviderResolver({ResourceKind.REMOTE_LIBVIRT: replace(local, authority=modules)})
+    if not receipt:
+        return resolver, None
+    attempt = ModuleAttempt(vehicle.system_id, vehicle.run_id, "1" * 32)
+    repository = RemoteModuleAttemptObligationRepository()
+    await repository.open_mutation_obligation(seed, attempt)
+    await repository.record_terminal_evidence(seed, attempt, _evidence(attempt))
+    await repository.open_reap_obligation(seed, attempt)
+    preparation = await repository.read_reap_preparation(seed, vehicle.system_id, vehicle.run_id)
+    assert preparation is not None
+    return resolver, {
+        "remote_module_attempt_v1": preparation.model_dump(mode="json", by_alias=True)
+    }
+
+
+@pytest.mark.parametrize("provider", ["local", "remote", "remote-receipt"])
 @pytest.mark.parametrize(
     ("reservation", "mode", "releases"),
     [("pending", "pending_system_teardown", 0), ("ready", "system_teardown", 1)],
@@ -205,12 +261,15 @@ def test_teardown_of_a_preparing_activation_skips_preparation(
     reservation: str,
     mode: str,
     releases: int,
+    provider: str,
 ) -> None:
     """#2961: teardown neither debits nor prepares.
 
     A pending reservation ends uncredited. A ready one — the activate job debited it before the
-    teardown took over — is released and credited exactly once.
+    teardown took over — is released and credited exactly once. #3016: a remote-libvirt teardown
+    reads no PREP receipt, so it completes with or without one.
     """
+    provider_kind = "local-libvirt" if provider == "local" else "remote-libvirt"
 
     async def body(seed: AsyncConnection) -> None:
         vehicle = build_vehicle()
@@ -223,9 +282,24 @@ def test_teardown_of_a_preparing_activation_skips_preparation(
             with_materialization=False,
             with_recovery_point=False,
             with_reservation=reservation == "ready",
+            marker_overrides={"provider_kind": provider_kind},
         )
+        resolver, extra = None, None
+        if provider != "local":
+            resolver, extra = await _bind_remote(
+                seed, case, vehicle, receipt=provider == "remote-receipt"
+            )
 
-        await _dispatch(authority_role_dsns, seed, case, "teardown", vehicle)
+        await _dispatch(
+            authority_role_dsns,
+            seed,
+            case,
+            "teardown",
+            vehicle,
+            resolver=resolver,
+            marker=case.marker | {"provider_kind": provider_kind},
+            extra=extra,
+        )
 
         assert vehicle.port.calls == ["authority-teardown"]
         async with seed.cursor(row_factory=dict_row) as cur:
