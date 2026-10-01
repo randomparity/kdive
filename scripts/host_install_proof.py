@@ -131,6 +131,7 @@ git clone --quiet "$HOME/kdive-candidate.bundle" "$HOME/kdive"
 cd "$HOME/kdive"
 git checkout --quiet --detach {candidate}
 git remote set-url origin {origin}
+git fetch --quiet origin main
 rm -f "$HOME/kdive-candidate.bundle"
 git rev-parse HEAD
 """

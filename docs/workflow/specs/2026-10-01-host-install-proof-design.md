@@ -72,7 +72,7 @@ step whose exit code is recorded as `timeout`.
 | 2 | `operator-prerequisites` | The supplied file, if given. This covers the documented operator duties: a Docker engine and access where the distribution has no known package, the EL CRB and source repositories, and POWER Rust. |
 | 3 | `bootstrap` | Git through the distribution package manager when absent, then the documented `uv` installer. |
 | 3a | `just` | `uv tool install rust-just`, in a new login, so the `~/.local/bin` the installer created is on `PATH`. |
-| 4 | `clone` | Clone a `git bundle` of the candidate (copied by `scp`) to `~/kdive`, detached at the candidate, with `origin` set to the public URL. |
+| 4 | `clone` | Clone a `git bundle` of the candidate (copied by `scp`) to `~/kdive`, detached at the candidate, with `origin` set to the public URL and `origin/main` fetched, as a documented clone has it (the setup hooks read it). |
 | 5 | `setup` | `just setup` |
 | 6 | `prepare` | `just prepare-local-libvirt-host`, with the documented local witness DSN exported and an empty line on stdin for the become prompt. |
 | 7 | `preflight` | `just check-local-libvirt` |
