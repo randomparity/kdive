@@ -356,6 +356,35 @@ Rejected for this amendment:
   terminal `conflict` (`external_boot_teardown_not_supported`) for any System with an activation
   row, so the close committed a teardown that could not run.
 
+### Amendment (2026-10-01): the authority teardown admits `tearing_down` (#3026)
+
+A System that a pre-#2966 ordinary teardown left in `tearing_down` with external-boot history now
+has an exit: `systems.teardown`, or `ops.force_teardown` (which shares its route), while its
+Allocation is `active`. Migration 0168 adds `tearing_down` to the purpose-`teardown` System-state
+list in the allocator, the success finalizer, and the failure commit. The worker's teardown
+precondition admits it too. The finalizer takes the `tearing_down -> torn_down` edge in the
+receipt transaction, so the reservation still credits at most once. No other predicate changes.
+On an `expired` or `released` Allocation the allocator still answers `superseded`, which leaves
+that case with #2992. The operator runbook `docs/operating/runbooks/stuck-tearing-down-system.md`
+is the documented exit for this failure class. It replaces the #2966 amendment's "only lease
+expiry ends it" for a `tearing_down` System whose Allocation is `active`.
+
+`repair_stalled_tearing_down_systems` now also logs one WARNING per System for a skipped
+authority-marked prior row. It keeps the warned System and cause in a map that it prunes each
+pass to that pass's candidates.
+
+Rejected for this amendment:
+
+- **Runbook only, schema unchanged.** verified: at 3ed5b5c0e, `rg -n "TORN_DOWN" src/kdive`
+  finds one Python writer (`_finalize_teardown`, which `teardown_handler` never reaches for a
+  System with an activation), and the 0147/0149 finalizer's state list omits `tearing_down`. No
+  tool could finish the System.
+- **Rewrite the System to `failed` by hand, then tear it down.** judgment: it uses an edge the
+  System state machine does not have (`domain/capacity/state.py`), and that path was never
+  proven.
+- **Also admit an expired or released Allocation.** judgment: it moves the ADR-0584 allocation
+  fence, which #2992 owns.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
