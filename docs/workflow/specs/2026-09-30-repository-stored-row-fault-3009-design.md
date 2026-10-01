@@ -81,8 +81,11 @@ records the helper's new home. The amendment is append-only, and no ADR number i
 - **Accepted failure classes:**
   - Some non-MCP worker callers record `str(exc)` in a failure message. That text changes to the
     `stored <Model> failed validation` form, and the category is unchanged.
-  - The rebuild in `providers/external_boot_authority/repository.py:79` stays a bare
-    `ValidationError`. It is outside the named files, and that layer is out of scope.
+  - These stored-row rebuilds outside the 22 sites still raise a bare `ValidationError`:
+    `providers/external_boot_authority/repository.py:79`,
+    `images/cataloging/catalog.py:141`, and the worker-side
+    `db/remote_module_attempt_obligations.py:272` constructor rebuild. Each is outside the named
+    files, which the charter's worker-only exclusion and named-file criterion cover.
 - **Covered elsewhere:**
   - Caller-input validation stays with the operator (an exclusion).
   - Worker-only rebuilds outside `kdive.db` stay with the operator (an exclusion).
@@ -94,7 +97,7 @@ records the helper's new home. The amendment is append-only, and no ADR number i
    from `kdive.mcp.responses` are the same objects.
 2. The 22 rebuild sites listed under **Rebuild sites** raise `ServerFaultError`, chained from the
    `ValidationError`, when a stored row is invalid.
-3. A tool call through FastMCP that rebuilds an invalid stored row returns an
+3. A tool call through FastMCP whose stored-row rebuild goes through one of the 22 sites returns an
    `infrastructure_failure` envelope with `SERVER_FAULT_DETAIL`. FastMCP logs no
    `Invalid arguments for tool` record for it.
 4. `_target_os_id` returns `None`, and `readiness` returns `False`, on a `ServerFaultError`.

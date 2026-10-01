@@ -24,8 +24,10 @@ files, and a 20-line ADR amendment.
 - `ServerFaultError` stays a plain `Exception` subclass. Never make it a `ValueError`; ADR-0709
   explains why.
 - The error message stays `stored {model.__name__} failed validation`, chained with `from exc`.
-- ADR-0709 is Accepted and append-only. Add one `### Amendment (2026-09-30): ... (#3009)` block
-  at the end of the file and change no existing line.
+- ADR-0709 is Accepted and append-only. Insert one `### Amendment (2026-09-30): ... (#3009)` block
+  at the end of `## Consequences`, after the #2981 amendment and before `## Considered & rejected`
+  (`docs/adr/README.md`: an amendment goes in the level-2 section it qualifies). Change no
+  existing line.
 - Guardrails: `just lint`, `just type`, focused `just test-verbose <paths>`, and `just records`
   (run `git fetch origin main` first) for the ADR change. Run `just format` before each commit.
 
@@ -167,7 +169,7 @@ the substitution land together.
 4. In `src/kdive/mcp/responses.py`:
    - Delete the `ServerFaultError` class and the `validate_stored` function.
    - Change the serialization import to
-     `from kdive.serialization import (JsonValue, ServerFaultError, safe_error_details, validate_json_value, validate_stored)`.
+     `from kdive.serialization import (JsonValue, ServerFaultError, safe_error_details, validate_json_value)`.
    - `validate_stored` is now unused inside `responses.py` and exists there only for importers.
      Import it on its own line as `from kdive.serialization import validate_stored as validate_stored`,
      the explicit re-export form that ruff's F401 accepts.
@@ -248,13 +250,13 @@ the substitution land together.
    def test_a_corrupt_stored_row_in_the_family_lookup_still_completes_as_unknown(
        migrated_url: str, monkeypatch: Any
    ) -> None:
-       # A repository rebuild of a corrupt row raises ServerFaultError (#3009); the lookup still
-       # fails open after the build committed (ADR-0678).
+       # Stands in for SYSTEMS.get raising ServerFaultError over a corrupt systems row (#3009);
+       # the lookup still fails open after the build committed (ADR-0678).
        from kdive.mcp.tools.lifecycle.runs import complete_build as module
        from kdive.serialization import ServerFaultError
 
        async def _corrupt(conn: Any, system: Any) -> None:
-           raise ServerFaultError("stored ImageCatalogEntry failed validation")
+           raise ServerFaultError("stored System failed validation")
 
        monkeypatch.setattr(module, "resolve_system_catalog_rootfs", _corrupt)
        _config_uploaded(monkeypatch)
@@ -364,20 +366,22 @@ status.
 
 **Steps:**
 
-1. Append to `docs/adr/0709-invalid-envelope-is-a-server-fault.md`:
+1. Insert at the end of `## Consequences` in `docs/adr/0709-invalid-envelope-is-a-server-fault.md`,
+   immediately before `## Considered & rejected`:
 
    ```markdown
    ### Amendment (2026-09-30): repository-layer rebuilds are server faults (#3009)
 
-   This widens the #2981 allowlist to the repository layer and moves the helper. Its last
-   excluded bullet, the repository layer, no longer holds.
+   This widens the #2981 allowlist and moves the helper. It narrows that amendment's last
+   excluded bullet to rebuilds outside `kdive.db.repositories`,
+   `kdive.db.external_boot_activations`, and the authority-journal binding.
 
    `ServerFaultError` and `validate_stored` now live in `kdive.serialization`, below the MCP layer,
    because `kdive.db` may not import `kdive.mcp`. `kdive.mcp.responses` re-exports both, and
    `InvalidEnvelopeError` still subclasses `ServerFaultError`. Every stored-row rebuild in
    `kdive.db.repositories`, `kdive.db.external_boot_activations`, and the
    `kdive.db.external_boot_authority_journal` binding goes through `validate_stored`, including
-   `RETURNING` readbacks. A corrupt row read by a tool now reaches the caller as the
+   `RETURNING` readbacks. A corrupt row rebuilt at one of these sites during a tool call now reaches the caller as the
    `infrastructure_failure` envelope.
 
    Two callers relied on the old `ValueError` and now also catch `ServerFaultError`:
@@ -385,19 +389,10 @@ status.
    service's `readiness` still fails closed. Broad `except Exception` handlers in workers and the
    reconciler are unaffected.
 
-   Rebuilds outside `kdive.db`, such as the provider-layer authority repository, and caller-input
-   rebuilds keep their current path. The rejected denylist stays rejected.
+   Other stored-row rebuilds keep their current path. These include the worker-side
+   `kdive.db.remote_module_attempt_obligations` receipt, the image catalog lookup, and the
+   provider-layer authority repository. Caller-input rebuilds keep their current path too. The rejected denylist stays rejected.
    ```
 
 2. Run `git fetch origin main`, then `just records`, and expect exit 0. Commit
    `docs(adr): widen ADR-0709 to repository rebuilds (#3009)`.
-
-## Spec coverage
-
-| Spec success criterion | Task |
-|---|---|
-| 1 (ownership and identity) | 1 |
-| 2 (22 sites raise `ServerFaultError`) | 1 |
-| 3 (tool-call envelope) | 2 |
-| 4 (callers keep their behaviour) | 2 |
-| 5 (ADR) | 3 |
