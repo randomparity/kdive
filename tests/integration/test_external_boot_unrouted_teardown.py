@@ -1,6 +1,7 @@
 """#3017: systems.teardown routes a preparing activation whose activate job allocated no authority.
 
-The activate job's marker is the durable route (migration 0167, ADR-0620 amendment).
+The activate job's marker is the durable route (migration 0167, ADR-0620 amendment). The same
+route finishes a System a pre-#2966 ordinary teardown left in `tearing_down` (#3026, 0168).
 """
 
 from __future__ import annotations
@@ -16,10 +17,12 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.handlers.external_boot.router import route_marked
 from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.payloads import Authorizing, TeardownPayload
 from kdive.jobs.worker import Worker
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.jobs import cancel_job
@@ -142,8 +145,38 @@ _OUTCOME_SQL = (
 )
 
 
+async def _seed_tearing_down_residue(seed: AsyncConnection, system_id: str) -> str:
+    """The residue of a pre-#2966 ordinary teardown: `tearing_down` and a failed unmarked job."""
+    system = await fetch_one(seed, "SELECT project FROM systems WHERE id = %s", (UUID(system_id),))
+    ordinary = await queue.enqueue(
+        seed,
+        JobKind.TEARDOWN,
+        TeardownPayload(system_id=system_id),
+        Authorizing(principal="reconciler", agent_session=None, project=system["project"]),
+        f"{system_id}:teardown",
+    )
+    await seed.execute(
+        "UPDATE jobs SET state = 'failed', error_category = 'conflict' WHERE id = %s",
+        (ordinary.id,),
+    )
+    await seed.execute(
+        "UPDATE systems SET state = 'tearing_down' WHERE id = %s", (UUID(system_id),)
+    )
+    return str(ordinary.id)
+
+
+async def _exhaust_marked_teardown(seed: AsyncConnection, job_id: str, worker_id: str) -> None:
+    """A marked job the pre-#3026 worker refused: still `running`, exhausted, lease lapsed."""
+    await seed.execute(
+        "UPDATE jobs SET state = 'running', attempt = max_attempts, worker_id = %s, "
+        "lease_expires_at = now() - interval '1 minute' WHERE id = %s",
+        (worker_id, UUID(job_id)),
+    )
+
+
+@pytest.mark.parametrize("residue", ["none", "tearing_down"])
 def test_routed_teardown_completes_and_releases(
-    migrated_url: str, authority_role_dsns: Callable[[str], str]
+    migrated_url: str, authority_role_dsns: Callable[[str], str], residue: str
 ) -> None:
     async def body() -> None:
         configure_external_boot()
@@ -162,8 +195,15 @@ def test_routed_teardown_completes_and_releases(
             system_id, job_id = await _boot(pool, resolver)
             canceled = await cancel_job(pool, runs_support.ctx(), job_id)
             assert canceled.status == "canceled", canceled.model_dump()
+            if residue == "tearing_down":
+                ordinary_id = await _seed_tearing_down_residue(seed, system_id)
+                replaced = await _teardown(pool, system_id, resolver)
+                assert (replaced.status, replaced.object_id) == ("queued", ordinary_id)
+                await _exhaust_marked_teardown(seed, ordinary_id, worker_id)
             response = await _teardown(pool, system_id, resolver)
             assert response.status == "queued", response.model_dump()
+            if residue == "tearing_down":
+                assert response.object_id == ordinary_id
             lane = await fetch_one(
                 seed, "SELECT dispatch_lane FROM jobs WHERE id = %s", (UUID(response.object_id),)
             )
@@ -179,6 +219,12 @@ def test_routed_teardown_completes_and_releases(
                 )
             )["allocation_id"]
             released = await release_allocation(pool, runs_support.ctx(), str(allocation_id))
+            audit = await fetch_one(
+                seed,
+                "SELECT array_agg(transition) AS transitions FROM audit_log "
+                "WHERE object_id = %s AND tool = 'systems.teardown'",
+                (UUID(system_id),),
+            )
 
         assert teardown_job == {"state": "succeeded"}
         assert len(executor.calls) == 1
@@ -191,6 +237,8 @@ def test_routed_teardown_completes_and_releases(
         }
         assert provider.phases == []
         assert released.status == "released", released.model_dump()
+        prior = "tearing_down" if residue == "tearing_down" else "ready"
+        assert audit == {"transitions": [f"{prior}->torn_down"]}
 
     asyncio.run(body())
 
