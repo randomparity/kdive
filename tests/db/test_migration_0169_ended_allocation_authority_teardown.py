@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
 import psycopg
 import pytest
@@ -271,3 +272,34 @@ def test_0169_commit_keeps_fence_for_other_purposes(
         "failed",
     )
     assert _lifecycle(migrated_url, case) == before
+
+
+@pytest.mark.parametrize("purpose", _OTHER_PURPOSES)
+def test_0169_claimed_teardown_purpose_does_not_open_the_fence(
+    migrated_url: str, authority_role_dsns: _RoleDsns, purpose: str
+) -> None:
+    """A non-teardown job or authority that claims purpose `teardown` stays fenced."""
+    case = _seed_other(migrated_url, purpose, "d")
+    claimed = replace(case, purpose="teardown")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        unacknowledged = _allocate(worker, case)
+    _end(migrated_url, case, "expired")
+    assert _try_allocate(authority_role_dsns, claimed) == "superseded"
+    assert _acknowledge(authority_role_dsns, claimed, unacknowledged) == "superseded"
+    _end(migrated_url, case, "active")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    assert _acknowledge(authority_role_dsns, case, authority) == "applied"
+    before = _lifecycle(migrated_url, case)
+    _end(migrated_url, case, "expired")
+    assert _commit_failure(authority_role_dsns, claimed, authority) == (
+        "authority_superseded",
+        "failed",
+    )
+    assert _lifecycle(migrated_url, case) == before
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM external_boot_authorities "
+            "WHERE system_id = %s AND purpose = 'teardown'",
+            (case.system_id,),
+        ).fetchone() == (0,)
