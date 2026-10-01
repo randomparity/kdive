@@ -1022,13 +1022,14 @@ _TEARDOWN_REQUIRED = ReleaseOutcome(
                     "reason": "external_boot_restricted",
                     "activation_id": "act-1",
                     "activation_state": "active",
+                    "system_id": "sys-2",
                     "owning_run_id": "run-1",
                 },
                 detail="allocations.release is denied ...; systems.teardown is admitted ...",
                 next_actions=("runs.get", "runs.release_external_boot", "systems.teardown"),
             ),
-            "break-glass release is denied while external-boot activation act-1 holds its "
-            "System in active; ops.force_teardown is admitted while the activation is active",
+            "break-glass release is denied while external-boot activation act-1 holds System "
+            "sys-2 in active; ops.force_teardown is admitted while the activation is active",
         ),
         (
             ReleaseOutcome(
@@ -1037,24 +1038,28 @@ _TEARDOWN_REQUIRED = ReleaseOutcome(
                 details={
                     "reason": "external_boot_restricted",
                     "activation_id": "act-2",
-                    "activation_state": "recovering",
+                    "activation_state": "torn_down",
+                    "system_id": "sys-3",
                     "owning_run_id": "run-2",
                 },
                 detail="allocations.release is denied ...; no exit is admitted ...",
                 next_actions=("runs.get",),
             ),
-            "break-glass release is denied while external-boot activation act-2 holds its "
-            "System in recovering; no exit is admitted while the activation is recovering",
+            "break-glass release is denied while external-boot activation act-2 holds System "
+            "sys-3 in torn_down; no exit is admitted while the activation is torn_down",
         ),
         (
             ReleaseOutcome(
                 released=False,
                 category=ErrorCategory.CONFLICT,
-                details={"reason": "authority_system_preactivation_mutation_fenced"},
+                details={
+                    "reason": "authority_system_preactivation_mutation_fenced",
+                    "system_id": "sys-4",
+                },
                 detail="allocations.release is denied before the authority-owned System's ...",
                 next_actions=("systems.get", "systems.teardown"),
             ),
-            "break-glass release is denied before the authority-owned System's first "
+            "break-glass release is denied before authority-owned System sys-4's first "
             "activation; run ops.force_teardown",
         ),
     ],

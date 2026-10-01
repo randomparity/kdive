@@ -69,9 +69,10 @@ _BREAKGLASS_TEARDOWN = "ops.force_teardown"
 def _breakglass_detail(details: Mapping[str, Any], suggested: tuple[str, ...]) -> str:
     """Say why a break-glass release was refused, naming only an exit its caller can invoke."""
     reason = details.get("reason")
+    system_id = details.get("system_id")
     if reason == SYSTEM_TEARDOWN_REQUIRED_REASON:
         return (
-            f"break-glass release is denied while System {details.get('system_id')} has "
+            f"break-glass release is denied while System {system_id} has "
             f"external-boot history and is not torn down; run {_BREAKGLASS_TEARDOWN} first "
             "(ADR-0620)"
         )
@@ -84,13 +85,13 @@ def _breakglass_detail(details: Mapping[str, Any], suggested: tuple[str, ...]) -
         )
         return (
             "break-glass release is denied while external-boot activation "
-            f"{details.get('activation_id')} holds its System in {state}; "
+            f"{details.get('activation_id')} holds System {system_id} in {state}; "
             f"{exit_hint} while the activation is {state}"
         )
     if reason == AUTHORITY_PREACTIVATION_DENIAL_REASON:
         return (
-            "break-glass release is denied before the authority-owned System's first "
-            f"activation; run {_BREAKGLASS_TEARDOWN}"
+            f"break-glass release is denied before authority-owned System {system_id}'s "
+            f"first activation; run {_BREAKGLASS_TEARDOWN}"
         )
     return f"break-glass release is denied by external-boot admission ({reason})"
 

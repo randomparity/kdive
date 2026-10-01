@@ -460,6 +460,7 @@ def test_force_release_external_boot_denial_carries_detail_and_next_action(
         assert resp.error_category == "conflict"
         assert resp.detail is not None
         assert str(seeded.activation.id) in resp.detail
+        assert str(seeded.system_id) in resp.detail
         _assert_names_breakglass_exit(resp.detail)
         assert resp.data["reason"] == "external_boot_restricted"
         assert resp.data["activation_id"] == str(seeded.activation.id)
@@ -510,6 +511,8 @@ def test_drain_force_release_item_carries_external_boot_denial(migrated_url: str
         assert item.error_category == "conflict"
         assert item.detail is not None
         _assert_names_breakglass_exit(item.detail)
+        assert str(seeded.system_id) in item.detail
+        assert item.data["system_id"] == str(seeded.system_id)
         assert item.data["activation_id"] == str(seeded.activation.id)
         assert item.data["activation_state"] == "abandoned"
         assert item.suggested_next_actions == ["ops.force_teardown"]
