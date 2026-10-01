@@ -9,8 +9,7 @@ surfaces the fault and adds no handler; its docstrings say so. ADR-0709 gets an 
 amendment. Spec:
 [2026-10-01-catalog-receipt-stored-row-fault-3044-design.md](../specs/2026-10-01-catalog-receipt-stored-row-fault-3044-design.md).
 
-Expected implementation size: 90–130 changed lines (S) — four substitutions plus imports,
-two docstring edits, a 15-line ADR amendment and about 80 lines of tests in two files.
+Expected implementation size: 90–130 changed lines (S) — 4 substitutions, 2 docstrings, a 15-line ADR amendment, ~80 test lines
 
 ## Global Constraints
 
