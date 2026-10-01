@@ -10,7 +10,6 @@ from kdive.db import migrate
 from tests.db.external_boot_authority_support import (
     _ALLOCATE_SIGNATURE,
     _COMMIT_SIGNATURE,
-    _PLAN,
     _allocate,
     _apply_through,
     _AuthorityCase,
@@ -74,40 +73,3 @@ def test_0168_tearing_down_teardown_credits_once(
             (case.activation_id, case.activation_id, case.system_id),
         ).fetchone()
     assert outcome == ("torn_down", 1, 0, ["tearing_down->torn_down"])
-
-
-def test_0168_expired_allocation_still_supersedes(
-    migrated_url: str, authority_role_dsns: _RoleDsns
-) -> None:
-    case = _tearing_down_case(migrated_url, "w")
-    with psycopg.connect(migrated_url) as conn:
-        conn.execute(
-            "UPDATE allocations SET state = 'expired' WHERE id = %s", (case.allocation_id,)
-        )
-    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
-        row = worker.execute(
-            "SELECT status FROM allocate_external_boot_authority"
-            "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (
-                case.credential,
-                case.job_id,
-                case.attempt,
-                case.activation_id,
-                case.run_id,
-                case.system_id,
-                _PLAN,
-                case.purpose,
-                case.provider_kind,
-                case.authority_instance,
-                case.operation_identity,
-            ),
-        ).fetchone()
-    assert row == ("superseded",)
-    with psycopg.connect(migrated_url) as conn:
-        assert conn.execute(
-            "SELECT s.state, e.state, "
-            "(SELECT count(*) FROM external_boot_authorities a WHERE a.system_id = s.id) "
-            "FROM systems s JOIN external_boot_activations e ON e.system_id = s.id "
-            "WHERE s.id = %s",
-            (case.system_id,),
-        ).fetchone() == ("tearing_down", "prepared", 0)

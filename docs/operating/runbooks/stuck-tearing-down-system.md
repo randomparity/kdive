@@ -23,6 +23,10 @@ reconciler: system <system-id> is stuck in tearing_down behind authority-marked 
 <job-id> (<state>); no supported exit exists for it (<runbook>)
 ```
 
+The first message predates migration 0169. Since then the authority teardown also runs on an
+`expired` or `released` Allocation, so the "while its Allocation is active" clause no longer
+applies.
+
 The reconciler does not log a System whose teardown job is `queued`, `running`, or `canceled`.
 Use the queries below to find one.
 
@@ -67,26 +71,21 @@ Read the job row as follows:
 
 ## Recover
 
-The authority teardown runs only on an `active` Allocation.
+The authority teardown runs whatever the Allocation state, including after the lease expired.
 
-1. If `lease_expiry` is close, extend it first with `allocations.renew`. The extension is clamped
-   to the deployment's lease maximum and is checked against the project budget.
-2. Run `systems.teardown <system-id>`, which needs the project `admin` role. A platform operator
+1. Run `systems.teardown <system-id>`, which needs the project `admin` role. A platform operator
    outside the project can use `kdivectl ops force-teardown` instead. It calls `ops.force_teardown`
    and needs `platform_admin`, `--force`, and a reason. Both tools take the same route:
    - a failed unmarked job is replaced by an authority-marked teardown on the same job row;
    - a failed or exhausted authority-marked job is requeued on the same row.
-3. Wait for the job with `jobs.wait`, then confirm with `systems.get` that the System is
+2. Wait for the job with `jobs.wait`, then confirm with `systems.get` that the System is
    `torn_down`. The authority teardown records the `tearing_down->torn_down` transition in the
    audit log, in the same transaction as the teardown receipt.
-4. Release the Allocation with `allocations.release`, and close any bound Investigation with
-   `investigations.close`.
+3. If the Allocation is still `active`, release it with `allocations.release`. Close any bound
+   Investigation with `investigations.close`.
 
 ## Limits
 
-- **Expired or released Allocation.** The authority allocator refuses a teardown that is not on
-  an `active` Allocation. The job allocates nothing and changes nothing, and it stays `running`
-  until its attempts are exhausted. No supported exit exists until #2992.
 - **No route.** `external_boot_teardown_authority_unresolved` means the System has no
   unambiguous authority route. `systems.teardown` refuses it, as it does for a System in any
   other state.
