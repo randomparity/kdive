@@ -4,25 +4,27 @@ This runbook covers a System that sits in `tearing_down` and has at least one ex
 activation row. Such a System is residue from an ordinary teardown that ran before the worker
 began refusing ordinary teardowns for any external-boot history
 ([ADR-0620](../../adr/0620-authority-owned-system-teardown.md), #2966). No new System reaches this
-state.
-
-**No supported manual step moves such a System to `torn_down`.** This page describes how to
-recognize the System, which tools refuse it and why, and what lease expiry does and does not
-end. Do not improvise a recovery from it.
+state. Only the authority teardown may finish it, because the provider-host authority owns the
+host domain.
 
 ## Symptom
 
-The reconciler logs this WARNING once per System per process:
+The reconciler logs one WARNING per System and cause:
 
 ```text
 reconciler: system <system-id> is stuck in tearing_down with external-boot activation
 <activation-id>; the ordinary teardown is refused (external_boot_teardown_not_supported), so no
-job is requeued and the System needs operator recovery
+job is requeued; run systems.teardown while its Allocation is active (<runbook>)
+
+reconciler: system <system-id> is stuck in tearing_down behind authority-marked teardown job
+<job-id> (<state>); this lane never replaces it, so re-run systems.teardown (<runbook>)
+
+reconciler: system <system-id> is stuck in tearing_down behind authority-marked teardown job
+<job-id> (<state>); no supported exit exists for it (<runbook>)
 ```
 
-If an earlier `systems.teardown` or `ops.force_teardown` replaced the refused job with an
-authority-marked `{system}:teardown` job, the reconciler skips the System without this
-WARNING. Use the queries below to find it.
+The reconciler does not log a System whose teardown job is `queued`, `running`, or `canceled`.
+Use the queries below to find one.
 
 ## Confirm the state
 
@@ -47,64 +49,51 @@ WHERE s.state = 'tearing_down';
 Then read its teardown job:
 
 ```sql
-SELECT id, state, attempt, error_category,
-       payload ? 'external_boot_authority_v1' AS authority_marked
+SELECT id, state, attempt, max_attempts, lease_expires_at, error_category,
+       payload ? 'external_boot_authority_v1' AS authority_marked,
+       payload ? 'authority_system_v1' AS authority_system_marked
 FROM jobs
 WHERE dedup_key = '<system-id>:teardown';
 ```
 
-An unmarked job in `failed` with error category `conflict` is the ordinary teardown that the
-worker refused.
+Read the job row as follows:
 
-## Why no tool ends it
+- **Unmarked and `failed`, with error category `conflict`.** This is the ordinary teardown that
+  the worker refused.
+- **Authority-marked and `running`, with `attempt` below `max_attempts`.** It is waiting for its
+  lease to lapse. The next claim retries it with no action from you.
+- **Authority-marked and `running`, with `attempt` at `max_attempts` and a past
+  `lease_expires_at`.** It is exhausted. Re-run the teardown as described below.
 
-Only two writers move a System from `tearing_down` to `torn_down`, and neither admits this one:
+## Recover
 
-- **The ordinary teardown worker.** It refuses any System with an activation row as a terminal
-  `conflict` (`external_boot_teardown_not_supported`) before any provider call, because the
-  provider-host authority owns the host domain.
-- **The authority teardown.** Migration 0147's authority allocator and teardown receipt admit
-  purpose `teardown` only for a System in `provisioning`, `ready`, `reprovisioning`,
-  `restoring`, `paused`, `crashing`, `crashed`, or `failed`. `tearing_down` is not in that list.
+The authority teardown runs only on an `active` Allocation.
 
-Each operator tool therefore refuses or makes no progress:
+1. If `lease_expiry` is close, extend it first with `allocations.renew`. The extension is clamped
+   to the deployment's lease maximum and is checked against the project budget.
+2. Run `systems.teardown <system-id>`, which needs the project `admin` role. A platform operator
+   outside the project can use `kdivectl ops force-teardown` instead. It calls `ops.force_teardown`
+   and needs `platform_admin`, `--force`, and a reason. Both tools take the same route:
+   - a failed unmarked job is replaced by an authority-marked teardown on the same job row;
+   - a failed or exhausted authority-marked job is requeued on the same row.
+3. Wait for the job with `jobs.wait`, then confirm with `systems.get` that the System is
+   `torn_down`. The authority teardown records the `tearing_down->torn_down` transition in the
+   audit log, in the same transaction as the teardown receipt.
+4. Release the Allocation with `allocations.release`, and close any bound Investigation with
+   `investigations.close`.
 
-| Tool | Result |
-|---|---|
-| `systems.teardown` | Replaces the refused ordinary job with an authority-marked teardown. The allocator answers `superseded`, so each attempt fails with `stale_handle` and the System state does not change. |
-| `ops.force_teardown` | Takes the same route as `systems.teardown`, with the same result. |
-| `allocations.release`, `ops.force_release`, `resources.drain` | Refused with `conflict`, reason `external_boot_system_teardown_required`, while the System is not `torn_down`. |
-| `investigations.close` | Refused with `bound_systems_live`, because the System is not terminal. |
-| `investigations.close force=true` | Refused with `conflict`, reason `external_boot_system_teardown_required`, before any write. |
+## Limits
 
-Do not write `systems.state` directly, in either direction. A direct update to `torn_down`
-skips the authority teardown that destroys the host domain, so the domain keeps running with no
-System to account for it, and it lets `allocations.release` succeed. A direct update to any
-other state uses a transition the System state machine does not have, and the effect of an
-authority teardown from that state has not been verified.
-
-## What lease expiry ends
-
-The reconciler's lease-expiry sweep moves the Allocation to `expired` once `lease_expiry`
-passes. The sweep refuses only while an activation still restricts the System. A pre-fix
-teardown ran only after the activation stopped restricting it (a cleaned `recovered` or
-`abandoned` activation), so for this residue the sweep proceeds. This frees the Allocation's
-host capacity.
-
-Lease expiry does not end anything else:
-
-- The System stays in `tearing_down`. The reconciler keeps it in its stalled-teardown candidate
-  set and enqueues nothing for it.
-- The authority teardown cannot run after expiry either, because the authority allocator also
-  requires an `active` Allocation (#2992).
-- The host domain that the provider-host authority owns is not destroyed by any kdive path.
-- A bound Investigation stays `open`, because both forms of `investigations.close` refuse it.
-
-## Escalation
-
-Record the System, Allocation, Investigation, and activation ids from the queries above, and
-report them on #3026. Ending such a System requires a change to kdive: either the schema exit
-that #3026 describes, in which the 0147 allocator and receipt also admit `tearing_down` for
-purpose `teardown`, or a reviewed operator procedure that has been proven on a lab host. Until
-then, the System and its bound Investigation remain as they are, and the Allocation ends at
-lease expiry.
+- **Expired or released Allocation.** The authority allocator refuses a teardown that is not on
+  an `active` Allocation. The job allocates nothing and changes nothing, and it stays `running`
+  until its attempts are exhausted. No supported exit exists until #2992.
+- **No route.** `external_boot_teardown_authority_unresolved` means the System has no
+  unambiguous authority route. `systems.teardown` refuses it, as it does for a System in any
+  other state.
+- **Authority-System marker.** A teardown job carrying `authority_system_v1` belongs to a System
+  with an authority-System binding. If that System also has no activation, it has no supported
+  exit from `tearing_down`.
+- **No manual state writes.** Do not write `systems.state` directly in either direction. A
+  direct write to `torn_down` skips the authority teardown that destroys the host domain and lets
+  `allocations.release` succeed while that domain still runs. A direct write to any other state
+  uses a transition the System state machine does not have.
