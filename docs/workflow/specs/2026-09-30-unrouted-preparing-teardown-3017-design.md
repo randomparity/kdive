@@ -41,29 +41,36 @@ admits a plan-less `preparing` teardown (#2961). The worker path for that marker
    - an `allocating` or `superseded` authority row for the activation still refuses (approved
      exclusion, owner: operator);
    - two or more matching activate jobs still refuse (approved exclusion, owner: operator);
+     unconstructible through `runs.boot` (unique `{run}:boot` dedup key), so defence in depth;
    - an activate job that allocates after the route is resolved: the teardown allocation
      supersedes it and fences it (0161); both reservation orderings are held by the 0147 receipt
-     (#2961 design, Concurrency).
+     (#2961 design, Concurrency);
+   - a repeat `systems.teardown` while that activate authority is `allocating` returns
+     `unresolved` before the replay probe; the queued teardown is unaffected (bounded: the window
+     ends when the row becomes `current`, which routes and replays);
+   - a System whose bound provider kind changed since boot still refuses in
+     `build_external_boot_payload` (unchanged).
 4. **Covered elsewhere** — remote-libvirt teardown needs retained PREP evidence (#3016); a
    released or expired allocation (#2992).
 
 ## Success
 
 - After `boot_run`, with the activate job `canceled` or still `queued`, `systems.teardown`
-  returns `queued` with a teardown marker whose `provider_kind` and
-  `authority_instance` equal the activate marker's, and the reservation is still `pending`.
+  returns `queued` with a teardown marker whose `provider_kind`, `authority_instance` and
+  `activation_id` equal the activate marker's, and the reservation is still `pending`.
+- A real `Worker` then runs that teardown job: activation and System are `torn_down`, the
+  reservation row is gone, no reservation release row exists, and `allocations.release` returns
+  `released`. In the `queued` arm, running the stale activate job afterwards leaves the
+  activation `torn_down`.
 - With a second matching activate job, or an `allocating` or `superseded` authority row for the
   activation, `systems.teardown` still returns `external_boot_teardown_authority_unresolved`.
-- The authority teardown of a `preparing` activation with no prior authority row deletes the
-  pending reservation and writes no release row: the existing
-  `test_teardown_of_a_preparing_activation_skips_preparation[pending...]`, whose seed has no
-  authority row.
 
 ## Validation
 
-- `focused-test`: `tests/integration/test_external_boot_unrouted_teardown.py` — the route arms
-  (red before 0167: `external_boot_teardown_authority_unresolved`) and the refusal arms.
+- `focused-test`: `tests/integration/test_external_boot_unrouted_teardown.py` — the reachability
+  test is committed unchanged first; then the route and end-to-end arms (red before 0167:
+  `external_boot_teardown_authority_unresolved`) and the refusal arms (bite by controlled fault).
 - `focused-test`: migration ledgers in `tests/db/test_migrate.py` and the three
-  `test_migration_0*` files gain `0167` (red: the applied-version list mismatch).
+  `test_migration_0*` files gain `0167` (red: the tail-window and version-list mismatch).
 - `task-test-not-applicable`: ADR-0620 amendment — prose; `just records` checks its shape.
 - Gates: `just lint`, `just type`, focused `just test-verbose`, pre-push `just ci`.
