@@ -29,21 +29,23 @@ an `infrastructure_failure` envelope. No job is enqueued. ADR-0361's fail-open r
 *resolution gaps*: the server lacks the information to judge, so it does not refuse. A corrupt
 row is a different case. The server's own catalog is broken, and the operator needs to see
 that. Admitting the capture would hide the corruption and run a capture against an image whose
-record the server can no longer read. `runs.complete_build` fails open for a separate reason
-(ADR-0678): its lookup runs after the build has committed and on every replay. That reason does
-not apply to a pre-enqueue admission gate. The gate and resolver docstrings say that a corrupt
-row is not a gap.
+record the server can no longer read. `runs.complete_build` fails open (ADR-0678) because a failed
+lookup there would fail a build that has already committed. The `vmcore.fetch` gate also runs
+on a retry, before the replay lookup. But a refused call commits nothing, so surfacing the fault
+there cannot fail a committed result. The gate and resolver docstrings say that a corrupt row is
+not a gap.
 
 **Callers (survey at `95e7d2b07`).**
 
 | Caller | Handler | Effect |
 |---|---|---|
 | `complete_build._target_os_id` | already catches `ServerFaultError` (#3009) | unchanged, fails open |
-| `images/rootfs/fetch.py:156`, `:210` (provisioning) | none in `rootfs_catalog_fetch`, `materialize`, or `provision` | the worker's `_failure_category` already maps either exception to `infrastructure_failure` |
+| `images/rootfs/fetch.py:210` (provisioning; `:156` has test callers only) | none in `rootfs_catalog_fetch`, `materialize`, or `provision` | the worker's `_failure_category` already maps either exception to `infrastructure_failure` |
 | `admission.py:119-123` | `ModuleAttemptObligationError` only | the fault propagates |
 | `systems/admin.py`, `recovery_requests.py`, `steps.py` | `CategorizedError` or none | the fault reaches the middleware |
+| `reconciler/repairs/external_boot.py:272` | `except Exception`, which logs | unchanged |
 
-No handler on these paths catches `ValueError` or `ValidationError`.
+No handler on the MCP tool paths catches `ValueError` or `ValidationError`.
 
 **ADR.** ADR-0709 gets an append-only `### Amendment (2026-10-01)` that moves both sites onto
 the allowlist and records the gate decision.
@@ -57,8 +59,9 @@ the allowlist and records the gate decision.
   a tool caller as an argument error; the error envelope discloses nothing beyond `SERVER_FAULT_DETAIL`.
 - **Accepted failure classes:**
   - A corrupt catalog row blocks `vmcore.fetch` kdump/fadump captures for Systems that boot
-    that image until an operator repairs the row. The cost is bounded and visible, and it is
-    the point of the decision.
+    that image until an operator repairs the row. This includes a retry of an already-admitted
+    capture, which loses its replayed envelope. The cost is bounded and visible, and it is the
+    point of the decision.
   - The receipt columns are fully constrained in the database (`uuid` types and the nonce
     `CHECK`), so the receipt fault is reachable only after an out-of-band schema change.
     The change is defensive, and the test drops those constraints to reach it.
@@ -71,4 +74,6 @@ the allowlist and records the gate decision.
 Each site gets a corrupt-row test. The test asserts `ServerFaultError` with a `ValidationError`
 cause, and asserts the `infrastructure_failure` envelope through a FastMCP app that runs
 `ServerFaultMiddleware`. For the catalog, the test goes through the real `vmcore.fetch` handler
-and also asserts that no job is enqueued. The plan's verification entries name each test.
+and also asserts that no job is enqueued. The receipt test wraps the repository read itself.
+Reachability from the five tools rests on the caller survey above. The plan's verification
+entries name each test.

@@ -103,7 +103,8 @@ Steps:
    followed by `UPDATE remote_module_attempt_obligations SET operation_nonce = 'A' * 32`. The
    rollback restores the schema for later tests on the worker. In the same block, assert
    `ServerFaultError` with a `ValidationError` cause from `read_reap_preparation`. Then call a
-   `FastMCP` tool wrapping the same read behind `ServerFaultMiddleware` and assert that the
+   `FastMCP` tool that closes over `conn` (a pool connection would block on the ALTER
+   lock) and wraps the same read behind `ServerFaultMiddleware` and assert that the
    envelope's `error_category` is `infrastructure_failure`.
 2. Confirm red, then change line 272 to
    `module_attempt_obligation=validate_stored(ModuleAttemptObligationReceiptV1, rows[0])` and
@@ -119,7 +120,7 @@ No executable consumer reads the amendment's prose. `just records` still checks 
 shape after `git fetch origin main`.
 
 Steps: append the amendment: both sites join the allowlist (narrowing #3009's "keep their
-current path" paragraph); the kdump gate surfaces the fault (the spec's rationale in two
-sentences); `complete_build` still fails open; provisioning is unaffected; the provider-layer
+current path" paragraph); the kdump gate surfaces the fault (the spec's rationale, including the
+replay ordering, in two sentences); `complete_build` still fails open; provisioning is unaffected; the provider-layer
 authority repository keeps its path. Commit `docs(adr): amend ADR-0709 for catalog and receipt
 rebuilds`.
