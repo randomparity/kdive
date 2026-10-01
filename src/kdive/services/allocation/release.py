@@ -183,7 +183,11 @@ LockedPrecondition = Callable[[AsyncConnection], Awaitable[bool]]
 async def guard_external_boot_release(
     conn: AsyncConnection, allocation_id: UUID, *, project: str
 ) -> None:
-    """Lock every historical System and reject release while one remains restricted."""
+    """Lock every historical System and reject release while one remains restricted.
+
+    The denial names the refusing System in ``details`` as well as its message, so a renderer
+    that drops the message (the break-glass envelope, #3047) still has the System to act on.
+    """
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT id FROM systems WHERE allocation_id = %s ORDER BY id", (allocation_id,)
@@ -193,12 +197,16 @@ async def guard_external_boot_release(
         for system_id in system_ids:
             await locks.enter_async_context(advisory_xact_lock(conn, LockScope.SYSTEM, system_id))
         for system_id in system_ids:
-            await check_external_boot_admission(
-                conn,
-                system_id,
-                ExternalBootOperation.ALLOCATION_RELEASE,
-                project=project,
-            )
+            try:
+                await check_external_boot_admission(
+                    conn,
+                    system_id,
+                    ExternalBootOperation.ALLOCATION_RELEASE,
+                    project=project,
+                )
+            except ExternalBootDenied as denied:
+                denied.details.setdefault("system_id", str(system_id))
+                raise
 
 
 # The authority allocator admits a teardown only on an `active` allocation (0122), so ending the
@@ -209,6 +217,7 @@ _SYSTEM_AWAITING_AUTHORITY_TEARDOWN_SQL = (
     "  AND EXISTS (SELECT 1 FROM external_boot_activations e WHERE e.system_id = s.id) "
     "ORDER BY s.id LIMIT 1"
 )
+SYSTEM_TEARDOWN_REQUIRED_REASON = "external_boot_system_teardown_required"
 
 
 async def _require_system_teardown(
@@ -222,7 +231,7 @@ async def _require_system_teardown(
     raise ExternalBootDenied(
         f"allocations.release is denied while System {row[0]} has external-boot history and is "
         "not torn down; run systems.teardown first (ADR-0620)",
-        details={"reason": "external_boot_system_teardown_required", "system_id": str(row[0])},
+        details={"reason": SYSTEM_TEARDOWN_REQUIRED_REASON, "system_id": str(row[0])},
         next_actions=["systems.teardown", "systems.get"],
         project=project,
     )
