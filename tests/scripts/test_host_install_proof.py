@@ -185,6 +185,18 @@ def test_incomplete_or_mismatched_runs_fail(
     assert evidence.impediments == []
 
 
+def test_a_stack_deployed_from_another_revision_fails(cell: Cell, tmp_path: Path) -> None:
+    other = dict.fromkeys(ROLES, "d" * 40)
+    evidence = _compose(
+        cell,
+        tmp_path,
+        first=_phase("first-boot", deployed=other),
+        second=_phase("second-boot", deployed=other),
+    )
+    assert evidence.outcome is Outcome.FAILURE
+    assert evidence.deployed_roles == other
+
+
 def test_missing_role_is_omitted_rather_than_guessed(cell: Cell, tmp_path: Path) -> None:
     second = _phase("second-boot", deployed={**dict.fromkeys(ROLES, SHA), "authority": None})
     evidence = _compose(cell, tmp_path, second=second)
