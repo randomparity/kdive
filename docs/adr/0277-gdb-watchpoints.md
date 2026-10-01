@@ -137,9 +137,9 @@ additive.
 
 ### Amendment (2026-10-01): Resume-time insert failures are an error, not a timeout (#3023)
 
-Where gdb rejects a resume with `Could not insert hardware watchpoint N.`, the result is category
-`debug_attach_failure` with `data.code` `watchpoint_insert_failed`, not the `timed_out=True`
-described above for debug-register exhaustion. The ADR 0712 amendment of 2026-09-30 (#2964)
+Where gdb rejects a resume with `Could not insert hardware watchpoint N.` as the resume's `^error`,
+the result is category `debug_attach_failure` with `data.code` `watchpoint_insert_failed`. That
+supersedes the `timed_out=True` described above for debug-register exhaustion in this case. The ADR 0712 amendment of 2026-09-30 (#2964)
 records the decision; the `debug.set_watchpoint` docstring and the debug toolset guide now name
 the code and `debug.clear_watchpoint` as the fix. A watchpoint the stub accepts but never traps
 still surfaces as a `debug.continue` timeout.
