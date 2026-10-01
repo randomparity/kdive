@@ -19,6 +19,7 @@ from kdive.domain.lifecycle.records import System
 from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 from kdive.images.planes.base import PROVENANCE_OS_RELEASE
 from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.serialization import validate_stored
 
 # Order by visibility so the project's private row (if any) sorts before the public one; the
 # resolver takes the first. `private` < `public` lexically, so the explicit CASE keeps the
@@ -64,7 +65,7 @@ async def resolve_rootfs(
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_RESOLVE_SQL, params)
         row = await cur.fetchone()
-    return None if row is None else ImageCatalogEntry.model_validate(row)
+    return None if row is None else validate_stored(ImageCatalogEntry, row)
 
 
 _RESOLVE_PUBLIC_ARCH_SQL = f"""
@@ -107,7 +108,7 @@ def resolve_public_rootfs_sync(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_RESOLVE_PUBLIC_ARCH_SQL, params)
         row = cur.fetchone()
-    return None if row is None else ImageCatalogEntry.model_validate(row)
+    return None if row is None else validate_stored(ImageCatalogEntry, row)
 
 
 async def resolve_system_catalog_rootfs(
@@ -119,7 +120,8 @@ async def resolve_system_catalog_rootfs(
     booted rather than a private shadow the provision would never have selected. Returns ``None``
     on every resolution gap: an unparsable profile, a non-local-libvirt section, a rootfs that is
     not ``catalog`` (``local``/``artifact``/``upload``), or no visible registered row of the
-    profile's arch (ADR-0361, ADR-0678).
+    profile's arch (ADR-0361, ADR-0678). A visible row that fails its rebuild is not a gap: it
+    raises ``ServerFaultError`` (ADR-0709, #3044).
     """
     try:
         profile = ProvisioningProfile.parse(system.provisioning_profile)
@@ -138,7 +140,7 @@ async def resolve_system_catalog_rootfs(
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_RESOLVE_PUBLIC_ARCH_SQL, params)
         row = await cur.fetchone()
-    return None if row is None else ImageCatalogEntry.model_validate(row)
+    return None if row is None else validate_stored(ImageCatalogEntry, row)
 
 
 def image_os_id(entry: ImageCatalogEntry) -> str | None:
