@@ -99,10 +99,6 @@ def _catalog_entry() -> ImageCatalogEntry:
     )
 
 
-def _assert_catalog_fault(got: pytest.ExceptionInfo[ServerFaultError]) -> None:
-    assert isinstance(got.value.__cause__, ValidationError)
-
-
 def test_catalog_rebuild_of_a_corrupt_row_is_a_server_fault(migrated_url: str) -> None:
     async def _corrupt_and_resolve() -> None:
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
@@ -110,10 +106,10 @@ def test_catalog_rebuild_of_a_corrupt_row_is_a_server_fault(migrated_url: str) -
             await conn.execute("UPDATE image_catalog SET capabilities = '{bogus}'")
             with pytest.raises(ServerFaultError, match="stored ImageCatalogEntry failed") as got:
                 await resolve_rootfs(conn, "local-libvirt", "base", project="proj")
-            _assert_catalog_fault(got)
+            assert isinstance(got.value.__cause__, ValidationError)
             with pytest.raises(ServerFaultError, match="stored ImageCatalogEntry failed") as got:
                 await resolve_system_catalog_rootfs(conn, _catalog_system())
-            _assert_catalog_fault(got)
+            assert isinstance(got.value.__cause__, ValidationError)
 
     asyncio.run(_corrupt_and_resolve())
     with (
@@ -121,7 +117,7 @@ def test_catalog_rebuild_of_a_corrupt_row_is_a_server_fault(migrated_url: str) -
         pytest.raises(ServerFaultError, match="stored ImageCatalogEntry failed") as got,
     ):
         resolve_public_rootfs_sync(sync_conn, "local-libvirt", "base", "x86_64")
-    _assert_catalog_fault(got)
+    assert isinstance(got.value.__cause__, ValidationError)
 
 
 def test_receipt_rebuild_of_a_corrupt_row_is_a_server_fault(migrated_url: str) -> None:
