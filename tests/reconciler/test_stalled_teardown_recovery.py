@@ -191,7 +191,7 @@ def test_external_boot_history_is_not_requeued_and_warns_once(
     migrated_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING, logger=system_repairs.__name__)
-    system_repairs._warned_stalled_teardown_history.clear()
+    system_repairs._warned_stalled_teardowns.clear()
 
     async def _run() -> None:
         conn = await connect(migrated_url)
@@ -214,8 +214,19 @@ def test_external_boot_history_is_not_requeued_and_warns_once(
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("key", ["authority_system_v1", "external_boot_authority_v1"])
-def test_authority_marked_row_is_not_overwritten(migrated_url: str, key: str) -> None:
+@pytest.mark.parametrize(
+    ("key", "remedy"),
+    [
+        ("authority_system_v1", "no supported exit"),
+        ("external_boot_authority_v1", "re-run systems.teardown"),
+    ],
+)
+def test_authority_marked_row_is_not_overwritten_and_warns_once(
+    migrated_url: str, key: str, remedy: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=system_repairs.__name__)
+    system_repairs._warned_stalled_teardowns.clear()
+
     async def _run() -> None:
         conn = await connect(migrated_url)
         system_id = await seed_system(conn, system_state=SystemState.TEARING_DOWN)
@@ -226,8 +237,40 @@ def test_authority_marked_row_is_not_overwritten(migrated_url: str, key: str) ->
         )
         async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
             await pool.open()
-            assert await run_repair(pool, repair_stalled_tearing_down_systems) == 0
+            for _ in range(2):
+                assert await run_repair(pool, repair_stalled_tearing_down_systems) == 0
         assert await _teardown_job(conn, system_id) == (JobState.FAILED.value, 3)
+        warnings = [r.message for r in caplog.records if str(system_id) in r.message]
+        assert len(warnings) == 1
+        assert remedy in warnings[0]
+        await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_warned_map_drops_a_system_that_leaves_tearing_down(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=system_repairs.__name__)
+    system_repairs._warned_stalled_teardowns.clear()
+
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        system_id = await seed_system(conn, system_state=SystemState.TEARING_DOWN)
+        await _seed_completed_activation(conn, system_id)
+        await _seed_teardown_job(conn, system_id, state=JobState.FAILED)
+        set_state = "UPDATE systems SET state = %s WHERE id = %s"
+        async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
+            await pool.open()
+            await run_repair(pool, repair_stalled_tearing_down_systems)
+            assert system_id in system_repairs._warned_stalled_teardowns
+            await conn.execute(set_state, (SystemState.TORN_DOWN.value, system_id))
+            await run_repair(pool, repair_stalled_tearing_down_systems)
+            assert system_id not in system_repairs._warned_stalled_teardowns
+            await conn.execute(set_state, (SystemState.TEARING_DOWN.value, system_id))
+            await run_repair(pool, repair_stalled_tearing_down_systems)
+        warnings = [r for r in caplog.records if str(system_id) in r.message]
+        assert len(warnings) == 2
         await conn.close()
 
     asyncio.run(_run())
