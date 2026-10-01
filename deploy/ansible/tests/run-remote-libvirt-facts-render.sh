@@ -17,7 +17,7 @@
 #   3. the declared image names and the OMITTED/INCOMPLETE markers are exactly as expected.
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../../.." && pwd)"
 playbook="$here/remote_libvirt_facts_render.yml"
 

@@ -17,7 +17,7 @@ die() {
 # A function, not a source-time assignment, because this file must have no side effects when sourced.
 kdive_python() {
   local repo_root
-  repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+  repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
   printf '%s' "${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"
 }
 
@@ -25,7 +25,7 @@ kdive_python() {
 # before build-fs runs. It uses the same interpreter that will build the rootfs.
 fixture_helper() {
   local repo_root
-  repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+  repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
   printf '%s/scripts/live_vm_fixtures.py' "$repo_root"
 }
 

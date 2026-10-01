@@ -19,7 +19,7 @@
 #
 set -euo pipefail
 
-here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/live-stack/lib.sh
 source "${here}/lib.sh"
 # shellcheck disable=SC1091 # repo-relative env script

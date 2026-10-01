@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # shellcheck disable=SC2034 # callers source env.sh and use the resolved checkout root
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # One libvirt endpoint for every consumer a live-stack entry point starts, whichever entry point
 # that is (#2480). This file set none at all, so the bare `scripts/live-stack/stack-services.sh`

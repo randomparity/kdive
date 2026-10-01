@@ -12,5 +12,5 @@
 # regardless of the caller's working directory.
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 (cd "$repo_root" && uv version --short) | sed -E $'s/\x1b\\[[0-9;]*m//g'
