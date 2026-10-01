@@ -129,14 +129,6 @@ def _worker(
     )
 
 
-async def _run_job(worker: Worker, conn: AsyncConnection, job_id: str) -> None:
-    lane = (await fetch_one(conn, "SELECT dispatch_lane FROM jobs WHERE id = %s", (UUID(job_id),)))[
-        "dispatch_lane"
-    ]
-    claimed = await worker.run_once(lane)
-    assert claimed is not None and str(claimed.id) == job_id
-
-
 _OUTCOME_SQL = (
     "SELECT e.state, s.state AS system_state, "
     "(SELECT count(*) FROM external_boot_reservations r WHERE r.activation_id = e.id) "
@@ -172,7 +164,11 @@ def test_routed_teardown_completes_and_releases(
             assert canceled.status == "canceled", canceled.model_dump()
             response = await _teardown(pool, system_id, resolver)
             assert response.status == "queued", response.model_dump()
-            await _run_job(worker, seed, response.object_id)
+            lane = await fetch_one(
+                seed, "SELECT dispatch_lane FROM jobs WHERE id = %s", (UUID(response.object_id),)
+            )
+            claimed = await worker.run_once(lane["dispatch_lane"])
+            assert claimed is not None and str(claimed.id) == response.object_id
             outcome = await fetch_one(seed, _OUTCOME_SQL, (UUID(system_id),))
             teardown_job = await fetch_one(
                 seed, "SELECT state FROM jobs WHERE id = %s", (UUID(response.object_id),)
