@@ -6,7 +6,7 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -46,9 +46,11 @@ from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools.lifecycle.systems import admin as systems_admin
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.view import get_system
+from kdive.mcp.tools.ops.security import breakglass
 from kdive.profiles.provisioning import RootfsSource
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
@@ -60,6 +62,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot import ExternalBootDenied
 from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.mcp import systems_support
 from tests.mcp.systems_support import (
@@ -1328,6 +1331,7 @@ async def _seed_retired_teardown_authority(
     *,
     purpose: str = "recover",
     current: bool = False,
+    provider_kind: str = "local-libvirt",
 ) -> None:
     """Persist the durable route that System teardown must use, not infer."""
     job_id = uuid4()
@@ -1362,7 +1366,7 @@ async def _seed_retired_teardown_authority(
         "(system_id, allocation_id, activation_id, run_id, plan_identity, job_id, job_attempt, "
         "purpose, provider_kind, authority_instance, worker_incarnation, operation, "
         "operation_identity, operation_digest, generation, state, acknowledged_at, retired_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, 'local-libvirt', 'authority-a', %s, "
+        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s, 'authority-a', %s, "
         "%s, 'prior-recovery', %s, 1, %s, now(), CASE WHEN %s THEN NULL ELSE now() END)",
         (
             seeded.system_id,
@@ -1372,6 +1376,7 @@ async def _seed_retired_teardown_authority(
             plan_identity,
             job_id,
             purpose,
+            provider_kind,
             worker,
             purpose,
             "sha256:" + "2" * 64,
@@ -1441,8 +1446,14 @@ def test_teardown_with_external_boot_history_enqueues_authority_marker(
     asyncio.run(_run())
 
 
-def test_teardown_of_preparing_activation_enqueues_authority_marker(migrated_url: str) -> None:
-    """#2961: a preparing activation, with its activate authority still current, is torn down."""
+@pytest.mark.parametrize("provider_kind", ["local-libvirt", "remote-libvirt"])
+def test_teardown_of_preparing_activation_enqueues_authority_marker(
+    migrated_url: str, provider_kind: str
+) -> None:
+    """#2961: a preparing activation, with its activate authority still current, is torn down.
+
+    #3016: a remote-libvirt one that never opened its module reap obligation carries no receipt.
+    """
 
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:
@@ -1462,15 +1473,22 @@ def test_teardown_of_preparing_activation_enqueues_authority_marker(migrated_url
                     "VALUES (%s, 'stores/main', %s, 4096, 'pending')",
                     (seeded.activation.id, f"owners/{seeded.activation.id}"),
                 )
+                resolver = provider_resolver(external_boot=ExternalBootOperations())
+                if provider_kind == "remote-libvirt":
+                    await conn.execute(
+                        "UPDATE resources SET kind = 'remote-libvirt' "
+                        "WHERE id = (SELECT resource_id FROM allocations WHERE id = %s)",
+                        (alloc_id,),
+                    )
+                    await conn.execute(
+                        "UPDATE runs SET target_kind = 'remote-libvirt' WHERE id = %s", (run_id,)
+                    )
+                    local = resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
+                    resolver = ProviderResolver({ResourceKind.REMOTE_LIBVIRT: local})
                 await _seed_retired_teardown_authority(
-                    conn, seeded, purpose="activate", current=True
+                    conn, seeded, purpose="activate", current=True, provider_kind=provider_kind
                 )
-            response = await _teardown(
-                pool,
-                ctx(Role.ADMIN),
-                system_id,
-                resolver=provider_resolver(external_boot=ExternalBootOperations()),
-            )
+            response = await _teardown(pool, ctx(Role.ADMIN), system_id, resolver=resolver)
             assert response.status == "queued", response.model_dump()
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
@@ -1487,7 +1505,9 @@ def test_teardown_of_preparing_activation_enqueues_authority_marker(migrated_url
         marker = job["payload"]["external_boot_authority_v1"]
         assert marker["activation_id"] == str(seeded.activation.id)
         assert (marker["purpose"], marker["operation"]) == ("teardown", "teardown")
+        assert marker["provider_kind"] == provider_kind
         assert "external_boot_plan_v1" not in job["payload"]
+        assert job["payload"].get("remote_module_attempt_v1") is None
         # Enqueueing credits nothing: only the authority's teardown receipt ends the reservation.
         assert reservation == {"state": "pending"}
 
@@ -1731,39 +1751,76 @@ def test_teardown_replays_live_or_settled_ordinary_job(migrated_url: str, prior:
     asyncio.run(_run())
 
 
+_BREAKGLASS_ADMIN = RequestContext(
+    principal="ops-admin",
+    agent_session="sess-admin",
+    projects=(),
+    roles={},
+    platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
+)
+_FORCE_TEARDOWN_AUDIT_SQL = (
+    "SELECT count(*) FROM platform_audit_log WHERE tool = 'ops.force_teardown'"
+)
+
+
+async def _force_teardown(
+    pool: AsyncConnectionPool, system_id: str, resolver: ProviderResolver | None
+) -> tuple[Any, int]:
+    """Drive break-glass `ops.force_teardown`; return its envelope and the audit row count."""
+    response = await breakglass.force_teardown(
+        pool, _BREAKGLASS_ADMIN, system_id=system_id, reason="stuck", resolver=resolver
+    )
+    async with pool.connection() as conn:
+        row = await (await conn.execute(_FORCE_TEARDOWN_AUDIT_SQL)).fetchone()
+    assert row is not None
+    return response, row[0]
+
+
+async def _ordinary_job_with_history(
+    pool: AsyncConnectionPool, prior: str, worker: str | None
+) -> tuple[str, str, Any]:
+    """A System whose ordinary teardown row is ``prior`` and that has completed history."""
+    system_id, job_id = await _ordinary_teardown_job(pool, SystemState.READY)
+    run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE jobs SET state = %s, worker_id = %s WHERE id = %s",
+            (prior, worker, job_id),
+        )
+        seeded = await seed_activation(
+            conn,
+            state=ExternalBootActivationState.RECOVERED,
+            cleanup_complete=True,
+            ready_reservation=True,
+            system_id=UUID(system_id),
+            run_id=UUID(run_id),
+        )
+        await _seed_retired_teardown_authority(conn, seeded)
+    return system_id, job_id, seeded
+
+
+@pytest.mark.parametrize("via", ["systems.teardown", "ops.force_teardown"])
 @pytest.mark.parametrize(
     ("prior", "worker", "replaced"),
     [("failed", None, True), ("canceled", None, True), ("canceled", "worker-live", False)],
 )
 def test_teardown_replaces_failed_ordinary_job_for_external_boot_history(
-    migrated_url: str, prior: str, worker: str | None, replaced: bool
+    migrated_url: str, prior: str, worker: str | None, replaced: bool, via: str
 ) -> None:
-    """#2966: the worker refuses an ordinary job for history, so the public route replaces it."""
+    """#2966: the worker refuses an ordinary job for history, so the public route replaces it.
+
+    Break-glass `ops.force_teardown` takes the same route (#3007) and still writes its audit row.
+    """
 
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:
-            system_id, job_id = await _ordinary_teardown_job(pool, SystemState.READY)
-            run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE jobs SET state = %s, worker_id = %s WHERE id = %s",
-                    (prior, worker, job_id),
-                )
-                seeded = await seed_activation(
-                    conn,
-                    state=ExternalBootActivationState.RECOVERED,
-                    cleanup_complete=True,
-                    ready_reservation=True,
-                    system_id=UUID(system_id),
-                    run_id=UUID(run_id),
-                )
-                await _seed_retired_teardown_authority(conn, seeded)
-            response = await _teardown(
-                pool,
-                ctx(Role.ADMIN),
-                system_id,
-                resolver=provider_resolver(external_boot=ExternalBootOperations()),
-            )
+            system_id, job_id, seeded = await _ordinary_job_with_history(pool, prior, worker)
+            resolver = provider_resolver(external_boot=ExternalBootOperations())
+            if via == "systems.teardown":
+                response = await _teardown(pool, ctx(Role.ADMIN), system_id, resolver=resolver)
+            else:
+                response, audited = await _force_teardown(pool, system_id, resolver)
+                assert audited == 1
             async with pool.connection() as conn:
                 after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
 
@@ -1776,6 +1833,57 @@ def test_teardown_replaces_failed_ordinary_job_for_external_boot_history(
         assert response.object_id == job_id
         assert after is not None and after[0] == "queued"
         assert after[2]["external_boot_authority_v1"]["activation_id"] == str(seeded.activation.id)
+
+    asyncio.run(_run())
+
+
+def test_force_teardown_external_boot_history_needs_resolver(migrated_url: str) -> None:
+    """#3007: with no authority resolver, break-glass refuses instead of recycling the job."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id, _ = await _ordinary_job_with_history(pool, "failed", None)
+            response, audited = await _force_teardown(pool, system_id, None)
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.error_category == ErrorCategory.CONFIGURATION_ERROR, response.model_dump()
+        assert response.data["reason"] == "external_boot_teardown_authority_unresolved"
+        assert after is not None and after[0] == "failed"
+        assert "external_boot_authority_v1" not in after[2]
+        assert audited == 1
+
+    asyncio.run(_run())
+
+
+def test_force_teardown_ordinary_path_runs_admission_matrix(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3007: break-glass keeps the matrix call `systems.teardown` makes before an ordinary job."""
+
+    async def _deny(*_: object, project: str, **__: object) -> None:
+        raise ExternalBootDenied(
+            "denied", details={"reason": "test_denial"}, next_actions=[], project=project
+        )
+
+    monkeypatch.setattr(systems_admin, "check_external_boot_admission", _deny)
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            response, audited = await _force_teardown(pool, system_id, None)
+            async with pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT count(*) FROM jobs WHERE dedup_key = %s", (f"{system_id}:teardown",)
+                    )
+                ).fetchone()
+
+        assert response.error_category == ErrorCategory.CONFLICT, response.model_dump()
+        assert response.data["reason"] == "test_denial"
+        assert row is not None and row[0] == 0
+        assert audited == 1
 
     asyncio.run(_run())
 
@@ -2525,6 +2633,162 @@ def test_reprovision_different_profile_is_new_job(migrated_url: str) -> None:
                 await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
                 n = await cur.fetchone()
         assert n is not None and n["n"] == 2
+
+    asyncio.run(_run())
+
+
+async def _settle_reprovision_job(
+    pool: AsyncConnectionPool,
+    job_id: str,
+    state: str,
+    *,
+    error_category: str | None = None,
+    attempt: int = 1,
+    ago: timedelta | None = None,
+) -> None:
+    """Leave the System `ready` behind its reprovision job in ``state``, as a worker would."""
+    if state == "running":
+        await _run_final_attempt(pool, job_id, lease="5 minutes")
+    async with pool.connection() as conn:
+        if state != "running":
+            await conn.execute(
+                "UPDATE jobs SET state = %s, error_category = %s, attempt = %s WHERE id = %s",
+                (state, error_category, attempt, job_id),
+            )
+        await conn.execute(
+            "UPDATE systems SET state = 'ready' WHERE id = "
+            "(SELECT (payload->>'system_id')::uuid FROM jobs WHERE id = %s)",
+            (job_id,),
+        )
+        if ago is not None:
+            await conn.execute("ALTER TABLE jobs DISABLE TRIGGER jobs_set_updated_at")
+            try:
+                await conn.execute(
+                    "UPDATE jobs SET updated_at = now() - %s WHERE id = %s", (ago, job_id)
+                )
+            finally:
+                await conn.execute("ALTER TABLE jobs ENABLE TRIGGER jobs_set_updated_at")
+
+
+async def _job_row(pool: AsyncConnectionPool, job_id: str) -> dict[str, Any]:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    return row
+
+
+def test_reprovision_back_to_applied_profile_runs_fresh_attempt(migrated_url: str) -> None:
+    """#3008: A -> B -> A recycles A's settled job, so the third handler runs."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile_a = _active_allocation_profile()
+            profile_b = {**profile_a, "memory_mb": 8192}
+            prov = FakeProvisioning()
+            resolver = provider_resolver(provisioner=prov)
+            job_ids: list[str] = []
+            for profile in (profile_a, profile_b, profile_a):
+                resp = await _reprovision(pool, ctx(), sys_id, profile)
+                assert resp.status == "queued"
+                row = await _job_row(pool, resp.object_id)
+                assert row["state"] == "queued" and row["attempt"] == 0  # a fresh attempt
+                async with pool.connection() as conn:
+                    await systems_handlers.reprovision_handler(
+                        conn, Job.model_validate(row), resolver=resolver
+                    )
+                await _settle_reprovision_job(pool, resp.object_id, "succeeded")
+                job_ids.append(resp.object_id)
+            state = await _system_state(pool, sys_id)
+        assert prov.reprovisioned == [UUID(sys_id)] * 3  # the third handler ran
+        assert job_ids[2] == job_ids[0]  # A's dedup row, recycled
+        assert state == "ready"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("job_state", "error_category", "attempt", "ago"),
+    [
+        ("succeeded", None, 1, None),
+        ("failed", None, 1, None),  # the only handler returned before this write
+        ("canceled", None, 1, timedelta(minutes=16)),
+        ("failed", "lease_expired", 1, timedelta(minutes=16)),
+        ("failed", None, 2, timedelta(minutes=16)),
+        ("succeeded", None, 2, timedelta(minutes=16)),
+    ],
+)
+def test_reprovision_recycles_settled_same_profile_job(
+    migrated_url: str,
+    job_state: str,
+    error_category: str | None,
+    attempt: int,
+    ago: timedelta | None,
+) -> None:
+    """#3008: a same-profile row with no handler left behind it is reset to a fresh attempt."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile = _active_allocation_profile()
+            first = await _reprovision(pool, ctx(), sys_id, profile)
+            await _settle_reprovision_job(
+                pool,
+                first.object_id,
+                job_state,
+                error_category=error_category,
+                attempt=attempt,
+                ago=ago,
+            )
+            again = await _reprovision(pool, ctx(), sys_id, profile)
+            row = await _job_row(pool, first.object_id)
+            state = await _system_state(pool, sys_id)
+        assert again.status == "queued"
+        assert again.object_id == first.object_id
+        assert row["state"] == "queued" and row["attempt"] == 0 and row["error_category"] is None
+        assert state == "reprovisioning"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("job_state", "error_category", "attempt"),
+    [
+        ("queued", None, 0),
+        ("running", None, 3),
+        ("canceled", None, 1),  # `jobs.cancel` leaves the handler running
+        ("failed", "lease_expired", 1),  # written over a lapsed attempt
+        ("failed", None, 2),  # a reclaimed attempt; the lapsed one may still run
+        ("succeeded", None, 2),
+    ],
+)
+def test_reprovision_refuses_while_same_profile_handler_may_run(
+    migrated_url: str, job_state: str, error_category: str | None, attempt: int
+) -> None:
+    """#3008: a recycle resets the attempt counter, so a row that may hide a handler blocks."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile = _active_allocation_profile()
+            first = await _reprovision(pool, ctx(), sys_id, profile)
+            await _settle_reprovision_job(
+                pool, first.object_id, job_state, error_category=error_category, attempt=attempt
+            )
+            before = await _job_row(pool, first.object_id)
+            resp = await _reprovision(pool, ctx(), sys_id, profile)
+            after = await _job_row(pool, first.object_id)
+            state = await _system_state(pool, sys_id)
+        assert resp.status == "error"
+        assert resp.error_category == "conflict"
+        assert resp.data == {"reason": "reprovision_job_settling", "job_id": first.object_id}
+        assert resp.suggested_next_actions == ["systems.get"]
+        assert state == "ready"
+        assert after == before  # the job row is untouched
 
     asyncio.run(_run())
 

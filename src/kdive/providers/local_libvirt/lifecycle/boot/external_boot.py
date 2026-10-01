@@ -2966,14 +2966,10 @@ class LocalLibvirtExternalBoot:
     ) -> None:
         if proof.binding != recovery.binding or proof.point_digest != self.point_digest(recovery):
             raise ValueError("external-boot cleanup proof does not match recovery point")
-        # No operation session, as in ``finalize_cleanup_tombstone``: this runs after
-        # ``cleanup`` pruned the activation's artifact parents, and a session open used to
-        # re-create them, leaving exact recovery absence unprovable (#2898). Since ADR-0710 a
-        # session creates them only on artifact use; the session-free shape stays for now.
-        # ``authority`` is therefore unused; the store re-reads the exact tombstone. The
-        # unpinned-write residual is the same as finalization's; the #2898 design's Scope
-        # (criterion 8) records it.
-        self._io.record_cleanup_quarantine(recovery, proof)
+        # Pinned since ADR-0710's 2026-09-30 amendment: a session open creates nothing, so
+        # exact recovery absence stays provable after cleanup pruned the parents (#2898).
+        with self._io.open(authority, _expected_binding(recovery.binding)):
+            self._io.record_cleanup_quarantine(recovery, proof)
 
     def observe_object(
         self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
@@ -3113,17 +3109,10 @@ class LocalLibvirtExternalBoot:
         # The authority supplies the anchored mutation-started proof as
         # ``AuthorityCommitContextV1`` (ADR-0592).  The local seam deliberately does not
         # decode it; it compares the closed owner/point fields and handles present or
-        # post-delete absence idempotently.
-        #
-        # ``authority`` is accepted and deliberately not used to open an operation session:
-        # ``test_real_adapter_finalization_replays_exact_proof_without_session`` asserts that
-        # finalization resolves no lease and opens no session, because this is a durable-store
-        # delete under the recovery root that needs no libvirt or guest access. What bounds it
-        # instead is the pair of comparisons above plus the store's own re-read of the
-        # tombstone. The residual — that the delete carries no lease pin, unlike its sibling
-        # calls — is recorded in the design's threat model rather than closed here, because
-        # the finalization seam's shape belongs to ADR-0586.
-        self._io.finalize_tombstone(recovery, proof)
+        # post-delete absence idempotently. The delete runs under the pinned session, as
+        # ``record_cleanup_quarantine`` does (ADR-0710 amendment, 2026-09-30).
+        with self._io.open(authority, _expected_binding(recovery.binding)):
+            self._io.finalize_tombstone(recovery, proof)
 
     def _reopen(
         self, operation: LocalExternalBootOperation, recovery: RecoveryPoint

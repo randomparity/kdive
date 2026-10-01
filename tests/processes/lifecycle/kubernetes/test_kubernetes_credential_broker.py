@@ -355,7 +355,9 @@ def test_tls_handshakes_are_admitted_before_the_session_limit(
         connect_accepted_socket = loop.connect_accepted_socket
         active_handshakes = 0
         peak_handshakes = 0
+        stalled_connections = session_limit + 2
         at_capacity = asyncio.Event()
+        drained = asyncio.Event()
         handshake_timeouts: list[float | None] = []
         shutdown_timeouts: list[float | None] = []
 
@@ -371,6 +373,8 @@ def test_tls_handshakes_are_admitted_before_the_session_limit(
                 return await connect_accepted_socket(*args, **kwargs)
             finally:
                 active_handshakes -= 1
+                if len(handshake_timeouts) == stalled_connections and active_handshakes == 0:
+                    drained.set()
 
         monkeypatch.setattr(loop, "connect_accepted_socket", track_connect_accepted_socket)
         monkeypatch.setattr(
@@ -393,17 +397,22 @@ def test_tls_handshakes_are_admitted_before_the_session_limit(
         await asyncio.sleep(0)
         incomplete: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
         try:
-            for _ in range(session_limit + 2):
+            for _ in range(stalled_connections):
                 incomplete.append(await asyncio.open_connection("127.0.0.1", port))
             await asyncio.wait_for(at_capacity.wait(), timeout=1)
             assert peak_handshakes == session_limit
             assert active_handshakes <= session_limit
-            assert set(handshake_timeouts) == {5}
-            assert set(shutdown_timeouts) == {5}
 
             for _, writer in incomplete:
                 writer.close()
             await asyncio.gather(*(writer.wait_closed() for _, writer in incomplete))
+            # The listen backlog equals the session limit, so the closed connections the
+            # workers have not accepted yet still fill it. A connect that arrives first is
+            # reset on macOS; wait until every one was accepted and its handshake ended.
+            await asyncio.wait_for(drained.wait(), timeout=3)
+            assert peak_handshakes == session_limit
+            assert set(handshake_timeouts) == {5}
+            assert set(shutdown_timeouts) == {5}
             request = encode_request(
                 BrokerRequest("deliver", "bound-token", "kdive", "kdive-worker-0", "uid-1")
             )

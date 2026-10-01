@@ -548,6 +548,11 @@ def _register_systems_reprovision(
         (`reason: teardown_in_progress`) and left unchanged. The teardown normally ends the
         System; reprovision only if `systems.get` shows it still `ready` after the teardown job
         failed or was canceled.
+
+        Re-applying a profile the System applied before runs a fresh attempt of that
+        profile's job. While that job is queued or running, or for 15 minutes after it ended
+        canceled, lease-lapsed, or on a retried attempt, the call is refused with `conflict`
+        (`reason: reprovision_job_settling`, `job_id`) and the System stays `ready`.
         """
         ctx = current_context()
         try:
