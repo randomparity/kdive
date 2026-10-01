@@ -40,7 +40,7 @@ Expected implementation size: 700–1000 changed lines (L) — runner ~380, node
 | `scripts/coverage_campaign/obligations.toml` | modify | `"host-install"` implementation binding |
 | `tests/scripts/test_coverage_contract.py` | modify | line 62 "no cell bound" narrows to non-`host-install` cells; asserts the six host-install cells carry the node |
 | `docs/development/coverage-qualification.md` | modify | runner usage, output contract, merge |
-| `docs/operating/install.md` | modify | unattended become prompt; proven-family pointer |
+| `docs/operating/install.md` | modify | one bounded sentence: passwordless-sudo hosts answer the become prompt with an empty line |
 | `docs/operating/providers/local-libvirt.md` | modify | proof status pointer |
 | `docs/design/2026-10-01-host-install-proof-record-2807.md` | create | sanitized live record |
 
@@ -203,7 +203,7 @@ installed live stack; the pure decisions are Task 1's tests. Proven by Task 5. S
   line 62 becomes `all(c.node_id is None for c in contract.cells if c.scenario_id != "host-install")`
   plus an assertion that the six host-install cells carry the node; red before the manifest line.
   Green: `uv run python -m pytest tests/scripts/test_coverage_contract.py -q`.
-- Docs (coverage-qualification runner section; install unattended become note; local-libvirt
+- Docs (coverage-qualification runner section; install passwordless-sudo become sentence; local-libvirt
   status) — `Mode: task-test-not-applicable`: prose; gated by `just docs-check docs-links docs-paths`.
 
 ## Task 5 — Live runs and proof record

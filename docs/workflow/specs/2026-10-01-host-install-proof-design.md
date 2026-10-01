@@ -117,7 +117,7 @@ from the checked bundle manifest:
 | `first-boot` | The first phase record | The phase passed. |
 | `repeat-setup` | Steps 11–14 | Every listed step exits 0. |
 | `second-boot` | The second phase record | The phase passed. |
-| `confinement` | Host mode at step 1 and in each phase, plus the guest process labels | The host enforces in all three samples (`Enforcing`, or AppArmor enabled `Y`), and each phase observed a confined qemu process. |
+| `confinement` | Host mode at step 1 and in each phase, the guest process labels, and each phase's installed-prerequisite observations (worker interpreter imports, lifecycle socket, operator group, published libvirt endpoint, authority revision) | The host enforces in all three samples (`Enforcing`, or AppArmor enabled `Y`), each phase observed a confined qemu process, and each phase's installed-prerequisite checks hold. |
 | `cleanup` | Cleanup observations from both phases | Each phase saw its system `torn_down` and its domain absent. |
 
 The outcome is decided in this order:
@@ -192,8 +192,10 @@ failures. The node asserts `passed`. A missing `phase.json` counts as a failed p
   three x86_64 cells here, and the three ppc64le cells #2818 owns, which move from
   `pending-implementation` to `missing-result`. The existing contract test's "no cell is bound"
   assertion narrows to the cells outside this scenario.
-- The docs gain the runner usage and output contract (coverage qualification), the unattended
-  become behaviour (install), and the proven family status (local-libvirt).
+- The docs gain the runner usage and output contract (coverage qualification) and the proven
+  family status (local-libvirt). The install page gains one bounded sentence: on a host whose
+  sudo policy needs no password, as on the proof hosts, the recipe's become prompt accepts an
+  empty line. The interactive default stays as documented.
 - The proof record is `docs/design/2026-10-01-host-install-proof-record-2807.md`.
 
 ## Failure model
