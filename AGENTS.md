@@ -36,7 +36,7 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and passing any argument makes it serial | — |
 | `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image); declares the `throwaway`, `provisioned` and `debug-stepping` env families up front, and fails loud naming the tier rather than exiting 0 when no proof actually ran | — |
 | `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, and fails loud naming the tier rather than exiting 0 when no proof actually ran | — |
-| `just ci` | the local gate: lint, type, coverage ownership, lock/schema/container guards, shell/workflow/Ansible lint and Ansible role tests, doc checks, then the ordinary suite | — |
+| `just ci` | the local gate: lint, type, coverage ownership, lock/schema/container guards, decision-record shape (`just records`, needs a fetched `origin/main`), shell/workflow/Ansible lint and Ansible role tests, doc checks, then the ordinary suite | — |
 | `just stack-backends` | the backends only: Postgres + SeaweedFS + mock OIDC healthy, bucket created, schema migrated | — |
 | `just compose-up` | the **containerized** tier — backends *plus* `server`/`reconciler`, then the `worker` created and started through the lifecycle witness (`--profile managed-worker`) | — |
 | `just compose-stop` / `compose-down` | stop that tier; `compose-stop` keeps the named volumes, `compose-down` adds `--volumes` and drops the database and object store | — |
@@ -399,8 +399,8 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   artifacts and `docs/archive/` the retired ones. A merged plan is a point-in-time record — do
   not treat one as current guidance.
 - **Deferred work is a numbered record** (`docs/debt/`, same `NNNN-kebab-title.md` shape as an
-  ADR). `just records` is the gate; it compares against `origin/main`, so `git fetch origin main`
-  first.
+  ADR). `just records` is the gate (`just ci` runs it too); it compares against `origin/main`,
+  so `git fetch origin main` first.
 - **Releasing** — see [`docs/development/releasing.md`](docs/development/releasing.md) and
   [ADR-0041](docs/adr/0041-versioning-release-process.md) (SemVer, milestone→minor,
   tag-driven release).
