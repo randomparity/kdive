@@ -237,9 +237,9 @@ reservation through the 0147 receipt, uncredited, exactly once.
 
 Rejected for this amendment:
 
-- **Do nothing.** verified: on main 2c4df02fd, the reachability test committed first on the
-  #3017 branch (`test_canceled_activate_before_authority_leaves_teardown_unrouted` in
-  `tests/integration/test_external_boot_unrouted_teardown.py`) drove `boot_run`, `jobs.cancel`,
+- **Do nothing.** verified: on main 2c4df02fd, the reachability test added in commit 9baee0b8c
+  (`test_canceled_activate_before_authority_leaves_teardown_unrouted` in
+  `tests/integration/test_external_boot_unrouted_teardown.py`, later turned into the route arm) drove `boot_run`, `jobs.cancel`,
   then `systems.teardown`, and got `external_boot_teardown_authority_unresolved` with the
   activation `preparing` and the reservation `pending`.
 - **The server retires the activation and deletes the reservation.** verified: a `torn_down`

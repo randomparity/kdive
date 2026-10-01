@@ -134,7 +134,8 @@ Steps:
    `succeeded`, activation and System `torn_down`, zero `external_boot_reservations` and zero
    `external_boot_reservation_releases` rows for the activation, one recorded teardown call; then
    `release_allocation` returns `released`. In the `queued` arm, run the activate job's lane once
-   more and assert the activation is still `torn_down` with zero reservations.
+   more and assert the activation is still `torn_down` with zero reservations, the activation's only
+   authority row is the teardown one, and `PreparingProvider.phases` is empty.
 2. Green; commit `test(external-boot): drive the routed preparing teardown to release`.
 
 ## Task 3 — kept refusals
