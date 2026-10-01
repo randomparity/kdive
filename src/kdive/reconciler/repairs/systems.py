@@ -45,8 +45,8 @@ _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES = tuple(
 )
 # A reprovisioning System has no teardown edge (#2928), so the lane leaves it to a later pass.
 # Once it settles to `ready` the lane enqueues, unless a `{uid}:teardown` row already exists. The
-# lane never recycles (`NEVER`): a failed row is left alone for an operator `systems.teardown`,
-# and `report_stranded_orphan_teardowns` warns about it once per failure (#2978).
+# lane never recycles (`NEVER`): a failed or canceled row is left alone for an operator
+# `systems.teardown`, and `report_stranded_orphan_teardowns` warns about it once per write (#2978).
 _ORPHAN_TEARDOWN_SKIPPED_STATE_VALUES = (
     *_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES,
     SystemState.REPROVISIONING.value,
@@ -58,15 +58,15 @@ _STRANDED_TEARDOWN_EXCLUDED_STATE_VALUES = (
     SystemState.TEARING_DOWN.value,
 )
 _STRANDED_TEARDOWN_SQL = (
-    "SELECT s.id, j.id AS job_id, j.error_category, j.updated_at, "
+    "SELECT s.id, j.id AS job_id, j.state, j.error_category, j.updated_at, "
     "       (j.payload ? 'authority_system_v1' OR j.payload ? %s) AS authority_marked "
     "FROM systems s "
     "JOIN allocations a ON a.id = s.allocation_id "
     "JOIN jobs j ON j.dedup_key = s.id::text || ':teardown' "
-    "WHERE s.state <> ALL(%s) AND a.state = ANY(%s) AND j.state = %s"
+    "WHERE s.state <> ALL(%s) AND a.state = ANY(%s) AND j.state = ANY(%s)"
 )
-# System id -> the failed row's `updated_at` last warned about, so each failure warns once per
-# process. Replaced every pass by the current stranded set, so it never outgrows that set.
+# System id -> the failed or canceled row's `updated_at` last warned about, so each stop warns once
+# per process. Replaced every pass by the current stranded set, so it never outgrows that set.
 _warned_stranded_teardowns: dict[UUID, datetime] = {}
 
 # Pacing with a stated limit, not a fence (ADR-0634). An operator `jobs.cancel` takes a teardown
@@ -215,10 +215,10 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
 
 
 async def report_stranded_orphan_teardowns(conn: AsyncConnection) -> int:
-    """Warn once per failure about an orphaned System whose teardown dead-lettered (#2978).
+    """Warn once per stop about an orphaned System whose teardown failed or was canceled (#2978).
 
-    `repair_orphaned_systems` never recycles a failed `{uid}:teardown` row, so without this the
-    System would sit with its Allocation gone and no log line. Read-only: the remedy is the
+    `repair_orphaned_systems` never recycles a failed or canceled `{uid}:teardown` row, so without
+    this the System would sit with its Allocation gone and no log line. Read-only: the remedy is the
     operator's `systems.teardown` (or `systems.get` for an authority-marked row, whose re-run
     belongs to the authority path). Returns the number of new warnings, which the loop feeds to
     the repairs counter.
@@ -230,7 +230,7 @@ async def report_stranded_orphan_teardowns(conn: AsyncConnection) -> int:
                 EXTERNAL_BOOT_AUTHORITY_MARKER_KEY,
                 list(_STRANDED_TEARDOWN_EXCLUDED_STATE_VALUES),
                 list(_TERMINAL_ALLOCATION_STATE_VALUES),
-                JobState.FAILED.value,
+                [JobState.FAILED.value, JobState.CANCELED.value],
             ),
         )
         rows = await cur.fetchall()
@@ -239,11 +239,11 @@ async def report_stranded_orphan_teardowns(conn: AsyncConnection) -> int:
     _warned_stranded_teardowns.update({row["id"]: row["updated_at"] for row in rows})
     for row in new:
         _log.warning(
-            "reconciler: orphaned system %s has a failed teardown job %s (%s); "
-            "it needs an operator %s",
+            "reconciler: orphaned system %s has a %s teardown job %s (%s); it needs an operator %s",
             row["id"],
+            row["state"],
             row["job_id"],
-            row["error_category"],
+            row["error_category"] or "no error category",
             "systems.get" if row["authority_marked"] else "systems.teardown",
         )
     return len(new)
