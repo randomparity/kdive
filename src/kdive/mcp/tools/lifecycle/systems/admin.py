@@ -487,17 +487,11 @@ async def _teardown_locked(
         except RoleDenied:
             await _audit_destructive_denied(conn, ctx, system, _TEARDOWN, ["admin_role"])
             return _authz_denied(system_id, ["admin_role"])
-        activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, uid)
-        if activation is not None:
-            return await _enqueue_authority_teardown(
-                conn,
-                ctx,
-                system,
-                activation,
-                system_id,
-                idempotency_key,
-                resolver,
-            )
+        routed = await route_external_boot_teardown(
+            conn, ctx, system, system_id, idempotency_key, resolver
+        )
+        if routed is not None:
+            return routed
         if idempotency_key is not None:
             replay = await resolve_envelope_replay(
                 conn, principal=ctx.principal, key=idempotency_key, kind=_TEARDOWN_KIND
@@ -548,15 +542,9 @@ async def _teardown_locked(
         )
         if replay is not None:
             return job_envelope(replay, "system_id", uid)
-        # No restricting activation exists at this exact System-locked read. Keep the matrix call
-        # so this reverse operation stays inside the shared admission inventory if the matrix later
-        # gains another restriction source.
-        try:
-            await check_external_boot_admission(
-                conn, uid, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project
-            )
-        except ExternalBootDenied as exc:
-            return _external_boot_denial(system_id, exc, ctx)
+        denial = await ordinary_teardown_denial(conn, ctx, system, system_id)
+        if denial is not None:
+            return denial
         job = await queue.enqueue(
             conn,
             JobKind.TEARDOWN,
@@ -576,6 +564,44 @@ async def _teardown_locked(
                 envelope=envelope,
             )
         return envelope
+
+
+async def route_external_boot_teardown(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    system: System,
+    system_id: str,
+    idempotency_key: str | None,
+    resolver: ProviderResolver | None,
+) -> ToolResponse | None:
+    """Route a System with any external-boot activation to its authority teardown, else ``None``.
+
+    The caller holds the System advisory lock. Shared by `systems.teardown` and break-glass
+    `ops.force_teardown` (#3007): the worker refuses an ordinary teardown for such a System (#2966).
+    """
+    activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system.id)
+    if activation is None:
+        return None
+    return await _enqueue_authority_teardown(
+        conn, ctx, system, activation, system_id, idempotency_key, resolver
+    )
+
+
+async def ordinary_teardown_denial(
+    conn: AsyncConnection, ctx: RequestContext, system: System, system_id: str
+) -> ToolResponse | None:
+    """Run the admission matrix ahead of an ordinary teardown: the typed denial, or ``None``.
+
+    No activation exists at the caller's System-locked read. The call keeps this reverse operation
+    inside the shared admission inventory if the matrix later gains another restriction source.
+    """
+    try:
+        await check_external_boot_admission(
+            conn, system.id, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project
+        )
+    except ExternalBootDenied as exc:
+        return _external_boot_denial(system_id, exc, ctx)
+    return None
 
 
 async def _enqueue_preactivation_authority_teardown(
