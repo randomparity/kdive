@@ -78,6 +78,11 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalSystemTeardownInspection,
     OverlayIdentity,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    LocalArtifactRoot,
+    LocalOperationLane,
+    LocalOperationLeaseScope,
+)
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
@@ -94,6 +99,7 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.providers.shared.runtime_paths import overlay_path
 from tests.providers.local_libvirt.external_boot_support import (
     _BINDING,
     _SOURCE_XML,
@@ -101,6 +107,8 @@ from tests.providers.local_libvirt.external_boot_support import (
     _point,
     _pre_stop,
 )
+from tests.providers.local_libvirt.lifecycle.boot.session_support import Conn, Domain, Guest
+from tests.providers.local_libvirt.lifecycle.boot.session_support import _xml as _session_xml
 from tests.support.external_boot_plan import (
     external_boot_materialization,
     external_boot_plan,
@@ -5096,44 +5104,85 @@ def test_real_adapter_cleanup_complete_still_validates_authority(
     assert session.close_attempts == 0
 
 
-def test_real_adapter_finalization_replays_exact_proof_without_session(tmp_path: Path) -> None:
+class _WriteObservingIO(RealLocalExternalBootIO):
+    """Records how many session closes preceded each cleanup store write."""
+
+    def __init__(
+        self,
+        session: _RealSession,
+        root: Path,
+        host: _RealPreparation,
+        resolve: Callable[[OpaqueProviderRef], LocalExternalBootOperationLease],
+        factory: _RealSessionFactory,
+    ) -> None:
+        super().__init__(
+            root,
+            host,
+            _RecordingRecoveryWriter(host),
+            resolve,
+            cast(LocalExternalBootSessionFactory, factory),
+            32 * 1024**3,
+        )
+        self.session = session
+        self.closes_at_write: list[int] = []
+
+    def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
+        self.closes_at_write.append(self.session.close_attempts)
+        super().finalize_tombstone(recovery, proof)
+
+    def record_cleanup_quarantine(
+        self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
+    ) -> None:
+        self.closes_at_write.append(self.session.close_attempts)
+        super().record_cleanup_quarantine(recovery, proof)
+
+
+def _resolving_io(
+    root: Path, host: _RealPreparation, session: _RealSession, resolutions: list[str]
+) -> tuple[_WriteObservingIO, _RealSessionFactory]:
+    factory = _RealSessionFactory(session)
+
+    def resolve(reference: OpaqueProviderRef) -> LocalExternalBootOperationLease:
+        resolutions.append(reference.ref)
+        return cast(LocalExternalBootOperationLease, object())
+
+    io = _WriteObservingIO(session, root, host, resolve, factory)
+    return io, factory
+
+
+_EXPECTED_OWNERSHIP = ExpectedOperationOwnership(
+    UUID(_BINDING.system_id), UUID(_BINDING.run_id), UUID(_BINDING.activation_id)
+)
+
+
+def test_real_adapter_finalization_replays_exact_proof_under_session(tmp_path: Path) -> None:
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
     metadata = _metadata("recovered")
     point = _point(metadata)
     host = _RealPreparation(metadata, root)
     session = _RealSession(host)
-
-    def reject_session(_authority: OpaqueProviderRef) -> LocalExternalBootOperationLease:
-        raise AssertionError("finalization must not resolve or open an operation session")
-
-    io = RealLocalExternalBootIO(
-        root,
-        host,
-        _RecordingRecoveryWriter(host),
-        reject_session,
-        cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
-        32 * 1024**3,
-    )
+    resolutions: list[str] = []
+    io, factory = _resolving_io(root, host, session, resolutions)
     ports = LocalLibvirtExternalBoot(io)
-    proof = FinalizeCleanupProof(
-        point_digest=ports.point_digest(point),
-        binding=point.binding,
-        operation_id="00000000-0000-0000-0000-000000000004",
-        attempt_id="00000000-0000-0000-0000-000000000005",
-        journal_sequence=7,
-        journal_digest="sha256:" + "4" * 64,
-        phase="mutation-started",
-    )
+    proof = _cleanup_proof_for(point)
     with RecoveryMetadataStore(root) as store:
         reference = store.publish(metadata)
         store.publish_tombstone(reference, metadata.binding, metadata, proof.point_digest)
 
     authority = OpaqueProviderRef(ref="authority/authenticated-by-2140")
+    with pytest.raises(ValueError, match="cleanup proof does not match"):
+        ports.finalize_cleanup_tombstone(
+            point, proof.model_copy(update={"point_digest": "sha256:" + "0" * 64}), authority
+        )
+    assert resolutions == []
     ports.finalize_cleanup_tombstone(point, proof, authority)
     ports.finalize_cleanup_tombstone(point, proof, authority)
 
-    assert session.close_attempts == 0
+    assert resolutions == [authority.ref] * 2
+    assert factory.expected == [_EXPECTED_OWNERSHIP] * 2
+    assert io.closes_at_write == [0, 1]
+    assert session.close_attempts == 2
     assert not (root / recovery_directory_name(point.recovery_ref, point.binding)).exists()
 
 
@@ -5163,32 +5212,19 @@ def test_finalization_prunes_empty_activation_parents_on_first_call_and_replay(
             assert store.exact_recovery_absence(_BINDING)
 
 
-def test_real_adapter_quarantine_records_without_session_or_artifact_parents(
+def test_real_adapter_quarantine_records_under_session_without_artifact_parents(
     tmp_path: Path,
 ) -> None:
-    """A session open re-creates the activation's pruned artifact parents (#2898).
-
-    Cleanup prunes `<system>/<run>/<activation>`; an empty re-created activation directory
-    makes exact recovery absence unprovable, so a System teardown could never complete.
-    """
+    """A session open creates no artifact parents (ADR-0710), so quarantine records under the
+    session and exact absence stays provable."""
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
     metadata = _metadata("recovered")
     point = _point(metadata)
     host = _RealPreparation(metadata, root)
     session = _RealSession(host)
-
-    def reject_session(_authority: OpaqueProviderRef) -> LocalExternalBootOperationLease:
-        raise AssertionError("quarantine recording must not resolve or open an operation session")
-
-    io = RealLocalExternalBootIO(
-        root,
-        host,
-        _RecordingRecoveryWriter(host),
-        reject_session,
-        cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
-        32 * 1024**3,
-    )
+    resolutions: list[str] = []
+    io, factory = _resolving_io(root, host, session, resolutions)
     ports = LocalLibvirtExternalBoot(io)
     proof = _cleanup_proof_for(point)
     with RecoveryMetadataStore(root) as store:
@@ -5206,13 +5242,104 @@ def test_real_adapter_quarantine_records_without_session_or_artifact_parents(
         pytest.raises(ValueError, match="tombstone does not match"),
     ):
         store.record_cleanup_quarantine(other, _cleanup_proof_for(other))
+    assert resolutions == []
     ports.record_cleanup_quarantine(point, proof, authority)
 
-    assert session.close_attempts == 0
+    assert resolutions == [authority.ref]
+    assert factory.expected == [_EXPECTED_OWNERSHIP]
+    assert io.closes_at_write == [0]
+    assert session.close_attempts == 1
     assert not (root / metadata.binding.system_id).exists()
     with RecoveryMetadataStore(root) as store:
         receipt = store.read_cleanup_quarantine(point.binding)
     assert receipt is not None and receipt.proof == proof
+
+
+def test_cleanup_writes_refuse_without_an_operation_session(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    host = _RealPreparation(metadata, root)
+
+    def refuse(_authority: OpaqueProviderRef) -> LocalExternalBootOperationLease:
+        raise RuntimeError("operation lease is not active")
+
+    io = RealLocalExternalBootIO(
+        root,
+        host,
+        _RecordingRecoveryWriter(host),
+        refuse,
+        cast(LocalExternalBootSessionFactory, _RealSessionFactory(_RealSession(host))),
+        32 * 1024**3,
+    )
+    ports = LocalLibvirtExternalBoot(io)
+    proof = _cleanup_proof_for(point)
+    authority = OpaqueProviderRef(ref="authority/current")
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        store.publish_tombstone(reference, metadata.binding, metadata, proof.point_digest)
+
+    with pytest.raises(RuntimeError, match="operation lease is not active"):
+        ports.record_cleanup_quarantine(point, proof, authority)
+    with pytest.raises(RuntimeError, match="operation lease is not active"):
+        ports.finalize_cleanup_tombstone(point, proof, authority)
+
+    with RecoveryMetadataStore(root) as store:
+        assert store.read_cleanup_quarantine(point.binding) is None
+        assert store.cleanup_complete(point.recovery_ref, point)
+
+
+def test_session_pinned_cleanup_writes_keep_exact_recovery_absence(tmp_path: Path) -> None:
+    """#3012: quarantine, finalization and its ADR-0586 replay leave nothing behind."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    system_id = UUID(_BINDING.system_id)
+    events: list[str] = []
+    domain = Domain(events, _session_xml(overlay=overlay_path(system_id), system_id=system_id))
+    factory = LocalExternalBootSessionFactory(
+        connect=lambda: Conn(events, domain),
+        pin_lease=LocalOperationLane().pin,
+        open_artifact_root=LocalArtifactRoot(root).open,
+        open_guest=lambda: Guest(events),
+        worker_pid=4242,
+        open_overlay=lambda _path: os.open(os.devnull, os.O_RDONLY),
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=os.close,
+    )
+    scope = LocalOperationLeaseScope()
+    io = RealLocalExternalBootIO(
+        root,
+        cast(LocalExternalBootMaterializer, object()),
+        cast(GuestRecoveryWriter, object()),
+        scope.resolve,
+        factory,
+        32 * 1024**3,
+    )
+    ports = LocalLibvirtExternalBoot(io)
+    proof = _cleanup_proof_for(point)
+    authority = OpaqueProviderRef(ref="authority/current")
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        store.publish_tombstone(reference, metadata.binding, metadata, proof.point_digest)
+
+    with pytest.raises(RuntimeError, match="operation lease is not active"):
+        ports.record_cleanup_quarantine(point, proof, authority)
+    for write in (
+        ports.record_cleanup_quarantine,
+        ports.finalize_cleanup_tombstone,
+        ports.finalize_cleanup_tombstone,
+    ):
+        with scope.issue(authority, _BINDING):
+            write(point, proof, authority)
+        assert not (root / _BINDING.system_id).exists()
+
+    assert events.count(f"domain.open:kdive-{system_id}") == 3
+    assert list(root.iterdir()) == []
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING)
 
 
 def _preparation_request(phase: str) -> ExternalBootPreparationRequest:
@@ -5463,9 +5590,8 @@ def test_finalize_passes_authenticated_journal_fields_without_local_interpretati
         journal_digest="sha256:" + "f" * 64,
         phase="mutation-started",
     )
-    ports.finalize_cleanup_tombstone(
-        point, proof, OpaqueProviderRef(ref="authority/authenticated-by-2140")
-    )
+    authority = OpaqueProviderRef(ref="authority/current")
+    ports.finalize_cleanup_tombstone(point, proof, authority)
     assert io.finalized_proof is proof
 
     crossed = proof.model_copy(
@@ -5476,9 +5602,7 @@ def test_finalize_passes_authenticated_journal_fields_without_local_interpretati
         }
     )
     with pytest.raises(ValueError, match="proof"):
-        ports.finalize_cleanup_tombstone(
-            point, crossed, OpaqueProviderRef(ref="authority/authenticated-by-2140")
-        )
+        ports.finalize_cleanup_tombstone(point, crossed, authority)
 
 
 def test_recovery_metadata_refuses_a_substituted_target_xml() -> None:
