@@ -31,7 +31,9 @@ never happens, and the System stays bound to a closed Investigation until an adm
    `ExternalBootActivationRepository().get_latest_for_system(conn, system_id)` for each bound live
    System in id order. If any return a row, it raises `InvestigationServiceError(object_id=<inv>,
    reason=EXTERNAL_BOOT_TEARDOWN_REQUIRED, detail=..., data={"external_boot_systems": [ids]})`.
-   The detail names each System id and `systems.teardown`.
+   The detail names each System id and `systems.teardown`. The transient reprovisioning refusal
+   keeps precedence, as in the #3007 break-glass order, so a caller that retries after a
+   reprovision settles can then meet this refusal.
 3. The read runs inside `_close_locked`'s transaction, after it took each bound live System's
    SYSTEM lock and then the INVESTIGATION lock, so the lock order is unchanged. An activation is
    created under the System lock (`runs.boot`), so the read cannot race a new activation for a
@@ -75,6 +77,9 @@ The default close (`force=False`) is unchanged: it already refuses any bound liv
    - A System whose `systems.teardown` cannot resolve an authority route keeps the Investigation
      open. Accepted: the close was not deliverable either way; the refusal names the tool whose
      own typed error explains why.
+   - A bound `tearing_down` System with external-boot history (a pre-#2966 residue) keeps the
+     Investigation open until #3026 gives it an exit. Accepted: the close could not be delivered
+     for that System either way.
 4. Covered elsewhere
    - Orphaned-System lane and reconciler producers: #3015.
    - The `tearing_down` exit: #3026.
