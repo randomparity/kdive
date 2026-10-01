@@ -239,6 +239,9 @@ that row is `queued` or `running`, or for 15 minutes (ADR-0634's settle bound) a
 can hide a running handler: `canceled`, `lease_expired`, or any terminal state at `attempt > 1`.
 This is the stalled-reprovision lane's set plus `succeeded` at `attempt > 1`, which matters only
 when a row is reused. The lane itself is unchanged: a recycled row is `queued` and defers it.
+The window is ADR-0634 pacing, not a fence. A handler that outlives it behind a recycled row
+finds the System `reprovisioning` again, not `failed`, so the #2980 backstop does not cover it;
+that residual is accepted.
 
 The recycled row keeps its original authorizing principal, as every `JobRecyclePolicy` recycle
 does; the admission audit row names the caller. Rejected: refusing every terminal same-profile
