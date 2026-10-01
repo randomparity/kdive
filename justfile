@@ -580,7 +580,7 @@ adr-status-check:
 # "validate shape only" and would pass, hiding an E-REWRITE.
 records base_ref="origin/main":
     base="$(git merge-base {{base_ref}} HEAD)" || { \
-        echo "records: cannot resolve '{{base_ref}}' — run 'git fetch origin main'" >&2; exit 1; }; \
+        echo "records: no merge-base between '{{base_ref}}' and HEAD — run 'git fetch origin main' or pass a reachable ref" >&2; exit 1; }; \
     BASE_SHA="$base" RECORD_PROFILES="adr debt" ./.github/scripts/check-records.sh
 
 # Audit runtime dependencies for known vulnerabilities. The script retries only a run that
