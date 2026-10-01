@@ -369,9 +369,13 @@ that case with #2992. The operator runbook `docs/operating/runbooks/stuck-tearin
 is the documented exit for this failure class. It replaces the #2966 amendment's "only lease
 expiry ends it" for a `tearing_down` System whose Allocation is `active`.
 
-`repair_stalled_tearing_down_systems` now also logs one WARNING per System for a skipped
-authority-marked prior row. It keeps the warned System and cause in a map that it prunes each
-pass to that pass's candidates.
+A marked teardown that the worker refused before this change stays `running`, because the worker
+never writes a marked row. A lapsed lease re-claims it and the run succeeds. Once its attempts are
+exhausted, `systems.teardown` recycles it (`FAILED_OR_LAPSED_EXHAUSTED`).
+`repair_stalled_tearing_down_systems` now also logs one WARNING per System when it skips an
+authority-marked prior row that is not active. An `authority_system_v1` marker without an
+activation is a separate case with no supported exit. The lane keeps each warned System and its
+cause in a map that it prunes each pass to that pass's candidates.
 
 Rejected for this amendment:
 
