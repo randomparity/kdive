@@ -366,3 +366,17 @@ def test_anchor_stage_failure_cannot_certify_links(
     assert "injected" in result.stderr
     assert "cannot check markdown anchors" in result.stderr
     assert "markdown links resolve" not in result.stdout
+
+
+def test_exported_cdpath_does_not_break_anchor_stage(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("# Here\n[x](#here)\n")
+    assert BASH is not None
+    result = subprocess.run(
+        [BASH, str(SCRIPT.relative_to(SCRIPT.parents[1])), str(tmp_path)],
+        cwd=SCRIPT.parents[1],
+        env={**os.environ, "CDPATH": "."},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

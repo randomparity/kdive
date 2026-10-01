@@ -15,7 +15,7 @@
 # Usage: check-doc-links.sh [ROOT]   (ROOT defaults to the repo root / cwd)
 set -euo pipefail
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SELF_DIR
 readonly ROOT="${1:-.}"
 cd "${ROOT}"
