@@ -612,6 +612,7 @@ async def _teardown_prerequisites(
         "crashing",
         "crashed",
         "failed",
+        "tearing_down",
     }
     if (
         row is None

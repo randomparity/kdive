@@ -16,7 +16,7 @@ from kdive.db.repositories import SNAPSHOTS, SYSTEMS, record_system_failure_cate
 from kdive.domain.capacity.state import AllocationState, JobState, SnapshotState, SystemState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
-from kdive.domain.operations.jobs import JobKind
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY, Authorizing, TeardownPayload
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
@@ -69,8 +69,10 @@ _STRANDED_TEARDOWN_SQL = (
 # System id -> the failed or canceled row's `updated_at` last warned about, so each stop warns once
 # per process. Replaced every pass by the current stranded set, so it never outgrows that set.
 _warned_stranded_teardowns: dict[UUID, datetime] = {}
-# Systems already warned about for a stalled `tearing_down` with external-boot history (#3015).
-_warned_stalled_teardown_history: set[UUID] = set()
+# System id -> the cause last warned about for a skipped stalled `tearing_down` (#3015, #3026).
+# Pruned every pass to that pass's candidates, so a System that leaves `tearing_down` is dropped.
+_warned_stalled_teardowns: dict[UUID, str] = {}
+_STUCK_TEARING_DOWN_RUNBOOK = "docs/operating/runbooks/stuck-tearing-down-system.md"
 _EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
 _AUTHORITY_TEARDOWN_PAYLOAD_KEYS = frozenset(
     {"authority_system_v1", EXTERNAL_BOOT_AUTHORITY_MARKER_KEY}
@@ -341,16 +343,30 @@ def gone_system_state_values() -> tuple[str, ...]:
     return _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES
 
 
-def _warn_stalled_teardown_history(system_id: UUID, activation_id: UUID) -> None:
-    if system_id in _warned_stalled_teardown_history:
+def _warn_stalled_teardown_once(system_id: UUID, cause: str, message: str, *args: object) -> None:
+    if _warned_stalled_teardowns.get(system_id) == cause:
         return
-    _warned_stalled_teardown_history.add(system_id)
-    _log.warning(
-        "reconciler: system %s is stuck in tearing_down with external-boot activation %s; the "
-        "ordinary teardown is refused (external_boot_teardown_not_supported), so no job is "
-        "requeued and the System needs operator recovery",
+    _warned_stalled_teardowns[system_id] = cause
+    _log.warning(message, system_id, *args)
+
+
+def _warn_marked_stalled_teardown(system_id: UUID, existing: Job) -> None:
+    if EXTERNAL_BOOT_AUTHORITY_MARKER_KEY in existing.payload:
+        cause, remedy = (
+            "authority_marked",
+            "this lane never replaces it, so re-run systems.teardown",
+        )
+    else:
+        cause, remedy = "authority_system_marked", "no supported exit exists for it"
+    _warn_stalled_teardown_once(
         system_id,
-        activation_id,
+        cause,
+        "reconciler: system %s is stuck in tearing_down behind authority-marked teardown job %s "
+        "(%s); %s (%s)",
+        existing.id,
+        existing.state.value,
+        remedy,
+        _STUCK_TEARING_DOWN_RUNBOOK,
     )
 
 
@@ -364,8 +380,9 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
 
     A System with external-boot activation history is skipped: the ordinary worker refuses its
     unmarked teardown as a terminal conflict, so a recycle only writes a failed attempt each pass,
-    and an authority-marked prior row is never overwritten (#3015, ADR-0620). The skip logs one
-    WARNING per System per process; the supported exit is tracked in #3026.
+    and an authority-marked prior row is never overwritten (#3015, ADR-0620). Each skip, including a
+    non-active authority-marked prior row, logs one WARNING per System and cause; the warned map is
+    pruned to each pass's candidates (#3026).
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -385,6 +402,8 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
             ),
         )
         candidates: list[UUID] = [row["id"] for row in await cur.fetchall()]
+    for gone in _warned_stalled_teardowns.keys() - set(candidates):
+        del _warned_stalled_teardowns[gone]
     requeued = 0
     for system_id in candidates:
         try:
@@ -403,10 +422,20 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
                     existing is not None
                     and _AUTHORITY_TEARDOWN_PAYLOAD_KEYS & existing.payload.keys()
                 ):
+                    _warn_marked_stalled_teardown(system_id, existing)
                     continue
                 activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system_id)
                 if activation is not None:
-                    _warn_stalled_teardown_history(system_id, activation.id)
+                    _warn_stalled_teardown_once(
+                        system_id,
+                        "external_boot_history",
+                        "reconciler: system %s is stuck in tearing_down with external-boot "
+                        "activation %s; the ordinary teardown is refused "
+                        "(external_boot_teardown_not_supported), so no job is requeued; run "
+                        "systems.teardown while its Allocation is active (%s)",
+                        activation.id,
+                        _STUCK_TEARING_DOWN_RUNBOOK,
+                    )
                     continue
                 _, admitted = await queue.enqueue_with_status(
                     conn,

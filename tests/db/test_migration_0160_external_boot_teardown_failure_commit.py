@@ -135,11 +135,12 @@ def _commit(
 
 
 def _admitted(
-    migrated_url: str, role_dsns: _RoleDsns, activation: str
+    migrated_url: str, role_dsns: _RoleDsns, activation: str, system_state: str = "ready"
 ) -> tuple[_AuthorityCase, _Allocated]:
     with psycopg.connect(migrated_url) as seed:
         case = _seed_case(seed, purpose="teardown", worker_suffix="t")
         _set_real_state(seed, case, activation)
+        seed.execute("UPDATE systems SET state = %s WHERE id = %s", (system_state, case.system_id))
     with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
         authority = _allocate(worker, case)
     with psycopg.connect(migrated_url) as seed:
@@ -171,11 +172,13 @@ def test_0160_patch_targets_exist_once(pg_conn: psycopg.Connection) -> None:
         assert definition[0].count(target) == 1
 
 
+# `tearing_down` is admitted by migration 0168 (#3026).
+@pytest.mark.parametrize("system_state", ["ready", "tearing_down"])
 @pytest.mark.parametrize("activation", ["prepared", "activating"])
 def test_0160_commits_teardown_failure_for_nonfailed_system(
-    migrated_url: str, authority_role_dsns: _RoleDsns, activation: str
+    migrated_url: str, authority_role_dsns: _RoleDsns, activation: str, system_state: str
 ) -> None:
-    case, authority = _admitted(migrated_url, authority_role_dsns, activation)
+    case, authority = _admitted(migrated_url, authority_role_dsns, activation, system_state)
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
         assert _commit(worker, case, authority) == ("applied", "queued")
     with psycopg.connect(migrated_url) as conn:
@@ -184,7 +187,7 @@ def test_0160_commits_teardown_failure_for_nonfailed_system(
             "JOIN external_boot_activations e ON e.system_id = s.id "
             "JOIN external_boot_authorities a ON a.id = %s WHERE s.id = %s",
             (authority.authority_id, case.system_id),
-        ).fetchone() == ("ready", activation, "retired")
+        ).fetchone() == (system_state, activation, "retired")
 
 
 def test_0160_terminal_teardown_failure_leaves_the_run(
