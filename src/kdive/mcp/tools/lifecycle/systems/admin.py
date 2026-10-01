@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from hashlib import sha256
 from typing import LiteralString
 from uuid import UUID
@@ -83,6 +84,19 @@ _REPROVISION_KIND = "systems.reprovision"
 _TEARDOWN_KIND = "systems.teardown"
 _AUTHORITY_MARKER = "external_boot_authority_v1"
 _EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
+# A ready System's re-admission of a profile it applied before recycles that profile's settled
+# dedup row (#3008), and a recycle resets the attempt counter, which a still-running handler of
+# the old row would then pass at its heartbeat and finalize fences. So the row blocks while it is
+# live, or for ADR-0634's 15-minute settle window after a write that can hide a running handler:
+# `canceled` (`jobs.cancel` leaves the handler running), `lease_expired`, or any attempt past the
+# first (a reclaim of a lapsed attempt). The stalled-reprovision lane defers on the same rows
+# (ADR-0435, #2980 amendment); a `succeeded` reclaim is added here because only a recycle reuses
+# its attempt numbers.
+_REPROVISION_SETTLE = timedelta(minutes=15)
+_REPROVISION_SETTLING_SQL: LiteralString = (
+    "SELECT id FROM jobs WHERE dedup_key = %s AND (state = ANY(%s) "
+    "    OR ((state = %s OR error_category = %s OR attempt > 1) AND updated_at > now() - %s))"
+)
 _SYSTEM_TEARDOWN_AUTHORITY_SQL: LiteralString = (
     "SELECT activation_id, run_id, plan_identity, provider_kind, authority_instance "
     "FROM resolve_external_boot_system_teardown_dispatch_binding(%s)"
@@ -268,6 +282,15 @@ async def _reprovision_in_lock(
         )
     if await _has_live_run(conn, system_id):
         return _stale_handle(str(system_id), current_status=system.state.value)
+    if (settling := await _settling_reprovision_job(conn, dedup_key)) is not None:
+        return ToolResponse.failure(
+            str(system_id),
+            ErrorCategory.CONFLICT,
+            detail="a prior reprovision job for this profile may still be running; "
+            "retry once it settles",
+            suggested_next_actions=["systems.get"],
+            data={"reason": "reprovision_job_settling", "job_id": str(settling)},
+        )
     try:
         await validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)
         # A reprovision can carry a new cpu.model pin; validate it against the bound host's
@@ -337,6 +360,22 @@ async def _job_for_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | Non
     return validate_stored(Job, row) if row else None
 
 
+async def _settling_reprovision_job(conn: AsyncConnection, dedup_key: str) -> UUID | None:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            _REPROVISION_SETTLING_SQL,
+            (
+                dedup_key,
+                [s.value for s in _LIVE_JOB_STATES],
+                JobState.CANCELED.value,
+                ErrorCategory.LEASE_EXPIRED.value,
+                _REPROVISION_SETTLE,
+            ),
+        )
+        row = await cur.fetchone()
+    return None if row is None else row[0]
+
+
 async def _authority_system_binding(
     conn: AsyncConnection, system_id: UUID
 ) -> AuthoritySystemBinding | None:
@@ -381,6 +420,8 @@ async def _admit_reprovision(
         ReprovisionPayload(system_id=str(system.id), profile_digest=digest),
         job_authorizing(ctx, system.project),
         dedup_key,
+        # The caller refused a row that may still hide a handler, so any row left is settled.
+        recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
     )
     return job_envelope(job, "system_id", system.id)
 
