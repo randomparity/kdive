@@ -241,12 +241,14 @@ fi
 
 # The host MCP server writes gdb-MI debug transcripts here (#2955, ADR-0088 amendment), and
 # /var/lib/kdive is root-owned on a provisioned host. Same skip-or-elevate rule as the provision
-# dirs above; outside the libvirt block because --skip-libvirt still starts the server.
+# dirs above; outside the libvirt block because --skip-libvirt still starts the server. The group is
+# the operator's user-named group, as the live_vm_host role sets it: 0750 makes the group decide who
+# reads the transcripts, and a bare install -d would leave root.
 debug_dir="${KDIVE_DEBUG_DIR:-/var/lib/kdive/debug}"
 if [[ ! -d "$debug_dir" || ! -w "$debug_dir" ]]; then
-  sudo install -d -o "$(id -un)" -m 0750 "$debug_dir" || {
+  sudo install -d -o "$(id -un)" -g "$(id -un)" -m 0750 "$debug_dir" || {
     echo "cannot create the debug transcript dir ${debug_dir}: re-run the live_vm_host play," >&2
-    echo "or create it owned by $(id -un) with mode 0750" >&2
+    echo "or create it owned by $(id -un):$(id -un) with mode 0750" >&2
     exit 1
   }
 fi
