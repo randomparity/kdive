@@ -122,20 +122,20 @@ File: the same integration module. Interfaces: `_boot`, `_teardown`; `Worker(poo
 worker_id, incarnation_credential, secret_registry)`; `build_operations(ExternalBootHandlerPorts(
 resolver=, incarnation_credential=CREDENTIAL, secret_registry=SecretRegistry(),
 acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
-teardown_executor=RecordingTeardownExecutor(conn)))` registered for `TEARDOWN` and `BOOT` through
+teardown_executor=RecordingTeardownExecutor(conn)))` registered for `TEARDOWN` through
 `route_marked(operations, must_not_run)`, as `tests/integration/test_external_boot_job_lifecycle.py`
 `_registry` does; `register_incarnation`; `release_allocation(pool, ctx, allocation_id)`.
 
-Verification: `Mode: focused-test` — `test_routed_teardown_completes_and_releases[canceled|queued]`.
-Red before 0167: the teardown response is `error`. Green: the Task 1 command.
+Verification: `Mode: focused-test` — `test_routed_teardown_completes_and_releases` (activate job
+canceled; a queued one would be claimed first by `created_at`). Red before 0167: the teardown
+response is `error`. Green: the Task 1 command.
 
 Steps:
 1. After the Task 1 route, `worker.run_once(<teardown job's dispatch_lane>)`; assert the job
    `succeeded`, activation and System `torn_down`, zero `external_boot_reservations` and zero
-   `external_boot_reservation_releases` rows for the activation, one recorded teardown call; then
-   `release_allocation` returns `released`. In the `queued` arm, run the activate job's lane once
-   more and assert the activation is still `torn_down` with zero reservations, the activation's only
-   authority row is the teardown one, and `PreparingProvider.phases` is empty.
+   `external_boot_reservation_releases` rows for the activation, the only authority row is the
+   teardown one, one recorded teardown call, `PreparingProvider.phases` empty; then
+   `release_allocation` returns `released`. The ports also need `artifact_store=INERT_OBJECT_STORE`.
 2. Green; commit `test(external-boot): drive the routed preparing teardown to release`.
 
 ## Task 3 — kept refusals

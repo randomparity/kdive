@@ -58,10 +58,10 @@ admits a plan-less `preparing` teardown (#2961). The worker path for that marker
 - After `boot_run`, with the activate job `canceled` or still `queued`, `systems.teardown`
   returns `queued` with a teardown marker whose `provider_kind`, `authority_instance` and
   `activation_id` equal the activate marker's, and the reservation is still `pending`.
-- A real `Worker` then runs that teardown job: activation and System are `torn_down`, the
-  reservation row is gone, no reservation release row exists, and `allocations.release` returns
-  `released`. In the `queued` arm, running the stale activate job afterwards leaves the
-  activation `torn_down`.
+- With the activate job `canceled`, a real `Worker` then runs that teardown job: activation and
+  System are `torn_down`, the reservation row is gone, no reservation release row exists, the only
+  authority row is the teardown one, and `allocations.release` returns `released`. (A still-queued
+  activate job is claimed first by `created_at`, which is the accepted race above, not this arm.)
 - With a second matching activate job, or an `allocating` or `superseded` authority row for the
   activation, `systems.teardown` still returns `external_boot_teardown_authority_unresolved`.
 
