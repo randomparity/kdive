@@ -1477,6 +1477,32 @@ def test_a_failing_family_lookup_still_completes_as_unknown(
     asyncio.run(_run())
 
 
+def test_a_corrupt_stored_row_in_the_family_lookup_still_completes_as_unknown(
+    migrated_url: str, monkeypatch: Any
+) -> None:
+    # Stands in for SYSTEMS.get raising ServerFaultError over a corrupt systems row (#3009); the
+    # lookup still fails open after the build committed (ADR-0678).
+    from kdive.mcp.tools.lifecycle.runs import complete_build as module
+    from kdive.serialization import ServerFaultError
+
+    async def _corrupt(conn: Any, system: Any) -> None:
+        raise ServerFaultError("stored System failed validation")
+
+    monkeypatch.setattr(module, "resolve_system_catalog_rootfs", _corrupt)
+    _config_uploaded(monkeypatch)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _complete_with_config(
+                pool, _NO_RHEL_KDUMP_SET, target_kind=ResourceKind.LOCAL_LIBVIRT
+            )
+        assert resp.status == "succeeded", resp
+        warning = cast(dict[str, Any], resp.data["rhel_guest_crash_config"])
+        assert warning["guest_family"] == "unknown"
+
+    asyncio.run(_run())
+
+
 def test_a_registered_fedora_catalog_image_resolves_to_the_rhel_family(
     migrated_url: str, monkeypatch: Any
 ) -> None:
