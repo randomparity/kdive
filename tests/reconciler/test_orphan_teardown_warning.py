@@ -1,4 +1,4 @@
-"""A failed orphan teardown is left alone and reported once per failure (#2978, ADR-0435)."""
+"""A failed or canceled orphan teardown is left alone and reported once (#2978, ADR-0435)."""
 
 from __future__ import annotations
 
@@ -139,5 +139,31 @@ def test_stranded_teardown_skips_tearing_down_system(migrated_url: str) -> None:
                 )
             count = await run_repair(pool, report_stranded_orphan_teardowns)
         assert count == 0
+
+    asyncio.run(_run())
+
+
+def test_stranded_teardown_warns_for_canceled_row(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A canceled row stays an operator stop (`recycle=NEVER`), but is no longer silent (#3006)."""
+    caplog.set_level(logging.WARNING, logger=system_repairs.__name__)
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            system_id = await _orphan_with_failed_teardown(migrated_url, pool)
+            async with await connect(migrated_url) as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'canceled', error_category = NULL "
+                    "WHERE dedup_key = %s",
+                    (f"{system_id}:teardown",),
+                )
+            before = await _row(migrated_url, system_id)
+            counts = [await run_repair(pool, report_stranded_orphan_teardowns) for _ in range(2)]
+            assert await run_repair(pool, repair_orphaned_systems) == 0
+            assert await _row(migrated_url, system_id) == before
+        (line,) = _warnings(caplog, system_id)
+        assert counts == [1, 0]
+        assert "canceled teardown job" in line and "systems.teardown" in line
 
     asyncio.run(_run())
