@@ -42,7 +42,7 @@ from kdive.mcp.tools.catalog.artifacts.uploads import (
 )
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
-from kdive.serialization import JsonValue
+from kdive.serialization import JsonValue, ServerFaultError
 from kdive.services.runs.complete_build import (
     NO_UPLOAD_MANIFEST,
     UPLOAD_WINDOW_REPLACED,
@@ -305,8 +305,9 @@ async def _target_os_id(conn: AsyncConnection, run: Run) -> str | None:
     ``None`` for an unbound Run (the decoupled path, #1881), a missing System, a rootfs that is not
     a registered local-libvirt catalog image, or an image with no recorded os-release. Fails open:
     this runs after the build committed and on every replay, so a lookup error must not fail a
-    completed Run. The savepoint rolls back only the lookup, leaving the enclosing transaction
-    usable for the envelope's ``clock_timestamp()`` read.
+    completed Run, and that includes a corrupt stored row (``ServerFaultError``, #3009). The
+    savepoint rolls back only the lookup, leaving the enclosing transaction usable for the
+    envelope's ``clock_timestamp()`` read.
     """
     if run.system_id is None:
         return None
@@ -314,7 +315,7 @@ async def _target_os_id(conn: AsyncConnection, run: Run) -> str | None:
         async with conn.transaction():
             system = await SYSTEMS.get(conn, run.system_id)
             entry = None if system is None else await resolve_system_catalog_rootfs(conn, system)
-    except psycopg.Error, ValidationError:
+    except psycopg.Error, ValidationError, ServerFaultError:
         _log.warning("guest OS lookup failed for run %s; the advisory reports unknown", run.id)
         return None
     return None if entry is None else image_os_id(entry)

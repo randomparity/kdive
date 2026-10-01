@@ -214,6 +214,48 @@ Rejected for this amendment:
   allocation binding in a migration; the release refusal keeps the allocation `active` for the
   common path at no schema cost.
 
+### Amendment (2026-09-30): a never-authorized preparing activation routes by its activate marker (#3017)
+
+`runs.boot` creates the activation `preparing` with a pending reservation and enqueues the
+activate job; only that job's worker allocates the first authority row. When the job is canceled,
+fails, or has not yet allocated, the activation has no authority row, and the dispatch resolver
+returned no route, so `systems.teardown` refused and `allocations.release` held the allocation.
+
+The resolver (migration 0167) now also returns a route when the newest activation is `preparing`
+and has no `external_boot_authorities` row in any state: the `provider_kind` and
+`authority_instance` of each `boot` job whose `external_boot_authority_v1` marker names that
+activation, its run, System and plan, with purpose `activate`. The server minted that marker under
+the System lock in the same transaction as the activation, so it is the route an activate
+authority would have recorded. The job's state is not read, so a canceled, failed, queued or
+running activate job routes alike. Two or more such jobs return two rows and still refuse; this is
+defence in depth, because `runs.boot` mints the marker only on its `{run}:boot` job and
+`jobs.dedup_key` is unique. A `preparing` activation with an `allocating` or `superseded` row
+still refuses, and so does a System whose bound provider kind no longer equals the marker's
+(`build_external_boot_payload`). The teardown then runs the
+authority-marked path #2961 already admits for `preparing`: the authority ends the pending
+reservation through the 0147 receipt, uncredited, exactly once.
+
+Rejected for this amendment:
+
+- **Do nothing.** verified: on main 2c4df02fd, the reachability test added in commit 9baee0b8c
+  (`test_canceled_activate_before_authority_leaves_teardown_unrouted` in
+  `tests/integration/test_external_boot_unrouted_teardown.py`, later turned into the route arm) drove `boot_run`, `jobs.cancel`,
+  then `systems.teardown`, and got `external_boot_teardown_authority_unresolved` with the
+  activation `preparing` and the reservation `pending`.
+- **The server retires the activation and deletes the reservation.** verified: a `torn_down`
+  activation needs `external-boot-teardown-evidence-v1` teardown evidence (0147
+  `external_boot_activation_state_evidence`), which only the authority produces, and the ordinary
+  teardown handler refuses any System with an activation (#2966 amendment), so the System's
+  domain would have no teardown path.
+- **Route from the System's current provider binding.** verified: `_enqueue_external_boot`
+  (`mcp/tools/lifecycle/runs/steps.py` at 2c4df02fd) refuses with `authority_route_changed` when
+  the binding's route moves, so the current binding can differ from the durable one the Decision
+  requires.
+- **Route only a canceled or failed activate job, or cancel a queued one in `systems.teardown`.**
+  judgment: an activate job no worker claims would leave the System with no exit, and the race
+  with a live activate job is already ordered by the teardown fence (migration 0161, #2884
+  amendment above) and the 0147 receipt, which credits a pending or ready reservation once.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.

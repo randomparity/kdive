@@ -52,6 +52,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
 )
+from kdive.serialization import ServerFaultError
 from tests.providers.external_boot_authority.service_support import (
     _DIGEST_A,
     _DIGEST_B,
@@ -1293,6 +1294,21 @@ async def test_refused_orphan_disposition_logs_category_and_reason_once(
         "untrusted",
         "unresolved",
     )
+
+
+@pytest.mark.anyio
+async def test_readiness_fails_closed_on_a_corrupt_stored_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The journal's binding rebuild raises ServerFaultError on a corrupt row (#3009).
+    service, repository, _, peer, request = _service(tmp_path)
+
+    async def _corrupt(*_: object) -> None:
+        raise ServerFaultError("stored ExternalBootPlan failed validation")
+
+    monkeypatch.setattr(repository, "resolve_allocating", _corrupt)
+    assert not await service.readiness(peer, request)
+    assert service.metrics.recovery_failures == {("untrusted", "unresolved"): 1}
 
 
 @pytest.mark.anyio

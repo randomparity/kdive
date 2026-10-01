@@ -47,7 +47,7 @@ from kdive.domain.lifecycle.records import (
     SystemShape,
 )
 from kdive.domain.operations.jobs import Job
-from kdive.serialization import JsonValue
+from kdive.serialization import JsonValue, validate_stored
 
 # DB-authoritative columns, omitted from inserts so their defaults/trigger apply.
 _SERVER_GENERATED = ("created_at", "updated_at")
@@ -86,7 +86,7 @@ class InvestigationBuildRepository:
             row = await cur.fetchone()
         if row is None:  # Invariant: INSERT ... RETURNING always yields one row.
             raise RuntimeError("INSERT into investigation_builds returned no row")
-        return InvestigationBuild.model_validate(row)
+        return validate_stored(InvestigationBuild, row)
 
     async def get(
         self, conn: AsyncConnection, investigation_id: UUID, build_ref: str
@@ -98,7 +98,7 @@ class InvestigationBuildRepository:
                 (investigation_id, build_ref),
             )
             row = await cur.fetchone()
-        return None if row is None else InvestigationBuild.model_validate(row)
+        return None if row is None else validate_stored(InvestigationBuild, row)
 
     async def active_by_digest(
         self, conn: AsyncConnection, investigation_id: UUID, content_digest: str, now: datetime
@@ -116,7 +116,7 @@ class InvestigationBuildRepository:
                 (investigation_id, content_digest, now),
             )
             row = await cur.fetchone()
-        return None if row is None else InvestigationBuild.model_validate(row)
+        return None if row is None else validate_stored(InvestigationBuild, row)
 
 
 class Repository[M: BaseModel]:
@@ -176,7 +176,7 @@ class Repository[M: BaseModel]:
             row = await cur.fetchone()
         if row is None:  # Invariant: INSERT ... RETURNING always yields one row.
             raise RuntimeError(f"INSERT into {self._table} returned no row")
-        return self._model.model_validate(row)
+        return validate_stored(self._model, row)
 
     async def get(self, conn: AsyncConnection, key: UUID | str) -> M | None:
         """Return the row whose ``key_column`` equals ``key``, or ``None`` if absent."""
@@ -188,7 +188,7 @@ class Repository[M: BaseModel]:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(query, (key,))
             row = await cur.fetchone()
-        return None if row is None else self._model.model_validate(row)
+        return None if row is None else validate_stored(self._model, row)
 
     async def list_all(self, conn: AsyncConnection) -> list[M]:
         """Return every row, ordered by ``key_column`` for a stable collection envelope."""
@@ -200,7 +200,7 @@ class Repository[M: BaseModel]:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(query)
             rows = await cur.fetchall()
-        return [self._model.model_validate(row) for row in rows]
+        return [validate_stored(self._model, row) for row in rows]
 
     async def delete(self, conn: AsyncConnection, key: UUID | str) -> bool:
         """Delete the row whose ``key_column`` equals ``key``; return whether one was removed.
@@ -262,7 +262,7 @@ class StatefulRepository[M: DomainModel, S: StrEnum](Repository[M]):
             updated = await cur.fetchone()
         if updated is None:  # Invariant: the row was held under FOR UPDATE.
             raise RuntimeError(f"UPDATE of {self._table} id {obj_id} returned no row")
-        return self._model.model_validate(updated)
+        return validate_stored(self._model, updated)
 
     async def set_json_column(
         self,
@@ -397,7 +397,7 @@ class KeyedRepository[M: BaseModel](Repository[M]):
             row = await cur.fetchone()
         if row is None:  # Invariant: INSERT ... RETURNING always yields one row.
             raise RuntimeError(f"UPSERT into {self._table} returned no row")
-        return self._model.model_validate(row)
+        return validate_stored(self._model, row)
 
 
 class ArtifactRepository(Repository[Artifact]):
@@ -429,11 +429,11 @@ class ArtifactRepository(Repository[Artifact]):
                 await cur.execute(insert_query, self._insert_params(obj))
                 row = await cur.fetchone()
                 if row is not None:
-                    return self._model.model_validate(row), True
+                    return validate_stored(self._model, row), True
                 await cur.execute(select_query, (obj.owner_kind, obj.owner_id, obj.object_key))
                 row = await cur.fetchone()
                 if row is not None:
-                    return self._model.model_validate(row), False
+                    return validate_stored(self._model, row), False
         raise ArtifactClaimConflict(
             "artifact claim winner disappeared twice for "
             f"({obj.owner_kind}, {obj.owner_id}, {obj.object_key}); "
@@ -498,7 +498,7 @@ async def snapshot_by_name(conn: AsyncConnection, system_id: UUID, name: str) ->
             "SELECT * FROM snapshots WHERE system_id = %s AND name = %s", (system_id, name)
         )
         row = await cur.fetchone()
-    return None if row is None else Snapshot.model_validate(row)
+    return None if row is None else validate_stored(Snapshot, row)
 
 
 async def snapshots_for_system(conn: AsyncConnection, system_id: UUID) -> list[Snapshot]:
@@ -509,7 +509,7 @@ async def snapshots_for_system(conn: AsyncConnection, system_id: UUID) -> list[S
             (system_id,),
         )
         rows = await cur.fetchall()
-    return [Snapshot.model_validate(row) for row in rows]
+    return [validate_stored(Snapshot, row) for row in rows]
 
 
 async def delete_snapshots_for_system(conn: AsyncConnection, system_id: UUID) -> None:

@@ -65,6 +65,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
 )
 from kdive.providers.system_authority.service import AuthoritySystemService
 from kdive.security.secrets.redaction import REDACTION
+from kdive.serialization import ServerFaultError
 
 _ERROR_MESSAGE_MAX = 512
 # Defence in depth for the fixed refusal text: every URL userinfo is masked.
@@ -1064,10 +1065,10 @@ class ExternalBootAuthorityService:
             trusted_labels = self._trusted_labels(binding)
             journal = self._journal_factory(request.system_id)
             records = await self._recover(binding, journal)
-        except (AuthorityServiceError, OSError, ValueError) as error:
+        except (AuthorityServiceError, OSError, ValueError, ServerFaultError) as error:
             self.metrics.recovery_failed_labels(trusted_labels)
-            # OSError/ValueError text can carry paths or payload fragments, so those log
-            # their class name alone.
+            # Other errors log their class name alone: OSError/ValueError text can carry
+            # paths or payload fragments.
             category, reason = (
                 (error.category, error.reason)
                 if isinstance(error, AuthorityServiceError)

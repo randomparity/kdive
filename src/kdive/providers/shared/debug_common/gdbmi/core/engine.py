@@ -191,6 +191,7 @@ class GdbMiEngine(
             rsp_port=port,
             transcript_path=transcript_path,
             run_id=run_id,
+            guest_arch=guest_arch,
         )
         try:
             self.execute_mi_command(attachment, "-gdb-set confirm off")
