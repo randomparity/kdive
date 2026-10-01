@@ -79,6 +79,30 @@ The following keep their current behaviour:
 We rejected treating every bare `ValidationError` as a fault (a denylist). judgment: it would
 relabel any unmarked caller-input rebuild as a retryable server fault.
 
+### Amendment (2026-09-30): repository-layer rebuilds are server faults (#3009)
+
+This widens the #2981 allowlist and moves the helper. It narrows that amendment's last excluded
+bullet to rebuilds outside `kdive.db.repositories`, `kdive.db.external_boot_activations`, and the
+authority-journal binding.
+
+`ServerFaultError` and `validate_stored` now live in `kdive.serialization`, below the MCP layer,
+because `kdive.db` may not import `kdive.mcp`. `kdive.mcp.responses` re-exports both, and
+`InvalidEnvelopeError` still subclasses `ServerFaultError`. Every stored-row model rebuild in
+`kdive.db.repositories`, in `kdive.db.external_boot_activations`, and in the
+`kdive.db.external_boot_authority_journal` binding goes through `validate_stored`, including
+`RETURNING` readbacks. A corrupt row rebuilt at one of these sites during a tool call now reaches
+the caller as the `infrastructure_failure` envelope.
+
+Two callers relied on the old `ValueError`, and both now also catch `ServerFaultError`. The
+guest-OS lookup in `runs.complete_build` still fails open (ADR-0678). The authority service's
+`readiness` still fails closed. Broad `except Exception` handlers in workers and the reconciler
+are unaffected.
+
+Other stored-row rebuilds keep their current path. These include the worker-side
+`kdive.db.remote_module_attempt_obligations` receipt, the image catalog lookup, and the
+provider-layer authority repository. Caller-input rebuilds keep their current path too. The
+rejected denylist stays rejected.
+
 ## Considered & rejected
 
 - **Middleware alone, keyed on `ValidationError.title == "ToolResponse"`.** verified: in
