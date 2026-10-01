@@ -25,8 +25,9 @@ model test ~15, migration lists and windows ~12.
 ## Global Constraints
 
 - Migration file `src/kdive/db/schema/0170_repeated_provider_conflict_terminal.sql`; ADR
-  `docs/adr/0714-*.md`. Both numbers are assigned by the campaign; do not renumber them. Applied
-  migrations are byte-immutable (ADR-0015). Sibling #2992 holds `0169`. After it merges, the
+  `docs/adr/0714-repeated-provider-conflict-ends-the-external-boot-job.md`. Both numbers are
+  assigned by the campaign; do not renumber them. Applied migrations are byte-immutable
+  (ADR-0015). Sibling #2992 holds `0169`. After it merges, the
   branch base is refreshed, and the `tests/db/test_migrate.py` lists gain `0169` before `0170`.
 - Do not change the authority wire categories (`transport.py`, `_PEER_REASONS`),
   `COMMITTABLE_ERROR_CATEGORIES`, `worker._is_terminal`, `max_attempts`, or any ADR-0711 grant
