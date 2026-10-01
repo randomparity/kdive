@@ -285,6 +285,20 @@ Rejected for this amendment:
   break-glass operator is usually not a project `admin`, so the named tool would be unreachable to
   the caller that most needs it.
 
+### Amendment (2026-10-01): the stalled `tearing_down` lane skips external-boot history (#3015)
+
+`repair_stalled_tearing_down_systems` reads the System's latest external-boot activation under
+the System lock. A System with any activation row is skipped: the lane enqueues nothing and
+logs one WARNING per System per process, naming the activation. This replaces the re-enqueue
+the #2966 amendment accepted for such Systems, which wrote a failed attempt every pass. A prior
+`{system}:teardown` row carrying an authority marker is never recycled by this lane, so an
+unmarked payload cannot overwrite it. The supported exit for such a System is tracked in #3026.
+
+A skipped System stays in the lane's candidate set, so it spends one slot of the per-pass limit
+each pass. The set is the finite residue of pre-fix ordinary teardowns (no new System reaches
+`tearing_down` with history), and the in-lock visit is what emits the warning, so the candidate
+query does not exclude it. Only 100 or more such Systems would crowd out a recoverable one.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
