@@ -50,7 +50,11 @@ halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session 
 - `debug.set_watchpoint` — trap a write to a data address. A ppc64le guest under KVM cannot
   insert one; the call returns `not_implemented` with `watchpoint_unsupported` and arms
   nothing. A stub that refuses the insert itself returns the same code under
-  `debug_attach_failure`.
+  `debug_attach_failure`. gdb inserts watchpoints on resume, so one it cannot insert (a
+  refusing stub, or too many armed watchpoints) fails the next resume with
+  `debug_attach_failure` and `watchpoint_insert_failed` (`data.verb`, `data.watchpoint`);
+  remove a watchpoint with `debug.clear_watchpoint`, then retry. A watchpoint the stub accepts
+  but never traps shows as a `debug.continue` timeout.
 - `debug.list_watchpoints` — list the current watchpoints.
 - `debug.clear_watchpoint` — remove a watchpoint.
 
