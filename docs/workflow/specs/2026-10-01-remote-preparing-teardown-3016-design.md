@@ -33,7 +33,8 @@ Read against `b3316923c`:
    (`providers/remote_libvirt/external_boot_authority.py:2129-2222`) reads its own durable
    provider-private state. With a terminal module record it reaps through the module host. With
    an unfinished preparation record whose absence it cannot prove, it returns quarantine facts,
-   so the 0147 receipt yields `retained_quarantine` and requeues the job. With neither record it
+   so the 0147 receipt is `retained_quarantine` (a non-final attempt requeues; the final one
+   dead-letters, 0164). With neither record it
    destroys, undefines and removes, with no module call. The existing test
    `test_remote_system_teardown_restarts_after_lost_storage_response` covers that last path.
 3. `finalize_external_boot_authority_teardown` (0147) does not read the payload's receipt.
@@ -81,8 +82,10 @@ Not changed:
 3. **Accepted failure classes**
    - A `preparing` activation with a mutation obligation but no reap obligation (preparation
      interrupted mid-flight) is admitted without a receipt. This is accepted because the
-     authority host quarantines its unfinished preparation (point 2), and the 0147 receipt
-     requeues the job.
+     authority host quarantines its unfinished preparation (point 2). Residual: such a System
+     never reaches `torn_down` (the final attempt dead-letters, 0164) until the interrupted
+     preparation is resolved, which is an excluded lifecycle operation. Before this change it
+     was refused at admission, so nothing regresses.
    - An activation that leaves `preparing` between admission and the worker claim is torn
      down with a payload that has no receipt. This is accepted because the teardown handler
      never reads the receipt (point 1).
@@ -94,7 +97,8 @@ Not changed:
 ## Success
 
 - `build_external_boot_payload` returns a `TEARDOWN` payload whose `remote_module_attempt_v1`
-  is `None` for a remote-libvirt `preparing` activation with no retained receipt. With one
+  is `None` for a remote-libvirt `preparing` activation with no retained receipt (torn down to
+  `torn_down` when its preparation created no module volumes; see the failure model's residual). With one
   retained receipt it carries that receipt. With two it refuses as ambiguous.
 - For a remote-libvirt activation with no receipt, it still refuses `teardown` of a
   `recovery_failed` activation and `release` of a `recovered` activation.

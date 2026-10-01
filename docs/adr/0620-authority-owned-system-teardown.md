@@ -270,8 +270,9 @@ The teardown performs no worker-side module reap that the receipt would bind. `t
 completes in its `before_port` hook, so the runner never calls `_execute` or
 `_execute_remote_module_lifecycle` for purpose `teardown`. The authority host reaps module
 volumes at System teardown from its own provider-private records. It quarantines an unfinished
-preparation it cannot prove absent, and the 0147 receipt then requeues the job as
-`retained_quarantine`.
+preparation it cannot prove absent: the receipt is `retained_quarantine`, a non-final attempt
+requeues, and the final one dead-letters (#2917 amendment above). Such a System stays out of
+`torn_down` until its interrupted preparation is resolved, as it did when admission refused it.
 
 Rejected for this amendment:
 

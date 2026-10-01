@@ -122,11 +122,8 @@ def test_remote_preparing_teardown_prep_receipt(
 
 2. Run `just test-verbose tests/jobs/handlers/external_boot/test_admission.py`. Expect
    `[none]` to fail with "no retained PREP evidence" and every other case to pass. If `[two]`
-   fails because `open_mutation_obligation` refuses a second live attempt for the same System,
-   open, record and reap the first attempt's obligation and then discharge its mutation
-   obligation with `discharge_mutation_obligation(conn, attempt, reason=...)`, using a reason
-   from `_DISCHARGE_REASONS`, before opening the second. Record the change in the commit
-   message.
+   cannot open a second attempt, discharge the first one's mutation obligation
+   (`discharge_mutation_obligation(conn, attempt, reason=...)`) before opening the second.
 3. In `admission.py`, replace
 
 ```python
@@ -159,19 +156,18 @@ Interfaces: `_job(case)` and `_dispatch(dsns, conn, case, operation, vehicle)` i
 keyword `marker: dict[str, Any] | None = None` (default `case.marker`); `_dispatch` also gains
 `resolver: ProviderResolver | None = None` (default `resolver_for(vehicle)`). Uses
 `AuthorityCapability(authority_instance, geometry=None, sender=None, modules=None)` from
-`kdive.providers.ports.authority` and the module attribute
-`kdive.jobs.handlers.external_boot.lifecycle.execute_remote_module_lifecycle_on_authority_host`.
+`kdive.providers.ports.authority`.
 
 Verification:
 
 - Contract: a remote-libvirt teardown of a `preparing` activation whose payload has no
-  `remote_module_attempt_v1` ends `torn_down`, ends the reservation exactly once, and runs no
-  worker module lifecycle. Mode: focused-test. Test
+  `remote_module_attempt_v1` ends `torn_down` and ends the reservation exactly once. Mode:
+  focused-test. Test
   `test_teardown_of_a_preparing_activation_skips_preparation[remote-libvirt-*]`. It passes on
-  main because no source change is needed. Controlled fault: insert
-  `await execute_remote_module_lifecycle_on_authority_host()` as the first statement of
-  `complete` in `teardown_handler`; expect red with "must not run the worker module lifecycle"
-  (which also proves the patched attribute is the one the handler calls). Revert it with
+  main because no source change is needed. Controlled fault (the regression the
+  spec rules out): insert `await _execute(context)` as the first statement of `complete` in
+  `teardown_handler`; expect red (refused, activation not `torn_down`).
+  Revert it with
   `git checkout -- src/kdive/jobs/handlers/external_boot/lifecycle.py` only after Task 1 is
   committed. Green command:
   `just test-verbose tests/jobs/handlers/external_boot/test_prepared_before_admission.py`.
@@ -193,19 +189,8 @@ def _job(case: SeededCase, marker: dict[str, Any] | None = None) -> Job:
    None = None` after `vehicle`; pass `resolver=resolver or resolver_for(vehicle)` to
    `ExternalBootHandlerPorts`; call
    `handler(worker, _job(case, marker), ExternalBootAuthorityMarkerV1.model_validate(marker or case.marker))`.
-2. Add a `provider_kind` parameter, `["local-libvirt", "remote-libvirt"]`, and `monkeypatch`
-   to `test_teardown_of_a_preparing_activation_skips_preparation`. Before `body`, patch the
-   module lifecycle entry point to fail:
-
-```python
-async def forbidden(**_values: object) -> None:
-    raise AssertionError("System teardown must not run the worker module lifecycle")
-
-
-monkeypatch.setattr(lifecycle, "execute_remote_module_lifecycle_on_authority_host", forbidden)
-```
-
-   Pass `marker_overrides={"provider_kind": provider_kind}` to `seed_case`, and replace the
+2. Add a `provider_kind` parameter, `["local-libvirt", "remote-libvirt"]`, to
+   `test_teardown_of_a_preparing_activation_skips_preparation`. Pass `marker_overrides={"provider_kind": provider_kind}` to `seed_case`, and replace the
    `_dispatch` call with:
 
 ```python
@@ -234,14 +219,12 @@ await _dispatch(
 
    Add the imports `from dataclasses import replace`, `from typing import cast`,
    `from kdive.domain.catalog.resources import ResourceKind`,
-   `from kdive.jobs.handlers.external_boot import lifecycle`,
    `from kdive.providers.core.resolver import ProviderResolver`, and
    `from kdive.providers.ports.authority import AuthorityCapability`. Add "#3016: remote-libvirt
    reads no PREP receipt" to the docstring. The existing row assertion (`torn_down`, mode,
    reservations 0, releases 0 or 1) then covers both providers unchanged.
-3. Run the green command; expect four cases to pass. If the runner refuses the remote binding
-   (for example an `authority_instance` mismatch), record the exact refusal and change only the
-   test binding to what the runner compares against.
+3. Run the green command; expect four cases to pass. A runner refusal of the remote binding is
+   fixed in the test binding only.
 4. Apply the controlled fault, expect red, revert, expect green.
 5. `just lint`, `just type` (exit 0); commit
    `test(external-boot): prove remote preparing teardown needs no PREP (#3016)`.
@@ -293,9 +276,8 @@ if provider_kind == "remote-libvirt":
         assert job["payload"].get("remote_module_attempt_v1") is None
 ```
 
-3. Run the green command; expect both cases to pass. If `_teardown` refuses the remote case for
-   a reason other than the PREP check (for example a profile keyed to `local-libvirt`), record
-   the refusal and adjust only the seed rows; never production code in this task.
+3. Run the green command; expect both cases to pass. A non-PREP refusal of the remote case is
+   fixed in the seed rows only, never in production code.
 4. Show red against the pre-Task-1 `admission.py`, then restore it.
 5. `just lint`, `just type` (exit 0); commit
    `test(mcp): systems.teardown queues a remote preparing teardown (#3016)`.
