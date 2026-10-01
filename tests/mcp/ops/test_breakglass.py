@@ -383,6 +383,8 @@ def test_force_release_expired_stale_but_audited(migrated_url: str) -> None:
             )
         assert resp.status == "error"
         assert resp.error_category == "stale_handle"
+        # `allocations.wait` needs a project role the non-member admin does not hold.
+        assert resp.suggested_next_actions == []
         assert await _count_platform_audit(migrated_url) == 1
 
     asyncio.run(_run())
@@ -493,6 +495,7 @@ def test_drain_force_release_item_carries_external_boot_denial(migrated_url: str
                 reason="maintenance",
             )
         assert [item.object_id for item in resp.items] == [str(alloc_id)]
+        assert (resp.data["released"], resp.data["failed"]) == ("0", "1")
         item = resp.items[0]
         assert item.error_category == "conflict"
         assert item.detail is not None

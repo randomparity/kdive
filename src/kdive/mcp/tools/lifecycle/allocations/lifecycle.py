@@ -70,6 +70,7 @@ def release_failure(
     ``breakglass`` names ``ops.force_teardown`` where the service suggests ``systems.teardown``:
     a platform admin acting on a project it is not a member of cannot call the project tool,
     and the break-glass teardown takes the same authority route for external-boot Systems.
+    The service-owned ``detail`` text still names ``systems.teardown``.
     """
     data: dict[str, Any] = dict(outcome.details)
     if outcome.current_status:
@@ -80,13 +81,13 @@ def release_failure(
         suggested = tuple(
             "ops.force_teardown" if action == "systems.teardown" else action for action in suggested
         )
-    next_actions = ["allocations.wait"] if category is ErrorCategory.STALE_HANDLE else []
-    next_actions += visible_next_actions(suggested, ctx, project)
+    if category is ErrorCategory.STALE_HANDLE:
+        suggested = ("allocations.wait", *suggested)
     return ToolResponse.failure(
         object_id,
         category,
         detail=outcome.detail,
-        suggested_next_actions=next_actions,
+        suggested_next_actions=visible_next_actions(suggested, ctx, project),
         data=data,
     )
 
