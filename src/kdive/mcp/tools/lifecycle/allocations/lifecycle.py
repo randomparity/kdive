@@ -54,17 +54,40 @@ def _release_response(
 ) -> ToolResponse:
     if outcome.released:
         return ToolResponse.success(str(uid), "released")
+    return release_failure(str(uid), outcome, ctx, project)
+
+
+def release_failure(
+    object_id: str,
+    outcome: ReleaseOutcome,
+    ctx: RequestContext,
+    project: str,
+    *,
+    breakglass: bool = False,
+) -> ToolResponse:
+    """Render a refused release as the failure envelope every release tool shares (#3018).
+
+    ``breakglass`` names ``ops.force_teardown`` where the service suggests ``systems.teardown``:
+    a platform admin acting on a project it is not a member of cannot call the project tool,
+    and the break-glass teardown takes the same authority route for external-boot Systems.
+    The service-owned ``detail`` text still names ``systems.teardown``.
+    """
     data: dict[str, Any] = dict(outcome.details)
     if outcome.current_status:
         data["current_status"] = outcome.current_status
     category = outcome.category or ErrorCategory.CONFIGURATION_ERROR
-    next_actions = ["allocations.wait"] if category is ErrorCategory.STALE_HANDLE else []
-    next_actions += visible_next_actions(outcome.next_actions, ctx, project)
+    suggested = outcome.next_actions
+    if breakglass:
+        suggested = tuple(
+            "ops.force_teardown" if action == "systems.teardown" else action for action in suggested
+        )
+    if category is ErrorCategory.STALE_HANDLE:
+        suggested = ("allocations.wait", *suggested)
     return ToolResponse.failure(
-        str(uid),
+        object_id,
         category,
         detail=outcome.detail,
-        suggested_next_actions=next_actions,
+        suggested_next_actions=visible_next_actions(suggested, ctx, project),
         data=data,
     )
 
