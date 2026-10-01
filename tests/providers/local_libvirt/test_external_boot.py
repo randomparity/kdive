@@ -5334,6 +5334,7 @@ def test_session_pinned_cleanup_writes_keep_exact_recovery_absence(tmp_path: Pat
     ):
         with scope.issue(authority, _BINDING):
             write(point, proof, authority)
+        assert not (root / _BINDING.system_id).exists()
 
     assert events.count(f"domain.open:kdive-{system_id}") == 3
     assert list(root.iterdir()) == []
