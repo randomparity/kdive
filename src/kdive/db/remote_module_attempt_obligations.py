@@ -28,6 +28,7 @@ from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
 )
+from kdive.serialization import validate_stored
 
 type MutationDischargeReason = Literal["restored", "baseline_committed", "terminal_escape"]
 
@@ -269,7 +270,7 @@ class RemoteModuleAttemptObligationRepository:
                 f"multiple retained module attempts exist for {system_id}/{run_id}"
             )
         return ModuleAttemptPreparationRequestV1(
-            module_attempt_obligation=ModuleAttemptObligationReceiptV1(**rows[0])
+            module_attempt_obligation=validate_stored(ModuleAttemptObligationReceiptV1, rows[0])
         )
 
     async def discharge_mutation_obligation(

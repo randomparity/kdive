@@ -4,24 +4,30 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from fastmcp import Client, FastMCP
 from pydantic import ValidationError
 
+from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.db.repositories import IMAGE_CATALOG, RESOURCES
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.images.cataloging.catalog import (
     resolve_public_rootfs_sync,
     resolve_rootfs,
     resolve_system_catalog_rootfs,
 )
+from kdive.mcp.middleware.server_fault import ServerFaultMiddleware
+from kdive.mcp.responses import ToolResponse
 from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.serialization import ServerFaultError
+from tests.db.remote_module_attempt_obligations_support import _attempt, _evidence, _seed
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 
@@ -116,3 +122,46 @@ def test_catalog_rebuild_of_a_corrupt_row_is_a_server_fault(migrated_url: str) -
     ):
         resolve_public_rootfs_sync(sync_conn, "local-libvirt", "base", "x86_64")
     _assert_catalog_fault(got)
+
+
+def test_receipt_rebuild_of_a_corrupt_row_is_a_server_fault(migrated_url: str) -> None:
+    # The table's own constraints make this row unwritable, so they are dropped inside a
+    # rolled-back transaction to reach the defensive rebuild (#3044).
+    repo = RemoteModuleAttemptObligationRepository()
+
+    async def _run() -> Any:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            system_id, run_id = await _seed(conn)
+            attempt = _attempt(system_id, run_id)
+            await repo.open_mutation_obligation(conn, attempt)
+            await repo.record_terminal_evidence(conn, attempt, _evidence(attempt))
+            await repo.open_reap_obligation(conn, attempt)
+            async with conn.transaction(force_rollback=True):
+                await conn.execute(
+                    "ALTER TABLE remote_module_attempt_obligations DISABLE TRIGGER USER, "
+                    "DROP CONSTRAINT remote_module_attempt_nonce, "
+                    "DROP CONSTRAINT remote_module_attempt_evidence_ownership"
+                )
+                await conn.execute(
+                    "UPDATE remote_module_attempt_obligations SET operation_nonce = %s",
+                    ("A" * 32,),
+                )
+                with pytest.raises(ServerFaultError, match="stored ModuleAttempt") as got:
+                    await repo.read_reap_preparation(conn, system_id, run_id)
+                assert isinstance(got.value.__cause__, ValidationError)
+
+                app: FastMCP = FastMCP("t")
+                app.add_middleware(ServerFaultMiddleware())
+
+                # Closes over ``conn``: a pool connection would block on the ALTER's lock.
+                @app.tool(name="systems.teardown")
+                async def teardown() -> ToolResponse:
+                    await repo.read_reap_preparation(conn, system_id, run_id)
+                    return ToolResponse.success(str(system_id), "queued")
+
+                async with Client(app) as client:
+                    return await client.call_tool("systems.teardown", {}, raise_on_error=False)
+
+    result = asyncio.run(_run())
+    assert not result.is_error
+    assert result.structured_content["error_category"] == ErrorCategory.INFRASTRUCTURE_FAILURE.value
