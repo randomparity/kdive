@@ -218,7 +218,7 @@ The `KDIVE_S3_*` vars carry only the endpoint, bucket, and region.
 
 | var | value | consumed by |
 |-----|-------|-------------|
-| `KDIVE_MIGRATION_DATABASE_URL` | migration-owner member DSN | migration and role bootstrap only |
+| `KDIVE_MIGRATION_DATABASE_URL` | migration-owner member DSN | migration and role bootstrap; the [installed local authority carrier tests](live-testing.md#installed-local-authority-carrier) as `KDIVE_DATABASE_URL` |
 | `KDIVE_SERVER_DATABASE_URL` | server-member DSN, member only of `kdive_server` | server |
 | `KDIVE_WORKER_DATABASE_URL` | worker-member DSN, member only of `kdive_worker` | fixed workers |
 | `KDIVE_RECONCILER_DATABASE_URL` | reconciler-member DSN, member only of `kdive_reconciler` | reconciler |

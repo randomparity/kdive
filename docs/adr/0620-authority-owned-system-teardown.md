@@ -285,6 +285,48 @@ Rejected for this amendment:
   break-glass operator is usually not a project `admin`, so the named tool would be unreachable to
   the caller that most needs it.
 
+### Amendment (2026-10-01): the stalled `tearing_down` lane skips external-boot history (#3015)
+
+`repair_stalled_tearing_down_systems` reads the System's latest external-boot activation under
+the System lock. A System with any activation row is skipped: the lane enqueues nothing and
+logs one WARNING per System per process, naming the activation. This replaces the re-enqueue
+the #2966 amendment accepted for such Systems, which wrote a failed attempt every pass. A prior
+`{system}:teardown` row carrying an authority marker is never recycled by this lane, so an
+unmarked payload cannot overwrite it. The supported exit for such a System is tracked in #3026.
+
+A skipped System stays in the lane's candidate set, so it spends one slot of the per-pass limit
+each pass. The set is the finite residue of pre-fix ordinary teardowns (no new System reaches
+`tearing_down` with history), and the in-lock visit is what emits the warning, so the candidate
+query does not exclude it. Only 100 or more such Systems would crowd out a recoverable one.
+
+### Amendment (2026-10-01): a remote-libvirt preparing teardown needs no PREP receipt (#3016)
+
+A remote-libvirt activation opens its remote module reap obligation only during preparation. A
+`preparing` activation that stopped before then has no retained PREP receipt, and
+`build_external_boot_payload` refused its teardown with "remote module lifecycle has no retained
+PREP evidence". The payload builder now admits purpose `teardown` on a `preparing` activation
+without a receipt. The payload carries no `remote_module_attempt_v1`. A retained receipt is still
+carried, two retained receipts still refuse as ambiguous, and every other remote module lifecycle
+operation, and teardown of any other activation state, still requires one.
+
+The teardown performs no worker-side module reap that the receipt would bind. `teardown_handler`
+completes in its `before_port` hook, so the runner never calls `_execute` or
+`_execute_remote_module_lifecycle` for purpose `teardown`. The authority host reaps module
+volumes at System teardown from its own provider-private records. It quarantines an unfinished
+preparation it cannot prove absent: the receipt is `retained_quarantine`, a non-final attempt
+requeues, and the final one dead-letters (#2917 amendment above). Such a System stays out of
+`torn_down` until its interrupted preparation is resolved, as it did when admission refused it.
+
+Rejected for this amendment:
+
+- **Drop the receipt requirement for every teardown.** judgment: the same reasoning holds, but
+  the operator kept the requirement for non-`preparing` activations out of this change's scope.
+- **Open a reap obligation or synthesize a receipt at admission.** judgment: it would write
+  durable module state for an attempt that never ran, and nothing on the teardown path reads it.
+- **Relax the check in the worker executor.** verified: `lifecycle.py` at b3316923c shows that
+  `teardown_handler` passes `before_port=complete`. `run_operation` (`runner.py:739-744`) returns
+  that result before `call_port`, so the executor's receipt check is never reached on teardown.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.

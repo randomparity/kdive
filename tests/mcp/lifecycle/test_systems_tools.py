@@ -1331,6 +1331,7 @@ async def _seed_retired_teardown_authority(
     *,
     purpose: str = "recover",
     current: bool = False,
+    provider_kind: str = "local-libvirt",
 ) -> None:
     """Persist the durable route that System teardown must use, not infer."""
     job_id = uuid4()
@@ -1365,7 +1366,7 @@ async def _seed_retired_teardown_authority(
         "(system_id, allocation_id, activation_id, run_id, plan_identity, job_id, job_attempt, "
         "purpose, provider_kind, authority_instance, worker_incarnation, operation, "
         "operation_identity, operation_digest, generation, state, acknowledged_at, retired_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, 'local-libvirt', 'authority-a', %s, "
+        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s, 'authority-a', %s, "
         "%s, 'prior-recovery', %s, 1, %s, now(), CASE WHEN %s THEN NULL ELSE now() END)",
         (
             seeded.system_id,
@@ -1375,6 +1376,7 @@ async def _seed_retired_teardown_authority(
             plan_identity,
             job_id,
             purpose,
+            provider_kind,
             worker,
             purpose,
             "sha256:" + "2" * 64,
@@ -1444,8 +1446,14 @@ def test_teardown_with_external_boot_history_enqueues_authority_marker(
     asyncio.run(_run())
 
 
-def test_teardown_of_preparing_activation_enqueues_authority_marker(migrated_url: str) -> None:
-    """#2961: a preparing activation, with its activate authority still current, is torn down."""
+@pytest.mark.parametrize("provider_kind", ["local-libvirt", "remote-libvirt"])
+def test_teardown_of_preparing_activation_enqueues_authority_marker(
+    migrated_url: str, provider_kind: str
+) -> None:
+    """#2961: a preparing activation, with its activate authority still current, is torn down.
+
+    #3016: a remote-libvirt one that never opened its module reap obligation carries no receipt.
+    """
 
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:
@@ -1465,15 +1473,22 @@ def test_teardown_of_preparing_activation_enqueues_authority_marker(migrated_url
                     "VALUES (%s, 'stores/main', %s, 4096, 'pending')",
                     (seeded.activation.id, f"owners/{seeded.activation.id}"),
                 )
+                resolver = provider_resolver(external_boot=ExternalBootOperations())
+                if provider_kind == "remote-libvirt":
+                    await conn.execute(
+                        "UPDATE resources SET kind = 'remote-libvirt' "
+                        "WHERE id = (SELECT resource_id FROM allocations WHERE id = %s)",
+                        (alloc_id,),
+                    )
+                    await conn.execute(
+                        "UPDATE runs SET target_kind = 'remote-libvirt' WHERE id = %s", (run_id,)
+                    )
+                    local = resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
+                    resolver = ProviderResolver({ResourceKind.REMOTE_LIBVIRT: local})
                 await _seed_retired_teardown_authority(
-                    conn, seeded, purpose="activate", current=True
+                    conn, seeded, purpose="activate", current=True, provider_kind=provider_kind
                 )
-            response = await _teardown(
-                pool,
-                ctx(Role.ADMIN),
-                system_id,
-                resolver=provider_resolver(external_boot=ExternalBootOperations()),
-            )
+            response = await _teardown(pool, ctx(Role.ADMIN), system_id, resolver=resolver)
             assert response.status == "queued", response.model_dump()
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
@@ -1490,7 +1505,9 @@ def test_teardown_of_preparing_activation_enqueues_authority_marker(migrated_url
         marker = job["payload"]["external_boot_authority_v1"]
         assert marker["activation_id"] == str(seeded.activation.id)
         assert (marker["purpose"], marker["operation"]) == ("teardown", "teardown")
+        assert marker["provider_kind"] == provider_kind
         assert "external_boot_plan_v1" not in job["payload"]
+        assert job["payload"].get("remote_module_attempt_v1") is None
         # Enqueueing credits nothing: only the authority's teardown receipt ends the reservation.
         assert reservation == {"state": "pending"}
 
