@@ -27,56 +27,11 @@ from tests.db.external_boot_authority_support import (
     _apply_through,
     _apply_version,
     _AuthorityCase,
+    _prepare_purpose_state,
     _RoleDsns,
     _seed_case,
 )
 from tests.db_waits import wait_until_blocked_by
-
-
-def _prepare_purpose_state(conn: psycopg.Connection, case: _AuthorityCase, purpose: str) -> None:
-    terminal = Jsonb(
-        {
-            "schema": "external-boot-terminal-evidence-v1",
-            "activation_id": str(case.activation_id),
-            "system_id": str(case.system_id),
-            "outcome": "active" if purpose == "recover" else "abandoned",
-        }
-    )
-    if purpose == "recover":
-        conn.execute(
-            "UPDATE external_boot_activations SET state='active', terminal_evidence=%s, "
-            "activation_readiness_deadline=now() WHERE id=%s",
-            (terminal, case.activation_id),
-        )
-    elif purpose == "resolve-conflict":
-        attempt_id = uuid4()
-        conn.execute(
-            "INSERT INTO external_boot_recovery_attempts "
-            "(activation_id, attempt_number, attempt_id, authority_generation, recovery_basis, "
-            "recovery_readiness_deadline, state, conflict_evidence) "
-            "VALUES (%s, 1, %s, 1, 'recovery_point', now(), 'conflict', %s)",
-            (
-                case.activation_id,
-                attempt_id,
-                Jsonb(
-                    {
-                        "schema": "external-boot-conflict-evidence-v1",
-                        "activation_id": str(case.activation_id),
-                    }
-                ),
-            ),
-        )
-        conn.execute(
-            "UPDATE external_boot_activations "
-            "SET state='recovery_conflict', current_attempt_id=%s WHERE id=%s",
-            (attempt_id, case.activation_id),
-        )
-    elif purpose == "release":
-        conn.execute(
-            "UPDATE external_boot_activations SET state='abandoned', materialization=NULL, "
-            "recovery_point=NULL, terminal_evidence=%s WHERE id=%s",
-            (terminal, case.activation_id),
-        )
 
 
 def _acknowledge(

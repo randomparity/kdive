@@ -259,31 +259,36 @@ def _make_current(
     sequence: int,
     *,
     category: str = "absent",
+    acknowledge: bool = True,
 ) -> str:
-    """Acknowledge ``authority`` and point the head at its terminal teardown record."""
+    """Acknowledge ``authority`` and point the head at its terminal teardown record.
+
+    ``acknowledge=False`` writes only the head, after a real acknowledgement already did the rest.
+    """
     digest = "sha256:" + f"{sequence:x}" * 64
-    conn.execute(
-        "UPDATE external_boot_authorities SET state = 'current', acknowledged_at = now() "
-        "WHERE id = %s",
-        (authority.authority_id,),
-    )
-    conn.execute(
-        "INSERT INTO external_boot_authority_acknowledgements "
-        "(authority_id, system_id, generation, authority_instance, operation_identity, "
-        "operation_digest, journal_sequence, journal_digest, positive_quiescence_digest) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        (
-            authority.authority_id,
-            case.system_id,
-            authority.generation,
-            case.authority_instance,
-            case.operation_identity,
-            authority.operation_digest,
-            sequence - 1,
-            _DIGEST,
-            _DIGEST,
-        ),
-    )
+    if acknowledge:
+        conn.execute(
+            "UPDATE external_boot_authorities SET state = 'current', acknowledged_at = now() "
+            "WHERE id = %s",
+            (authority.authority_id,),
+        )
+        conn.execute(
+            "INSERT INTO external_boot_authority_acknowledgements "
+            "(authority_id, system_id, generation, authority_instance, operation_identity, "
+            "operation_digest, journal_sequence, journal_digest, positive_quiescence_digest) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                authority.authority_id,
+                case.system_id,
+                authority.generation,
+                case.authority_instance,
+                case.operation_identity,
+                authority.operation_digest,
+                sequence - 1,
+                _DIGEST,
+                _DIGEST,
+            ),
+        )
     conn.execute(
         "INSERT INTO external_boot_authority_journal_heads "
         "(authority_instance, system_id, sequence, digest, phase, authority_id, generation, "

@@ -389,6 +389,29 @@ Rejected for this amendment:
 - **Also admit an expired or released Allocation.** judgment: it moves the ADR-0584 allocation
   fence, which #2992 owns.
 
+### Amendment (2026-10-01): the authority teardown runs after expiry or release (#2992)
+
+The authority teardown now runs on an Allocation in any state
+([ADR-0584](0584-provider-host-authority-fences-external-boot-mutations.md) amendment of
+2026-10-01, migration 0169). `systems.teardown` or `ops.force_teardown` finishes a System with
+external-boot history after its lease expires, from any System state the teardown admits,
+`tearing_down` included. The reconciler `cleanup` lane's purpose-`teardown` jobs are no longer
+refused at the Allocation fence either.
+
+This supersedes three earlier statements for an expired or released Allocation:
+
+- the #2966 amendment's "the authority allocator admits a teardown only on an `active`
+  allocation";
+- its rejected alternative "Admit an authority teardown on a released allocation". Lease expiry
+  is the path #2966 left to #2992. The `allocations.release` refusal itself is unchanged;
+- the #3026 amendment's "On an `expired` or `released` Allocation the allocator still answers
+  `superseded`".
+
+Rejected for this amendment:
+
+- **Do nothing.** verified: see the ADR-0584 amendment of 2026-10-01; the allocator refused the
+  teardown, so the System stayed stranded after lease expiry.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.

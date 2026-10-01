@@ -401,6 +401,33 @@ Rejected for this amendment:
   snapshot so that a replay or adoption cannot run under different deadlines than the recorded
   attempt.
 
+### Amendment (2026-10-01): a teardown generation outlives its Allocation (#2992)
+
+Purpose `teardown` is allocated, acknowledged, and committed on an Allocation in any state. The
+three functions that required an `active` Allocation for every purpose
+(`allocate_external_boot_authority`, `acknowledge_external_boot_authority`, and
+`commit_external_boot_authority_result`) now require it only for `activate`, `recover`,
+`resolve-conflict`, and `release`. Migration 0169 makes the change. Every other part of the
+binding is unchanged: the credential, the job attempt, the generation, the acknowledgement, the
+System state, and the newest activation. Each function binds `p_purpose` to the marked or stored
+purpose in the same predicate, so a generation of another purpose cannot pass as a teardown.
+
+Lease expiry ends an Allocation without tearing down its Systems, and only the authority teardown
+may finish a System with external-boot history (ADR-0620). Before, such a System had no exit.
+Tearing it down needs no live Allocation, because it removes the System rather than using it.
+
+Rejected for this amendment:
+
+- **Do nothing.** verified: `test_0168_expired_allocation_still_supersedes` (removed by this
+  change, at ccc8b4329) showed the allocator answering `superseded` for a teardown on an
+  `expired` Allocation, which leaves the System with no supported exit.
+- **Admit only `released` and `expired`.** judgment: no other non-`active` state needs a
+  separate rule. A teardown is the operation that every Allocation end needs, so a list would
+  only add a case to maintain.
+- **Relax only the allocator.** verified: acknowledgement and commit each test
+  `v_allocation.state <> 'active'` (`0122_external_boot_authority.sql` lines 651 and 905), so a
+  teardown would allocate and then fail at acknowledgement.
+
 ## Consequences
 
 - External boot gains a fence at the provider mutation boundary and a separate database fence for
