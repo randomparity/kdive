@@ -5,8 +5,8 @@ receipt. Architecture: one guard in `build_external_boot_payload`; no worker, au
 schema change; tests prove the admission, the handler path and the MCP tool. Spec:
 [design](../specs/2026-10-01-remote-preparing-teardown-3016-design.md).
 
-Expected implementation size: 120–190 changed lines (M) — a 6-line guard, about 70 lines of
-admission tests, about 50 lines of handler helper and parametrization, and about 30 lines of
+Expected implementation size: 130–210 changed lines (M) — a 6-line guard, about 70 lines of
+admission tests, about 90 lines of handler helper, parametrization and the retained-receipt case, and about 30 lines of
 MCP test.
 
 ## Global Constraints
