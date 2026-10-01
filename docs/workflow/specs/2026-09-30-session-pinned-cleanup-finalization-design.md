@@ -15,8 +15,9 @@ session.
 (`lifecycle/boot/external_boot.py`) call `self._io.record_cleanup_quarantine` and
 `self._io.finalize_tombstone` without an operation session, and do not use `authority`. #2898
 made them session-free because a session open re-created the pruned activation parents. Since
-ADR-0710 a session open creates nothing, so these two writes are the only activation-port
-recovery-root writes that are not pinned to the lease's ownership snapshot.
+ADR-0710 a session open creates nothing. These two cleanup-completion writes can therefore move
+under the lease's ownership snapshot. The recovery-object writes in `delete_recovery_object` and
+`adopt_object` are also unpinned and stay out of this change (Failure model, entry 4).
 
 ## Replay after lease or domain loss
 
