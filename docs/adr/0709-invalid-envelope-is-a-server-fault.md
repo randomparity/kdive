@@ -103,6 +103,30 @@ Other stored-row rebuilds keep their current path. These include the worker-side
 provider-layer authority repository. Caller-input rebuilds keep their current path too. The
 rejected denylist stays rejected.
 
+### Amendment (2026-10-01): image-catalog and module-attempt receipt rebuilds (#3044)
+
+This narrows the #3009 amendment's last paragraph. Two more sites now rebuild through
+`validate_stored`:
+
+- the three image-catalog resolvers in `kdive.images.cataloging.catalog`;
+- the retained receipt in
+  `kdive.db.remote_module_attempt_obligations.read_reap_preparation`.
+
+A corrupt row at either site, read during a tool call, reaches the caller as the
+`infrastructure_failure` envelope. The receipt path covers `systems.teardown`,
+`ops.force_teardown`, the external-boot recovery-request tools, and run step enqueue.
+
+The `vmcore.fetch` kdump capability gate surfaces this fault. It does not fail open. A corrupt
+row is not one of ADR-0361's resolution gaps. The gate cannot admit on missing information when
+the server's own catalog is unreadable, and the operator has to see that. The gate also runs on
+a retry, before the replay lookup. Even so, a refused call commits nothing. The guest-OS lookup
+in `runs.complete_build` still fails open, because a failure there would fail a build that has
+already committed.
+
+The worker's provisioning fetch is unaffected, because the worker already classifies both
+exceptions as `infrastructure_failure`. The provider-layer authority repository and caller-input
+rebuilds keep their current path.
+
 ## Considered & rejected
 
 - **Middleware alone, keyed on `ValidationError.title == "ToolResponse"`.** verified: in
