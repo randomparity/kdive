@@ -30,6 +30,7 @@ class InvestigationErrorReason(StrEnum):
 
     ABANDONED = "abandoned"
     BOUND_SYSTEMS_LIVE = "bound_systems_live"
+    EXTERNAL_BOOT_TEARDOWN_REQUIRED = "external_boot_system_teardown_required"
     FORCE_REQUIRES_ADMIN = "force_requires_admin"
     ILLEGAL_STATE = "illegal_state"
     INVALID_EXTERNAL_REF = "invalid_external_ref"

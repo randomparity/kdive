@@ -15,11 +15,14 @@ separate field from the description, and closing without a non-empty summary fai
 If any System bound to this Investigation is still live, a default close is refused and
 lists the blocking Systems. Tear those Systems down first, then close; or pass
 `force=true` to tear them down and close together — the forced teardown is admin-only, so
-`force` requires admin on the project.
+`force` requires admin on the project. A forced close is refused with `conflict` (reason
+`external_boot_system_teardown_required`) while a bound System has external-boot history;
+`data.external_boot_systems` lists those Systems. Tear each down with `systems.teardown`,
+then close.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `force` | boolean | no | Default false: the close is refused (and lists them) if any System bound to this Investigation is still live, so tear those Systems down first. Set true to tear the bound Systems down and then close in one step; that teardown is admin-only, so force requires admin on the project (a plain close does not). |
+| `force` | boolean | no | Default false: the close is refused (and lists them) if any System bound to this Investigation is still live, so tear those Systems down first. Set true to tear the bound Systems down and then close in one step; that teardown is admin-only, so force requires admin on the project (a plain close does not). Force is refused (conflict, reason external_boot_system_teardown_required, ids in data.external_boot_systems) while a bound System has external-boot history; tear each one down with systems.teardown, then close. |
 | `investigation_id` | string | yes | The Investigation to drive to closed. |
 | `summary` | string | yes | Required account of the investigation's work, recorded on the row at close. Must be non-empty; summarize what was found and the outcome. Distinct from the anytime-editable description; a blank summary is rejected. |
 

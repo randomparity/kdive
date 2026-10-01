@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.errors import ErrorCategory
 from kdive.jobs.service_operations import JobOperations
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -17,7 +18,10 @@ from kdive.mcp.tools.lifecycle.investigations.common import (
 from kdive.mcp.tools.lifecycle.investigations.view import envelope_for_investigation
 from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
 from kdive.security.authz.context import RequestContext
-from kdive.services.investigations.common import InvestigationServiceError
+from kdive.services.investigations.common import (
+    InvestigationErrorReason,
+    InvestigationServiceError,
+)
 from kdive.services.investigations.lifecycle import (
     close_investigation_record,
     open_investigation_record,
@@ -94,6 +98,14 @@ async def close_investigation(
             jobs=jobs,
         )
     except InvestigationServiceError as exc:
+        if exc.reason is InvestigationErrorReason.EXTERNAL_BOOT_TEARDOWN_REQUIRED:
+            return ToolResponse.failure(
+                exc.object_id,
+                ErrorCategory.CONFLICT,
+                detail=exc.detail,
+                suggested_next_actions=["systems.teardown", "systems.get"],
+                data={"reason": exc.reason.value, **exc.data},
+            )
         return investigation_error_response(exc)
     async with pool.connection() as conn:
         return await envelope_for_investigation(conn, inv)
