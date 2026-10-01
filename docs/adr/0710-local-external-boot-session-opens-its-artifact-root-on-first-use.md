@@ -68,3 +68,28 @@ leaves unauthenticated residue, which still quarantines as `provider_conflict`.
   exact absence to "no owned content" and leaves empty directories under the recovery root for
   every read.
 - **Do nothing.** judgment: a non-System TEARDOWN of a partial preparation can never complete.
+
+### Amendment (2026-09-30): cleanup quarantine and finalization run under the session (#3012)
+
+This amendment replaces the last Consequences bullet's "They stay session-free here".
+`LocalLibvirtExternalBoot.record_cleanup_quarantine` and `finalize_cleanup_tombstone` now check
+the proof, then open `self._io.open(authority, _expected_binding(recovery.binding))` and make the
+store write inside it, like the other activation ports. Because session open creates nothing, the
+pinned shape leaves exact recovery absence provable after cleanup.
+
+The added precondition is session open itself (lane pin, owned domain, overlay), not the lease:
+the authority adapter issues one lease for each offloaded call. Every production caller opens a
+session on the same binding just before these writes, while the authority's System lane stays
+active: `cleanup` before quarantine; `cleanup_is_accounted` before System-teardown finalization
+(which precedes `teardown_system`); and `cleanup_receipt`, or the commit's `cleanup` and the
+`observe` that follows it, before `finalize`. ADR-0586's post-delete replay of an absent
+tombstone still succeeds, because the store branch is unchanged and finalization does not touch
+the domain. If a domain or overlay is removed out of band between those two opens, the write now
+fails closed as `provider_conflict` instead of writing without a pin.
+
+- **Pin only when the lease resolves, otherwise write without a session.** verified: the
+  production lease cannot fail to resolve inside an offloaded call (`LocalOperationLeaseScope.issue`
+  in `LocalExternalBootAuthorityAdapter._offload`, `external_boot_authority.py` at `b1a8cd8c6`), so the
+  fallback guards nothing reachable and would only reintroduce the unpinned write.
+- **Keep both writes session-free.** judgment: the #2898 reason no longer holds, and the unpinned
+  write was a recorded residual, not a required property.
