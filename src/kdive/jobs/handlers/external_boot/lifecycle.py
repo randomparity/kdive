@@ -110,7 +110,6 @@ async def _execute_remote_module_lifecycle(
             AuthorityOperation.RECOVER,
             AuthorityOperation.RESOLVE_CONFLICT,
             AuthorityOperation.CLEANUP,
-            AuthorityOperation.TEARDOWN,
         }
     ):
         return
@@ -426,7 +425,7 @@ def _mutation_request(context: OperationContext) -> AuthorityMutationRequestV1:
         NAMESPACE_URL, f"kdive/external-boot/{context.marker.operation_identity}"
     )
     objects = ()
-    if context.marker.operation in {"cleanup", "teardown"}:
+    if context.marker.operation == "cleanup":
         objects = (
             RecoveryObjectBindingV1(
                 system_id=context.marker.system_id,
