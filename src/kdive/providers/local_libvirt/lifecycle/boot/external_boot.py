@@ -2997,12 +2997,14 @@ class LocalLibvirtExternalBoot:
         observed = self.observe_object(binding, authority)
         if observed.observed_digest != expected_observed_digest:
             raise ValueError("cleanup quarantine observation changed before delete")
-        receipt = self._io.read_cleanup_quarantine(binding.binding)
-        if receipt is not None:
-            current = self._quarantine_observation(receipt)
-            if current.observed_digest != expected_observed_digest or current.managed:
-                raise ValueError("cleanup quarantine observation changed before delete")
-            self._io.finalize_tombstone(receipt.tombstone.recovery_point, receipt.proof)
+        # The re-read and delete run under the pinned session (ADR-0710 amendment, 2026-10-01).
+        with self._io.open(authority, _expected_binding(binding.binding)):
+            receipt = self._io.read_cleanup_quarantine(binding.binding)
+            if receipt is not None:
+                current = self._quarantine_observation(receipt)
+                if current.observed_digest != expected_observed_digest or current.managed:
+                    raise ValueError("cleanup quarantine observation changed before delete")
+                self._io.finalize_tombstone(receipt.tombstone.recovery_point, receipt.proof)
         return self.observe_object(binding, authority)
 
     def adopt_object(
@@ -3014,10 +3016,12 @@ class LocalLibvirtExternalBoot:
         observed = self.observe_object(binding, authority)
         if observed.observed_digest != expected_observed_digest or not observed.present:
             raise ValueError("cleanup quarantine observation changed before adopt")
-        receipt = self._io.read_cleanup_quarantine(binding.binding)
-        if receipt is None:
-            raise ValueError("cleanup quarantine disappeared before adopt")
-        self._io.adopt_cleanup_quarantine(receipt)
+        # Pinned like delete_recovery_object (ADR-0710 amendment, 2026-10-01).
+        with self._io.open(authority, _expected_binding(binding.binding)):
+            receipt = self._io.read_cleanup_quarantine(binding.binding)
+            if receipt is None:
+                raise ValueError("cleanup quarantine disappeared before adopt")
+            self._io.adopt_cleanup_quarantine(receipt)
         return self.observe_object(binding, authority)
 
     def recovery_point(
