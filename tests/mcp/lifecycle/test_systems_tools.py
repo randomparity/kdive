@@ -46,9 +46,11 @@ from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools.lifecycle.systems import admin as systems_admin
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.view import get_system
+from kdive.mcp.tools.ops.security import breakglass
 from kdive.profiles.provisioning import RootfsSource
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
@@ -60,6 +62,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot import ExternalBootDenied
 from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.mcp import systems_support
 from tests.mcp.systems_support import (
@@ -1731,39 +1734,76 @@ def test_teardown_replays_live_or_settled_ordinary_job(migrated_url: str, prior:
     asyncio.run(_run())
 
 
+_BREAKGLASS_ADMIN = RequestContext(
+    principal="ops-admin",
+    agent_session="sess-admin",
+    projects=(),
+    roles={},
+    platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
+)
+_FORCE_TEARDOWN_AUDIT_SQL = (
+    "SELECT count(*) FROM platform_audit_log WHERE tool = 'ops.force_teardown'"
+)
+
+
+async def _force_teardown(
+    pool: AsyncConnectionPool, system_id: str, resolver: ProviderResolver | None
+) -> tuple[Any, int]:
+    """Drive break-glass `ops.force_teardown`; return its envelope and the audit row count."""
+    response = await breakglass.force_teardown(
+        pool, _BREAKGLASS_ADMIN, system_id=system_id, reason="stuck", resolver=resolver
+    )
+    async with pool.connection() as conn:
+        row = await (await conn.execute(_FORCE_TEARDOWN_AUDIT_SQL)).fetchone()
+    assert row is not None
+    return response, row[0]
+
+
+async def _ordinary_job_with_history(
+    pool: AsyncConnectionPool, prior: str, worker: str | None
+) -> tuple[str, str, Any]:
+    """A System whose ordinary teardown row is ``prior`` and that has completed history."""
+    system_id, job_id = await _ordinary_teardown_job(pool, SystemState.READY)
+    run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE jobs SET state = %s, worker_id = %s WHERE id = %s",
+            (prior, worker, job_id),
+        )
+        seeded = await seed_activation(
+            conn,
+            state=ExternalBootActivationState.RECOVERED,
+            cleanup_complete=True,
+            ready_reservation=True,
+            system_id=UUID(system_id),
+            run_id=UUID(run_id),
+        )
+        await _seed_retired_teardown_authority(conn, seeded)
+    return system_id, job_id, seeded
+
+
+@pytest.mark.parametrize("via", ["systems.teardown", "ops.force_teardown"])
 @pytest.mark.parametrize(
     ("prior", "worker", "replaced"),
     [("failed", None, True), ("canceled", None, True), ("canceled", "worker-live", False)],
 )
 def test_teardown_replaces_failed_ordinary_job_for_external_boot_history(
-    migrated_url: str, prior: str, worker: str | None, replaced: bool
+    migrated_url: str, prior: str, worker: str | None, replaced: bool, via: str
 ) -> None:
-    """#2966: the worker refuses an ordinary job for history, so the public route replaces it."""
+    """#2966: the worker refuses an ordinary job for history, so the public route replaces it.
+
+    Break-glass `ops.force_teardown` takes the same route (#3007) and still writes its audit row.
+    """
 
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:
-            system_id, job_id = await _ordinary_teardown_job(pool, SystemState.READY)
-            run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE jobs SET state = %s, worker_id = %s WHERE id = %s",
-                    (prior, worker, job_id),
-                )
-                seeded = await seed_activation(
-                    conn,
-                    state=ExternalBootActivationState.RECOVERED,
-                    cleanup_complete=True,
-                    ready_reservation=True,
-                    system_id=UUID(system_id),
-                    run_id=UUID(run_id),
-                )
-                await _seed_retired_teardown_authority(conn, seeded)
-            response = await _teardown(
-                pool,
-                ctx(Role.ADMIN),
-                system_id,
-                resolver=provider_resolver(external_boot=ExternalBootOperations()),
-            )
+            system_id, job_id, seeded = await _ordinary_job_with_history(pool, prior, worker)
+            resolver = provider_resolver(external_boot=ExternalBootOperations())
+            if via == "systems.teardown":
+                response = await _teardown(pool, ctx(Role.ADMIN), system_id, resolver=resolver)
+            else:
+                response, audited = await _force_teardown(pool, system_id, resolver)
+                assert audited == 1
             async with pool.connection() as conn:
                 after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
 
@@ -1776,6 +1816,57 @@ def test_teardown_replaces_failed_ordinary_job_for_external_boot_history(
         assert response.object_id == job_id
         assert after is not None and after[0] == "queued"
         assert after[2]["external_boot_authority_v1"]["activation_id"] == str(seeded.activation.id)
+
+    asyncio.run(_run())
+
+
+def test_force_teardown_external_boot_history_needs_resolver(migrated_url: str) -> None:
+    """#3007: with no authority resolver, break-glass refuses instead of recycling the job."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id, _ = await _ordinary_job_with_history(pool, "failed", None)
+            response, audited = await _force_teardown(pool, system_id, None)
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.error_category == ErrorCategory.CONFIGURATION_ERROR, response.model_dump()
+        assert response.data["reason"] == "external_boot_teardown_authority_unresolved"
+        assert after is not None and after[0] == "failed"
+        assert "external_boot_authority_v1" not in after[2]
+        assert audited == 1
+
+    asyncio.run(_run())
+
+
+def test_force_teardown_ordinary_path_runs_admission_matrix(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3007: break-glass keeps the matrix call `systems.teardown` makes before an ordinary job."""
+
+    async def _deny(*_: object, project: str, **__: object) -> None:
+        raise ExternalBootDenied(
+            "denied", details={"reason": "test_denial"}, next_actions=[], project=project
+        )
+
+    monkeypatch.setattr(systems_admin, "check_external_boot_admission", _deny)
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            response, audited = await _force_teardown(pool, system_id, None)
+            async with pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT count(*) FROM jobs WHERE dedup_key = %s", (f"{system_id}:teardown",)
+                    )
+                ).fetchone()
+
+        assert response.error_category == ErrorCategory.CONFLICT, response.model_dump()
+        assert response.data["reason"] == "test_denial"
+        assert row is not None and row[0] == 0
+        assert audited == 1
 
     asyncio.run(_run())
 
