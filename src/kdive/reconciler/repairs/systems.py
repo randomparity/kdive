@@ -432,7 +432,7 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
                         "reconciler: system %s is stuck in tearing_down with external-boot "
                         "activation %s; the ordinary teardown is refused "
                         "(external_boot_teardown_not_supported), so no job is requeued; run "
-                        "systems.teardown while its Allocation is active (%s)",
+                        "systems.teardown (%s)",
                         activation.id,
                         _STUCK_TEARING_DOWN_RUNBOOK,
                     )
