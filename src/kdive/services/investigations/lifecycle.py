@@ -10,6 +10,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
+from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
 from kdive.domain.capacity.state import IllegalTransition, InvestigationState, SystemState
@@ -35,6 +36,7 @@ from kdive.services.job_ports import TeardownJobPort
 # this Investigation and has not reached a terminal state (ADR-0441 §7). `torn_down` and `failed`
 # are the two terminal `SystemState` sinks; a NULL-investigation System is never considered.
 _TERMINAL_SYSTEM_STATES = (SystemState.TORN_DOWN.value, SystemState.FAILED.value)
+_EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
 
 
 async def open_investigation_record(
@@ -136,6 +138,34 @@ def _require_admin_for_force(ctx: RequestContext, uid: UUID, project: str) -> No
         ) from None
 
 
+async def _refuse_external_boot_history(conn: AsyncConnection, uid: UUID, live: list[UUID]) -> None:
+    """Refuse a force-close while any bound System has an external-boot activation (#3025).
+
+    The worker refuses an ordinary teardown for such a System, restricting or completed alike:
+    the provider-host authority owns its domain, and only the authority-marked teardown that
+    ``systems.teardown`` enqueues may destroy it. The caller holds each System's lock, under which
+    activations are created. A System with no activation, including an authority System before
+    its first activation, keeps its ordinary or preactivation teardown route.
+    """
+    ids = [
+        str(system_id)
+        for system_id in live
+        if await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system_id) is not None
+    ]
+    if not ids:
+        return
+    raise InvestigationServiceError(
+        object_id=str(uid),
+        reason=InvestigationErrorReason.EXTERNAL_BOOT_TEARDOWN_REQUIRED,
+        detail=(
+            f"cannot force-close: {len(ids)} bound System(s) have external-boot history "
+            f"({', '.join(ids)}); the provider-host authority owns their domains, so tear each "
+            "down with systems.teardown, then close"
+        ),
+        data={"external_boot_systems": list(ids)},
+    )
+
+
 async def _couple_bound_systems(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -149,7 +179,8 @@ async def _couple_bound_systems(
 
     Runs inside the caller's close transaction so the teardown enqueues and the close itself are
     atomic: an enqueue error rolls the whole close back with zero teardowns enqueued and the
-    Investigation unchanged.
+    Investigation unchanged. A forced close also refuses, before any enqueue, when a bound System
+    is reprovisioning or has external-boot history.
     """
     live = await _bound_live_systems(conn, uid)
     if not live:
@@ -180,6 +211,7 @@ async def _couple_bound_systems(
             ),
             data={"reprovisioning_systems": list(ids)},
         )
+    await _refuse_external_boot_history(conn, uid, live)
     for system_id in live:
         await jobs.enqueue_teardown(
             conn,

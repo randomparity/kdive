@@ -327,6 +327,35 @@ Rejected for this amendment:
   `teardown_handler` passes `before_port=complete`. `run_operation` (`runner.py:739-744`) returns
   that result before `call_port`, so the executor's receipt check is never reached on teardown.
 
+### Amendment (2026-10-01): investigation force-close refuses external-boot history (#3025)
+
+`investigations.close force=true` no longer enqueues an unmarked teardown for a bound System with
+external-boot history. After its admin gate and its `reprovisioning` refusal, and before any
+enqueue, it reads the newest activation of each bound live System under the System locks the close
+already holds. If any System has an activation row, restricting or completed, the close refuses
+with `conflict` (`external_boot_system_teardown_required`, the reason `allocations.release` uses),
+listing the Systems in `external_boot_systems` and naming `systems.teardown` in its next actions.
+The refusal precedes every write, so the close rolls back whole and the lock order (SYSTEM, then
+INVESTIGATION) is unchanged. A System with no activation, including an authority System before
+its first activation, keeps its route through `enqueue_control_teardown`.
+
+The #2966 amendment's list of `enqueue_control_teardown` producers that still enqueue an unmarked
+job for such a System now holds only the orphaned-System lane. Its rejected "Refuse in
+`enqueue_control_teardown`" alternative objected that force-close would roll back a close whose
+System an admin can tear down afterwards. That objection does not apply to this refusal: it lives
+in the force-close producer, not in `enqueue_control_teardown`, so the orphaned lane is unaffected,
+and `force=true` already requires project `admin`, so the refused caller can run
+`systems.teardown` and then close.
+
+Rejected for this amendment:
+
+- **Route through the authority teardown.** judgment: `build_external_boot_payload` needs a
+  `ProviderResolver`, which `JobOperations` would have to carry, and the #3007 route helper
+  returns MCP envelopes, and no `services/` module imports `kdive.mcp`; the operator chose refusal.
+- **Do nothing.** verified: `teardown_handler` (`jobs/handlers/systems.py` at 95e7d2b07) raises a
+  terminal `conflict` (`external_boot_teardown_not_supported`) for any System with an activation
+  row, so the close committed a teardown that could not run.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
