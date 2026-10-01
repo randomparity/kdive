@@ -5,8 +5,8 @@ receipt. Architecture: one guard in `build_external_boot_payload`; no worker, au
 schema change; tests prove the admission, the handler path and the MCP tool. Spec:
 [design](../specs/2026-10-01-remote-preparing-teardown-3016-design.md).
 
-Expected implementation size: 150–230 changed lines (M) — a 6-line guard, about 70 lines of
-admission tests, about 60 lines of handler test and helper parameters, and about 50 lines of
+Expected implementation size: 120–190 changed lines (M) — a 6-line guard, about 70 lines of
+admission tests, about 50 lines of handler helper and parametrization, and about 30 lines of
 MCP test.
 
 ## Global Constraints
@@ -155,30 +155,30 @@ with
 Files: test `tests/jobs/handlers/external_boot/test_prepared_before_admission.py`. No source
 change.
 
-Interfaces: consumes `_dispatch(dsns, conn, case, operation, vehicle)` from the same file. It
-gains two keyword-only parameters, `resolver: ProviderResolver | None = None` (default
-`resolver_for(vehicle)`) and `marker: dict[str, Any] | None = None` (default `case.marker`).
-`_job(case)` gains `marker: dict[str, Any] | None = None` with the same default. It also uses
-`AuthorityCapability(authority_instance=..., modules=...)` from
-`kdive.providers.ports.authority`, and the module attribute
+Interfaces: `_job(case)` and `_dispatch(dsns, conn, case, operation, vehicle)` in that file gain
+keyword `marker: dict[str, Any] | None = None` (default `case.marker`); `_dispatch` also gains
+`resolver: ProviderResolver | None = None` (default `resolver_for(vehicle)`). Uses
+`AuthorityCapability(authority_instance, geometry=None, sender=None, modules=None)` from
+`kdive.providers.ports.authority` and the module attribute
 `kdive.jobs.handlers.external_boot.lifecycle.execute_remote_module_lifecycle_on_authority_host`.
 
 Verification:
 
 - Contract: a remote-libvirt teardown of a `preparing` activation whose payload has no
-  `remote_module_attempt_v1` ends `torn_down` and ends the reservation exactly once, without
-  the worker-side module lifecycle. Mode: focused-test. Test
-  `test_remote_teardown_of_a_preparing_activation_needs_no_prep_receipt[pending|ready]`. It
-  passes on main because no source change is needed. Controlled fault: insert
+  `remote_module_attempt_v1` ends `torn_down`, ends the reservation exactly once, and runs no
+  worker module lifecycle. Mode: focused-test. Test
+  `test_teardown_of_a_preparing_activation_skips_preparation[remote-libvirt-*]`. It passes on
+  main because no source change is needed. Controlled fault: insert
   `await execute_remote_module_lifecycle_on_authority_host()` as the first statement of
-  `complete` in `teardown_handler`. Expect red with "must not run the worker module lifecycle",
-  which also proves the patched attribute is the one the handler module calls. Revert it with `git checkout -- src/kdive/jobs/handlers/external_boot/lifecycle.py`
-  only after Task 1 is committed. Green command:
+  `complete` in `teardown_handler`; expect red with "must not run the worker module lifecycle"
+  (which also proves the patched attribute is the one the handler calls). Revert it with
+  `git checkout -- src/kdive/jobs/handlers/external_boot/lifecycle.py` only after Task 1 is
+  committed. Green command:
   `just test-verbose tests/jobs/handlers/external_boot/test_prepared_before_admission.py`.
 
 Steps:
 
-1. Change `_job` and `_dispatch` so that the marker and resolver can be overridden:
+1. Let `_job` and `_dispatch` take the override:
 
 ```python
 def _job(case: SeededCase, marker: dict[str, Any] | None = None) -> Job:
@@ -190,104 +190,60 @@ def _job(case: SeededCase, marker: dict[str, Any] | None = None) -> Job:
 ```
 
    In `_dispatch`, add `*, resolver: ProviderResolver | None = None, marker: dict[str, Any] |
-   None = None` after `vehicle`. Pass `resolver=resolver or resolver_for(vehicle)` to
-   `ExternalBootHandlerPorts`. Replace the handler call with
-   `await handler(worker, _job(case, marker), ExternalBootAuthorityMarkerV1.model_validate(marker or case.marker))`.
-2. Append this test:
+   None = None` after `vehicle`; pass `resolver=resolver or resolver_for(vehicle)` to
+   `ExternalBootHandlerPorts`; call
+   `handler(worker, _job(case, marker), ExternalBootAuthorityMarkerV1.model_validate(marker or case.marker))`.
+2. Add a `provider_kind` parameter, `["local-libvirt", "remote-libvirt"]`, and `monkeypatch`
+   to `test_teardown_of_a_preparing_activation_skips_preparation`. Before `body`, patch the
+   module lifecycle entry point to fail:
 
 ```python
-@pytest.mark.parametrize(("reservation", "releases"), [("pending", 0), ("ready", 1)])
-def test_remote_teardown_of_a_preparing_activation_needs_no_prep_receipt(
-    migrated_url: str,
-    authority_role_dsns: Callable[[str], str],
-    monkeypatch: pytest.MonkeyPatch,
-    reservation: str,
-    releases: int,
-) -> None:
-    """#3016: a remote teardown reads no PREP receipt and runs no worker module lifecycle."""
+async def forbidden(**_values: object) -> None:
+    raise AssertionError("System teardown must not run the worker module lifecycle")
 
-    async def forbidden(**_values: object) -> None:
-        raise AssertionError("System teardown must not run the worker module lifecycle")
 
-    monkeypatch.setattr(
-        "kdive.jobs.handlers.external_boot.lifecycle."
-        "execute_remote_module_lifecycle_on_authority_host",
-        forbidden,
+monkeypatch.setattr(lifecycle, "execute_remote_module_lifecycle_on_authority_host", forbidden)
+```
+
+   Pass `marker_overrides={"provider_kind": provider_kind}` to `seed_case`, and replace the
+   `_dispatch` call with:
+
+```python
+resolver = resolver_for(vehicle)
+if provider_kind == "remote-libvirt":
+    await seed.execute(
+        "UPDATE resources SET kind='remote-libvirt' WHERE id=("
+        "SELECT a.resource_id FROM systems s JOIN allocations a ON a.id=s.allocation_id "
+        "WHERE s.id=%s)",
+        (vehicle.system_id,),
     )
-
-    async def body(seed: AsyncConnection) -> None:
-        vehicle = build_vehicle()
-        marker_overrides = {"provider_kind": "remote-libvirt"}
-        case = await seed_case(
-            seed,
-            vehicle,
-            purpose="teardown",
-            operation="teardown",
-            activation_state="preparing",
-            with_materialization=False,
-            with_recovery_point=False,
-            with_reservation=reservation == "ready",
-            marker_overrides=marker_overrides,
-        )
-        await seed.execute(
-            "UPDATE resources SET kind='remote-libvirt' WHERE id=("
-            "SELECT a.resource_id FROM systems s JOIN allocations a ON a.id=s.allocation_id "
-            "WHERE s.id=%s)",
-            (vehicle.system_id,),
-        )
-        await seed.execute(
-            "UPDATE runs SET target_kind='remote-libvirt' WHERE id=%s", (vehicle.run_id,)
-        )
-        local = resolver_for(vehicle).resolve(ResourceKind.LOCAL_LIBVIRT)
-        remote = replace(
-            local,
-            authority=AuthorityCapability(
-                authority_instance=case.marker["authority_instance"], modules=cast(Any, object())
-            ),
-        )
-
-        await _dispatch(
-            authority_role_dsns,
-            seed,
-            case,
-            "teardown",
-            vehicle,
-            resolver=ProviderResolver({ResourceKind.REMOTE_LIBVIRT: remote}),
-            marker=case.marker | marker_overrides,
-        )
-
-        async with seed.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT a.state, s.state AS system_state, "
-                "(SELECT count(*) FROM external_boot_reservations r "
-                " WHERE r.activation_id = a.id) AS reservations, "
-                "(SELECT count(*) FROM external_boot_reservation_releases r "
-                " WHERE r.activation_id = a.id) AS releases "
-                "FROM external_boot_activations a JOIN systems s ON s.id = a.system_id "
-                "WHERE a.id = %s",
-                (vehicle.activation_id,),
-            )
-            row = await cur.fetchone()
-        assert row == {
-            "state": "torn_down",
-            "system_state": "torn_down",
-            "reservations": 0,
-            "releases": releases,
-        }
-
-    _drive(migrated_url, body)
+    await seed.execute(
+        "UPDATE runs SET target_kind='remote-libvirt' WHERE id=%s", (vehicle.run_id,)
+    )
+    local = resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
+    # A module capability makes the worker module lifecycle reachable if teardown ran it.
+    modules = AuthorityCapability(
+        authority_instance=case.marker["authority_instance"], modules=cast(Any, object())
+    )
+    resolver = ProviderResolver({ResourceKind.REMOTE_LIBVIRT: replace(local, authority=modules)})
+marker = case.marker | {"provider_kind": provider_kind}
+await _dispatch(
+    authority_role_dsns, seed, case, "teardown", vehicle, resolver=resolver, marker=marker
+)
 ```
 
    Add the imports `from dataclasses import replace`, `from typing import cast`,
    `from kdive.domain.catalog.resources import ResourceKind`,
+   `from kdive.jobs.handlers.external_boot import lifecycle`,
    `from kdive.providers.core.resolver import ProviderResolver`, and
-   `from kdive.providers.ports.authority import AuthorityCapability`.
-3. Run the green command. Expect both cases to pass. If the runner refuses the binding because
-   its `authority_instance` differs from the marker's, record the exact refusal and set the
-   capability's `authority_instance` to the value the runner compares against.
-4. Apply the controlled fault, run the green command, and expect red. Revert the fault and
-   expect green again.
-5. Run `just lint` and `just type` (expect exit 0), then commit
+   `from kdive.providers.ports.authority import AuthorityCapability`. Add "#3016: remote-libvirt
+   reads no PREP receipt" to the docstring. The existing row assertion (`torn_down`, mode,
+   reservations 0, releases 0 or 1) then covers both providers unchanged.
+3. Run the green command; expect four cases to pass. If the runner refuses the remote binding
+   (for example an `authority_instance` mismatch), record the exact refusal and change only the
+   test binding to what the runner compares against.
+4. Apply the controlled fault, expect red, revert, expect green.
+5. `just lint`, `just type` (exit 0); commit
    `test(external-boot): prove remote preparing teardown needs no PREP (#3016)`.
 
 ## Task 3 — `systems.teardown` queues the remote teardown
@@ -295,110 +251,69 @@ def test_remote_teardown_of_a_preparing_activation_needs_no_prep_receipt(
 Files: test `tests/mcp/lifecycle/test_systems_tools.py`.
 
 Interfaces: `_seed_retired_teardown_authority(conn, seeded, *, purpose="recover",
-current=False)` gains `provider_kind: str = "local-libvirt"`, which replaces the literal
-`'local-libvirt'` in its `INSERT` with a bound parameter. It also uses the existing helpers
-`granted_allocation`, `_seed_teardown_system`, `_seed_run`, `seed_activation`, `_teardown`,
-`provider_resolver`, `ExternalBootOperations` and `ProviderResolver`, all already imported or
-defined in the file.
+current=False)` gains `provider_kind: str = "local-libvirt"`, bound in place of the literal
+`'local-libvirt'` in its `INSERT`.
 
 Verification:
 
 - Contract: `systems.teardown` on a remote-libvirt System whose newest activation is
-  `preparing` with no receipt returns `queued`, and the teardown job carries the remote marker
-  and no receipt. Mode: focused-test. Test
-  `test_remote_teardown_of_preparing_activation_needs_no_prep_receipt`. Red before Task 1:
-  status `failure` with reason `external_boot_teardown_authority_unresolved`. Show it by
-  running the test with `git stash` of Task 1's `admission.py` hunk, or with Task 1 temporarily
-  reverted through `git revert --no-commit <task-1-sha>` followed by `git revert --abort`.
-  Green command: `just test-verbose tests/mcp/lifecycle/test_systems_tools.py -k preparing`.
+  `preparing` with no receipt returns `queued`; the teardown job carries the remote marker and
+  no receipt. Mode: focused-test. Test
+  `test_teardown_of_preparing_activation_enqueues_authority_marker[remote-libvirt]`. Red with
+  `git show <task-1-sha>~1:<admission.py> > <admission.py>` (restore with
+  `git checkout -- <admission.py>`): status `failure`, reason
+  `external_boot_teardown_authority_unresolved`. Green command:
+  `just test-verbose tests/mcp/lifecycle/test_systems_tools.py -k preparing`.
 
 Steps:
 
-1. Parameterize `_seed_retired_teardown_authority` with `provider_kind`, as described above.
-2. Append:
+1. Parameterize `_seed_retired_teardown_authority` with `provider_kind`.
+2. Parametrize `test_teardown_of_preparing_activation_enqueues_authority_marker` with
+   `provider_kind` in `["local-libvirt", "remote-libvirt"]`. After the reservation insert:
 
 ```python
-def test_remote_teardown_of_preparing_activation_needs_no_prep_receipt(
-    migrated_url: str,
-) -> None:
-    """#3016: a remote-libvirt preparing activation with no PREP receipt is torn down."""
-
-    async def _run() -> None:
-        async with systems_support.pool(migrated_url) as pool:
-            alloc_id = await granted_allocation(pool)
-            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, system_id, RunState.RUNNING)
-            async with pool.connection() as conn:
-                seeded = await seed_activation(
-                    conn,
-                    state=ExternalBootActivationState.PREPARING,
-                    system_id=UUID(system_id),
-                    run_id=UUID(run_id),
-                )
-                await conn.execute(
-                    "INSERT INTO external_boot_reservations "
-                    "(activation_id, store_identity, owner_key, reserved_bytes, state) "
-                    "VALUES (%s, 'stores/main', %s, 4096, 'pending')",
-                    (seeded.activation.id, f"owners/{seeded.activation.id}"),
-                )
-                await conn.execute(
-                    "UPDATE resources SET kind = 'remote-libvirt' "
-                    "WHERE id = (SELECT resource_id FROM allocations WHERE id = %s)",
-                    (alloc_id,),
-                )
-                await conn.execute(
-                    "UPDATE runs SET target_kind = 'remote-libvirt' WHERE id = %s", (run_id,)
-                )
-                await _seed_retired_teardown_authority(
-                    conn, seeded, purpose="activate", current=True, provider_kind="remote-libvirt"
-                )
-            local = provider_resolver(external_boot=ExternalBootOperations()).resolve(
-                ResourceKind.LOCAL_LIBVIRT
-            )
-            response = await _teardown(
-                pool,
-                ctx(Role.ADMIN),
-                system_id,
-                resolver=ProviderResolver({ResourceKind.REMOTE_LIBVIRT: local}),
-            )
-            assert response.status == "queued", response.model_dump()
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    "SELECT kind, payload FROM jobs WHERE id = %s", (response.object_id,)
-                )
-                job = await cur.fetchone()
-
-        assert job is not None and job["kind"] == "teardown"
-        marker = job["payload"]["external_boot_authority_v1"]
-        assert (marker["provider_kind"], marker["purpose"]) == ("remote-libvirt", "teardown")
-        assert job["payload"].get("remote_module_attempt_v1") is None
-
-    asyncio.run(_run())
+resolver = provider_resolver(external_boot=ExternalBootOperations())
+if provider_kind == "remote-libvirt":
+    await conn.execute(
+        "UPDATE resources SET kind = 'remote-libvirt' "
+        "WHERE id = (SELECT resource_id FROM allocations WHERE id = %s)",
+        (alloc_id,),
+    )
+    await conn.execute("UPDATE runs SET target_kind = 'remote-libvirt' WHERE id = %s", (run_id,))
+    local = resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
+    resolver = ProviderResolver({ResourceKind.REMOTE_LIBVIRT: local})
 ```
 
-3. Run the green command. Expect the new test and the existing #2961 test to pass. If
-   `_teardown` refuses for a reason other than the PREP check (for example a profile keyed to
-   `local-libvirt`), record the exact refusal and adjust only the seed rows to match a
-   remote-libvirt System. Never adjust production code in this task.
-4. Show red against the pre-Task-1 `admission.py`, as described above, then restore it.
-5. Run `just lint` and `just type` (expect exit 0), then commit
+   Pass `provider_kind=provider_kind` to `_seed_retired_teardown_authority` and
+   `resolver=resolver` to `_teardown`. Append the assertions:
+
+```python
+        assert marker["provider_kind"] == provider_kind
+        # #3016: a preparing activation that never opened its module reap carries no receipt.
+        assert job["payload"].get("remote_module_attempt_v1") is None
+```
+
+3. Run the green command; expect both cases to pass. If `_teardown` refuses the remote case for
+   a reason other than the PREP check (for example a profile keyed to `local-libvirt`), record
+   the refusal and adjust only the seed rows; never production code in this task.
+4. Show red against the pre-Task-1 `admission.py`, then restore it.
+5. `just lint`, `just type` (exit 0); commit
    `test(mcp): systems.teardown queues a remote preparing teardown (#3016)`.
 
 ## Task 4 — records and live proof
 
-No code. Run `git fetch origin main && just records` (expect exit 0). Then run the remote-libvirt
-live tier, if a lab host can run it. Read the lab-host notes first; it is a teardown of a System
-whose `runs.boot` activate job was canceled before preparation. Otherwise state in the PR that
-only the DB-backed and handler arms ran. Mode: task-test-not-applicable for the live arm: it
-needs a provisioned remote-libvirt authority host, and Tasks 1–3 already cover the code
-contracts.
+No code. `git fetch origin main && just records` (exit 0). Then the remote-libvirt live tier if
+a lab host can run it: tear down a System whose `runs.boot` activate job was canceled before
+preparation. Otherwise the PR states that only the DB-backed and handler arms ran. Mode:
+task-test-not-applicable for the live arm: it needs a provisioned remote-libvirt authority
+host, and Tasks 1–3 cover the code contracts.
 
 ## Requirement map
 
 | Spec success line | Task |
 |---|---|
 | receipt-less preparing teardown admitted; one carried; two ambiguous | 1 |
-| non-preparing teardown and release still refuse | 1 (and existing release test) |
+| non-preparing teardown and release still refuse | 1 (and the existing release test) |
 | handler ends `torn_down`, reservation once, no module lifecycle | 2 |
 | `systems.teardown` returns `queued` with no receipt | 3 |
 | ADR amendment, records gate | design set, 4 |
