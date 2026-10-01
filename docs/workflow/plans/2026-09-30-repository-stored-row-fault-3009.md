@@ -54,7 +54,7 @@ the substitution land together.
 **Interfaces:**
 
 - Produces `kdive.serialization.ServerFaultError(Exception)`.
-- Produces `kdive.serialization.validate_stored[M: BaseModel](model: type[M], value: object) -> M`.
+- Produces `kdive.serialization.validate_stored(model: type[M], value: object) -> M` (generic over `M: BaseModel`).
 - Both names remain importable from `kdive.mcp.responses`, as the same objects.
 
 **Verification:**
@@ -138,30 +138,11 @@ the substitution land together.
    and expect `result.is_error` to be true.
 
 3. In `src/kdive/serialization.py`, add `from pydantic import BaseModel, ValidationError` beside
-   the existing imports. Then append:
-
-   ```python
-   class ServerFaultError(Exception):
-       """A value the server built failed validation — a server fault, not a caller error (ADR-0709).
-
-       Deliberately not a ``ValueError``: pydantic would re-wrap one raised from a nested model into a
-       ``ValidationError``, which FastMCP reports as the caller's argument error, and a tool's
-       ``except ValueError`` for caller input could absorb it. Lives here, below the MCP layer, so the
-       repository layer can raise it (#3009).
-       """
-
-
-   def validate_stored[M: BaseModel](model: type[M], value: object) -> M:
-       """Rebuild ``model`` from the server's own stored data (a database row, a recorded payload).
-
-       Only for values the call's arguments did not supply: a failure is the server's fault and
-       raises :class:`ServerFaultError` chained from the pydantic error (ADR-0709, #2981, #3009).
-       """
-       try:
-           return model.model_validate(value)
-       except ValidationError as exc:
-           raise ServerFaultError(f"stored {model.__name__} failed validation") from exc
-   ```
+   the existing imports. Then append `class ServerFaultError(Exception)` and `validate_stored`
+   moved verbatim from `src/kdive/mcp/responses.py` (lines 38-61 at `origin/main` 2c4df02fd).
+   Add one sentence to the class docstring, "Lives below the MCP layer so the repository layer
+   can raise it (#3009).", and add `#3009` to the helper docstring's citation list. The message
+   (`stored {model.__name__} failed validation`) and the `from exc` chaining stay unchanged.
 
    Update the module docstring's first line to say that it also holds the stored-data fault
    contract.
