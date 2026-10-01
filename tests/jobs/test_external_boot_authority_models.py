@@ -67,6 +67,27 @@ def test_closed_cas_failure_rejects_crossed_action_or_terminal() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("category", "valid"), [("infrastructure_failure", True), ("boot_timeout", False)]
+)
+def test_authority_reason_requires_infrastructure_failure(category: str, valid: bool) -> None:
+    result = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "fail",
+            "error_category": category,
+            "failure_context": {"phase": "commit", "authority_reason": "provider-conflict"},
+            "terminal": False,
+        }
+    )
+    if valid:
+        failure = ExternalBootAuthorityFailureV1.model_validate(result)
+        assert cast(Any, failure.result).failure_context.authority_reason == "provider-conflict"
+    else:
+        with pytest.raises(ValidationError, match="authority reason"):
+            ExternalBootAuthorityFailureV1.model_validate(result)
+
+
 def test_authority_executor_protocol_has_mutation_contract() -> None:
     assert get_type_hints(ExternalBootAuthorityExecutor.execute) == {
         "request": AuthorityMutationRequestV1,

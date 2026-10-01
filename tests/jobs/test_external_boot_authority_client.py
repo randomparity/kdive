@@ -1,5 +1,6 @@
 """A worker invocation retains one route, binding, and absolute deadline."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -127,3 +128,21 @@ def test_unavailable_or_mismatched_runtime_route_is_refused(
     )
     with pytest.raises(CategorizedError, match=reason):
         clients.external_boot_client_factory()(binding, marker, 123.0)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reason", ["provider-conflict", "provider-failure", "journal-conflict"])
+async def test_sender_marks_only_provider_conflict(reason: str) -> None:
+    class Backend:
+        async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+            return json.dumps(
+                {"category": reason, "status": "error"}, sort_keys=True, separators=(",", ":")
+            ).encode()
+
+    sender = AuthorityRequestSender(Backend, lambda: SecretStr("test-incarnation"))
+    with pytest.raises(CategorizedError) as caught:
+        await sender.health(deadline=1.0)
+
+    assert str(caught.value) == f"authority: {reason}"
+    expected = {"authority_reason": "provider-conflict"} if reason == "provider-conflict" else {}
+    assert caught.value.details == expected

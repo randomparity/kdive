@@ -36,12 +36,13 @@ from pydantic import SecretStr
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.capacity.state import ExternalBootActivationState
+from kdive.domain.capacity.state import ExternalBootActivationState, JobState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs.authority_sender import _failure
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.runner import (
     COMMITTABLE_ERROR_CATEGORIES,
@@ -1333,6 +1334,47 @@ def test_committable_categories_match_the_migration_exactly() -> None:
         "control_failure",
         "authorization_denied",
     )
+
+
+@pytest.mark.parametrize("marked", [True, False], ids=["marked", "unmarked"])
+def test_bound_failure_carries_the_provider_conflict_mark(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    vehicle: Vehicle,
+    marked: bool,
+) -> None:
+    """Only the authority's `provider-conflict` reason marks the bound context (#2901, ADR-0714)."""
+
+    def explode(_context: OperationContext) -> RunningKernelObservation:
+        if marked:
+            raise _failure("provider-conflict")
+        raise CategorizedError("x", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    async def body(seed: AsyncConnection, conn: AsyncConnection) -> None:
+        case = await seed_case(seed, vehicle, purpose="activate")
+        ports = _ports(
+            case,
+            resolver=resolver_for(vehicle),
+            acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+        )
+
+        with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
+            await _run(conn, case, ports=ports, call_port=explode)
+
+        result = excinfo.value.result.result
+        assert isinstance(result, _FailureResult)
+        assert result.failure_context.phase == "provider-call"
+        assert result.failure_context.authority_reason == ("provider-conflict" if marked else None)
+        committed = await queue.fail_external_boot(
+            conn,
+            _job(case),
+            excinfo.value.result,
+            incarnation_credential=SecretStr(case.credential),
+        )
+        assert isinstance(committed, Job)
+        assert committed.state is JobState.QUEUED
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
 
 @pytest.mark.parametrize(

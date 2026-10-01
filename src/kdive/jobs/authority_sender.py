@@ -74,6 +74,9 @@ def _failure(reason: str) -> CategorizedError:
         details = {"completion": "failed-after-mutation"}
     elif reason == "remote-module-refused":
         details = {"completion": "refused-before-mutation"}
+    elif reason == "provider-conflict":
+        # ADR-0714: the bound failure carries this mark so a repeat can end the job.
+        details = {"authority_reason": reason}
     return CategorizedError(
         f"authority: {reason}",
         category=category,

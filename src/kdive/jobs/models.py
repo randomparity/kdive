@@ -186,6 +186,7 @@ class ExternalBootAuthorityFailureContext(_ClosedModel):
     ) = None
     next_action: Literal["systems.get", "jobs.wait", "jobs.get"] | None = None
     cmdline_mismatch: ExternalBootCmdlineMismatchV1 | None = None
+    authority_reason: Literal["provider-conflict"] | None = None
 
     @model_validator(mode="after")
     def _reason_action_pair_is_closed(self) -> ExternalBootAuthorityFailureContext:
@@ -235,6 +236,15 @@ class _FailureResult(_ResultBase):
         }[reason]
         if (self.error_category, self.terminal) != expected:
             raise ValueError("failure reason, category, and terminal flag do not match")
+        return self
+
+    @model_validator(mode="after")
+    def _authority_reason_is_infrastructure(self) -> _FailureResult:
+        if (
+            self.failure_context.authority_reason is not None
+            and self.error_category is not ErrorCategory.INFRASTRUCTURE_FAILURE
+        ):
+            raise ValueError("authority reason requires infrastructure failure")
         return self
 
     @model_validator(mode="after")
