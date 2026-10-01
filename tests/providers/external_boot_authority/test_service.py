@@ -388,6 +388,132 @@ async def test_preparation_uses_authenticated_lane_and_exact_receipt(tmp_path: P
     assert repository.records[-1].phase is JournalPhase.TERMINAL
 
 
+def _materialize(
+    takeover: AuthorityTakeoverRequestV1, operation_identity: str
+) -> AuthorityPreparationMutationRequestV1:
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    return AuthorityPreparationMutationRequestV1(
+        **takeover.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={"operation", "operation_identity", "operation_digest", "plan_identity"},
+        ),
+        operation="materialize",
+        operation_identity=operation_identity,
+        operation_digest="sha256:" + "c" * 64,
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(),
+        plan=plan,
+    )
+
+
+def _materialized(request: AuthorityPreparationMutationRequestV1) -> _PreparationAdapter:
+    return _PreparationAdapter(
+        ExternalBootPreparationObservation(
+            state="materialized",
+            binding=ExternalBootActivationBinding(
+                system_id=str(request.system_id),
+                run_id=str(request.run_id),
+                activation_id=str(request.activation_id),
+            ),
+            plan_identity=request.plan_identity,
+            authority=OpaqueProviderRef(
+                ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+            ),
+            operation_identity=request.operation_identity,
+            materialization=external_boot_materialization(request.plan),
+        )
+    )
+
+
+async def _lane_with_terminal_materialize(
+    tmp_path: Path,
+) -> tuple[
+    ExternalBootAuthorityService, _Repository, AuthenticatedPeer, AuthorityTakeoverRequestV1
+]:
+    service, repository, _adapter, peer, takeover = _service(tmp_path)
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    takeover = takeover.model_copy(update={"plan_identity": plan.identity})
+    repository.request = repository.allocating_request = takeover
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    first = _materialize(takeover, "materialize-a")
+    service._adapter = cast(Any, _materialized(first))
+    await service.execute_preparation(peer, first)
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    return service, repository, peer, takeover
+
+
+async def _successor(
+    service: ExternalBootAuthorityService,
+    repository: _Repository,
+    peer: AuthenticatedPeer,
+    successor: AuthorityTakeoverRequestV1,
+) -> None:
+    repository.current = False
+    repository.request = repository.allocating_request = successor
+    await service.acknowledge_takeover(peer, successor)
+    repository.current = True
+
+
+@pytest.mark.anyio
+async def test_another_activations_terminal_preparation_is_not_a_predecessor(
+    tmp_path: Path,
+) -> None:
+    """#2968: a reused System's lane holds the prior activation's records; they are history."""
+    service, repository, peer, takeover = await _lane_with_terminal_materialize(tmp_path)
+    run_id = uuid4()
+    successor = takeover.model_copy(
+        update={
+            "authority_id": uuid4(),
+            "generation": 2,
+            "activation_id": uuid4(),
+            "run_id": run_id,
+            "plan_identity": external_boot_plan(takeover.system_id, run_id).identity,
+            "operation_identity": "takeover-b",
+        }
+    )
+    await _successor(service, repository, peer, successor)
+    second = _materialize(successor, "materialize-b")
+    service._adapter = cast(Any, _materialized(second))
+
+    await service.execute_preparation(peer, second)
+
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert repository.records[-1].activation_id == successor.activation_id
+
+
+@pytest.mark.anyio
+async def test_same_activation_predecessor_mismatch_still_refuses(tmp_path: Path) -> None:
+    """The activation scope must not skip a takeover's own predecessor check (ADR-0713)."""
+    service, repository, peer, takeover = await _lane_with_terminal_materialize(tmp_path)
+    run_id = uuid4()
+    successor = takeover.model_copy(
+        update={
+            "authority_id": uuid4(),
+            "generation": 2,
+            "run_id": run_id,
+            "plan_identity": external_boot_plan(takeover.system_id, run_id).identity,
+            "operation_identity": "takeover-b",
+        }
+    )
+    await _successor(service, repository, peer, successor)
+    drifted = _materialize(successor, "materialize-b")
+    records = len(repository.records)
+
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.execute_preparation(peer, drifted)
+
+    assert (refused.value.category, refused.value.reason) == (
+        "journal_conflict",
+        "predecessor_operation_mismatch",
+    )
+    assert len(repository.records) == records
+
+
 @pytest.mark.anyio
 async def test_remote_prepare_begin_anchors_before_opening_its_authority_receipt(
     tmp_path: Path,
