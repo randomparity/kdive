@@ -21,8 +21,8 @@ from tests.db.external_boot_authority_support import (
     _AuthorityCase,
     _RoleDsns,
     _seed_case,
+    _set_real_state,
 )
-from tests.db.test_migration_0160_external_boot_teardown_failure_commit import _set_real_state
 
 _CONFLICT = {"phase": "commit", "authority_reason": "provider-conflict"}
 

@@ -265,6 +265,40 @@ def _seed_case(
     )
 
 
+def _set_real_state(conn: psycopg.Connection, case: _AuthorityCase, activation: str) -> None:
+    """Move the legacy failed-System teardown seed to a live System with a pre-active activation."""
+    conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (case.system_id,))
+    conn.execute("UPDATE runs SET state = 'succeeded' WHERE id = %s", (case.run_id,))
+    conn.execute(
+        "UPDATE external_boot_activations SET state = %s, current_attempt_id = NULL, "
+        "pre_recovery_evidence = NULL, terminal_evidence = NULL, recovery_point = %s, "
+        "activation_readiness_deadline = CASE WHEN %s = 'activating' "
+        "THEN now() + interval '5 minutes' END WHERE id = %s",
+        (
+            activation,
+            Jsonb(
+                {
+                    "schema": "external-boot-recovery-v1",
+                    "binding": {
+                        "system_id": str(case.system_id),
+                        "run_id": str(case.run_id),
+                        "activation_id": str(case.activation_id),
+                    },
+                    "plan_identity": _PLAN,
+                }
+            ),
+            activation,
+            case.activation_id,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO external_boot_reservations "
+        "(activation_id, store_identity, owner_key, reserved_bytes, state, ready_at) "
+        "VALUES (%s, 'store/private', 'owner/private', 4096, 'ready', now())",
+        (case.activation_id,),
+    )
+
+
 def _allocate(worker: psycopg.Connection, case: _AuthorityCase) -> _Allocated:
     row = worker.execute(
         "SELECT status, authority_id, generation, operation_digest "
