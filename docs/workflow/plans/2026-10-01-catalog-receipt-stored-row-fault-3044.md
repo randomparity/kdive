@@ -73,7 +73,8 @@ Steps:
    `ImageCatalogEntry.model_validate(row)` with `validate_stored(ImageCatalogEntry, row)`.
    Append to the `resolve_system_catalog_rootfs` docstring: "A visible row that fails its
    rebuild is not a gap: it raises ``ServerFaultError`` (ADR-0709)."
-5. In the `refusing_kdump_capability` docstring, after the resolution-gap list, add: "A corrupt
+5. In the module docstring (after "Every resolution uncertainty passes") and the
+   `refusing_kdump_capability` docstring, after the resolution-gap list, add: "A corrupt
    catalog row is not a gap. The resolver's ``ServerFaultError`` propagates, so the call
    reports a server fault instead of admitting a capture over a catalog record the server
    cannot read (ADR-0709, #3044)."
@@ -120,7 +121,7 @@ No executable consumer reads the amendment's prose. `just records` still checks 
 shape after `git fetch origin main`.
 
 Steps: append the amendment: both sites join the allowlist (narrowing #3009's "keep their
-current path" paragraph); the kdump gate surfaces the fault (the spec's rationale, including the
+current path" paragraph); the kdump gate surfaces the fault, a corrupt row not being one of ADR-0361's resolution gaps (the spec's rationale, including the
 replay ordering, in two sentences); `complete_build` still fails open; provisioning is unaffected; the provider-layer
 authority repository keeps its path. Commit `docs(adr): amend ADR-0709 for catalog and receipt
 rebuilds`.
