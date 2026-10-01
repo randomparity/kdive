@@ -30,34 +30,19 @@ from kdive.domain.errors import (
 )
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.security.authz.rbac import PlatformRole, Role
-from kdive.serialization import JsonValue, safe_error_details, validate_json_value
+from kdive.serialization import (
+    JsonValue,
+    ServerFaultError,
+    safe_error_details,
+    validate_json_value,
+)
+from kdive.serialization import validate_stored as validate_stored
 
 _log = logging.getLogger(__name__)
 
 
-class ServerFaultError(Exception):
-    """A value the server built failed validation — a server fault, not a caller error (ADR-0709).
-
-    Deliberately not a ``ValueError``: pydantic would re-wrap one raised from a nested model into a
-    ``ValidationError``, which FastMCP reports as the caller's argument error, and a tool's
-    ``except ValueError`` for caller input could absorb it.
-    """
-
-
 class InvalidEnvelopeError(ServerFaultError):
     """A producer built an invalid :class:`ToolResponse` — a server fault (ADR-0709)."""
-
-
-def validate_stored[M: BaseModel](model: type[M], value: object) -> M:
-    """Rebuild ``model`` from the server's own stored data (a database row, a recorded payload).
-
-    Only for values the call's arguments did not supply: a failure is the server's fault and
-    raises :class:`ServerFaultError` chained from the pydantic error (ADR-0709, #2981).
-    """
-    try:
-        return model.model_validate(value)
-    except ValidationError as exc:
-        raise ServerFaultError(f"stored {model.__name__} failed validation") from exc
 
 
 # Literal next tool names by the job's state.

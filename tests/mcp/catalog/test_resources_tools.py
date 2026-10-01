@@ -12,6 +12,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
+from fastmcp import Client, FastMCP
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
@@ -22,6 +23,7 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.middleware.server_fault import SERVER_FAULT_DETAIL, ServerFaultMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
@@ -198,6 +200,40 @@ def test_list_malformed_resource_row_degrades_to_infrastructure_failure(
         )
 
     asyncio.run(_run())
+
+
+def test_describe_over_a_corrupt_row_is_a_server_fault_envelope(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A repository rebuild of a corrupt stored row is a server fault, not an argument error (#3009).
+    fastmcp_logger = logging.getLogger("fastmcp")
+    fastmcp_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG)
+
+    async def _run() -> Any:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            async with pool.connection() as conn:
+                await conn.execute("UPDATE resources SET capabilities = '[]'::jsonb")
+            app: FastMCP = FastMCP("t")
+            app.add_middleware(ServerFaultMiddleware())
+
+            @app.tool(name="resources.describe")
+            async def describe() -> ToolResponse:
+                return await catalog_resources_tools.describe_resource(pool, CTX, res_id)
+
+            async with Client(app) as client:
+                return await client.call_tool("resources.describe", {}, raise_on_error=False)
+
+    try:
+        result = asyncio.run(_run())
+    finally:
+        fastmcp_logger.removeHandler(caplog.handler)
+    assert not result.is_error
+    envelope = result.structured_content
+    assert envelope["error_category"] == ErrorCategory.INFRASTRUCTURE_FAILURE.value
+    assert envelope["detail"] == SERVER_FAULT_DETAIL
+    assert not [r for r in caplog.records if "Invalid arguments for tool" in r.getMessage()]
 
 
 def test_describe_adds_pool_cost_host(migrated_url: str) -> None:
