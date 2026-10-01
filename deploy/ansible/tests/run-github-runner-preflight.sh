@@ -10,7 +10,7 @@
 # which is unreachable offline anyway (the download precedes it and fails first).
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../../.." && pwd)"
 playbook="$here/github_runner_preflight.yml"
 

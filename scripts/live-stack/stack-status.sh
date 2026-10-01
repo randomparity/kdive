@@ -4,7 +4,7 @@
 # Usage: scripts/live-stack/stack-status.sh
 set -euo pipefail
 
-here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # A health report is the tool an operator reaches for when the host is broken, so it declares
 # itself libvirt-free and reports an unresolved endpoint instead of aborting on one (ADR-0659).
 # EXPORTED, because the `worker-lifecycle.sh status` call below is a child process that sources

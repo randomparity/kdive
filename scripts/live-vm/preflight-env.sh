@@ -8,7 +8,7 @@
 # it — the env families assert paths that staging produces, so they cannot run first.
 set -euo pipefail
 
-here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/live-vm/lib.sh
 source "${here}/lib.sh"
 

@@ -15,7 +15,7 @@
 #   3. the delete log equals the expected line numbers, in descending (highest-first) order.
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../../.." && pwd)"
 playbook="$here/gdbstub_acl_prune.yml"
 fixtures="$here/fixtures"
