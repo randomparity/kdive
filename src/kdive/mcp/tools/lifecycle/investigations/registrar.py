@@ -158,7 +158,9 @@ def _register_investigations_close(app: FastMCP, pool: AsyncConnectionPool) -> N
                     "Default false: the close is refused (and lists them) if any System bound to "
                     "this Investigation is still live, so tear those Systems down first. Set true "
                     "to tear the bound Systems down and then close in one step; that teardown is "
-                    "admin-only, so force requires admin on the project (a plain close does not)."
+                    "admin-only, so force requires admin on the project (a plain close does not). "
+                    "Force is refused (conflict, listing them) while a bound System has "
+                    "external-boot history; tear each one down with systems.teardown, then close."
                 ),
             ),
         ] = False,
@@ -172,7 +174,8 @@ def _register_investigations_close(app: FastMCP, pool: AsyncConnectionPool) -> N
         If any System bound to this Investigation is still live, a default close is refused and
         lists the blocking Systems. Tear those Systems down first, then close; or pass
         `force=true` to tear them down and close together — the forced teardown is admin-only, so
-        `force` requires admin on the project.
+        `force` requires admin on the project. A forced close is refused while a bound System has
+        external-boot history: tear that System down with `systems.teardown`, then close.
         """
         return await close_investigation(
             pool, current_context(), investigation_id, summary, force=force
