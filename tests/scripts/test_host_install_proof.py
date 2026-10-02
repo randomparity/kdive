@@ -305,6 +305,8 @@ def test_remote_argv_pins_host_keys_and_sends_the_script_as_one_argument() -> No
     copy = scp_argv(known, "src", "op@lab:dst")
     assert copy[0] == "scp" and all(option in copy for option in SSH_OPTIONS)
     assert f"UserKnownHostsFile={known}" in copy and copy[-2:] == ["src", "op@lab:dst"]
+    assert "GlobalKnownHostsFile=/dev/null" in argv and "GlobalKnownHostsFile=/dev/null" in copy
+    assert "-r" not in copy and "-r" in scp_argv(known, "a", "b", recursive=True)
 
 
 def test_run_step_closes_stdin_and_records_timeouts(tmp_path: Path) -> None:

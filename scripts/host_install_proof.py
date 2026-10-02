@@ -85,7 +85,8 @@ _PHASE_BYTES = 1024 * 1024
 # No ':' in the host: scp addresses `host:path`, so a bare IPv6 literal would misroute.
 _TARGET = re.compile(r"[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*")
 _NAME = re.compile(r"[a-z0-9][a-z0-9._-]*")
-# The disposable local witness-member DSN from docs/operating/runbooks/live-stack.md.
+# The disposable local witness-member DSN from docs/operating/runbooks/live-stack.md. It travels
+# inside the step script (a process argument), so only this published value may ever be used.
 _WITNESS_DSN = (
     "postgresql://kdive-witness-member:kdive-witness-local"  # pragma: allowlist secret
     "@localhost:5432/kdive"
@@ -257,15 +258,22 @@ def _in_run(script: str, run_id: str, phase: str = "") -> str:
 
 
 def _transport(known_hosts: Path) -> list[str]:
-    return [*SSH_OPTIONS, "-o", f"UserKnownHostsFile={known_hosts}"]
+    # The supplied pin file is the only key source; no system-wide known_hosts or CA.
+    return [
+        *SSH_OPTIONS,
+        "-o",
+        f"UserKnownHostsFile={known_hosts}",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+    ]
 
 
 def ssh_argv(target: str, known_hosts: Path, script: str) -> list[str]:
     return ["ssh", *_transport(known_hosts), target, "bash -lc " + shlex.quote(script)]
 
 
-def scp_argv(known_hosts: Path, source: str, dest: str) -> list[str]:
-    return ["scp", "-q", "-r", *_transport(known_hosts), source, dest]
+def scp_argv(known_hosts: Path, source: str, dest: str, *, recursive: bool = False) -> list[str]:
+    return ["scp", "-q", *(["-r"] if recursive else []), *_transport(known_hosts), source, dest]
 
 
 def _file_digest(path: Path) -> str:
@@ -682,8 +690,9 @@ class _Remote:
     def step(self, name: str, script: str, timeout_s: float = SHORT_STEP_S) -> Step:
         return self._record(name, ssh_argv(self.target, self.known_hosts, script), timeout_s)
 
-    def copy(self, name: str, source: str, dest: str) -> Step:
-        return self._record(name, scp_argv(self.known_hosts, source, dest), SHORT_STEP_S)
+    def copy(self, name: str, source: str, dest: str, *, recursive: bool = False) -> Step:
+        argv = scp_argv(self.known_hosts, source, dest, recursive=recursive)
+        return self._record(name, argv, SHORT_STEP_S)
 
     def _record(self, name: str, argv: list[str], timeout_s: float) -> Step:
         result = run_step(
@@ -748,7 +757,9 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("no implemented host-install cell for this family and architecture")
     cell = cells[0]
     operator = args.operator_prerequisites
-    operator_sha256 = _file_digest(operator) if operator else None
+    # Read once: the digest in the evidence must name exactly the script that runs.
+    operator_script = operator.read_bytes() if operator else None
+    operator_sha256 = hashlib.sha256(operator_script).hexdigest() if operator_script else None
     output: Path = args.output.resolve()
     output.mkdir(parents=True)
     output.chmod(0o700)  # private transcripts and phase records, whatever the umask
@@ -789,7 +800,7 @@ def run(args: argparse.Namespace) -> int:
             candidate=candidate,
             image=image,
             node=node,
-            operator=operator,
+            operator=operator_script,
             binding=binding,
             phases=phases,
             output=output,
@@ -829,7 +840,7 @@ def _drive(
     candidate: str,
     image: str,
     node: str,
-    operator: Path | None,
+    operator: bytes | None,
     binding: Context,
     phases: dict[str, PhaseRecord | None],
     output: Path,
@@ -844,7 +855,7 @@ def _drive(
     host_dir = f"{remote.target}:host-install-{run_id}"
     if (
         operator is not None
-        and not remote.step("operator-prerequisites", operator.read_text(), LONG_STEP_S).ok
+        and not remote.step("operator-prerequisites", operator.decode(), LONG_STEP_S).ok
     ):
         return binding
     source = output / "kdive-candidate.bundle"
@@ -876,7 +887,7 @@ def _drive(
     if not built.ok or match is None:
         return binding
     binding = binding.model_copy(update={"image_sha256": match.group(1)})
-    if not remote.copy("copy-bundle", str(bundle_dir), f"{host_dir}/bundle").ok:
+    if not remote.copy("copy-bundle", str(bundle_dir), f"{host_dir}/bundle", recursive=True).ok:
         return binding
     boot = {"candidate": candidate, "image": image, "node": node, "run_id": run_id}
     phases["first-boot"] = _boot(remote, "first-boot", output=output, **boot)
