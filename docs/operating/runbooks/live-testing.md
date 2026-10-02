@@ -654,7 +654,9 @@ native POWER host runs it. Remote deep cells stay pending for #2810.
 Last run: candidate `749bd29d6` (server, worker and reconciler at that SHA), an Ubuntu 26.04 x86_64
 KVM lab host, fixtures `v6.18.54` (longterm) and `v7.2.8` (stable). Every cell proved `upload`,
 `install`, `reconnect`, `boot-identity` and `modules`, and failed `cleanup` on #3078: teardown
-leaves the installed kernel under `KDIVE_INSTALL_STAGING`.
+leaves the installed kernel under `KDIVE_INSTALL_STAGING`. The System reached `torn_down`, the
+Allocation `released` and the domain was undefined, but the surviving kernel stops the check before
+it reads capacity, so capacity reclamation was not observed; rerun once #3078 is fixed.
 
 | Cell (`deep-lifecycle/local-libvirt/x86_64/…`) | Guest | Outcome | Failing assertion |
 |---|---|---|---|
