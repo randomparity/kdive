@@ -182,9 +182,12 @@ def _append_ssh_forward(commandline: ET.Element, ssh_addr: str, ssh_port: int) -
 
     ``restrict=on`` isolates the slirp NIC to the inbound forward only (no guest-initiated
     outbound on it); ``hostfwd`` forwards ``ssh_addr:ssh_port`` to the guest sshd on ``:22``.
-    Mirrors local-libvirt's loopback forward (ADR-0218), differing only in the routable ACL'd
-    bind address. ``addr=0x10`` pins the PCI slot so it does not collide with the disk/bridge/
-    agent virtio devices.
+    Unlike local-libvirt's loopback forward (ADR-0218), the bind address is routable, so slirp
+    delivers the connection with the client's own source address and the guest's default route
+    is on the libvirt NIC. The reply returns through slirp only because the base image routes
+    traffic sourced from the slirp lease back through slirp's gateway (ADR-0721); the forward
+    keeps slirp's default subnet, which that route matches. ``addr=0x10`` pins the PCI slot so
+    it does not collide with the disk/bridge/agent virtio devices.
     """
     netdev = f"user,id=kdivessh,restrict=on,hostfwd=tcp:{ssh_addr}:{ssh_port}-:22"
     device = "virtio-net-pci,netdev=kdivessh,addr=0x10"

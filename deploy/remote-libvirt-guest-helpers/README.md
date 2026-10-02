@@ -31,6 +31,16 @@ this directory is staged as on the remote build host. The unit's own header docu
 [offline harvest](../../src/kdive/providers/local_libvirt/retrieve/guestfs.py) — change one side
 and the `test_fadump_capture_unit_writes_only_paths_the_harvest_globs_match` test fails.
 
+`kdive-ssh-return-route` is a NetworkManager dispatcher script, installed as
+`/etc/NetworkManager/dispatcher.d/50-kdive-ssh-return-route` in images that ship NetworkManager.
+Remote SSH parity ([ADR-0291](../../docs/adr/0291-remote-ssh-bootstrap-injection.md)) forwards
+`ssh_addr:<port>` through a user-mode (slirp) NIC, and slirp delivers that connection with the
+client's own source address. The script routes traffic sourced from the slirp lease back through
+slirp's gateway, so the guest's reply does not leave through the default route on the libvirt NIC.
+It keys on slirp's fixed lease subnet, never on an interface name.
+[ADR-0721](../../docs/adr/0721-remote-ssh-forward-return-path-is-a-guest-source-route.md) records
+the contract. An image without it accepts the forward's TCP connection but never answers.
+
 `kdive-install-kernel install` fetches the kernel bundle and installs a deterministic GRUB
 entry; `boot` selects that entry for one boot and starts a detached reboot. `boot-id` reads
 the guest boot identity. `kdump-status` reports reserved crash memory and whether the capture
