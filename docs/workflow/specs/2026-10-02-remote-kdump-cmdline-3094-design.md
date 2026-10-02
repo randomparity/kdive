@@ -17,7 +17,7 @@ method is kdump; the helper breaks that promise.
   kdump-family methods and refuses it in user overrides, so on remote this means "non-kdump".
 - A kdump install (cmdline carries `crashkernel=`) runs exactly the commands it runs today.
 - The #1610 gate and `install.py` are unchanged; their docstrings are already correct.
-- ADR-0082 gains an amendment line in §2 saying the helper enforces the iff.
+- ADR-0082's Decision gains an appended `### Amendment` block: the helper enforces the iff.
 - Both remote runbooks say images staged before this change must be rebuilt
   (`force_image_rebuild=true`).
 - How a kdump install merges its `crashkernel=` with an image default that has one is unchanged
