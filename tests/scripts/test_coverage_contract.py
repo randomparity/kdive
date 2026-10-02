@@ -56,6 +56,42 @@ def test_native_deep_families_and_foreign_tcg_stay_distinct(inventory: Inventory
 
 
 _IMAGE_SMOKE_NODE = "tests/integration/test_image_smoke_live.py::test_image_smoke"
+_DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
+_LIFECYCLE_TOOLS = {
+    "images.publish",
+    "runs.boot",
+    "runs.cancel",
+    "runs.install",
+    "runs.release_external_boot",
+    "systems.authorize_ssh_key",
+    "systems.check_ssh_reachable",
+    "systems.provision",
+    "systems.reprovision",
+    "systems.ssh_info",
+    "systems.teardown",
+}
+
+
+def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+
+    def owners(operations: set[str], provider: str, arch: str) -> set[int]:
+        return {
+            c.owner
+            for c in cells
+            if c.operation in operations and c.provider == provider and c.guest_arch == arch
+        }
+
+    deep = {"deep-lifecycle"}
+    assert owners(_LIFECYCLE_TOOLS, "local-libvirt", "x86_64") == {3062}
+    assert owners(_LIFECYCLE_TOOLS, "local-libvirt", "ppc64le") == {2818}
+    assert owners(deep, "local-libvirt", "x86_64") == {2809}
+    assert owners(deep, "local-libvirt", "ppc64le") == {2818}
+    for arch in SUPPORTED_ARCHES:
+        assert owners(_LIFECYCLE_TOOLS | deep, "remote-libvirt", arch) == {2810}
+    assert len([c for c in cells if c.owner == 2809]) == 8
+    local = {c.scenario_id for c in cells if c.operation in deep and c.provider == "local-libvirt"}
+    assert local == {"deep-lifecycle/local-libvirt/longterm", "deep-lifecycle/local-libvirt/stable"}
 
 
 def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: Inventory) -> None:
@@ -65,12 +101,15 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     smoke = [c for c in contract.cells if c.operation == "image-smoke"]
     assert {c.node_id for c in smoke} == {_IMAGE_SMOKE_NODE}
     assert {c.owner for c in smoke if c.guest_arch == "ppc64le"} == {2818}
+    deep = [c for c in contract.cells if c.operation == "deep-lifecycle"]
+    assert {c.node_id for c in deep if c.provider == "local-libvirt"} == {_DEEP_NODE}
+    assert all(c.node_id is None for c in deep if c.provider == "remote-libvirt")
     host_install = [c for c in contract.cells if c.scenario_id == "host-install"]
     assert len(host_install) == 6
     assert {c.node_id for c in host_install} == {
         "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
     }
-    bound = {"image-smoke", "host-install"}
+    bound = {"image-smoke", "deep-lifecycle", "host-install"}
     assert all(c.node_id is None for c in contract.cells if c.operation not in bound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
