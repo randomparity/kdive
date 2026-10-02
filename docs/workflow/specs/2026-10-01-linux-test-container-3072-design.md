@@ -51,7 +51,7 @@ The charter in the `WORK:SCOPE` comment on #3072 governs. In summary:
    `ghcr.io/astral-sh/uv:0.11.31@sha256:ecd4…` pin onto its
    `python:3.14.6-slim-bookworm@sha256:86f9…` pin. Both are multi-arch indexes (amd64, arm64).
    It installs `build-essential`, `ca-certificates`, `curl`, `git`, `gnupg`, `iproute2`,
-   `libvirt-dev`, `pkg-config`, `docker-ce-cli`, `docker-compose-plugin`, and
+   `libvirt-dev`, `openssh-client`, `pkg-config`, `procps`, `python3`, `docker-ce-cli`, `docker-compose-plugin`, and
    `rust-just==1.58.0`, and adds the user `tester` (uid 1000). It has no `--platform`, so it
    builds at the engine's native arch. Dependabot's docker ecosystem lists `/tests/container`.
 3. **Entry script.** `tests/container/run-suite.sh <commit>`. As root, it adds `tester` to the

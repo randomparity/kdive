@@ -5,11 +5,14 @@ FROM ghcr.io/astral-sh/uv:0.11.31@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fccc
 
 FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30
 COPY --from=uv /uv /uvx /usr/local/bin/
-# libvirt-dev and the build tools compile libvirt-python; iproute2 gives `ss` to the
-# live-stack script tests; the Docker CLI and compose plugin reach the host engine socket.
+# libvirt-dev and the build tools compile libvirt-python. The slim base lacks tools that CI's
+# runner has and tests call: `ss` (iproute2), `ps`/`pgrep` (procps), `ssh-keygen`
+# (openssh-client), and the system /usr/bin/python3 that host scripts run (python3). The Docker
+# CLI and compose plugin reach the host engine socket.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates curl git gnupg iproute2 libvirt-dev pkg-config \
+    build-essential ca-certificates curl git gnupg iproute2 libvirt-dev openssh-client \
+    pkg-config procps python3 \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
