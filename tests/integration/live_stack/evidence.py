@@ -28,59 +28,34 @@ from tests.integration.live_stack.skew import _fetch_version, _resolve, readyz_u
 from tests.integration.live_stack.spine import report_artifact_dir
 from tests.live_vm.installed_local_authority_support import _active_worker_readyz_urls
 
-REQUIRED_ROLES = ("server", "worker", "reconciler", "authority")
 AUTHORITY_REVISION = "/opt/kdive-provider-authority/revision"
 _ROOT = Path(__file__).resolve().parents[3]
 _TIMEOUT_S = 10.0
 
 
-def _git(*args: str) -> str | None:
+def _output(*argv: str) -> str | None:
+    """A fixed command's stripped stdout, or ``None`` when it cannot run or exits non-zero."""
     try:
-        result = subprocess.run(  # noqa: S603,S607 - fixed git argv  # nosec B603 B607
-            ["git", "-C", str(_ROOT), *args],
-            capture_output=True,
-            text=True,
-            timeout=_TIMEOUT_S,
-            check=True,
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell  # nosec B603
+            argv, capture_output=True, text=True, timeout=_TIMEOUT_S, check=True
         )
     except (OSError, subprocess.SubprocessError) as _exc:
         return None
     return result.stdout.strip()
+
+
+def _git(*args: str) -> str | None:
+    return _output("git", "-C", str(_ROOT), *args)
 
 
 def _read_privileged(path: str) -> str | None:
     """Read a root-owned identity file without prompting; ``None`` when it cannot be read."""
-    try:
-        result = subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
-            ["sudo", "-n", "cat", path],
-            capture_output=True,
-            text=True,
-            timeout=_TIMEOUT_S,
-            check=True,
-        )
-    except (OSError, subprocess.SubprocessError) as _exc:
-        return None
-    return result.stdout.strip()
+    return _output("sudo", "-n", "cat", path)
 
 
 def _running_workers() -> str:
-    try:
-        result = subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
-            [
-                "systemctl",
-                "list-units",
-                "kdive-live-worker@*.service",
-                "--state=running",
-                "--no-legend",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=_TIMEOUT_S,
-            check=True,
-        )
-    except (OSError, subprocess.SubprocessError) as _exc:
-        return ""
-    return result.stdout
+    units = ("systemctl", "list-units", "kdive-live-worker@*.service", "--state=running")
+    return _output(*units, "--no-legend") or ""
 
 
 @cache
@@ -88,13 +63,19 @@ def _matrix() -> str:
     return build_contract().matrix_sha256
 
 
-def os_identity(os_release: str) -> str:
-    """Return the public ``ID:VERSION_ID`` identity from ``/etc/os-release`` text."""
+def key_values(text: str) -> dict[str, str]:
+    """``KEY=VALUE`` lines (``/etc/os-release`` style) with surrounding quotes removed."""
     fields = {}
-    for line in os_release.splitlines():
+    for line in text.splitlines():
         key, sep, value = line.partition("=")
         if sep:
             fields[key.strip()] = value.strip().strip("\"'")
+    return fields
+
+
+def os_identity(os_release: str) -> str:
+    """Return the public ``ID:VERSION_ID`` identity from ``/etc/os-release`` text."""
+    fields = key_values(os_release)
     if not fields.get("ID") or not fields.get("VERSION_ID"):
         raise ValueError("os-release lacks ID or VERSION_ID; cannot name the platform")
     return f"{fields['ID']}:{fields['VERSION_ID']}"

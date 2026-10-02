@@ -25,7 +25,7 @@ from kdive.inventory.model import StagedPathSource
 from kdive.inventory.path import systems_toml_path
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings
-from tests.integration.live_stack.evidence import os_identity
+from tests.integration.live_stack.evidence import key_values, os_identity
 
 # One line per fact, then the guest's os-release, all in KEY=VALUE form.
 PROBE = (
@@ -49,13 +49,8 @@ def native_cells(arch: str | None = None) -> list[Cell]:
 
 
 def parse_probe(stdout: str) -> dict[str, str]:
-    """``KEY=VALUE`` lines of :data:`PROBE` output, with os-release quoting removed."""
-    fields = {}
-    for line in stdout.splitlines():
-        key, sep, value = line.partition("=")
-        if sep:
-            fields[key.strip()] = value.strip().strip("\"'")
-    return fields
+    """The :data:`PROBE` facts plus the guest's os-release fields."""
+    return key_values(stdout)
 
 
 def os_matches(entry: RootfsCatalogEntry, probe: dict[str, str]) -> bool:
