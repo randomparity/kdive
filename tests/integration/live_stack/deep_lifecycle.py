@@ -12,7 +12,10 @@ host, after the images are staged and the fixtures built. The live test is
 from __future__ import annotations
 
 import argparse
+import asyncio
+import base64
 import hashlib
+import json
 import os
 import platform
 import struct
@@ -22,12 +25,34 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kdive.images.rootfs.catalog import load_rootfs_catalog
+from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
+from kdive.mcp.dev_harness import LiveStackClient
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings
 from scripts.kernel_fixtures import identity, verify
 from tests.integration.live_stack.evidence import os_identity
-from tests.integration.live_stack.image_smoke import PROBE, staged_image
+from tests.integration.live_stack.image_smoke import (
+    PROBE,
+    os_matches,
+    parse_probe,
+    ssh,
+    staged_image,
+)
+from tests.integration.live_stack.scenario import (
+    CellRun,
+    authorize_ssh,
+    probe_new_boot,
+    ssh_endpoint,
+    ssh_probe,
+)
+from tests.integration.live_stack.spine import (
+    build_and_upload_kernel,
+    build_profile,
+    drain_job,
+    ok,
+    scalar,
+)
+from tests.mcp.json_data import data_mapping
 
 FIXTURE_ROOT_ENV = "KDIVE_FIXTURE_ROOT"
 # A loadable module of every fixture build: CONFIG_BLK_DEV_LOOP=m in fixtures/kernel/debug.config.
@@ -194,6 +219,152 @@ def bindings(
             }
         )
     return InputBindings(version=1, candidate_sha=candidate, matrix_sha256=matrix, cells=cells)
+
+
+async def deep_body(
+    run: CellRun,
+    op: LiveStackClient,
+    system_id: str,
+    owned: list[str],
+    *,
+    project: str,
+    entry: RootfsCatalogEntry,
+    tree: Path,
+    manifest: dict[str, Any],
+    tmp: Path,
+    staged_kernel: Callable[[str], str],
+) -> None:
+    """Upload → install → boot → reconnect → build identity → module load, on a ready System.
+
+    Provider-neutral: ``staged_kernel(system_id)`` names the installed kernel file on the
+    provider host; it joins ``owned``, the paths the caller's cleanup proves absent.
+    """
+    port, key = await asyncio.wait_for(
+        authorize_ssh(op, system_id, tmp, "deep-lifecycle"), timeout=900
+    )
+    before = await asyncio.to_thread(ssh_probe, port, key)
+    assert before.get("uid") == "0", f"ssh as root reported uid {before.get('uid')!r}"
+    assert os_matches(entry, before), f"guest {before.get('ID')} is not catalog {entry.distro}"
+    run.observed |= {"guest_os": f"{entry.distro}:{entry.version}", "guest_arch": entry.arch}
+    investigation = ok(
+        await scalar(op, "investigations.open", project=project, title="deep lifecycle"), "open"
+    ).object_id
+    try:
+        upload = tmp / "upload"
+        run_id = ok(
+            await scalar(
+                op,
+                "runs.create",
+                investigation_id=investigation,
+                system_id=system_id,
+                build_profile=build_profile(entry.arch),
+            ),
+            "create-run",
+        ).object_id
+        await _upload(run, op, run_id, tree, manifest, upload)
+        await _install_and_boot(run, op, run_id, system_id, owned, tree, manifest, staged_kernel)
+        port = await ssh_endpoint(op, system_id)
+        after = await asyncio.to_thread(probe_new_boot, port, key, before["boot_id"], KERNEL_PROBE)
+        assert after.get("uid") == "0", "ssh after boot did not authenticate as root"
+        run.prove("reconnect", {"user": "root", "same_key": True, "boot_id_changed": True})
+        _prove_boot_identity(run, after, manifest, upload)
+        await _prove_module(run, port, key, after["release"], upload / "modstage")
+    finally:
+        closed = await scalar(
+            op,
+            "investigations.close",
+            investigation_id=investigation,
+            summary="deep lifecycle finished",
+        )
+        assert closed.status == "closed", f"investigation not closed: {closed.status}"
+
+
+async def _upload(
+    run: CellRun,
+    op: LiveStackClient,
+    run_id: str,
+    tree: Path,
+    manifest: dict[str, Any],
+    upload: Path,
+) -> None:
+    # with_vmlinux sets the build's debuginfo reference, which is what makes install inject
+    # lib/modules into the guest; require_network keeps the reconnect path in the kernel.
+    await build_and_upload_kernel(
+        op,
+        run_id=run_id,
+        arch=manifest["arch"],
+        kernel_tree=tree,
+        evidence_dir=upload,
+        with_vmlinux=True,
+        require_network=True,
+        root_fs="ext4",
+    )
+    record = json.loads((upload / "upload.json").read_text(encoding="utf-8"))
+    status = record["result"]["status"]
+    assert record["build_id"] == manifest["build_id"], "uploaded vmlinux is not the fixture's"
+    assert status == "succeeded", f"runs.complete_build returned {status}"
+    run.prove(
+        "upload",
+        {
+            "declared": {a["name"]: a["sha256"] for a in record["artifacts"]},
+            "build_id": record["build_id"],
+            "complete_build": status,
+        },
+    )
+
+
+async def _install_and_boot(
+    run: CellRun,
+    op: LiveStackClient,
+    run_id: str,
+    system_id: str,
+    owned: list[str],
+    tree: Path,
+    manifest: dict[str, Any],
+    staged_kernel: Callable[[str], str],
+) -> None:
+    for step in ("install", "boot"):
+        env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
+        await drain_job(op, step, env.object_id)
+    steps = data_mapping(ok(await scalar(op, "runs.get", run_id=run_id), "read-back"), "steps")
+    assert (steps.get("install"), steps.get("boot")) == ("succeeded", "succeeded"), steps
+    kernel = staged_kernel(system_id)
+    owned.append(kernel)
+    digest = file_sha256(kernel)
+    assert digest == boot_kernel_sha256(tree, manifest["arch"]), (
+        "the installed kernel is not the uploaded boot member"
+    )
+    run.observed["kernel_sha256"] = digest
+    run.prove("install", {"steps": dict(steps), "kernel_sha256": digest})
+
+
+def _prove_boot_identity(
+    run: CellRun, after: dict[str, str], manifest: dict[str, Any], upload: Path
+) -> None:
+    build_id = gnu_build_id(base64.b64decode(after.get("notes", "")))
+    assert after.get("release") == manifest["release"], (
+        f"running release {after.get('release')!r} is not {manifest['release']!r}"
+    )
+    assert build_id == manifest["build_id"], f"running build ID {build_id!r} is not the fixture's"
+    run.observed |= {
+        "kernel_build_id": build_id,
+        "kernel_source_sha": manifest["source"]["commit"],
+        "kernel_config_sha256": file_sha256(upload / "effective_config"),
+        "compiler_id": identity(manifest["toolchain"]),
+    }
+    run.prove("boot-identity", {"release": after["release"], "build_id": build_id})
+
+
+async def _prove_module(run: CellRun, port: int, key: Path, release: str, modstage: Path) -> None:
+    result = await asyncio.to_thread(ssh, port, key, MODULE_PROBE)
+    assert result.returncode == 0, f"module probe exit {result.returncode}: {result.stderr[-500:]}"
+    module = parse_probe(result.stdout)
+    assert module.get("initstate") == "live", f"{MODULE} initstate {module.get('initstate')!r}"
+    vermagic = module.get("vermagic", "").split()
+    assert vermagic[:1] == [release], f"{MODULE} vermagic {vermagic[:1]} is not {release}"
+    staged = file_sha256(staged_module(modstage, module.get("path", "")))
+    assert module.get("sha256") == staged, f"loaded {MODULE} is not the uploaded module"
+    run.prove("modules", {"module": MODULE, "initstate": "live", "sha256": staged})
 
 
 def main(argv: list[str] | None = None) -> int:
