@@ -97,6 +97,21 @@ would exist — and `authorize_ssh_key` still rejects).
   `known_hosts` is a named future hardening, deferred to avoid a guest-agent round-trip on
   every authorize.
 
+### Amendment (2026-10-02): the forward does not mirror local's return path (#3090)
+
+This is an amendment because the decision stands and only one claim in it was wrong. The Decision
+says the remote forward "mirrors local's loopback forward (ADR-0218), differing only in the
+routable ACL'd bind address". The bind address is not the only difference. libslirp rewrites a
+forwarded connection's source address to its gateway only when the client is loopback or
+unspecified. Local binds loopback and has one NIC, so replies always return through slirp. Remote
+binds a routable `ssh_addr` and keeps its default route on the libvirt NIC, so the guest's reply
+left through that NIC and the forward never answered. The second-NIC consequence above named
+DHCP bring-up as the primary live-proof risk; the return path was the actual one.
+[ADR-0721](0721-remote-ssh-forward-return-path-is-a-guest-source-route.md) adds the missing
+contract: the remote base images carry a NetworkManager dispatcher script that routes traffic
+sourced from the slirp lease back through slirp's gateway. Remote SSH parity holds only on images
+that carry that contract.
+
 ## Considered & rejected
 
 - **Expose the guest's bridge DHCP IP** (guest-agent `guest-network-get-interfaces`) as

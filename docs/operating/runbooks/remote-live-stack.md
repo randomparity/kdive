@@ -154,6 +154,12 @@ bootstrap key over the guest agent at provision, so `systems.ssh_info` returns a
   worker pool (and any agent host that must SSH in) at the host firewall. The worker→guest SSH does
   not verify the guest host key (`StrictHostKeyChecking=no`), so the ACL is the trust boundary —
   see ADR-0291.
+- The base image must carry the SSH-forward return route (ADR-0721). Without it, the provider
+  host accepts TCP on the forward but the guest never answers, and `systems.authorize_ssh_key`
+  fails `transport_failure`. Rebuild a Fedora or Rocky image staged before that change with
+  `force_image_rebuild=true` (see the
+  [host setup's image section](remote-libvirt-host-setup.md#2-prepare-guest-images)). The Ubuntu
+  24.04 and bare images do not carry it yet (#3091).
 
 ## 3. Object-store reachability for the presigned PUT
 

@@ -15,7 +15,8 @@ agent SSHing in with its own key after ``systems.authorize_ssh_key`` — are exe
 running the remote live-stack spine (``docs/operating/runbooks/remote-live-stack.md``) against a
 ``[[remote_libvirt]]`` instance that declares ``ssh_addr`` + ``ssh_range`` (§2.1). They are not
 reproduced here because they need the full server/worker spine + a routable SSH path, not just an
-agent-ready domain.
+agent-ready domain. That SSH path also needs a base image carrying the SSH-forward return route
+(ADR-0721); on an image without it the forward accepts TCP but the guest never answers.
 
 Required env: ``KDIVE_SSH_PARITY_DOMAIN`` (a running, agent-ready remote domain name) and
 ``KDIVE_SSH_PARITY_URI`` (its ``qemu+tls://`` connect URI).
