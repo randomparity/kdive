@@ -2,22 +2,18 @@
 
 - **Issue:** #2807 · **Decision:** [ADR-0716](../adr/0716-host-install-evidence-producer.md)
   · **Design:** [spec](../workflow/specs/2026-10-01-host-install-proof-design.md)
-- **Candidate:** `0ac30cfe74f461930bbc15a15b5418ddb0c3c6a7`. Every role on every host reported
-  this revision. Commits after it on the branch are documentation plus a merge of `main` that
-  brought in the image-smoke binding (#2808). That merge changes the matrix identity, so this
-  evidence qualifies the candidate and matrix named here, not a later head.
-- **Matrix:** `fc53e68775e6c519ac5f72e3b4e89f1bc8fd79836f4d654cb4ca5513e5729740`
-- **Date:** 2026-10-01 to 2026-10-02 (UTC).
+- **Candidate:** `d1b06633184b7baf90505f2b5d71f84f9a80d8a8`. Server, reconciler and worker
+  reported this revision on every host. Commits after it on the branch change only
+  documentation.
+- **Matrix:** `16a04fca5f067cf68caf3a5b267e12614ca03cb0c9aca6eacad2c6e188c2b8c9`
+- **Date:** 2026-10-02 (UTC).
 - **Hosts:** exclusive, snapshot-capable disposable lab test hosts with nested KVM, one per
   family. In this record they are `lab-ubuntu` (Ubuntu 26.04, AppArmor enabled), `lab-fedora`
   (Fedora 44, btrfs root, SELinux enforcing) and `lab-rocky` (Rocky Linux 10.2, SELinux
-  enforcing). Each had 8 vCPUs, 32 GiB RAM and a 256 GiB disk.
-
-  Each host was restored to its verified `clean` snapshot through the lab's restore tooling
-  before its run, and again afterwards. Before its run, `lab-rocky` also had `dnf upgrade`
-  applied and was rebooted. Its clean image runs a kernel whose matching
-  `kernel-modules-extra` the repositories no longer carry, so Docker cannot start on it
-  unchanged.
+  enforcing). Each had 8 vCPUs, 32 GiB RAM and a 256 GiB disk. The hosts ran one at a time.
+  Each was restored to its verified `clean` snapshot through the lab's restore tooling
+  immediately before its run and again afterwards; its higher snapshots stayed intact. Nothing
+  was changed by hand before a run.
 - **Kernel bundle:** the pinned `longterm` fixture: `v6.18.54`, commit
   `1b357ecb321392158d507b04672ffee57bfa071d`, release `6.18.54-g1b357ecb3213`, ELF build ID
   `6eda386b6100539e05faf0928f99b2a127ad6bf2`, fixture ID
@@ -32,54 +28,77 @@
 
 `coverage_campaign qualify` over the merged runs at the candidate:
 
-| Required cell | Outcome | Qualified | Reasons | Linked defect |
+| Required cell | Outcome | Qualified | Reasons | Owner of the blocker |
 |---|---|---|---|---|
-| `host-install/local-libvirt/x86_64/fedora` | success | yes | none | — |
-| `host-install/local-libvirt/x86_64/debian` | failure | no | reported-failure (confinement) | #3067 |
-| `host-install/local-libvirt/x86_64/enterprise` | failure | no | deployed-role-missing, required-input-missing (stopped at host preparation) | #3068 |
+| `host-install/local-libvirt/x86_64/fedora` | failure | no | deployed-role-missing (`authority`) | #3066 |
+| `host-install/local-libvirt/x86_64/debian` | failure | no | deployed-role-missing (`authority`); `confinement` fails | #3066, #3067 |
+| `host-install/local-libvirt/x86_64/enterprise` | failure | no | deployed-role-missing, required-input-missing (stopped at the operator prerequisites) | lab baseline, #3068 |
 
 The three ppc64le cells share the bound node and stay `not-run` / `missing-result` until #2818
 runs them on native POWER.
+
+**The `authority` role.** The contract requires `authority` for every host-install cell. The
+shared ADR-0715 reader takes that role from the provider authority's installed revision, and
+the local-libvirt host path installs no provider authority. So every cell here reports it
+missing. #3066 is changing the contract to require `authority` only for authority-routed
+cells, and that change includes the host-install cells. The installed lifecycle witness is
+checked separately: its stamp and its venv's code digest matched the candidate on both hosts
+that reached a boot, as a prerequisite inside the `confinement` assertion.
 
 ## What each run proved
 
 | Assertion | lab-fedora | lab-ubuntu | lab-rocky |
 |---|---|---|---|
-| `clean-install` | holds | holds | fails: `just prepare-local-libvirt-host` exit 2 |
+| `clean-install` | holds | holds | fails: operator prerequisites (Docker would not start) |
 | `first-boot` | holds | holds | not reached |
 | `repeat-setup` | holds | holds | not reached |
 | `second-boot` | holds | holds | not reached |
-| `confinement` | holds: `svirt_t` with per-boot MCS pairs (`s0:c671,c900`, `s0:c155,c170`) | fails: guest qemu `unconfined` in both boots | not reached |
+| `confinement` | holds: `svirt_t` with per-boot MCS pairs (`s0:c876,c974`, `s0:c42,c717`) | fails: guest qemu `unconfined` in both boots | not reached |
 | `cleanup` | holds: System `torn_down`, domain absent, both boots | holds | not reached |
-| Deployed `server`/`worker`/`reconciler`/`authority` | candidate, both phases | candidate, both phases | not reached |
+| Deployed `server`/`worker`/`reconciler` | candidate, both phases | candidate, both phases | not reached |
+| Deployed `authority` | unknown | unknown | not reached |
 
-The authority revision counts only when the installed lifecycle venv's `kdive` package source
-digest equals the checkout's `src/kdive`. On `lab-ubuntu`, both boots booted the bundle kernel:
-the console showed `Linux version 6.18.54-g1b357ecb3213`, and the worker prerequisites held.
-The only failed check was guest confinement. The session libvirt daemon reports security model
-`none`, so qemu runs `unconfined` while host AppArmor stays enabled (#3067). On `lab-rocky`, the
-EL10 guestfs binding build enabled Docker's `docker-ce-stable-source` repository through
-`--enablerepo='*source*'`, and its metadata download failed (#3068).
-
-An earlier full run at candidate `a5a3818754d048cafddfda1cfdc2d2b095c4bc76` reached the same
-three outcomes for the same reasons. It ran on disposable VMs created from the catalog-pinned
-vendor cloud images while the lab hosts were unreachable.
+- **lab-fedora** proved every assertion. Its one gap is the `authority` role.
+- **lab-ubuntu** booted the bundle kernel in both boots (the console showed
+  `Linux version 6.18.54-g1b357ecb3213`), and its worker prerequisites held. Guest confinement
+  failed: the session libvirt daemon reports security model `none`, so qemu runs `unconfined`
+  while host AppArmor stays enabled (#3067).
+- **lab-rocky** stopped in its operator prerequisites. Its `clean` snapshot runs kernel
+  `6.12.0-211.16.1`, the repositories carry `kernel-modules-extra` only for newer kernels, and
+  Docker CE could not start:
+  `iptables ... -m addrtype ...: Extension addrtype revision 0 not supported, missing kernel
+  module?`. This is the lab baseline's state, not a KDIVE defect. An earlier lab run on the
+  same guest, with packages upgraded and the guest rebooted first, got past this point and then
+  stopped in `just prepare-local-libvirt-host`, where the EL10 guestfs binding build enabled
+  Docker's `docker-ce-stable-source` repository (#3068).
 
 ## Step durations (seconds)
 
 | Step | lab-fedora | lab-ubuntu | lab-rocky |
 |---|---|---|---|
-| operator prerequisites | 12 | 10 | 42 |
-| bootstrap + just | 5 | 1 | 5 |
-| kernel source | 57 | 57 | 55 |
-| `just setup` | 118 | 111 | 101 |
-| `prepare-local-libvirt-host` | 102 | 101 | 99 (failed) |
-| `demo-up.sh` | 229 | 212 | — |
-| `build-image.sh` | 80 | 82 | — |
-| first boot (node) | 113 | 111 | — |
-| repeat setup + prepare + stack | 96 | 102 | — |
-| second boot (node) | 103 | 132 | — |
-| **whole run** | **920** | **922** | **304** |
+| operator prerequisites | 12 | 12 | 75 (failed) |
+| bootstrap + just | 3 | 1 | — |
+| kernel source | 59 | 61 | — |
+| `just setup` | 100 | 90 | — |
+| `prepare-local-libvirt-host` | 119 | 121 | — |
+| `demo-up.sh` | 195 | 182 | — |
+| `build-image.sh` | 80 | 104 | — |
+| first boot (node) | 115 | 119 | — |
+| repeat setup + prepare + stack | 92 | 91 | — |
+| second boot (node) | 104 | 132 | — |
+| **whole run** | **883** | **917** | **75** |
+
+## Earlier runs
+
+Earlier full runs at intermediate branch revisions showed the same Fedora and Ubuntu behaviour.
+Those revisions still mapped the lifecycle witness to the `authority` role, so Fedora then
+qualified `success`. The runs were on lab hosts and, before the lab hosts were reachable, on
+disposable VMs built from the catalog-pinned cloud images. They also fixed three runner defects:
+
+- A bundle clone has no `origin/main`, and the setup hooks read it.
+- A clean host has no kernel tree, and host preparation grants traversal only to a tree that
+  exists.
+- An AppArmor label was cut at its mode suffix.
 
 ## Operator prerequisite files
 
@@ -131,23 +150,9 @@ sudo -n usermod -aG docker "$USER"
 The runner also fetched the kernel tree that `examples/local-libvirt/README.md` lists as a
 prerequisite, using the repository's own `scripts/fetch-kernel-tree.sh` at the bundle's source
 commit. No package was installed by hand.
-
-## Rehearsals that changed the runner
-
-Three earlier runs at intermediate branch revisions failed for reasons in the runner itself, and
-were fixed before the final runs:
-
-- A bundle clone has no `origin/main`, and the setup hooks read it. The clone now fetches it.
-- A clean host has no kernel tree, and host preparation grants traversal only to a tree that
-  exists. The runner now fetches one before setup.
-- An AppArmor label was cut at its mode suffix. The node now reads the whole label from `/proc`.
-
-Those rehearsals produced the same per-family conclusions as the final runs.
-
 ## Limits
 
-- The clean baseline is the lab's verified `clean` snapshot. `lab-rocky` additionally received
-  a package upgrade and reboot, as described above.
+- The clean baseline is the lab's verified `clean` snapshot, used unchanged.
 - Evidence files, transcripts and phase records stay private. This record publishes only
   outcomes, durations and content identities.
 - The qualifier checks accounting and identity, not whether a producer fabricated a digest

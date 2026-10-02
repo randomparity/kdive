@@ -22,10 +22,16 @@ and Arch are rejected by the worker role. See the
 the separate host-install and guest-image status of each distro.
 
 The clean-host installation proof for #2807 ran this path from a fresh baseline through a real
-guest, repeated setup, and booted again. On Fedora 44 every check held. Ubuntu 26.04 installed
-and booted, but its session-mode guests run unconfined under AppArmor (#3067). Rocky Linux 10
-stops at host preparation when Docker comes from Docker's repository (#3068). See the
-[proof record](../../design/2026-10-01-host-install-proof-record-2807.md).
+guest, repeated setup, and booted again.
+
+- **Fedora 44:** every install, boot, confinement and cleanup check held.
+- **Ubuntu 26.04:** installed and booted, but its session-mode guests run unconfined under
+  AppArmor (#3067).
+- **Rocky Linux 10:** host preparation stops when Docker comes from Docker's repository (#3068).
+- **All three:** the host-install cells also await #3066, which stops requiring a provider
+  authority on these hosts.
+
+See the [proof record](../../design/2026-10-01-host-install-proof-record-2807.md).
 
 ## Setup path
 
