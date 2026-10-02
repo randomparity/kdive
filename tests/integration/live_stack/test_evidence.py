@@ -156,3 +156,24 @@ def test_assembly_refuses_an_invalid_record(tmp_path: Path) -> None:
     )
     with pytest.raises(EvidenceError):
         assemble(tmp_path, _HEAD, tmp_path / "results.json")
+
+
+def test_an_unreadable_head_fails_instead_of_recording_an_empty_candidate() -> None:
+    with pytest.raises(RuntimeError, match="git HEAD"):
+        _identity(git=lambda *a: {"rev-parse": None, "status": ""}[a[0]])
+
+
+def test_unasserted_artifacts_are_retained_on_the_record(tmp_path: Path) -> None:
+    writer = EvidenceWriter(tmp_path)
+    cell, record = _record(_identity(), writer)
+    extra = writer.artifact({"cleanup-attempt": {"error": "AssertionError"}})
+    with_extra = build_record(
+        cell,
+        _identity(),
+        outcome=Outcome.FAILURE,
+        context=record.context,
+        duration_s=1.0,
+        assertions=record.assertions,
+        artifacts=[extra],
+    )
+    assert set(with_extra.artifacts) == {*record.artifacts, extra}

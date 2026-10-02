@@ -94,6 +94,7 @@ class _Run:
     outcome: Outcome = Outcome.FAILURE
     reason: str = "scenario raised before completing"
     assertions: dict[str, str] = field(default_factory=dict)
+    artifacts: list[str] = field(default_factory=list)
     guest_os: str | None = None
     guest_arch: str | None = None
     accelerator: str = "none"
@@ -334,8 +335,9 @@ async def _cleanup_attempt(
         else:
             result = await _cleanup(op, allocation, system_id, disks, in_use)
     except Exception as exc:  # noqa: BLE001 - recorded; the scenario already failed
-        result = {"error": type(exc).__name__, "detail": str(exc)[:300]}
-    run.writer.artifact({"cell": run.cell.id, "cleanup-attempt": result})
+        # The type only: a message can carry host paths or a libvirt URI (ADR-0715 evidence).
+        result = {"error": type(exc).__name__}
+    run.artifacts.append(run.writer.artifact({"cell": run.cell.id, "cleanup-attempt": result}))
 
 
 @pytest.mark.parametrize("cell", native_cells(), ids=lambda cell: str(cell.image))
@@ -364,6 +366,7 @@ def test_image_smoke(cell: Cell, tmp_path: Path) -> None:
                 duration_s=round(time.monotonic() - started, 1),
                 assertions=run.assertions,
                 impediments=["missing-prerequisite"] if run.outcome is Outcome.BLOCKED else [],
+                artifacts=run.artifacts,
             )
         )
     assert run.outcome is Outcome.SUCCESS, f"{cell.id}: {run.outcome.value}: {run.reason}"

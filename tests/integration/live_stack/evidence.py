@@ -149,7 +149,9 @@ def run_identity(
     os_release: Callable[[], str] = lambda: Path("/etc/os-release").read_text(encoding="utf-8"),
 ) -> RunIdentity:
     """Read the candidate, matrix, host and deployed role revisions for one cell."""
-    head = git("rev-parse", "HEAD") or ""
+    head = git("rev-parse", "HEAD")
+    if not head:
+        raise RuntimeError("cannot read the test checkout's git HEAD; run from a git checkout")
     urls = readyz_urls(base_url, {})
     roles: dict[str, str] = {}
     for role in ("server", "reconciler"):
@@ -198,8 +200,12 @@ def build_record(
     duration_s: float,
     assertions: dict[str, str],
     impediments: Iterable[str] = (),
+    artifacts: Iterable[str] = (),
 ) -> Evidence:
-    """One version-1 record for ``cell``; identity fields come from the cell, never the caller."""
+    """One version-1 record for ``cell``; identity fields come from the cell, never the caller.
+
+    ``artifacts`` adds retained evidence that backs no assertion, such as a cleanup attempt.
+    """
     return Evidence.model_validate(
         {
             "version": 1,
@@ -218,7 +224,7 @@ def build_record(
             "context": context.model_dump(),
             "duration_seconds": duration_s,
             "assertions": assertions,
-            "artifacts": sorted(set(assertions.values())),
+            "artifacts": sorted(set(assertions.values()) | set(artifacts)),
             "impediments": list(impediments),
         }
     )
