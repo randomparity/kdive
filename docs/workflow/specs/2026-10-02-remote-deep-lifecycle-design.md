@@ -113,14 +113,19 @@ the remote tool cells implemented.
 ## Threat model
 
 - Boundaries: guest SSH output (untrusted) → assertions; provider-host SSH and libvirt answers
-  → assertions; operator env (`REMOTE_PROVIDER_SSH`) → an `ssh` argv and a libvirt URI.
-- Controls: commands sent to guest and host are literals or the fixture's release (validated
-  against `uname -r`, `shlex.quote`d); the destination must match the regex above, so it cannot
+  → assertions; operator env (`REMOTE_PROVIDER_SSH`) → an `ssh` argv and a libvirt URI;
+  operator inventory (storage pool, staged volume name) → a provider-host shell command.
+  Amended after the branch security pass.
+- Controls: commands sent to guest and host are literals, the fixture's release (validated
+  against `uname -r`) or the inventory's pool and volume names, each `shlex.quote`d; the destination must match the regex above, so it cannot
   start with `-` and be parsed as an `ssh` option; module paths stay confined to the
   upload's `modstage`; evidence artifacts carry counts, digests and OS identities only, and a
   cleanup error records its exception type.
 - Out of scope: provider-host compromise (accepted above); the worker's TLS material is never
-  read by the test.
+  read by the test. The guest SSH leg crosses the lab network to the provider's `ssh_addr`
+  without a pinned host key (each guest is freshly provisioned): an on-path actor on that network
+  could answer for the guest. The lane runs on an exclusive lab network, which is trusted here;
+  pinning the guest key through the observer is not part of this change.
 
 ## Success
 
