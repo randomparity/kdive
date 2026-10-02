@@ -64,7 +64,7 @@ REPRESENTATIVES = {
     ("fedora", "ppc64le"): "fedora-kdive-ready-44-ppc64le",
     ("enterprise", "x86_64"): "rocky-kdive-ready-10",
     ("enterprise", "ppc64le"): "rocky-kdive-ready-10-ppc64le",
-    ("suse", "x86_64"): "opensuse-tumbleweed-kdive-ready",
+    ("suse", "x86_64"): "opensuse-leap-kdive-ready-15.6",
 }
 KERNEL_PROBE = (
     PROBE + '; printf "release=%s\\nnotes=%s\\n" "$(uname -r)" "$(base64 -w0 /sys/kernel/notes)"'

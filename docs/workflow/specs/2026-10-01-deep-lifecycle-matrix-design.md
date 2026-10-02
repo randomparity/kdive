@@ -43,7 +43,8 @@ deep and tool cell, which the approved split moves to #3062 and #2818.
    - Representatives (one per family and architecture, Fedora and EL distinct):
      debian `debian-kdive-ready-13`; fedora `fedora-kdive-ready-44` (ppc64le
      `fedora-kdive-ready-44-ppc64le`); enterprise `rocky-kdive-ready-10` (ppc64le
-     `rocky-kdive-ready-10-ppc64le`); suse `opensuse-tumbleweed-kdive-ready`. A unit test requires
+     `rocky-kdive-ready-10-ppc64le`); suse `opensuse-leap-kdive-ready-15.6` (the Tumbleweed
+     row's pinned snapshot is no longer served, #3064). A unit test requires
      a representative of the right family and architecture for every deep cell of both arches.
    - Fixtures: `KDIVE_FIXTURE_ROOT/<baseline>` built and checked by `scripts/kernel_fixtures.py`
      (`verify`). Kernel inputs from the verified manifest: `kernel_sha256` = digest of the boot
