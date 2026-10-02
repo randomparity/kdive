@@ -201,8 +201,19 @@ class HostFacts:
         return self.mode in ("Enforcing", "Y")
 
     @property
+    def blocked_reason(self) -> str | None:
+        """Why an identified host cannot be proven; only `not-clean` clears with a reset."""
+        if not self.clean:
+            return "not-clean"
+        if not self.sudo:
+            return "no-sudo"
+        if not self.kvm:
+            return "no-kvm"
+        return None
+
+    @property
     def prepared(self) -> bool:
-        return self.clean and self.kvm and self.sudo
+        return self.blocked_reason is None
 
 
 class PhaseRecord(BaseModel):
@@ -687,9 +698,12 @@ class _Remote:
             return stream.read(_PHASE_BYTES).decode(errors="replace")
 
 
-def _summary(output: Path, steps: list[Step], outcome: str | None) -> None:
+def _summary(
+    output: Path, steps: list[Step], outcome: str | None, reason: str | None = None
+) -> None:
     payload = {
         "outcome": outcome,
+        "reason": reason,
         "steps": [{"name": s.name, "exit_code": s.exit_code, "seconds": s.seconds} for s in steps],
     }
     (output / "summary.json").write_text(json.dumps(payload, indent=2) + "\n")
@@ -718,7 +732,9 @@ def run(args: argparse.Namespace) -> int:
     target = validate_target(args.target)
     image = validate_name(args.guest_image)
     candidate = _checked_candidate(args.candidate)
-    manifest, kernel_sha256 = bundle_inputs(args.bundle)
+    # Absolute operands: scp would read a relative `a:b` local path as a remote host.
+    bundle_dir: Path = args.bundle.resolve()
+    manifest, kernel_sha256 = bundle_inputs(bundle_dir)
     arch = str(manifest["arch"])
     row = load_rootfs_catalog().get(image)
     if row is None or row.arch != arch:
@@ -733,7 +749,7 @@ def run(args: argparse.Namespace) -> int:
     cell = cells[0]
     operator = args.operator_prerequisites
     operator_sha256 = _file_digest(operator) if operator else None
-    output: Path = args.output
+    output: Path = args.output.resolve()
     output.mkdir(parents=True)
     output.chmod(0o700)  # private transcripts and phase records, whatever the umask
     (output / "steps").mkdir()
@@ -756,11 +772,11 @@ def run(args: argparse.Namespace) -> int:
     observe = remote.step("observe-host", _OBSERVE)
     host = parse_host(remote.text(observe))
     if not observe.ok or host is None:
-        _summary(output, remote.steps, None)
+        _summary(output, remote.steps, None, "unidentified")
         (output / "kdive-candidate.bundle").unlink()
         return 3
     if not family_matches(host.os.split(":", 1)[0], args.family) or host.arch != arch:
-        _summary(output, remote.steps, None)
+        _summary(output, remote.steps, None, "host-mismatch")
         (output / "kdive-candidate.bundle").unlink()
         print("target host family or architecture differs from the selected cell", file=sys.stderr)
         return 2
@@ -769,7 +785,7 @@ def run(args: argparse.Namespace) -> int:
     if host.prepared:
         binding = _drive(
             remote,
-            bundle_dir=args.bundle,
+            bundle_dir=bundle_dir,
             candidate=candidate,
             image=image,
             node=node,
@@ -802,7 +818,7 @@ def run(args: argparse.Namespace) -> int:
     (output / "result.json").write_text(
         json.dumps([evidence.model_dump(mode="json")], indent=2) + "\n"
     )
-    _summary(output, remote.steps, evidence.outcome.value)
+    _summary(output, remote.steps, evidence.outcome.value, host.blocked_reason)
     return {Outcome.SUCCESS: 0, Outcome.BLOCKED: 3}.get(evidence.outcome, 1)
 
 
@@ -818,7 +834,11 @@ def _drive(
     phases: dict[str, PhaseRecord | None],
     output: Path,
 ) -> Context:
-    """Run the documented sequence; stop at the first failed step. Returns the final binding."""
+    """Run the documented sequence and return the final binding.
+
+    A failed install or setup step stops the run. A failed boot phase that still wrote its
+    record continues through repeat setup and the second boot, so both phases are recorded.
+    """
     run_id = uuid.uuid4().hex[:12]
     kernel_commit = binding.kernel_source_sha or ""
     host_dir = f"{remote.target}:host-install-{run_id}"

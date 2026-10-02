@@ -156,7 +156,7 @@ A run directory holds these files:
 | `binding.json` | One-cell bindings: host platform from the pre-install observation, guest platform from the catalog row, kernel identity from the bundle, image digest from the built image. |
 | `result.json` | The single `Evidence` record. |
 | `artifacts/` | One canonical JSON artifact per assertion. |
-| `summary.json` | Each step's `name`, `exit_code` and `seconds`, plus the `outcome`. |
+| `summary.json` | Each step's `name`, `exit_code` and `seconds`, plus the `outcome` and, for exits 2 and 3, a `reason`. |
 | `steps/`, `phases/` | Private transcripts and phase records. |
 
 Keep the run directory private: it holds the transcripts, the phase records and every assertion
@@ -169,9 +169,11 @@ artifact. Publish only sanitized excerpts.
 | 0 | `success` |
 | 1 | `failure` |
 | 2 | Invalid input, or a host that does not match the cell. Nothing is mutated. |
-| 3 | `blocked`, or a host that could not be identified (no result; `merge` skips the directory and the cell stays `not-run`). A reset wrapper retries on this code. |
+| 3 | `blocked`, or a host that could not be identified (no result; `merge` skips the directory and the cell stays `not-run`). `summary.json` `reason` says why: `not-clean` or `unidentified` may clear after a reset; `no-sudo` and `no-kvm` will not, so a reset wrapper caps its retries. |
 
-A failed or timed-out step stops the run. A host reset is the lab's responsibility, not KDIVE's.
+A failed or timed-out install or setup step stops the run. A failed boot phase that wrote its
+record still continues through repeat setup and the second boot, so both phases are recorded.
+A host reset is the lab's responsibility, not KDIVE's.
 
 ## Limits and verification
 

@@ -247,6 +247,13 @@ def test_unprepared_host_is_blocked(cell: Cell, tmp_path: Path, host: HostFacts)
     assert evidence.context == _context()
 
 
+def test_blocked_hosts_name_their_reason() -> None:
+    assert _host().blocked_reason is None
+    assert _host(markers=("~/kdive",), sudo=False).blocked_reason == "not-clean"
+    assert _host(sudo=False).blocked_reason == "no-sudo"
+    assert _host(kvm=False).blocked_reason == "no-kvm"
+
+
 def test_operator_step_is_optional_only_without_a_file(cell: Cell, tmp_path: Path) -> None:
     steps = [s for s in _steps() if s.name != "operator-prerequisites"]
     assert _compose(cell, tmp_path, steps=steps, operator_sha256=None).outcome is Outcome.SUCCESS

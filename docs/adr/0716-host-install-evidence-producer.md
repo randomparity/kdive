@@ -55,7 +55,8 @@ the same producer on a different host architecture.
 - The `host-install` scenario has one node ID, shared by every family and architecture. The
   node skips unless the runner supplies its phase inputs, so the ordinary `live_stack` recipe
   collects it without running it.
-- A failed step stops the run and yields `failure`. An identified host that is not clean, or
+- A failed install or setup step stops the run and yields `failure`; a failed boot phase
+  still runs repeat setup and the second boot so both phases are recorded. An identified host that is not clean, or
   lacks non-interactive sudo or `/dev/kvm`, yields `blocked` with `missing-prerequisite`. An
   unreachable or unidentifiable host yields no result (exit 3, so the cell stays `not-run`), and
   invalid input exits 2 before any mutation. No partial run yields `success`.

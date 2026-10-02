@@ -132,9 +132,12 @@ The outcome is decided in this order:
    or the phase contexts differ from each other or from the binding.
 4. Otherwise `success`.
 
-A failed or timed-out step stops the run, and the result still lists only what ran. `run`
+A failed or timed-out install or setup step stops the run, and the result still lists only
+what ran. A failed boot phase that wrote its record continues through repeat setup and the
+second boot, so both phases are recorded. `run`
 exits 0 on `success`, 1 on `failure`, 3 on `blocked` or an unidentified host, and 2 on invalid
-input. Exit 3 is the signal a reset wrapper retries on.
+input. `summary.json` carries a `reason` (`unidentified`, `not-clean`, `no-sudo`, `no-kvm`,
+`host-mismatch`); only `not-clean` and `unidentified` can clear after a reset.
 
 `merge --output DIR RUN...` combines run directories into `inputs.json` and `results.json` for
 `coverage_campaign qualify`. Two runs that bind the same cell, or carry different candidates or
