@@ -41,7 +41,7 @@ from scripts.host_install_proof import (
     package_digest,
     qemu_pid,
 )
-from tests.integration.live_stack.evidence import run_identity
+from tests.integration.live_stack.evidence import os_identity, run_identity
 from tests.integration.live_stack.skew import repo_facts
 from tests.integration.live_stack.spine import (
     LOCAL_ALLOCATION_DISK_GB,
@@ -79,15 +79,6 @@ def _host_mode() -> str:
     except OSError, subprocess.CalledProcessError:
         path = Path("/sys/module/apparmor/parameters/enabled")
         return path.read_text().strip() if path.exists() else "none"
-
-
-def _host_os() -> str:
-    fields = dict(
-        line.split("=", 1)
-        for line in Path("/etc/os-release").read_text().splitlines()
-        if "=" in line
-    )
-    return f"{fields['ID'].strip('"')}:{fields['VERSION_ID'].strip('"')}"
 
 
 def _file_sha256(path: Path) -> str:
@@ -317,7 +308,7 @@ def test_installed_host_boots_pinned_kernel() -> None:
     if not booted:
         failures.append("console never showed the bundle's kernel release")
     context = {
-        "host_os": _host_os(),
+        "host_os": os_identity(Path("/etc/os-release").read_text(encoding="utf-8")),
         "host_arch": host_arch,
         "guest_os": f"{row.distro}:{row.version}",
         "guest_arch": row.arch,
