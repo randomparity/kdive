@@ -12,7 +12,8 @@ modes. Catalog smoke covers every image, including build images. Deep lifecycle,
 clean-host, failure/resource and kernel-corpus obligations also remain in the expected set.
 Native x86_64/KVM, ppc64le/KVM-HV and foreign-architecture TCG are separate cells.
 
-No live scenarios are marked implemented by this foundation. The owner issues in the manifest and
+The foundation marked no live scenario implemented; `host-install` is now bound to its producer
+(see [Host-installation producer](#host-installation-producer)). The owner issues in the manifest and
 expanded cells supply their fixtures and producers under epic
 [#2803](https://github.com/randomparity/kdive/issues/2803). Adding a scenario means adding its
 repository-relative pytest node ID to the manifest's `implementations` table, keyed by the existing
@@ -109,6 +110,70 @@ records; each result allows at most 256 assertions and artifact references. Put 
 in retained artifacts and submit their digests. Validation errors name a schema field/category
 without echoing supplied values. Keep detailed producer diagnostics private and redact them before
 publishing separately.
+
+## Host-installation producer
+
+`scripts/host_install_proof.py` produces the `host-install/local-libvirt/<arch>/<family>` results
+([ADR-0716](../adr/0716-host-install-evidence-producer.md)). The `host-install` scenario binds
+every family and architecture to one on-host node,
+`tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel`. That node
+skips unless the runner supplies its phase inputs.
+
+1. Cut the pinned kernel bundle on the host where the fixture verifies in place, its native build
+   host:
+
+   ```sh
+   uv run python -m scripts.host_install_proof bundle --fixture "$fixture_root/longterm"      --output "$bundle"
+   ```
+
+2. Reset an exclusive host to its clean baseline. The host needs non-interactive `sudo`,
+   `/dev/kvm` and a pinned SSH host key. Then, from a clean controller checkout at the
+   candidate, run:
+
+   ```sh
+   uv run python -m scripts.host_install_proof run --target "$user@$host"      --known-hosts "$known_hosts" --family fedora --candidate "$(git rev-parse HEAD)"      --bundle "$bundle" --guest-image fedora-kdive-ready-44 --output "$run_dir"      [--operator-prerequisites "$prerequisites"]
+   ```
+
+   The runner checks that the host is clean and that its distribution and architecture match the
+   cell. It then runs the documented entry points in separate login sessions: bootstrap, the
+   example's kernel tree (`scripts/fetch-kernel-tree.sh`), `just setup`, `just prepare-local-libvirt-host`, `just check-local-libvirt`,
+   `examples/local-libvirt/demo-up.sh` and `examples/local-libvirt/build-image.sh`. After that it
+   runs the node, repeats the setup steps, and runs the node again. The optional prerequisites
+   file holds only operator duties the installation docs assign, such as a Docker engine where
+   the distribution has no known package. Its digest is part of the evidence.
+
+3. Combine runs and qualify:
+
+   ```sh
+   uv run python -m scripts.host_install_proof merge --output "$merged" "$run_dir"...
+   uv run python -m scripts.coverage_campaign qualify --inputs "$merged/inputs.json"      --results "$merged/results.json"
+   ```
+
+A run directory holds these files:
+
+| File | Contents |
+|---|---|
+| `binding.json` | One-cell bindings: host platform from the pre-install observation, guest platform from the catalog row, kernel identity from the bundle, image digest from the built image. |
+| `result.json` | The single `Evidence` record. |
+| `artifacts/` | One canonical JSON artifact per assertion. |
+| `summary.json` | Each step's `name`, `exit_code` and `seconds`, plus the `outcome` and, for exits 2 and 3, a `reason`. |
+| `steps/`, `phases/` | Private transcripts and phase records. |
+
+Keep the run directory private: it holds the transcripts, the phase records and every assertion
+artifact. Publish only sanitized excerpts.
+
+`run` exits with one of these codes:
+
+| Exit | Meaning |
+|---|---|
+| 0 | `success` |
+| 1 | `failure` |
+| 2 | Invalid input or a host that does not match the cell (nothing mutated), or a controller error such as a full disk after the run started (the host may be mutated; reset it). |
+| 3 | `blocked`, or a host that could not be identified (no result; `merge` skips the directory and the cell stays `not-run`). `summary.json` `reason` says why: `not-clean` or `unidentified` may clear after a reset; `no-sudo` and `no-kvm` will not, so a reset wrapper caps its retries. |
+
+A failed or timed-out install or setup step stops the run. A failed boot phase that wrote its
+record still continues through repeat setup and the second boot, so both phases are recorded.
+A host reset is the lab's responsibility, not KDIVE's.
 
 ## Limits and verification
 

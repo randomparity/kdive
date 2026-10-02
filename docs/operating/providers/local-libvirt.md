@@ -21,6 +21,17 @@ and Arch are rejected by the worker role. See the
 [host and guest distribution table](../platform-support.md#host-and-guest-distributions) for
 the separate host-install and guest-image status of each distro.
 
+The clean-host installation proof for #2807 ran this path from a fresh baseline through a real
+guest, repeated setup, and booted again.
+
+- **Fedora 44:** every install, boot, confinement and cleanup check held.
+- **Ubuntu 26.04:** installed and booted, but its session-mode guests run unconfined under
+  AppArmor (#3067).
+- **Rocky Linux 10:** host preparation stops when Docker comes from Docker's repository (#3068).
+  The lab's stale clean image cannot start Docker at all until its packages are upgraded.
+
+See the [proof record](../../design/2026-10-01-host-install-proof-record-2807.md).
+
 ## Setup path
 
 1. Prepare the host: `examples/local-libvirt/install-host.sh`, then log out and back in so the new

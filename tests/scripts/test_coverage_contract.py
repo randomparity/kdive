@@ -65,7 +65,13 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     smoke = [c for c in contract.cells if c.operation == "image-smoke"]
     assert {c.node_id for c in smoke} == {_IMAGE_SMOKE_NODE}
     assert {c.owner for c in smoke if c.guest_arch == "ppc64le"} == {2818}
-    assert all(c.node_id is None for c in contract.cells if c.operation != "image-smoke")
+    host_install = [c for c in contract.cells if c.scenario_id == "host-install"]
+    assert len(host_install) == 6
+    assert {c.node_id for c in host_install} == {
+        "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
+    }
+    bound = {"image-smoke", "host-install"}
+    assert all(c.node_id is None for c in contract.cells if c.operation not in bound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
     assert recovery and {c.configuration for c in recovery} == {"recovery"}

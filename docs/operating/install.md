@@ -268,8 +268,11 @@ See [remote-libvirt](providers/remote-libvirt.md) for remote-provider requiremen
 From a complete KDIVE checkout, prepare a local-libvirt host with the canonical Ansible-backed
 recipe. It passes `--ask-become-pass`, so it requires an interactive become password and cannot run
 unattended: the play installs distribution packages and writes system units as root, and this
-repository holds no sudo credential to supply on the operator's behalf. It reads the
-lifecycle-witness database URL from the environment, so the URL is not a process argument:
+repository holds no sudo credential to supply on the operator's behalf. On a host whose sudo
+policy needs no password, an empty line on standard input answers the prompt; the
+[host-installation producer](../development/coverage-qualification.md#host-installation-producer)
+runs the recipe that way. It reads the lifecycle-witness database URL from the environment, so
+the URL is not a process argument:
 
 ```bash
 export KDIVE_LIFECYCLE_WITNESS_DATABASE_URL='<witness database URL>'
