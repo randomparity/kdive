@@ -20,6 +20,10 @@ entry script ~25, recipe ~35, sandbox ~6, manifest maps 2, tests ~30, docs ~80, 
 
 ## Global Constraints
 
+- Notation: in snippets for other files, `«TEXT → TARGET»` stands for a Markdown link with
+  that text and target. Write it as a real link in the target file; the plan avoids the link
+  syntax so the link checker does not resolve targets relative to the plan.
+
 - Python 3.14, `uv` 0.11.31 (root Dockerfile pin), `rust-just==1.58.0` (PyPI latest on
   2026-10-01).
 - Base images, exactly as in the root `Dockerfile`:
@@ -48,8 +52,8 @@ entry script ~25, recipe ~35, sandbox ~6, manifest maps 2, tests ~30, docs ~80, 
 | `scripts/generate/build-capture-bootstrap-manifest.py` | arch map | adds `aarch64` | 7 |
 | `tests/jobs/capture_operations/test_sandbox.py` | x86_64/ppc64le numbers | adds aarch64 numbers | 7 |
 | `tests/jobs/capture_operations/test_manifest.py` | first `(supported, searched)` line | `glibc-hwcaps` section only; `aarch64` accepted | 7 |
-| `docs/adr/0558-…md` | arch claim | appended amendment linking 0717 | 7 |
-| `docs/adr/0717-…md` | Proposed | Accepted | — |
+| `docs/adr/0558-supervised-capture-operation-processes.md` | arch claim | appended amendment linking 0717 | 7 |
+| `docs/adr/0717-native-arch-linux-test-container-and-aarch64-capture-filter.md` | Proposed | Accepted | — |
 | `AGENTS.md`, `docs/development/cross-platform.md`, solution doc | manual recipe | `just test-linux` as the macOS gate | 8 |
 
 No owner moves; every change extends its current owner.
@@ -317,14 +321,14 @@ Steps:
    ### Amendment (2026-10-01): the filter also supports aarch64 (#3072)
 
    This qualifies the claim above that the filter fails closed unless the architecture is the
-   x86_64 or ppc64le form. [ADR-0717](0717-native-arch-linux-test-container-and-aarch64-capture-filter.md)
+   x86_64 or ppc64le form. «ADR-0717 → 0717-native-arch-linux-test-container-and-aarch64-capture-filter.md»
    adds aarch64. aarch64 has no `fork` or `vfork` syscall; glibc implements both with `clone`,
    which the thread-bit rules deny. The other rules and the fail-closed behavior for an unlisted
    architecture are unchanged.
    ```
 
    Under ADR-0558's status line add:
-   `> **Amended by [ADR-0717](0717-native-arch-linux-test-container-and-aarch64-capture-filter.md) (#3072):** the capture filter also supports aarch64.`
+   `> **Amended by «ADR-0717 → 0717-native-arch-linux-test-container-and-aarch64-capture-filter.md» (#3072):** the capture filter also supports aarch64.`
 2. In ADR-0717, change `Proposed (2026-10-01)` to `Accepted (<merge-prep date>)`. Change the
    docstrings: `sandbox.py` → `"""Minimal pre-gate seccomp installation for capture children (ADR-0558, ADR-0717)."""`;
    `test_sandbox.py` → `"""Native seccomp matrix for the capture-operation child boundary (ADR-0558, ADR-0717)."""`.
@@ -332,7 +336,7 @@ Steps:
    `| `just test-linux` | the `just test` selection in a native-arch Linux container (Docker or Podman); the unit gate on macOS; tests a commit, not uncommitted edits | — |`.
    In `## Host prerequisites`, after the paragraph that ends `cannot install the runner that
    invokes it.`, add: `On macOS, a host `just test` is not regression evidence: the suite needs
-   Linux behavior. Run `just test-linux` instead ([cross-platform guide](docs/development/cross-platform.md#macos-run-the-suite-in-a-linux-container)).`
+   Linux behavior. Run `just test-linux` instead («cross-platform guide → docs/development/cross-platform.md#macos-run-the-suite-in-a-linux-container»).`
 4. `docs/development/cross-platform.md`: add before `## Container images`:
 
    ```markdown
@@ -342,7 +346,7 @@ Steps:
    (`/proc`, pidfd, seccomp, GNU tool output), so hundreds of tests fail on every branch.
    Use `just test-linux`, which runs the same selection, hash seed and `--tb=short` output in a
    Linux container at the engine's native architecture (arm64 on Apple silicon;
-   [ADR-0717](../adr/0717-native-arch-linux-test-container-and-aarch64-capture-filter.md)).
+   «ADR-0717 → ../adr/0717-native-arch-linux-test-container-and-aarch64-capture-filter.md»).
 
    - `just test-linux` tests `HEAD`; `just test-linux <sha>` tests another commit. Commit first:
      uncommitted edits are not tested, and the recipe warns when the tree is dirty.
@@ -356,7 +360,7 @@ Steps:
    ```
 
 5. Solution doc: replace the body of `## Solution` with one paragraph: `Use `just test-linux`
-   ([cross-platform guide](../development/cross-platform.md#macos-run-the-suite-in-a-linux-container)).
+   («cross-platform guide → ../development/cross-platform.md#macos-run-the-suite-in-a-linux-container»).
    It runs natively on arm64, and a clean `main` exits 0, so no baseline comparison is needed.`
    In `## Prevention`, change the first bullet to name `just test-linux` and remove the bullet
    about the `rm -rf` hook (it described the scratch Dockerfile, which no longer exists).
