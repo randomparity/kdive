@@ -3451,7 +3451,11 @@ def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> 
 def test_lifecycle_launcher_covers_required_worker_settings_and_authority_geometry() -> None:
     from kdive.processes.lifecycle.systemd.systemd_worker_contract import WorkerSettings
 
-    program = LIFECYCLE.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    program = next(
+        chunk.split("\nPY\n", 1)[0]
+        for chunk in LIFECYCLE.read_text().split("<<'PY'\n")[1:]
+        if "LifecycleRequest.model_validate" in chunk
+    )
     dictionaries = [node for node in ast.walk(ast.parse(program)) if isinstance(node, ast.Dict)]
     settings_keys = next(
         keys
@@ -3465,9 +3469,166 @@ def test_lifecycle_launcher_covers_required_worker_settings_and_authority_geomet
         for name in WorkerSettings.model_fields
         if name.startswith("authority_") or name == "external_boot_capacity_bytes"
     }
-    assert required | authority <= settings_keys
+    assert required | authority | {"systems_toml"} <= settings_keys
     assert settings_keys <= WorkerSettings.model_fields.keys()
     assert "libvirt_recovery_root" not in settings_keys
+
+
+_REMOTE_INVENTORY = """schema_version = 2
+
+[[image]]
+provider = "remote-libvirt"
+name = "remote-base"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+[image.source]
+kind = "staged"
+volume = "remote-base.qcow2"
+
+[[remote_libvirt]]
+name = "remote-a"
+uri = "qemu+tls://host.example/system"
+gdb_addr = "192.0.2.10"
+gdbstub_range = "47000:47099"
+client_cert_ref = "remote-libvirt/clientcert.pem"
+client_key_ref = "remote-libvirt/clientkey.pem"  # pragma: allowlist secret
+ca_cert_ref = "remote-libvirt/cacert.pem"
+base_image = "remote-base"
+cost_class = "remote"
+vcpus = 2
+memory_mb = 2048
+"""
+
+
+def _lifecycle_start_with_inventory(
+    tmp_path: Path,
+    inventory: str | None,
+    *,
+    access_ok: bool = True,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """Run `request start 1` with the launcher's inventory resolution and a stubbed socket."""
+    systems_toml = tmp_path / "systems.toml"
+    if inventory is not None:
+        systems_toml.write_text(inventory, encoding="utf-8")
+    probe = tmp_path / "request-probe"
+    access_log = tmp_path / "access-log"
+    (tmp_path / "sitecustomize.py").write_text(
+        "import os\n"
+        "from kdive.processes.lifecycle.systemd import systemd_worker_control as control\n"
+        "from kdive.processes.lifecycle.systemd.systemd_worker_contract import LifecycleResponse\n"
+        "def request_path(path, request):\n"
+        "    with open(os.environ['INVENTORY_PROBE'], 'w') as handle:\n"
+        "        handle.write(repr(request.settings.systems_toml))\n"
+        "    return LifecycleResponse(ok=True, code='ok', message='ok', retry_action='none')\n"
+        "control.request_path = request_path\n",
+        encoding="utf-8",
+    )
+    env: dict[str, str] = {
+        **os.environ,
+        "PYTHONPATH": str(tmp_path),
+        "KDIVE_PYTHON": sys.executable,
+        "INVENTORY_PROBE": str(probe),
+        "KDIVE_SYSTEMS_TOML": str(systems_toml),
+        "KDIVE_ROOTFS_DIR": "/tmp/rootfs",
+        "KDIVE_BUILD_WORKSPACE": "/tmp/build",
+        "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
+        "KDIVE_INSTALL_STAGING": "/tmp/install",
+        "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
+        "KDIVE_KERNEL_SRC": "/tmp/kernel",
+        "KDIVE_WORKER_DATABASE_URL": "postgresql://worker-member/kdive",
+        "AWS_ACCESS_KEY_ID": "access-key",
+        "AWS_SECRET_ACCESS_KEY": "secret-key",  # pragma: allowlist secret
+        **(extra_env or {}),
+    }
+    if "KDIVE_SECRETS_ROOT" not in (extra_env or {}):
+        env.pop("KDIVE_SECRETS_ROOT", None)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"\n'
+            'uri="$2" log="$3" access_ok="$4"\n'
+            "require_compatible_lifecycle() { :; }\n"
+            "require_start_prerequisites() { :; }\n"
+            'load_published_libvirt_uri() { printf %s "$uri"; }\n'
+            'require_worker_path_access() { printf "%s %s\\n" "$1" "$2" >>"$log"; '
+            "[[ $access_ok == yes ]]; }\n"
+            "request start 1",
+            "bash",
+            str(LIFECYCLE),
+            "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+            str(access_log),
+            "yes" if access_ok else "no",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    return result, probe, access_log
+
+
+def test_lifecycle_start_sends_the_inventory_when_a_remote_instance_is_declared(
+    tmp_path: Path,
+) -> None:
+    result, probe, access_log = _lifecycle_start_with_inventory(tmp_path, _REMOTE_INVENTORY)
+
+    assert result.returncode == 0, result.stderr
+    assert probe.read_text() == repr(str(tmp_path / "systems.toml"))
+    assert access_log.read_text().splitlines() == [
+        f"{tmp_path / 'systems.toml'} r",
+        "/var/lib/kdive/secrets x",
+    ]
+
+
+@pytest.mark.parametrize("inventory", [None, "schema_version = 2\n"])
+def test_lifecycle_start_omits_the_inventory_for_a_local_only_stack(
+    tmp_path: Path, inventory: str | None
+) -> None:
+    result, probe, access_log = _lifecycle_start_with_inventory(tmp_path, inventory)
+
+    assert result.returncode == 0, result.stderr
+    assert probe.read_text() == "None"
+    assert not access_log.exists()
+
+
+def test_lifecycle_start_refuses_a_non_default_secrets_root_with_a_remote_instance(
+    tmp_path: Path,
+) -> None:
+    result, probe, _ = _lifecycle_start_with_inventory(
+        tmp_path, _REMOTE_INVENTORY, extra_env={"KDIVE_SECRETS_ROOT": str(tmp_path / "secrets")}
+    )
+
+    assert result.returncode == 2
+    assert "KDIVE_SECRETS_ROOT" in result.stderr
+    assert not probe.exists()
+
+
+def test_lifecycle_start_refuses_a_relative_inventory_with_a_remote_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "relative.toml").write_text(_REMOTE_INVENTORY, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    result, probe, _ = _lifecycle_start_with_inventory(
+        tmp_path, None, extra_env={"KDIVE_SYSTEMS_TOML": "relative.toml"}
+    )
+
+    assert result.returncode == 2
+    assert "KDIVE_SYSTEMS_TOML" in result.stderr
+    assert not probe.exists()
+
+
+def test_lifecycle_start_refuses_an_inventory_a_slot_cannot_read(tmp_path: Path) -> None:
+    result, probe, access_log = _lifecycle_start_with_inventory(
+        tmp_path, _REMOTE_INVENTORY, access_ok=False
+    )
+
+    assert result.returncode != 0
+    assert access_log.read_text().splitlines() == [f"{tmp_path / 'systems.toml'} r"]
+    assert not probe.exists()
 
 
 def test_lifecycle_start_rejects_mismatched_authority_geometry_before_request() -> None:
