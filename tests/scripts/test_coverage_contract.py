@@ -125,6 +125,26 @@ def test_capability_modes_and_deployed_roles_follow_operation_contract(
     assert queue and all("worker" in c.roles for c in queue)
 
 
+_NATIVE = {
+    "image-smoke",
+    "deep-lifecycle",
+    "tcg-upload-boot",
+    "host-install",
+    "failure-resource",
+    "kernel-corpus",
+}
+
+
+def test_authority_role_follows_the_scenario(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+    native = [c for c in cells if c.operation in _NATIVE]
+    assert {c.operation for c in native} == _NATIVE
+    assert all(c.roles == ("server", "worker", "reconciler") for c in native)
+    routed = {name for g in load_mapping().groups if g.authority for name in g.tools}
+    tool = [c for c in cells if c.operation in routed and c.kind == "functional"]
+    assert tool and all("authority" in c.roles for c in tool)
+
+
 def test_debug_session_covers_every_advertised_transport(inventory: Inventory) -> None:
     cells = build_contract(inventory=inventory).cells
     sessions = [c for c in cells if c.operation == "debug.start_session" and c.kind == "functional"]
