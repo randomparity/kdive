@@ -9,8 +9,10 @@ offline qualifier (`python -m scripts.coverage_campaign qualify`) remains the ju
 Spec: [design](../specs/2026-10-01-catalog-image-smoke-design.md);
 [ADR-0715](../../adr/0715-live-evidence-identity-and-staged-image-binding.md).
 
-Expected implementation size: 450–600 changed lines (M) — three helper modules (~280), one live
-test (~120), unit tests (~150), mapping/test/runbook edits (~40).
+Expected implementation size: 450–600 changed lines (M) at plan time; the built branch is ~1,470
+(helpers ~600, live test ~370, unit tests ~450, edits ~50). The plan undercounted the failure
+paths review added (blocked/failure records, cleanup-attempt evidence, unsearchable-disk and
+held-capacity checks) and their tests; scope and design are unchanged.
 
 ## Global Constraints
 
