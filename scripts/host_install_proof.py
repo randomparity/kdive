@@ -81,7 +81,6 @@ SSH_OPTIONS = (
 ARCH_LANE = {"x86_64": ("kvm", "arch/x86/boot/bzImage"), "ppc64le": ("kvm-hv", "vmlinux")}
 SHORT_STEP_S = 3600.0
 LONG_STEP_S = 3 * 3600.0
-NODE_ID = "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
 _PHASE_BYTES = 1024 * 1024
 # No ':' in the host: scp addresses `host:path`, so a bare IPv6 literal would misroute.
 _TARGET = re.compile(r"[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*")
@@ -518,6 +517,13 @@ def compose(
     )
 
 
+def _run_binding(run: Path) -> InputBindings | None:
+    if not (run / "binding.json").exists():
+        print(f"skipping {run}: no binding (host not identified)", file=sys.stderr)
+        return None
+    return InputBindings.model_validate_json((run / "binding.json").read_text())
+
+
 def merge(runs: list[Path], output: Path) -> None:
     """Combine run directories into one `qualify` input pair; collisions are errors.
 
@@ -528,10 +534,9 @@ def merge(runs: list[Path], output: Path) -> None:
     results: list[object] = []
     identity: tuple[str, str] | None = None
     for run in runs:
-        if not (run / "binding.json").exists():
-            print(f"skipping {run}: no binding (host not identified)", file=sys.stderr)
+        inputs = _run_binding(run)
+        if inputs is None:
             continue
-        inputs = InputBindings.model_validate_json((run / "binding.json").read_text())
         if identity is None:
             identity = (inputs.candidate_sha, inputs.matrix_sha256)
         elif identity != (inputs.candidate_sha, inputs.matrix_sha256):
@@ -722,7 +727,8 @@ def run(args: argparse.Namespace) -> int:
     cells = [
         c for c in contract.cells if c.id == f"host-install/local-libvirt/{arch}/{args.family}"
     ]
-    if len(cells) != 1 or cells[0].node_id is None:
+    node = cells[0].node_id if len(cells) == 1 else None
+    if node is None:
         raise ValueError("no implemented host-install cell for this family and architecture")
     cell = cells[0]
     operator = args.operator_prerequisites
@@ -761,7 +767,17 @@ def run(args: argparse.Namespace) -> int:
     binding = _binding(host, f"{row.distro}:{row.version}", arch, manifest, kernel_sha256)
     phases: dict[str, PhaseRecord | None] = {"first-boot": None, "second-boot": None}
     if host.prepared:
-        binding = _drive(remote, args, candidate, image, operator, binding, phases, output)
+        binding = _drive(
+            remote,
+            bundle_dir=args.bundle,
+            candidate=candidate,
+            image=image,
+            node=node,
+            operator=operator,
+            binding=binding,
+            phases=phases,
+            output=output,
+        )
     (output / "kdive-candidate.bundle").unlink(missing_ok=True)
     inputs = InputBindings(
         version=1,
@@ -792,9 +808,11 @@ def run(args: argparse.Namespace) -> int:
 
 def _drive(
     remote: _Remote,
-    args: argparse.Namespace,
+    *,
+    bundle_dir: Path,
     candidate: str,
     image: str,
+    node: str,
     operator: Path | None,
     binding: Context,
     phases: dict[str, PhaseRecord | None],
@@ -838,21 +856,29 @@ def _drive(
     if not built.ok or match is None:
         return binding
     binding = binding.model_copy(update={"image_sha256": match.group(1)})
-    if not remote.copy("copy-bundle", str(args.bundle), f"{host_dir}/bundle").ok:
+    if not remote.copy("copy-bundle", str(bundle_dir), f"{host_dir}/bundle").ok:
         return binding
-    phases["first-boot"] = _boot(remote, "first-boot", candidate, image, run_id, output)
+    boot = {"candidate": candidate, "image": image, "node": node, "run_id": run_id}
+    phases["first-boot"] = _boot(remote, "first-boot", output=output, **boot)
     if phases["first-boot"] is None or not _run_sequence(
         remote, [(f"repeat-{name}", script, timeout_s) for name, script, timeout_s in setup]
     ):
         return binding
-    phases["second-boot"] = _boot(remote, "second-boot", candidate, image, run_id, output)
+    phases["second-boot"] = _boot(remote, "second-boot", output=output, **boot)
     return binding
 
 
 def _boot(
-    remote: _Remote, phase: str, candidate: str, image: str, run_id: str, output: Path
+    remote: _Remote,
+    phase: str,
+    *,
+    candidate: str,
+    image: str,
+    node: str,
+    run_id: str,
+    output: Path,
 ) -> PhaseRecord | None:
-    script = step_script(_NODE, phase=phase, candidate=candidate, image=image, node=NODE_ID)
+    script = step_script(_NODE, phase=phase, candidate=candidate, image=image, node=node)
     remote.step(phase, _in_run(script, run_id, phase), SHORT_STEP_S)
     local = output / "phases" / phase
     local.mkdir(parents=True)
