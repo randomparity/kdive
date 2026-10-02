@@ -198,3 +198,70 @@ def test_debug_session_covers_every_advertised_transport(inventory: Inventory) -
         assert scenarios == {
             f"tool/debug.start_session/{mode}/functional" for mode in support.debug_transports
         }
+
+
+_CORE_TOOLS = {
+    "fixtures.validate",
+    "projects.list",
+    "session.whoami",
+    "systems.profile_examples",
+    "tools.invoke",
+    "tools.search",
+}
+_SPLIT = {
+    3095: {
+        *(f"images.{n}" for n in ("delete", "describe", "kernel_config", "list", "upload")),
+        *(f"shapes.{n}" for n in ("delete", "list", "set")),
+        *(f"resources.{n}" for n in ("availability", "describe", "list")),
+    },
+    3096: {
+        *(
+            f"investigations.{n}"
+            for n in (
+                "close",
+                "complete_rootfs_upload",
+                "get",
+                "link",
+                "list",
+                "open",
+                "set",
+                "unlink",
+            )
+        ),
+        *(
+            f"artifacts.{n}"
+            for n in (
+                "create_investigation_upload",
+                "create_run_upload",
+                "fetch_raw",
+                "get",
+                "list",
+            )
+        ),
+    },
+    3097: {
+        *(f"runs.{n}" for n in ("bind", "complete_build", "create", "get", "list", "set")),
+        "systems.get",
+        "systems.list",
+        *(f"jobs.{n}" for n in ("cancel", "list", "wait")),
+    },
+    3098: {
+        *(f"allocations.{n}" for n in ("list", "release", "renew", "request", "wait")),
+        *(f"accounting.{n}" for n in ("estimate", "report", "set_budget", "set_quota", "usage")),
+        "reports.generate",
+    },
+}
+
+
+def test_core_tools_follow_the_approved_split(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+    owned = {owner: {c.operation for c in cells if c.owner == owner} for owner in (2811, *_SPLIT)}
+    assert owned == {2811: _CORE_TOOLS, **_SPLIT}
+    assert len([c for c in cells if c.owner == 2811]) == 56
+    overrides = {g.owner: set(g.role_overrides) for g in load_mapping().groups if g.owner in _SPLIT}
+    assert overrides == {
+        3095: set(),
+        3096: set(),
+        3097: {"jobs.cancel", "jobs.wait"},
+        3098: {"allocations.release", "allocations.wait"},
+    }
