@@ -84,7 +84,7 @@ Results are one JSON array. Each record contains:
 | `outcome` | One of the six values above. |
 | `candidate_sha`, `matrix_sha256` | Exact candidate and generated matrix identities. |
 | `input_sha256` | Canonical digest of the independently bound context. |
-| `deployed_roles` | Map of required `server`, `worker`, `reconciler`, `authority` roles to full candidate SHAs. |
+| `deployed_roles` | Map of deployed `server`, `worker`, `reconciler` and, when installed, `authority` revisions to full SHAs. It must include the cell's required roles. |
 | `context` | Actual observed `Context`, equal to the independent binding. |
 | `duration_seconds` | Finite, nonnegative seconds measured by the producer. |
 | `assertions` | Map of exact required assertion IDs to SHA-256 artifact digests. |
