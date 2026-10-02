@@ -220,6 +220,7 @@ kernel = true
 "systems.snapshot" = "supports_snapshots"
 
 [implementations]
+"host-install" = "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
 "image-smoke" = "tests/integration/test_image_smoke_live.py::test_image_smoke"
 "deep-lifecycle/local-libvirt/longterm" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 "deep-lifecycle/local-libvirt/stable" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"

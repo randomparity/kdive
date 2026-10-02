@@ -104,8 +104,13 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     deep = [c for c in contract.cells if c.operation == "deep-lifecycle"]
     assert {c.node_id for c in deep if c.provider == "local-libvirt"} == {_DEEP_NODE}
     assert all(c.node_id is None for c in deep if c.provider == "remote-libvirt")
-    implemented = {"image-smoke", "deep-lifecycle"}
-    assert all(c.node_id is None for c in contract.cells if c.operation not in implemented)
+    host_install = [c for c in contract.cells if c.scenario_id == "host-install"]
+    assert len(host_install) == 6
+    assert {c.node_id for c in host_install} == {
+        "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
+    }
+    bound = {"image-smoke", "deep-lifecycle", "host-install"}
+    assert all(c.node_id is None for c in contract.cells if c.operation not in bound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
     assert recovery and {c.configuration for c in recovery} == {"recovery"}

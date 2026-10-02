@@ -74,6 +74,7 @@ def test_shipped_pending_set_reports_every_missing_result(
     output = capsys.readouterr().out
     pending = [c for c in contract.cells if c.node_id is None]
     assert output.count("pending-implementation") == len(pending)
+    assert output.count("missing-result") == len(contract.cells)
     assert "success=0" in output
     assert f"not-run={len(contract.cells)}" in output
 
