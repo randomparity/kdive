@@ -14,8 +14,11 @@ The live run in #2810 found that the forward never answers (#3090). libslirp rew
 connection's source address to its gateway (`10.0.2.2`) only when the client address is loopback
 or unspecified. Local-libvirt binds `127.0.0.1` and has a single NIC, so its replies always return
 through slirp. Remote binds a routable `ssh_addr`. The SYN reaches the guest's slirp lease
-(`10.0.2.15`) with the worker's real address as its source. The SYN-ACK follows the main table's
-default route out of the libvirt NIC, and the connection stays in `SYN_SENT` in slirp.
+(`10.0.2.15`) with the worker's real address as its source. The guest's route back to that
+address is the main table's default route on the libvirt NIC. Under strict reverse-path filtering
+(`rp_filter=1`, the Rocky 10 image) the kernel drops the SYN; under loose filtering (`rp_filter=2`,
+systemd's default on Fedora) the SYN-ACK leaves through the libvirt NIC. Either way the connection
+stays in `SYN_SENT` in slirp.
 
 ## Decision
 
@@ -35,9 +38,10 @@ The script's contract:
 - It keys on the lease subnet. It never matches an interface name or a PCI path.
 - Table and rule priority 2291 belong to kdive inside the guest.
 
-These stay unchanged: the main routing table, `rp_filter=1`, `restrict=on`, the domain XML, and
-the authority projection. The kernel's strict reverse-path check passes, because the lookup for a
-SYN to the lease uses the lease as source and resolves to the slirp NIC through the rule.
+These stay unchanged: the main routing table, the image's `rp_filter` setting, `restrict=on`, the
+domain XML, and the authority projection. Even the strict reverse-path check passes, because the
+lookup for a SYN to the lease uses the lease as source and resolves to the slirp NIC through the
+rule.
 
 Images without NetworkManager (Ubuntu 24.04 and the bare image) do not get the script. Their return
 path is #3091.
@@ -73,5 +77,6 @@ path is #3091.
 - **An NM keyfile that matches the NIC by PCI path** (`addr=0x10`) with route rules. It couples
   the image to a QEMU slot number and to the PCI path naming, which differ across machine types.
   The lease subnet is the property slirp guarantees.
-- **`rp_filter=2`.** Loose mode does not change where the reply is routed. On the diagnosis guest
+- **`rp_filter=2`.** Loose mode lets the SYN in but does not change where the reply is routed. On
+the diagnosis guest
   it did not help; only a route back through slirp's gateway did.

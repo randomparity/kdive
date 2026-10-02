@@ -11,8 +11,9 @@ user-mode (slirp) NIC that carries `hostfwd=tcp:<ssh_addr>:<port>-:22`. libslirp
 forwarded connection's source address to its gateway (`10.0.2.2`) only when the client address is
 loopback or unspecified. Local-libvirt binds `127.0.0.1` and has one NIC, so it works. Remote binds
 a routable `ssh_addr`, so the SYN reaches the guest's slirp NIC (`10.0.2.15`) with the worker's own
-address. The guest's SYN-ACK follows the main table's default route out of the libvirt NIC, and the
-client never sees it. `systems.authorize_ssh_key` then fails `transport_failure`.
+address. The guest's route back to the worker is the main table's default route on the libvirt NIC:
+with strict `rp_filter=1` (Rocky 10) the guest drops the SYN, and with loose `rp_filter=2`
+(Fedora) its SYN-ACK leaves through the libvirt NIC. The client never gets an answer. `systems.authorize_ssh_key` then fails `transport_failure`.
 
 ## Design
 
@@ -36,8 +37,9 @@ client never sees it. `systems.authorize_ssh_key` then fails `transport_failure`
    `/etc/NetworkManager/dispatcher.d/50-kdive-ssh-return-route` (root:root, 0755) and runs
    `restorecon` when present. An image without NetworkManager skips it. On the catalog that is
    the Ubuntu 24.04 and bare images, owned by #3091.
-3. **Unchanged.** The main routing table, `rp_filter=1`, `restrict=on`, the domain XML, and the
-   authority projection. `rp_filter=1` keeps passing because the reverse-path lookup for a SYN to
+3. **Unchanged.** The main routing table, the image's `rp_filter` setting (1 on Rocky 10, 2 on
+   Fedora), `restrict=on`, the domain XML, and the authority projection. Even strict
+   `rp_filter=1` passes, because the reverse-path lookup for a SYN to
    the lease uses the lease as source, matches the rule, and resolves to the slirp NIC.
 4. **Docs.** The `_append_ssh_forward` docstring stops claiming the forward mirrors local and states
    the return-path dependency. The guest-helpers README and both runbooks say the image carries the
@@ -74,6 +76,6 @@ client never sees it. `systems.authorize_ssh_key` then fails `transport_failure`
   dispatcher path with root ownership and mode 0755, guarded on the dispatcher directory.
 - AC3: live proof on lab hosts. Both images rebuilt with the script present. For each image, a new
   remote System passes `ssh_info`, `check_ssh_reachable`, `authorize_ssh_key`, and an agent SSH
-  login; in the guest the rule is present, `rp_filter` is still 1, and the forward is ESTAB. After a
+  login; in the guest the rule is present, `rp_filter` is unchanged from the image default, and the forward is ESTAB. After a
   guest reboot SSH works again. Guest egress over the libvirt NIC works, and guest-initiated
   traffic out the slirp NIC is still dropped.
