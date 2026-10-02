@@ -83,7 +83,8 @@ SHORT_STEP_S = 3600.0
 LONG_STEP_S = 3 * 3600.0
 NODE_ID = "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
 _PHASE_BYTES = 1024 * 1024
-_TARGET = re.compile(r"[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.:-]*")
+# No ':' in the host: scp addresses `host:path`, so a bare IPv6 literal would misroute.
+_TARGET = re.compile(r"[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*")
 _NAME = re.compile(r"[a-z0-9][a-z0-9._-]*")
 # The disposable local witness-member DSN from docs/operating/runbooks/live-stack.md.
 _WITNESS_DSN = (
@@ -394,9 +395,13 @@ def _holds(
     complete = len(both) == 2
     return {
         "clean-install": host.prepared and _steps_hold(steps, clean),
-        "first-boot": first is not None and first.booted,
+        "first-boot": first is not None
+        and first.booted
+        and _steps_hold(steps, ("copy-bundle", "first-boot", "fetch-first-boot")),
         "repeat-setup": _steps_hold(steps, REPEAT_STEPS),
-        "second-boot": second is not None and second.booted,
+        "second-boot": second is not None
+        and second.booted
+        and _steps_hold(steps, ("second-boot", "fetch-second-boot")),
         "confinement": host.enforcing
         and complete
         and all(
@@ -514,11 +519,18 @@ def compose(
 
 
 def merge(runs: list[Path], output: Path) -> None:
-    """Combine run directories into one `qualify` input pair; collisions are errors."""
+    """Combine run directories into one `qualify` input pair; collisions are errors.
+
+    A run that could not identify its host wrote no binding and is skipped, so its cell
+    stays `not-run` under `qualify`.
+    """
     cells: dict[str, Context] = {}
     results: list[object] = []
     identity: tuple[str, str] | None = None
     for run in runs:
+        if not (run / "binding.json").exists():
+            print(f"skipping {run}: no binding (host not identified)", file=sys.stderr)
+            continue
         inputs = InputBindings.model_validate_json((run / "binding.json").read_text())
         if identity is None:
             identity = (inputs.candidate_sha, inputs.matrix_sha256)
@@ -607,7 +619,15 @@ def bundle_inputs(bundle_dir: Path) -> tuple[dict[str, Any], str]:
             raise ValueError(f"bundle manifest lacks {key}; recut it with `bundle`")
     if _file_digest(bundle_dir / "effective_config") != artifacts.get(".config"):
         raise ValueError("bundle effective_config differs from its manifest; recut it")
-    return manifest, kernel_member_digest(bundle_dir / "kernel.tar.gz")
+    kernel_sha256 = kernel_member_digest(bundle_dir / "kernel.tar.gz")
+    try:
+        fields = kernel_fields(manifest, kernel_sha256)
+        Context.model_validate(
+            {"host_os": "fedora:44", "host_arch": "x86_64", "accelerator": "none", **fields}
+        )
+    except (KeyError, TypeError, ValidationError) as error:
+        raise ValueError("bundle manifest kernel identity is malformed; recut it") from error
+    return manifest, kernel_sha256
 
 
 def kernel_fields(manifest: dict[str, Any], kernel_sha256: str) -> dict[str, str]:

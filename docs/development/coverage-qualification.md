@@ -169,7 +169,7 @@ artifact. Publish only sanitized excerpts.
 | 0 | `success` |
 | 1 | `failure` |
 | 2 | Invalid input, or a host that does not match the cell. Nothing is mutated. |
-| 3 | `blocked`, or a host that could not be identified (no result). A reset wrapper retries on this code. |
+| 3 | `blocked`, or a host that could not be identified (no result; `merge` skips the directory and the cell stays `not-run`). A reset wrapper retries on this code. |
 
 A failed or timed-out step stops the run. A host reset is the lab's responsibility, not KDIVE's.
 

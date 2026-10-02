@@ -44,6 +44,10 @@ from scripts.host_install_proof import (
 
 SHA = "a" * 40
 DIGEST = "b" * 64
+BOOT_STEPS = (
+    ("copy-bundle", "first-boot", "fetch-first-boot"),
+    ("second-boot", "fetch-second-boot"),
+)
 NODE = "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
 CELL_ID = "host-install/local-libvirt/x86_64/debian"
 ROLES = ("server", "worker", "reconciler", "authority")
@@ -111,7 +115,7 @@ def _host(**changes: object) -> HostFacts:
 
 def _steps(*, failed: str | None = None, timeout: str | None = None) -> list[Step]:
     steps = []
-    for name in (*CLEAN_STEPS, *REPEAT_STEPS):
+    for name in (*CLEAN_STEPS, *BOOT_STEPS[0], *REPEAT_STEPS, *BOOT_STEPS[1]):
         code: int | str = 0
         if name == failed:
             code = 1
@@ -166,6 +170,8 @@ def test_complete_run_qualifies_through_the_shipped_checker(
     [
         {"steps": _steps(failed="prepare")},
         {"steps": _steps(timeout="stack")},
+        {"steps": [s for s in _steps() if s.name != "fetch-first-boot"]},
+        {"steps": _steps(failed="second-boot")},
         {"second": None},
         {"second": _phase("first-boot")},
         {"first": _phase("first-boot", passed=False, booted=False)},
@@ -261,7 +267,9 @@ def test_parse_host_refuses_an_unidentified_host(text: str) -> None:
     assert parse_host(text) is None
 
 
-@pytest.mark.parametrize("value", ["a@b;rm -rf /", "root@", "@host", "user@ho st", "-oProxy@x"])
+@pytest.mark.parametrize(
+    "value", ["a@b;rm -rf /", "root@", "@host", "user@ho st", "-oProxy@x", "u@fe80::1"]
+)
 def test_target_validation_rejects_shell_and_option_text(value: str) -> None:
     with pytest.raises(ValueError, match="target"):
         validate_target(value)
@@ -407,6 +415,12 @@ def test_merge_combines_runs_and_refuses_collisions(tmp_path: Path) -> None:
         merge([first, _write_run(tmp_path / "c", CELL_ID)], tmp_path / "out2")
     with pytest.raises(ValueError, match="candidate"):
         merge([first, _write_run(tmp_path / "d", "x/y", candidate="f" * 40)], tmp_path / "out3")
+    unidentified = tmp_path / "e"
+    unidentified.mkdir()
+    (unidentified / "summary.json").write_text('{"outcome": null, "steps": []}')
+    merge([first, unidentified], tmp_path / "out4")
+    skipped = InputBindings.model_validate_json((tmp_path / "out4" / "inputs.json").read_text())
+    assert set(skipped.cells) == {CELL_ID}
 
 
 def test_cli_names_its_subcommands(capsys: pytest.CaptureFixture[str]) -> None:
