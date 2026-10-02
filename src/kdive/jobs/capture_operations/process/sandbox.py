@@ -1,4 +1,4 @@
-"""Minimal pre-gate seccomp installation for capture children (ADR-0558)."""
+"""Minimal pre-gate seccomp installation for capture children (ADR-0558, ADR-0717)."""
 
 from __future__ import annotations
 

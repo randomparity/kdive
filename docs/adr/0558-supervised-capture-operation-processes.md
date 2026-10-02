@@ -4,6 +4,8 @@
 
 Accepted (2026-08-13)
 
+> **Amended by [ADR-0717](0717-native-arch-linux-test-container-and-aarch64-capture-filter.md) (#3072):** the capture filter also supports aarch64.
+
 ## Context
 
 `capture_traffic` currently runs blocking libvirt calls in threads owned by the job handler.
@@ -125,6 +127,14 @@ transaction first installs a durable minimum protocol of 3, then rechecks every 
 incarnation and its authority termination under that lock before sampling the cutoff. Any restart
 must register a fresh immutable incarnation; protocol 2 is rejected after the bar, while a restart
 that registered before the bar appears in the locked recheck and must already be terminated.
+
+### Amendment (2026-10-01): the filter also supports aarch64 (#3072)
+
+This qualifies the claim above that the filter fails closed unless the architecture is the
+x86_64 or ppc64le form. [ADR-0717](0717-native-arch-linux-test-container-and-aarch64-capture-filter.md)
+adds aarch64. aarch64 has no `fork` or `vfork` syscall; glibc implements both with `clone`,
+which the thread-bit rules deny. The other rules and the fail-closed behavior for an unlisted
+architecture are unchanged.
 
 ## Consequences
 

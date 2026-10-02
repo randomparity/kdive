@@ -1,4 +1,4 @@
-"""Native seccomp matrix for the capture-operation child boundary (ADR-0558)."""
+"""Native seccomp matrix for the capture-operation child boundary (ADR-0558, ADR-0717)."""
 
 from __future__ import annotations
 

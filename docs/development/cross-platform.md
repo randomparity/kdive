@@ -57,6 +57,25 @@ A successful import alone does not prove that a real capture can be read.
 Source builds can make the first setup slow; later runs reuse cached artifacts. The runtime
 container's native dependency setup is maintained in the [Dockerfile](../../Dockerfile).
 
+## macOS: run the suite in a Linux container
+
+On macOS, a host `just test` is not regression evidence. The suite needs Linux behavior
+(`/proc`, pidfd, seccomp, GNU tool output), so hundreds of tests fail on every branch.
+Use `just test-linux`, which runs the same selection, hash seed and `--tb=short` output in a
+Linux container at the engine's native architecture (arm64 on Apple silicon;
+[ADR-0717](../adr/0717-native-arch-linux-test-container-and-aarch64-capture-filter.md)).
+
+- `just test-linux` tests `HEAD`; `just test-linux <sha>` tests another commit. Commit first:
+  uncommitted edits are not tested, and the recipe warns when the tree is dirty.
+- `just test-linux HEAD tests/jobs` runs only the given paths.
+- The recipe works from a worktree. It mounts the git directory read-only and changes nothing
+  in the checkout. A named volume, `kdive-test-linux-uv-cache`, keeps downloaded packages.
+- The container runs at most 8 xdist workers, the limit for the shared test PostgreSQL lock.
+- `CONTAINER_ENGINE=podman just test-linux` uses Podman. Only Docker Desktop is verified on
+  macOS.
+- The container uses the engine's socket to start the test PostgreSQL and SeaweedFS
+  containers, the same as `just test` on a Linux host with Docker.
+
 ## Container images
 
 The [Compose operating guide](../../deploy/compose/README.md) owns container-stack bring-up and

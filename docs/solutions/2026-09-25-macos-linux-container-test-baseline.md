@@ -30,99 +30,15 @@ The failures come from the test host, not from the code:
 
 ## Solution
 
-Run the `just test` selection in an x86_64 Linux container that is close to the CI job, and
-compare failing test IDs between an `origin/main` baseline and the branch.
-
-`Dockerfile` (in a scratch directory, not in the repository):
-
-```dockerfile
-FROM --platform=linux/amd64 ghcr.io/astral-sh/uv:python3.14-bookworm
-RUN apt-get update \
- && apt-get install -y --no-install-recommends libvirt-dev pkg-config build-essential git ca-certificates curl gnupg \
- && install -m 0755 -d /etc/apt/keyrings \
- && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
- && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin
-RUN UV_TOOL_BIN_DIR=/usr/local/bin UV_TOOL_DIR=/opt/uv-tools uv tool install rust-just \
- && useradd -m -u 1000 tester \
- && install -d -o tester -g tester /work /venv
-ENV UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/venv UV_CACHE_DIR=/work/.uv-cache
-WORKDIR /work
-```
-
-`run.sh` (same scratch directory; the container mounts it at `/out`):
-
-```bash
-#!/usr/bin/env bash
-# Usage (container entry, as root): run.sh <sha> <name>
-# Grants the non-root tester the Docker socket's group, then runs the suite as tester.
-set -uo pipefail
-sha=$1; name=$2
-if [[ $(id -u) == 0 ]]; then
-  gid=$(stat -c %g /var/run/docker.sock)
-  getent group "$gid" >/dev/null || groupadd -g "$gid" dockersock
-  usermod -aG "$(getent group "$gid" | cut -d: -f1)" tester
-  exec runuser -u tester -- "$0" "$@"
-fi
-git clone -q /repo /work/src && cd /work/src && git checkout -q "$sha" || exit 3
-uv sync --locked --quiet || exit 4
-PYTHONHASHSEED=0 KDIVE_REQUIRE_DOCKER=1 uv run --no-sync python -m pytest \
-  -m "not live_vm and not live_stack and not agent_smoke" -n auto --maxprocesses=8 --dist worksteal \
-  -q --tb=short -p no:cacheprovider > "/out/$name.log" 2>&1
-rc=$?
-grep -E "^(FAILED|ERROR) " "/out/$name.log" | sed 's/ - .*//' | sort -u > "/out/$name.fail"
-echo "$name rc=$rc $(tail -1 "/out/$name.log")"
-```
-
-Build once, then run the baseline and the branch one after the other, and compare:
-
-```bash
-cd "$SCRATCH" && docker build --platform linux/amd64 -t kdive-linux-test:py314-amd64 .
-for pair in "main:$(git rev-parse origin/main)" "branch:$(git rev-parse HEAD)"; do
-  docker run --rm --platform linux/amd64 \
-    -v "$REPO:/repo:ro" -v "$SCRATCH:/out" \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
-    --add-host host.docker.internal:host-gateway \
-    kdive-linux-test:py314-amd64 /out/run.sh "${pair#*:}" "${pair%%:*}"
-done
-comm -13 "$SCRATCH/main.fail" "$SCRATCH/branch.fail"   # new on the branch
-comm -23 "$SCRATCH/main.fail" "$SCRATCH/branch.fail"   # fixed on the branch
-```
-
-Notes on the parts that matter:
-
-- `$REPO` is the main checkout, not a worktree. Commits made in a worktree are in the main
-  repository's object store, so `git clone /repo` then `git checkout <sha>` works for a
-  worktree branch. The clone happens inside the container, so the macOS `.venv` and the
-  worktree files are not touched (`UV_PROJECT_ENVIRONMENT=/venv`).
-- The DB tests start PostgreSQL through testcontainers (`tests/db/conftest.py`). The container
-  uses the host's Docker through the mounted socket, and reaches the sibling PostgreSQL
-  container through `host.docker.internal`.
-- Match the CI job: `KDIVE_REQUIRE_DOCKER=1` and the `just test` marker selection
-  (`.github/workflows/ci.yml`, step `Test`).
-
-Verified on 2026-09-25 with Docker Desktop 29.8.0 on Apple silicon, `main` at `d2b0686ed`:
-
-```text
-main rc=1 50 failed, 19154 passed, 181 skipped in 339.92s (0:05:39)
-branch rc=1 50 failed, 19190 passed, 181 skipped in 345.71s (0:05:45)
-NEW on branch:
-FIXED on branch:
-```
-
-The 50 failures that remain on `main` in this container are a known baseline, not a
-regression signal: `tests/jobs/capture_operations/` (36, the process sandbox and launcher
-tests), `tests/scripts/test_live_stack_scripts.py` (11), and 3 others. Compare against the
-baseline; do not expect a zero-failure run.
+Use `just test-linux`
+([cross-platform guide](../development/cross-platform.md#macos-run-the-suite-in-a-linux-container),
+ADR-0717, #3072). It runs the `just test` selection natively on arm64 in a committed image, and
+a clean `main` exits 0, so no baseline comparison is needed. The manual amd64 recipe that this
+section held is gone: under Rosetta the capture seccomp filter does not load
+(`seccomp_load failed: 125`), which kept a 50-failure baseline.
 
 ## Prevention
 
-- Do not use a macOS `just test` result as regression evidence. Use this container comparison,
-  or CI.
-- Keep `--maxprocesses` at 8 or lower. With 12 workers the shared PostgreSQL global lock
-  timed out and added errors on one side of the comparison only.
-- In an agent session, a hook blocks any Bash command whose text contains `rm` with `-r` and
-  `-f`. A Dockerfile written through a heredoc with an `rm -rf /var/lib/apt/lists/*` cleanup
-  is blocked too, so leave that cleanup out of this test-only image.
+- Do not use a macOS `just test` result as regression evidence. Use `just test-linux`, or CI.
+- Keep `--maxprocesses` at 8 or lower in a container. With 12 workers the shared PostgreSQL
+  global lock timed out. `just test-linux` sets 8.
