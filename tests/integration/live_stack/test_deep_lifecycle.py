@@ -22,6 +22,7 @@ from tests.integration.live_stack.deep_lifecycle import (
     gnu_build_id,
     kernel_inputs,
     native_cells,
+    prove_install,
     representative,
     staged_module,
 )
@@ -151,3 +152,17 @@ def test_bindings_bind_every_native_cell(tmp_path: Path) -> None:
         built = baseline(cell) == "longterm"
         assert (context.kernel_build_id is not None) is built
         assert (context.kernel_sha256 is not None) is built
+
+
+def test_prove_install_owns_the_path_and_checks_the_digest(tmp_path: Path) -> None:
+    cell = Cell("c", "s", 1, "deep-lifecycle", "obs", ("install",))
+    run = CellRun(cell, EvidenceWriter(tmp_path))
+    owned: list[str] = []
+    steps = {"install": "succeeded", "boot": "succeeded"}
+    prove_install(run, steps, ("d" * 64, "/kernels/vmlinuz"), owned, "d" * 64)
+    assert owned == ["/kernels/vmlinuz"]
+    assert run.observed["kernel_sha256"] == "d" * 64 and "install" in run.assertions
+    prove_install(run, steps, ("d" * 64, None), owned, "d" * 64)
+    assert owned == ["/kernels/vmlinuz"]
+    with pytest.raises(AssertionError, match="not the uploaded boot member"):
+        prove_install(run, steps, ("e" * 64, None), owned, "d" * 64)

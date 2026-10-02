@@ -17,6 +17,7 @@ import subprocess  # noqa: S404 - fixed ssh argv, no shell  # nosec B404
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple, Protocol
 
 from kdive.images.families import family_for
 from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
@@ -38,6 +39,24 @@ _RPM_FAMILIES = frozenset({"rhel", "suse"})
 _SSH_RETRY_S = 5.0
 
 
+class Endpoint(NamedTuple):
+    """Where an SSH probe connects: the host and port ``systems.ssh_info`` returns."""
+
+    host: str
+    port: int
+
+
+class GuestIdentity(Protocol):
+    """The OS a guest must report: a catalog entry or a remote base image (#2810)."""
+
+    @property
+    def distro(self) -> str: ...
+    @property
+    def version(self) -> str: ...
+    @property
+    def arch(self) -> str: ...
+
+
 def native_cells(arch: str | None = None) -> list[Cell]:
     """The contract's ``image-smoke`` cells whose guest architecture is ``arch`` (the host's)."""
     arch = arch or platform.machine()
@@ -53,7 +72,7 @@ def parse_probe(stdout: str) -> dict[str, str]:
     return key_values(stdout)
 
 
-def os_matches(entry: RootfsCatalogEntry, probe: dict[str, str]) -> bool:
+def os_matches(entry: GuestIdentity, probe: dict[str, str]) -> bool:
     """Whether the guest is the catalog row's distro, version (or a point release) and arch."""
     distro = _DISTRO_FOR_ID.get(probe.get("ID", ""), probe.get("ID", ""))
     version = probe.get("VERSION_ID", "")
@@ -77,9 +96,9 @@ def toolchain_command(entry: RootfsCatalogEntry) -> str:
 
 
 def ssh(
-    port: int, key: Path, command: str, *, deadline_s: float = 300.0
+    endpoint: Endpoint, key: Path, command: str, *, deadline_s: float = 300.0
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``command`` as root over the worker-loopback forward, retrying while sshd is down."""
+    """Run ``command`` as root at ``endpoint``, retrying while sshd is down."""
     argv = [
         "ssh",
         "-i",
@@ -95,8 +114,8 @@ def ssh(
         "-o",
         "ConnectTimeout=10",
         "-p",
-        str(port),
-        "root@127.0.0.1",
+        str(endpoint.port),
+        f"root@{endpoint.host}",
         "--",
         command,
     ]
