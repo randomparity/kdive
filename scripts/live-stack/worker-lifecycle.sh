@@ -179,19 +179,53 @@ require_worker_path_access() {
   done
 }
 
+# Print the inventory path the operator's server and reconciler resolve, but only when it declares
+# a [[remote_libvirt]] instance: a local-only stack sends today's request unchanged (#3086).
+resolve_worker_inventory() {
+  "$py" - <<'PY'
+import sys
+from pathlib import Path
+
+from kdive.config.core_settings import SECRETS_ROOT
+from kdive.inventory.path import systems_toml_path
+from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
+from kdive.security.secrets.secrets import secrets_root_from_env
+
+if is_remote_libvirt_configured():
+    inventory = systems_toml_path()
+    if not inventory.is_absolute():
+        print("KDIVE_SYSTEMS_TOML must resolve to an absolute path for fixed workers", file=sys.stderr)
+        raise SystemExit(2)
+    if secrets_root_from_env() != Path(SECRETS_ROOT.default):
+        print(
+            f"fixed workers resolve remote TLS refs only under {SECRETS_ROOT.default};"
+            " unset KDIVE_SECRETS_ROOT",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    print(inventory)
+PY
+}
+
 request() {
-  local operation="$1" count="${2:-}" libvirt_uri=""
+  local operation="$1" count="${2:-}" libvirt_uri="" inventory=""
   if [[ "$operation" != diagnostics ]]; then
     require_compatible_lifecycle || return 1
   fi
   if [[ "$operation" == start ]]; then
     require_start_prerequisites || return 1
     libvirt_uri="$(load_published_libvirt_uri)" || return 1
+    inventory="$(resolve_worker_inventory)" || return
+    if [[ -n "$inventory" ]]; then
+      require_worker_path_access "$inventory" r "worker inventory" || return 1
+      require_worker_path_access /var/lib/kdive/secrets x "worker secrets root" || return 1
+    fi
   fi
   env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
     -u KDIVE_RECONCILER_DATABASE_URL KDIVE_LIFECYCLE_OPERATION="$operation" \
     KDIVE_LIFECYCLE_COUNT="$count" \
     KDIVE_LIFECYCLE_LIBVIRT_URI="$libvirt_uri" KDIVE_WORKER_PYTHON="$WORKER_EXECUTABLE" \
+    LIFECYCLE_SYSTEMS_TOML="$inventory" \
     KDIVE_SOURCE_ROOT="${KDIVE_KERNEL_SRC:-}" \
     KDIVE_EXPECTED_SLOTS="${KDIVE_LIFECYCLE_EXPECTED_SLOTS:-}" "$py" - <<'PY'
 import os
@@ -264,6 +298,7 @@ try:
                     "external_boot_capacity_bytes": os.environ.get(
                         "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES"
                     ),
+                    "systems_toml": os.environ["LIFECYCLE_SYSTEMS_TOML"] or None,
                 },
             }
         )

@@ -530,12 +530,14 @@ INSTALL_STAGING = Setting(
     parse=_str,
     default="/var/lib/kdive/install",
     group="install",
-    processes=_WORKER,
+    processes=_DISCOVERY,
     help=(
         "Worker staging root for install artifacts. Must be writable by the run user; the "
         "default's parent (/var/lib/kdive) is root-owned, so on a source checkout pre-create "
         "it (or repoint this var) — on SELinux hosts with the svirt_image_t label (ADR-0640). An "
-        "unwritable root fails install with a configuration_error (ADR-0204)."
+        "unwritable root fails install with a configuration_error (ADR-0204). Local-libvirt "
+        "teardown removes <root>/<system_id>/, so the reconciler, whose reaper tears down "
+        "orphaned domains, must see the same value as the worker."
     ),
 )
 

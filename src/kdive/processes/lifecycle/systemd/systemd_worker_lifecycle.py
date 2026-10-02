@@ -24,6 +24,10 @@ from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     SlotResult,
     WorkerSettings,
 )
+from kdive.processes.lifecycle.systemd.systemd_worker_inventory import (
+    UntrustedInventory,
+    require_trusted_inventory,
+)
 from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
     BootObservation,
     CommandDeadlineExceeded,
@@ -256,6 +260,7 @@ class SystemdWorkerLifecycle:
         load_redaction_values: Callable[[Path, int], tuple[str, ...]] = (
             load_slot_redaction_values
         ),
+        check_inventory: Callable[[str], None] = require_trusted_inventory,
     ) -> None:
         if tuple(store.slot for store in stores) != tuple(range(1, 9)):
             raise ValueError("lifecycle requires the eight ordered fixed slot stores")
@@ -264,6 +269,7 @@ class SystemdWorkerLifecycle:
         self._authority = authority
         self._wait = wait
         self._load_redaction_values = load_redaction_values
+        self._check_inventory = check_inventory
         self._diagnostics = SystemdDiagnostics(
             stores=self._stores,
             runtime=self._runtime,
@@ -284,6 +290,18 @@ class SystemdWorkerLifecycle:
         operation_deadline = _BudgetDeadline(deadline, _REQUEST_SECONDS)
         if request.operation != "start" or request.worker_count is None:
             return _invalid_start_response()
+        inventory = request.settings.systems_toml if request.settings is not None else None
+        if inventory is not None:
+            # Before any slot is touched: a rejected inventory leaves the current fleet as it was.
+            try:
+                self._check_inventory(inventory)
+            except UntrustedInventory as exc:
+                return LifecycleResponse(
+                    ok=False,
+                    code="invalid_request",
+                    message=str(exc),
+                    retry_action="correct_request",
+                )
         try:
             unmanaged = self._systemd_call(operation_deadline, self._runtime.unmanaged_workers)
             if unmanaged:

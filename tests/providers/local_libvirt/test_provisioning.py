@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import importlib
 import itertools
 import logging
@@ -795,6 +796,7 @@ def _prov(
     overlay_exists: Callable[[str], bool] = lambda _overlay: False,
     remove_baseline: Callable[[str], None] = lambda _baseline: None,
     baseline_exists: Callable[[str], bool] = lambda _path: False,
+    install_staging_root: str | None = None,
     extract_baseline_kernel: Callable[[Path, Path, str | None], BaselineKernel] = _fake_extract,
     free_port: Callable[[], int] = lambda: next(_FREE_PORTS),
     overlay_virtual_size: Callable[[str], int] = lambda _overlay: 1 << 60,
@@ -821,6 +823,7 @@ def _prov(
             prepare_console_log=prepare_console_log,
             overlay_virtual_size=overlay_virtual_size,
             resize_overlay=resize_overlay,
+            install_staging_root=install_staging_root,
         ),
         materialize_rootfs=lambda rootfs, _system_id, _arch, *, job_id=None: (
             rootfs.path if rootfs.kind == "local" else "/var/lib/kdive/rootfs/upload.qcow2"
@@ -1161,6 +1164,101 @@ def test_teardown_removes_baseline_dir() -> None:
     removed: list[str] = []
     _prov(conn, remove_baseline=removed.append).teardown(name)
     assert removed == [storage_module.baseline_dir(_SYS)]
+
+
+def _stage_installed_runs(root: Path, system_id: UUID) -> Path:
+    """Lay out two installed Runs under ``root`` the way ``runs.install`` stages them."""
+    system_dir = root / str(system_id)
+    for run in ("run-a", "run-b"):
+        (system_dir / run).mkdir(parents=True)
+        (system_dir / run / "kernel").write_bytes(b"bzImage")
+    (system_dir / "run-b" / "initrd").write_bytes(b"initrd")
+    return system_dir
+
+
+_OTHER_SYS = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def test_teardown_reclaims_every_installed_run_but_not_another_systems(tmp_path: Path) -> None:
+    mine = _stage_installed_runs(tmp_path, _SYS)
+    theirs = _stage_installed_runs(tmp_path, _OTHER_SYS)
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    _prov(conn, install_staging_root=str(tmp_path)).teardown(name)
+    assert not mine.exists()
+    assert (theirs / "run-a" / "kernel").is_file()
+    assert (theirs / "run-b" / "initrd").is_file()
+
+
+def test_teardown_of_an_undefined_domain_still_reclaims_staging_and_repeats_as_noop(
+    tmp_path: Path,
+) -> None:
+    mine = _stage_installed_runs(tmp_path, _SYS)
+    prov = _prov(
+        _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN), install_staging_root=str(tmp_path)
+    )
+    prov.teardown(domain_name_for(_SYS))
+    assert not mine.exists()
+    prov.teardown(domain_name_for(_SYS))  # the achieved post-state; no raise
+    assert tmp_path.is_dir()
+
+
+def test_reprovision_reclaims_the_prior_runs_staged_kernels(tmp_path: Path) -> None:
+    mine = _stage_installed_runs(tmp_path, _SYS)
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    _prov(conn, install_staging_root=str(tmp_path)).reprovision(_SYS, _profile())
+    assert not mine.exists()
+    assert conn.defined[name].created is True
+
+
+def test_teardown_without_an_install_staging_root_reclaims_none() -> None:
+    # The authority lane and direct constructions own no install staging (no root bound).
+    removed: list[str] = []
+    name = domain_name_for(_SYS)
+    LocalLibvirtProvisioning(
+        connect=lambda: _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN),
+        files=ProvisioningFiles(
+            remove_overlay=lambda _overlay: None,
+            remove_baseline=lambda _baseline: None,
+            remove_install_staging=removed.append,
+        ),
+    ).teardown(name)
+    assert removed == []
+
+
+def test_real_remove_install_staging_oserror_is_infrastructure_failure_naming_only_the_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _rmtree_failed(_path: object, *_: object, **__: object) -> None:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(storage_module.shutil, "rmtree", _rmtree_failed)
+    staging = tmp_path / str(_SYS)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_remove_install_staging(str(staging))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to remove the per-System install staging directory"
+    assert caught.value.details == {"op": "remove_install_staging", "staging": str(_SYS)}
+
+
+def test_teardown_propagates_an_install_staging_reclaim_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stage_installed_runs(tmp_path, _SYS)
+
+    def _rmtree_failed(_path: object, *_: object, **__: object) -> None:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(storage_module.shutil, "rmtree", _rmtree_failed)
+    prov = _prov(
+        _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN), install_staging_root=str(tmp_path)
+    )
+    with pytest.raises(CategorizedError) as caught:
+        prov.teardown(domain_name_for(_SYS))
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_teardown_undefines_with_snapshot_metadata_flag() -> None:
@@ -2761,6 +2859,20 @@ def test_reprovision_first_boot_crash_fails_not_ready() -> None:
         _gated(conn, probe).reprovision(_SYS, _profile())
     assert caught.value.details["first_boot"] == "not_ready"
     assert caught.value.details["crash_signature"] == "Kernel panic"
+
+
+def test_from_env_binds_the_configured_install_staging_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("KDIVE_INSTALL_STAGING", str(tmp_path))
+    mine = _stage_installed_runs(tmp_path, _SYS)
+    prov = LocalLibvirtProvisioning.from_env()
+    prov._connect = lambda: _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN)
+    prov._files = dataclasses.replace(
+        prov._files, remove_overlay=lambda _overlay: None, remove_baseline=lambda _b: None
+    )
+    prov.teardown(domain_name_for(_SYS))
+    assert not mine.exists()
 
 
 def test_from_env_wires_real_first_boot_readiness() -> None:

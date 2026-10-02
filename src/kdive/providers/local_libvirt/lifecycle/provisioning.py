@@ -35,6 +35,7 @@ from kdive.components.references import (
     CatalogComponentRef,
     LocalComponentRef,
 )
+from kdive.config.core_settings import INSTALL_STAGING
 from kdive.domain.catalog.resource_capabilities import (
     GUEST_ARCHES_KEY,
     ResourceCapabilities,
@@ -260,6 +261,7 @@ class LocalLibvirtProvisioning:
         # `defineXML`/`lookupByName`), so no suppression is needed at this seam.
         return cls(
             connect=lambda: libvirt.open(host_uri),
+            files=ProvisioningFiles(install_staging_root=config.require(INSTALL_STAGING)),
             allowed_roots=allowed_roots,
             catalog_fetch=rootfs_catalog_fetch_from_env(allowed_roots),
             upload_fetch=rootfs_upload_fetch_from_env(store),
@@ -786,11 +788,13 @@ class LocalLibvirtProvisioning:
         )
 
     def teardown(self, domain_name: str) -> None:
-        """Destroy+undefine the domain and reclaim its per-System overlay and baseline dir.
+        """Destroy+undefine the domain and reclaim its per-System overlay, baseline and staging.
 
-        The overlay and the per-System baseline-kernel directory (ADR-0272) are removed after the
-        libvirt teardown — including the already-absent-domain path — so a torn-down System leaves
-        no orphaned disk or kernel files (ADR-0060). The **shared uploaded rootfs base** is
+        The overlay, the per-System baseline-kernel directory (ADR-0272) and the System's
+        install-staging directory (every installed Run's kernel/initrd under
+        ``KDIVE_INSTALL_STAGING/<system_id>/``) are removed after the libvirt teardown — including
+        the already-absent-domain path — so a torn-down System leaves no orphaned disk or kernel
+        files (ADR-0060). The **shared uploaded rootfs base** is
         investigation-owned (ADR-0441) and is reclaimed only by the reconciler sweeps, never at a
         single System's teardown. An absent file/directory is a no-op; idempotent.
 
@@ -801,6 +805,7 @@ class LocalLibvirtProvisioning:
         self._teardown_domain(domain_name)
         self._files.remove_overlay_for_domain(domain_name)
         self._files.remove_baseline_for_domain(domain_name)
+        self._files.remove_install_staging_for_domain(domain_name)
 
     def _materialize_rootfs_base(
         self,

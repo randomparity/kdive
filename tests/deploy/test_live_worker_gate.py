@@ -15,7 +15,10 @@ from typing import cast
 
 import pytest
 
+from kdive.processes.lifecycle.systemd.systemd_worker_contract import LifecycleRequest, SlotPhase
+from kdive.processes.lifecycle.systemd.systemd_worker_state import SlotState, SlotStore
 from kdive.worker_lifecycle.worker_incarnation import worker_incarnation_credential
+from tests.processes.lifecycle.systemd.systemd_worker_support import start_payload
 
 GATE = Path(__file__).resolve().parents[2] / "deploy" / "systemd" / "bin" / "kdive-live-worker-gate"
 LIFECYCLE_WRAPPER = GATE.with_name("kdive-live-worker-lifecycle")
@@ -72,6 +75,7 @@ def _gate_env(tmp_path: Path, python: Path) -> tuple[dict[str, str], Path]:
         "KDIVE_S3_BUCKET": "kdive",
         "KDIVE_S3_ENDPOINT_URL": "http://127.0.0.1:9000",
         "KDIVE_S3_REGION": "us-east-1",
+        "KDIVE_SYSTEMS_TOML": "/etc/kdive/systems.toml",
         "KDIVE_WORKER_ACCEPTED_LANES": "default,state-fenced",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": "authority/client-cert",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": (
@@ -286,6 +290,7 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
         "KDIVE_S3_BUCKET": env["KDIVE_S3_BUCKET"],
         "KDIVE_S3_ENDPOINT_URL": env["KDIVE_S3_ENDPOINT_URL"],
         "KDIVE_S3_REGION": env["KDIVE_S3_REGION"],
+        "KDIVE_SYSTEMS_TOML": env["KDIVE_SYSTEMS_TOML"],
         "KDIVE_WORKER_ACCEPTED_LANES": env["KDIVE_WORKER_ACCEPTED_LANES"],
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": env[
             "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF"
@@ -383,3 +388,48 @@ def _patch_root_owned_files(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     monkeypatch.setattr(os, "fstat", root_owned_fstat)
+
+
+def test_gate_allowlist_matches_the_slot_environment_the_witness_writes(tmp_path: Path) -> None:
+    """The gate passes exactly what `worker.env` carries, minus the three values it owns (#3086).
+
+    `KDIVE_WORKER_PYTHON` is consumed as the exec target, and the incarnation ID and kind are
+    pinned by the gate itself. `KDIVE_SECRETS_ROOT` stays out of both: the fixed default is the
+    worker confinement root, and its name matches the diagnostics secret pattern.
+    """
+    namespace = runpy.run_path(str(GATE), run_name="kdive_gate_allowlist")
+    payload = start_payload()
+    cast(dict[str, object], payload["settings"]).update(
+        authority_instance="authority-a",
+        authority_request_socket="/run/authority.sock",
+        authority_server_ca_ref="authority/server-ca",
+        authority_client_certificate_ref="authority/client-cert",
+        authority_client_key_ref="authority/client-key",  # pragma: allowlist secret
+        authority_store_identity="authority-store",
+        authority_recovery_reserve_bytes=4096,
+        authority_recovery_max_bytes=8192,
+        external_boot_capacity_bytes=4096,
+        systems_toml="/etc/kdive/systems.toml",
+    )
+    settings = LifecycleRequest.model_validate(payload).settings
+    assert settings is not None
+    state = SlotState(
+        schema=1,
+        slot=1,
+        unit="kdive-live-worker@1.service",
+        generation=_GENERATION,
+        incarnation=_INCARNATION,
+        credential_hash="b" * 64,
+        phase=SlotPhase.PREPARED,
+    )
+    rendered = SlotStore(root=tmp_path, slot=1)._environment(settings, state)
+    keys = {line.split("=", 1)[0] for line in rendered.splitlines()}
+    gate_owned = {
+        "KDIVE_WORKER_PYTHON",
+        "KDIVE_WORKER_INCARNATION_ID",
+        "KDIVE_WORKER_INCARNATION_KIND",
+    }
+
+    assert namespace["_WORKER_ENV_NAMES"] == keys - gate_owned
+    assert gate_owned <= keys
+    assert "KDIVE_SECRETS_ROOT" not in keys | namespace["_WORKER_ENV_NAMES"]
