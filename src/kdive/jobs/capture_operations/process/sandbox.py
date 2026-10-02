@@ -14,7 +14,13 @@ _CLONE_VM = 0x00000100
 _CLONE_SIGHAND = 0x00000800
 _CLONE_THREAD = 0x00010000
 _REQUIRED_THREAD_BITS = (_CLONE_VM, _CLONE_SIGHAND, _CLONE_THREAD)
-_SUPPORTED_ARCHITECTURES = frozenset({"x86_64", "ppc64le"})
+# Deny-list syscalls that the architecture's syscall table does not have (ADR-0717). On
+# aarch64, glibc implements fork and vfork with clone, which the thread-bit rules deny.
+_ABSENT_SYSCALLS = {
+    "x86_64": frozenset[str](),
+    "ppc64le": frozenset[str](),
+    "aarch64": frozenset({"fork", "vfork"}),
+}
 
 
 class _ScmpArgCmp(ctypes.Structure):
@@ -83,12 +89,13 @@ class _Seccomp:
 def install_capture_filter() -> None:
     """Install the single-process policy, allowing threads but no descendants or exec."""
     architecture = platform.machine().lower()
-    if architecture not in _SUPPORTED_ARCHITECTURES:
+    if architecture not in _ABSENT_SYSCALLS:
         raise RuntimeError(f"unsupported audit architecture: {architecture}")
     seccomp = _Seccomp.create()
     try:
         for syscall_name in ("fork", "vfork", "execve", "execveat"):
-            seccomp.deny(syscall_name, errno.EPERM)
+            if syscall_name not in _ABSENT_SYSCALLS[architecture]:
+                seccomp.deny(syscall_name, errno.EPERM)
         seccomp.deny("clone3", errno.ENOSYS)
         for required_bit in _REQUIRED_THREAD_BITS:
             seccomp.deny(

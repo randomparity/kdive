@@ -51,7 +51,7 @@ def test_filter_returns_enosys_for_clone3_and_denies_later_exec() -> None:
     result = _sandbox_probe(
         "import ctypes, errno, os, platform\n"
         "libc = ctypes.CDLL(None, use_errno=True)\n"
-        "numbers = {'x86_64': 435, 'ppc64le': 435}\n"
+        "numbers = {'x86_64': 435, 'ppc64le': 435, 'aarch64': 435}\n"
         "rc = libc.syscall(numbers[platform.machine()], 0, 0)\n"
         "clone3_errno = ctypes.get_errno()\n"
         "try:\n"
@@ -72,6 +72,7 @@ def test_filter_denies_vfork_execveat_and_clone_missing_thread_bits() -> None:
         "numbers = {\n"
         " 'x86_64': {'clone': 56, 'execveat': 322},\n"
         " 'ppc64le': {'clone': 120, 'execveat': 362},\n"
+        " 'aarch64': {'clone': 220, 'execveat': 281},\n"
         "}[platform.machine()]\n"
         "clone_rc = libc.syscall(numbers['clone'], 0, 0, 0, 0, 0)\n"
         "clone_errno = ctypes.get_errno()\n"
@@ -91,7 +92,7 @@ def test_filter_enforces_complete_raw_clone_flag_matrix() -> None:
     result = _sandbox_probe(
         "import ctypes, platform, time\n"
         "libc = ctypes.CDLL(None, use_errno=True)\n"
-        "clone_number = {'x86_64': 56, 'ppc64le': 120}[platform.machine()]\n"
+        "clone_number = {'x86_64': 56, 'ppc64le': 120, 'aarch64': 220}[platform.machine()]\n"
         "vm, sighand, thread = 0x100, 0x800, 0x10000\n"
         "required = vm | sighand | thread\n"
         "normal = required | 0x200 | 0x400 | 0x40000\n"
