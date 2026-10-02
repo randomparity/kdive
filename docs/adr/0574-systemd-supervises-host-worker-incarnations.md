@@ -133,6 +133,42 @@ before cleanup so a successful proof retains its immutable provision claim recor
 workflow condition and ADR-0574's lifecycle, credential, witness, and cleanup decisions remain in
 force.
 
+### Amendment (2026-10-02): the inventory path is an allowlisted worker setting (#3086)
+
+This amendment extends the allowlisted unprivileged worker settings with one optional absolute
+inventory path, `systems_toml`, delivered to slot workers as `KDIVE_SYSTEMS_TOML`. Without it a
+fixed worker cannot register the remote-libvirt runtime that the operator's server and reconciler
+already grant. The launcher sends it only when the operator inventory declares a
+`[[remote_libvirt]]` instance.
+
+The root witness treats the path as untrusted operator input. It runs `lstat` on each component
+before any slot mutation and never opens, reads, copies, or parses the file, so it cannot act as a
+confused deputy. The request is rejected as `invalid_request` / `correct_request` when the path is
+not absolute and normal, when any component is a symlink, when the target is not a regular file,
+or when the file or an ancestor is owned by a slot account or is group- or other-writable by
+principals a slot account holds. An other-writable sticky directory is the one exception.
+`kdive-live-libvirt` is always a forbidden group. Read access is enforced only by each slot UID's
+own permissions.
+
+The secrets root stays the fixed default `/var/lib/kdive/secrets`. Remote TLS refs resolve under a
+`remote-libvirt/` subdirectory: the directory is `root:<group>` mode `0750` and the files are mode
+`0440`, where the group holds the slot accounts and the operator. The launcher refuses a
+non-default operator `KDIVE_SECRETS_ROOT` while a remote instance is declared. Slot homes stay
+`/nonexistent`; neither `HOME` nor `XDG_CONFIG_HOME` is passed. Inventory changes reach workers
+only at the next `start`. The lifecycle protocol identity changes and the protocol version stays
+1. Every other ADR-0574 decision remains in force.
+
+Considered & rejected:
+
+- **Pass `KDIVE_SECRETS_ROOT` through as a caller setting.** judgment: it lets the caller widen the
+  confinement root that every worker secret ref resolves under. verified:
+  `_SECRET_ENVIRONMENT_PATTERN` in `systemd_worker_runtime.py` matches `SECRET`, so diagnostics
+  would treat the root path as a secret literal and scrub it everywhere it appears.
+- **Pass `HOME` / `XDG_CONFIG_HOME` so the XDG default resolves.** judgment: it gives slot
+  accounts an operator-chosen home, and that home is deliberately `/nonexistent` (#2300, #2333).
+- **Have the witness copy the inventory into slot state.** judgment: root would then read an
+  operator-named file, which is the confused-deputy path this amendment exists to avoid.
+
 ## Consequences
 
 Supported host-process operation now requires systemd system units, provisioned worker accounts,
