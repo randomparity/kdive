@@ -55,16 +55,23 @@ def test_native_deep_families_and_foreign_tcg_stay_distinct(inventory: Inventory
     assert all(c.accelerator == "tcg" and c.host_arch != c.guest_arch for c in tcg)
 
 
+_IMAGE_SMOKE_NODE = "tests/integration/test_image_smoke_live.py::test_image_smoke"
+
+
 def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: Inventory) -> None:
     contract = build_contract(inventory=inventory)
     assert contract.cells
     assert all(c.owner > 0 and c.observation and c.assertions for c in contract.cells)
-    assert all(c.node_id is None for c in contract.cells if c.scenario_id != "host-install")
+    smoke = [c for c in contract.cells if c.operation == "image-smoke"]
+    assert {c.node_id for c in smoke} == {_IMAGE_SMOKE_NODE}
+    assert {c.owner for c in smoke if c.guest_arch == "ppc64le"} == {2818}
     host_install = [c for c in contract.cells if c.scenario_id == "host-install"]
     assert len(host_install) == 6
     assert {c.node_id for c in host_install} == {
         "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
     }
+    bound = {"image-smoke", "host-install"}
+    assert all(c.node_id is None for c in contract.cells if c.operation not in bound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
     assert recovery and {c.configuration for c in recovery} == {"recovery"}
