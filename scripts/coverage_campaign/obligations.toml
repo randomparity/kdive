@@ -112,7 +112,7 @@ authority = true
 "systems.resolve_external_boot_conflict" = "Wait for conflict resolution and verify authoritative provider and database state agree."
 
 [[groups]]
-owner = 2809
+owner = 3062
 execution = "provider"
 kernel = true
 authority = true
@@ -221,3 +221,5 @@ kernel = true
 
 [implementations]
 "image-smoke" = "tests/integration/test_image_smoke_live.py::test_image_smoke"
+"deep-lifecycle/local-libvirt/longterm" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
+"deep-lifecycle/local-libvirt/stable" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"

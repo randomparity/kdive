@@ -201,11 +201,11 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                     roles = tuple(group.role_overrides.get(row.tool, roles))
                     if group.authority:
                         roles = (*roles, "authority")
-                    owner = (
-                        2810
-                        if group.owner == 2809 and provider == "remote-libvirt"
-                        else group.owner
-                    )
+                    owner = group.owner
+                    if group.owner == 3062 and provider == "remote-libvirt":
+                        owner = 2810
+                    elif group.owner == 3062 and arch == "ppc64le":
+                        owner = 2818
                     cell = Cell(
                         identity + "/functional",
                         scenario + "/functional",
@@ -327,7 +327,7 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
         for provider in sorted(inventory.capabilities):
             cell = _native_cell(
                 "deep-lifecycle",
-                2809 if provider == "local-libvirt" else 2810,
+                2810 if provider == "remote-libvirt" else (2809 if arch == "x86_64" else 2818),
                 arch,
                 provider,
                 "Upload each baseline, install, boot, verify actual build and modules, "
@@ -339,7 +339,7 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
                     replace(
                         cell,
                         id=f"{cell.id}/{family}/{baseline}",
-                        scenario_id=f"deep-lifecycle/{baseline}",
+                        scenario_id=f"deep-lifecycle/{provider}/{baseline}",
                         assertions=(
                             "upload",
                             "install",
