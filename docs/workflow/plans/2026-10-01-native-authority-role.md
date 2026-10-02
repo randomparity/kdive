@@ -28,7 +28,8 @@ about six focused tests, three doc paragraphs.
 | `scripts/coverage_campaign/contract.py` | `_native_cell` roles drop `authority` | 1 |
 | `tests/scripts/test_coverage_contract.py` | one test | 1 |
 | `tests/integration/live_stack/evidence.py` | `_present` plus a `run_identity` guard | 2, 3 |
-| `tests/integration/live_stack/test_evidence.py` | `present` injection, new cases | 2, 3 |
+| `tests/integration/live_stack/test_evidence.py` | `present` injection, new cases | 2 |
+| `tests/scripts/test_results.py` | unrequired stale role still fails | 3 |
 | `docs/development/coverage-qualification.md` | `deployed_roles` row | 4 |
 | `docs/operating/runbooks/live-testing.md` | drop the "until #3066" claim | 4 |
 
@@ -93,6 +94,11 @@ Verification:
   `test_presence_is_false_only_when_absence_is_proven`, using `tmp_path` with an absent file, a
   present file, and a file under a mode-000 directory (skipped when euid is 0). Red: no `_present`
   exists, so the import fails. Green: the same command.
+- `Mode: focused-test`. Contract: a stale recorded role the cell does not require still fails
+  qualification. Test: `tests/scripts/test_results.py::test_a_recorded_role_the_cell_does_not_require_is_still_judged`.
+  Red: not applicable, because it pins unchanged `results.py` behavior. Bite check: narrowing
+  `results.py` line 77 to `cell.roles` turns it red. Green:
+  `uv run python -m pytest tests/scripts/test_results.py -q`.
 
 Steps:
 1. In `test_evidence.py`, give `_identity` a `present: Callable[[str], bool] = lambda _p: True`
@@ -143,8 +149,24 @@ def test_presence_is_false_only_when_absence_is_proven(tmp_path: Path) -> None:
 
    `"zzz"` is not a key in `resolve`'s table, so it resolves to `None`. A stale authority does not
    appear in `identity_problems` when the cell does not require it; `results.py` reports it as
-   `deployed-revision-mismatch`. That path already has coverage, because
-   `tests/scripts/test_coverage_cli.py` changes a recorded `worker` SHA.
+   `deployed-revision-mismatch`. No existing test pins that for a role the cell does not require
+   (`test_results.py` and `test_coverage_cli.py` mutate required roles only), so add to
+   `tests/scripts/test_results.py`:
+
+```python
+def test_a_recorded_role_the_cell_does_not_require_is_still_judged() -> None:
+    contract, bindings, results = complete_evidence()
+    cells = tuple(replace(c, roles=("server", "worker", "reconciler")) for c in contract.cells)
+    contract = replace(contract, cells=cells)
+    assert qualify(contract, bindings, results).passed
+    roles = {**results[0].deployed_roles, "authority": "d" * 40}
+    results[0] = results[0].model_copy(update={"deployed_roles": roles})
+    report = qualify(contract, bindings, results)
+    assert "deployed-revision-mismatch" in report.cells[0].reasons
+```
+
+   It is green from the start: it pins `results.py`, which this change relies on but does not
+   modify.
 2. Run the tests and confirm red.
 3. In `evidence.py`, add `_present` after `_read_privileged`:
 
@@ -208,8 +230,9 @@ Steps:
    `/readyz`.
 2. Recompute bindings and run the image smoke and `qualify` per the runbook section "Catalog image
    smoke and coverage evidence". Expected: the passing rows qualify, with no `deployed-role-missing`.
-3. Fault 1: write a non-candidate commit to `/opt/kdive-provider-authority/revision` and rerun one
-   cell. Expected: `qualify` reports `deployed-revision-mismatch`. Fault 2: replace the file with a
+3. Before Fault 1, confirm `sudo -n true` succeeds. Fault 1: create
+   `/opt/kdive-provider-authority` with sudo and write `git rev-parse HEAD~1` (a commit the checkout
+   resolves) to its `revision` file, then rerun one cell. Expected: `qualify` reports `deployed-revision-mismatch`. Fault 2: replace the file with a
    dangling symlink, which `lstat` finds and `sudo -n cat` cannot read. Expected: `run_identity`
    raises and the cell records nothing.
 4. Remove the fault files and directory. Confirm there are no leftover domains or volumes.

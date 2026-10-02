@@ -46,7 +46,9 @@ under ADR-0686.
 2. **Invariants and assets at stake**
    - Epic #2803 requirement 3: an involved deployed revision that is unknown or not the candidate
      fails. A cell may not qualify against a stale installed authority.
-   - Coverage reports stay honest: a cell fails only for a reason that applies to it.
+   - Coverage reports stay honest: a cell fails only for a reason that applies to it. An installed
+     authority applies to every native cell on that host: once it is bound, local-libvirt can
+     route through it (ADR-0623), so its involvement cannot be ruled out.
 3. **Accepted failure classes**
    - An authority installed in a location other than `/opt/kdive-provider-authority` is not
      seen. Accepted: that path is where the `provider_authority_host` role installs it, per
@@ -86,6 +88,9 @@ under ADR-0686.
 - `focused-test`, `tests/integration/live_stack/test_evidence.py`: the four `run_identity`
   cases, plus `_present` against a real temporary path (absent, present, and a mode-000 parent
   when not root). Red before task 2: an unreadable present file is silently dropped.
+- `focused-test`, `tests/scripts/test_results.py`: a stale `authority` revision recorded for a cell
+  that does not require the role fails `deployed-revision-mismatch`. This pins `results.py`, which
+  this change relies on but does not modify; the test is green from the start.
 - `task-test-not-applicable`, the ADR, guide and runbook prose: no executable consumer parses
   these sentences; `just records` and the doc checks gate the record's shape.
 - Live proof: the image-smoke rerun and both faults, recorded and redacted in the PR.

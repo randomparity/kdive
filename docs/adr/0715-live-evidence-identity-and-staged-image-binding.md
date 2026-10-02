@@ -47,7 +47,9 @@ omitted authority would hide a stale install.
   absence unproven. A present file must be read through `sudo -n` and resolved to a full SHA, or the
   identity read raises and the cell records nothing.
 - A recorded role is still checked against the candidate whether or not the cell requires it, so a
-  stale authority fails `deployed-revision-mismatch`.
+  stale authority fails `deployed-revision-mismatch`. An installed authority can be bound, and a bound
+  authority changes local-libvirt routing (ADR-0623). Its involvement in a native cell therefore
+  cannot be ruled out once it is installed.
 
 ## Consequences
 
@@ -94,4 +96,5 @@ the rejection above, which concerned this record's own change.
   authority-routed cells install it (#2812, #2807).
 - **Keep omitting an authority whose revision cannot be read.** judgment: once native cells stop
   requiring the role, omission makes "installed but unreadable" look like "not installed". That
-  hides the stale revision #2803 requirement 3 says must fail.
+  hides a stale revision. Once installed, the authority may be involved, because a bound authority
+  changes local-libvirt routing (ADR-0623). #2803 requirement 3 says such a revision must fail.
