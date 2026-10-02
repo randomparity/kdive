@@ -52,9 +52,13 @@ class _Caller:
     result: ToolResponse | Exception = field(default_factory=lambda: _OK)
     status: int = 401
     calls: list[tuple[str, Mapping[str, object]]] = field(default_factory=list)
+    issued: set[str] = field(default_factory=set)
+    refuse_issued: bool = False
 
     def token(self, grants: Grants) -> str:
-        return forge_source(grants)
+        token = forge_source(grants)
+        self.issued.add(token)
+        return token
 
     async def call(
         self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
@@ -66,7 +70,7 @@ class _Caller:
 
     async def post(self, tool: str, args: Mapping[str, object], token: str) -> int:
         self.calls.append((tool, claims_of(token)))
-        return self.status
+        return 200 if token in self.issued and not self.refuse_issued else self.status
 
 
 def _run(tmp_path: Path, boundary: str) -> CellRun:
@@ -107,6 +111,16 @@ def test_authentication_needs_401(tmp_path: Path) -> None:
             prove_rejection(
                 _run(tmp_path, "authentication"),
                 _Caller("direct", status=200),
+                "authentication",
+                Rejection({}, _GRANTS),
+                _snapshot(1, 1),
+            )
+        )
+    with pytest.raises(AssertionError, match="also refused"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "authentication"),
+                _Caller("direct", refuse_issued=True),
                 "authentication",
                 Rejection({}, _GRANTS),
                 _snapshot(1, 1),

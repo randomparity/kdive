@@ -255,10 +255,14 @@ async def _observe(
     caller: Caller, tool: str, boundary: Boundary, rejection: Rejection
 ) -> dict[str, object]:
     if boundary == "authentication":
-        token = forge(caller.token(rejection.grants))
-        status = await caller.post(tool, rejection.args, token)
+        genuine = caller.token(rejection.grants)
+        status = await caller.post(tool, rejection.args, forge(genuine))
         assert status == 401, f"forged-signature call to {tool} answered HTTP {status}, not 401"
-        return {"http_status": status, "token": "foreign-signature"}
+        # The same request with the issued token must pass authentication, so the 401 above is
+        # the signature's and not the request's.
+        control = await caller.post(tool, rejection.args, genuine)
+        assert control != 401, f"the issued token's call to {tool} was also refused with 401"
+        return {"http_status": status, "token": "foreign-signature", "issued_token_status": control}
     result = await _attempt(caller, tool, rejection)
     if boundary == "validation":
         assert rejected_by_validation(caller.exposure, result), (

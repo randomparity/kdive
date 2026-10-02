@@ -39,7 +39,8 @@ The `recovery` configuration exists only when the server runs with a worker-deat
 3. **Rejections.** One harness proves every boundary:
    - `authentication`: a token carrying the cell's claims but signed by a key the server does
      not trust is sent as a raw `tools/call`, to the tool (`direct`) or to `tools.invoke`
-     (`gateway`), and must receive HTTP 401;
+     (`gateway`), and must receive HTTP 401, while the same request with the issued token must
+     not;
    - `authorization` and `project-isolation`: a real-issuer token with the grants the cell
      supplies must receive a failure envelope whose category is in the cell's closed set;
    - `validation`: schema-invalid arguments must receive a `configuration_error` envelope, or,
