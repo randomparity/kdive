@@ -28,16 +28,20 @@ _XML = """<domain type='kvm'><devices>
 
 
 class _Client:
-    def __init__(self, in_use: int) -> None:
-        self.in_use = in_use
+    def __init__(self, *in_use: int) -> None:
+        self.in_use = list(in_use)
         self.calls: list[str] = []
+
+    def _next_in_use(self) -> int:
+        """Each availability read takes the next value; the last one repeats."""
+        return self.in_use.pop(0) if len(self.in_use) > 1 else self.in_use[0]
 
     async def call_tool(self, name: str, /, **_args: object) -> ToolResponse:
         self.calls.append(name)
         if name == "resources.availability":
             items = [
                 ToolResponse.success(str(i), "available", data={"in_use": n})
-                for i, n in enumerate((self.in_use, 0))
+                for i, n in enumerate((self._next_in_use(), 0))
             ]
             return ToolResponse.collection("resources", "ok", items)
         status = {"systems.get": "torn_down", "allocations.wait": "released"}.get(name, "ok")
@@ -83,37 +87,42 @@ def test_domain_disks_lists_only_file_sources() -> None:
 
 
 def test_verified_cleanup_reports_every_observation(tmp_path: Path) -> None:
-    client = _Client(in_use=0)
+    client = _Client(1, 0)
     result = _verify(client, [str(tmp_path / "gone.qcow2")])
     assert result == {
         "system": "torn_down",
         "allocation": "released",
         "domain": "absent",
         "disks_absent": 1,
-        "in_use": [0, 0],
+        "in_use": [0, 1, 0],
     }
-    assert client.calls[0] == "allocations.release"
+    assert client.calls[:2] == ["resources.availability", "allocations.release"]
 
 
 def test_a_surviving_disk_fails(tmp_path: Path) -> None:
     disk = tmp_path / "overlay.qcow2"
     disk.write_bytes(b"x")
     with pytest.raises(AssertionError, match="disk"):
-        _verify(_Client(in_use=0), [str(disk)])
+        _verify(_Client(1, 0), [str(disk)])
 
 
 def test_a_defined_domain_fails(tmp_path: Path) -> None:
     with pytest.raises(AssertionError, match="domain"):
-        _verify(_Client(in_use=0), [], defined=True)
+        _verify(_Client(1, 0), [], defined=True)
 
 
 def test_capacity_that_did_not_return_fails() -> None:
-    with pytest.raises(AssertionError, match="capacity"):
-        _verify(_Client(in_use=1), [])
+    with pytest.raises(AssertionError, match="not the 0 held before"):
+        _verify(_Client(1, 1), [])
+
+
+def test_capacity_that_never_counted_the_allocation_fails() -> None:
+    with pytest.raises(AssertionError, match="does not see this allocation"):
+        _verify(_Client(0), [])
 
 
 def test_capacity_sums_every_resource() -> None:
-    assert asyncio.run(capacity_in_use(cast(LiveStackClient, _Client(in_use=3)))) == 3
+    assert asyncio.run(capacity_in_use(cast(LiveStackClient, _Client(3)))) == 3
 
 
 @pytest.fixture

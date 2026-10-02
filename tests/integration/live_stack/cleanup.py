@@ -3,7 +3,8 @@
 ``release_and_verify`` is the ``cleanup`` assertion: after ``allocations.release`` the System is
 ``torn_down``, the Allocation is ``released``, the worker's libvirt no longer defines the
 domain, every file-backed disk of the domain is gone, and the fleet's summed ``in_use``
-capacity is back to its value from before the Allocation was requested.
+capacity, which counted the Allocation while held, is back to its value from before the
+Allocation was requested.
 """
 
 from __future__ import annotations
@@ -109,6 +110,11 @@ async def release_and_verify(
     poll_s: float = POLL_INTERVAL_S,
 ) -> dict[str, object]:
     """Release the Allocation and prove its owned domain, disks and capacity were reclaimed."""
+    in_use_held = await capacity_in_use(client)
+    assert in_use_held > in_use_before, (
+        f"capacity in use is {in_use_held} while allocated, not above {in_use_before}; "
+        "resources.availability does not see this allocation"
+    )
     ok(await scalar(client, "allocations.release", allocation_id=allocation_id), "release")
     await await_system_state(client, "cleanup", system_id, "torn_down", deadline_s=deadline_s)
     await _await_released(client, allocation_id, deadline_s, poll_s)
@@ -133,5 +139,5 @@ async def release_and_verify(
         "allocation": "released",
         "domain": "absent",
         "disks_absent": len(disks),
-        "in_use": [in_use_before, in_use_after],
+        "in_use": [in_use_before, in_use_held, in_use_after],
     }
