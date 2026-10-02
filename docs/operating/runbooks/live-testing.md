@@ -712,8 +712,9 @@ refused; a schema-validation failure for invalid arguments) and that the cell's 
 there is nothing to tear down beyond the stack itself. `qualify` exits 1 because other owners'
 cells have no result; read the 56 `tool/…` rows of these six tools.
 
-Last run: candidate `09a80767c` (server, worker and reconciler at that SHA in both lanes), a
-disposable Fedora 44 x86_64 lab guest with SELinux enforcing. The `default` lane recorded the 28
+Last run: candidate `e3354a190` (server, worker and reconciler at that SHA in both lanes), a
+disposable Fedora 44 x86_64 lab guest with SELinux enforcing; the same result held at `09a80767c`
+before the merge with `main`. The `default` lane recorded the 28
 `…/default/default/…` cells and skipped the rest; the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane
 listed both recovery tools and recorded the 28 `…/default/recovery/…` cells. `qualify` reported
 all 56 qualified: 24 `success` (functional) and 32 `rejection` (authentication and validation),
