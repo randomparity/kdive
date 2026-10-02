@@ -216,7 +216,10 @@ def remote_host() -> RemoteHost:
     try:
         probe = host_probe(dest)
     except (AssertionError, OSError, subprocess.SubprocessError, ValueError) as exc:
-        raise ScenarioStop(Outcome.BLOCKED, f"provider-host probe failed: {exc}") from None
+        # The type only: a message can carry the SSH destination (ADR-0715 evidence).
+        raise ScenarioStop(
+            Outcome.BLOCKED, f"provider-host probe failed: {type(exc).__name__}"
+        ) from None
     return RemoteHost(dest, remote_config_for_resource(names[0]).storage_pool, **probe)
 
 

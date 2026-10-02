@@ -300,6 +300,8 @@ uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --result
 
 An unset or malformed `REMOTE_PROVIDER_SSH`, an unreachable provider host, a provider of another
 architecture, other than one `[[remote_libvirt]]` instance, an unstaged representative, or a
-missing or invalid fixture is `blocked` (`missing-prerequisite`). After an interrupted run,
-release the leftover allocation with `allocations.release` (or let the lease expire) and check the
-provider for a leftover `kdive-*` domain and its overlay volume.
+missing or invalid fixture is `blocked` (`missing-prerequisite`). A cell blocked before the
+provider host is observed records the control-plane host, so `qualify` lists context-mismatch
+reasons beside `missing-prerequisite` for it; the pytest line names the actual cause. After an
+interrupted run, release the leftover allocation with `allocations.release` (or let the lease
+expire) and check the provider for a leftover `kdive-*` domain and its overlay volume.

@@ -80,7 +80,8 @@ the remote tool cells implemented.
 4. **Test** `tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle`,
    `live_stack`, parametrized over the 8 cells owned by #2810 (remote x86_64); #2818's ppc64le
    remote cells never enter it. `run_cell` →
-   `on_remote_system` → `deep_body` (upload with `root_fs="xfs"`; both representatives are XFS).
+   `on_remote_system` → `deep_body`. The shared upload keeps #2809's `root_fs="ext4"` preflight;
+   the fixture also builds `CONFIG_XFS_FS=y`, which the XFS-rooted remote guests mount.
 5. **Docs**: a "Remote deep lifecycle" section in `docs/operating/runbooks/remote-live-stack.md`
    (topology, observer access, a source-restricted firewalld rule opening `ssh_addr:ssh_range` to
    the control plane, image staging, fixtures, bindings, run, assemble, qualify); one
