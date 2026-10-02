@@ -220,3 +220,4 @@ kernel = true
 "systems.snapshot" = "supports_snapshots"
 
 [implementations]
+"image-smoke" = "tests/integration/test_image_smoke_live.py::test_image_smoke"
