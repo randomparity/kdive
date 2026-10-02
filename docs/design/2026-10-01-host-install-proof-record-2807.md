@@ -2,18 +2,20 @@
 
 - **Issue:** #2807 · **Decision:** [ADR-0716](../adr/0716-host-install-evidence-producer.md)
   · **Design:** [spec](../workflow/specs/2026-10-01-host-install-proof-design.md)
-- **Candidate:** `a5a3818754d048cafddfda1cfdc2d2b095c4bc76`. Every role on every host reported
+- **Candidate:** `0ac30cfe74f461930bbc15a15b5418ddb0c3c6a7`. Every role on every host reported
   this revision. Commits after it on the branch change only documentation.
 - **Matrix:** `fc53e68775e6c519ac5f72e3b4e89f1bc8fd79836f4d654cb4ca5513e5729740`
 - **Date:** 2026-10-01 to 2026-10-02 (UTC).
-- **Hosts:** one disposable, exclusive x86_64 VM per family, with nested KVM. Each VM was created
-  fresh from the vendor cloud image that the rootfs catalog pins (SHA-256 verified), used for
-  one run, and destroyed afterwards. In this record they are `lab-ubuntu` (Ubuntu 26.04,
-  AppArmor enabled), `lab-fedora` (Fedora 44, btrfs root, SELinux enforcing) and `lab-rocky`
-  (Rocky Linux 10.2, SELinux enforcing). Each had 8 vCPUs, 24 GiB RAM and a 256 GiB disk.
-  Before its run, `lab-rocky` had `dnf upgrade` applied and was rebooted, so that its running
-  kernel matched the repository's kernel modules. The stale cloud image otherwise cannot start
-  Docker.
+- **Hosts:** exclusive, snapshot-capable disposable lab test hosts with nested KVM, one per
+  family. In this record they are `lab-ubuntu` (Ubuntu 26.04, AppArmor enabled), `lab-fedora`
+  (Fedora 44, btrfs root, SELinux enforcing) and `lab-rocky` (Rocky Linux 10.2, SELinux
+  enforcing). Each had 8 vCPUs, 32 GiB RAM and a 256 GiB disk.
+
+  Each host was restored to its verified `clean` snapshot through the lab's restore tooling
+  before its run, and again afterwards. Before its run, `lab-rocky` also had `dnf upgrade`
+  applied and was rebooted. Its clean image runs a kernel whose matching
+  `kernel-modules-extra` the repositories no longer carry, so Docker cannot start on it
+  unchanged.
 - **Kernel bundle:** the pinned `longterm` fixture: `v6.18.54`, commit
   `1b357ecb321392158d507b04672ffee57bfa071d`, release `6.18.54-g1b357ecb3213`, ELF build ID
   `6eda386b6100539e05faf0928f99b2a127ad6bf2`, fixture ID
@@ -45,7 +47,7 @@ runs them on native POWER.
 | `first-boot` | holds | holds | not reached |
 | `repeat-setup` | holds | holds | not reached |
 | `second-boot` | holds | holds | not reached |
-| `confinement` | holds: `svirt_t` with per-boot MCS pairs (`s0:c554,c641`, `s0:c604,c912`) | fails: guest qemu `unconfined` in both boots | not reached |
+| `confinement` | holds: `svirt_t` with per-boot MCS pairs (`s0:c671,c900`, `s0:c155,c170`) | fails: guest qemu `unconfined` in both boots | not reached |
 | `cleanup` | holds: System `torn_down`, domain absent, both boots | holds | not reached |
 | Deployed `server`/`worker`/`reconciler`/`authority` | candidate, both phases | candidate, both phases | not reached |
 
@@ -57,21 +59,25 @@ The only failed check was guest confinement. The session libvirt daemon reports 
 EL10 guestfs binding build enabled Docker's `docker-ce-stable-source` repository through
 `--enablerepo='*source*'`, and its metadata download failed (#3068).
 
-## Step durations (seconds, final runs)
+An earlier full run at candidate `a5a3818754d048cafddfda1cfdc2d2b095c4bc76` reached the same
+three outcomes for the same reasons. It ran on disposable VMs created from the catalog-pinned
+vendor cloud images while the lab hosts were unreachable.
+
+## Step durations (seconds)
 
 | Step | lab-fedora | lab-ubuntu | lab-rocky |
 |---|---|---|---|
-| operator prerequisites | 15 | 19 | 61 |
-| bootstrap + just | 8 | 1 | 6 |
-| kernel source | 61 | 62 | 60 |
-| `just setup` | 192 | 148 | 143 |
-| `prepare-local-libvirt-host` | 140 | 199 | 276 (failed) |
-| `demo-up.sh` | 258 | 251 | — |
-| `build-image.sh` | 114 | 126 | — |
-| first boot (node) | 108 | 155 | — |
-| repeat setup + prepare + stack | 138 | 130 | — |
-| second boot (node) | 131 | 131 | — |
-| **whole run** | **1170** | **1229** | **551** |
+| operator prerequisites | 12 | 10 | 42 |
+| bootstrap + just | 5 | 1 | 5 |
+| kernel source | 57 | 57 | 55 |
+| `just setup` | 118 | 111 | 101 |
+| `prepare-local-libvirt-host` | 102 | 101 | 99 (failed) |
+| `demo-up.sh` | 229 | 212 | — |
+| `build-image.sh` | 80 | 82 | — |
+| first boot (node) | 113 | 111 | — |
+| repeat setup + prepare + stack | 96 | 102 | — |
+| second boot (node) | 103 | 132 | — |
+| **whole run** | **920** | **922** | **304** |
 
 ## Operator prerequisite files
 
@@ -138,8 +144,8 @@ Those rehearsals produced the same per-family conclusions as the final runs.
 
 ## Limits
 
-- The hosts were disposable VMs rather than the shared lab guests. Their clean baseline is the
-  catalog-pinned vendor cloud image, plus a package upgrade on `lab-rocky`.
+- The clean baseline is the lab's verified `clean` snapshot. `lab-rocky` additionally received
+  a package upgrade and reboot, as described above.
 - Evidence files, transcripts and phase records stay private. This record publishes only
   outcomes, durations and content identities.
 - The qualifier checks accounting and identity, not whether a producer fabricated a digest
