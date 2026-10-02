@@ -205,6 +205,37 @@ def test_a_stack_deployed_from_another_revision_fails(cell: Cell, tmp_path: Path
     assert evidence.deployed_roles == other
 
 
+def test_a_node_exit_its_record_explains_keeps_the_boot_assertion(
+    cell: Cell, tmp_path: Path
+) -> None:
+    failed = [
+        Step(s.name, 1, s.seconds, s.transcript_sha256)
+        if s.name.endswith("-boot") and not s.name.startswith("fetch")
+        else s
+        for s in _steps()
+    ]
+    unknown = {**dict.fromkeys(ROLES, SHA), "authority": None}
+    evidence = _compose(
+        cell,
+        tmp_path,
+        steps=failed,
+        first=_phase("first-boot", passed=False, deployed=unknown),
+        second=_phase("second-boot", passed=False, deployed=unknown),
+    )
+    holds = {
+        name: json.loads((tmp_path / "artifacts" / f"{value}.json").read_text())["holds"]
+        for name, value in evidence.assertions.items()
+    }
+    assert evidence.outcome is Outcome.FAILURE
+    assert all(holds.values())
+
+
+def test_an_unexplained_node_exit_fails_the_boot(cell: Cell, tmp_path: Path) -> None:
+    steps = [Step("first-boot", 1, 1.0, DIGEST) if s.name == "first-boot" else s for s in _steps()]
+    evidence = _compose(cell, tmp_path, steps=steps)
+    assert evidence.outcome is Outcome.FAILURE
+
+
 def test_boot_assertions_hold_apart_from_confinement(cell: Cell, tmp_path: Path) -> None:
     unconfined = {"passed": False, "guest_label": "unconfined", "guest_confined": False}
     evidence = _compose(

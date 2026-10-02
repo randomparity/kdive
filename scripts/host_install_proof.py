@@ -397,6 +397,18 @@ def _artifact(directory: Path, payload: dict[str, object]) -> str:
     return value
 
 
+def _booted(steps: list[Step], record: PhaseRecord | None, copies: tuple[str, ...]) -> bool:
+    """The phase booted, its copies ran, and any node failure is one its record explains.
+
+    The node exits non-zero whenever its record lists a failure, so that exit alone says
+    nothing about the boot; an exit with a record that claims success is unexplained.
+    """
+    if record is None or not record.booted or not _steps_hold(steps, copies):
+        return False
+    node = [step for step in steps if step.name == record.phase]
+    return len(node) == 1 and (node[0].ok or not record.passed)
+
+
 def _steps_hold(steps: list[Step], required: tuple[str, ...]) -> bool:
     by_name = {step.name: step for step in steps}
     return all(name in by_name and by_name[name].ok for name in required)
@@ -418,13 +430,9 @@ def _holds(
     complete = len(both) == 2
     return {
         "clean-install": host.prepared and _steps_hold(steps, clean),
-        "first-boot": first is not None
-        and first.booted
-        and _steps_hold(steps, ("copy-bundle", "first-boot", "fetch-first-boot")),
+        "first-boot": _booted(steps, first, ("copy-bundle", "fetch-first-boot")),
         "repeat-setup": _steps_hold(steps, REPEAT_STEPS),
-        "second-boot": second is not None
-        and second.booted
-        and _steps_hold(steps, ("second-boot", "fetch-second-boot")),
+        "second-boot": _booted(steps, second, ("fetch-second-boot",)),
         "confinement": host.enforcing
         and complete
         and all(
