@@ -125,7 +125,7 @@ The change adds test code only. Boundaries it touches:
   real server. Control: the server's JWT verifier. The forged key is generated per run in memory
   and never written.
 - **Lab database** (existing): the snapshot reads with the DSN the carrier already uses
-  (`KDIVE_DATABASE_URL`). Table names come from `information_schema` and are quoted with
+  (`KDIVE_DATABASE_URL`). Table names come from `pg_catalog` and are quoted with
   `psycopg.sql.Identifier`; the project value is a bound parameter. Read-only queries.
 - **Evidence artifacts** (existing): observations hold tool names, digests, counts and synthetic
   claim values only, no tokens. Tokens are never written to an artifact.
