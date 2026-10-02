@@ -608,6 +608,61 @@ The artifacts under `coverage-evidence/artifacts/` hold assertion observations: 
 `os-release` fields, whether the boot ID changed, and cleanup counts. They hold no host names or
 keys. Check them before sharing.
 
+#### Deep lifecycle across representative guests (#2809)
+
+`tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle` has one parameter for each
+local-libvirt `deep-lifecycle` cell whose guest architecture is the host's: four families times
+the two pinned baselines in `fixtures/kernel/baselines.toml`. Each family runs on one
+representative catalog image (`REPRESENTATIVES` in `tests/integration/live_stack/deep_lifecycle.py`):
+`debian-kdive-ready-13`, `fedora-kdive-ready-44`, `rocky-kdive-ready-10` and
+`opensuse-leap-kdive-ready-15.6` on x86_64. A parameter uploads its baseline's fixture kernel,
+completes the build, installs and boots it, reconnects over SSH with the same key, checks the
+running release and GNU build ID against the fixture, loads the `loop` module and compares its
+bytes with the uploaded copy, then releases and proves owned cleanup, including the installed
+kernel file. The stack requirements are those of the image smoke above.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix            # one fresh directory per baseline below it
+for b in longterm stable; do
+  python3 scripts/kernel_fixtures.py build --baseline "$b" --arch "$(uname -m)" \
+    --source "$KDIVE_FIXTURE_ROOT/src-$b" --output "$KDIVE_FIXTURE_ROOT/$b" --jobs "$(nproc)"
+done
+examples/local-libvirt/build-image.sh <each representative image>
+uv run python -m tests.integration.live_stack.deep_lifecycle bindings --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+uv run python -m pytest -m live_stack tests/integration/test_deep_lifecycle_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Build the fixtures on the native architecture, on a Debian-family host until #3063 is fixed: on a
+host with both `rpm` and `dpkg-query` the fixture records an empty package inventory and `verify`
+rejects it. A missing `KDIVE_FIXTURE_ROOT`, a fixture that `verify` rejects, or an unregistered
+representative is `blocked` (`missing-prerequisite`); the other outcomes are those of the image
+smoke. A binding's kernel fields are null when its fixture is absent, which `qualify` reports as a
+missing required input.
+
+After an interrupted run, release the leftover allocation with `allocations.release` (or let the
+lease expire) and check `KDIVE_INSTALL_STAGING` (`/var/lib/kdive/install` on the demo lane) for
+the run's installed kernel.
+
+The four ppc64le local cells share the node and report `missing-result` (owner #2818) until a
+native POWER host runs it. Remote deep cells stay pending for #2810.
+
+Last run: candidate `749bd29d6` (server, worker and reconciler at that SHA), an Ubuntu 26.04 x86_64
+KVM lab host, fixtures `v6.18.54` (longterm) and `v7.2.8` (stable). Every cell proved `upload`,
+`install`, `reconnect`, `boot-identity` and `modules`, and failed `cleanup` on #3078: teardown
+leaves the installed kernel under `KDIVE_INSTALL_STAGING`.
+
+| Cell (`deep-lifecycle/local-libvirt/x86_64/…`) | Guest | Outcome | Failing assertion |
+|---|---|---|---|
+| `debian/longterm`, `debian/stable` | `debian:13` | failure | `cleanup` (#3078) |
+| `fedora/longterm`, `fedora/stable` | `fedora:44` | failure | `cleanup` (#3078) |
+| `enterprise/longterm`, `enterprise/stable` | `rocky:10` | failure | `cleanup` (#3078) |
+| `suse/longterm`, `suse/stable` | `opensuse-leap:15.6` | failure | `cleanup` (#3078) |
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
