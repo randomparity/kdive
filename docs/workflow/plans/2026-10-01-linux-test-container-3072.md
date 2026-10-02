@@ -15,8 +15,9 @@ Python 3.14, libseccomp through ctypes, pytest + xdist.
 Spec: [design](../specs/2026-10-01-linux-test-container-3072-design.md). Decision:
 [ADR-0717](../../adr/0717-native-arch-linux-test-container-and-aarch64-capture-filter.md).
 
-Expected implementation size: 230–330 changed lines (L) — the file map below: Dockerfile ~25,
-entry script ~25, recipe ~35, sandbox ~6, manifest maps 2, tests ~30, docs ~80, ADR amendment ~10.
+Expected implementation size: 300–390 changed lines (L) — the file map below: Dockerfile ~25,
+entry script ~30, recipe ~35, sandbox ~6, manifest maps 2, tests ~30, docs ~40 added plus ~85
+deleted from the solution doc's manual recipe, ADR amendment ~10.
 
 ## Global Constraints
 
@@ -120,7 +121,7 @@ Steps:
     && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin
    RUN UV_TOOL_BIN_DIR=/usr/local/bin UV_TOOL_DIR=/opt/uv-tools uv tool install rust-just==1.58.0 \
     && useradd --create-home --uid 1000 tester \
-    && install -d -o tester -g tester /work /home/tester/.cache/uv
+    && install -d -o tester -g tester /work /home/tester/.cache /home/tester/.cache/uv
    COPY run-suite.sh /usr/local/bin/run-suite
    ENV UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
    WORKDIR /work
@@ -150,6 +151,9 @@ Steps:
 
    commit=$1
    shift
+   # The read-only mount is owned by root (Docker Desktop) or a foreign uid, so git refuses it
+   # as dubious ownership without this entry.
+   git config --global --add safe.directory /repo
    git clone --quiet --no-checkout /repo /work/src
    cd /work/src
    git checkout --quiet --detach "$commit"
@@ -189,6 +193,7 @@ Steps:
          --volume "$common_dir:/repo:ro" \
          --volume "$socket:/var/run/docker.sock" \
          --volume kdive-test-linux-uv-cache:/home/tester/.cache/uv \
+         --env PYTHONHASHSEED \
          --env TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
          --add-host host.docker.internal:host-gateway \
          kdive-test-linux "$commit" {{ARGS}}
@@ -196,12 +201,11 @@ Steps:
 
 6. In `.github/dependabot.yml`, add `- "/tests/container"` to the docker ecosystem's
    `directories`, and extend the comment above it to name the test image.
-7. Run the four verifications above. Then run `just lint` (exit 0).
-8. Commit: `feat(test): add just test-linux native-arch container gate`.
-
-If `git clone` in step 4 fails with `detected dubious ownership`, add
-`git config --global --add safe.directory /repo` before the clone, rerun the third verification,
-and record the observed error in the commit message.
+7. Run the `test *ARGS`, engine-selection, and shell-lint verifications, and `just lint`
+   (exit 0).
+8. Commit: `feat(test): add just test-linux native-arch container gate`. The container clones
+   the commit, so the image + entry script verification runs only after this commit.
+9. Run the image + entry script verification.
 
 ## Task 2 — aarch64 in the capture filter and the bootstrap manifest
 
@@ -379,8 +383,10 @@ it, as its own commit.
   `2c4df02fd` (`28 failed … 37 errors`).
 - checkout unchanged — Mode: focused-test. Before and after the run, record
   `git status --porcelain` in the worktree and in the main checkout, and
-  `stat -f '%m %N'` of the worktree `.git` file and of every `__pycache__` directory under the
-  worktree. Both records must be equal.
+  the mtimes of the worktree `.venv`, the worktree `.git` file, and every `__pycache__`
+  directory under the worktree, with
+  `python3 -c 'import os,sys;[print(os.stat(p).st_mtime_ns,p) for p in sys.argv[1:]]' .venv .git $(find . -name __pycache__ -type d -not -path './.venv/*')`
+  (portable under BSD or GNU `stat`). Both records must be equal.
 - worker cap — Mode: focused-test. `just test-linux HEAD tests/domain/test_errors.py -v` prints
   `created: 8/8 workers` (`-v` cancels the recipe's `-q`, so xdist prints its worker line).
 

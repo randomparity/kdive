@@ -58,6 +58,8 @@ change. The operator also asked that the recipe support Docker and Podman.
 
 ## Considered & rejected
 
+- **Keep the manual recipe.** verified: on `2c4df02fd` it left a 50-failure amd64 baseline that
+  each run had to compare by hand.
 - **Emulated amd64 by default.** verified: the manual recipe on `2c4df02fd` under Rosetta gave
   `seccomp_load failed: 125` for 36 capture tests and took 4 min 52 s against 3 min 29 s native.
 - **Skip the capture tests on aarch64.** judgment: the operator chose to keep that coverage on

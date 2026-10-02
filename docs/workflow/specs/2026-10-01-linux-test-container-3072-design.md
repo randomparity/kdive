@@ -39,6 +39,7 @@ The charter in the `WORK:SCOPE` comment on #3072 governs. In summary:
      `/repo`, read-only;
    - the engine socket at `/var/run/docker.sock`;
    - the named volume `kdive-test-linux-uv-cache` at `/home/tester/.cache/uv`;
+   - `PYTHONHASHSEED` passed through from the host when it is set;
    - `TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal` and
      `--add-host host.docker.internal:host-gateway`.
 
@@ -54,7 +55,8 @@ The charter in the `WORK:SCOPE` comment on #3072 governs. In summary:
    `rust-just==1.58.0`, and adds the user `tester` (uid 1000). It has no `--platform`, so it
    builds at the engine's native arch. Dependabot's docker ecosystem lists `/tests/container`.
 3. **Entry script.** `tests/container/run-suite.sh <commit>`. As root, it adds `tester` to the
-   group that owns the socket, then re-executes as `tester`. As `tester`, it clones `/repo` into
+   group that owns the socket, then re-executes as `tester`. As `tester`, it marks `/repo` as a
+   git `safe.directory` (the mount is owned by root or a foreign uid), clones `/repo` into
    `/work/src`, checks out the commit detached, runs `uv sync --locked`, and runs
    `KDIVE_REQUIRE_DOCKER=1 just test --maxprocesses=8 <ARGS>`. The script's exit code is the suite's.
 4. **`test` recipe.** `test *ARGS:` appends `ARGS` to its pytest command. Without arguments the
@@ -79,9 +81,11 @@ exclusion 6).
 ## Failure model
 
 1. **Actors and deployments**
-   - A developer at a terminal on macOS (Apple silicon or Intel) with Docker Desktop. Verified.
+   - A developer at a terminal on macOS on Apple silicon with Docker Desktop. Verified.
+   - Intel macOS with Docker Desktop. Expected, not verified.
    - The same developer with Podman (`podman machine`). Supported, not verified.
-   - A Linux developer who runs the recipe. Supported, not verified.
+   - amd64 or arm64 Linux with Docker. Expected, not verified. Other architectures (ppc64le)
+     are not supported by this image: its base indexes list only amd64 and arm64.
    - Worker hosts that run the capture filter: `x86_64` and `ppc64le` deployments. `aarch64` is
      reached only by the test suite.
 2. **Invariants and assets at stake**
@@ -138,8 +142,9 @@ exclusion 6).
 
 1. On Apple silicon with Docker Desktop, `just test-linux` on a clean `main` that contains this
    change exits 0. Measured with `just test-linux > <log> 2>&1; echo rc=$?`.
-2. The run uses the same `_TEST_MARKERS`, `_TEST_XDIST`, `PYTHONHASHSEED`, and `--tb=short` as
-   `just test`, because it calls `just test`.
+2. The run uses the same `_TEST_MARKERS`, `--dist worksteal`, and `--tb=short` as `just test`,
+   because it calls `just test`. The seed is the same, including a host `PYTHONHASHSEED`
+   override. The worker cap is 8, by design.
 3. After a run from a worktree, `git status --porcelain` in that worktree and in the main
    checkout is the same as before, and the mtimes of `.venv`, the worktree `.git` file, and every
    `__pycache__` directory in the worktree do not change.
