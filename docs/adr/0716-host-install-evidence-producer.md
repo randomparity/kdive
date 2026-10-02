@@ -12,7 +12,8 @@ change that contract, its cell shape, or the qualifier.
 
 The contract requires one result per host family carrying six assertions — `clean-install`,
 `first-boot`, `repeat-setup`, `second-boot`, `confinement`, `cleanup` — plus the candidate
-SHA, deployed `server`/`worker`/`reconciler`/`authority` revisions, the host and guest
+SHA, the deployed `server`/`worker`/`reconciler` revisions (`authority` is required only for
+authority-routed cells, #3066; a reported one must still be the candidate), the host and guest
 platform, the accelerator and the six kernel identity inputs. Its `node_id` must name an
 existing pytest function.
 
@@ -41,7 +42,7 @@ the same producer on a different host architecture.
    record and does not judge the cell.
 3. **The runner composes the single result.** It records each assertion's retained artifact
    digest. A cell succeeds only when every step exits 0, both phase records pass, and both
-   phases report the same context and the candidate for every role. It writes the independent
+   phases report the same context and the candidate for every role the cell requires. It writes the independent
    binding before either boot phase. That binding takes kernel identities from the verified
    pinned fixture (ADR-0693), the guest platform from the catalog row, and the host platform
    from the pre-install observation.

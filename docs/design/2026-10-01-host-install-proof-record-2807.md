@@ -2,10 +2,10 @@
 
 - **Issue:** #2807 · **Decision:** [ADR-0716](../adr/0716-host-install-evidence-producer.md)
   · **Design:** [spec](../workflow/specs/2026-10-01-host-install-proof-design.md)
-- **Candidate:** `d1b06633184b7baf90505f2b5d71f84f9a80d8a8`. Server, reconciler and worker
-  reported this revision on every host. Commits after it on the branch change only
+- **Candidate:** `f119602a818e4106d4067fd7a542cc64c2a58d66`. Server, reconciler and worker
+  reported this revision on every host that booted. Commits after it on the branch change only
   documentation.
-- **Matrix:** `16a04fca5f067cf68caf3a5b267e12614ca03cb0c9aca6eacad2c6e188c2b8c9`
+- **Matrix:** `58995223c12ae6a536364c29ccd2be39edb7d86b6278682c9da3ba3f46b88cb5`
 - **Date:** 2026-10-02 (UTC).
 - **Hosts:** exclusive, snapshot-capable disposable lab test hosts with nested KVM, one per
   family. In this record they are `lab-ubuntu` (Ubuntu 26.04, AppArmor enabled), `lab-fedora`
@@ -28,22 +28,20 @@
 
 `coverage_campaign qualify` over the merged runs at the candidate:
 
-| Required cell | Outcome | Qualified | Reasons | Owner of the blocker |
+| Required cell | Outcome | Qualified | Reasons | Linked cause |
 |---|---|---|---|---|
-| `host-install/local-libvirt/x86_64/fedora` | failure | no | deployed-role-missing (`authority`) | #3066 |
-| `host-install/local-libvirt/x86_64/debian` | failure | no | deployed-role-missing (`authority`); `confinement` fails | #3066, #3067 |
-| `host-install/local-libvirt/x86_64/enterprise` | failure | no | deployed-role-missing, required-input-missing (stopped at the operator prerequisites) | lab baseline, #3068 |
+| `host-install/local-libvirt/x86_64/fedora` | success | yes | none | — |
+| `host-install/local-libvirt/x86_64/debian` | failure | no | reported-failure (`confinement`) | #3067 |
+| `host-install/local-libvirt/x86_64/enterprise` | failure | no | deployed-role-missing, required-input-missing (stopped at the operator prerequisites) | lab baseline; then #3068 |
 
 The three ppc64le cells share the bound node and stay `not-run` / `missing-result` until #2818
 runs them on native POWER.
 
-**The `authority` role.** The contract requires `authority` for every host-install cell. The
-shared ADR-0715 reader takes that role from the provider authority's installed revision, and
-the local-libvirt host path installs no provider authority. So every cell here reports it
-missing. #3066 is changing the contract to require `authority` only for authority-routed
-cells, and that change includes the host-install cells. The installed lifecycle witness is
-checked separately: its stamp and its venv's code digest matched the candidate on both hosts
-that reached a boot, as a prerequisite inside the `confinement` assertion.
+The host-install cells require the `server`, `worker` and `reconciler` revisions (#3066). The
+node reads all deployed roles through the shared ADR-0715 reader. These hosts run no provider
+authority, so `authority` is absent; a reported one would have to equal the candidate. The
+installed lifecycle witness is checked separately, as a prerequisite inside `confinement`. Its
+revision stamp and its venv's code digest both matched the candidate on both hosts that booted.
 
 ## What each run proved
 
@@ -53,47 +51,44 @@ that reached a boot, as a prerequisite inside the `confinement` assertion.
 | `first-boot` | holds | holds | not reached |
 | `repeat-setup` | holds | holds | not reached |
 | `second-boot` | holds | holds | not reached |
-| `confinement` | holds: `svirt_t` with per-boot MCS pairs (`s0:c876,c974`, `s0:c42,c717`) | fails: guest qemu `unconfined` in both boots | not reached |
+| `confinement` | holds: `svirt_t` with per-boot MCS pairs (`s0:c262,c492`, `s0:c488,c746`) | fails: guest qemu `unconfined` in both boots | not reached |
 | `cleanup` | holds: System `torn_down`, domain absent, both boots | holds | not reached |
 | Deployed `server`/`worker`/`reconciler` | candidate, both phases | candidate, both phases | not reached |
-| Deployed `authority` | unknown | unknown | not reached |
 
-- **lab-fedora** proved every assertion. Its one gap is the `authority` role.
 - **lab-ubuntu** booted the bundle kernel in both boots (the console showed
   `Linux version 6.18.54-g1b357ecb3213`), and its worker prerequisites held. Guest confinement
   failed: the session libvirt daemon reports security model `none`, so qemu runs `unconfined`
   while host AppArmor stays enabled (#3067).
 - **lab-rocky** stopped in its operator prerequisites. Its `clean` snapshot runs kernel
   `6.12.0-211.16.1`, the repositories carry `kernel-modules-extra` only for newer kernels, and
-  Docker CE could not start:
-  `iptables ... -m addrtype ...: Extension addrtype revision 0 not supported, missing kernel
-  module?`. This is the lab baseline's state, not a KDIVE defect. An earlier lab run on the
-  same guest, with packages upgraded and the guest rebooted first, got past this point and then
-  stopped in `just prepare-local-libvirt-host`, where the EL10 guestfs binding build enabled
-  Docker's `docker-ce-stable-source` repository (#3068).
+  Docker CE could not start. An earlier run on the same guest recorded the cause in the Docker
+  journal: `iptables ... -m addrtype ...: Extension addrtype revision 0 not supported, missing
+  kernel module?`. This is the lab baseline's state, not a KDIVE defect.
+  A lab run on the same guest, with packages upgraded and the guest rebooted first, got past
+  this point. It then stopped in `just prepare-local-libvirt-host`, where the EL10 guestfs
+  binding build enabled Docker's `docker-ce-stable-source` repository (#3068).
 
 ## Step durations (seconds)
 
 | Step | lab-fedora | lab-ubuntu | lab-rocky |
 |---|---|---|---|
-| operator prerequisites | 12 | 12 | 75 (failed) |
-| bootstrap + just | 3 | 1 | — |
-| kernel source | 59 | 61 | — |
-| `just setup` | 100 | 90 | — |
-| `prepare-local-libvirt-host` | 119 | 121 | — |
-| `demo-up.sh` | 195 | 182 | — |
-| `build-image.sh` | 80 | 104 | — |
-| first boot (node) | 115 | 119 | — |
-| repeat setup + prepare + stack | 92 | 91 | — |
+| operator prerequisites | 12 | 8 | 74 (failed) |
+| bootstrap + just | 5 | 1 | — |
+| kernel source | 56 | 56 | — |
+| `just setup` | 99 | 89 | — |
+| `prepare-local-libvirt-host` | 105 | 100 | — |
+| `demo-up.sh` | 205 | 185 | — |
+| `build-image.sh` | 74 | 74 | — |
+| first boot (node) | 90 | 119 | — |
+| repeat setup + prepare + stack | 93 | 90 | — |
 | second boot (node) | 104 | 132 | — |
-| **whole run** | **883** | **917** | **75** |
+| **whole run** | **846** | **856** | **74** |
 
 ## Earlier runs
 
-Earlier full runs at intermediate branch revisions showed the same Fedora and Ubuntu behaviour.
-Those revisions still mapped the lifecycle witness to the `authority` role, so Fedora then
-qualified `success`. The runs were on lab hosts and, before the lab hosts were reachable, on
-disposable VMs built from the catalog-pinned cloud images. They also fixed three runner defects:
+Earlier full runs at intermediate branch revisions reached the same outcome for each family.
+They ran on these lab hosts and, before the lab hosts were reachable, on disposable VMs built
+from the catalog-pinned cloud images. They also fixed three runner defects:
 
 - A bundle clone has no `origin/main`, and the setup hooks read it.
 - A clean host has no kernel tree, and host preparation grants traversal only to a tree that

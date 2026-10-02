@@ -28,8 +28,7 @@ guest, repeated setup, and booted again.
 - **Ubuntu 26.04:** installed and booted, but its session-mode guests run unconfined under
   AppArmor (#3067).
 - **Rocky Linux 10:** host preparation stops when Docker comes from Docker's repository (#3068).
-- **All three:** the host-install cells also await #3066, which stops requiring a provider
-  authority on these hosts.
+  The lab's stale clean image cannot start Docker at all until its packages are upgraded.
 
 See the [proof record](../../design/2026-10-01-host-install-proof-record-2807.md).
 
