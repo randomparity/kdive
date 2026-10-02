@@ -69,7 +69,7 @@ deployed role revisions, so no cell can qualify today.
      - `blocked` (`missing-prerequisite`) when the stack is configured but the issuer, the
        database or the registered image is missing;
      - `failure`, written before any mutation, when the revisions differ or the checkout is
-       dirty;
+       dirty. A missing role does not stop the scenario: it is recorded, and pytest fails;
      - `failure` with the assertions proven so far when any assertion fails;
      - otherwise `success`.
    - The pytest test fails unless the outcome is `success` and `identity_problems` is empty.
@@ -78,8 +78,8 @@ deployed role revisions, so no cell can qualify today.
      skipped scenario visible (issue Expected 3).
 6. `obligations.toml` maps `image-smoke` to the node. The scenario ID is shared, so the six
    ppc64le cells then report `missing-result` (owner #2818) rather than
-   `pending-implementation`. The same node runs them on a native POWER host. The contract tests
-   are updated to say so.
+   `pending-implementation`. On a POWER host the node selects them, but proving them stays with
+   #2818. The contract tests are updated to match.
 7. `live-testing.md` documents the run.
 
 ## Failure model
