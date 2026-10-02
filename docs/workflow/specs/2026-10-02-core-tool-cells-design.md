@@ -125,8 +125,9 @@ The change adds test code only. Boundaries it touches:
 - **Server HTTP authentication** (existing, exercised not widened): a forged token is sent to the
   real server. Control: the server's JWT verifier. The forged key is generated per run in memory
   and never written.
-- **Lab database** (existing): the snapshot reads with the DSN the carrier already uses
-  (`KDIVE_DATABASE_URL`). Table names come from `pg_catalog` and are quoted with
+- **Lab database** (existing): the snapshot reads with `KDIVE_DATABASE_URL`, which the runbook
+  sets to the migration-owner DSN because the server role cannot read every table with a
+  `project` column; the session is set read-only. Table names come from `pg_catalog` and are quoted with
   `psycopg.sql.Identifier`; the project value is a bound parameter. Read-only queries.
 - **Evidence artifacts** (existing): observations hold tool names, digests, counts and synthetic
   claim values only, no tokens. Tokens are never written to an artifact.

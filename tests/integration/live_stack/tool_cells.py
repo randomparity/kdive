@@ -316,6 +316,8 @@ async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
     table the DSN cannot read fails the snapshot instead of leaving it.
     """
     async with await psycopg.AsyncConnection.connect(db_url) as conn:
+        # The documented DSN is the schema owner's; a read-only session keeps the snapshot a read.
+        await conn.set_read_only(True)
         cursor = await conn.execute(
             "SELECT c.relname FROM pg_catalog.pg_attribute a "
             "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
