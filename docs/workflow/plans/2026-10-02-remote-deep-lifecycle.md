@@ -82,7 +82,9 @@ Steps:
    ```
    In `test_debug_session_covers_every_advertised_transport`, expect
    `f"tool/remote-libvirt/debug.start_session/{mode}/functional"` for `remote-libvirt` and the
-   unqualified form otherwise. Add:
+   unqualified form otherwise. In `test_capability_modes_and_deployed_roles_follow_operation_contract`
+   (the `introspect.run` assertion) expect `tool/remote-libvirt/introspect.run/live/functional` for
+   remote cells. Add:
    ```python
    def test_remote_tool_scenarios_never_share_a_local_node(inventory: Inventory) -> None:
        cells = build_contract(inventory=inventory).cells
@@ -189,21 +191,25 @@ ImportError before the module exists):
   non-zero exit → `AssertionError`.
 - `volume_absent`: refreshes every active pool; `VIR_ERR_NO_STORAGE_VOL` → True; a found volume →
   False; any other libvirt error propagates.
-- `guest_boot_kernel` sends `sha256sum -- '/boot/vmlinuz-6.18.54'` (via a patched `ssh`) and
-  returns `(digest, None)`; a quote-bearing release is quoted.
+- `guest_boot_kernel` sends `sha256sum -- /boot/vmlinuz-6.18.54` (via a patched `ssh`) and
+  returns `(digest, None)`; a release `6.1'x` is sent as `shlex.quote("/boot/vmlinuz-6.1'x")`.
+- Frame identity: with a faked probe (`rocky:10`, `x86_64`), the `run.observed` host fields the
+  frame's `observe_host(run, host)` sets make `run.context(identity)` report the probe's host,
+  not `identity`'s, and equal what `bindings` writes for the same probe; a probe arch other than
+  the cell's raises `ScenarioStop(BLOCKED)`.
 - `remote_profile` parses through `ProvisioningProfile.parse` with the given volume.
-- `bindings` binds exactly the remote deep cells of the host arch; representatives get guest
+- `bindings` binds exactly `remote_cells()` (the 8 owner-2810 cells); representatives get guest
   identity, `kvm`, the faked volume digest and fixture kernel inputs; blocked families get null
-  guest fields; a ppc64le cell is absent for an x86_64 host.
+  guest fields; no ppc64le cell appears.
 
 Interfaces: consumes Task 2; Task 4 relies on `REMOTE_BLOCKED: dict[str, str]`,
-`REMOTE_REPRESENTATIVES: dict[str, RemoteImage]`, `remote_cells() -> list[Cell]`,
-`provider_arch() -> str | None`, `guest_boot_kernel: InstalledKernel`,
-`async on_remote_system(run, base_url, issuer, db_url, *, project, family, body: CatalogBody)`.
+`REMOTE_REPRESENTATIVES: dict[str, RemoteImage]`, `remote_cells() -> list[Cell]` (owner 2810),
+`guest_boot_kernel: InstalledKernel`, `async on_remote_system(run, base_url, issuer, db_url, *, project, family, body: CatalogBody)`.
 
 Steps:
 1. Create `remote_lifecycle.py` with the module docstring of the design's item 3 and:
-   `HOST_SSH_ENV = "KDIVE_REMOTE_HOST_SSH"`; `RemoteImage` frozen dataclass; the two maps;
+   `HOST_SSH_ENV = "REMOTE_PROVIDER_SSH"`; `RemoteImage` frozen dataclass; the two maps;
+   `remote_cells()` (contract `deep-lifecycle` cells with `owner == 2810`);
    `HOST_PROBE = 'cat /etc/os-release; printf "machine=%s\\nvirt=%s\\n" "$(uname -m)" "$(systemd-detect-virt || true)"'`;
    `RemoteHost(dest, pool, host_os, host_arch, virt)` frozen dataclass;
    `destination()` (env → `None` | validated str, `ValueError` otherwise);
@@ -211,18 +217,19 @@ Steps:
    `os_identity(stdout)`, `key_values` for `machine`/`virt`);
    `observer(dest)` (`libvirt.open(f"qemu+ssh://{dest}/system?no_tty=1")`);
    `volume_absent(conn, path)`; `@cache volume_sha256(dest, pool, volume)` (`vol.download` into
-   `conn.newStream(0)`, `stream.recvAll(lambda _s, data, d: d.update(data), digest)`,
+   `conn.newStream(0)`, `stream.recvAll(_feed, digest)` with
+   `def _feed(_stream, data: bytes, digest) -> int: digest.update(data); return len(data)`,
    `stream.finish()`, connection closed in `finally`);
    `staged_volume(name)` (the `remote-libvirt` `[[image]]` with a `StagedSource`);
    `remote_host()` (raises `ScenarioStop(Outcome.BLOCKED, …)` for an unset/invalid destination,
    instance count ≠ 1, or a failed probe; pool from `remote_config_for_resource(name).storage_pool`);
-   `@cache provider_arch()` (`remote_host().host_arch`, `None` on `ScenarioStop`);
+   `observe_host(run, host)` (`ScenarioStop(BLOCKED)` unless `host.host_arch == run.cell.guest_arch`;
+   then `run.observed |= {"host_os": …, "host_arch": …}` and the `provider_host` artifact);
    `remote_profile(arch, volume)` (`disk-image`, `vcpu` 2, `memory_mb` 2048,
    `REMOTE_ALLOCATION_DISK_GB`, `kernel_source_ref` `"remote-deep-lifecycle-unread"`,
    `{"remote-libvirt": {"base_image_volume": volume}}`);
    `guest_boot_kernel(_system_id, endpoint, key, release)`;
-   `on_remote_system` exactly as design item 3 (host artifact `{"provider_host": {"os", "arch",
-   "virtualization"}}`; domain XML read through `observer`; cleanup
+   `on_remote_system` exactly as design item 3 (`observe_host` first; domain XML read through `observer`; cleanup
    `release_and_verify(..., connect=partial(observer, host.dest), absent=partial(volume_absent, conn))`
    with `conn = observer(host.dest)` closed afterwards; `cleanup_attempt` on failure);
    `bindings(candidate, *, root, matrix, host, digest=volume_sha256, fixture=load_fixture,
@@ -248,8 +255,7 @@ Steps:
    `test_deep_lifecycle_live._deep`, then `on_remote_system(..., family=family, body=body)` where
    `body` calls `deep_body(..., entry=REMOTE_REPRESENTATIVES[family], installed_kernel=guest_boot_kernel)`,
    then re-verifies the fixture. `test_remote_deep_lifecycle(cell, tmp_path)` parametrized over
-   `remote_cells()` (ids `f"{c.guest_arch}-{c.family}-{baseline(c)}"`): skip when
-   `provider_arch()` is not `None` and differs from `cell.guest_arch` (reason names #2818), else
+   `remote_cells()` (ids `f"{c.family}-{baseline(c)}"`) runs
    `run_cell(cell, partial(_deep, tmp=tmp_path))`.
 2. `obligations.toml` `[implementations]`: the two `deep-lifecycle/remote-libvirt/*` rows; update
    the mapping test; green; commit `test(live-stack): drive the remote deep lifecycle (#2810)`.
@@ -262,8 +268,9 @@ checks run in `just ci`).
 Steps: add "## 7. Remote deep lifecycle (#2810)" to `remote-live-stack.md`: topology (control
 plane runs the stack and pytest; a separate x86_64 provider host prepared with the
 `libvirt_tls`/`libvirt_pool_net` roles and `image.yml` with `host_images` set to the two
-representatives); observer access (`KDIVE_REMOTE_HOST_SSH`, libvirt group, known host key);
-`ssh_addr`/`ssh_range` required; fixtures (`KDIVE_FIXTURE_ROOT`, as the live-testing runbook);
+representatives); observer access (`REMOTE_PROVIDER_SSH`, libvirt group, known host key);
+`ssh_addr`/`ssh_range` required, with a source-restricted firewalld rich rule opening that range
+to the control plane (as `gdbstub_acl` does for the gdbstub range); fixtures (`KDIVE_FIXTURE_ROOT`, as the live-testing runbook);
 `python -m tests.integration.live_stack.remote_lifecycle bindings`, the pytest node, `evidence
 assemble`, `qualify`; blocked families and owners; manual release after a killed run. In
 `coverage-qualification.md` say the remote deep lifecycle is bound and remote tool scenario IDs

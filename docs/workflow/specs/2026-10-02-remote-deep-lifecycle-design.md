@@ -50,29 +50,37 @@ the remote tool cells implemented.
      install helper), suse → #3082 (no SUSE remote image). A unit test requires every remote deep
      cell's family to be in exactly one map and every representative to match the Ansible
      catalog's distro/version.
-   - **Observer** (`KDIVE_REMOTE_HOST_SSH`, an operator `user@host` SSH destination, validated
-     `^[A-Za-z0-9][A-Za-z0-9._@-]*$`; unset → `blocked`): the test's own channel to the provider host, independent
-     of the worker's TLS identity. `host_probe` runs one fixed command over `ssh -o BatchMode=yes`
-     → `os-release` identity, `uname -m`, `systemd-detect-virt`. `observer()` opens
+   - **Observer** (`REMOTE_PROVIDER_SSH`, an operator `user@host` SSH destination, validated
+     `^[A-Za-z0-9][A-Za-z0-9._@-]*$`; unset → `blocked`; unprefixed because it is a test-only
+     input, which `env-docs-check` would otherwise require in the product config catalog): the
+     test's own channel to the provider host, independent of the worker's TLS identity.
+     `host_probe` runs one fixed command over `ssh -o BatchMode=yes` → `os-release` identity,
+     `uname -m`, `systemd-detect-virt`. `observer()` opens
      `qemu+ssh://<dest>/system?no_tty=1` read through libvirt for the domain XML, volume lookups
      and the base volume's streamed SHA-256 (cached per volume per process).
-   - `on_remote_system(run, base_url, issuer, db_url, *, project, image, body)`: exactly one
-     `[[remote_libvirt]]` instance and a staged `[[image]]` named `image` are required, else
-     `blocked`. Observes host identity and image digest; allocates `{"mode": "kind", "kind":
+   - `on_remote_system(run, base_url, issuer, db_url, *, project, family, body)`: a blocked
+     family, a provider host whose arch is not the cell's, anything but exactly one
+     `[[remote_libvirt]]` instance, or no staged `[[image]]` for the family's representative →
+     `blocked` before any mutation. It sets `run.observed` `host_os`/`host_arch` from the probe
+     (overriding the control-plane identity `CellRun.context` would otherwise record) and
+     `image_sha256` from the observer, then allocates `{"mode": "kind", "kind":
      "remote-libvirt"}`; provisions the disk-image profile with that volume; reads the remote
      domain XML (accelerator from `type`, owned disks from `<source file>`); runs `body`; proves
      `cleanup` with `release_and_verify(connect=observer, absent=volume_absent)`. A volume is
      absent only when every active pool has been refreshed and no pool resolves its path.
-   - `bindings` command: the expected `Context` of each x86_64 remote deep cell (host from the
+     Released capacity is kdive's own accounting of the remote resource
+     (`resources.availability`, as #2809); the remote-host observations are domain and volume
+     absence.
+   - `bindings` command: the expected `Context` of each #2810 cell (host from the same
      probe, guest from the representative, `kvm`, image digest, kernel inputs as #2809); blocked
      families get null guest fields.
 4. **Test** `tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle`,
-   `live_stack`, parametrized over every remote deep cell. A cell whose `guest_arch` differs from
-   the probed provider-host arch skips before `run_cell` (it is #2818's; no record). Blocked
-   families stop `blocked` naming the owner issue before any mutation. Otherwise `run_cell` →
+   `live_stack`, parametrized over the 8 cells owned by #2810 (remote x86_64); #2818's ppc64le
+   remote cells never enter it. `run_cell` →
    `on_remote_system` → `deep_body` (upload with `root_fs="xfs"`; both representatives are XFS).
 5. **Docs**: a "Remote deep lifecycle" section in `docs/operating/runbooks/remote-live-stack.md`
-   (topology, observer access, image staging, fixtures, bindings, run, assemble, qualify); one
+   (topology, observer access, a source-restricted firewalld rule opening `ssh_addr:ssh_range` to
+   the control plane, image staging, fixtures, bindings, run, assemble, qualify); one
    sentence in `docs/development/coverage-qualification.md`.
 
 ## Failure model
@@ -99,7 +107,7 @@ the remote tool cells implemented.
 ## Threat model
 
 - Boundaries: guest SSH output (untrusted) → assertions; provider-host SSH and libvirt answers
-  → assertions; operator env (`KDIVE_REMOTE_HOST_SSH`) → an `ssh` argv and a libvirt URI.
+  → assertions; operator env (`REMOTE_PROVIDER_SSH`) → an `ssh` argv and a libvirt URI.
 - Controls: commands sent to guest and host are literals or the fixture's release (validated
   against `uname -r`, `shlex.quote`d); the destination must match the regex above, so it cannot
   start with `-` and be parsed as an `ssh` option; module paths stay confined to the
