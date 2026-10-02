@@ -38,7 +38,7 @@ deployed role revisions, so no cell can qualify today.
    `live_stack`, parametrized over the contract's `image-smoke` cells whose guest architecture is
    the host's. Probes and bindings live in `tests/integration/live_stack/image_smoke.py`.
    The test proves the assertions in order:
-   - **acquire**: `images.list` and `images.describe` find a `ready` local-libvirt image with the
+   - **acquire**: `images.list` and `images.describe` find a `registered` (bootable) local-libvirt image with the
      cell's name and architecture, staged beforehand by `examples/local-libvirt/build-image.sh`.
    - **first-boot**: provision `{kind: "catalog", name}`, wait for `ready`, and find the
      `kdive-ready` console marker.

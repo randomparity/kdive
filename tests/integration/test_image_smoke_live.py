@@ -158,7 +158,7 @@ async def _acquire(op: LiveStackClient, run: _Run) -> None:
         )
     described = ok(await scalar(op, "images.describe", image_id=match.object_id), "acquire")
     digest = str(described.data.get("digest", ""))
-    assert described.data.get("state") == "ready", f"image state {described.data.get('state')}"
+    assert described.data.get("state") == "registered", f"image state {described.data.get('state')}"
     assert digest.startswith("sha256:") and len(digest) == 71, f"image digest {digest!r}"
     run.image_sha256 = digest.removeprefix("sha256:")
     run.prove(
