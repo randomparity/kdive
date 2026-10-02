@@ -39,6 +39,7 @@ from scripts.host_install_proof import (
     kernel_fields,
     label_confined,
     package_digest,
+    qemu_pid,
 )
 from tests.integration.live_stack.skew import probe_stack_skew, repo_facts
 from tests.integration.live_stack.spine import (
@@ -108,11 +109,14 @@ def _deployed(candidate: str, base_url: str, failures: list[str]) -> dict[str, s
     if facts is None or facts.head != candidate or facts.newest_modified_source_mtime():
         failures.append("checkout is not the clean candidate")
         return dict.fromkeys(ROLES)
-    revisions = probe_stack_skew(base_url).revisions
+    probe = probe_stack_skew(base_url)
     deployed: dict[str, str | None] = {}
     for role in ("server", "reconciler", "worker"):
-        reported = revisions.get(role)
+        reported = probe.revisions.get(role)
         deployed[role] = facts.resolve(reported) if reported else None
+    if probe.worker_pids is None:
+        failures.append("worker inventory disagrees with the reported worker builds")
+        deployed["worker"] = None
     try:
         stamp = (_LIFECYCLE / "revision").read_text().strip()
         located = _lifecycle_python("import kdive, os; print(os.path.dirname(kdive.__file__))")
@@ -157,10 +161,11 @@ def _guest_observation(system_id: str, host_arch: str) -> tuple[str, str, bool]:
     kind = ElementTree.fromstring(xml).get("type")
     accelerator = ARCH_LANE[host_arch][0] if kind == "kvm" else "tcg"
     rows = subprocess.run(
-        ["ps", "-ww", "-eo", "label=,args="], capture_output=True, text=True, check=True
-    ).stdout.splitlines()
-    labels = [row.split(None, 1)[0] for row in rows if f"guest={name}" in row]
-    label = labels[0] if len(labels) == 1 else "-"
+        ["ps", "-ww", "-eo", "pid=,args="], capture_output=True, text=True, check=True
+    ).stdout
+    pid = qemu_pid(rows, name)
+    # The whole label, mode suffix included: AppArmor prints `libvirt-<uuid> (enforce)`.
+    label = "-" if pid is None else Path(f"/proc/{pid}/attr/current").read_text().strip("\0\n ")
     return accelerator, label, label_confined(label, uuid)
 
 

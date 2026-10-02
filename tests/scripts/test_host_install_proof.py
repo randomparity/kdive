@@ -32,6 +32,7 @@ from scripts.host_install_proof import (
     merge,
     package_digest,
     parse_host,
+    qemu_pid,
     read_phase,
     run_step,
     scp_argv,
@@ -214,6 +215,11 @@ def test_boot_assertions_hold_apart_from_confinement(cell: Cell, tmp_path: Path)
     assert [name for name, held in holds.items() if not held] == ["confinement"]
 
 
+def test_a_failed_phase_verdict_fails_the_cell(cell: Cell, tmp_path: Path) -> None:
+    failed = _phase("second-boot", passed=False, failures=["a later node check"])
+    assert _compose(cell, tmp_path, second=failed).outcome is Outcome.FAILURE
+
+
 def test_missing_role_is_omitted_rather_than_guessed(cell: Cell, tmp_path: Path) -> None:
     second = _phase("second-boot", deployed={**dict.fromkeys(ROLES, SHA), "authority": None})
     evidence = _compose(cell, tmp_path, second=second)
@@ -346,6 +352,17 @@ def test_console_release_must_match_the_whole_token() -> None:
 )
 def test_guest_label_classification(label: str, confined: bool) -> None:
     assert label_confined(label, "0b6c") is confined
+
+
+def test_qemu_pid_selects_the_one_domain_process() -> None:
+    rows = (
+        "  41 /usr/bin/qemu-system-x86_64 -name guest=kdive-a,debug-threads=on -m 2048\n"
+        "  42 /usr/bin/qemu-system-x86_64 -name guest=kdive-ab,debug-threads=on\n"
+        "  43 bash -c grep guest=kdive-a\n"
+    )
+    assert qemu_pid(rows, "kdive-a") == 41
+    assert qemu_pid(rows, "kdive-missing") is None
+    assert qemu_pid(rows + rows, "kdive-a") is None
 
 
 def test_package_digest_tracks_python_sources_only(tmp_path: Path) -> None:

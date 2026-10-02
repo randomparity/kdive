@@ -325,6 +325,18 @@ def console_has_release(text: str, release: str) -> bool:
     return re.search(rf"Linux version {re.escape(release)} ", text) is not None
 
 
+def qemu_pid(ps_rows: str, domain: str) -> int | None:
+    """The single process whose `pid args` row runs the named domain's guest, if exactly one."""
+    pids = [
+        int(fields[0])
+        for row in ps_rows.splitlines()
+        if len(fields := row.split(None, 1)) == 2
+        and fields[0].isdecimal()
+        and f"-name guest={domain}," in fields[1]
+    ]
+    return pids[0] if len(pids) == 1 else None
+
+
 def label_confined(label: str, domain_uuid: str) -> bool:
     """A per-domain sVirt SELinux type, or libvirt's per-domain AppArmor profile in enforce."""
     fields = label.split(":")
@@ -478,6 +490,7 @@ def compose(
             or set(deployed) != set(ROLES)
             or any(value != candidate for value in deployed.values())
             or any(p.context != binding for p in present)
+            or not all(p.passed for p in present)
         )
         outcome, impediments = (Outcome.FAILURE if failed else Outcome.SUCCESS), []
     if cell.node_id is None:
@@ -697,21 +710,38 @@ def run(args: argparse.Namespace) -> int:
     output: Path = args.output
     output.mkdir(parents=True)
     (output / "steps").mkdir()
+    # Every local failure that can exit 2 happens before the first remote step.
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "bundle",
+            "create",
+            str(output / "kdive-candidate.bundle"),
+            "HEAD",
+        ],
+        check=True,
+        capture_output=True,
+    )
     remote = _Remote(target, args.known_hosts, output / "steps", [])
     started = time.monotonic()
     observe = remote.step("observe-host", _OBSERVE)
     host = parse_host(remote.text(observe))
     if not observe.ok or host is None:
         _summary(output, remote.steps, None)
+        (output / "kdive-candidate.bundle").unlink()
         return 3
     if not family_matches(host.os.split(":", 1)[0], args.family) or host.arch != arch:
         _summary(output, remote.steps, None)
+        (output / "kdive-candidate.bundle").unlink()
         print("target host family or architecture differs from the selected cell", file=sys.stderr)
         return 2
     binding = _binding(host, f"{row.distro}:{row.version}", arch, manifest, kernel_sha256)
     phases: dict[str, PhaseRecord | None] = {"first-boot": None, "second-boot": None}
     if host.prepared:
         binding = _drive(remote, args, candidate, image, operator, binding, phases, output)
+    (output / "kdive-candidate.bundle").unlink(missing_ok=True)
     inputs = InputBindings(
         version=1,
         candidate_sha=candidate,
@@ -758,20 +788,16 @@ def _drive(
         and not remote.step("operator-prerequisites", operator.read_text(), LONG_STEP_S).ok
     ):
         return binding
-    with tempfile.TemporaryDirectory(prefix="kdive-host-install-") as scratch:
-        source = Path(scratch) / "kdive-candidate.bundle"
-        subprocess.run(
-            ["git", "-C", str(ROOT), "bundle", "create", str(source), "HEAD"], check=True
+    source = output / "kdive-candidate.bundle"
+    copied = (
+        _run_sequence(
+            remote, [("bootstrap", _BOOTSTRAP, SHORT_STEP_S), ("just", _JUST, SHORT_STEP_S)]
         )
-        if not (
-            _run_sequence(
-                remote, [("bootstrap", _BOOTSTRAP, SHORT_STEP_S), ("just", _JUST, SHORT_STEP_S)]
-            )
-            and remote.copy(
-                "copy-source", str(source), f"{remote.target}:kdive-candidate.bundle"
-            ).ok
-        ):
-            return binding
+        and remote.copy("copy-source", str(source), f"{remote.target}:kdive-candidate.bundle").ok
+    )
+    source.unlink(missing_ok=True)
+    if not copied:
+        return binding
     clone = step_script(_CLONE, candidate=candidate, origin=_PUBLIC_ORIGIN)
     prepare = step_script(_PREPARE, dsn=_WITNESS_DSN)
     setup = [
