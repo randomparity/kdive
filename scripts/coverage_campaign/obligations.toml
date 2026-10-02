@@ -224,3 +224,5 @@ kernel = true
 "image-smoke" = "tests/integration/test_image_smoke_live.py::test_image_smoke"
 "deep-lifecycle/local-libvirt/longterm" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 "deep-lifecycle/local-libvirt/stable" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
+"deep-lifecycle/remote-libvirt/longterm" = "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
+"deep-lifecycle/remote-libvirt/stable" = "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"

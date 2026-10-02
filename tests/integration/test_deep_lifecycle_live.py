@@ -26,10 +26,12 @@ from tests.integration.live_stack.deep_lifecycle import (
     FIXTURE_ROOT_ENV,
     baseline,
     deep_body,
+    file_sha256,
     load_fixture,
     native_cells,
     representative,
 )
+from tests.integration.live_stack.image_smoke import Endpoint
 from tests.integration.live_stack.scenario import (
     CellRun,
     ScenarioStop,
@@ -43,11 +45,13 @@ pytestmark = pytest.mark.live_stack
 _PROJECT = "deep-lifecycle"
 
 
-def _domain_kernel(system_id: str) -> str:
-    """The ``<os><kernel>`` file the domain boots: the install's staged kernel."""
+def _domain_kernel(
+    system_id: str, _endpoint: Endpoint, _key: Path, _release: str
+) -> tuple[str, str]:
+    """The ``<os><kernel>`` file the domain boots (the install's staged kernel) and its digest."""
     kernel = ET.fromstring(domain_xml(system_id)).findtext("./os/kernel")  # noqa: S314  # nosec B314
     assert kernel, "the booted domain names no direct kernel"
-    return kernel
+    return file_sha256(kernel), kernel
 
 
 async def _deep(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, *, tmp: Path) -> None:
@@ -74,7 +78,7 @@ async def _deep(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, *,
             tree=tree,
             manifest=manifest,
             tmp=tmp,
-            staged_kernel=_domain_kernel,
+            installed_kernel=_domain_kernel,
         )
 
     await on_catalog_system(run, base_url, issuer, db_url, project=_PROJECT, image=image, body=body)
