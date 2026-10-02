@@ -17,6 +17,7 @@ import time
 import xml.etree.ElementTree as ET  # noqa: S405 - the worker's own domain XML  # nosec B405
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from uuid import UUID
 
@@ -42,7 +43,7 @@ from tests.integration.live_stack.evidence import (
     identity_problems,
     run_identity,
 )
-from tests.integration.live_stack.image_smoke import PROBE, parse_probe, ssh
+from tests.integration.live_stack.image_smoke import PROBE, Endpoint, parse_probe, ssh
 from tests.integration.live_stack.spine import (
     LOCAL_ALLOCATION_DISK_GB,
     drain_job,
@@ -55,7 +56,7 @@ from tests.integration.live_stack.spine import (
 )
 from tests.mcp.json_data import data_mapping
 
-_ACCELERATORS = {"kvm": "kvm", "qemu": "tcg"}
+ACCELERATORS = {"kvm": "kvm", "qemu": "tcg"}
 _REBOOT_DEADLINE_S = 300.0
 
 
@@ -207,14 +208,16 @@ def domain_xml(system_id: str) -> str:
         conn.close()
 
 
-def ssh_probe(port: int, key: Path, command: str = PROBE) -> dict[str, str]:
+def ssh_probe(endpoint: Endpoint, key: Path, command: str = PROBE) -> dict[str, str]:
     """Run ``command`` as root and parse its ``KEY=VALUE`` output; a non-zero exit fails."""
-    result = ssh(port, key, command)
+    result = ssh(endpoint, key, command)
     assert result.returncode == 0, f"ssh probe exit {result.returncode}: {result.stderr[-500:]}"
     return parse_probe(result.stdout)
 
 
-def probe_new_boot(port: int, key: Path, boot_id: str, command: str = PROBE) -> dict[str, str]:
+def probe_new_boot(
+    endpoint: Endpoint, key: Path, boot_id: str, command: str = PROBE
+) -> dict[str, str]:
     """Probe until the guest reports a ``boot_id`` other than ``boot_id``.
 
     A drained reboot job (``control.power`` ``cycle``, ``runs.boot``) can precede the old boot
@@ -222,7 +225,7 @@ def probe_new_boot(port: int, key: Path, boot_id: str, command: str = PROBE) -> 
     """
     deadline = time.monotonic() + _REBOOT_DEADLINE_S
     while True:
-        probe = ssh_probe(port, key, command)
+        probe = ssh_probe(endpoint, key, command)
         if probe.get("boot_id") != boot_id:
             return probe
         assert time.monotonic() < deadline, (
@@ -231,20 +234,21 @@ def probe_new_boot(port: int, key: Path, boot_id: str, command: str = PROBE) -> 
         time.sleep(5.0)
 
 
-async def ssh_endpoint(op: LiveStackClient, system_id: str) -> int:
-    """The worker-loopback SSH port ``systems.ssh_info`` returns for ``system_id``."""
+async def ssh_endpoint(op: LiveStackClient, system_id: str) -> Endpoint:
+    """The SSH host and port ``systems.ssh_info`` returns for ``system_id``."""
     info = data_mapping(
         ok(await scalar(op, "systems.ssh_info", system_id=system_id), "ssh_info"), "ssh"
     )
-    port = info.get("port")
-    assert info.get("host_scope") == "worker_loopback" and isinstance(port, int), info
-    return port
+    host, port = info.get("host"), info.get("port")
+    assert info.get("host_scope") == "worker_loopback", info
+    assert isinstance(host, str) and isinstance(port, int), info
+    return Endpoint(host, port)
 
 
 async def authorize_ssh(
     op: LiveStackClient, system_id: str, directory: Path, comment: str
-) -> tuple[int, Path]:
-    """Authorize a fresh ed25519 key for root; return the SSH port and the private key path."""
+) -> tuple[Endpoint, Path]:
+    """Authorize a fresh ed25519 key for root; return the SSH endpoint and private key path."""
     key = directory / "id_ed25519"
     subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
         ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", str(key)],
@@ -310,14 +314,21 @@ async def on_catalog_system(
             )
             xml = domain_xml(system_id)
             accelerator = ET.fromstring(xml).get("type", "")  # noqa: S314  # nosec B314
-            run.observed["accelerator"] = _ACCELERATORS.get(accelerator, "none")
+            run.observed["accelerator"] = ACCELERATORS.get(accelerator, "none")
             owned = domain_disks(xml)
             await body(op, system_id, owned)
             run.prove("cleanup", await _cleanup(op, allocation, system_id, owned, in_use_before))
             cleaned = True
         finally:
             if not cleaned:
-                await _cleanup_attempt(run, op, allocation, system_id, owned, in_use_before)
+                await cleanup_attempt(
+                    run,
+                    op,
+                    allocation,
+                    None
+                    if system_id is None
+                    else partial(_cleanup, op, allocation, system_id, owned, in_use_before),
+                )
 
 
 async def _cleanup(
@@ -333,21 +344,22 @@ async def _cleanup(
     )
 
 
-async def _cleanup_attempt(
+async def cleanup_attempt(
     run: CellRun,
     op: LiveStackClient,
     allocation: str,
-    system_id: str | None,
-    owned: list[str],
-    in_use: int,
+    cleanup: Callable[[], Awaitable[dict[str, object]]] | None,
 ) -> None:
-    """Best-effort release after a failed scenario; the attempt is evidence, not an assertion."""
+    """Best-effort release after a failed scenario; the attempt is evidence, not an assertion.
+
+    ``cleanup`` is the frame's owned-resource proof, or ``None`` before a System existed.
+    """
     try:
-        if system_id is None:
+        if cleanup is None:
             env = await scalar(op, "allocations.release", allocation_id=allocation)
             result: dict[str, object] = {"released": env.status}
         else:
-            result = await _cleanup(op, allocation, system_id, owned, in_use)
+            result = await cleanup()
     except Exception as exc:  # noqa: BLE001 - recorded; the scenario already failed
         # The type only: a message can carry host paths or a libvirt URI (ADR-0715 evidence).
         result = {"error": type(exc).__name__}

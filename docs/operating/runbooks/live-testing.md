@@ -649,7 +649,8 @@ lease expire) and check `KDIVE_INSTALL_STAGING` (`/var/lib/kdive/install` on the
 the run's installed kernel.
 
 The four ppc64le local cells share the node and report `missing-result` (owner #2818) until a
-native POWER host runs it. Remote deep cells stay pending for #2810.
+native POWER host runs it. The remote deep cells are the remote runbook's
+([remote deep lifecycle](remote-live-stack.md#7-remote-deep-lifecycle-2810)).
 
 Last run: candidate `09761ef44` (server, worker and reconciler at that SHA), a Fedora 44 x86_64
 KVM lab host, fixtures `v6.18.54` (longterm) and `v7.2.8` (stable) built on that host. All eight

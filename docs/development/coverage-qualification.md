@@ -13,9 +13,11 @@ clean-host, failure/resource and kernel-corpus obligations also remain in the ex
 Native x86_64/KVM, ppc64le/KVM-HV and foreign-architecture TCG are separate cells.
 
 The foundation marked no live scenario implemented; catalog image smoke (#2808), the local deep
-lifecycle (#2809) and `host-install` (see [Host-installation producer](#host-installation-producer))
-are now bound to their producers. The owner issues in the manifest and expanded cells supply their
-fixtures and producers under epic
+lifecycle (#2809), the remote deep lifecycle (#2810) and `host-install` (see
+[Host-installation producer](#host-installation-producer)) are now bound to their producers.
+Remote-libvirt tool scenario IDs carry the provider (`tool/remote-libvirt/<tool>/...`), so mapping
+a local tool node never marks the remote cells of the same tool implemented. The owner issues in
+the manifest and expanded cells supply their fixtures and producers under epic
 [#2803](https://github.com/randomparity/kdive/issues/2803). Adding a scenario means adding its
 repository-relative pytest node ID to the manifest's `implementations` table, keyed by the existing
 scenario ID. The checker verifies that the file and test function exist. Existence alone is not

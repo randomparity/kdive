@@ -54,10 +54,10 @@ async def _scenario(
     marker = b"kdive-ready" in read_console_log(console_log_path(UUID(system_id)))
     assert marker, "System reached ready without the kdive-ready first-boot marker"
     run.prove("first-boot", {"state": "ready", "console_marker": "kdive-ready"})
-    port, key = await asyncio.wait_for(
+    endpoint, key = await asyncio.wait_for(
         authorize_ssh(op, system_id, tmp_path, "image-smoke"), timeout=900
     )
-    first = await asyncio.to_thread(ssh_probe, port, key)
+    first = await asyncio.to_thread(ssh_probe, endpoint, key)
     assert first.get("uid") == "0", f"ssh as root reported uid {first.get('uid')!r}"
     run.prove("authenticated-access", {"user": "root", "uid": first["uid"]})
     os_release = {k: first.get(k) for k in ("ID", "VERSION_ID", "machine")}
@@ -65,13 +65,13 @@ async def _scenario(
     run.observed |= {"guest_os": f"{entry.distro}:{entry.version}", "guest_arch": entry.arch}
     run.prove("os-architecture", {"observed": os_release})
     if "build-toolchain" in run.cell.assertions:
-        result = await asyncio.to_thread(ssh, port, key, toolchain_command(entry))
+        result = await asyncio.to_thread(ssh, endpoint, key, toolchain_command(entry))
         assert result.returncode == 0, f"toolchain check exit {result.returncode}"
         run.prove("build-toolchain", {"packages_and_build": "ok"})
     env = ok(await scalar(op, "control.power", system_id=system_id, action="cycle"), "reboot")
     await drain_job(op, "reboot", env.object_id)
     await await_system_state(op, "reboot", system_id, "ready")
-    second = await asyncio.to_thread(probe_new_boot, port, key, first["boot_id"])
+    second = await asyncio.to_thread(probe_new_boot, endpoint, key, first["boot_id"])
     assert second.get("uid") == "0", "ssh after reboot did not authenticate as root"
     run.prove("reboot", {"action": "cycle", "boot_id_changed": True})
 

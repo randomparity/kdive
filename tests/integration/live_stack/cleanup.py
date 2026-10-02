@@ -106,6 +106,7 @@ async def release_and_verify(
     disks: list[str],
     in_use_before: int,
     connect: Callable[[], _Conn] = _worker_connect,
+    absent: Callable[[str], bool] = disk_absent,
     deadline_s: float = DRAIN_DEADLINE_S,
     poll_s: float = POLL_INTERVAL_S,
 ) -> dict[str, object]:
@@ -128,7 +129,7 @@ async def release_and_verify(
         raise AssertionError(f"domain {domain} is still defined after teardown")
     finally:
         conn.close()
-    surviving = [path for path in disks if not disk_absent(path)]
+    surviving = [path for path in disks if not absent(path)]
     assert not surviving, f"owned disk(s) survived teardown: {surviving}"
     in_use_after = await capacity_in_use(client)
     assert in_use_after == in_use_before, (

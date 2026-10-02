@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from kdive.images.families import family_for
 from kdive.images.rootfs.catalog import load_rootfs_catalog
@@ -13,10 +16,12 @@ from scripts.coverage_campaign.evidence import Outcome
 from scripts.coverage_campaign.results import qualify
 from tests.integration.live_stack.evidence import RunIdentity, build_record
 from tests.integration.live_stack.image_smoke import (
+    Endpoint,
     bindings,
     native_cells,
     os_matches,
     parse_probe,
+    ssh,
     toolchain_command,
 )
 
@@ -130,3 +135,17 @@ def test_a_success_record_from_the_binding_qualifies_without_an_authority(
     )
     verdict = next(v for v in qualify(contract, inputs, [stale]).cells if v.cell.id == cell_id)
     assert verdict.reasons == ("deployed-revision-mismatch",)
+
+
+def test_ssh_connects_to_the_endpoint_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert ssh(Endpoint("192.0.2.10", 47201), tmp_path / "key", "true").returncode == 0
+    argv = seen[0]
+    assert argv[argv.index("-p") + 1] == "47201"
+    assert argv[-3:] == ["root@192.0.2.10", "--", "true"]

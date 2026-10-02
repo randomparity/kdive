@@ -260,3 +260,5 @@ kernel = true
 "tool/tools.search/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
 "tool/tools.search/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
 "tool/tools.search/default/validation" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"deep-lifecycle/remote-libvirt/longterm" = "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
+"deep-lifecycle/remote-libvirt/stable" = "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"

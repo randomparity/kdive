@@ -141,3 +141,21 @@ def test_a_disk_under_an_unsearchable_parent_is_not_absent(unsearchable: Path) -
     assert disk_absent(str(unsearchable), privileged_test=lambda _p: 1) is True
     with pytest.raises(AssertionError, match="cannot observe"):
         disk_absent(str(unsearchable), privileged_test=lambda _p: 2)
+
+
+def test_cleanup_uses_the_absent_predicate() -> None:
+    with pytest.raises(AssertionError, match="kept.qcow2"):
+        asyncio.run(
+            release_and_verify(
+                cast(LiveStackClient, _Client(1, 0)),
+                allocation_id="a",
+                system_id="s",
+                domain="kdive-s",
+                disks=["/remote/gone.qcow2", "/remote/kept.qcow2"],
+                in_use_before=0,
+                connect=lambda: _Conn(False),
+                absent=lambda path: path != "/remote/kept.qcow2",
+                deadline_s=1.0,
+                poll_s=0.0,
+            )
+        )
