@@ -202,6 +202,34 @@
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: true
 
+# --- Install the SSH-forward return route (ADR-0721). ---
+# The remote SSH forward (ADR-0291) is a slirp NIC beside the libvirt NIC. A connection forwarded
+# from a routable worker keeps the worker's source address, so without a source route the guest
+# replies through its default route on the libvirt NIC and the forward never answers. The
+# NetworkManager dispatcher script adds that route on every activation. An image without
+# NetworkManager has no dispatcher directory and is skipped; its return path is #3091.
+# Like the fadump unit, the source is the staged copy. It is uploaded to /tmp because --upload
+# cannot target a directory the image may not have.
+- name: Install the SSH-forward return-route dispatcher for {{ image.name }}
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    # No Ansible module wraps virt-customize; the command module is the only option.
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-ssh-return-route:/tmp/kdive-ssh-return-route"
+      - --run-command
+      - >-
+        set -e; src=/tmp/kdive-ssh-return-route;
+        dst=/etc/NetworkManager/dispatcher.d/50-kdive-ssh-return-route;
+        if [ -d /etc/NetworkManager/dispatcher.d ]; then
+        install -o root -g root -m 0755 "$src" "$dst";
+        if command -v restorecon >/dev/null 2>&1; then restorecon -v "$dst"; fi; fi;
+        rm -f "$src"
+  when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
+
 # --- Set the crashkernel reservation when a debuginfo/kdump image is requested. ---
 - name: Set the crashkernel reservation for {{ image.name }}
   ansible.builtin.command:  # noqa: command-instead-of-module

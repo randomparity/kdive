@@ -1,0 +1,56 @@
+#!/bin/sh
+# NetworkManager dispatcher script: the return path for the remote-libvirt SSH forward (ADR-0721).
+#
+# The forward NIC is a QEMU user-mode (slirp) netdev. libslirp delivers a connection forwarded
+# from a routable client with that client's own source address, so without this script the
+# guest's reply follows the main table's default route out of the libvirt NIC and never reaches
+# the client. Traffic sourced from the slirp lease is sent back through slirp's gateway by a
+# source rule and a private table; the main table, rp_filter and the domain stay unchanged.
+#
+# The script keys on the lease subnet, which slirp fixes, never on an interface name or PCI path.
+# Installed as /etc/NetworkManager/dispatcher.d/50-kdive-ssh-return-route; NetworkManager calls it
+# with the interface and the action, and passes the lease in DHCP4_IP_ADDRESS.
+set -eu
+
+table=2291
+pref=2291
+gateway=10.0.2.2
+
+iface=${1:-}
+action=${2:-}
+
+in_slirp_subnet() {
+  case $1 in
+  *[!0-9.]*) return 1 ;;
+  10.0.2.?*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+install_return_path() {
+  lease=${DHCP4_IP_ADDRESS:-}
+  in_slirp_subnet "$lease" || return 0
+  ip -4 route replace default via "$gateway" dev "$iface" table "$table"
+  # A dhcp4-change may move the lease; drop the rule for the old address before adding the new.
+  ip -4 rule flush table "$table"
+  ip -4 rule add pref "$pref" from "$lease" table "$table"
+}
+
+remove_return_path() {
+  # The table holds one route, through the slirp interface. Another interface going down leaves
+  # it alone; an empty table means the kernel already dropped the route with the slirp device.
+  # A device that has vanished owns no route, so its failed lookup counts as empty.
+  owned=$(ip -4 route show table "$table" dev "$iface" 2>/dev/null) || owned=""
+  if [ -n "$owned" ]; then
+    ip -4 route flush table "$table"
+  elif [ -n "$(ip -4 route show table "$table")" ]; then
+    return 0
+  fi
+  ip -4 rule flush table "$table"
+}
+
+case $action in
+up | dhcp4-change) install_return_path ;;
+down) remove_return_path ;;
+*) ;;
+esac
