@@ -4,9 +4,10 @@ The ``deep-lifecycle/remote-libvirt/x86_64`` cells run #2809's provider-neutral 
 a System of a separate ``remote-libvirt`` host. The provider host is observed through the
 operator's own SSH access (:data:`HOST_SSH_ENV`), never the worker's TLS identity:
 :func:`host_probe` reads its OS, architecture and virtualization, and :func:`observer` opens
-``qemu+ssh`` for the domain XML, volume absence, the defined ``kdive-*`` domains and the base
-volume's digest. ``python -m tests.integration.live_stack.remote_lifecycle bindings --candidate SHA
---out FILE`` writes the qualifier's expected ``Context`` for those cells. The live test is
+``qemu+ssh`` for the domain XML, volume absence and the defined ``kdive-*`` domains;
+:func:`volume_sha256` hashes the base volume on the provider host.
+``python -m tests.integration.live_stack.remote_lifecycle bindings --candidate SHA --out FILE``
+writes the qualifier's expected ``Context`` for those cells. The live test is
 ``tests/integration/test_remote_deep_lifecycle_live.py``.
 """
 
@@ -14,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import os
 import re
 import shlex
@@ -123,15 +123,19 @@ def destination() -> str | None:
     return value
 
 
-def host_probe(dest: str) -> dict[str, str]:
-    """The provider host's ``ID:VERSION_ID``, ``uname -m`` and ``systemd-detect-virt``."""
-    result = subprocess.run(  # noqa: S603,S607 - fixed argv, validated destination  # nosec B603 B607
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", dest, HOST_PROBE],
+def _host_ssh(dest: str, command: str, timeout: float) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603,S607 - fixed argv, validated destination  # nosec B603 B607
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", dest, command],
         capture_output=True,
         text=True,
-        timeout=60.0,
+        timeout=timeout,
         check=False,
     )
+
+
+def host_probe(dest: str) -> dict[str, str]:
+    """The provider host's ``ID:VERSION_ID``, ``uname -m`` and ``systemd-detect-virt``."""
+    result = _host_ssh(dest, HOST_PROBE, 60.0)
     assert result.returncode == 0, f"provider-host probe exited {result.returncode}"
     fields = key_values(result.stdout)
     return {
@@ -164,25 +168,21 @@ def remote_kdive_domains(conn: libvirt.virConnect) -> set[str]:
     return {d.name() for d in conn.listAllDomains(0) if d.name().startswith("kdive-")}
 
 
-def _feed(_stream: libvirt.virStream, data: bytes, digest: hashlib._Hash) -> int:
-    digest.update(data)
-    return len(data)
-
-
 @cache
 def volume_sha256(dest: str, pool: str, volume: str) -> str:
-    """SHA-256 of the provider host's ``pool``/``volume`` bytes, streamed over the observer."""
-    conn = observer(dest)
-    try:
-        vol = conn.storagePoolLookupByName(pool).storageVolLookupByName(volume)
-        stream = conn.newStream(0)
-        digest = hashlib.sha256()
-        vol.download(stream, 0, 0, 0)
-        stream.recvAll(_feed, digest)
-        stream.finish()
-        return digest.hexdigest()
-    finally:
-        conn.close()
+    """SHA-256 of ``pool``/``volume``, read through libvirt on the provider host itself.
+
+    ``virsh vol-download`` runs beside the volume, so only the digest crosses the network.
+    """
+    command = (
+        "set -o pipefail; virsh -q -c qemu:///system vol-download "
+        f"--pool {shlex.quote(pool)} {shlex.quote(volume)} /dev/stdout | sha256sum"
+    )
+    result = _host_ssh(dest, command, 1800.0)
+    assert result.returncode == 0, f"volume digest exited {result.returncode}"
+    digest = result.stdout.split()[0]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest), "volume digest is not a SHA-256"
+    return digest
 
 
 def staged_volume(name: str) -> str | None:

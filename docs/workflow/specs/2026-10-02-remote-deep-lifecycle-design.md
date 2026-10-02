@@ -56,8 +56,9 @@ the remote tool cells implemented.
      test's own channel to the provider host, independent of the worker's TLS identity.
      `host_probe` runs one fixed command over `ssh -o BatchMode=yes` → `os-release` identity,
      `uname -m`, `systemd-detect-virt`. `observer()` opens
-     `qemu+ssh://<dest>/system?no_tty=1` read through libvirt for the domain XML, volume lookups
-     and the base volume's streamed SHA-256 (cached per volume per process).
+     `qemu+ssh://<dest>/system?no_tty=1` read through libvirt for the domain XML and volume
+     lookups; `volume_sha256` hashes the base volume on the provider host (`virsh vol-download`
+     piped to `sha256sum` over the same SSH), cached per volume per process.
    - `on_remote_system(run, base_url, issuer, db_url, *, project, family, body)`: a blocked
      family, a provider host whose arch is not the cell's, anything but exactly one
      `[[remote_libvirt]]` instance, or no staged `[[image]]` for the family's representative →

@@ -220,10 +220,10 @@ Steps:
    `host_probe(dest)` (`ssh -o BatchMode=yes -o ConnectTimeout=10 dest HOST_PROBE`, timeout 60,
    `os_identity(stdout)`, `key_values` for `machine`/`virt`);
    `observer(dest)` (`libvirt.open(f"qemu+ssh://{dest}/system?no_tty=1")`);
-   `volume_absent(conn, path)`; `@cache volume_sha256(dest, pool, volume)` (`vol.download` into
-   `conn.newStream(0)`, `stream.recvAll(_feed, digest)` with
-   `def _feed(_stream, data: bytes, digest) -> int: digest.update(data); return len(data)`,
-   `stream.finish()`, connection closed in `finally`);
+   `volume_absent(conn, path)`; `@cache volume_sha256(dest, pool, volume)` (one SSH command on the
+   provider host: `set -o pipefail; virsh -q -c qemu:///system vol-download --pool <pool>
+   <volume> /dev/stdout | sha256sum`, quoted; amended after the first live run, where a libvirt
+   stream download over `qemu+ssh` reset mid-transfer);
    `staged_volume(name)` (the `remote-libvirt` `[[image]]` with a `StagedSource`);
    `remote_host()` (raises `ScenarioStop(Outcome.BLOCKED, …)` for an unset/invalid destination,
    instance count ≠ 1, or a failed probe; pool from `remote_config_for_resource(name).storage_pool`);

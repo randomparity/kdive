@@ -281,3 +281,21 @@ def test_remote_cleanup_requires_the_prior_domain_set(monkeypatch: pytest.Monkey
     }
     with pytest.raises(AssertionError, match="kdive-y"):
         _cleanup(monkeypatch, {"kdive-x"}, ("kdive-x", "kdive-y"))
+
+
+def test_volume_sha256_hashes_on_the_provider_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        sent.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "a" * 64 + "  -\n", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    remote_lifecycle.volume_sha256.cache_clear()
+    assert remote_lifecycle.volume_sha256("dave@lab-a.example", "default", "f b.qcow2") == "a" * 64
+    command = sent[0][-1]
+    assert "set -o pipefail" in command and "--pool default 'f b.qcow2' /dev/stdout" in command
+    remote_lifecycle.volume_sha256.cache_clear()
+    monkeypatch.setattr(subprocess, "run", _completed(1, ""))
+    with pytest.raises(AssertionError, match="volume digest exited 1"):
+        remote_lifecycle.volume_sha256("dave@lab-a.example", "default", "x.qcow2")

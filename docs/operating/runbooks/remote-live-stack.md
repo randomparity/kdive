@@ -231,14 +231,16 @@ Topology and prerequisites, in addition to steps 1–4:
 - `REMOTE_PROVIDER_SSH=user@host` gives the test its own access to the provider host: an `ssh`
   destination that works non-interactively from the control plane (key and known host entry),
   whose user is in the provider's `libvirt` group. The test reads the host's `os-release`,
-  `uname -m` and `systemd-detect-virt` over it and opens `qemu+ssh://<destination>/system` to
-  observe domains, volumes and the base volume's digest. It never reads the worker's TLS
+  `uname -m` and `systemd-detect-virt` over it, hashes the base volume there with
+  `virsh vol-download`, and opens `qemu+ssh://<destination>/system` to observe domains and
+  volumes. It never reads the worker's TLS
   material, and the evidence never records the destination.
 - Fixtures as in the [live-testing runbook](live-testing.md#deep-lifecycle-across-representative-guests-2809).
 
 ```bash
 sha=$(git rev-parse HEAD)
 export KDIVE_FIXTURE_ROOT=$HOME/kfix REMOTE_PROVIDER_SSH=<user>@<provider-host>
+export KDIVE_SYSTEMS_TOML=<the stack's systems.toml>  # live tests ignore the XDG default
 uv run python -m tests.integration.live_stack.remote_lifecycle bindings --candidate "$sha" --out inputs.json
 export KDIVE_ARTIFACT_DIR=$(mktemp -d)
 uv run python -m pytest -m live_stack tests/integration/test_remote_deep_lifecycle_live.py
