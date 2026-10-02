@@ -312,7 +312,7 @@ reasons beside `missing-prerequisite` for it; the pytest line names the actual c
 interrupted run, release the leftover allocation with `allocations.release` (or let the lease
 expire) and check the provider for a leftover `kdive-*` domain and its overlay volume.
 
-Last run: candidate `638f4dda8` (server, worker and reconciler at that SHA) on snapshot-capable
+Last run: candidate `0ec1b49ec` (server, worker and reconciler at that SHA) on snapshot-capable
 disposable lab test hosts: an Ubuntu 26.04 x86_64 control plane and a separate Rocky Linux 10.2
 x86_64 provider host, itself a KVM guest (`systemd-detect-virt` `kvm`; domains run with the `kvm`
 accelerator, nested). Fixtures `v6.18.54` (longterm) and `v7.2.8` (stable). Two provider-host
@@ -326,3 +326,6 @@ and from `virbr0` so guests reach the object store past docker's `FORWARD` drop 
 | `enterprise/longterm`, `enterprise/stable` | `rocky:10` | failure | `install` (boot waits for kdump arming, #3094) |
 | `debian/longterm`, `debian/stable` | — | blocked | no Debian install helper (#3081) |
 | `suse/longterm`, `suse/stable` | — | blocked | no SUSE remote image (#3082) |
+
+`qualify` accepted both Fedora cells; the other six do not qualify. The four blocked cells also
+list context-mismatch reasons, because they stop before the provider host is observed.
