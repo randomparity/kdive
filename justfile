@@ -184,8 +184,10 @@ _TEST_XDIST := _TEST_WORKERS + ' --dist worksteal'
 # an empty `--lf` cache, an unmappable change — so both have the same mass-failure shape.
 # `just test-verbose <paths>` is the escalation when a full frame or an assertion diff is
 # actually needed.
-test:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short
+# Extra arguments go to pytest unchanged; pytest keeps the last value of a repeated option such
+# as `--maxprocesses`, which is how `test-linux` lowers the worker cap.
+test *ARGS:
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short {{ARGS}}
 
 
 # CI partitions the ordinary suite by path; local test/ci still run every selected test.
@@ -201,6 +203,40 @@ test-shard shard:
     esac
     PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short "${paths[@]}"
 
+
+# Run the `test` selection in a Linux container at the container engine's native
+# architecture (ADR-0717). This is the unit gate on macOS, where a host `just test` is not
+# regression evidence. It tests the committed `sha` (default HEAD), never uncommitted edits;
+# a dirty tree gets a warning. The git common directory is mounted read-only, so the run works
+# from a worktree and changes nothing in the checkout. `CONTAINER_ENGINE` selects `docker`
+# (default) or `podman`; only Docker is verified on macOS. Extra arguments go to `just test`,
+# with the same shell splitting as `test-verbose`.
+test-linux $sha="HEAD" *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    engine="${CONTAINER_ENGINE:-docker}"
+    case "$engine" in
+      docker) socket=/var/run/docker.sock ;;
+      podman) socket="$(podman info --format '{{{{.Host.RemoteSocket.Path}}')" ;;
+      *)
+        echo "test-linux: CONTAINER_ENGINE must be docker or podman, not '$engine'" >&2
+        exit 2
+        ;;
+    esac
+    commit="$(git rev-parse --verify --end-of-options "$sha^{commit}")"
+    if [[ -n "$(git status --porcelain)" ]]; then
+      echo "test-linux: warning: uncommitted changes are not tested; testing $commit" >&2
+    fi
+    common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+    "$engine" build --quiet --tag kdive-test-linux tests/container >/dev/null
+    exec "$engine" run --rm --init \
+      --volume "$common_dir:/repo:ro" \
+      --volume "$socket:/var/run/docker.sock" \
+      --volume kdive-test-linux-uv-cache:/home/tester/.cache/uv \
+      --env PYTHONHASHSEED \
+      --env TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
+      --add-host host.docker.internal:host-gateway \
+      kdive-test-linux "$commit" {{ARGS}}
 
 # Detect hash-order-dependent pytest collection directly and reproducibly (#2072). The
 # weekly suite's shared per-run seed makes every xdist worker collect identically, so
@@ -511,8 +547,8 @@ test-compose-volumes:
 
 # Lint and format-check the shell scripts across the repo's listed directories.
 lint-shell:
-    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts | xargs shellcheck
-    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts
+    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts tests/container | xargs shellcheck
+    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts tests/container
 
 # Lint and syntax-check the Ansible automation (deploy/ansible).
 lint-ansible:

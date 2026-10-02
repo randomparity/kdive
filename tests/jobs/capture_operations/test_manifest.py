@@ -148,6 +148,19 @@ def test_elf_closure_hashes_runtime_runpath_selection_not_competing_soname(
     assert unused not in hashes
 
 
+def _supported_glibc_hwcaps(help_text: str) -> str | None:
+    """First supported entry of the loader's glibc-hwcaps section, not its legacy section."""
+    in_section = False
+    for line in help_text.splitlines():
+        if line.startswith("Subdirectories of glibc-hwcaps directories"):
+            in_section = True
+        elif in_section and not line.strip():
+            return None
+        elif in_section and "(supported, searched)" in line:
+            return line.strip().split()[0]
+    return None
+
+
 def test_runtime_verifier_rejects_new_higher_priority_hwcaps_selection(tmp_path: Path) -> None:
     executable, selected, _unused = _compile_runpath_fixture(tmp_path)
     payload = _fixture_manifest(executable)
@@ -169,14 +182,7 @@ def test_runtime_verifier_rejects_new_higher_priority_hwcaps_selection(tmp_path:
         capture_output=True,
         check=True,
     )
-    supported = next(
-        (
-            line.strip().split()[0]
-            for line in help_result.stdout.splitlines()
-            if "(supported, searched)" in line
-        ),
-        None,
-    )
+    supported = _supported_glibc_hwcaps(help_result.stdout)
     if supported is None:
         pytest.skip("runtime loader exposes no supported glibc-hwcaps directory")
     hwcaps = selected.parent / "glibc-hwcaps" / supported / selected.name
@@ -342,7 +348,7 @@ def test_builder_records_real_interpreter_arch_and_absolute_dependency_closure(
     assert result.returncode == 0, result.stderr
     manifest = json.loads(output.read_text())
     assert manifest["interpreter"] == str(Path(sys.executable).resolve())
-    assert manifest["architecture"] in {"x86_64", "ppc64le"}
+    assert manifest["architecture"] in {"x86_64", "ppc64le", "aarch64"}
     assert all(Path(entry["path"]).is_absolute() for entry in manifest["files"])
     assert any(entry["kind"] == "elf-interpreter" for entry in manifest["files"])
     assert any(entry["kind"] == "bootstrap-python" for entry in manifest["files"])

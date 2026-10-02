@@ -13,7 +13,12 @@ from kdive.jobs.capture_operations.bootstrap.bootstrap_attestation import finger
 from kdive.jobs.capture_operations.bootstrap.bootstrap_elf import runtime_elf_closure
 
 _DEFAULT_MANIFEST = Path("/usr/share/kdive/capture-bootstrap-manifest.json")
-_ARCHITECTURES = {"amd64": "x86_64", "x86_64": "x86_64", "ppc64le": "ppc64le"}
+_ARCHITECTURES = {
+    "amd64": "x86_64",
+    "x86_64": "x86_64",
+    "ppc64le": "ppc64le",
+    "aarch64": "aarch64",
+}
 _MANIFEST_KEYS = {"schema_version", "architecture", "interpreter", "bootstrap_modules", "files"}
 _FINGERPRINT_KINDS = {
     "python-interpreter",
