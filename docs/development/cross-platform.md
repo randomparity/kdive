@@ -67,6 +67,8 @@ Linux container at the engine's native architecture (arm64 on Apple silicon;
 
 - `just test-linux` tests `HEAD`; `just test-linux <sha>` tests another commit. Commit first:
   uncommitted edits are not tested, and the recipe warns when the tree is dirty.
+- `<sha>` must contain the `test-linux` change itself (#3072). An older commit fails inside the
+  container with `justfile does not contain recipe '--maxprocesses=8'`.
 - `just test-linux HEAD tests/jobs` runs only the given paths.
 - The recipe works from a worktree. It mounts the git directory read-only and changes nothing
   in the checkout. A named volume, `kdive-test-linux-uv-cache`, keeps downloaded packages.
