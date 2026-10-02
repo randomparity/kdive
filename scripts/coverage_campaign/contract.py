@@ -197,18 +197,24 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                     identity = (
                         f"{scenario}/{configuration}/{exposure}/{provider}/{arch or 'service'}"
                     )
+                    # Provider-qualified so a local-only node never marks a remote cell (#2810).
+                    scenario_id = (
+                        f"tool/{provider}/{row.tool}/{variant}"
+                        if provider == "remote-libvirt"
+                        else scenario
+                    )
                     roles = ("server",) if arch is None else ("server", "worker", "reconciler")
                     roles = tuple(group.role_overrides.get(row.tool, roles))
                     if group.authority:
                         roles = (*roles, "authority")
                     owner = group.owner
-                    if group.owner == 3062 and provider == "remote-libvirt":
-                        owner = 2810
-                    elif group.owner == 3062 and arch == "ppc64le":
+                    if group.owner == 3062 and arch == "ppc64le":
                         owner = 2818
+                    elif group.owner == 3062 and provider == "remote-libvirt":
+                        owner = 3080
                     cell = Cell(
                         identity + "/functional",
-                        scenario + "/functional",
+                        scenario_id + "/functional",
                         owner,
                         row.tool,
                         group.tools[row.tool],
@@ -238,7 +244,7 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         replace(
                             cell,
                             id=identity + "/" + boundary,
-                            scenario_id=scenario + "/" + boundary,
+                            scenario_id=scenario_id + "/" + boundary,
                             kind="rejection",
                             observation=(
                                 f"Verify {boundary} rejection for {row.tool} "
@@ -327,7 +333,7 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
         for provider in sorted(inventory.capabilities):
             cell = _native_cell(
                 "deep-lifecycle",
-                2810 if provider == "remote-libvirt" else (2809 if arch == "x86_64" else 2818),
+                2818 if arch == "ppc64le" else (2810 if provider == "remote-libvirt" else 2809),
                 arch,
                 provider,
                 "Upload each baseline, install, boot, verify actual build and modules, "
