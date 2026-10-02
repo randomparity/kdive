@@ -598,9 +598,11 @@ A cell's record says what happened:
 - An assertion that does not hold is `failure`, carrying the assertions proven so far.
 
 The pytest parameter fails in each of those cases. It also fails when a role is missing.
-The default demo-up lane installs no provider authority, so every native cell there fails
-`deployed-role-missing` until #3066 is settled. `qualify` exits 1 whenever any required cell
-lacks a result, which on a single-cell-type run is always.
+Image-smoke cells do not require the provider authority. When one is installed, its revision
+must be the candidate, and the evidence seam must be able to read
+`/opt/kdive-provider-authority/revision` through `sudo -n`. Otherwise the run stops
+(ADR-0715). `qualify` exits 1 whenever any required cell lacks a result, which on a
+single-cell-type run is always.
 
 The artifacts under `coverage-evidence/artifacts/` hold assertion observations: digests, guest
 `os-release` fields, whether the boot ID changed, and cleanup counts. They hold no host names or
