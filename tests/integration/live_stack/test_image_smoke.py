@@ -91,7 +91,7 @@ def test_bindings_carry_the_full_expected_context(tmp_path: Path) -> None:
     assert set(inputs.cells) == {c.id for c in native_cells("x86_64")}
 
 
-def test_a_success_record_from_the_binding_fails_only_on_the_missing_authority(
+def test_a_success_record_from_the_binding_qualifies_without_an_authority(
     tmp_path: Path,
 ) -> None:
     _, inputs = _binding_inputs(tmp_path)
@@ -118,4 +118,7 @@ def test_a_success_record_from_the_binding_fails_only_on_the_missing_authority(
         assertions=dict.fromkeys(cell.assertions, "d" * 64),
     )
     verdict = next(v for v in qualify(contract, inputs, [record]).cells if v.cell.id == cell_id)
-    assert verdict.reasons == ("deployed-role-missing",)
+    assert verdict.qualified, verdict.reasons
+    stale = record.model_copy(update={"deployed_roles": {**roles, "authority": "e" * 40}})
+    verdict = next(v for v in qualify(contract, inputs, [stale]).cells if v.cell.id == cell_id)
+    assert verdict.reasons == ("deployed-revision-mismatch",)
