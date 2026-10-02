@@ -603,8 +603,8 @@ The default demo-up lane installs no provider authority, so every native cell th
 lacks a result, which on a single-cell-type run is always.
 
 The artifacts under `coverage-evidence/artifacts/` hold assertion observations: digests, guest
-`os-release` fields, boot IDs and cleanup counts. They hold no host names or keys. Check them
-before sharing.
+`os-release` fields, whether the boot ID changed, and cleanup counts. They hold no host names or
+keys. Check them before sharing.
 
 ### `live_vm` (native) — a real kernel on real silicon
 
