@@ -57,6 +57,9 @@ def test_native_deep_families_and_foreign_tcg_stay_distinct(inventory: Inventory
 
 _IMAGE_SMOKE_NODE = "tests/integration/test_image_smoke_live.py::test_image_smoke"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
+_REMOTE_DEEP_NODE = (
+    "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
+)
 _LIFECYCLE_TOOLS = {
     "images.publish",
     "runs.boot",
@@ -108,7 +111,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert {c.owner for c in smoke if c.guest_arch == "ppc64le"} == {2818}
     deep = [c for c in contract.cells if c.operation == "deep-lifecycle"]
     assert {c.node_id for c in deep if c.provider == "local-libvirt"} == {_DEEP_NODE}
-    assert all(c.node_id is None for c in deep if c.provider == "remote-libvirt")
+    assert {c.node_id for c in deep if c.provider == "remote-libvirt"} == {_REMOTE_DEEP_NODE}
     host_install = [c for c in contract.cells if c.scenario_id == "host-install"]
     assert len(host_install) == 6
     assert {c.node_id for c in host_install} == {
