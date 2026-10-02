@@ -141,25 +141,28 @@ fixed worker cannot register the remote-libvirt runtime that the operator's serv
 already grant. The launcher sends it only when the operator inventory declares a
 `[[remote_libvirt]]` instance.
 
-The root witness treats the path as untrusted operator input. It runs `lstat` on each component
-before any slot mutation and never opens, reads, copies, or parses the file, so it cannot act as a
-confused deputy. The request is rejected as `invalid_request` / `correct_request` when the path is
-not absolute and normal, when any component is a symlink, when the target is not a regular file,
-or when the file or an ancestor is owned by a slot account or is group- or other-writable by
-principals a slot account holds. An other-writable sticky directory is the one exception.
-`kdive-live-libvirt` is always a forbidden group. Read access is enforced only by each slot UID's
-own permissions.
+The root witness treats the path as untrusted operator input. Before any slot mutation it runs a
+metadata-only `lstat` check, which never opens or parses the file, so the witness cannot act as a
+confused deputy. The check rejects a non-normal path, a symlink, a non-regular file, or a path that
+slot principals or `kdive-live-libvirt` can write. The rejection is
+`invalid_request` / `correct_request`. The rules are listed in the
+[#3086 design](../workflow/specs/2026-10-02-worker-remote-inventory-3086-design.md). Slot
+readability is checked by the operator-side launcher, not by root. Delivery also makes fixed workers
+honor the inventory's other entries, such as `[[local_libvirt]] guest_egress`.
 
-The secrets root stays the fixed default `/var/lib/kdive/secrets`. Remote TLS refs resolve under a
-`remote-libvirt/` subdirectory: the directory is `root:<group>` mode `0750` and the files are mode
-`0440`, where the group holds the slot accounts and the operator. The launcher refuses a
-non-default operator `KDIVE_SECRETS_ROOT` while a remote instance is declared. Slot homes stay
-`/nonexistent`; neither `HOME` nor `XDG_CONFIG_HOME` is passed. Inventory changes reach workers
-only at the next `start`. The lifecycle protocol identity changes and the protocol version stays
-1. Every other ADR-0574 decision remains in force.
+The secrets root stays the fixed default `/var/lib/kdive/secrets`. Remote TLS refs resolve under
+a `remote-libvirt/` subdirectory: the directory is `root:<group>` mode `0750` and the files are mode
+`0440`, where the group holds the slot accounts and the operator. The launcher refuses a non-default
+operator `KDIVE_SECRETS_ROOT` while a remote instance is declared. Slot homes stay `/nonexistent`;
+neither `HOME` nor `XDG_CONFIG_HOME` is passed. Whether the remote runtime is registered is decided
+at worker start, so adding or removing a `[[remote_libvirt]]` block needs a restart. Host entries
+are re-read on each operation. The lifecycle protocol identity changes and the protocol version
+stays 1. Every other ADR-0574 decision remains in force.
 
 Considered & rejected:
 
+- **Do nothing.** judgment: fixed workers are the supported host-process path, so every remote job
+  on a fixed-worker stack would keep failing.
 - **Pass `KDIVE_SECRETS_ROOT` through as a caller setting.** judgment: it lets the caller widen the
   confinement root that every worker secret ref resolves under. verified:
   `_SECRET_ENVIRONMENT_PATTERN` in `systemd_worker_runtime.py` matches `SECRET`, so diagnostics

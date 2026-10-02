@@ -33,20 +33,29 @@ allowlist drops `KDIVE_SYSTEMS_TOML`, the slot accounts' home is `/nonexistent`,
    The forbidden users are `kdive-worker-1`..`8`. The forbidden groups are every group any slot
    account belongs to (`os.getgrouplist`) plus `kdive-live-libvirt`. A failed check returns
    `invalid_request` / `correct_request` with a fixed message that names the rule but echoes no
-   metadata. Readability is not checked: a slot UID that cannot read the file fails in its own
-   worker, under its own permissions.
+   metadata. The witness does not check readability. An unreadable inventory is not a loud
+   failure in the worker: `load_inventory_optional` treats `EACCES` as "no file", so the worker
+   would silently reproduce this issue. The launcher therefore checks readability before it sends
+   the request (design 4).
 4. **Launcher.** `scripts/live-stack/worker-lifecycle.sh start` resolves the inventory the way the
    operator's server and reconciler do (`systems_toml_path()`). It sends `systems_toml` only when
    `is_remote_libvirt_configured()` is true, so a local-only stack sends today's request. With a
-   remote instance declared it fails fast (exit 2, a specific message) on a non-absolute resolved
-   path, or when `secrets_root_from_env()` differs from the setting's default
-   `/var/lib/kdive/secrets`. The workers always use that fixed default.
+   remote instance declared, it fails fast with exit 2 and a message naming the variable in three
+   cases:
+   - the resolved path is not absolute;
+   - `secrets_root_from_env()` differs from the setting's default `/var/lib/kdive/secrets`, which
+     is the root the workers always use;
+   - the existing `require_worker_path_access` finds that some slot account cannot read the
+     inventory (`r`) or traverse the secrets root (`x`). For example, the XDG default sits under a
+     0700 or 0750 operator home.
 5. **TLS ref layout (operator-provisioned, documented).** Remote client cert, key, and CA live
    under `/var/lib/kdive/secrets/remote-libvirt/`. The directory is `root:<group>` mode `0750`, the
    files are `root:<group>` mode `0440`, and `<group>` contains the slot accounts and the operator
    (`kdive-live-libvirt` on an installer-provisioned host). Refs read
    `remote-libvirt/clientcert.pem`. This follows the worker-authority TLS layout in the
-   `live_vm_host` role. Ansible provisioning of it is a follow-up under #2803.
+   `live_vm_host` role. The secrets root itself must be root-owned and traversable by slot
+   accounts: mode `0711`, as `worker_install_dirs.yml` provisions it. Ansible provisioning of the
+   subdirectory is a follow-up under #2803.
 
 ## Failure model
 
@@ -58,13 +67,20 @@ allowlist drops `KDIVE_SYSTEMS_TOML`, the slot accounts' home is `/nonexistent`,
    deputy). A slot account cannot change the inventory another slot loads, because the file and its
    ancestors are unwritable by slot principals. Secret literals stay scrubbed in diagnostics. The
    worker confinement root stays fixed. `worker.env` is unchanged when no inventory is sent.
+   - Delivery also makes fixed workers honor the inventory's other entries, for example
+     `[[local_libvirt]] guest_egress`. Today they always see no inventory, which means
+     restrict-on. Because delivery is gated on a remote block, local-only stacks keep today's
+     behavior.
 3. **Accepted failure classes.**
    - The operator swaps the file after `start` (time-of-check to time-of-use). The operator is
      trusted, and slot principals cannot write the path.
    - Write access granted by a POSIX ACL or another LSM rule is not detected. Only mode bits are
      checked; the operator owns ACL hygiene on their own file, as with every other operator path in
      `WorkerSettings`.
-   - Inventory edits do not reach running workers until the next `start`. Hot-reload is excluded.
+   - Whether the remote runtime is registered is decided at worker start. Adding or removing a
+     `[[remote_libvirt]]` block needs a restart; hot-reload is excluded. Host entries are re-read
+     on each operation, as on the server, so the operator edits them atomically (write, then
+     rename).
    - A malformed inventory on the operator side reads as "no remote declared". Both server and
      worker then fail closed at operation time, as today.
 4. **Covered elsewhere.** Cross-slot baseline and staging ownership: #3084. Remote deep-lifecycle
@@ -92,7 +108,8 @@ allowlist drops `KDIVE_SYSTEMS_TOML`, the slot accounts' home is `/nonexistent`,
   the worker with it.
 - AC2: a relative, non-normal, symlinked, missing or non-regular, or slot-writable path is rejected
   `invalid_request` / `correct_request`. The fake stores and runtime record no call at all. A
-  slot-writable path is one whose file or any ancestor is writable by a slot principal.
+  slot-writable path is one whose file or any ancestor is writable by a slot principal. The
+  launcher separately refuses an inventory that a slot cannot read (design 4).
 - AC3: without the field, `worker.env` equals today's rendering.
 - AC4: `KDIVE_SECRETS_ROOT` is in neither the gate allowlist nor `worker.env`. A test pins the gate
   allowlist to exactly the `_environment` keys (all optional fields set), minus the
@@ -101,8 +118,8 @@ allowlist drops `KDIVE_SYSTEMS_TOML`, the slot accounts' home is `/nonexistent`,
 - AC5: the diagnostics secret-literal set excludes the `KDIVE_SYSTEMS_TOML` value.
 - AC6: live proof on lab hosts. A remote provision through a fixed slot reaches `ready`. Release
   and teardown reach `torn_down` with no remote domain or volume left. The pre-existing stuck
-  remote Systems tear down. The symlinked and slot-writable arms are rejected at `start`; omitting
-  the field reproduces `configuration_error`.
+  remote Systems tear down. The symlinked, slot-writable, and slot-unreadable arms are rejected at
+  `start`. Omitting the field reproduces `configuration_error`.
 - AC7: the remote runbook and `deploy/systemd/README.md` document the delivery and the TLS layout.
 
 ## Validation
