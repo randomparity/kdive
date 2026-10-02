@@ -16,7 +16,7 @@ from kdive.mcp.dev_harness import LiveStackToolError, make_keypair
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import build_contract
 from scripts.coverage_campaign.evidence import Outcome
-from tests.integration.live_stack import scenario
+from tests.integration.live_stack import scenario, tool_cells
 from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
 from tests.integration.live_stack.scenario import CellRun
 from tests.integration.live_stack.tool_cells import (
@@ -231,3 +231,19 @@ def test_run_cell_records_the_proven_outcome(
     scenario.run_cell(cell, body, proves=Outcome.REJECTION)
     (record,) = (tmp_path / "records").glob("*.json")
     assert json.loads(record.read_text())["outcome"] == "rejection"
+
+
+def test_missing_issuer_fails_instead_of_skipping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_issuer() -> None:
+        pytest.skip("KDIVE_OIDC_ISSUER unset")
+
+    monkeypatch.setattr(tool_cells, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(tool_cells, "require_issuer", no_issuer)
+
+    async def never(*_: object) -> None:
+        raise AssertionError("the scenario must not run")
+
+    with pytest.raises(pytest.fail.Exception, match="KDIVE_OIDC_ISSUER"):
+        tool_cells.run_tool_cell(_run(tmp_path, "authentication").cell, never)

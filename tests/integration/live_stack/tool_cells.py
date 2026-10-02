@@ -370,7 +370,12 @@ def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
     A completed rejection cell records ``rejection``, a functional one ``success``.
     """
     base_url = require_stack()
-    configuration, listed = server_configuration(base_url, require_issuer())
+    try:
+        issuer = require_issuer()
+    except pytest.skip.Exception as exc:
+        # Without the issuer the configuration cannot be read, so no cell could be placed.
+        pytest.fail(f"cannot prove the stack's configuration: {exc}; set KDIVE_OIDC_ISSUER")
+    configuration, listed = server_configuration(base_url, issuer)
     if configuration != cell.configuration:
         pytest.skip(f"stack runs {configuration}; {cell.id} needs {cell.configuration}")
 

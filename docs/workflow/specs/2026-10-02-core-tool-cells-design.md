@@ -42,8 +42,9 @@ Out of scope (operator-approved): the other 46 tools' cells (#3095-#3098), CLI t
 (#3099), production-utilization reporting (#2720, #2725), provider-dependent tool cells (#2812,
 #3062, #3080). `examples/local-libvirt/demo-up.sh` needs no change: the server inherits
 `KDIVE_WORKER_DEATH_VERIFIER` from the caller's environment (`scripts/live-stack/lib.sh`,
-`restart_host_processes`), so the recovery lane is `KDIVE_WORKER_DEATH_VERIFIER=local
-examples/local-libvirt/demo-up.sh`.
+`restart_host_processes`), so the recovery lane is `KDIVE_WORKER_DEATH_VERIFIER=docker
+examples/local-libvirt/demo-up.sh`. `docker`, not `local`: the process assembly keeps only the
+durable verifiers (`src/kdive/assembly.py`).
 
 ### Cells
 

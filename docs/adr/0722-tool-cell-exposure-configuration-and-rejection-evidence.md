@@ -15,9 +15,11 @@ binds evidence to the deployed build; it says nothing about what a tool cell's c
 exposure or rejection is. #2811 is the first tool-cell carrier, and #3095-#3098 reuse its
 harness, so the meaning has to be fixed once.
 
-The `recovery` configuration exists only when the server runs with a worker-death verifier:
-`build_plane_registrars` registers the build-use recovery tools only when
-`assembly.worker_death_verifier` is set (`src/kdive/mcp/assembly/tool_registration.py`).
+The `recovery` configuration exists only when the server runs with a durable worker-death
+verifier: `build_plane_registrars` registers the build-use recovery tools only when
+`assembly.worker_death_verifier` is set (`src/kdive/mcp/assembly/tool_registration.py`), and
+`build_process_assembly` keeps only the `docker` and `kubernetes` verifiers
+(`src/kdive/assembly.py`, `_durable_worker_death_verifier`), so `local` leaves the tools out.
 `KDIVE_WORKER_DEATH_VERIFIER` defaults to `disabled`, and the demo-up lane does not set it.
 
 ## Decision
@@ -34,8 +36,11 @@ The `recovery` configuration exists only when the server runs with a worker-deat
    the gateway's core tools, which shows the token was not taken for `kdivectl`. A cell of the other
    configuration is skipped and writes no record. The proof is stored as an artifact on each
    record, not as an assertion, because the contract fixes each cell's assertion set. The
-   recovery lane is the same stack started with `KDIVE_WORKER_DEATH_VERIFIER=local`. Both lanes
-   write into one evidence root, which is assembled once.
+   recovery lane is the same stack started with `KDIVE_WORKER_DEATH_VERIFIER=docker`. Its Docker
+   death endpoint is not reachable on the host-process lane, so a recovery-tool call there cannot
+   prove a worker dead and fails closed; the tool cells here never make one. Both lanes write into
+   one evidence root, which is assembled once. A missing issuer fails the run rather than skipping
+   it, because without one the configuration cannot be read.
 3. **Rejections.** One harness proves every boundary:
    - `authentication`: a token carrying the cell's claims but signed by a key the server does
      not trust is sent as a raw `tools/call`, to the tool (`direct`) or to `tools.invoke`
@@ -57,8 +62,9 @@ The `recovery` configuration exists only when the server runs with a worker-deat
 
 ## Consequences
 
-- Recovery-configuration evidence exists only from a run whose catalog proved it. A run that
-  cannot prove its configuration records nothing, so `qualify` reports `missing-result`.
+- Recovery-configuration evidence exists only from a run whose catalog proved it. A carrier of
+  the recovery tools themselves (#2812) needs a lane whose death verifier can reach its authority.
+- A run that cannot prove its configuration records nothing, so `qualify` reports `missing-result`.
 - A rejection that writes a denial audit row still passes; any other durable write to the cell's
   project fails it. Writes outside the project are not observed.
 - A read-only functional cell proves `cleanup` by the same unchanged snapshot. A carrier whose

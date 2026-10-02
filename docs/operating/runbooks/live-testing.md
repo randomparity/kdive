@@ -679,9 +679,12 @@ A run proves its configuration before recording anything. It reads the operator 
 `kdivectl` token holding `platform_operator`: both build-use recovery tools listed means
 `recovery`, neither means `default`, and anything else fails the run. A catalog clipped to the
 gateway's core tools also fails it, which happens when the server's `KDIVE_CLI_CLIENT_ID` differs
-from the test process's. Cells of the other configuration skip and write no record. The server
-runs the `recovery` configuration only when it starts with `KDIVE_WORKER_DEATH_VERIFIER` set, so
-the two lanes are two bring-ups that share one evidence root:
+from the test process's, and so does a missing mock-OIDC issuer. Cells of the other configuration
+skip and write no record. The server runs the `recovery` configuration only when it starts with a
+durable worker-death verifier, `docker` or `kubernetes`; `local` leaves the recovery tools out.
+On this lane `docker` has no reachable Docker death endpoint, so a recovery-tool call fails
+closed, which these cells never make. The two lanes are two bring-ups that share one evidence
+root:
 
 ```bash
 sha=$(git rev-parse HEAD)
@@ -689,14 +692,15 @@ uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$
 export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
 examples/local-libvirt/demo-up.sh             # default configuration
 uv run python -m pytest -m live_stack tests/integration/test_core_tool_cells_live.py
-KDIVE_WORKER_DEATH_VERIFIER=local examples/local-libvirt/demo-up.sh   # recovery configuration
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
 uv run python -m pytest -m live_stack tests/integration/test_core_tool_cells_live.py
 uv run python -m tests.integration.live_stack.evidence assemble \
   "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Each pytest run reports 28 cells skipped for the other configuration. Run the pytest commands with
+Each pytest run reports 28 cells skipped for the other configuration: the second run must skip the
+`…/default/default/…` cells, not the `…/default/recovery/…` ones. Run the pytest commands with
 `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`, the migration-owner DSN: the protected-state
 snapshot reads every table with a `project` column, some of which the server DSN cannot read, and
 it fails with `permission denied` rather than skipping one. A functional cell

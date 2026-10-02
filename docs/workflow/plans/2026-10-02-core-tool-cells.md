@@ -1216,7 +1216,7 @@ uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$
 export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
 examples/local-libvirt/demo-up.sh             # default configuration
 uv run python -m pytest -m live_stack tests/integration/test_core_tool_cells_live.py
-KDIVE_WORKER_DEATH_VERIFIER=local examples/local-libvirt/demo-up.sh   # recovery
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh   # recovery
 uv run python -m pytest -m live_stack tests/integration/test_core_tool_cells_live.py
 uv run python -m tests.integration.live_stack.evidence assemble \
   "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
