@@ -55,7 +55,7 @@ allowlist drops `KDIVE_SYSTEMS_TOML`, the slot accounts' home is `/nonexistent`,
    `remote-libvirt/clientcert.pem`. This follows the worker-authority TLS layout in the
    `live_vm_host` role. The secrets root itself must be root-owned and traversable by slot
    accounts: mode `0711`, as `worker_install_dirs.yml` provisions it. Ansible provisioning of the
-   subdirectory is a follow-up under #2803.
+   subdirectory is #3088 (under #2803).
 
 ## Failure model
 
@@ -85,7 +85,7 @@ allowlist drops `KDIVE_SYSTEMS_TOML`, the slot accounts' home is `/nonexistent`,
      worker then fail closed at operation time, as today.
 4. **Covered elsewhere.** Cross-slot baseline and staging ownership: #3084. Remote deep-lifecycle
    cells: #2810. Helm and k8s secrets projection: #550. Ansible TLS subdirectory provisioning:
-   follow-up under #2803.
+   #3088 (under #2803).
 
 ### Threat model
 

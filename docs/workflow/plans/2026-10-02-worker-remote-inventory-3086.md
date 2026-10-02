@@ -184,5 +184,5 @@ Steps:
 
 ## Deferrals
 
-- Ansible provisioning of the `remote-libvirt/` TLS subdirectory → needs-triage follow-up under
-  #2803.
+- Ansible provisioning of the `remote-libvirt/` TLS subdirectory → #3088 (needs-triage, under
+  #2803).
