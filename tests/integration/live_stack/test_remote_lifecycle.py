@@ -39,7 +39,7 @@ from tests.integration.live_stack.remote_lifecycle import (
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 
 _ROOT = Path(__file__).resolve().parents[3]
-_HOST = RemoteHost("dave@lab-a.example", "default", "rocky:10.2", "x86_64", "kvm")
+_HOST = RemoteHost("operator@provider.example", "default", "rocky:10.2", "x86_64", "kvm")
 _IDENTITY = RunIdentity(
     candidate_sha="a" * 40,
     matrix_sha256="b" * 64,
@@ -73,9 +73,9 @@ def test_representatives_are_ansible_catalog_rows_of_their_family() -> None:
 def test_destination_rejects_option_and_shell_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(remote_lifecycle.HOST_SSH_ENV, raising=False)
     assert destination() is None
-    monkeypatch.setenv(remote_lifecycle.HOST_SSH_ENV, "dave@lab-a.example")
-    assert destination() == "dave@lab-a.example"
-    for hostile in ("-oProxyCommand=x", "a b", "dave@host;id"):
+    monkeypatch.setenv(remote_lifecycle.HOST_SSH_ENV, "operator@provider.example")
+    assert destination() == "operator@provider.example"
+    for hostile in ("-oProxyCommand=x", "a b", "operator@host;id"):
         monkeypatch.setenv(remote_lifecycle.HOST_SSH_ENV, hostile)
         with pytest.raises(ValueError, match="SSH destination"):
             destination()
@@ -84,7 +84,7 @@ def test_destination_rejects_option_and_shell_shapes(monkeypatch: pytest.MonkeyP
 def _completed(code: int, stdout: str) -> Any:
     def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         assert argv[:5] == ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
-        assert argv[5] == "dave@lab-a.example"
+        assert argv[5] == "operator@provider.example"
         return subprocess.CompletedProcess(argv, code, stdout, "")
 
     return run
@@ -93,14 +93,14 @@ def _completed(code: int, stdout: str) -> Any:
 def test_host_probe_reads_os_arch_and_virtualization(monkeypatch: pytest.MonkeyPatch) -> None:
     out = 'NAME="Rocky Linux"\nID="rocky"\nVERSION_ID="10.2"\nmachine=x86_64\nvirt=kvm\n'
     monkeypatch.setattr(subprocess, "run", _completed(0, out))
-    assert host_probe("dave@lab-a.example") == {
+    assert host_probe("operator@provider.example") == {
         "host_os": "rocky:10.2",
         "host_arch": "x86_64",
         "virt": "kvm",
     }
     monkeypatch.setattr(subprocess, "run", _completed(255, ""))
     with pytest.raises(AssertionError, match="probe exited 255"):
-        host_probe("dave@lab-a.example")
+        host_probe("operator@provider.example")
 
 
 class _NoVolume(libvirt.libvirtError):
@@ -204,13 +204,13 @@ def test_observe_host_overrides_the_control_plane_identity(tmp_path: Path) -> No
     assert (context.host_os, context.host_arch) == ("rocky:10.2", "x86_64")
     assert len(run.artifacts) == 1
     stored = (tmp_path / "artifacts" / run.artifacts[0]).read_text()
-    assert '"virtualization":"kvm"' in stored and "lab-a" not in stored
+    assert '"virtualization":"kvm"' in stored and "provider.example" not in stored
     bound = _bindings(tmp_path).cells[run.cell.id]
     assert (bound.host_os, bound.host_arch) == (context.host_os, context.host_arch)
 
 
 def test_observe_host_blocks_a_foreign_architecture(tmp_path: Path) -> None:
-    host = RemoteHost("dave@lab-a.example", "default", "fedora:43", "ppc64le", "none")
+    host = RemoteHost("operator@provider.example", "default", "fedora:43", "ppc64le", "none")
     with pytest.raises(ScenarioStop) as stop:
         observe_host(_run(tmp_path), host)
     assert stop.value.outcome is Outcome.BLOCKED
@@ -292,10 +292,11 @@ def test_volume_sha256_hashes_on_the_provider_host(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(subprocess, "run", run)
     remote_lifecycle.volume_sha256.cache_clear()
-    assert remote_lifecycle.volume_sha256("dave@lab-a.example", "default", "f b.qcow2") == "a" * 64
+    digest = remote_lifecycle.volume_sha256("operator@provider.example", "default", "f b.qcow2")
+    assert digest == "a" * 64
     command = sent[0][-1]
     assert "set -o pipefail" in command and "--pool default 'f b.qcow2' /dev/stdout" in command
     remote_lifecycle.volume_sha256.cache_clear()
     monkeypatch.setattr(subprocess, "run", _completed(1, ""))
     with pytest.raises(AssertionError, match="volume digest exited 1"):
-        remote_lifecycle.volume_sha256("dave@lab-a.example", "default", "x.qcow2")
+        remote_lifecycle.volume_sha256("operator@provider.example", "default", "x.qcow2")

@@ -186,7 +186,7 @@ ImportError before the module exists):
   / `REMOTE_BLOCKED`; each representative's name/distro/version is a `kdive_image_catalog` row of
   `deploy/ansible/inventory/group_vars/all.yml` (read with `yaml.safe_load`) and its `distro`
   maps to the cell family under the local catalog (`image_family`).
-- Destination: `dave@lab-a.example` accepted; `-oProxyCommand=x`, `a b` and the empty string rejected (`ValueError`).
+- Destination: `operator@provider.example` accepted; `-oProxyCommand=x`, `a b` and the empty string rejected (`ValueError`).
 - `host_probe` parses a faked `subprocess.run` stdout into `host_os`, `host_arch`, `virt`;
   non-zero exit → `AssertionError`.
 - `volume_absent`: refreshes every active pool; `VIR_ERR_NO_STORAGE_VOL` → True; a found volume →
