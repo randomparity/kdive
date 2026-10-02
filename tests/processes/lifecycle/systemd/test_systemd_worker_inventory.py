@@ -61,7 +61,9 @@ def test_trusted_operator_file_is_accepted_without_opening_it(
     require_trusted_inventory(str(operator_tree), principals=_none_forbidden)
 
 
-@pytest.mark.parametrize("raw", ["etc/systems.toml", "/etc/../etc/systems.toml", "/etc/./x", "//x"])
+@pytest.mark.parametrize(
+    "raw", ["etc/systems.toml", "/etc/../etc/systems.toml", "/etc/./x", "//x", "/etc/sys\x00tems"]
+)
 def test_non_absolute_or_non_normal_paths_are_rejected(raw: str) -> None:
     with pytest.raises(UntrustedInventory, match="absolute and normalized"):
         require_trusted_inventory(raw, principals=_none_forbidden)

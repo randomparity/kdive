@@ -44,7 +44,12 @@ def require_trusted_inventory(
             missing component, does not name a regular file, or is writable by a slot principal
             at the file or any ancestor directory.
     """
-    if not path.startswith("/") or path.startswith("//") or os.path.normpath(path) != path:
+    if (
+        not path.startswith("/")
+        or path.startswith("//")
+        or "\x00" in path
+        or os.path.normpath(path) != path
+    ):
         raise UntrustedInventory("worker inventory path must be absolute and normalized")
     uids, gids = principals()
     parts = Path(path).parts
