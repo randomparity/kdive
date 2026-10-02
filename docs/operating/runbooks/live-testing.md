@@ -651,19 +651,19 @@ the run's installed kernel.
 The four ppc64le local cells share the node and report `missing-result` (owner #2818) until a
 native POWER host runs it. Remote deep cells stay pending for #2810.
 
-Last run: candidate `749bd29d6` (server, worker and reconciler at that SHA), an Ubuntu 26.04 x86_64
-KVM lab host, fixtures `v6.18.54` (longterm) and `v7.2.8` (stable). Every cell proved `upload`,
-`install`, `reconnect`, `boot-identity` and `modules`, and failed `cleanup` on #3078: teardown
-leaves the installed kernel under `KDIVE_INSTALL_STAGING`. The System reached `torn_down`, the
-Allocation `released` and the domain was undefined, but the surviving kernel stops the check before
-it reads capacity, so capacity reclamation was not observed; rerun once #3078 is fixed.
+Last run: candidate `09761ef44` (server, worker and reconciler at that SHA), a Fedora 44 x86_64
+KVM lab host, fixtures `v6.18.54` (longterm) and `v7.2.8` (stable) built on that host. All eight
+cells proved `upload`, `install`, `reconnect`, `boot-identity`, `modules` and `cleanup`, and
+`qualify` reported each one qualified. `KDIVE_INSTALL_STAGING` held no System directory after the
+run. The earlier run at `749bd29d6` failed `cleanup` on every cell because teardown left the
+installed kernel behind (#3078).
 
-| Cell (`deep-lifecycle/local-libvirt/x86_64/…`) | Guest | Outcome | Failing assertion |
-|---|---|---|---|
-| `debian/longterm`, `debian/stable` | `debian:13` | failure | `cleanup` (#3078) |
-| `fedora/longterm`, `fedora/stable` | `fedora:44` | failure | `cleanup` (#3078) |
-| `enterprise/longterm`, `enterprise/stable` | `rocky:10` | failure | `cleanup` (#3078) |
-| `suse/longterm`, `suse/stable` | `opensuse-leap:15.6` | failure | `cleanup` (#3078) |
+| Cell (`deep-lifecycle/local-libvirt/x86_64/…`) | Guest | Outcome |
+|---|---|---|
+| `debian/longterm`, `debian/stable` | `debian:13` | success |
+| `fedora/longterm`, `fedora/stable` | `fedora:44` | success |
+| `enterprise/longterm`, `enterprise/stable` | `rocky:10` | success |
+| `suse/longterm`, `suse/stable` | `opensuse-leap:15.6` | success |
 
 ### `live_vm` (native) — a real kernel on real silicon
 
