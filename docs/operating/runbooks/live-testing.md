@@ -565,6 +565,47 @@ Before you run it:
 - **Do not change host caps mid-run.** The monitor compares `in_use` with the cap it reads at
   that moment, so a cap lowered under load reports a false violation.
 
+#### Catalog image smoke and coverage evidence (#2808)
+
+`tests/integration/test_image_smoke_live.py::test_image_smoke` has one parameter for each
+`image-smoke` coverage cell whose guest architecture is the host's. Each parameter writes one
+version-1 evidence record for `python -m scripts.coverage_campaign qualify`
+([coverage qualification](../../development/coverage-qualification.md),
+[ADR-0715](../../adr/0715-live-evidence-identity-and-staged-image-binding.md)).
+The stack, from `examples/local-libvirt/demo-up.sh`, must run the test checkout's exact clean
+`HEAD`. Do not restart it during the run.
+
+```bash
+sha=$(git rev-parse HEAD)
+examples/local-libvirt/build-image.sh <every catalog image for this architecture>
+uv run python -m tests.integration.live_stack.image_smoke bindings --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)   # an empty evidence root for this run
+uv run python -m pytest -m live_stack tests/integration/test_image_smoke_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Write the bindings after staging and before the smoke. Each binding's `image_sha256` is the
+digest of the staged bytes. A rebuilt image needs new bindings.
+
+A cell's record says what happened:
+
+- An image that is not registered, a missing issuer or a missing `KDIVE_DATABASE_URL` is
+  `blocked` (`missing-prerequisite`).
+- A deployed revision other than `HEAD`, or a dirty checkout, is `failure` before anything is
+  provisioned.
+- An assertion that does not hold is `failure`, carrying the assertions proven so far.
+
+The pytest parameter fails in each of those cases. It also fails when a role is missing.
+The default demo-up lane installs no provider authority, so every native cell there fails
+`deployed-role-missing` until #3066 is settled. `qualify` exits 1 whenever any required cell
+lacks a result, which on a single-cell-type run is always.
+
+The artifacts under `coverage-evidence/artifacts/` hold assertion observations: digests, guest
+`os-release` fields, boot IDs and cleanup counts. They hold no host names or keys. Check them
+before sharing.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
