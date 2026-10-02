@@ -109,10 +109,12 @@ def _deployed(candidate: str, base_url: str, failures: list[str]) -> dict[str, s
         return dict.fromkeys(ROLES)
     roles = run_identity(base_url).deployed_roles
     deployed: dict[str, str | None] = {role: roles.get(role) for role in ROLES}
+    # A host-install host runs no provider authority, and the contract does not require one
+    # for these cells (#3066); a reported authority must still be the candidate.
     failures.extend(
         f"{role} revision is {value or 'unknown'}"
         for role, value in deployed.items()
-        if value != candidate
+        if value != candidate and not (role == "authority" and value is None)
     )
     return deployed
 

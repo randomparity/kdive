@@ -263,6 +263,22 @@ def test_missing_role_is_omitted_rather_than_guessed(cell: Cell, tmp_path: Path)
     assert "authority" not in evidence.deployed_roles
 
 
+def test_only_the_cell_roles_are_required(contract: Contract, cell: Cell, tmp_path: Path) -> None:
+    assert "authority" not in cell.roles
+    no_authority = {**dict.fromkeys(ROLES, SHA), "authority": None}
+    evidence = _compose(
+        cell,
+        tmp_path,
+        matrix=contract.matrix_sha256,
+        first=_phase("first-boot", deployed=no_authority),
+        second=_phase("second-boot", deployed=no_authority),
+    )
+    assert evidence.outcome is Outcome.SUCCESS
+    worker_missing = {**dict.fromkeys(ROLES, SHA), "worker": None}
+    missing = _compose(cell, tmp_path, first=_phase("first-boot", deployed=worker_missing))
+    assert missing.outcome is Outcome.FAILURE
+
+
 def test_mismatched_phase_reports_the_first_observed_context(cell: Cell, tmp_path: Path) -> None:
     observed = _context(image_sha256="e" * 64)
     evidence = _compose(cell, tmp_path, first=_phase("first-boot", context=observed))

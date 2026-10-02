@@ -523,7 +523,7 @@ def compose(
     else:
         failed = (
             not all(holds.values())
-            or set(deployed) != set(ROLES)
+            or not set(cell.roles) <= set(deployed)
             or any(value != candidate for value in deployed.values())
             or any(p.context != binding for p in present)
             or not all(p.passed for p in present)
