@@ -200,3 +200,55 @@ Operator notes:
   leg additionally waits out the guest's crash→reboot→upload window.
 - **Record.** Attach the run log (the per-phase names identify any failing leg) as the recorded
   evidence that the remote spine reached 4/4.
+
+## 7. Remote deep lifecycle (#2810)
+
+`tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle` has one
+parameter for each `deep-lifecycle/remote-libvirt/x86_64` contract cell: four families times the
+two pinned baselines in `fixtures/kernel/baselines.toml`. Fedora runs on
+`fedora-kdive-remote-base-43` and Enterprise Linux on `rocky-10-kdive-remote-base`
+(`REMOTE_REPRESENTATIVES` in `tests/integration/live_stack/remote_lifecycle.py`). Debian and SUSE
+record `blocked`: the in-guest install helper is Fedora/RHEL-only (#3081) and there is no SUSE
+remote base image (#3082). A parameter provisions the representative, uploads its baseline's
+fixture kernel, completes the build, installs and boots it in the guest, reconnects over the SSH
+forward with the same key, checks the running release and GNU build ID against the fixture, reads
+the digest of the guest's `/boot/vmlinuz-<release>`, loads the `loop` module and compares its
+bytes with the uploaded copy, then releases and proves on the provider host that the domain is
+undefined, its volumes are gone and no new `kdive-*` domain remains, with kdive's capacity back to
+its starting value. The ppc64le remote cells share the node and stay `missing-result` for #2818.
+
+Topology and prerequisites, in addition to steps 1–4:
+
+- The control plane runs the stack at the candidate SHA, and pytest runs there: the evidence reads
+  the deployed role revisions from that host. The provider is a separate x86_64 host, used by
+  this lane alone while it runs (another allocation there fails the domain-set check).
+- Prepare the provider with the `libvirt_tls` and `libvirt_pool_net` roles and
+  `deploy/ansible/playbooks/image.yml` with
+  `host_images: [fedora-kdive-remote-base-43, rocky-10-kdive-remote-base]`, and stage both as
+  `[[image]]` entries. Declare exactly one `[[remote_libvirt]]` instance, with `ssh_addr` and
+  `ssh_range` (§2.1). Allow `ssh_addr:ssh_range` from the control plane in the provider's firewall
+  (a source-restricted firewalld rich rule, as `gdbstub_acl` writes for the gdbstub range).
+- `REMOTE_PROVIDER_SSH=user@host` gives the test its own access to the provider host: an `ssh`
+  destination that works non-interactively from the control plane (key and known host entry),
+  whose user is in the provider's `libvirt` group. The test reads the host's `os-release`,
+  `uname -m` and `systemd-detect-virt` over it and opens `qemu+ssh://<destination>/system` to
+  observe domains, volumes and the base volume's digest. It never reads the worker's TLS
+  material, and the evidence never records the destination.
+- Fixtures as in the [live-testing runbook](live-testing.md#deep-lifecycle-across-representative-guests-2809).
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix REMOTE_PROVIDER_SSH=<user>@<provider-host>
+uv run python -m tests.integration.live_stack.remote_lifecycle bindings --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+uv run python -m pytest -m live_stack tests/integration/test_remote_deep_lifecycle_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+An unset or malformed `REMOTE_PROVIDER_SSH`, an unreachable provider host, a provider of another
+architecture, other than one `[[remote_libvirt]]` instance, an unstaged representative, or a
+missing or invalid fixture is `blocked` (`missing-prerequisite`). After an interrupted run,
+release the leftover allocation with `allocations.release` (or let the lease expire) and check the
+provider for a leftover `kdive-*` domain and its overlay volume.
