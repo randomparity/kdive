@@ -11,9 +11,10 @@ routes ownership by provider and architecture.
 
 Tech stack: Python 3.14, pytest, pydantic, libvirt bindings, `uv`, `just`.
 
-Expected implementation size: 650–750 changed lines (M) — file map below: ~180 shared runner
-(about 150 of it moved from image smoke), ~280 deep module with its body, ~40 live test, ~150 unit
-tests, ~30 contract/manifest, ~50 docs.
+Expected implementation size: 1400–1500 changed lines (M) — corrected after the build from the
+file map: ~650 of them are the image smoke's frame counted twice (deleted from the smoke test,
+added to `scenario.py`); the rest is ~390 deep module, ~150 unit tests, ~90 live test, ~60
+contract and tests, ~60 docs. The first estimate (650–750) counted moved lines once.
 
 ## Global Constraints
 
