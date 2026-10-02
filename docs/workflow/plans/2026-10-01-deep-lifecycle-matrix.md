@@ -11,8 +11,9 @@ routes ownership by provider and architecture.
 
 Tech stack: Python 3.14, pytest, pydantic, libvirt bindings, `uv`, `just`.
 
-Expected implementation size: 550–700 changed lines (M) — file map below: ~180 shared runner
-(mostly moved), ~170 deep module, ~150 live test, ~150 unit tests, ~30 contract/manifest, ~40 docs.
+Expected implementation size: 650–750 changed lines (M) — file map below: ~180 shared runner
+(about 150 of it moved from image smoke), ~280 deep module with its body, ~40 live test, ~150 unit
+tests, ~30 contract/manifest, ~50 docs.
 
 ## Global Constraints
 
@@ -34,9 +35,9 @@ Expected implementation size: 550–700 changed lines (M) — file map below: ~1
 | `tests/scripts/test_coverage_contract.py` | modify | ownership and node assertions |
 | `tests/integration/live_stack/scenario.py` | new | shared cell frame (moved from image smoke) |
 | `tests/integration/test_image_smoke_live.py` | modify | smoke assertions only, on the shared frame |
-| `tests/integration/live_stack/deep_lifecycle.py` | new | representatives, fixture inputs, probes, bindings |
+| `tests/integration/live_stack/deep_lifecycle.py` | new | representatives, fixture inputs, probes, bindings, `deep_body` |
 | `tests/integration/live_stack/test_deep_lifecycle.py` | new | unit tests for that module |
-| `tests/integration/test_deep_lifecycle_live.py` | new | the live scenario |
+| `tests/integration/test_deep_lifecycle_live.py` | new | parametrization + local frame + hook |
 | `docs/operating/runbooks/live-testing.md` | modify | deep-lifecycle procedure |
 
 ## Task 1 — contract ownership and scenario identity
@@ -144,7 +145,9 @@ which gains `note(payload)` (append an artifact backing no assertion); `_prerequ
 `acquire` observation, raises `ScenarioStop(BLOCKED)` when unregistered, no `prove`); `_profile`
 → `catalog_profile(entry, name, unread_ref)`; `_domain_xml` → `domain_xml`; `_probe` →
 `ssh_probe(port, key, command=PROBE)`; `_rebooted_probe` → `probe_new_boot(port, key, boot_id,
-command=PROBE)`; `_authorize` → `authorize_ssh(op, system_id, directory, comment)`.
+command=PROBE)`; `_authorize` → `authorize_ssh(op, system_id, directory, comment)`. The
+accelerator observation (domain XML `type`) moves from the smoke body into `on_catalog_system`,
+after provisioning, so every local cell records it.
 
 New in the frame (the body of `_smoke`/`_cleanup_attempt` and of `test_image_smoke`):
 
@@ -212,7 +215,7 @@ green `uv run python -m pytest tests/integration/live_stack/test_deep_lifecycle.
   cells, each `Context` has `guest_os` of its representative and the kernel fields; an unbuilt
   baseline yields null kernel fields.
 
-Module `tests/integration/live_stack/deep_lifecycle.py` (public names used by Task 4):
+Module `tests/integration/live_stack/deep_lifecycle.py` (public names; Task 4 adds `deep_body`):
 
 ```python
 FIXTURE_ROOT_ENV = "KDIVE_FIXTURE_ROOT"
@@ -291,15 +294,61 @@ from the fixture (or `root is None`) leaves the kernel fields null. `main` reads
 Steps: write the five tests (red: import error), implement, green, `just lint && just type`,
 commit `test(live-stack): add deep-lifecycle inputs, probes and bindings (#2809)`.
 
-## Task 4 — the live deep-lifecycle scenario
+## Task 4 — the deep body and the live scenario
 
 Verification:
-- Mode: task-test-not-applicable for the live body: it needs a KVM host, a deployed stack and
-  built fixtures; its proof is the live run recorded in the PR, and collection
+- Mode: task-test-not-applicable for `deep_body` and the live test: they need a KVM host, a
+  deployed stack and built fixtures; their proof is the live run recorded in the PR. Collection
   (`uv run python -m pytest tests/integration/test_deep_lifecycle_live.py --collect-only -q`
-  lists eight ids on x86_64) plus `just coverage-check` (node exists) guard its shape.
+  lists eight ids on x86_64) and `just coverage-check` (node exists) guard the shape.
 
-`tests/integration/test_deep_lifecycle_live.py`:
+Add to `tests/integration/live_stack/deep_lifecycle.py` the provider-neutral body (#2810 calls
+it from its remote frame):
+
+```python
+async def deep_body(
+    run: CellRun,
+    op: LiveStackClient,
+    system_id: str,
+    owned: list[str],
+    *,
+    project: str,
+    entry: RootfsCatalogEntry,
+    tree: Path,
+    manifest: dict[str, Any],
+    tmp: Path,
+    staged_kernel: Callable[[str], str],
+) -> None:
+    """Upload → install → boot → reconnect → build identity → module load (spec item 4)."""
+```
+
+In order:
+- `port, key = authorize_ssh(...)`; `before = ssh_probe(port, key)`; assert uid `"0"` and
+  `os_matches(entry, before)`; set `guest_os`, `guest_arch`.
+- `investigations.open` (`project`, title `deep lifecycle`); in
+  `try`/`finally` close it with `investigations.close` (summary `deep lifecycle finished`).
+- `runs.create(investigation_id, system_id, build_profile(arch))`;
+  `build_and_upload_kernel(op, run_id=…, arch=arch, kernel_tree=tree,
+  evidence_dir=tmp / "upload", with_vmlinux=True, require_network=True, root_fs="ext4")`
+  (`with_vmlinux` sets the debuginfo reference that makes install inject `lib/modules`); read
+  `upload.json`; assert `build_id == manifest["build_id"]` and the result status `succeeded`;
+  prove `upload` with the declared digests and build ID.
+- `runs.install` → `drain_job`; `runs.boot` → `drain_job`; `runs.get` steps `install` and
+  `boot` are `succeeded`.
+- `kernel = staged_kernel(system_id)`; `owned.append(kernel)`; `digest = file_sha256(kernel)`;
+  assert equal to `kernel_inputs(tree, manifest)["kernel_sha256"]`; prove `install`.
+- `ssh_info` again; `after = probe_new_boot(port, key, before["boot_id"], KERNEL_PROBE)`; uid
+  `"0"`; prove `reconnect`.
+- `build_id = gnu_build_id(base64.b64decode(after["notes"]))`; assert
+  `after["release"] == manifest["release"]` and `build_id == manifest["build_id"]`; set the five
+  kernel context fields (`kernel_sha256` the observed digest, `kernel_build_id` the observed ID,
+  `kernel_config_sha256` = `file_sha256(tmp / "upload" / "effective_config")`, the other two from
+  the manifest); prove `boot-identity`.
+- `module = parse_probe(ssh(port, key, MODULE_PROBE).stdout)` (exit 0 asserted); assert
+  `initstate == "live"`, `vermagic.split()[0] == release`, and
+  `sha256 == file_sha256(staged_module(tmp / "upload" / "modstage", path))`; prove `modules`.
+
+`tests/integration/test_deep_lifecycle_live.py` (replaces the Task 1 stub):
 
 ```python
 pytestmark = pytest.mark.live_stack
@@ -311,37 +360,11 @@ def test_deep_lifecycle(cell: Cell, tmp_path: Path) -> None:
     run_cell(cell, partial(_deep, tmp=tmp_path))
 ```
 
-`_deep(run, base_url, issuer, db_url, tmp)`:
-1. `root = os.environ.get(FIXTURE_ROOT_ENV)`; unset → `ScenarioStop(BLOCKED, …)`;
-   `load_fixture` `ValueError` → `ScenarioStop(BLOCKED, "fixture …: rebuild")`.
-2. `on_catalog_system(run, …, project="deep-lifecycle", image=representative(cell), body=…)`.
-3. Body (`op`, `system_id`, `owned`), in order:
-   - accelerator from `domain_xml` type (as image smoke); `port, key = authorize_ssh(...)`;
-     `before = ssh_probe(port, key)`; assert uid `"0"` and `os_matches(entry, before)`; set
-     `guest_os`, `guest_arch`.
-   - `investigations.open` (`project`, title `deep lifecycle`); in `try`/`finally` close it with
-     `investigations.close` (summary `deep lifecycle finished`).
-   - `runs.create(investigation_id, system_id, build_profile(arch))`;
-     `build_and_upload_kernel(op, run_id=…, arch=arch, kernel_tree=tree,
-     evidence_dir=tmp / "upload", with_vmlinux=True, require_network=True, root_fs="ext4")`;
-     read `upload.json`; assert `build_id == manifest["build_id"]` and the result status
-     `succeeded`; prove `upload` with the declared digests and build ID.
-   - `runs.install` → `drain_job`; `runs.boot` → `drain_job`; `runs.get` steps `install` and
-     `boot` are `succeeded`.
-   - `kernel = ET.fromstring(domain_xml(system_id)).findtext("./os/kernel")`; `owned.append`;
-     `digest = file_sha256(kernel)`; assert equal to `kernel_inputs(...)["kernel_sha256"]`;
-     prove `install` with the steps and digest.
-   - `ssh_info` again (same port contract); `after = probe_new_boot(port, key, before["boot_id"],
-     KERNEL_PROBE)`; uid `"0"`; prove `reconnect`.
-   - `build_id = gnu_build_id(base64.b64decode(after["notes"]))`; assert
-     `after["release"] == manifest["release"]` and `build_id == manifest["build_id"]`; set the
-     five kernel context fields (`kernel_sha256` the observed digest, `kernel_build_id` the
-     observed ID, `kernel_config_sha256` = `file_sha256(tmp/"upload"/"effective_config")`, the
-     other two from the manifest); prove `boot-identity`.
-   - `module = parse_probe(ssh(port, key, MODULE_PROBE).stdout)` (exit 0 asserted);
-     assert `initstate == "live"`, `vermagic.split()[0] == release`, and
-     `sha256 == file_sha256(staged_module(tmp/"upload"/"modstage", path))`; prove `modules`.
-4. Re-`verify` the fixture after the run; a change is a failure.
+`_deep(run, base_url, issuer, db_url, tmp)`: `KDIVE_FIXTURE_ROOT` unset, or `load_fixture`
+raising `ValueError`, → `ScenarioStop(BLOCKED, …)`; then `on_catalog_system(run, …,
+project="deep-lifecycle", image=representative(cell), body=…)` whose body calls `deep_body` with
+`staged_kernel=_domain_kernel` (`ET.fromstring(domain_xml(id)).findtext("./os/kernel")`, asserted
+non-empty); afterwards re-`verify` the fixture, a change being a failure.
 
 Steps: implement, collect, `just lint && just type && just coverage-check`, commit
 `test(live-stack): drive the deep lifecycle over representative guests (#2809)`.
@@ -352,13 +375,20 @@ Verification: Mode: task-test-not-applicable — runbook prose; its proof is fol
 host for the PR evidence.
 
 Add `#### Deep lifecycle across representative guests (#2809)` after the image-smoke subsection:
-build both fixtures with `scripts/kernel_fixtures.py build` (native host; Debian-family builder
-until #3063), stage the four representatives with `examples/local-libvirt/build-image.sh`,
-`export KDIVE_FIXTURE_ROOT`, write bindings with
-`python -m tests.integration.live_stack.deep_lifecycle bindings`, run the test, `assemble`,
-`qualify`; list blocked/failure meanings as image smoke does.
+- build both fixtures with `scripts/kernel_fixtures.py build` (native host; Debian-family builder
+  until #3063); stage the four representatives with `examples/local-libvirt/build-image.sh`;
+  `export KDIVE_FIXTURE_ROOT`; write bindings with
+  `python -m tests.integration.live_stack.deep_lifecycle bindings`; run; `assemble`; `qualify`.
+- blocked/failure meanings, as image smoke lists them.
+- after an interrupted run: `allocations.release` the leftover allocation (or wait out the lease)
+  and check `KDIVE_INSTALL_STAGING` for the run's staged kernel.
+- the four ppc64le local cells report `missing-result` for #2818 until a native POWER host runs
+  the same node.
+- the sanitized per-cell outcome table from the live proof below.
 
 Live proof: redeploy the lab host at the branch head (demo-down, prepare, demo-up; `/readyz`
-commits equal `HEAD`), run the procedure, record the eight per-cell `qualify` rows (sanitized) in
-the PR body; file a linked `status:needs-triage` issue per product defect found. Commit
-`docs(live-testing): run the deep lifecycle cells (#2809)`.
+commits equal `HEAD`). Run one cell first (`-k fedora-longterm`). If it shows a staged kernel
+surviving teardown or a fixture kernel that cannot boot, file that issue (`status:needs-triage`,
+linked) before running the other seven. Then run all eight, `assemble`, `qualify`, and record the
+eight rows (sanitized) in the runbook table and the PR body, each failing row with its linked
+issue. Commit `docs(live-testing): run the deep lifecycle cells (#2809)`.

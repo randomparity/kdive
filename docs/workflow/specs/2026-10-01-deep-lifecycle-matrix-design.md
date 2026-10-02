@@ -27,13 +27,18 @@ deep and tool cell, which the approved split moves to #3062 and #2818.
      does not mark the remote cells implemented. Remote cells stay `pending-implementation` for
      #2810. The two local scenario IDs map to the new node; ppc64le local cells share it and report
      `missing-result` (owner #2818) until a native POWER host runs it, as image smoke does.
+   - The deep cells keep the native roles (server, worker, reconciler): on the local-libvirt
+     demo-up lane the scenario does not route through the provider authority. An installed
+     authority is still judged (ADR-0715). #2810 and #2818 decide this for their lanes.
 2. **Shared cell runner** (`tests/integration/live_stack/scenario.py`), extracted from
    `test_image_smoke_live.py` with no behaviour change to image smoke:
    `ScenarioStop`, `CellRun` (assertions, artifacts, observed `Context` fields), `run_cell`
    (identity → prerequisites → scenario → one record → pytest verdict), `on_catalog_system`
-   (acquire a registered catalog image, allocate, provision to `ready`, run a body, prove `cleanup`
-   with `release_and_verify`, record a cleanup attempt on failure), `authorize_ssh`, `ssh_probe`,
-   `probe_new_boot`, `domain_xml`. #2810 reuses these with its own allocation.
+   (the local-libvirt frame: acquire a registered catalog image, allocate, provision to `ready`,
+   observe the accelerator, run a body, prove `cleanup` with `release_and_verify`, record a cleanup
+   attempt on failure), `authorize_ssh`, `ssh_probe`, `probe_new_boot`, `domain_xml`. Everything
+   except `on_catalog_system` and `domain_xml` is provider-neutral; #2810 wraps the same deep body
+   in its own remote frame.
 3. **Deep inputs and probes** (`tests/integration/live_stack/deep_lifecycle.py`):
    - Representatives (one per family and architecture, Fedora and EL distinct):
      debian `debian-kdive-ready-13`; fedora `fedora-kdive-ready-44` (ppc64le
@@ -49,16 +54,21 @@ deep and tool cell, which the approved split moves to #3062 and #2818.
    - `gnu_build_id(notes)` parses the running kernel's `/sys/kernel/notes`.
    - Module probe: `modprobe loop` (`CONFIG_BLK_DEV_LOOP=m` in `fixtures/kernel/debug.config`),
      then `/sys/module/loop/initstate`, `modinfo -n`/`-F vermagic`, and the module file's SHA-256.
+   - `deep_body(run, op, system_id, owned, *, project, entry, tree, manifest, tmp, staged_kernel)`: the
+     provider-neutral assertion sequence of item 4; `staged_kernel(system_id) -> str` is the
+     provider hook naming the installed kernel file (local: the domain XML `<kernel>`).
    - `bindings` command: the expected `Context` of every native local deep cell — host identity,
      catalog `guest_os`/arch, accelerator, staged image digest (as image smoke), kernel inputs from
      the verified fixture; null where unstaged or unbuilt.
 4. **Test** `tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle`, `live_stack`,
-   parametrized over the native local deep cells. Inside `on_catalog_system` with the
-   representative:
+   parametrized over the native local deep cells: `run_cell` → `on_catalog_system` with the
+   representative → `deep_body`, which proves in order:
    - authorize a fresh key; SSH probe as root: uid 0, catalog OS/arch, baseline `boot_id`.
    - open an investigation; `runs.create` bound to the System.
    - **upload**: `build_and_upload_kernel(kernel_tree=<fixture>, evidence_dir=…, with_vmlinux=True,
      require_network=True, root_fs="ext4")`; the completed build's `build_id` equals the manifest.
+     `with_vmlinux` is required: it sets the build's debuginfo reference, which is what makes
+     install inject `lib/modules` into the guest.
    - **install**: `runs.install` drains, then (after boot) the domain XML `<kernel>` file's
      SHA-256 equals the bound `kernel_sha256`, and `runs.get` shows `install` and `boot` steps
      succeeded. The staged kernel path joins the owned files cleanup must prove absent.
@@ -87,7 +97,13 @@ deep and tool cell, which the approved split moves to #3062 and #2818.
    reclaimed; the shared lab host's other guests are untouched; published evidence holds no host
    names, paths or keys.
 3. Accepted failure classes:
-   - A killed pytest leaks its allocation — bounded by the lease; the runbook names the recovery.
+   - A killed pytest leaks its allocation until the lease expires (domain, disks, capacity); the
+     runbook names the manual release. Whether teardown reclaims the staged kernel is unproven
+     (install keeps it for the System's lifetime); if the first live cell shows it survives, that
+     is a product defect filed before the full run, and `cleanup` fails on every cell until fixed.
+   - A fixture kernel that cannot boot a representative's userspace (defconfig plus
+     `debug.config`, no initrd) is a fixture defect: filed against the fixture owner, recorded as
+     that cell's failure; the fixture is not changed here.
    - The qualifier trusts producer digests (ADR-0686 limit).
    - A representative stands for its family; other images of the family are image smoke's.
 4. Covered elsewhere: remote deep cells #2810; ppc64le execution #2818; lifecycle tool cells
