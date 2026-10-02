@@ -3,7 +3,9 @@
 - **Issue:** #2807 · **Decision:** [ADR-0716](../adr/0716-host-install-evidence-producer.md)
   · **Design:** [spec](../workflow/specs/2026-10-01-host-install-proof-design.md)
 - **Candidate:** `0ac30cfe74f461930bbc15a15b5418ddb0c3c6a7`. Every role on every host reported
-  this revision. Commits after it on the branch change only documentation.
+  this revision. Commits after it on the branch are documentation plus a merge of `main` that
+  brought in the image-smoke binding (#2808). That merge changes the matrix identity, so this
+  evidence qualifies the candidate and matrix named here, not a later head.
 - **Matrix:** `fc53e68775e6c519ac5f72e3b4e89f1bc8fd79836f4d654cb4ca5513e5729740`
 - **Date:** 2026-10-01 to 2026-10-02 (UTC).
 - **Hosts:** exclusive, snapshot-capable disposable lab test hosts with nested KVM, one per
