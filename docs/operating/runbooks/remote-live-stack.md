@@ -280,9 +280,12 @@ Topology and prerequisites, in addition to steps 1–4:
 - Prepare the provider with the `libvirt_tls` and `libvirt_pool_net` roles and
   `deploy/ansible/playbooks/image.yml` with
   `host_images: [fedora-kdive-remote-base-43, rocky-10-kdive-remote-base]`, and stage both as
-  `[[image]]` entries. Declare exactly one `[[remote_libvirt]]` instance, with `ssh_addr` and
-  `ssh_range` (§2.1). Allow `ssh_addr:ssh_range` from the control plane in the provider's firewall
-  (a source-restricted firewalld rich rule, as `gdbstub_acl` writes for the gdbstub range).
+  `[[image]]` entries. Images built before #3094 fail the `enterprise` cells at boot (the
+  [host setup's image section](remote-libvirt-host-setup.md#2-prepare-guest-images) says why):
+  rebuild them with `force_image_rebuild=true`. Declare exactly one `[[remote_libvirt]]`
+  instance, with `ssh_addr` and `ssh_range` (§2.1). Allow `ssh_addr:ssh_range` from the control
+  plane in the provider's firewall (a source-restricted firewalld rich rule, as `gdbstub_acl`
+  writes for the gdbstub range).
 - `REMOTE_PROVIDER_SSH=user@host` gives the test its own access to the provider host: an `ssh`
   destination that works non-interactively from the control plane (key and known host entry),
   whose user is in the provider's `libvirt` group. The test reads the host's `os-release`,
