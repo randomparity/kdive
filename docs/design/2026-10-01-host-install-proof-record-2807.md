@@ -3,8 +3,7 @@
 - **Issue:** #2807 · **Decision:** [ADR-0716](../adr/0716-host-install-evidence-producer.md)
   · **Design:** [spec](../workflow/specs/2026-10-01-host-install-proof-design.md)
 - **Candidate:** `a5a3818754d048cafddfda1cfdc2d2b095c4bc76`. Every role on every host reported
-  this revision. Commits after it on the branch change only this record and
-  `docs/operating/providers/local-libvirt.md`.
+  this revision. Commits after it on the branch change only documentation.
 - **Matrix:** `fc53e68775e6c519ac5f72e3b4e89f1bc8fd79836f4d654cb4ca5513e5729740`
 - **Date:** 2026-10-01 to 2026-10-02 (UTC).
 - **Hosts:** one disposable, exclusive x86_64 VM per family, with nested KVM. Each VM was created
