@@ -108,10 +108,15 @@ def test_an_installed_authority_that_cannot_be_identified_stops_the_run(
         _identity(read=lambda _p: installed)
 
 
-def test_a_stale_authority_is_recorded_as_a_mismatch() -> None:
+def test_a_stale_authority_is_recorded_and_judged_though_no_cell_requires_it(
+    tmp_path: Path,
+) -> None:
     identity = _identity(read=lambda _p: "def5678")
     assert identity.deployed_roles["authority"] == _OTHER
-    assert identity_problems(identity, ()) == []
+    assert identity_problems(identity, ("server",)) == [f"mismatch:authority:{_OTHER}"]
+    cell, record = _record(identity, EvidenceWriter(tmp_path))
+    assert "authority" not in cell.roles
+    assert record.deployed_roles["authority"] == _OTHER
 
 
 def test_presence_is_false_only_when_absence_is_proven(tmp_path: Path) -> None:

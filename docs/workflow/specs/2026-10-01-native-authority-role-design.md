@@ -32,7 +32,9 @@ Recorded as amendments to
    path and the fix. Before this change it recorded nothing.
 3. **Recorded roles are still judged.** `results.py` is unchanged. It fails any recorded role whose
    revision differs from the candidate (`deployed-revision-mismatch`). That includes an `authority`
-   revision the cell does not require.
+   revision the cell does not require. So `build_record` writes every role `run_identity` read, not
+   only the cell's required roles. `identity_problems` reports a mismatch for any recorded role, so
+   the carrier stops before provisioning.
 
 The matrix digest changes, so bindings computed before this change are invalid. This is expected
 under ADR-0686.

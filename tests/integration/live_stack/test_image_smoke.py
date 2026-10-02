@@ -119,6 +119,14 @@ def test_a_success_record_from_the_binding_qualifies_without_an_authority(
     )
     verdict = next(v for v in qualify(contract, inputs, [record]).cells if v.cell.id == cell_id)
     assert verdict.qualified, verdict.reasons
-    stale = record.model_copy(update={"deployed_roles": {**roles, "authority": "e" * 40}})
+    stale_identity = replace(identity, deployed_roles={**roles, "authority": "e" * 40})
+    stale = build_record(
+        cell,
+        stale_identity,
+        outcome=Outcome.SUCCESS,
+        context=inputs.cells[cell_id],
+        duration_s=1.0,
+        assertions=dict.fromkeys(cell.assertions, "d" * 64),
+    )
     verdict = next(v for v in qualify(contract, inputs, [stale]).cells if v.cell.id == cell_id)
     assert verdict.reasons == ("deployed-revision-mismatch",)

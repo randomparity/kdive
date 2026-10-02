@@ -179,14 +179,16 @@ def identity_problems(identity: RunIdentity, roles: Iterable[str]) -> list[str]:
 
     ``missing:<role>`` lets a scenario still run and record its assertions; ``mismatch:`` and
     ``dirty-checkout`` mean the stack or checkout is not the candidate, so nothing should run.
+    A mismatch names any recorded role, required or not: an installed authority is judged even
+    where the cell does not require it (ADR-0715).
     """
     problems = [] if identity.clean else ["dirty-checkout"]
-    for role in roles:
-        revision = identity.deployed_roles.get(role)
-        if revision is None:
-            problems.append(f"missing:{role}")
-        elif revision != identity.candidate_sha:
-            problems.append(f"mismatch:{role}:{revision}")
+    problems += [f"missing:{role}" for role in roles if role not in identity.deployed_roles]
+    problems += [
+        f"mismatch:{role}:{revision}"
+        for role, revision in identity.deployed_roles.items()
+        if revision != identity.candidate_sha
+    ]
     return problems
 
 
@@ -203,6 +205,9 @@ def build_record(
 ) -> Evidence:
     """One version-1 record for ``cell``; identity fields come from the cell, never the caller.
 
+    Every deployed role that was read is recorded, so the qualifier judges a role the cell does
+    not require as well as the ones it does.
+
     ``artifacts`` adds retained evidence that backs no assertion, such as a cleanup attempt.
     """
     return Evidence.model_validate(
@@ -215,11 +220,7 @@ def build_record(
             "candidate_sha": identity.candidate_sha,
             "matrix_sha256": identity.matrix_sha256,
             "input_sha256": digest(context),
-            "deployed_roles": {
-                role: identity.deployed_roles[role]
-                for role in cell.roles
-                if role in identity.deployed_roles
-            },
+            "deployed_roles": dict(identity.deployed_roles),
             "context": context.model_dump(),
             "duration_seconds": duration_s,
             "assertions": assertions,
