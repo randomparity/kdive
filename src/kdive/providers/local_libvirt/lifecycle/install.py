@@ -408,7 +408,8 @@ class LocalLibvirtInstaller:
             # after boot/vmlinuz, or an inject/initrd failure — yet the domain is only redefined
             # *after* staging returns, so a staging failure never references either. Reclaim both
             # (only on the error path — on success they are the durable <kernel>/<initrd> for the
-            # System's lifetime) so an abandoned, not-retried install leaves nothing behind.
+            # System's lifetime, reclaimed by its teardown with all of <staging_root>/<system_id>/)
+            # so an abandoned, not-retried install leaves nothing behind.
             # Best-effort/idempotent; a retry re-writes them anyway.
             for orphan in (kernel_path, staging_dir / "initrd"):
                 with contextlib.suppress(OSError):
