@@ -115,9 +115,9 @@ from the checked bundle manifest:
 | Assertion | Artifact content | Holds when |
 |---|---|---|
 | `clean-install` | Steps 1–9: exit codes, durations, transcript digests, clean markers, operator-file digest | Every listed step exits 0, and step 1 found all markers absent. |
-| `first-boot` | The first phase record | The phase passed. |
+| `first-boot` | The first phase record | The phase booted the bundle's kernel (console release observed). |
 | `repeat-setup` | Steps 11–14 | Every listed step exits 0. |
-| `second-boot` | The second phase record | The phase passed. |
+| `second-boot` | The second phase record | The phase booted the bundle's kernel. |
 | `confinement` | Host mode at step 1 and in each phase, the guest process labels, and each phase's installed-prerequisite observations (worker interpreter imports, lifecycle socket, operator group, published libvirt endpoint, authority revision) | The host enforces in all three samples (`Enforcing`, or AppArmor enabled `Y`), each phase observed a confined qemu process, and each phase's installed-prerequisite checks hold. |
 | `cleanup` | Cleanup observations from both phases | Each phase saw its system `torn_down` and its domain absent. |
 
@@ -183,7 +183,7 @@ are set. It runs from `~/kdive`, with `examples/local-libvirt/env.sh` sourced, a
   | `kernel_sha256` | The uploaded tar member |
   | Remaining kernel fields | The bundle manifest, after its `.config` digest matches `effective_config` |
 
-`phase.json` records `passed`, `phase`, `deployed`, `context`, and per-check observations and
+`phase.json` records `passed`, `booted`, `phase`, `deployed`, `context`, and per-check observations and
 failures. The node asserts `passed`. A missing `phase.json` counts as a failed phase.
 
 ### Wiring

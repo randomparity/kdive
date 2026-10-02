@@ -81,6 +81,7 @@ def _phase(phase: str, **changes: object) -> PhaseRecord:
     values: dict[str, object] = {
         "phase": phase,
         "passed": True,
+        "booted": True,
         "deployed": dict.fromkeys(ROLES, SHA),
         "context": _context(),
         "host_enforcing": True,
@@ -166,7 +167,7 @@ def test_complete_run_qualifies_through_the_shipped_checker(
         {"steps": _steps(timeout="stack")},
         {"second": None},
         {"second": _phase("first-boot")},
-        {"first": _phase("first-boot", passed=False)},
+        {"first": _phase("first-boot", passed=False, booted=False)},
         {"second": _phase("second-boot", deployed={**dict.fromkeys(ROLES, SHA), "worker": None})},
         {"first": _phase("first-boot", deployed={**dict.fromkeys(ROLES, SHA), "server": "d" * 40})},
         {"second": _phase("second-boot", context=_context(image_sha256="e" * 64))},
@@ -195,6 +196,22 @@ def test_a_stack_deployed_from_another_revision_fails(cell: Cell, tmp_path: Path
     )
     assert evidence.outcome is Outcome.FAILURE
     assert evidence.deployed_roles == other
+
+
+def test_boot_assertions_hold_apart_from_confinement(cell: Cell, tmp_path: Path) -> None:
+    unconfined = {"passed": False, "guest_label": "unconfined", "guest_confined": False}
+    evidence = _compose(
+        cell,
+        tmp_path,
+        first=_phase("first-boot", **unconfined),
+        second=_phase("second-boot", **unconfined),
+    )
+    holds = {
+        name: json.loads((tmp_path / "artifacts" / f"{value}.json").read_text())["holds"]
+        for name, value in evidence.assertions.items()
+    }
+    assert evidence.outcome is Outcome.FAILURE
+    assert [name for name, held in holds.items() if not held] == ["confinement"]
 
 
 def test_missing_role_is_omitted_rather_than_guessed(cell: Cell, tmp_path: Path) -> None:

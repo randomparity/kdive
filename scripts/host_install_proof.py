@@ -211,6 +211,7 @@ class PhaseRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     phase: Literal["first-boot", "second-boot"]
     passed: bool
+    booted: bool
     deployed: dict[Role, GitSHA | None]
     context: Context
     host_enforcing: bool
@@ -381,9 +382,9 @@ def _holds(
     complete = len(both) == 2
     return {
         "clean-install": host.prepared and _steps_hold(steps, clean),
-        "first-boot": first is not None and first.passed,
+        "first-boot": first is not None and first.booted,
         "repeat-setup": _steps_hold(steps, REPEAT_STEPS),
-        "second-boot": second is not None and second.passed,
+        "second-boot": second is not None and second.booted,
         "confinement": host.enforcing
         and complete
         and all(

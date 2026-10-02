@@ -330,6 +330,7 @@ def test_installed_host_boots_pinned_kernel() -> None:
         {
             "phase": inputs["PHASE"],
             "passed": not failures,
+            "booted": booted,
             "deployed": deployed,
             "context": context,
             "host_enforcing": host_enforcing,
