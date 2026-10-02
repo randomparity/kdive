@@ -28,6 +28,7 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just format` | `ruff check --fix` + `ruff format` (mutating) | — |
 | `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone | — |
 | `just test` | unit, service, database, integration, and other ordinary tests; excludes `live_vm`, `live_stack`, and `agent_smoke` | ~5 min 20 s |
+| `just test-linux` | the `just test` selection in a native-arch Linux container (Docker or Podman); the unit gate on macOS; tests a commit, not uncommitted edits | — |
 | `just test-verbose tests/domain/test_errors.py` | example Docker-free unit-test file, run serially (39 tests) | ~2 s |
 | `uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py::test_request_under_cap_grants -q` | example single database-backed test, including disposable Postgres startup | ~4 s |
 | `just test-changed` | tests mapped from branch and working-tree changes; unmappable changes fall back to the full suite | Selection-dependent |
@@ -228,6 +229,8 @@ first on `PATH`; on macOS that means Homebrew ([macOS steps](docs/operating/inst
 ADR-0673). Normal development and the optional `live` group have different
 native requirements; POWER also needs Rust and the documented source-build prerequisites.
 `just check-deps` checks the host; it cannot install the runner that invokes it.
+On macOS, a host `just test` is not regression evidence: the suite needs Linux behavior.
+Run `just test-linux` instead ([cross-platform guide](docs/development/cross-platform.md#macos-run-the-suite-in-a-linux-container)).
 
 - The db/integration tests need a reachable Docker daemon (disposable Postgres via
   testcontainers). They **skip** when Docker is absent — unless `KDIVE_REQUIRE_DOCKER=1`

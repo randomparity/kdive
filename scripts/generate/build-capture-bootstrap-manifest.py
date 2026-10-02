@@ -21,7 +21,12 @@ from kdive.jobs.capture_operations.bootstrap.bootstrap_elf import runtime_elf_cl
 SCHEMA_VERSION = 1
 DEFAULT_DESTINATION = Path("/usr/share/kdive/capture-bootstrap-manifest.json")
 _MAX_MANIFEST_BYTES = 1_048_576
-_ARCHITECTURES = {"amd64": "x86_64", "x86_64": "x86_64", "ppc64le": "ppc64le"}
+_ARCHITECTURES = {
+    "amd64": "x86_64",
+    "x86_64": "x86_64",
+    "ppc64le": "ppc64le",
+    "aarch64": "aarch64",
+}
 
 
 def _environment(source_root: Path | None = None) -> dict[str, str]:

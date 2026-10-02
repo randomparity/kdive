@@ -33,6 +33,24 @@ change on every rebuild (ADR-0688). The `fedora-kdive-ready-43` row pins no sour
    staged-path image, that is the digest build-fs recorded in its sidecar. Equal values mean the
    stack registered the bytes that were bound. Nothing hashes the disk at provision time.
 
+### Amendment (2026-10-01): an installed authority that cannot be read stops the run (#3066)
+
+An amendment rather than a new decision: rules 1 and 3 and the other roles in rule 2 stand. It
+qualifies one claim in rule 2, that a role which cannot be read or resolved is omitted, for the
+`authority` role only. Omission was safe for the `/readyz` roles because a missing role failed every
+native cell. After the Consequences amendment below, no native cell requires `authority`, so an
+omitted authority would hide a stale install.
+
+- `authority` is recorded only when `/opt/kdive-provider-authority/revision` exists. An `os.lstat`
+  that reports a missing file or path component means no authority is installed; nothing is read.
+- Any other `lstat` result means the file is present, including a permission error that leaves its
+  absence unproven. A present file must be read through `sudo -n` and resolved to a full SHA, or the
+  identity read raises and the cell records nothing.
+- A recorded role is still checked against the candidate whether or not the cell requires it, so a
+  stale authority fails `deployed-revision-mismatch`. An installed authority can be bound, and a bound
+  authority changes local-libvirt routing (ADR-0623). Its involvement in a native cell therefore
+  cannot be ruled out once it is installed.
+
 ## Consequences
 
 - A rebuilt image needs new bindings and new evidence, as ADR-0688 expects.
@@ -41,6 +59,16 @@ change on every rebuild (ADR-0688). The `fedora-kdive-ready-43` row pins no sour
   between a contract change and a lane change.
 - `/readyz` reports a commit, not tree state. Restarting the stack from a dirty tree goes
   undetected; only the test checkout's own state is checked.
+
+### Amendment (2026-10-01): native cells require only the roles their scenario uses (#3066)
+
+An amendment rather than a new decision: it settles the question the second bullet above left to
+#3066 and qualifies that bullet's claim that the contract requires `authority` for every native cell.
+Native cells now require `server`, `worker` and `reconciler`. No native scenario on the demo-up lane
+routes through the provider authority: with no authority binding, local-libvirt behaves as before
+(ADR-0623). Tool cells keep their declared `authority = true` flag and `role_overrides`. A native
+scenario that does route through the authority adds the role to its own cells in the change that
+implements it (#2809, #2810). The matrix digest changes, so earlier bindings are void.
 
 ## Considered & rejected
 
@@ -56,3 +84,17 @@ change on every rebuild (ADR-0688). The `fedora-kdive-ready-43` row pins no sour
   login, server and client PKI, and the `provider_authority_host` role inputs
   (`deploy/ansible/roles/provider_authority_host/defaults/main.yml`). That is lane provisioning,
   which #2807 owns and #3066 tracks.
+
+### Amendment (2026-10-01): two further rejections (#3066)
+
+An amendment rather than a new decision: it adds the alternatives #3066 weighed. It does not change
+the rejection above, which concerned this record's own change.
+
+- **Install the authority on the qualification lane and keep the role on every native cell.**
+  judgment: it would record a revision for a component that no native scenario on the lane exercises.
+  The cell would then qualify on an identity that has nothing to do with its assertions. Owners of
+  authority-routed cells install it (#2812, #2807).
+- **Keep omitting an authority whose revision cannot be read.** judgment: once native cells stop
+  requiring the role, omission makes "installed but unreadable" look like "not installed". That
+  hides a stale revision. Once installed, the authority may be involved, because a bound authority
+  changes local-libvirt routing (ADR-0623). #2803 requirement 3 says such a revision must fail.

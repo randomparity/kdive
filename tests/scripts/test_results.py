@@ -218,3 +218,14 @@ def test_both_input_files_cannot_redefine_the_required_platform_lane(
             }
         )
         assert qualify(contract, inputs, [result]).passed is should_pass
+
+
+def test_a_recorded_role_the_cell_does_not_require_is_still_judged() -> None:
+    contract, bindings, results = complete_evidence()
+    cells = tuple(replace(c, roles=("server", "worker", "reconciler")) for c in contract.cells)
+    contract = replace(contract, cells=cells)
+    assert qualify(contract, bindings, results).passed
+    roles = {**results[0].deployed_roles, "authority": "d" * 40}
+    results[0] = results[0].model_copy(update={"deployed_roles": roles})
+    report = qualify(contract, bindings, results)
+    assert "deployed-revision-mismatch" in report.cells[0].reasons

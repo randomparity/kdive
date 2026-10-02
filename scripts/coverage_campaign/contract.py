@@ -284,7 +284,7 @@ def _native_cell(
         host_arch=arch,
         guest_arch=arch,
         accelerator="kvm" if arch == "x86_64" else "kvm-hv",
-        roles=("server", "worker", "reconciler", "authority"),
+        roles=("server", "worker", "reconciler"),
         inputs=_KERNEL_INPUTS,
         image=image,
         family=family,
