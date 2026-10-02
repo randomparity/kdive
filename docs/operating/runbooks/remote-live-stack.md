@@ -64,6 +64,55 @@ memory_mb = 65536
 The libvirt storage pool / network / machine knobs that the inventory model does not carry stay
 operational env settings (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `_NETWORK`, `_MACHINE`).
 
+### Delivering the inventory and TLS refs to the fixed workers
+
+The live stack's workers are the fixed `kdive-live-worker@N` slots (ADR-0574). Their accounts have
+no home directory, so they never see the XDG default `~/.config/kdive/systems.toml`. When the
+operator's inventory declares a `[[remote_libvirt]]` instance, `scripts/live-stack/worker-lifecycle.sh
+start` sends the path the operator's server and reconciler resolve to the root lifecycle witness.
+The witness writes it into each slot's environment as `KDIVE_SYSTEMS_TOML`. An inventory with no
+remote instance is not sent, so the request a local-only stack sends is unchanged.
+
+Place the inventory where the slot accounts can read it but cannot write it, and point the server
+and reconciler at it:
+
+```bash
+sudo install -o root -g root -m 0644 systems.toml /etc/kdive/systems.toml
+export KDIVE_SYSTEMS_TOML=/etc/kdive/systems.toml
+```
+
+Each check below fails before anything starts or stops:
+
+- **Launcher.** It refuses an inventory that any `kdive-worker-N` account cannot read, for example
+  one under a 0700 or 0750 home.
+- **Witness.** It inspects only metadata and never opens the file. It returns `invalid_request` /
+  `correct_request` when the path:
+  - is relative or not normalized;
+  - traverses a symlink;
+  - is not a regular file;
+  - can be written by a slot account, through any slot group or `kdive-live-libvirt`, or by other
+    users. This covers the file and every ancestor directory, except a sticky one such as `/tmp`.
+
+Adding or removing a `[[remote_libvirt]]` block takes effect at the next `worker-lifecycle.sh
+start`. Host entries are re-read on every operation, so replace the file atomically (write a
+sibling, then rename) rather than editing it in place. The delivered inventory also governs the
+fixed workers' other inventory-driven behavior, such as `[[local_libvirt]] guest_egress`.
+
+The TLS refs resolve under the fixed secrets root `/var/lib/kdive/secrets`. Workers never take
+another root, and the launcher refuses to start remote workers while `KDIVE_SECRETS_ROOT` names a
+different directory. Keep the remote client material in its own subdirectory:
+
+```text
+/var/lib/kdive/secrets                    root:root            0711
+/var/lib/kdive/secrets/remote-libvirt     root:kdive-live-libvirt 0750
+/var/lib/kdive/secrets/remote-libvirt/*   root:kdive-live-libvirt 0440
+```
+
+The Ansible `local_worker_host` role creates the secrets root. On an installer-only host, create it
+yourself with `sudo install -d -o root -g root -m 0711 /var/lib/kdive/secrets`. The installer adds both the slot accounts and the operator to `kdive-live-libvirt`. The refs then
+read `client_cert_ref = "remote-libvirt/clientcert.pem"`, and likewise for the key and CA. The
+launcher also checks that every slot account can traverse the secrets root.
+
 Confirm the worker host can actually reach libvirtd over TLS before running the spine:
 
 ```bash

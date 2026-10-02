@@ -72,6 +72,17 @@ world-accessible. The witness credential and service configuration are root-only
 `/etc/kdive`; per-slot state is root-owned beneath `/var/lib/kdive/live-workers`, and each slot
 account can neither traverse nor replace a sibling slot.
 
+The `start` request may also carry one optional absolute inventory path (`systems_toml`, delivered
+as `KDIVE_SYSTEMS_TOML`). `scripts/live-stack/worker-lifecycle.sh` sends it only when the
+operator's inventory declares a `[[remote_libvirt]]` instance. Before it touches any slot, the
+witness checks the path with `lstat` alone and never opens the file. It rejects a relative or
+non-normalized path, a symlink anywhere along it, a non-regular file, and any file or ancestor
+directory that a slot account, any slot group, `kdive-live-libvirt`, or other users can write. A
+sticky directory is the one exception. The launcher separately checks that every slot can read
+the inventory. `KDIVE_SECRETS_ROOT`, `HOME`, and `XDG_CONFIG_HOME` are never passed. Workers
+resolve secret refs only under the fixed `/var/lib/kdive/secrets`. The
+[remote live-stack runbook](../../docs/operating/runbooks/remote-live-stack.md) gives the layout.
+
 Adding the operator to `kdive-live-control` does not refresh an already-running process's kernel
 group list. Interactive operators must start a new login session after installation before using
 the installed socket.
