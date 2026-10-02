@@ -677,9 +677,9 @@ class _Remote:
         return result
 
     def text(self, step: Step) -> str:
-        return (self.logs / f"{self.steps.index(step) + 1:02d}-{step.name}.log").read_text(
-            errors="replace"
-        )
+        log = self.logs / f"{self.steps.index(step) + 1:02d}-{step.name}.log"
+        with log.open("rb") as stream:
+            return stream.read(_PHASE_BYTES).decode(errors="replace")
 
 
 def _summary(output: Path, steps: list[Step], outcome: str | None) -> None:
@@ -729,6 +729,7 @@ def run(args: argparse.Namespace) -> int:
     operator_sha256 = _file_digest(operator) if operator else None
     output: Path = args.output
     output.mkdir(parents=True)
+    output.chmod(0o700)  # private transcripts and phase records, whatever the umask
     (output / "steps").mkdir()
     # Every local failure that can exit 2 happens before the first remote step.
     subprocess.run(
@@ -854,8 +855,12 @@ def _boot(
     script = step_script(_NODE, phase=phase, candidate=candidate, image=image, node=NODE_ID)
     remote.step(phase, _in_run(script, run_id, phase), SHORT_STEP_S)
     local = output / "phases" / phase
-    local.parent.mkdir(exist_ok=True)
-    remote.copy(f"fetch-{phase}", f"{remote.target}:host-install-{run_id}/{phase}", str(local))
+    local.mkdir(parents=True)
+    remote.copy(
+        f"fetch-{phase}",
+        f"{remote.target}:host-install-{run_id}/{phase}/phase.json",
+        str(local / "phase.json"),
+    )
     return read_phase(local / "phase.json")
 
 
