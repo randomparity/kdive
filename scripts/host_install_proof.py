@@ -258,13 +258,18 @@ def _in_run(script: str, run_id: str, phase: str = "") -> str:
 
 
 def _transport(known_hosts: Path) -> list[str]:
-    # The supplied pin file is the only key source; no system-wide known_hosts or CA.
+    # The supplied pin file is the only key source: no system-wide known_hosts, no
+    # KnownHostsCommand and no DNS SSHFP lookup from the controller's ssh_config.
     return [
         *SSH_OPTIONS,
         "-o",
         f"UserKnownHostsFile={known_hosts}",
         "-o",
         "GlobalKnownHostsFile=/dev/null",
+        "-o",
+        "KnownHostsCommand=none",
+        "-o",
+        "VerifyHostKeyDNS=no",
     ]
 
 
@@ -758,8 +763,11 @@ def run(args: argparse.Namespace) -> int:
     cell = cells[0]
     operator = args.operator_prerequisites
     # Read once: the digest in the evidence must name exactly the script that runs.
-    operator_script = operator.read_bytes() if operator else None
-    operator_sha256 = hashlib.sha256(operator_script).hexdigest() if operator_script else None
+    # A non-UTF-8 file fails here, before any remote step.
+    operator_script = operator.read_text(encoding="utf-8") if operator else None
+    operator_sha256 = (
+        None if operator_script is None else hashlib.sha256(operator_script.encode()).hexdigest()
+    )
     output: Path = args.output.resolve()
     output.mkdir(parents=True)
     output.chmod(0o700)  # private transcripts and phase records, whatever the umask
@@ -840,7 +848,7 @@ def _drive(
     candidate: str,
     image: str,
     node: str,
-    operator: bytes | None,
+    operator: str | None,
     binding: Context,
     phases: dict[str, PhaseRecord | None],
     output: Path,
@@ -853,10 +861,7 @@ def _drive(
     run_id = uuid.uuid4().hex[:12]
     kernel_commit = binding.kernel_source_sha or ""
     host_dir = f"{remote.target}:host-install-{run_id}"
-    if (
-        operator is not None
-        and not remote.step("operator-prerequisites", operator.decode(), LONG_STEP_S).ok
-    ):
+    if operator is not None and not remote.step("operator-prerequisites", operator, LONG_STEP_S).ok:
         return binding
     source = output / "kdive-candidate.bundle"
     copied = (
