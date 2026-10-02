@@ -115,6 +115,8 @@ exclusion 6).
      start containers on the host engine.
    - Added: the image build downloads Debian packages, the Docker apt key, and `rust-just`.
    - Widened: the capture filter now installs on `aarch64`.
+   - Widened: the capture-bootstrap manifest and its builder accept `aarch64`, so an aarch64
+     host can now pass attestation where it failed closed before.
 2. **Actor model**
    - The developer, who runs the recipe on their own commit. Trusted: the same person can run
      the code with `just test` on a Linux host.
@@ -123,9 +125,17 @@ exclusion 6).
    - A capture provider on an aarch64 host, held by the filter. Untrusted, same as on x86_64.
 3. **Control per boundary**
    - Socket: no new control. The suite already has this access on a Linux host with Docker
-     (`KDIVE_REQUIRE_DOCKER=1` in CI). The tests run as the non-root `tester`.
+     (`KDIVE_REQUIRE_DOCKER=1` in CI). Socket access is root-equivalent on the engine, and on
+     Docker Desktop the socket is `root:root`, so `tester` joins group `root`. The drop to the
+     non-root `tester` exists for test semantics (tests that expect a permission refusal), not
+     as a control on the socket.
    - Image inputs: the bases are digest-pinned; `rust-just` is version-pinned; apt verifies
-     signatures; the Docker key comes over HTTPS.
+     signatures; the Docker key comes over HTTPS. The accepted control for the Docker apt key
+     and `rust-just` is TLS plus the version pin, with no fingerprint or hash check: a bad key
+     or wheel needs a compromise of download.docker.com or the rust-just PyPI project.
+   - aarch64 manifest: the architecture, interpreter, and fingerprint drift checks do not
+     change. Worker hosts stay `x86_64` and `ppc64le` (exclusion 5), so only the test suite
+     reaches the aarch64 path.
    - aarch64 filter: the default action for a non-native syscall ABI stays the libseccomp
      default (kill). `fork` and `vfork` do not exist on aarch64; `clone` without the thread bits
      returns `EPERM`; `clone3` returns `ENOSYS`; `execve` and `execveat` return `EPERM`. The
