@@ -488,6 +488,8 @@ class SlotStore:
         }
         if health_bind := settings.health_binds.get(self.slot):
             values["KDIVE_HEALTH_BIND_ADDR"] = health_bind
+        if settings.systems_toml is not None:
+            values["KDIVE_SYSTEMS_TOML"] = settings.systems_toml
         authority_values = {
             "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": settings.authority_instance,
             "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": (
