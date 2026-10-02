@@ -33,11 +33,12 @@ the remote tool cells implemented.
      `ssh_endpoint` and `authorize_ssh` carry it instead of a loopback port. `ssh_endpoint` keeps
      the `worker_loopback` assertion and uses the returned `host` (127.0.0.1 locally).
    - `deep_body`'s `staged_kernel(system_id) -> path` hook becomes `installed_kernel(system_id,
-     endpoint, key, release) -> (sha256, owned_path | None)`, called after the reconnect and the
-     boot-identity proof. Local: the domain XML `<kernel>` file (owned, as today). Remote: the
-     guest's `/boot/vmlinuz-<release>` read over SSH as root (inside the guest disk, so nothing
-     extra is owned). `release` is the fixture manifest's value, already asserted equal to
-     `uname -r`.
+     endpoint, key, release) -> (sha256, owned_path | None)`, called once `runs.boot` drains and
+     before the reconnect proof, so a failed later assertion still leaves the path in `owned`
+     (amended after branch review). Local: the domain XML `<kernel>` file (owned, as today).
+     Remote: the guest's `/boot/vmlinuz-<release>` read over SSH as root (inside the guest disk,
+     so nothing extra is owned). `release` is the fixture manifest's value, `shlex.quote`d; the
+     boot-identity proof then asserts it equals `uname -r`.
    - `deep_body`'s `entry` and `image_smoke.os_matches` take a `GuestIdentity` protocol
      (`distro`, `version`, `arch` properties) that a catalog entry and a remote image both meet.
    - `cleanup.release_and_verify` gains `absent: Callable[[str], bool] = disk_absent`;
@@ -116,11 +117,11 @@ the remote tool cells implemented.
   → assertions; operator env (`REMOTE_PROVIDER_SSH`) → an `ssh` argv and a libvirt URI;
   operator inventory (storage pool, staged volume name) → a provider-host shell command.
   Amended after the branch security pass.
-- Controls: commands sent to guest and host are literals, the fixture's release (validated
-  against `uname -r`) or the inventory's pool and volume names, each `shlex.quote`d; the destination must match the regex above, so it cannot
-  start with `-` and be parsed as an `ssh` option; module paths stay confined to the
-  upload's `modstage`; evidence artifacts carry counts, digests and OS identities only, and a
-  cleanup error records its exception type.
+- Controls: commands sent to guest and host are literals, the fixture's release (checked
+  against `uname -r` after use) or the inventory's pool and volume names, each `shlex.quote`d;
+  the destination must match the regex above, so it cannot start with `-` and be parsed as an
+  `ssh` option; module paths stay confined to the upload's `modstage`; evidence artifacts carry
+  counts, digests and OS identities only, and a cleanup error records its exception type.
 - Out of scope: provider-host compromise (accepted above); the worker's TLS material is never
   read by the test. The guest SSH leg crosses the lab network to the provider's `ssh_addr`
   without a pinned host key (each guest is freshly provisioned): an on-path actor on that network

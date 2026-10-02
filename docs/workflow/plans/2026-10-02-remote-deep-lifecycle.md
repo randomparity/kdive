@@ -157,7 +157,7 @@ Steps:
 3. `cleanup.py`: add the `absent` parameter; `surviving = [p for p in disks if not absent(p)]`.
 4. `deep_lifecycle.py`: rename `_bound_kernel` → `bound_kernel`; `entry: GuestIdentity`;
    `staged_kernel` → `installed_kernel: InstalledKernel`; `_install_and_boot(op, run_id)` drains
-   and returns the read-back `steps` (asserting both succeeded); after the boot-identity proof:
+   and returns the read-back `steps` (asserting both succeeded); right after `ssh_endpoint`, before the reconnect (amended after branch review):
    ```python
    installed = await asyncio.to_thread(installed_kernel, system_id, endpoint, key, manifest["release"])
    prove_install(run, steps, installed, owned, boot_kernel_sha256(tree, manifest["arch"]))

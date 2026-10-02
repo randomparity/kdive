@@ -239,7 +239,7 @@ async def deep_body(
     tmp: Path,
     installed_kernel: InstalledKernel,
 ) -> None:
-    """Upload → install and boot → reconnect → build identity → installed kernel → module load.
+    """Upload → install and boot → installed kernel → reconnect → build identity → module load.
 
     Provider-neutral: ``installed_kernel`` observes the kernel the install put in place, after the
     reboot into it; a host path it returns joins ``owned``, which the caller's cleanup proves
@@ -270,16 +270,18 @@ async def deep_body(
         await _upload(run, op, run_id, tree, manifest, upload)
         steps = await _install_and_boot(op, run_id)
         endpoint = await ssh_endpoint(op, system_id)
+        # Before the reconnect, so a host path the install created joins `owned` even when a
+        # later assertion fails and only the cleanup attempt runs.
+        installed = await asyncio.to_thread(
+            installed_kernel, system_id, endpoint, key, manifest["release"]
+        )
+        prove_install(run, steps, installed, owned, boot_kernel_sha256(tree, manifest["arch"]))
         after = await asyncio.to_thread(
             probe_new_boot, endpoint, key, before["boot_id"], KERNEL_PROBE
         )
         assert after.get("uid") == "0", "ssh after boot did not authenticate as root"
         run.prove("reconnect", {"user": "root", "same_key": True, "boot_id_changed": True})
         _prove_boot_identity(run, after, manifest, upload)
-        installed = await asyncio.to_thread(
-            installed_kernel, system_id, endpoint, key, manifest["release"]
-        )
-        prove_install(run, steps, installed, owned, boot_kernel_sha256(tree, manifest["arch"]))
         await _prove_module(run, endpoint, key, after["release"], upload / "modstage")
     finally:
         closed = await scalar(
