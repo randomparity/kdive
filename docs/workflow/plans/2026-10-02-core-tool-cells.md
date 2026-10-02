@@ -14,9 +14,10 @@ Tech stack: Python 3.14, pytest, fastmcp client, httpx, psycopg 3 (all existing 
 Spec: [2026-10-02-core-tool-cells-design.md](../specs/2026-10-02-core-tool-cells-design.md).
 Decision: [ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md).
 
-Expected implementation size: 650–800 changed lines (L) — the file map below: one harness module
-(~260), its unit tests (~170), the live carrier (~170), the TOML move (~110 moved lines), contract
-tests (~50) and the runbook section (~50).
+Expected implementation size: 1000–1100 changed lines (L) — the code blocks below: the harness
+module (~400), its unit tests (~210), the live carrier (~220), the TOML move (~110 moved lines),
+contract tests (~70), the `run_cell` change (~10) and the runbook section (~50). This sits at the
+L ceiling; the band is unchanged.
 
 ## Global Constraints
 
@@ -36,12 +37,15 @@ tests (~50) and the runbook section (~50).
 | `scripts/coverage_campaign/obligations.toml` | modify | owner groups 2811, 3095-3098; 14 new `[implementations]` rows |
 | `tests/scripts/test_coverage_contract.py` | modify | owner-split and binding assertions |
 | `tests/integration/live_stack/tool_cells.py` | create | ADR-0722 harness and `bindings` command |
+| `tests/integration/live_stack/scenario.py` | modify | `run_cell` records the outcome its caller proves (`success` or `rejection`) |
 | `tests/integration/live_stack/test_tool_cells.py` | create | harness unit tests (ordinary suite) |
 | `tests/integration/test_core_tool_cells_live.py` | create | `test_core_tool_cell`, the six tools' scenarios |
 | `docs/operating/runbooks/live-testing.md` | modify | how to run both lanes and qualify |
 
-No `contract.py`, `scenario.py`, `evidence.py` or `demo-up.sh` change: owners are group data, and
-the server inherits `KDIVE_WORKER_DEATH_VERIFIER` from the caller (`scripts/live-stack/lib.sh`).
+No `contract.py`, `evidence.py` or `demo-up.sh` change: owners are group data, and the server
+inherits `KDIVE_WORKER_DEATH_VERIFIER` from the caller (`scripts/live-stack/lib.sh`). `run_cell`
+changes because `qualify` requires outcome `rejection` for a rejection cell
+(`scripts/coverage_campaign/results.py`, `_cell_verdict`), and `run_cell` records `success` only.
 
 ## Task 1: owner split
 
@@ -186,7 +190,8 @@ Acceptance: the per-owner sets match; `check` exits 0; the observation strings a
 ## Task 2: tool-cell harness
 
 Files: create `tests/integration/live_stack/tool_cells.py`,
-`tests/integration/live_stack/test_tool_cells.py`.
+`tests/integration/live_stack/test_tool_cells.py`; modify
+`tests/integration/live_stack/scenario.py` (`run_cell` gains `proves`).
 
 Interfaces it consumes (existing, confirmed): `run_cell(cell, scenario)`, `CellRun`
 (`.cell`, `.writer`, `.artifacts`, `.assertions`, `.prove(name, observation)`) from
@@ -200,12 +205,14 @@ Interfaces it consumes (existing, confirmed): `run_cell(cell, scenario)`, `CellR
 Interfaces it provides to Task 3: `Grants(subject, projects, roles, platform_roles)`,
 `HttpCaller(exposure, base_url, issuer)` with `.token(grants) -> str`,
 `async .call(tool, args, token, *, discover=False)`, `async .post(tool, args, token) -> int`,
-`async .direct_schemas(grants) -> dict[str, object]`; `Rejection(args, grants, categories)`;
+`async operator_catalog(base_url, issuer, grants) -> dict[str, object]` (name → `inputSchema`);
+`Rejection(args, grants, categories)`;
 `claims_of(token)`, `forge(token)`, `matches(env)`, `one(result)`;
 `async prove_functional(run, caller, grants, body, snapshot)`;
 `async prove_rejection(run, caller, boundary, rejection, snapshot)`;
 `async project_state(db_url, project)`; `boundary_of(cell)`; `tool_cells(tools)`;
-`run_tool_cell(cell, scenario)`.
+`run_tool_cell(cell, scenario)`; and, in `scenario.py`,
+`run_cell(cell, scenario, *, proves: Outcome = Outcome.SUCCESS)`.
 
 Verification:
 
@@ -216,8 +223,12 @@ Verification:
   Tests `test_authentication_needs_401`, `test_validation_rule_per_exposure`,
   `test_category_boundaries_use_the_closed_set`, `test_changed_state_fails_the_rejection`. Red and
   green as above.
-- Mode: focused-test. Contract: `forge` keeps claims and changes the signature. Test
-  `test_forge_keeps_claims_and_changes_signature`.
+- Mode: focused-test. Contract: `forge` keeps claims and the `kid` header and changes the
+  signature. Test `test_forge_keeps_claims_and_changes_signature`.
+- Mode: focused-test. Contract: `run_cell(..., proves=Outcome.REJECTION)` records outcome
+  `rejection`, which `qualify` requires for a rejection cell. Test
+  `test_run_cell_records_the_proven_outcome`. Red: `TypeError: unexpected keyword argument
+  'proves'` before the `scenario.py` change.
 - Mode: focused-test. Contract: `bindings` writes a `none`-accelerator context for every bound
   service tool cell only. Test `test_bindings_cover_bound_tool_cells`.
 
@@ -231,6 +242,8 @@ Steps:
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -240,7 +253,9 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import LiveStackToolError, make_keypair
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import build_contract
-from tests.integration.live_stack.evidence import EvidenceWriter
+from scripts.coverage_campaign.evidence import Outcome
+from tests.integration.live_stack import scenario
+from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
 from tests.integration.live_stack.scenario import CellRun
 from tests.integration.live_stack.tool_cells import (
     RECOVERY_TOOLS,
@@ -264,6 +279,7 @@ def forge_source(grants: Grants) -> str:
         issuer="https://issuer.test",
         audience="kdive",
         additional_claims={"projects": list(grants.projects)},
+        kid="issuer-key-1",
     )
 
 
@@ -399,21 +415,46 @@ def test_forge_keeps_claims_and_changes_signature() -> None:
     forged = forge(token)
     assert claims_of(forged) | {"iat": 0, "exp": 0} == claims_of(token) | {"iat": 0, "exp": 0}
     assert forged.split(".")[2] != token.split(".")[2]
+    header = json.loads(base64.urlsafe_b64decode(forged.split(".")[0] + "=="))
+    assert header["kid"] == "issuer-key-1"
 
 
 def test_bindings_cover_bound_tool_cells() -> None:
     contract = build_contract()
-    bound = [c for c in contract.cells if c.operation == "session.whoami"]
-    other = replace(bound[0], node_id=None, id="unbound")
+    whoami = [c for c in contract.cells if c.operation == "session.whoami"]
+    bound = [replace(c, node_id="tests/x.py::test_x") for c in whoami]
+    unbound = replace(whoami[0], node_id=None, id="unbound")
+    provider = next(c for c in contract.cells if c.provider == "local-libvirt")
+    native = replace(provider, node_id="tests/x.py::test_x")
     inputs = bindings(
         "a" * 40,
         host_os="fedora:44",
         host_arch="x86_64",
         matrix=contract.matrix_sha256,
-        cells=[*bound, other],
+        cells=[*bound, unbound, native],
     )
-    assert set(inputs.cells) == {c.id for c in bound if c.node_id}
+    assert set(inputs.cells) == {c.id for c in bound}
     assert {c.accelerator for c in inputs.cells.values()} == {"none"}
+
+
+def test_run_cell_records_the_proven_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sha = "a" * 40
+    identity = RunIdentity(sha, "b" * 64, "fedora:44", "x86_64", True, {"server": sha})
+    monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
+    monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
+    monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
+    cell = replace(_run(tmp_path, "authentication").cell, node_id="tests/x.py::test_x")
+
+    async def body(run: CellRun, *_: object) -> None:
+        for name in cell.assertions:
+            run.prove(name, {})
+
+    scenario.run_cell(cell, body, proves=Outcome.REJECTION)
+    (record,) = (tmp_path / "records").glob("*.json")
+    assert json.loads(record.read_text())["outcome"] == "rejection"
 ```
 
    Format with `just format` before committing.
@@ -433,7 +474,7 @@ in the cell's exposure; :func:`prove_functional` and :func:`prove_rejection` pro
 assertions, with :func:`project_state` as the default protected-state snapshot.
 
 ``python -m tests.integration.live_stack.tool_cells bindings --candidate SHA --out FILE`` writes
-the expected ``Context`` of every bound service tool cell (``--owner N`` narrows to one owner).
+the expected ``Context`` of every bound service tool cell.
 """
 
 from __future__ import annotations
@@ -466,9 +507,10 @@ from kdive.mcp.dev_harness import (
     make_keypair,
     mint_token,
 )
+from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell, build_contract
-from scripts.coverage_campaign.evidence import Context, InputBindings
+from scripts.coverage_campaign.evidence import Context, InputBindings, Outcome
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.evidence import os_identity
 from tests.integration.live_stack.scenario import CellRun, run_cell
@@ -508,23 +550,32 @@ class Grants:
     platform_roles: tuple[str, ...] = ()
 
 
-def claims_of(token: str) -> dict[str, object]:
-    """The unverified payload of a JWT."""
-    payload = token.split(".")[1]
-    decoded = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-    assert isinstance(decoded, dict), "JWT payload is not an object"
+def _segment(token: str, index: int) -> dict[str, object]:
+    raw = token.split(".")[index]
+    decoded = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+    assert isinstance(decoded, dict), "JWT segment is not an object"
     return decoded
 
 
+def claims_of(token: str) -> dict[str, object]:
+    """The unverified payload of a JWT."""
+    return _segment(token, 1)
+
+
 def forge(token: str) -> str:
-    """``token``'s claims re-signed by a fresh key the server does not trust (ADR-0722 §3)."""
+    """``token`` re-signed by a fresh key the server does not trust (ADR-0722 §3).
+
+    The claims and the header's ``kid`` are kept, so the verifier selects the trusted key and
+    fails on the signature itself rather than on key lookup.
+    """
     claims = claims_of(token)
-    audience = claims.get("aud")
+    kid = _segment(token, 0).get("kid")
     return make_keypair().create_token(
         subject=str(claims["sub"]),
         issuer=str(claims["iss"]),
-        audience=cast(str | list[str] | None, audience),
+        audience=cast(str | list[str] | None, claims.get("aud")),
         additional_claims={k: v for k, v in claims.items() if k not in _JWT_STANDARD},
+        kid=kid if isinstance(kid, str) else None,
     )
 
 
@@ -608,14 +659,23 @@ class HttpCaller:
             response = await http.post(self.base_url, json=body, headers=headers)
         return response.status_code
 
-    async def direct_schemas(self, grants: Grants) -> dict[str, object]:
-        """Each tool's ``inputSchema`` in the operator-direct catalog for ``grants``."""
-        token = HttpCaller("direct", self.base_url, self.issuer).token(grants)
-        transport = StreamableHttpTransport(
-            url=self.base_url, headers={"Authorization": f"Bearer {token}"}
-        )
-        async with Client(transport) as client:
-            return {tool.name: tool.inputSchema for tool in await client.list_tools()}
+
+async def operator_catalog(base_url: str, issuer: OidcIssuer, grants: Grants) -> dict[str, object]:
+    """Each tool's ``inputSchema`` in the operator-direct catalog for ``grants``.
+
+    Fails unless the catalog is unclipped: a token whose ``azp`` the server does not take for
+    ``kdivectl`` gets the agent-gateway profile, clipped to ``CORE_TOOLS`` (ADR-0268), and would
+    make every ``direct`` cell name an exposure the run never had.
+    """
+    token = HttpCaller("direct", base_url, issuer).token(grants)
+    transport = StreamableHttpTransport(url=base_url, headers={"Authorization": f"Bearer {token}"})
+    async with Client(transport) as client:
+        catalog = {tool.name: tool.inputSchema for tool in await client.list_tools()}
+    assert set(catalog) - CORE_TOOLS, (
+        "operator catalog is clipped to CORE_TOOLS: the server does not resolve this process's "
+        "KDIVE_CLI_CLIENT_ID as kdivectl; use the same value for the server and the tests"
+    )
+    return catalog
 
 
 @dataclass(frozen=True)
@@ -711,11 +771,18 @@ async def prove_functional(
 
 
 async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
-    """Row count and row-text SHA-256 of ``project`` in every public table with a project column."""
+    """Row count and row-text SHA-256 of ``project`` in every public table with a project column.
+
+    Tables come from ``pg_catalog``, which lists every table whatever the DSN may read, so a
+    table the DSN cannot read fails the snapshot instead of leaving it.
+    """
     async with await psycopg.AsyncConnection.connect(db_url) as conn:
         cursor = await conn.execute(
-            "SELECT DISTINCT table_name FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND column_name = 'project' ORDER BY table_name"
+            "SELECT c.relname FROM pg_catalog.pg_attribute a "
+            "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
+            "AND a.attname = 'project' AND NOT a.attisdropped ORDER BY c.relname"
         )
         tables = [str(row[0]) for row in await cursor.fetchall()]
         tables = [t for t in tables if t not in _AUDIT_TABLES]
@@ -745,17 +812,11 @@ def tool_cells(tools: Sequence[str]) -> list[Cell]:
     return [cell for cell in build_contract().cells if cell.operation in tools]
 
 
-async def _catalog(base_url: str, issuer: OidcIssuer) -> list[str]:
-    grants = Grants("cov-configuration", ("cov-configuration",), {}, ("platform_operator",))
-    token = HttpCaller("direct", base_url, issuer).token(grants)
-    async with LiveStackClient.over_http(base_url, token) as client:
-        return await client.list_tools()
-
-
 def server_configuration(base_url: str, issuer: OidcIssuer) -> tuple[str, list[str]]:
     """The proven configuration and the recovery tools listed; read once per stack."""
     if base_url not in _CONFIGURATIONS:
-        catalog = asyncio.run(_catalog(base_url, issuer))
+        grants = Grants("cov-configuration", ("cov-configuration",), {}, ("platform_operator",))
+        catalog = asyncio.run(operator_catalog(base_url, issuer, grants))
         listed = sorted(RECOVERY_TOOLS & set(catalog))
         _CONFIGURATIONS[base_url] = (configuration_of(catalog), listed)
     return _CONFIGURATIONS[base_url]
@@ -765,7 +826,10 @@ ToolScenario = Callable[[CellRun, str, OidcIssuer, str], Awaitable[None]]
 
 
 def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
-    """Prove the configuration, skip another configuration's cell, else run and record it."""
+    """Prove the configuration, skip another configuration's cell, else run and record it.
+
+    A completed rejection cell records ``rejection``, a functional one ``success``.
+    """
     base_url = require_stack()
     configuration, listed = server_configuration(base_url, require_issuer())
     if configuration != cell.configuration:
@@ -776,7 +840,9 @@ def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
         run.artifacts.append(run.writer.artifact(proof))
         await scenario(run, url, issuer, db_url)
 
-    run_cell(cell, proven)
+    run_cell(
+        cell, proven, proves=Outcome.REJECTION if cell.kind == "rejection" else Outcome.SUCCESS
+    )
 
 
 def bindings(
@@ -804,7 +870,6 @@ def main(argv: list[str] | None = None) -> int:
     write = commands.add_parser("bindings")
     write.add_argument("--candidate", required=True)
     write.add_argument("--out", type=Path, required=True)
-    write.add_argument("--owner", type=int)
     args = parser.parse_args(argv)
     contract = build_contract()
     inputs = bindings(
@@ -812,7 +877,7 @@ def main(argv: list[str] | None = None) -> int:
         host_os=os_identity(Path("/etc/os-release").read_text(encoding="utf-8")),
         host_arch=platform.machine(),
         matrix=contract.matrix_sha256,
-        cells=[c for c in contract.cells if args.owner is None or c.owner == args.owner],
+        cells=contract.cells,
     )
     args.out.write_text(inputs.model_dump_json(indent=1) + "\n", encoding="utf-8")
     print(f"wrote {len(inputs.cells)} tool-cell binding(s)")
@@ -823,7 +888,26 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-4. Run the focused tests (all pass), `just lint`, `just type`. Commit:
+4. In `tests/integration/live_stack/scenario.py`, change `run_cell` to take the outcome a
+   completed scenario proves; only these lines change:
+
+```python
+def run_cell(cell: Cell, scenario: Scenario, *, proves: Outcome = Outcome.SUCCESS) -> None:
+    """Identity → prerequisites → ``scenario`` → one record; fail pytest unless ``proves``.
+
+    ``proves`` is what a completed scenario records: ``success`` for a functional or native cell,
+    ``rejection`` for a rejection cell, the outcome ``qualify`` requires of its kind (ADR-0722).
+    """
+    ...
+        asyncio.run(scenario(run, base_url, issuer, db_url))
+        run.outcome, run.reason = proves, ""
+    ...
+    assert run.outcome is proves, f"{cell.id}: {run.outcome.value}: {run.reason}"
+```
+
+   The `...` lines are the existing body, unchanged; the existing callers keep the default.
+5. Run the focused tests (all pass), `uv run python -m pytest tests/integration/live_stack -q`
+   (the existing harness unit tests still pass), `just lint`, `just type`. Commit:
    `test(live-stack): add the ADR-0722 tool-cell harness`.
 
 Acceptance: unit tests green; `ty` clean; no import of a package outside the manifest.
@@ -912,6 +996,7 @@ from tests.integration.live_stack.tool_cells import (
     claims_of,
     matches,
     one,
+    operator_catalog,
     project_state,
     prove_functional,
     prove_rejection,
@@ -1001,10 +1086,14 @@ async def _search(caller: HttpCaller, grants: Grants) -> dict[str, object]:
     token = caller.token(grants)
     named = one(await caller.call("tools.search", {"names": _SCHEMA_TOOLS}, token, discover=True))
     schemas = {str(m["name"]): m.get("input_schema") for m in matches(named)}
-    direct = await caller.direct_schemas(grants)
+    direct = await operator_catalog(caller.base_url, caller.issuer, grants)
     assert list(schemas) == _SCHEMA_TOOLS, f"names mode returned {list(schemas)}"
     for name in _SCHEMA_TOOLS:
         assert schemas[name] == direct[name], f"{name} schema differs from direct exposure"
+    # A test-side anchor: tools.invoke's own signature, independent of both catalogs.
+    invoke = cast(dict[str, object], schemas["tools.invoke"])
+    assert set(cast(dict[str, object], invoke["properties"])) == {"name", "arguments"}
+    assert invoke.get("required") == ["name"], f"tools.invoke requires {invoke.get('required')}"
     concept = one(await caller.call("tools.search", {"query": _CONCEPT}, token))
     found = [str(m["name"]) for m in matches(concept)]
     assert "projects.list" in found, f"{_CONCEPT!r} found {found}"
@@ -1123,7 +1212,7 @@ Steps:
 ```bash
 sha=$(git rev-parse HEAD)
 uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
-  --owner 2811 --out inputs.json
+  --out inputs.json
 export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
 examples/local-libvirt/demo-up.sh             # default configuration
 uv run python -m pytest -m live_stack tests/integration/test_core_tool_cells_live.py

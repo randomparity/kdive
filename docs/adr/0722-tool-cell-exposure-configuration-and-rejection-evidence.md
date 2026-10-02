@@ -30,7 +30,8 @@ The `recovery` configuration exists only when the server runs with a worker-deat
    the same way.
 2. **Configuration proof.** Before a cell runs, a `platform_operator` operator-direct catalog is
    read once per stack. Both `ops.build_uses_list` and `ops.recover_build_use` listed means
-   `recovery`; neither means `default`; one alone fails the run. A cell of the other
+   `recovery`; neither means `default`; one alone fails the run, and so does a catalog clipped to
+   the gateway's core tools, which shows the token was not taken for `kdivectl`. A cell of the other
    configuration is skipped and writes no record. The proof is stored as an artifact on each
    record, not as an assertion, because the contract fixes each cell's assertion set. The
    recovery lane is the same stack started with `KDIVE_WORKER_DEATH_VERIFIER=local`. Both lanes
@@ -43,10 +44,14 @@ The `recovery` configuration exists only when the server runs with a worker-deat
      supplies must receive a failure envelope whose category is in the cell's closed set;
    - `validation`: schema-invalid arguments must receive a `configuration_error` envelope, or,
      on `direct` only, a tool-error result whose text names a validation error.
+
+   A completed rejection cell records outcome `rejection`, which `qualify` requires of its kind
+   (`scripts/coverage_campaign/results.py`); a functional cell records `success`.
 4. **Protected state.** The default snapshot is a per-project digest: row count and row-text
    hash of every `public` table with a `project` column, except `audit_log`,
    `platform_audit_log` and `tool_invocation`, which a rejected or successful call is expected
-   to write. A rejection cell's `unchanged-state` and `cleanup` both compare that snapshot with
+   to write. The tables come from `pg_catalog`, so one the evidence DSN cannot read fails the
+   snapshot rather than dropping out of it. A rejection cell's `unchanged-state` and `cleanup` both compare that snapshot with
    the one taken before the call. A cell may replace the snapshot with a narrower one.
 
 ## Consequences
@@ -62,16 +67,18 @@ The `recovery` configuration exists only when the server runs with a worker-deat
 
 ## Considered & rejected
 
-- **Read the server's environment to learn its configuration.** judgment: the test process cannot
-  see the server's environment, and the tool catalog is the thing the configuration changes.
+- **Read `KDIVE_WORKER_DEATH_VERIFIER` from the test's environment.** judgment: the variable says
+  what the shell asked for, not what the server loaded; the catalog is what the configuration
+  changes and the only one of the two the server reports.
 - **Record the other configuration's cells as `blocked`.** verified:
   `EvidenceWriter.record` replaces an earlier record for the same cell
   (`tests/integration/live_stack/evidence.py` at `9e322375d`), so a blocked record from the
   second lane would overwrite the first lane's success.
 - **Call core tools directly by name in the gateway exposure.** judgment: the exposure would mean
   different things for core and non-core tools, and `tools.invoke` is what an agent uses.
-- **Use an expired real-issuer token for authentication.** judgment: an expired token needs a wait
-  or issuer support; a foreign signature tests the same verifier check at once.
+- **Use an expired real-issuer token for authentication.** judgment: `mint_token(lifetime_s=-60)`
+  could mint one, but it tests the expiry check of a trusted signature; a foreign signature tests
+  that the server refuses claims it did not issue, the boundary an unauthenticated caller crosses.
 - **A separate pytest function per scenario.** judgment: the contract binds many scenarios to one
   node, as the deep-lifecycle cells already do, and one dispatching function avoids fourteen copies
   of the same frame.

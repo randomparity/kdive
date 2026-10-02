@@ -31,6 +31,8 @@ In scope:
    configuration proof, the `direct` and `gateway` callers, the rejection harness, the
    per-project protected-state snapshot, the tool-cell frame around `run_cell`, and a
    `bindings` command that writes the expected `Context` of every bound service tool cell.
+   `run_cell` (`scenario.py`) gains a `proves` outcome so a completed rejection cell records
+   `rejection`, which `qualify` requires of a rejection cell; existing callers keep `success`.
 3. A live carrier, `tests/integration/test_core_tool_cells_live.py::test_core_tool_cell`,
    parametrized over every cell of the six tools, and 14 `[implementations]` entries binding
    their scenarios to it.
@@ -56,13 +58,15 @@ tests only.
 
 Each functional cell mints a token with distinctive claims for a fresh project `cov-<8 hex>`
 (two projects, a role on one, a `platform_auditor` platform role) and compares the result with a
-source the server did not produce:
+source the server did not produce. `tools.search` is the exception: its schemas are compared with
+the same server's operator-direct catalog (cross-surface consistency), anchored by the
+`tools.invoke` signature the test knows (`name` required, `arguments` optional):
 
 | Tool | Effect compared |
 |---|---|
 | `session.whoami` | `principal`, `client_id`, `projects`, `roles`, `platform_roles` against the token's own decoded claims |
 | `projects.list` | the `{project, role}` items, `principal` and `platform_roles` against the decoded claims |
-| `tools.search` | names mode returns `session.whoami` and `tools.invoke` with an `input_schema` equal to the operator-direct catalog's `inputSchema`; query `"granted projects roles"` returns `projects.list` among its matches |
+| `tools.search` | names mode returns `session.whoami` and `tools.invoke` with an `input_schema` equal to the operator-direct catalog's `inputSchema`, and `tools.invoke`'s has properties `{name, arguments}` and requires `name`; query `"granted projects roles"` returns `projects.list` among its matches |
 | `tools.invoke` | the inner `projects.list` envelope (object id `projects`) matches the decoded claims |
 | `fixtures.validate` | `path` and `profiles` equal the test-side `load_fixture_catalog(fixture_catalog_path_from_env())` |
 | `systems.profile_examples` | every example parses as `ProvisioningProfile`; the local example passes `validate_profile_for_provider`; its catalog rootfs name is the first public local-libvirt image in the test-side `systems.toml` |
@@ -83,7 +87,7 @@ the project snapshot before and after the cell (the six tools create nothing dur
    are preserved on the same tools.
 2. Every one of the 14 scenarios is bound to `test_core_tool_cell`, and no other tool scenario is
    bound by this change.
-3. A run whose catalog proves `default` writes records for exactly the 28 `default` cells and
+3. A run whose unclipped operator catalog proves `default` writes records for exactly the 28 `default` cells and
    skips the 28 `recovery` cells; the reverse for `recovery`; a partial catalog fails the run
    without writing records.
 4. Each functional record carries `effect` and `cleanup`; each rejection record carries its
@@ -135,7 +139,8 @@ lab DSN, which the operator supplies as for every live carrier.
   2811 cell count and the preserved role overrides (red before the TOML edit).
 - Harness: `tests/integration/live_stack/test_tool_cells.py` covers configuration
   classification, rejection classification per boundary and exposure, the rejection harness's
-  unchanged-state failure, the cell selection and the bindings contexts, with fake callers.
+  unchanged-state failure, `forge` keeping the `kid`, the bindings contexts, and that
+  `run_cell(..., proves=rejection)` writes outcome `rejection`, with fake callers.
 - Bindings: the contract test asserts the 14 scenarios bind `test_core_tool_cell` and that
   `_validate_node` accepts it.
 - Live: both lanes on a disposable lab host; `qualify` output recorded in the runbook.
