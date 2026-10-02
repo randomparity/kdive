@@ -12,7 +12,7 @@ phase record. See the [spec](../specs/2026-10-01-host-install-proof-design.md) a
 **Tech stack:** Python 3.14, stdlib `subprocess`/`shlex`/`json`/`tarfile`, pydantic (already a
 dependency), pytest, `uv`.
 
-Expected implementation size: 700–1000 changed lines (L) — runner ~380, node ~260, unit tests ~250, docs/proof record ~150.
+Expected implementation size: 700–1000 changed lines (L) — runner ~380, node ~260, unit tests ~250, docs and proof record ~150.
 
 ## Global Constraints
 
