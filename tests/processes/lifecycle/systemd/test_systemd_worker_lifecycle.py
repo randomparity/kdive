@@ -2122,7 +2122,8 @@ def _diagnostic_source_tree(tmp_path: Path) -> Path:
         "KDIVE_DATABASE_URL="
         "postgresql://worker:password@localhost/kdive\n"  # pragma: allowlist secret
         "KDIVE_API_TOKEN=future-token\n"
-        "KDIVE_LOG_LEVEL=INFO\n",
+        "KDIVE_LOG_LEVEL=INFO\n"
+        "KDIVE_SYSTEMS_TOML=/etc/kdive/systems.toml\n",
         encoding="utf-8",
     )
     environment.chmod(0o600)
@@ -2142,6 +2143,8 @@ def test_diagnostic_source_loader_returns_only_secret_classified_values(tmp_path
         "postgresql://worker:password@localhost/kdive",  # pragma: allowlist secret
     }
     assert "INFO" not in values
+    # The inventory path is public (#3086): scrubbing it would erase every log line naming it.
+    assert "/etc/kdive/systems.toml" not in values
 
 
 def test_diagnostic_loader_reads_a_real_prepared_slot_store(

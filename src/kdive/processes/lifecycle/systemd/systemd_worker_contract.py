@@ -108,6 +108,7 @@ class WorkerSettings(BaseModel):
     authority_recovery_reserve_bytes: int | None = Field(default=None, gt=0)
     authority_recovery_max_bytes: int | None = Field(default=None, gt=0)
     external_boot_capacity_bytes: int | None = Field(default=None, gt=0)
+    systems_toml: str | None = None
 
     @field_validator(
         "python",
@@ -129,6 +130,7 @@ class WorkerSettings(BaseModel):
         "authority_client_certificate_ref",
         "authority_client_key_ref",
         "authority_store_identity",
+        "systems_toml",
     )
     @classmethod
     def validate_string_bytes(cls, value: str | None) -> str | None:
@@ -156,6 +158,14 @@ class WorkerSettings(BaseModel):
         """Allow only absolute paths to cross the lifecycle control boundary."""
         if not value.startswith("/"):
             raise ValueError("worker paths must be absolute")
+        return value
+
+    @field_validator("systems_toml")
+    @classmethod
+    def validate_inventory_path(cls, value: str | None) -> str | None:
+        """Accept only an absolute inventory path; the witness checks its metadata at start."""
+        if value is not None and not value.startswith("/"):
+            raise ValueError("worker inventory path must be absolute")
         return value
 
     @field_validator("health_binds")
