@@ -9,8 +9,8 @@ installed-kernel hook, cleanup predicate) and a new remote frame with an operato
 Tech stack: Python 3.14, pytest, libvirt-python, `uv`, `just`.
 
 Expected implementation size: 550–700 changed lines (M) — contract ~20 + tests ~70, seams ~60 +
-tests ~40, remote module ~230 + tests ~150, live test ~80, docs ~70; above the M band because the
-remote frame and observer are new code the local carrier did not need.
+tests ~40, remote module ~230 + tests ~150, live test ~80, docs ~70. The estimate exceeds the
+frozen M denominator because the remote frame and observer are new code; the band is unchanged.
 
 ## Global Constraints
 
@@ -196,7 +196,11 @@ ImportError before the module exists):
 - Frame identity: with a faked probe (`rocky:10`, `x86_64`), the `run.observed` host fields the
   frame's `observe_host(run, host)` sets make `run.context(identity)` report the probe's host,
   not `identity`'s, and equal what `bindings` writes for the same probe; a probe arch other than
-  the cell's raises `ScenarioStop(BLOCKED)`.
+  the cell's raises `ScenarioStop(BLOCKED)`; the `provider_host` artifact carries `os`, `arch`
+  and `virtualization`.
+- `remote_kdive_domains` lists only `kdive-`-prefixed defined domain names of a faked connection;
+  `on_remote_system`'s post-cleanup check fails when a `kdive-*` domain not present before the
+  allocation remains.
 - `remote_profile` parses through `ProvisioningProfile.parse` with the given volume.
 - `bindings` binds exactly `remote_cells()` (the 8 owner-2810 cells); representatives get guest
   identity, `kvm`, the faked volume digest and fixture kernel inputs; blocked families get null
@@ -224,12 +228,17 @@ Steps:
    `remote_host()` (raises `ScenarioStop(Outcome.BLOCKED, …)` for an unset/invalid destination,
    instance count ≠ 1, or a failed probe; pool from `remote_config_for_resource(name).storage_pool`);
    `observe_host(run, host)` (`ScenarioStop(BLOCKED)` unless `host.host_arch == run.cell.guest_arch`;
-   then `run.observed |= {"host_os": …, "host_arch": …}` and the `provider_host` artifact);
+   then `run.observed |= {"host_os": …, "host_arch": …}` and the artifact
+   `{"cell": …, "provider_host": {"os": …, "arch": …, "virtualization": host.virt}}`);
+   `remote_kdive_domains(conn) -> set[str]` (`{d.name() for d in conn.listAllDomains(0) if
+   d.name().startswith("kdive-")}`);
    `remote_profile(arch, volume)` (`disk-image`, `vcpu` 2, `memory_mb` 2048,
    `REMOTE_ALLOCATION_DISK_GB`, `kernel_source_ref` `"remote-deep-lifecycle-unread"`,
    `{"remote-libvirt": {"base_image_volume": volume}}`);
    `guest_boot_kernel(_system_id, endpoint, key, release)`;
-   `on_remote_system` exactly as design item 3 (`observe_host` first; domain XML read through `observer`; cleanup
+   `on_remote_system` exactly as design item 3 (`observe_host` first; `remote_kdive_domains`
+   read before `allocations.request`; after `release_and_verify` assert the set is unchanged and
+   add `"remote_domains": "unchanged"` to the cleanup observation; domain XML read through `observer`; cleanup
    `release_and_verify(..., connect=partial(observer, host.dest), absent=partial(volume_absent, conn))`
    with `conn = observer(host.dest)` closed afterwards; `cleanup_attempt` on failure);
    `bindings(candidate, *, root, matrix, host, digest=volume_sha256, fixture=load_fixture,

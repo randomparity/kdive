@@ -68,9 +68,11 @@ the remote tool cells implemented.
      domain XML (accelerator from `type`, owned disks from `<source file>`); runs `body`; proves
      `cleanup` with `release_and_verify(connect=observer, absent=volume_absent)`. A volume is
      absent only when every active pool has been refreshed and no pool resolves its path.
-     Released capacity is kdive's own accounting of the remote resource
-     (`resources.availability`, as #2809); the remote-host observations are domain and volume
-     absence.
+     Released capacity is proven twice: kdive's accounting (`resources.availability`, as #2809)
+     returns to its pre-allocation value, and on the provider host the set of defined `kdive-*`
+     domains (`remote_kdive_domains(conn)`) returns to the set observed before the allocation.
+     The `provider_host` artifact records `os`, `arch` and `virtualization`
+     (`systemd-detect-virt`, e.g. `kvm` for a nested lab host).
    - `bindings` command: the expected `Context` of each #2810 cell (host from the same
      probe, guest from the representative, `kvm`, image digest, kernel inputs as #2809); blocked
      families get null guest fields.
@@ -98,6 +100,8 @@ the remote tool cells implemented.
      release.
    - A fixture kernel that cannot boot a representative's userspace or start its guest agent is a
      fixture defect: filed, recorded as that cell's failure, fixture unchanged here.
+   - Another kdive allocation on the same provider host during a cell fails its domain-set
+     check: the lane requires exclusive ownership of the provider host (#2803 req 4).
    - The observer trusts the provider host's libvirt and sshd answers; a compromised provider host
      is out of scope.
    - The qualifier trusts producer digests (ADR-0686 limit).
