@@ -168,7 +168,7 @@ artifact. Publish only sanitized excerpts.
 |---|---|
 | 0 | `success` |
 | 1 | `failure` |
-| 2 | Invalid input, or a host that does not match the cell. Nothing is mutated. |
+| 2 | Invalid input or a host that does not match the cell (nothing mutated), or a controller error such as a full disk after the run started (the host may be mutated; reset it). |
 | 3 | `blocked`, or a host that could not be identified (no result; `merge` skips the directory and the cell stays `not-run`). `summary.json` `reason` says why: `not-clean` or `unidentified` may clear after a reset; `no-sudo` and `no-kvm` will not, so a reset wrapper caps its retries. |
 
 A failed or timed-out install or setup step stops the run. A failed boot phase that wrote its

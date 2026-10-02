@@ -772,7 +772,7 @@ def run(args: argparse.Namespace) -> int:
     output.mkdir(parents=True)
     output.chmod(0o700)  # private transcripts and phase records, whatever the umask
     (output / "steps").mkdir()
-    # Every local failure that can exit 2 happens before the first remote step.
+    # Every input failure that exits 2 happens before the first remote step.
     subprocess.run(
         [
             "git",

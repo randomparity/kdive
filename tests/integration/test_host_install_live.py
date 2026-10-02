@@ -86,13 +86,18 @@ def _file_sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def _run(argv: list[str], **env: str) -> subprocess.CompletedProcess[str]:
+    """A check command; one that cannot start reads as failed so the record still lands."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, check=False, env=env or None)
+    except OSError as error:
+        return subprocess.CompletedProcess(argv, 127, "", type(error).__name__)
+
+
 def _lifecycle_python(code: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return _run(
         [str(_LIFECYCLE / ".venv/bin/python"), "-I", "-c", code],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={"PATH": os.environ.get("PATH", os.defpath)},
+        PATH=os.environ.get("PATH", os.defpath),
     )
 
 
@@ -129,10 +134,8 @@ def _witness_matches_checkout(candidate: str) -> bool:
 
 def _prerequisites(candidate: str) -> dict[str, bool]:
     imports = _lifecycle_python("import guestfs, libvirt, kdive")
-    socket = subprocess.run(
-        ["systemctl", "is-active", "--quiet", "kdive-live-worker-lifecycle.socket"], check=False
-    )
-    groups = subprocess.run(["id", "-nG"], capture_output=True, text=True, check=False)
+    socket = _run(["systemctl", "is-active", "--quiet", "kdive-live-worker-lifecycle.socket"])
+    groups = _run(["id", "-nG"])
     return {
         "worker-imports": imports.returncode == 0,
         "lifecycle-socket": socket.returncode == 0,
