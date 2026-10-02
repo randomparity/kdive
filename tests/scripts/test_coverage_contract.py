@@ -56,6 +56,7 @@ def test_native_deep_families_and_foreign_tcg_stay_distinct(inventory: Inventory
 
 
 _IMAGE_SMOKE_NODE = "tests/integration/test_image_smoke_live.py::test_image_smoke"
+_CORE_NODE = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _LIFECYCLE_TOOLS = {
     "images.publish",
@@ -109,7 +110,9 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert {c.node_id for c in host_install} == {
         "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
     }
-    bound = {"image-smoke", "deep-lifecycle", "host-install"}
+    core = [c for c in contract.cells if c.operation in _CORE_TOOLS]
+    assert len(core) == 56 and {c.node_id for c in core} == {_CORE_NODE}
+    bound = {"image-smoke", "deep-lifecycle", "host-install", *_CORE_TOOLS}
     assert all(c.node_id is None for c in contract.cells if c.operation not in bound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
