@@ -74,6 +74,7 @@ _PROJECT = "image-smoke"
 _SESSION = "image-smoke-sess"
 _CATALOG = load_rootfs_catalog()
 _ACCELERATORS = {"kvm": "kvm", "qemu": "tcg"}
+_REBOOT_DEADLINE_S = 300.0
 
 
 class _Stop(Exception):  # noqa: N818 - control flow, not an error type
@@ -200,6 +201,23 @@ def _probe(port: int, key: Path) -> dict[str, str]:
     return parse_probe(result.stdout)
 
 
+def _rebooted_probe(port: int, key: Path, boot_id: str) -> dict[str, str]:
+    """Probe until the guest reports a new ``boot_id``.
+
+    ``control.power`` ``cycle`` is ``virDomainReboot``: the job succeeds once the guest is asked
+    to reboot, so the old boot can still answer SSH for a while afterwards.
+    """
+    deadline = time.monotonic() + _REBOOT_DEADLINE_S
+    while True:
+        probe = _probe(port, key)
+        if probe.get("boot_id") != boot_id:
+            return probe
+        assert time.monotonic() < deadline, (
+            f"boot_id unchanged {_REBOOT_DEADLINE_S:.0f} s after control.power cycle"
+        )
+        time.sleep(5.0)
+
+
 async def _authorize(op: LiveStackClient, system_id: str, tmp_path: Path) -> tuple[int, Path]:
     key = tmp_path / "id_ed25519"
     subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
@@ -244,10 +262,7 @@ async def _scenario(run: _Run, op: LiveStackClient, system_id: str, tmp_path: Pa
     env = ok(await scalar(op, "control.power", system_id=system_id, action="cycle"), "reboot")
     await drain_job(op, "reboot", env.object_id)
     await await_system_state(op, "reboot", system_id, "ready")
-    second = await asyncio.to_thread(_probe, port, key)
-    assert second.get("boot_id") and second["boot_id"] != first.get("boot_id"), (
-        "boot_id did not change across control.power cycle"
-    )
+    second = await asyncio.to_thread(_rebooted_probe, port, key, first["boot_id"])
     assert second.get("uid") == "0", "ssh after reboot did not authenticate as root"
     run.prove("reboot", {"action": "cycle", "boot_id_changed": True})
 
