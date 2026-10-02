@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,7 @@ from scripts.coverage_campaign.evidence import Context, EvidenceError, Outcome
 from tests.integration.live_stack.evidence import (
     EvidenceWriter,
     RunIdentity,
+    _present,
     assemble,
     build_record,
     identity_problems,
@@ -38,6 +40,7 @@ def _identity(
     git: Callable[..., str | None] = _git,
     read: Callable[[str], str | None] = lambda _path: _HEAD,
     running_workers: Callable[[], str] = lambda: _SLOTS,
+    present: Callable[[str], bool] = lambda _path: True,
 ) -> RunIdentity:
     served: dict[str, str | None] = {
         ":9464/": "abc1234",
@@ -63,6 +66,7 @@ def _identity(
         running_workers=running_workers,
         matrix=lambda: "c" * 64,
         os_release=lambda: 'ID=ubuntu\nVERSION_ID="26.04"\n',
+        present=present,
     )
 
 
@@ -77,12 +81,53 @@ def test_run_identity_resolves_every_role_to_the_candidate() -> None:
 
 
 def test_unreadable_roles_are_omitted_and_reported_missing() -> None:
-    identity = _identity(reports={":9466/": None}, read=lambda _path: None)
+    identity = _identity(
+        reports={":9466/": None}, present=lambda _path: False, read=_unexpected_read
+    )
     assert set(identity.deployed_roles) == {"server", "worker"}
     assert identity_problems(identity, ("server", "reconciler", "authority")) == [
         "missing:reconciler",
         "missing:authority",
     ]
+
+
+def _unexpected_read(_path: str) -> str | None:
+    raise AssertionError("an absent authority must not be read")
+
+
+def test_an_absent_authority_is_not_read_or_recorded() -> None:
+    identity = _identity(present=lambda _p: False, read=_unexpected_read)
+    assert "authority" not in identity.deployed_roles
+
+
+@pytest.mark.parametrize("installed", [None, "", "zzz"])
+def test_an_installed_authority_that_cannot_be_identified_stops_the_run(
+    installed: str | None,
+) -> None:
+    with pytest.raises(RuntimeError, match="provider-authority/revision"):
+        _identity(read=lambda _p: installed)
+
+
+def test_a_stale_authority_is_recorded_as_a_mismatch() -> None:
+    identity = _identity(read=lambda _p: "def5678")
+    assert identity.deployed_roles["authority"] == _OTHER
+    assert identity_problems(identity, ()) == []
+
+
+def test_presence_is_false_only_when_absence_is_proven(tmp_path: Path) -> None:
+    assert not _present(str(tmp_path / "absent"))
+    assert not _present(str(tmp_path / "absent" / "revision"))
+    (tmp_path / "revision").write_text("x")
+    assert _present(str(tmp_path / "revision"))
+    if os.geteuid() == 0:
+        pytest.skip("root reads through a mode-000 directory")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        assert _present(str(locked / "revision"))
+    finally:
+        locked.chmod(0o700)
 
 
 def test_no_running_worker_slot_omits_the_worker_role() -> None:

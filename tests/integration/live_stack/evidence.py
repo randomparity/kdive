@@ -53,6 +53,17 @@ def _read_privileged(path: str) -> str | None:
     return _output("sudo", "-n", "cat", path)
 
 
+def _present(path: str) -> bool:
+    """False only when ``path`` is provably absent; an unprovable absence counts as present."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError, NotADirectoryError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def _running_workers() -> str:
     units = ("systemctl", "list-units", "kdive-live-worker@*.service", "--state=running")
     return _output(*units, "--no-legend") or ""
@@ -128,6 +139,7 @@ def run_identity(
     running_workers: Callable[[], str] = _running_workers,
     matrix: Callable[[], str] = _matrix,
     os_release: Callable[[], str] = lambda: Path("/etc/os-release").read_text(encoding="utf-8"),
+    present: Callable[[str], bool] = _present,
 ) -> RunIdentity:
     """Read the candidate, matrix, host and deployed role revisions for one cell."""
     head = git("rev-parse", "HEAD")
@@ -142,9 +154,15 @@ def run_identity(
     worker = _worker_revision(base_url, running_workers(), head, fetch, resolve)
     if worker:
         roles["worker"] = worker
-    installed = read(AUTHORITY_REVISION)
-    authority = resolve(installed) if installed else None
-    if authority:
+    if present(AUTHORITY_REVISION):
+        installed = read(AUTHORITY_REVISION)
+        authority = resolve(installed) if installed else None
+        if authority is None:
+            raise RuntimeError(
+                f"{AUTHORITY_REVISION} is installed but its revision cannot be read with "
+                "`sudo -n` or resolved in this checkout; grant passwordless read, fetch the "
+                "installed commit, or remove the stale install"
+            )
         roles["authority"] = authority
     return RunIdentity(
         candidate_sha=head,
