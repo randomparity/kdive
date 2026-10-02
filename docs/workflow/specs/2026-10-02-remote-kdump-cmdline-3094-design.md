@@ -2,8 +2,8 @@
 
 ## Problem
 
-`kdive-install-kernel` adds the kdive grub slot with `grubby --copy-default`, so the slot keeps
-the base image's default arguments. Rocky 10 images default to a `crashkernel=` range. A
+`kdive-install-kernel` adds the kdive grub slot with `grubby --copy-default`, inheriting the base
+image's default arguments, which on Rocky 10 include a `crashkernel=` range. A
 `gdbstub` Run then boots with memory reserved, and the #1610 gate in `boot()` waits for a kdump
 that never arms: `boot_timeout`. ADR-0082 promises the slot carries `crashkernel=` iff the
 method is kdump; the helper breaks that promise.
@@ -11,10 +11,10 @@ method is kdump; the helper breaks that promise.
 ## Scope
 
 - `install`: after `grubby --add-kernel`, when the requested `--cmdline` has no `crashkernel=`
-  substring, run `grubby --update-kernel=/boot/vmlinuz-<ver> --remove-args=crashkernel`
-  (`|| die`). Keying on the requested cmdline, not `--method`, removes only an inherited
-  reservation and never one the worker asked for. The worker adds `crashkernel=` only for
-  kdump-family methods and refuses it in user overrides, so on remote this is "non-kdump".
+  substring, run `grubby --update-kernel=TITLE=kdive --remove-args=crashkernel` (`|| die`).
+  Targeting the title spares a same-version base entry. Keying on the requested cmdline, not
+  `--method`, removes only an inherited reservation. The worker adds `crashkernel=` only for
+  kdump-family methods and refuses it in user overrides, so on remote this means "non-kdump".
 - A kdump install (cmdline carries `crashkernel=`) runs exactly the commands it runs today.
 - The #1610 gate and `install.py` are unchanged; their docstrings are already correct.
 - ADR-0082 gains an amendment line in §2 saying the helper enforces the iff.
@@ -37,7 +37,7 @@ method is kdump; the helper breaks that promise.
 
 ## Success
 
-1. A non-kdump install leaves no `crashkernel=` in the kdive slot, whatever the default carried.
+1. On the Fedora 43 and Rocky 10 images, a non-kdump install leaves no `crashkernel=` in the slot.
 2. A kdump install leaves the requested `crashkernel=` in the slot and issues no removal.
 3. Live: rebuilt images carry the helper byte-identical to source; the Rocky deep-lifecycle cells
    pass boot and the full cycle on both baselines; Fedora cells do not regress; a gdbstub Run's
@@ -45,12 +45,12 @@ method is kdump; the helper breaks that promise.
 
 ## Validation
 
-- Success 1 — `Mode: focused-test`. `tests/deploy/test_install_kernel_helper.py`: stub `grubby`,
-  `dracut`, `depmod`, `install`, `cp` on PATH; the grubby stub models the slot's args (copy the
-  default on `--add-kernel`, drop on `--remove-args`). Red: delete the removal call. Green:
-  `uv run pytest tests/deploy/test_install_kernel_helper.py`.
-- Success 2 — `Mode: focused-test`. Same file, kdump case asserts the requested token survives
-  and no `--remove-args` ran. Red: make the removal unconditional.
+- Success 1 — `Mode: focused-test`. `tests/deploy/test_install_kernel_helper.py`: stub
+  `grubby`, `dracut`, `depmod`, `install`, `cp`, `rm`, `systemctl` on PATH; the grubby stub
+  models the slot's args (default copied on add, dropped on `--remove-args`). Red: delete the
+  removal call. Green: `uv run pytest tests/deploy/test_install_kernel_helper.py`.
+- Success 2 — `Mode: focused-test`. Same file, kdump case asserts the requested token survives,
+  no `--remove-args` ran, and kdump was enabled. Red: make the removal unconditional.
 - Success 3 — `Mode: task-test-not-applicable`. Real grubby and guest boot exist only on lab
   hosts; proven by the live arms.
 - ADR amendment and runbook lines — `Mode: task-test-not-applicable`. Prose with no executable
