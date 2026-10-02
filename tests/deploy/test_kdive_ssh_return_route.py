@@ -141,10 +141,11 @@ def test_other_actions_change_nothing(tmp_path: Path, action: str) -> None:
     assert calls == []
 
 
-def test_a_failed_routing_change_fails_the_script(tmp_path: Path) -> None:
-    proc, calls = _run(tmp_path, "ens16", "up", lease="10.0.2.15", fail_on=_INSTALL_CALLS[2])
+@pytest.mark.parametrize("failing", range(len(_INSTALL_CALLS)))
+def test_a_failed_routing_change_stops_and_fails_the_script(tmp_path: Path, failing: int) -> None:
+    proc, calls = _run(tmp_path, "ens16", "up", lease="10.0.2.15", fail_on=_INSTALL_CALLS[failing])
     assert proc.returncode != 0
-    assert calls == _INSTALL_CALLS
+    assert calls == _INSTALL_CALLS[: failing + 1]
 
 
 def _install_task() -> dict[str, Any]:
