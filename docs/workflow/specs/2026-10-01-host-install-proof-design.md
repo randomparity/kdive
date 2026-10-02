@@ -118,7 +118,7 @@ from the checked bundle manifest:
 | `first-boot` | The first phase record | The phase booted the bundle's kernel (console release observed). |
 | `repeat-setup` | Steps 11–14 | Every listed step exits 0. |
 | `second-boot` | The second phase record | The phase booted the bundle's kernel. |
-| `confinement` | Host mode at step 1 and in each phase, the guest process labels, and each phase's installed-prerequisite observations (worker interpreter imports, lifecycle socket, operator group, published libvirt endpoint, authority revision) | The host enforces in all three samples (`Enforcing`, or AppArmor enabled `Y`), each phase observed a confined qemu process, and each phase's installed-prerequisite checks hold. |
+| `confinement` | Host mode at step 1 and in each phase, the guest process labels, and each phase's installed-prerequisite observations (worker interpreter imports, lifecycle socket, operator group, published libvirt endpoint, lifecycle-witness revision) | The host enforces in all three samples (`Enforcing`, or AppArmor enabled `Y`), each phase observed a confined qemu process, and each phase's installed-prerequisite checks hold. |
 | `cleanup` | Cleanup observations from both phases | Each phase saw its system `torn_down` and its domain absent. |
 
 The outcome is decided in this order:
@@ -150,16 +150,17 @@ matrices, are an error (exit 2).
 are set. It runs from `~/kdive`, with `examples/local-libvirt/env.sh` sourced, and writes
 `<output>/phase.json`. It makes these observations:
 
-- **Deployed revisions.** `server`, `reconciler` and `worker` come from `probe_stack_skew`. Each
-  reported commit is resolved to a full SHA in the checkout. Every reporting worker must agree,
-  and the checkout must be `HEAD == candidate` with no modified source.
-
-  `authority` is taken from `/opt/kdive-live-worker-lifecycle/revision`. It counts only when the
-  digest of the installed venv's `kdive` package `.py` files equals the digest of checkout
-  `src/kdive`. The stamp alone can lie.
+- **Deployed revisions.** All four contract roles come from the shared ADR-0715 reader
+  (`tests/integration/live_stack/evidence.py` `run_identity`). `server` and `reconciler` come
+  from their aux `/readyz`, `worker` from every running fixed slot, and `authority` from the
+  provider authority's installed revision. A role it cannot read stays unknown. The checkout
+  must be `HEAD == candidate` with no modified source.
 - **Installed prerequisites.** The lifecycle venv imports `guestfs`, `libvirt` and `kdive` under
   `-I`. `systemctl is-active kdive-live-worker-lifecycle.socket` reports active. The operator
   belongs to `kdive-live-control`. `KDIVE_LIBVIRT_URI` names the published session endpoint.
+  The lifecycle witness's `/opt/kdive-live-worker-lifecycle/revision` stamp equals the
+  candidate, and the digest of its venv's `kdive` package `.py` files equals the checkout's
+  `src/kdive`, since the stamp alone can lie. This is a prerequisite check, not a contract role.
 - **Boot.** The node runs `allocations.request` and `systems.provision` with the local rootfs and
   `boot_method: direct-kernel`, and waits for `ready`. It then runs `investigations.open` and
   `runs.create`, uploads `kernel` and `effective_config`, and runs `runs.complete_build`,

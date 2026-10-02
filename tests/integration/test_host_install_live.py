@@ -41,7 +41,8 @@ from scripts.host_install_proof import (
     package_digest,
     qemu_pid,
 )
-from tests.integration.live_stack.skew import probe_stack_skew, repo_facts
+from tests.integration.live_stack.evidence import run_identity
+from tests.integration.live_stack.skew import repo_facts
 from tests.integration.live_stack.spine import (
     LOCAL_ALLOCATION_DISK_GB,
     await_system_state,
@@ -105,27 +106,13 @@ def _lifecycle_python(code: str) -> subprocess.CompletedProcess[str]:
 
 
 def _deployed(candidate: str, base_url: str, failures: list[str]) -> dict[str, str | None]:
+    """Deployed contract roles from the shared ADR-0715 reader; a missing role stays unknown."""
     facts = repo_facts()
     if facts is None or facts.head != candidate or facts.newest_modified_source_mtime():
         failures.append("checkout is not the clean candidate")
         return dict.fromkeys(ROLES)
-    probe = probe_stack_skew(base_url)
-    deployed: dict[str, str | None] = {}
-    for role in ("server", "reconciler", "worker"):
-        reported = probe.revisions.get(role)
-        deployed[role] = facts.resolve(reported) if reported else None
-    if probe.worker_pids is None:
-        failures.append("worker inventory disagrees with the reported worker builds")
-        deployed["worker"] = None
-    try:
-        stamp = (_LIFECYCLE / "revision").read_text().strip()
-        located = _lifecycle_python("import kdive, os; print(os.path.dirname(kdive.__file__))")
-        installed = Path(located.stdout.strip())
-        same_code = located.returncode == 0 and package_digest(installed) == package_digest(_SOURCE)
-    except OSError as error:
-        failures.append(f"authority revision unreadable: {type(error).__name__}")
-        stamp, same_code = "", False
-    deployed["authority"] = stamp if same_code and len(stamp) == 40 else None
+    roles = run_identity(base_url).deployed_roles
+    deployed: dict[str, str | None] = {role: roles.get(role) for role in ROLES}
     failures.extend(
         f"{role} revision is {value or 'unknown'}"
         for role, value in deployed.items()
@@ -134,7 +121,22 @@ def _deployed(candidate: str, base_url: str, failures: list[str]) -> dict[str, s
     return deployed
 
 
-def _prerequisites(authority: str | None) -> dict[str, bool]:
+def _witness_matches_checkout(candidate: str) -> bool:
+    """The lifecycle witness venv holds this checkout's code, not just a matching stamp."""
+    try:
+        stamp = (_LIFECYCLE / "revision").read_text().strip()
+    except OSError:
+        return False
+    located = _lifecycle_python("import kdive, os; print(os.path.dirname(kdive.__file__))")
+    installed = Path(located.stdout.strip())
+    return (
+        stamp == candidate
+        and located.returncode == 0
+        and package_digest(installed) == package_digest(_SOURCE)
+    )
+
+
+def _prerequisites(candidate: str) -> dict[str, bool]:
     imports = _lifecycle_python("import guestfs, libvirt, kdive")
     socket = subprocess.run(
         ["systemctl", "is-active", "--quiet", "kdive-live-worker-lifecycle.socket"], check=False
@@ -145,7 +147,7 @@ def _prerequisites(authority: str | None) -> dict[str, bool]:
         "lifecycle-socket": socket.returncode == 0,
         "operator-control-group": _CONTROL_GROUP in groups.stdout.split(),
         "published-libvirt-endpoint": "live-libvirt" in os.environ.get("KDIVE_LIBVIRT_URI", ""),
-        "authority-revision": authority is not None,
+        "lifecycle-witness-revision": _witness_matches_checkout(candidate),
     }
 
 
@@ -298,7 +300,7 @@ def test_installed_host_boots_pinned_kernel() -> None:
     failures: list[str] = []
     manifest, kernel_sha256 = bundle_inputs(Path(inputs["BUNDLE"]))
     deployed = _deployed(inputs["CANDIDATE"], os.environ["KDIVE_STACK_BASE_URL"], failures)
-    prerequisites = _prerequisites(deployed.get("authority"))
+    prerequisites = _prerequisites(inputs["CANDIDATE"])
     host_arch = platform.machine()
     row = load_rootfs_catalog()[inputs["IMAGE"]]
     guest: dict[str, Any] = {"accelerator": "none", "label": "-", "confined": False}
