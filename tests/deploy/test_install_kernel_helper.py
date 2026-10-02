@@ -122,7 +122,7 @@ _KVER = "6.18.54-kdive-test"
 # options, --update-kernel=TITLE=kdive --remove-args=<key> drops <key> and <key>=*. Any other
 # --update-kernel target is not the slot. Every call is logged.
 _GRUBBY_STUB = """#!/bin/bash
-state="$KDIVE_TEST_STATE"
+state="$STUB_STATE"
 echo "$*" >>"$state/grubby.log"
 case "$1" in
 --info=ALL) exit 0 ;;
@@ -135,7 +135,7 @@ case "$1" in
   echo "$args" >"$state/slot_args"
   ;;
 --update-kernel=TITLE=kdive)
-  [ -z "${KDIVE_TEST_FAIL_UPDATE:-}" ] || exit 1
+  [ -z "${STUB_FAIL_UPDATE:-}" ] || exit 1
   key="${2#--remove-args=}" kept=()
   for tok in $(cat "$state/slot_args"); do
     case "$tok" in "$key" | "$key"=*) ;; *) kept+=("$tok") ;; esac
@@ -164,7 +164,7 @@ def _stub_guest(tmp_path: Path) -> tuple[str, dict[str, str]]:
     (state / "default_args").write_text(_DEFAULT_ARGS + "\n")
     bodies = {
         "grubby": _GRUBBY_STUB,
-        "systemctl": '#!/bin/bash\necho "$*" >>"$KDIVE_TEST_STATE/systemctl.log"\n',
+        "systemctl": '#!/bin/bash\necho "$*" >>"$STUB_STATE/systemctl.log"\n',
         "rm": f'#!/bin/bash\ncase "${{@: -1}}" in "$TMPDIR"/*) exec {real_rm} "$@" ;; esac\n',
     }
     for name in ("dracut", "depmod", "install", "cp"):
@@ -173,7 +173,7 @@ def _stub_guest(tmp_path: Path) -> tuple[str, dict[str, str]]:
         stub = stubs / name
         stub.write_text(body)
         stub.chmod(0o755)
-    env = {"KDIVE_TEST_STATE": str(state), "TMPDIR": str(scratch)}
+    env = {"STUB_STATE": str(state), "TMPDIR": str(scratch)}
     return f"{stubs}:/usr/bin:/bin", env
 
 
@@ -229,6 +229,6 @@ def test_kdump_install_keeps_its_requested_crashkernel(tmp_path: Path) -> None:
 @requires_curl
 def test_failed_crashkernel_removal_exits_deterministic(tmp_path: Path) -> None:
     """A grubby that cannot edit the slot is an image defect like every other grubby step."""
-    rc, err = _install(tmp_path, "console=ttyS0 nokaslr", "gdbstub", KDIVE_TEST_FAIL_UPDATE="1")
+    rc, err = _install(tmp_path, "console=ttyS0 nokaslr", "gdbstub", STUB_FAIL_UPDATE="1")
     assert rc == 1
     assert "crashkernel" in err
