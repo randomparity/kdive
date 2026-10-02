@@ -79,7 +79,8 @@ deployed role revisions, so no cell can qualify today.
 6. `obligations.toml` maps `image-smoke` to the node. The scenario ID is shared, so the six
    ppc64le cells then report `missing-result` (owner #2818) rather than
    `pending-implementation`. On a POWER host the node selects them, but proving them stays with
-   #2818. The contract tests are updated to match.
+   #2818. `coverage_campaign check` therefore counts 21 fewer pending cells; the
+   six ppc64le ones stay unproven. The contract tests are updated to match.
 7. `live-testing.md` documents the run.
 
 ## Failure model
