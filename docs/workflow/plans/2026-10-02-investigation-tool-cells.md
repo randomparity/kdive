@@ -518,12 +518,14 @@ async def _built_run(inv: _Investigation) -> tuple[str, bytes]:
     inv.keys |= keys
     for item in env.items:
         await _put(item, bundle if item.data.get("name") == "kernel" else vmlinux)
+    # Untracked before the adopting call: a response lost after the build committed must not
+    # purge objects its artifact rows now own. An unadopted upload is left to the manifest reaper.
+    inv.keys -= keys
     args = {"run_id": run_id, "build_id": _BUILD_ID}
     built = one(await inv.caller.call("runs.complete_build", args, inv.token))
     assert built.status == "succeeded", f"runs.complete_build answered {built.status}"
-    # The build adopted the Run's objects; the close hands them to the build GC.
+    # The close hands the succeeded build to the build GC.
     inv.runs.remove(run_id)
-    inv.keys -= keys
     return run_id, vmlinux
 
 
@@ -656,6 +658,7 @@ async def _pages(
 ) -> list[str]:
     """Every item id of a paginated tool; ``cursor_in`` names where the cursor goes."""
     ids: list[str] = []
+    seen: set[object] = set()
     request = dict(args)
     while True:
         call = {"request": request} if cursor_in == "request" else request
@@ -664,7 +667,8 @@ async def _pages(
         cursor = env.data.get("next_cursor")
         if not env.data.get("truncated") or not cursor:
             return ids
-        assert cursor != request.get("cursor"), f"{tool} repeated its cursor"
+        assert cursor not in seen, f"{tool} repeated a cursor"
+        seen.add(cursor)
         request = {**request, "cursor": cursor}
 
 
@@ -807,7 +811,9 @@ async def _upload(
     name = "rootfs" if tool == "artifacts.create_investigation_upload" else "kernel"
     call = {**args, "artifacts": [_declaration(name, data)]}
     env = one(await caller.call(tool, call, token, discover=True))
-    assert env.status == "upload_ready" and len(env.items) == 1, f"{tool} answered {env.status}"
+    # Scalars only: an assertion on the envelope would print its presigned upload URL.
+    status, count = env.status, len(env.items)
+    assert status == "upload_ready" and count == 1, f"{tool} answered {status} with {count} items"
     item = env.items[0]
     inv.keys.add(item.object_id)
     await _put(item, data)
@@ -859,13 +865,14 @@ async def _complete_rootfs_upload(
         item, data = await _upload(inv.caller, inv.token, inv, tool, args)
         finalize = {"investigation_id": inv.id}
         token = caller.token(grants)
+        # Untracked before the adopting call, as in _built_run; the close hands the finalized
+        # object to the rootfs reclaim.
+        inv.keys.discard(item.object_id)
         env = one(
             await caller.call(
                 "investigations.complete_rootfs_upload", finalize, token, discover=True
             )
         )
-        # The finalize adopted the object; the close hands it to the rootfs reclaim.
-        inv.keys.discard(item.object_id)
         key = str(env.data.get("object_key"))
         assert env.data.get("checksum_sha256") == _b64_sha256(data), "handle is not the digest"
         assert key == item.object_id and key.startswith(f"local/investigations/{inv.id}/")
@@ -896,12 +903,17 @@ async def _fetch_raw(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict
         env = one(
             await caller.call("artifacts.fetch_raw", args, caller.token(grants), discover=True)
         )
+        # Scalars only from here: an assertion on the envelope would print its presigned URL.
+        url, answered = (
+            env.refs["download_uri"],
+            (env.data.get("asset"), env.data.get("size_bytes")),
+        )
         async with httpx.AsyncClient(timeout=60.0) as http:
-            response = await http.get(env.refs["download_uri"])
+            response = await http.get(url)
         # The status alone: an HTTPStatusError would echo the presigned URL and its signature.
         assert response.status_code == 200, f"download answered HTTP {response.status_code}"
         assert response.content == vmlinux, "the downloaded vmlinux is not the uploaded one"
-        assert (env.data.get("asset"), env.data.get("size_bytes")) == ("vmlinux", len(vmlinux))
+        assert answered == ("vmlinux", len(vmlinux)), f"fetch_raw answered {answered}"
     run = await _rows(db_url, "SELECT state FROM runs WHERE id = %s", (run_id,))
     pending = (await _investigation_row(db_url, inv.id))["cleanup_pending_at"]
     assert run[0]["state"] == "succeeded" and pending is not None, (
@@ -947,25 +959,26 @@ async def _artifacts_get(caller: HttpCaller, grants: Grants, *, db_url: str) -> 
     body = gzip.decompress(raw) if metadata.get("content-encoding") == "gzip" else raw
     token, artifact = caller.token(grants), str(part["id"])
 
-    async def get(**request: object) -> ToolResponse:
+    async def get(**request: object) -> dict[str, object]:
+        """The answer's ``data`` alone: its ``refs`` carry a presigned download URL."""
         call = {"request": {"artifact_id": artifact, **request}}
-        return one(await caller.call("artifacts.get", call, token, discover=True))
+        return dict(one(await caller.call("artifacts.get", call, token, discover=True)).data)
 
     forward = await get(max_bytes=512)
-    assert forward.data.get("size_bytes") == len(body), "size_bytes is not the stored body's"
-    assert forward.data.get("content") == body[:512].decode("utf-8", errors="replace")
+    assert forward.get("size_bytes") == len(body), "size_bytes is not the stored body's"
+    assert forward.get("content") == body[:512].decode("utf-8", errors="replace")
     backward = await get(max_bytes=512, direction="backward")
-    assert backward.data.get("content") == body[-512:].decode("utf-8", errors="replace")
+    assert backward.get("content") == body[-512:].decode("utf-8", errors="replace")
     term = _literal(body)
     offset = body.find(term.encode())
     hit = await get(find=term)
     expected = {"match_found": True, "match_offset": offset}
     expected["match_line"] = body.count(b"\n", 0, offset) + 1
-    assert {k: hit.data.get(k) for k in expected} == expected, f"find answered {hit.data}"
+    assert {k: hit.get(k) for k in expected} == expected, f"find answered {hit}"
     absent = f"cov-absent-{secrets.token_hex(8)}"
     assert absent.encode() not in body
     miss = await get(find=absent)
-    assert miss.data.get("match_found") is False, f"find of an absent term answered {miss.data}"
+    assert miss.get("match_found") is False, f"find of an absent term answered {miss}"
     return {"bytes": len(body), "windows": ["forward", "backward"], "find": "hit-and-miss"}
 
 
