@@ -49,7 +49,7 @@ from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings, Outcome
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.evidence import os_identity
-from tests.integration.live_stack.scenario import CellRun, run_cell
+from tests.integration.live_stack.scenario import CellRun, ScenarioStop, run_cell
 
 Exposure = Literal["direct", "gateway"]
 Boundary = Literal["authentication", "authorization", "project-isolation", "validation"]
@@ -217,11 +217,20 @@ async def operator_catalog(base_url: str, issuer: OidcIssuer, grants: Grants) ->
 
 @dataclass(frozen=True)
 class Rejection:
-    """One call a boundary must reject: its arguments, grants and accepted categories."""
+    """One call a boundary must reject: its arguments, grants and accepted categories.
+
+    ``filtered_by`` names the issue that owns a list tool known to answer an empty page instead
+    of rejecting: that answer stops the cell ``blocked``, and a real rejection still qualifies.
+    ``absent_twin`` holds arguments naming an owner that does not exist: the rejected answer
+    must be indistinguishable from the twin's, so a category shared with an unrelated failure
+    cannot pass the cell.
+    """
 
     args: Mapping[str, object]
     grants: Grants
     categories: frozenset[str] = frozenset({ErrorCategory.AUTHORIZATION_DENIED.value})
+    filtered_by: str | None = None
+    absent_twin: Mapping[str, object] | None = None
 
 
 def rejected_by_validation(exposure: str, result: Result) -> bool:
@@ -262,11 +271,34 @@ def _shape(result: Result) -> dict[str, object]:
     return {"status": result.status, "error_category": result.error_category}
 
 
-async def _attempt(caller: Caller, tool: str, rejection: Rejection) -> Result:
+async def _attempt(
+    caller: Caller, tool: str, rejection: Rejection, args: Mapping[str, object] | None = None
+) -> Result:
     try:
-        return await caller.call(tool, rejection.args, caller.token(rejection.grants))
+        call = rejection.args if args is None else args
+        return await caller.call(tool, call, caller.token(rejection.grants))
     except LiveStackToolError as exc:
         return exc
+
+
+def _filtered(result: Result) -> bool:
+    """A successful envelope listing nothing: a list tool filtering instead of rejecting."""
+    return isinstance(result, ToolResponse) and result.error_category is None and not result.items
+
+
+def _answer(result: Result, args: Mapping[str, object]) -> dict[str, object]:
+    """``result`` with every string argument masked, to compare a call with its absent twin."""
+    if not isinstance(result, ToolResponse):
+        return _shape(result)
+    text = json.dumps(
+        [result.object_id, result.status, result.error_category, result.detail, result.data],
+        sort_keys=True,
+        default=str,
+    )
+    for value in args.values():
+        if isinstance(value, str) and value:
+            text = text.replace(value, "<arg>")
+    return {"answer_sha256": hashlib.sha256(text.encode()).hexdigest(), **_shape(result)}
 
 
 async def _observe(
@@ -286,13 +318,25 @@ async def _observe(
         assert rejected_by_validation(caller.exposure, result), (
             f"{tool} was not rejected by argument validation: {_shape(result)}"
         )
-    else:
-        category = result.error_category if isinstance(result, ToolResponse) else None
-        assert category is not None, f"{tool} was not rejected: {_shape(result)}"
-        assert category in rejection.categories, (
-            f"{tool} rejected with {category}, not one of {sorted(rejection.categories)}"
+        return {"rejected": _shape(result)}
+    if rejection.filtered_by is not None and _filtered(result):
+        raise ScenarioStop(
+            Outcome.BLOCKED,
+            f"{tool} answered an empty page instead of rejecting the {boundary} call; "
+            f"{rejection.filtered_by} owns the decision",
         )
-    return {"rejected": _shape(result)}
+    category = result.error_category if isinstance(result, ToolResponse) else None
+    assert category is not None, f"{tool} was not rejected: {_shape(result)}"
+    assert category in rejection.categories, (
+        f"{tool} rejected with {category}, not one of {sorted(rejection.categories)}"
+    )
+    observation: dict[str, object] = {"rejected": _shape(result)}
+    if rejection.absent_twin is not None:
+        twin = await _attempt(caller, tool, rejection, rejection.absent_twin)
+        answered, absent = _answer(result, rejection.args), _answer(twin, rejection.absent_twin)
+        assert answered == absent, f"{tool} answered {answered}, an absent owner {absent}"
+        observation["absent_owner_twin"] = answered
+    return observation
 
 
 def _digest(state: object) -> str:
@@ -322,7 +366,16 @@ async def prove_rejection(
     async with context as overrides:
         effective = replace(rejection, args={**rejection.args, **overrides})
         before = await snapshot()
-        observation = await _observe(caller, operation, boundary, effective)
+        try:
+            observation = await _observe(caller, operation, boundary, effective)
+        except ScenarioStop as stop:
+            # The record's impediment is the generic missing-prerequisite; this artifact names
+            # the owner and what the call answered.
+            blocked = {"cell": run.cell.id, "boundary": boundary, "blocked": str(stop)}
+            run.artifacts.append(
+                run.writer.artifact({**blocked, "filtered_by": rejection.filtered_by})
+            )
+            raise
         run.prove(boundary, {"exposure": caller.exposure, **observation})
         after = await snapshot()
         assert after == before, f"protected state changed across the rejected {operation}"
