@@ -14,6 +14,7 @@ import pytest
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import LiveStackToolError, make_keypair
 from kdive.mcp.responses import ToolResponse
+from kdive.serialization import JsonValue
 from scripts.coverage_campaign.contract import build_contract
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import scenario, tool_cells
@@ -128,14 +129,57 @@ def test_authentication_needs_401(tmp_path: Path) -> None:
         )
 
 
+def _invoke_error(detail: str | None, **data: JsonValue) -> ToolResponse:
+    return ToolResponse.failure(
+        "tools.invoke", ErrorCategory.CONFIGURATION_ERROR, detail=detail, data=data
+    )
+
+
+# The binding-failure detail tools.invoke writes when the caller can see the tool
+# (src/kdive/mcp/tools/gateway.py).
+_BINDING_DETAIL = (
+    "Arguments for 'tools.search' failed schema validation. Call "
+    'tools.search(names=["tools.search"], detail="full") for its exact schema.'
+)
+_FIELD_ERRORS: JsonValue = [{"field": "limit", "kind": "int_parsing"}]
+
+
 def test_validation_rule_per_exposure() -> None:
     tool_error = LiveStackToolError("tools.search", "1 validation error for call[tools_search]")
-    config = ToolResponse.failure("tools.invoke", ErrorCategory.CONFIGURATION_ERROR)
+    binding = _invoke_error(_BINDING_DETAIL, field_errors=_FIELD_ERRORS)
     assert rejected_by_validation("direct", tool_error)
     assert not rejected_by_validation("gateway", tool_error)
-    assert rejected_by_validation("gateway", config)
+    assert rejected_by_validation("gateway", binding)
+    assert rejected_by_validation("direct", _invoke_error(None))
     assert not rejected_by_validation("direct", LiveStackToolError("t", "boom"))
     assert not rejected_by_validation("direct", ToolResponse.success("x", "ok"))
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        pytest.param(
+            _invoke_error(
+                "No tool named 'tools.search' is registered or enabled; "
+                "discover available tools with tools.search."
+            ),
+            id="not-found",
+        ),
+        pytest.param(_invoke_error("project 'p' has no build host"), id="inner-categorized-error"),
+        pytest.param(
+            _invoke_error("Arguments for 'tools.search' failed schema validation."),
+            id="bare-pydantic-validation-error",
+        ),
+        pytest.param(_invoke_error(_BINDING_DETAIL), id="binding-without-field-errors"),
+        pytest.param(_invoke_error(_BINDING_DETAIL, field_errors=[]), id="empty-field-errors"),
+        pytest.param(
+            _invoke_error("project 'p' has no build host", field_errors=_FIELD_ERRORS),
+            id="field-errors-without-schema-detail",
+        ),
+    ],
+)
+def test_gateway_validation_needs_the_binding_failure(envelope: ToolResponse) -> None:
+    assert not rejected_by_validation("gateway", envelope)
 
 
 def test_category_boundaries_use_the_closed_set(tmp_path: Path) -> None:
