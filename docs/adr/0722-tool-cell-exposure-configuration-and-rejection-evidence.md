@@ -48,8 +48,13 @@ verifier: `build_plane_registrars` registers the build-use recovery tools only w
      not;
    - `authorization` and `project-isolation`: a real-issuer token with the grants the cell
      supplies must receive a failure envelope whose category is in the cell's closed set;
-   - `validation`: schema-invalid arguments must receive a `configuration_error` envelope, or,
-     on `direct` only, a tool-error result whose text names a validation error.
+   - `validation`: schema-invalid arguments must be rejected by argument validation. On
+     `direct` that is a `configuration_error` envelope or a tool-error result whose text names a
+     validation error. On `gateway` it is `tools.invoke`'s argument-binding failure: a
+     `configuration_error` envelope carrying a non-empty `data.field_errors` and a detail naming
+     a failed schema validation (`src/kdive/mcp/tools/gateway.py`). `tools.invoke` answers
+     `configuration_error` for other causes too (an unknown or hidden tool, an inner handler's
+     error, a tool body re-validating its own data), and none of them is validation evidence.
 
    A completed rejection cell records outcome `rejection`, which `qualify` requires of its kind
    (`scripts/coverage_campaign/results.py`); a functional cell records `success`.

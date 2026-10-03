@@ -223,12 +223,26 @@ class Rejection:
 
 
 def rejected_by_validation(exposure: str, result: Result) -> bool:
-    """A ``configuration_error`` envelope, or a ``direct`` tool error naming validation."""
+    """A schema rejection of the call's arguments (ADR-0722 §3).
+
+    ``direct`` accepts a ``configuration_error`` envelope or a tool error naming validation.
+    ``gateway`` accepts only ``tools.invoke``'s argument-binding failure: ``tools.invoke`` also
+    answers ``configuration_error`` for an unknown tool, an inner handler's error and a tool body
+    re-validating its own data, and only the binding failure carries non-empty
+    ``data.field_errors`` beside its "failed schema validation" detail
+    (``src/kdive/mcp/tools/gateway.py``).
+    """
     if isinstance(result, LiveStackToolError):
         return exposure == "direct" and "validation error" in result.message.lower()
-    return (
+    if not (
         isinstance(result, ToolResponse)
         and result.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+    ):
+        return False
+    if exposure == "direct":
+        return True
+    return bool(result.data.get("field_errors")) and "failed schema validation" in (
+        result.detail or ""
     )
 
 
