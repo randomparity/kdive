@@ -48,13 +48,8 @@ verifier: `build_plane_registrars` registers the build-use recovery tools only w
      not;
    - `authorization` and `project-isolation`: a real-issuer token with the grants the cell
      supplies must receive a failure envelope whose category is in the cell's closed set;
-   - `validation`: schema-invalid arguments must be rejected by argument validation. On
-     `direct` that is a `configuration_error` envelope or a tool-error result whose text names a
-     validation error. On `gateway` it is `tools.invoke`'s argument-binding failure: a
-     `configuration_error` envelope carrying a non-empty `data.field_errors` and a detail naming
-     a failed schema validation (`src/kdive/mcp/tools/gateway.py`). `tools.invoke` answers
-     `configuration_error` for other causes too (an unknown or hidden tool, an inner handler's
-     error, a tool body re-validating its own data), and none of them is validation evidence.
+   - `validation`: schema-invalid arguments must receive a `configuration_error` envelope, or,
+     on `direct` only, a tool-error result whose text names a validation error.
 
    A completed rejection cell records outcome `rejection`, which `qualify` requires of its kind
    (`scripts/coverage_campaign/results.py`); a functional cell records `success`.
@@ -64,6 +59,16 @@ verifier: `build_plane_registrars` registers the build-use recovery tools only w
    to write. The tables come from `pg_catalog`, so one the evidence DSN cannot read fails the
    snapshot rather than dropping out of it. A rejection cell's `unchanged-state` and `cleanup` both compare that snapshot with
    the one taken before the call. A cell may replace the snapshot with a narrower one.
+
+### Amendment (2026-10-02): a gateway validation rejection is the binding failure (#3103)
+
+This narrows decision 3's `validation` rule for `gateway`. `tools.invoke` answers
+`configuration_error` for causes that are not schema validation: an unknown or hidden tool, an
+inner handler's error, and a tool body re-validating its own data. None of them is validation
+evidence. A `gateway` validation cell therefore requires `tools.invoke`'s argument-binding
+failure: a `configuration_error` envelope carrying a non-empty `data.field_errors` and a detail
+naming a failed schema validation (`src/kdive/mcp/tools/gateway.py`). The cell's own token can
+see the tool, so the binding failure carries `data.field_errors`. The `direct` rule is unchanged.
 
 ## Consequences
 
