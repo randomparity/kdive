@@ -315,20 +315,21 @@ reasons beside `missing-prerequisite` for it; the pytest line names the actual c
 interrupted run, release the leftover allocation with `allocations.release` (or let the lease
 expire) and check the provider for a leftover `kdive-*` domain and its overlay volume.
 
-Last run: candidate `0ec1b49ec` (server, worker and reconciler at that SHA) on snapshot-capable
-disposable lab test hosts: an Ubuntu 26.04 x86_64 control plane and a separate Rocky Linux 10.2
-x86_64 provider host, itself a KVM guest (`systemd-detect-virt` `kvm`; domains run with the `kvm`
-accelerator, nested). Fixtures `v6.18.54` (longterm) and `v7.2.8` (stable). Two provider-host
-steps existed only because of open defects and are not product coverage: firewalld installed and
-enabled before `site.yml` (#3083), and a runtime `DOCKER-USER` rule accepting forwarded traffic to
-and from `virbr0` so guests reach the object store past docker's `FORWARD` drop policy (#3093).
+Last run: candidate `b5c5141c8` (server, worker and reconciler at that SHA; both base images rebuilt
+from it) on snapshot-capable disposable lab test hosts: an Ubuntu 26.04 x86_64 control plane and a
+separate Rocky Linux 10.2 x86_64 provider host, itself a KVM guest (`systemd-detect-virt` `kvm`;
+domains run with the `kvm` accelerator, nested). Fixtures `v6.18.54` (longterm) and `v7.2.8`
+(stable). Two provider-host steps existed only because of open defects and are not product coverage:
+firewalld installed and enabled before `site.yml` (#3083), and a runtime `DOCKER-USER` rule
+accepting forwarded traffic to and from `virbr0` so guests reach the object store past docker's
+`FORWARD` drop policy (#3093).
 
 | Cell (`deep-lifecycle/remote-libvirt/x86_64/…`) | Guest | Outcome | Failing assertion |
 |---|---|---|---|
 | `fedora/longterm`, `fedora/stable` | `fedora:43` | success | — |
-| `enterprise/longterm`, `enterprise/stable` | `rocky:10` | failure | `install` (boot waits for kdump arming, #3094) |
+| `enterprise/longterm`, `enterprise/stable` | `rocky:10` | success | — |
 | `debian/longterm`, `debian/stable` | — | blocked | no Debian install helper (#3081) |
 | `suse/longterm`, `suse/stable` | — | blocked | no SUSE remote image (#3082) |
 
-`qualify` accepted both Fedora cells; the other six do not qualify. The four blocked cells also
-list context-mismatch reasons, because they stop before the provider host is observed.
+`qualify` accepted the Fedora and Enterprise cells; the four blocked cells do not qualify, and
+also list context-mismatch reasons, because they stop before the provider host is observed.
