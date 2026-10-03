@@ -230,7 +230,9 @@ def rejected_by_validation(exposure: str, result: Result) -> bool:
     answers ``configuration_error`` for an unknown tool, an inner handler's error and a tool body
     re-validating its own data, and only the binding failure carries non-empty
     ``data.field_errors`` beside its "failed schema validation" detail
-    (``src/kdive/mcp/tools/gateway.py``).
+    (``src/kdive/mcp/tools/gateway.py``). A tool whose binding failure ``BindingErrorMiddleware``
+    re-envelopes (``src/kdive/mcp/middleware/binding_errors.py``) never reaches that branch, so
+    its ``gateway`` validation cell fails here rather than recording ambiguous evidence.
     """
     if isinstance(result, LiveStackToolError):
         return exposure == "direct" and "validation error" in result.message.lower()
@@ -280,7 +282,7 @@ async def _observe(
     result = await _attempt(caller, tool, rejection)
     if boundary == "validation":
         assert rejected_by_validation(caller.exposure, result), (
-            f"{tool} accepted invalid arguments: {_shape(result)}"
+            f"{tool} was not rejected by argument validation: {_shape(result)}"
         )
     else:
         category = result.error_category if isinstance(result, ToolResponse) else None

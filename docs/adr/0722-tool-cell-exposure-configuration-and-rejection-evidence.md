@@ -69,6 +69,11 @@ evidence. A `gateway` validation cell therefore requires `tools.invoke`'s argume
 failure: a `configuration_error` envelope carrying a non-empty `data.field_errors` and a detail
 naming a failed schema validation (`src/kdive/mcp/tools/gateway.py`). The cell's own token can
 see the tool, so the binding failure carries `data.field_errors`. The `direct` rule is unchanged.
+`systems.provision`, `systems.reprovision`, `runs.create` and `allocations.request` are the
+exception: `BindingErrorMiddleware` (`src/kdive/mcp/middleware/binding_errors.py`) re-envelopes
+their binding failures before `tools.invoke` sees them, without `data.field_errors`, so a
+`gateway` validation cell for one of them fails under this rule until a later decision names
+its evidence.
 
 ## Consequences
 
