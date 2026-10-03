@@ -32,8 +32,8 @@ In scope:
 2. A live carrier, `tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell`,
    parametrized over the 152 cells, with a catalog snapshot: the default per-project snapshot
    plus `image_catalog` rows owned by the cell's project and every `system_shapes` row (count and
-   row-text SHA-256, read-only session). It extends the default snapshot rather than replacing it,
-   which ADR-0722 §4 leaves to the cell.
+   row-text SHA-256, read-only session). It extends the default snapshot rather than replacing it:
+   completion criterion 2 requires the shapes catalog and owner-keyed private images to be observed.
 3. 38 `[implementations]` entries binding group 3095's scenarios to that node; the contract test
    names the new node and tools.
 4. The runbook's tool-cell section gains the catalog carrier and its one precondition.
@@ -69,8 +69,10 @@ in admission") and `resources.availability` ("controlled resource state"). Both 
 `allocations.request` and `allocations.release` as fixtures, as the operator, in the project the
 bring-up funded (`KDIVE_PROJECT`); those tools' own cells stay with #3098. Admission is
 synchronous: a grant or a refusal returns at once, and a release answers `released`. The released
-row stays as history in the funded project, outside the cell's snapshot; the fixture proves its
-cleanup by the `released` state and the occupancy it gives back.
+row, and the ledger entries admission and release write for it, stay as history in the funded
+project, outside the cell's snapshot; the fixture proves its cleanup by the `released` state and
+the occupancy it gives back. Deferred: driving a queued allocation for the queue-depth half of the
+`resources.availability` observation (#3106).
 
 ### Functional effects
 
@@ -114,10 +116,12 @@ and deletes it on exit. Every category accepted is `authorization_denied`.
    objects behind (the stack is wiped after the proof); concurrent writers to the catalog are not
    modelled (one carrier runs at a time); a remote-libvirt host's facts are compared only with its
    row; a shape with a PCIe match is left out of the `fits` comparison (the seeded presets carry
-   none); queue depth is compared with the database but not driven (on the lab stack a second
-   request with `on_capacity="queue"` answered `quota_exceeded`, not a queued row); the provider
+   none); queue depth is compared with the database but not driven (the funded project's
+   `max_pending_allocations` is the column default 0, so a queued request answers
+   `quota_exceeded`; owned by #3106); the provider
    capability planes of `resources.describe` are recorded but not compared (no source but the
-   provider runtime); released fixture allocations stay as history in the funded project.
+   provider runtime); released fixture allocations and their ledger entries stay as history in the
+   funded project, which the bring-up funds generously and the stack wipe discards.
 4. **Covered elsewhere:** the recovery tools' cells (#2812); the upload ingest that produces a
    quarantined object (the `artifacts.*` upload tools, #3096).
 

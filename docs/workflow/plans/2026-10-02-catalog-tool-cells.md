@@ -1143,7 +1143,8 @@ carriers in one invocation per lane. Run `just docs-check`; commit
 
 Verification: Mode: task-test-not-applicable for the run itself; its output is the evidence.
 
-Steps on the disposable lab host, at the pushed branch head:
+Steps on a snapshot-capable disposable lab host (restorable to a known level by its operator), at
+the pushed branch head:
 
 1. Ship the branch, `just sync`, `just build-capture-bootstrap-manifest`, write bindings with
    `python -m tests.integration.live_stack.tool_cells bindings --candidate <HEAD> --out inputs.json`.
