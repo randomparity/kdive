@@ -415,19 +415,28 @@ class _Investigation:
 
 
 async def _settle(inv: _Investigation) -> list[str]:
-    """Purge ``inv``'s unadopted objects, cancel its Runs and close it; what could not end."""
+    """Purge ``inv``'s unadopted objects, cancel its Runs and close it; what could not end.
+
+    Each step runs whatever an earlier one raised, so a store fault still closes ``inv``.
+    """
+
+    async def purge(key: str) -> list[str]:
+        gone = await asyncio.to_thread(_purge, key)
+        return [] if gone else [f"object {key} still has versions"]
+
+    async def call(tool: str, args: Mapping[str, object], status: str) -> list[str]:
+        result = await inv.caller.call(tool, args, inv.token)
+        if isinstance(result, ToolResponse) and result.status == status:
+            return []
+        return [f"{tool} {args}: {_failure(result)}"]
+
+    steps = [partial(purge, key) for key in sorted(inv.keys)]
+    steps += [partial(call, "runs.cancel", {"run_id": run}, "canceled") for run in inv.runs]
+    closing = {"investigation_id": inv.id, "summary": "coverage cell finished"}
+    steps.append(partial(call, "investigations.close", closing, "closed"))
     problems: list[str] = []
-    for key in sorted(inv.keys):
-        if not await asyncio.to_thread(_purge, key):
-            problems.append(f"object {key} still has versions")
-    for run_id in inv.runs:
-        result = await inv.caller.call("runs.cancel", {"run_id": run_id}, inv.token)
-        if not isinstance(result, ToolResponse) or result.status != "canceled":
-            problems.append(f"runs.cancel {run_id}: {_failure(result)}")
-    args = {"investigation_id": inv.id, "summary": "coverage cell finished"}
-    result = await inv.caller.call("investigations.close", args, inv.token)
-    if not isinstance(result, ToolResponse) or result.status != "closed":
-        problems.append(f"investigations.close {inv.id}: {_failure(result)}")
+    for step in steps:
+        problems += await _attempt(step)
     return problems
 
 
@@ -604,15 +613,6 @@ def _release_session_systems() -> Iterator[None]:
     _SYSTEMS.clear()
     for system in systems:
         asyncio.run(_release(system))
-
-
-async def _system_state(db_url: str, project: str, system_id: str) -> dict[str, list[object]]:
-    """:func:`_live_state` of ``project`` plus the session System's artifact rows."""
-    state = await _live_state(db_url, project)
-    where: LiteralString = "FROM artifacts t WHERE t.owner_kind = 'systems' AND t.owner_id = %s"
-    row = (await _rows(db_url, _DIGEST + where, (system_id,)))[0]
-    state["artifacts:system"] = [row["n"], row["h"]]
-    return state
 
 
 async def _oldest_part(db_url: str, system_id: str) -> dict[str, Any]:
@@ -880,7 +880,7 @@ async def _complete_rootfs_upload(
         assert not manifests, "the finalize left its upload manifest"
     pending = (await _investigation_row(db_url, inv.id))["rootfs_cleanup_pending_at"]
     assert pending is not None, "the close did not schedule the rootfs reclaim"
-    return {"handle_is_digest": True, "rootfs_reclaim_pending": True, "owned": [inv.id, key]}
+    return {"handle_is_digest": True, "close_scheduled_reclaim": True, "owned": [inv.id, key]}
 
 
 async def _fetch_raw(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
@@ -899,7 +899,11 @@ async def _fetch_raw(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict
     run = await _rows(db_url, "SELECT state FROM runs WHERE id = %s", (run_id,))
     pending = (await _investigation_row(db_url, inv.id))["cleanup_pending_at"]
     assert run[0]["state"] == "succeeded" and pending is not None, "the build is not handed off"
-    return {"bytes_equal": len(vmlinux), "build_gc_pending": True, "owned": [inv.id, run_id]}
+    return {
+        "bytes_equal": len(vmlinux),
+        "close_scheduled_build_gc": True,
+        "owned": [inv.id, run_id],
+    }
 
 
 async def _artifacts_list(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
@@ -1114,8 +1118,9 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     snapshot: Snapshot = partial(_live_state, db_url, project)
     system = None
     if tool in _SYSTEM_TOOLS and targeted:
+        # Console rotation adds parts to the System whenever its guest writes enough, so its
+        # rows stay out of the snapshot; artifacts.list compares them inside its body.
         system = await _session_system(base_url, issuer, db_url)
-        snapshot = partial(_system_state, db_url, project, system.id)
     if cell.kind == "functional":
         body = cast(Functional, partial(_FUNCTIONAL[tool], db_url=db_url))
         await prove_functional(run, caller, _functional_grants(tool, project), body, snapshot)

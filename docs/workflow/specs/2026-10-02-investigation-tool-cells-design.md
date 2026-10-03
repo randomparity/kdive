@@ -95,11 +95,15 @@ error rather than replacing it.
      for one minute. Probed on the lab host, a ready guest seals its first part within about a
      minute and then stays quiet.
 
-  A session finalizer releases the allocation. Once the System exists, even if its parts never
-  settle, the finalizer proves teardown with `release_and_verify`: the domain and disks are gone
-  and the capacity is returned. Cells read its artifacts as a viewer of
-  `KDIVE_PROJECT`; they do not own it. Their snapshot is P's plus the row text of the System's
-  artifact rows.
+  A session finalizer releases the allocation. Once the System has reached `ready`, even if its
+  parts never settle, the finalizer proves teardown with `release_and_verify`: the domain and
+  disks are gone and the capacity is returned. A provision that fails before `ready` releases
+  the allocation only, and the failure surfaces as the failing cell.
+
+  Cells read the System's artifacts as a viewer of `KDIVE_PROJECT`; they do not own it. Their
+  snapshot is P's alone. Console rotation adds parts to the System whenever its guest writes
+  enough, and the read tools cannot write those rows, so `artifacts.list` compares them inside
+  its body instead. The oldest part `artifacts.get` reads is sealed and immutable.
 
 ### Functional effects
 
@@ -199,6 +203,9 @@ Notes on the table:
      The wipe clears them.
    - Console rotation adding a part during an `artifacts.list` read is retried once. A second
      change fails the cell rather than loosening the comparison.
+   - A session System that fails before `ready` has its allocation released without the
+     domain and disk proof. The provisioning failure is reported, and the wipe clears any
+     domain left behind.
    - Redaction itself (a secret replaced in the stored bytes) is not driven. The cell proves the
      stored object is labelled `redacted` and that the served bytes are those stored bytes. The
      redactor is unit-tested where it is written.
