@@ -79,7 +79,8 @@ error rather than replacing it.
     `SHT_NOTE` over its GNU build-id note.
 
   Both are PUT through the presigned URLs, and then `runs.complete_build(build_id=
-  "0123456789abcdef")` runs. The Run ends `succeeded`. Its build is published to the
+  "0123456789abcdef")` runs. Until the build succeeds, the Run is canceled and its objects are
+  purged on exit like any other fixture's. The Run ends `succeeded`. Its build is published to the
   investigation, and the investigation's close hands it to the reconciler's build GC.
 - **Uploaded bytes.** The cell PUTs 4 KiB of fresh random bytes. Bytes the cell PUT that no
   catalog row has adopted (an unfinalized upload) are purged from the object store on exit, with
@@ -94,8 +95,9 @@ error rather than replacing it.
      for one minute. Probed on the lab host, a ready guest seals its first part within about a
      minute and then stays quiet.
 
-  A session finalizer releases the allocation and proves teardown with `release_and_verify` (the
-  domain and disks are gone and the capacity is returned). Cells read its artifacts as a viewer of
+  A session finalizer releases the allocation. Once the System exists, even if its parts never
+  settle, the finalizer proves teardown with `release_and_verify`: the domain and disks are gone
+  and the capacity is returned. Cells read its artifacts as a viewer of
   `KDIVE_PROJECT`; they do not own it. Their snapshot is P's plus the row text of the System's
   artifact rows.
 
@@ -167,7 +169,10 @@ Notes on the table:
   `configuration_error` they return for an absent owner (`mcp/tools/catalog/artifacts/uploads.py`
   `_create_upload`, `complete_rootfs_upload.py`). The isolation is real and leaks nothing, so
   `configuration_error` is the closed set for those cells. The target is a valid, live owner,
-  and that is the only reason left for the call to fail.
+  so the boundary is the only reason left for the call to fail. For `complete_rootfs_upload`, the
+  setup also mints a window and PUTs bytes into it. A finalize that skipped the boundary would
+  then adopt the bytes and change the snapshot, rather than fail on the missing manifest with the
+  same category.
 - **Filtering list tools.** `investigations.list` (authorization, project-isolation) and
   `artifacts.list` (project-isolation) filter instead of rejecting: the caller gets an empty `ok`
   page (`services/investigations/read.py`, `services/artifacts/listing.py`). ADR-0722 §3 cannot be

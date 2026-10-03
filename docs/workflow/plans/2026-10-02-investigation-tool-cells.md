@@ -12,8 +12,8 @@ Design: [spec](../specs/2026-10-02-investigation-tool-cells-design.md); decision
 Tech stack: Python 3.14, pytest, the fastmcp client (`kdive.mcp.dev_harness`), psycopg 3, boto3,
 httpx and libvirt-python. All are already dependencies (`pyproject.toml`); nothing is added.
 
-Expected implementation size: 1050–1120 changed lines (L). The range is derived from the file
-map: the carrier (~963 lines), 65 binding lines, the contract test (~15) and the runbook (~29).
+Expected implementation size: 1060–1130 changed lines (L). The range is derived from the file
+map: the carrier (~975 lines), 65 binding lines, the contract test (~15) and the runbook (~29).
 
 ## Global Constraints
 
@@ -491,19 +491,25 @@ def _synthetic_build() -> tuple[bytes, bytes]:
 async def _built_run(inv: _Investigation) -> tuple[str, bytes]:
     """A Run of ``inv`` whose synthetic build ``runs.complete_build`` accepted, and its vmlinux.
 
-    A succeeded Run is history to the live snapshot; ``inv``'s close hands its build to the
+    Until the build succeeds the Run is canceled and its objects purged when ``inv`` settles; a
+    succeeded Run is history to the live snapshot, and ``inv``'s close hands its build to the
     reconciler's build GC (``cleanup_pending_at``).
     """
-    run_id = await _unbound_run(inv, cancel=False)
+    run_id = await _unbound_run(inv)
     bundle, vmlinux = _synthetic_build()
     declared = [_declaration("kernel", bundle), _declaration("vmlinux", vmlinux)]
     args = {"run_id": run_id, "artifacts": declared}
     env = one(await inv.caller.call("artifacts.create_run_upload", args, inv.token))
+    keys = {item.object_id for item in env.items}
+    inv.keys |= keys
     for item in env.items:
         await _put(item, bundle if item.data.get("name") == "kernel" else vmlinux)
     args = {"run_id": run_id, "build_id": _BUILD_ID}
     built = one(await inv.caller.call("runs.complete_build", args, inv.token))
     assert built.status == "succeeded", f"runs.complete_build answered {built.status}"
+    # The build adopted the Run's objects; the close hands them to the build GC.
+    inv.runs.remove(run_id)
+    inv.keys -= keys
     return run_id, vmlinux
 
 
@@ -518,6 +524,7 @@ class _System:
     in_use_before: int
     id: str = ""
     disks: list[str] = field(default_factory=list)
+    settled: bool = False
 
 
 _SYSTEMS: dict[str, _System] = {}
@@ -531,7 +538,7 @@ async def _session_system(base_url: str, issuer: OidcIssuer, db_url: str) -> _Sy
     """The session's ``ready`` System with settled console parts, provisioned on first use."""
     if base_url in _SYSTEMS:
         system = _SYSTEMS[base_url]
-        assert system.id, "the session System failed to provision in an earlier cell"
+        assert system.settled, "the session System failed to provision in an earlier cell"
         return system
     project = _funded_project()
     entry = load_rootfs_catalog()[_IMAGE]
@@ -548,9 +555,10 @@ async def _session_system(base_url: str, issuer: OidcIssuer, db_url: str) -> _Sy
         system_id = await provision_to_ready(
             op, allocation_id=system.allocation, profile=profile, phase_name="session-system"
         )
+    system.id = system_id
     system.disks = domain_disks(await asyncio.to_thread(domain_xml, system_id))
     await _settled_parts(db_url, system_id)
-    system.id = system_id
+    system.settled = True
     return system
 
 
@@ -1072,6 +1080,12 @@ def _target_setup(
     @asynccontextmanager
     async def setup() -> AsyncIterator[Mapping[str, object]]:
         async with _investigation(base_url, issuer, project) as inv:
+            if tool == "investigations.complete_rootfs_upload":
+                # A window holding bytes: a finalize that skipped the boundary would adopt them
+                # and change the snapshot, so configuration_error alone cannot pass the cell.
+                tool_args = {"investigation_id": inv.id}
+                window = "artifacts.create_investigation_upload"
+                await _upload(inv.caller, inv.token, inv, window, tool_args)
             if tool in _RUN_TARGETS:
                 yield {"run_id": await _unbound_run(inv)}
             elif tool == "investigations.list":
@@ -1171,8 +1185,8 @@ Steps:
       evidence root, with `KDIVE_SYSTEMS_TOML` and
       `KDIVE_DATABASE_URL=$KDIVE_MIGRATION_DATABASE_URL` exported.
 
-   Expected per lane: 182 passed, 6 failed (the #3108 cells) and 182 skipped (the other
-   configuration).
+   Expected per lane, out of 468 collected cells: 228 passed, 6 failed (the #3108 cells) and
+   234 skipped (the other configuration).
 4. Assemble the evidence (`python -m tests.integration.live_stack.evidence assemble`), then
    qualify (`python -m scripts.coverage_campaign qualify`). Expected:
    - #2811's 56 cells and #3095's 152 cells are `yes`;
