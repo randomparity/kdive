@@ -21,7 +21,7 @@ from scripts.coverage_campaign.contract import build_contract
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import scenario, tool_cells
 from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
-from tests.integration.live_stack.scenario import CellRun
+from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.integration.live_stack.tool_cells import (
     RECOVERY_TOOLS,
     Grants,
@@ -215,6 +215,90 @@ def test_category_boundaries_use_the_closed_set(tmp_path: Path) -> None:
                 "authorization",
                 Rejection({}, _GRANTS),
                 _snapshot(1, 1),
+            )
+        )
+
+
+_EMPTY_PAGE = ToolResponse.collection("investigations", "ok", [])
+
+
+def test_filtering_list_stops_blocked_naming_its_owner(tmp_path: Path) -> None:
+    run = _run(tmp_path, "validation")
+    filtered = Rejection({}, _GRANTS, filtered_by="#3108")
+    with pytest.raises(ScenarioStop, match="#3108") as stop:
+        asyncio.run(
+            prove_rejection(
+                run, _Caller("direct", _EMPTY_PAGE), "authorization", filtered, _snapshot(1, 1)
+            )
+        )
+    assert stop.value.outcome is Outcome.BLOCKED
+    assert "authorization" not in run.assertions
+
+
+def test_filtering_list_that_rejects_still_qualifies(tmp_path: Path) -> None:
+    run = _run(tmp_path, "validation")
+    denied = ToolResponse.failure("x", ErrorCategory.AUTHORIZATION_DENIED)
+    filtered = Rejection({}, _GRANTS, filtered_by="#3108")
+    asyncio.run(
+        prove_rejection(run, _Caller("direct", denied), "authorization", filtered, _snapshot(1, 1))
+    )
+    assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
+    listed = ToolResponse.collection("investigations", "ok", [ToolResponse.success("i", "open")])
+    with pytest.raises(AssertionError, match="was not rejected"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "validation"),
+                _Caller("direct", listed),
+                "project-isolation",
+                filtered,
+                _snapshot(1, 1),
+            )
+        )
+
+
+@dataclass
+class _Twin(_Caller):
+    """Answers the absent owner's arguments with ``absent``, everything else with ``result``."""
+
+    absent: ToolResponse = field(default_factory=lambda: _OK)
+
+    async def call(
+        self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
+    ) -> ToolResponse | list[ToolResponse]:
+        self.calls.append((tool, args))
+        return (
+            self.absent
+            if args.get("investigation_id") == "absent"
+            else cast(ToolResponse, self.result)
+        )
+
+
+def _owner_error(owner: str, **data: JsonValue) -> ToolResponse:
+    return ToolResponse.failure(owner, ErrorCategory.CONFIGURATION_ERROR, data=data)
+
+
+def test_absent_twin_must_answer_identically(tmp_path: Path) -> None:
+    run = _run(tmp_path, "validation")
+    twin = Rejection(
+        {"investigation_id": "inv-1"},
+        _GRANTS,
+        frozenset({"configuration_error"}),
+        absent_twin={"investigation_id": "absent"},
+    )
+    caller = _Twin("direct", _owner_error("inv-1"), absent=_owner_error("absent"))
+    asyncio.run(prove_rejection(run, caller, "project-isolation", twin, _snapshot(1, 1)))
+    assert [args for _, args in caller.calls] == [
+        {"investigation_id": "inv-1"},
+        {"investigation_id": "absent"},
+    ]
+    assert "absent_owner_twin" in _artifact(run, "project-isolation")
+    other = _Twin(
+        "direct", _owner_error("inv-1", reason="no_upload_manifest"), absent=_owner_error("absent")
+    )
+    with pytest.raises(AssertionError, match="an absent owner"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "validation"), other, "project-isolation", twin, _snapshot(1, 1)
             )
         )
 
