@@ -420,7 +420,12 @@ async def _settle(inv: _Investigation) -> list[str]:
     Each step runs whatever an earlier one raised, so a store fault still closes ``inv``.
     """
 
+    owned = (f"local/investigations/{inv.id}/", *(f"local/runs/{run}/" for run in inv.runs))
+
     async def purge(key: str) -> list[str]:
+        # A key outside the cell's own owners is never deleted, whatever the server returned.
+        if not key.startswith(owned):
+            return [f"object {key} is outside {owned}; not purged"]
         gone = await asyncio.to_thread(_purge, key)
         return [] if gone else [f"object {key} still has versions"]
 
