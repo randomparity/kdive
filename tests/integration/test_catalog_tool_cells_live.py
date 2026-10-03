@@ -383,7 +383,8 @@ async def _list(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str,
         image_id = await _register(operator, operator.token(grants), upload, db_url)
         own = {str(r["id"]) for r in await _rows(db_url, _VISIBLE_IMAGES, ([project],))}
         public = {str(r["id"]) for r in await _rows(db_url, _VISIBLE_IMAGES, ([],))}
-        mine = {i.object_id for i in await _pages(caller, "images.list", caller.token(grants))}
+        viewer = caller.token(_viewer(project))
+        mine = {i.object_id for i in await _pages(caller, "images.list", viewer)}
         theirs = {
             i.object_id for i in await _pages(caller, "images.list", caller.token(_viewer(other)))
         }
