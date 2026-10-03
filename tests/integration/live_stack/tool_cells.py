@@ -21,7 +21,8 @@ import hashlib
 import json
 import platform
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from contextlib import AbstractAsyncContextManager, nullcontext
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, Protocol, cast, get_args
 
@@ -54,6 +55,7 @@ Exposure = Literal["direct", "gateway"]
 Boundary = Literal["authentication", "authorization", "project-isolation", "validation"]
 Result = ToolResponse | list[ToolResponse] | LiveStackToolError
 Snapshot = Callable[[], Awaitable[object]]
+Setup = Callable[[], AbstractAsyncContextManager[Mapping[str, object]]]
 
 RECOVERY_TOOLS = frozenset({"ops.build_uses_list", "ops.recover_build_use"})
 # Rows a rejected or successful call is expected to write (ADR-0722 §4).
@@ -298,17 +300,38 @@ def _digest(state: object) -> str:
 
 
 async def prove_rejection(
-    run: CellRun, caller: Caller, boundary: Boundary, rejection: Rejection, snapshot: Snapshot
+    run: CellRun,
+    caller: Caller,
+    boundary: Boundary,
+    rejection: Rejection,
+    snapshot: Snapshot,
+    *,
+    setup: Setup | None = None,
 ) -> None:
-    """Prove ``boundary`` rejects the call and the protected state is unchanged (ADR-0722)."""
-    before = await snapshot()
-    observation = await _observe(caller, run.cell.operation, boundary, rejection)
-    run.prove(boundary, {"exposure": caller.exposure, **observation})
-    after = await snapshot()
-    assert after == before, f"protected state changed across the rejected {run.cell.operation}"
-    state = _digest(before)
-    run.prove("unchanged-state", {"snapshot_sha256": state})
-    run.prove("cleanup", {"owned": [], "snapshot_sha256": state})
+    """Prove ``boundary`` rejects the call and the protected state is unchanged (ADR-0722).
+
+    ``setup`` provides state the rejected call needs and removes it on exit; it yields argument
+    overrides. ``unchanged-state`` brackets the call alone, and ``cleanup`` compares the snapshot
+    taken before ``setup`` with the one taken after it, so the setup's own state must go.
+    """
+    operation = run.cell.operation
+    outer = await snapshot() if setup is not None else None
+    context: AbstractAsyncContextManager[Mapping[str, object]] = (
+        setup() if setup is not None else nullcontext({})
+    )
+    async with context as overrides:
+        effective = replace(rejection, args={**rejection.args, **overrides})
+        before = await snapshot()
+        observation = await _observe(caller, operation, boundary, effective)
+        run.prove(boundary, {"exposure": caller.exposure, **observation})
+        after = await snapshot()
+        assert after == before, f"protected state changed across the rejected {operation}"
+        run.prove("unchanged-state", {"snapshot_sha256": _digest(before)})
+    final = await snapshot() if setup is not None else after
+    start = outer if setup is not None else before
+    assert final == start, f"the setup of the rejected {operation} left state behind"
+    owned = sorted(str(value) for value in overrides.values())
+    run.prove("cleanup", {"owned": owned, "snapshot_sha256": _digest(start)})
 
 
 Functional = Callable[[HttpCaller, Grants], Awaitable[dict[str, object]]]
@@ -317,12 +340,17 @@ Functional = Callable[[HttpCaller, Grants], Awaitable[dict[str, object]]]
 async def prove_functional(
     run: CellRun, caller: HttpCaller, grants: Grants, body: Functional, snapshot: Snapshot
 ) -> None:
-    """Prove ``effect`` with ``body``, then ``cleanup`` as an unchanged project snapshot."""
+    """Prove ``effect`` with ``body``, then ``cleanup`` as an unchanged project snapshot.
+
+    A body that writes state removes it and names it under ``owned``.
+    """
     before = await snapshot()
-    run.prove("effect", {"exposure": caller.exposure, **await body(caller, grants)})
+    observed = await body(caller, grants)
+    owned = observed.pop("owned", [])
+    run.prove("effect", {"exposure": caller.exposure, **observed})
     after = await snapshot()
     assert after == before, f"{run.cell.operation} left durable state in the cell's project"
-    run.prove("cleanup", {"owned": [], "snapshot_sha256": _digest(before)})
+    run.prove("cleanup", {"owned": owned, "snapshot_sha256": _digest(before)})
 
 
 async def project_state(db_url: str, project: str) -> dict[str, list[object]]:

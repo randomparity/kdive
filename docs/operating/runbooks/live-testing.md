@@ -721,6 +721,42 @@ all 56 qualified: 24 `success` (functional) and 32 `rejection` (authentication a
 with the issued token's control request not refused in every authentication cell. An earlier
 recovery lane started with `local` proved `default` again, which is why the lane uses `docker`.
 
+#### Catalog and configuration tool cells (#3095)
+
+`tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell` carries the 152 cells
+of `images.{delete,describe,kernel_config,list,upload}`, `shapes.{delete,list,set}` and
+`resources.{availability,describe,list}` on the same harness, lanes, bindings and assembly as the
+core cells above; run both files in each lane's pytest command. The
+[design](../../workflow/specs/2026-10-02-catalog-tool-cells-design.md) lists what each functional
+cell compares and with which independent source.
+
+Before the first lane, stage the public image the image cells read, once per host:
+`examples/local-libvirt/build-image.sh fedora-kdive-ready-44`. It writes the qcow2 with its
+`.provenance.json` and `.config` siblings and declares it in `systems.toml`; a wiped stack
+re-registers it on the next bring-up's reconcile. Without it the image cells record `blocked`.
+Run pytest in a shell that sourced `examples/local-libvirt/env.sh`: the cells read the object
+store (`KDIVE_S3_*`, `AWS_*`), `KDIVE_LIBVIRT_URI` and the funded `KDIVE_PROJECT`, beside
+`KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`. Also export
+`KDIVE_SYSTEMS_TOML=~/.config/kdive/systems.toml`: the test session sandboxes the XDG default and
+keeps only an exported path for a live tier (`tests/conftest.py`). The core
+`systems.profile_examples` cell reads the same file, so once an image is declared both carriers
+need it.
+
+Unlike the core cells, these write and remove state. Each cell works in a fresh `cov-<hex>`
+project and proves its cleanup with a snapshot that adds that project's private images and the
+whole shapes catalog to the per-project one:
+
+- `images.upload`, `images.delete` and `images.list` upload the staged qcow2 to
+  `uploads/q/<project>/` with the metadata the upload reassembly writes, register it, delete the
+  image and purge every version of the quarantine key and the published object;
+- `shapes.set` and `shapes.delete` create and remove a `cov-<hex>` shape;
+- `shapes.set` and `resources.availability` take one allocation in `KDIVE_PROJECT` through
+  `allocations.request` and release it. The released row and its ledger entries stay in that
+  project as history.
+
+A cell killed mid-run can leave any of these behind; `demo-down.sh --wipe --yes` clears them.
+Queue depth is compared but not driven (#3106).
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
