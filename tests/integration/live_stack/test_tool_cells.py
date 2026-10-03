@@ -1,0 +1,249 @@
+"""Unit tests of the ADR-0722 tool-cell harness (no stack needed)."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+
+import pytest
+
+from kdive.domain.errors import ErrorCategory
+from kdive.mcp.dev_harness import LiveStackToolError, make_keypair
+from kdive.mcp.responses import ToolResponse
+from scripts.coverage_campaign.contract import build_contract
+from scripts.coverage_campaign.evidence import Outcome
+from tests.integration.live_stack import scenario, tool_cells
+from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
+from tests.integration.live_stack.scenario import CellRun
+from tests.integration.live_stack.tool_cells import (
+    RECOVERY_TOOLS,
+    Grants,
+    Rejection,
+    bindings,
+    claims_of,
+    configuration_of,
+    forge,
+    prove_rejection,
+    rejected_by_validation,
+)
+
+_OK = ToolResponse.success("x", "ok")
+_GRANTS = Grants("agent", ("p",), {"p": "viewer"}, ("platform_auditor",))
+
+
+def forge_source(grants: Grants) -> str:
+    """A stand-in for a real-issuer token carrying ``grants``."""
+    return make_keypair().create_token(
+        subject=grants.subject,
+        issuer="https://issuer.test",
+        audience="kdive",
+        additional_claims={"projects": list(grants.projects)},
+        kid="issuer-key-1",
+    )
+
+
+@dataclass
+class _Caller:
+    exposure: str
+    result: ToolResponse | Exception = field(default_factory=lambda: _OK)
+    status: int = 401
+    calls: list[tuple[str, Mapping[str, object]]] = field(default_factory=list)
+    issued: set[str] = field(default_factory=set)
+    refuse_issued: bool = False
+
+    def token(self, grants: Grants) -> str:
+        token = forge_source(grants)
+        self.issued.add(token)
+        return token
+
+    async def call(
+        self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
+    ) -> ToolResponse | list[ToolResponse]:
+        self.calls.append((tool, args))
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+    async def post(self, tool: str, args: Mapping[str, object], token: str) -> int:
+        self.calls.append((tool, claims_of(token)))
+        return 200 if token in self.issued and not self.refuse_issued else self.status
+
+
+def _run(tmp_path: Path, boundary: str) -> CellRun:
+    cell = next(
+        c
+        for c in build_contract().cells
+        if c.operation == "tools.search" and c.scenario_id.endswith("/" + boundary)
+    )
+    return CellRun(cell, EvidenceWriter(tmp_path))
+
+
+def _snapshot(*states: object) -> Callable[[], Awaitable[object]]:
+    values = iter(states)
+
+    async def snap() -> object:
+        return next(values)
+
+    return snap
+
+
+def test_configuration_follows_the_recovery_tools() -> None:
+    assert configuration_of(["tools.search"]) == "default"
+    assert configuration_of([*RECOVERY_TOOLS, "tools.search"]) == "recovery"
+    with pytest.raises(AssertionError, match="neither default nor recovery"):
+        configuration_of(["ops.build_uses_list"])
+
+
+def test_authentication_needs_401(tmp_path: Path) -> None:
+    run = _run(tmp_path, "authentication")
+    caller = _Caller("gateway")
+    asyncio.run(
+        prove_rejection(run, caller, "authentication", Rejection({}, _GRANTS), _snapshot(1, 1))
+    )
+    assert set(run.assertions) == {"authentication", "unchanged-state", "cleanup"}
+    assert caller.calls[0][1]["projects"] == ["p"]
+    with pytest.raises(AssertionError, match="HTTP 200"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "authentication"),
+                _Caller("direct", status=200),
+                "authentication",
+                Rejection({}, _GRANTS),
+                _snapshot(1, 1),
+            )
+        )
+    with pytest.raises(AssertionError, match="also refused"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "authentication"),
+                _Caller("direct", refuse_issued=True),
+                "authentication",
+                Rejection({}, _GRANTS),
+                _snapshot(1, 1),
+            )
+        )
+
+
+def test_validation_rule_per_exposure() -> None:
+    tool_error = LiveStackToolError("tools.search", "1 validation error for call[tools_search]")
+    config = ToolResponse.failure("tools.invoke", ErrorCategory.CONFIGURATION_ERROR)
+    assert rejected_by_validation("direct", tool_error)
+    assert not rejected_by_validation("gateway", tool_error)
+    assert rejected_by_validation("gateway", config)
+    assert not rejected_by_validation("direct", LiveStackToolError("t", "boom"))
+    assert not rejected_by_validation("direct", ToolResponse.success("x", "ok"))
+
+
+def test_category_boundaries_use_the_closed_set(tmp_path: Path) -> None:
+    denied = ToolResponse.failure("x", ErrorCategory.AUTHORIZATION_DENIED)
+    for boundary in ("authorization", "project-isolation"):
+        run = _run(tmp_path, "validation")
+        asyncio.run(
+            prove_rejection(
+                run, _Caller("direct", denied), boundary, Rejection({}, _GRANTS), _snapshot(1, 1)
+            )
+        )
+        assert boundary in run.assertions
+    narrow = Rejection({}, _GRANTS, frozenset({"not_found"}))
+    with pytest.raises(AssertionError, match="authorization_denied"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "validation"),
+                _Caller("direct", denied),
+                "project-isolation",
+                narrow,
+                _snapshot(1, 1),
+            )
+        )
+    with pytest.raises(AssertionError, match="was not rejected"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "validation"),
+                _Caller("direct", ToolResponse.success("x", "ok")),
+                "authorization",
+                Rejection({}, _GRANTS),
+                _snapshot(1, 1),
+            )
+        )
+
+
+def test_changed_state_fails_the_rejection(tmp_path: Path) -> None:
+    run = _run(tmp_path, "authentication")
+    with pytest.raises(AssertionError, match="protected state changed"):
+        asyncio.run(
+            prove_rejection(
+                run,
+                _Caller("direct"),
+                "authentication",
+                Rejection({}, _GRANTS),
+                _snapshot({"t": [0]}, {"t": [1]}),
+            )
+        )
+    assert "unchanged-state" not in run.assertions
+
+
+def test_forge_keeps_claims_and_changes_signature() -> None:
+    token = forge_source(_GRANTS)
+    forged = forge(token)
+    assert claims_of(forged) | {"iat": 0, "exp": 0} == claims_of(token) | {"iat": 0, "exp": 0}
+    assert forged.split(".")[2] != token.split(".")[2]
+    header = json.loads(base64.urlsafe_b64decode(forged.split(".")[0] + "=="))
+    assert header["kid"] == "issuer-key-1"
+
+
+def test_bindings_cover_bound_tool_cells() -> None:
+    contract = build_contract()
+    whoami = [c for c in contract.cells if c.operation == "session.whoami"]
+    bound = [replace(c, node_id="tests/x.py::test_x") for c in whoami]
+    unbound = replace(whoami[0], node_id=None, id="unbound")
+    provider = next(c for c in contract.cells if c.provider == "local-libvirt")
+    native = replace(provider, node_id="tests/x.py::test_x")
+    inputs = bindings(
+        "a" * 40,
+        host_os="fedora:44",
+        host_arch="x86_64",
+        matrix=contract.matrix_sha256,
+        cells=[*bound, unbound, native],
+    )
+    assert set(inputs.cells) == {c.id for c in bound}
+    assert {c.accelerator for c in inputs.cells.values()} == {"none"}
+
+
+def test_run_cell_records_the_proven_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sha = "a" * 40
+    identity = RunIdentity(sha, "b" * 64, "fedora:44", "x86_64", True, {"server": sha})
+    monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
+    monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
+    monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
+    cell = replace(_run(tmp_path, "authentication").cell, node_id="tests/x.py::test_x")
+
+    async def body(run: CellRun, *_: object) -> None:
+        for name in cell.assertions:
+            run.prove(name, {})
+
+    scenario.run_cell(cell, body, proves=Outcome.REJECTION)
+    (record,) = (tmp_path / "records").glob("*.json")
+    assert json.loads(record.read_text())["outcome"] == "rejection"
+
+
+def test_missing_issuer_fails_instead_of_skipping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_issuer() -> None:
+        pytest.skip("KDIVE_OIDC_ISSUER unset")
+
+    monkeypatch.setattr(tool_cells, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(tool_cells, "require_issuer", no_issuer)
+
+    async def never(*_: object) -> None:
+        raise AssertionError("the scenario must not run")
+
+    with pytest.raises(pytest.fail.Exception, match="KDIVE_OIDC_ISSUER"):
+        tool_cells.run_tool_cell(_run(tmp_path, "authentication").cell, never)

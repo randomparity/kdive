@@ -108,8 +108,12 @@ def prerequisites() -> tuple[OidcIssuer, str]:
     return issuer, db_url
 
 
-def run_cell(cell: Cell, scenario: Scenario) -> None:
-    """Identity → prerequisites → ``scenario`` → one record; fail pytest unless ``success``."""
+def run_cell(cell: Cell, scenario: Scenario, *, proves: Outcome = Outcome.SUCCESS) -> None:
+    """Identity → prerequisites → ``scenario`` → one record; fail pytest unless ``proves``.
+
+    ``proves`` is what a completed scenario records: ``success`` for a functional or native cell,
+    ``rejection`` for a rejection cell, the outcome ``qualify`` requires of its kind (ADR-0722).
+    """
     base_url = require_stack()
     run = CellRun(cell, EvidenceWriter(evidence_root()))
     started = time.monotonic()
@@ -122,7 +126,7 @@ def run_cell(cell: Cell, scenario: Scenario) -> None:
             )
         issuer, db_url = prerequisites()
         asyncio.run(scenario(run, base_url, issuer, db_url))
-        run.outcome, run.reason = Outcome.SUCCESS, ""
+        run.outcome, run.reason = proves, ""
     except ScenarioStop as stop:
         run.outcome, run.reason = stop.outcome, str(stop)
     finally:
@@ -138,7 +142,7 @@ def run_cell(cell: Cell, scenario: Scenario) -> None:
                 artifacts=run.artifacts,
             )
         )
-    assert run.outcome is Outcome.SUCCESS, f"{cell.id}: {run.outcome.value}: {run.reason}"
+    assert run.outcome is proves, f"{cell.id}: {run.outcome.value}: {run.reason}"
     assert not problems, f"{cell.id}: deployed identity incomplete: {problems}"
 
 

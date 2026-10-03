@@ -666,6 +666,61 @@ installed kernel behind (#3078).
 | `enterprise/longterm`, `enterprise/stable` | `rocky:10` | success |
 | `suse/longterm`, `suse/stable` | `opensuse-leap:15.6` | success |
 
+#### Core tool cells and server configurations (#2811)
+
+`tests/integration/test_core_tool_cells_live.py::test_core_tool_cell` has one parameter for each
+contract cell of `session.whoami`, `projects.list`, `tools.search`, `tools.invoke`,
+`fixtures.validate` and `systems.profile_examples`: 56 cells, each a configuration (`default` or
+`recovery`), an exposure (`direct` or `gateway`) and a kind (`functional`, `authentication` or
+`validation`). [ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md)
+defines what each of those means. The harness in `tests/integration/live_stack/tool_cells.py` is
+shared by the later tool-cell carriers.
+
+A run proves its configuration before recording anything. It reads the operator catalog of a
+`kdivectl` token holding `platform_operator`: both build-use recovery tools listed means
+`recovery`, neither means `default`, and anything else fails the run. A catalog clipped to the
+gateway's core tools also fails it, which happens when the server's `KDIVE_CLI_CLIENT_ID` differs
+from the test process's, and so does a missing mock-OIDC issuer. Cells of the other configuration
+skip and write no record. The server runs the `recovery` configuration only when it starts with a
+durable worker-death verifier, `docker` or `kubernetes`; `local` leaves the recovery tools out.
+On this lane `docker` has no reachable Docker death endpoint, so a recovery-tool call fails
+closed, which these cells never make. The two lanes are two bring-ups that share one evidence
+root:
+
+```bash
+sha=$(git rev-parse HEAD)
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
+examples/local-libvirt/demo-up.sh             # default configuration
+uv run python -m pytest -m live_stack tests/integration/test_core_tool_cells_live.py
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack tests/integration/test_core_tool_cells_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Each pytest run reports 28 cells skipped for the other configuration: the second run must skip the
+`…/default/default/…` cells, not the `…/default/recovery/…` ones. Run the pytest commands with
+`KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`, the migration-owner DSN: the protected-state
+snapshot reads every table with a `project` column, some of which the server DSN cannot read, and
+it fails with `permission denied` rather than skipping one. A functional cell
+compares the tool's answer with the token's own claims, the fixture catalog and `systems.toml`
+read by the test process, or, for `tools.search`, the operator-direct catalog. A rejection cell
+proves its boundary (HTTP 401 for a token signed by a foreign key, where the issued token is not
+refused; a schema-validation failure for invalid arguments) and that the cell's project rows did not change. The tools create nothing, so
+there is nothing to tear down beyond the stack itself. `qualify` exits 1 because other owners'
+cells have no result; read the 56 `tool/…` rows of these six tools.
+
+Last run: candidate `e3354a190` (server, worker and reconciler at that SHA in both lanes), a
+disposable Fedora 44 x86_64 lab guest with SELinux enforcing; the same result held at `09a80767c`
+before the merge with `main`. The `default` lane recorded the 28
+`…/default/default/…` cells and skipped the rest; the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane
+listed both recovery tools and recorded the 28 `…/default/recovery/…` cells. `qualify` reported
+all 56 qualified: 24 `success` (functional) and 32 `rejection` (authentication and validation),
+with the issued token's control request not refused in every authentication cell. An earlier
+recovery lane started with `local` proved `default` again, which is why the lane uses `docker`.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```

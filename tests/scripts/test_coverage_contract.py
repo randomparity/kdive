@@ -56,6 +56,7 @@ def test_native_deep_families_and_foreign_tcg_stay_distinct(inventory: Inventory
 
 
 _IMAGE_SMOKE_NODE = "tests/integration/test_image_smoke_live.py::test_image_smoke"
+_CORE_NODE = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _REMOTE_DEEP_NODE = (
     "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
@@ -117,7 +118,9 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert {c.node_id for c in host_install} == {
         "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
     }
-    bound = {"image-smoke", "deep-lifecycle", "host-install"}
+    core = [c for c in contract.cells if c.operation in _CORE_TOOLS]
+    assert len(core) == 56 and {c.node_id for c in core} == {_CORE_NODE}
+    bound = {"image-smoke", "deep-lifecycle", "host-install", *_CORE_TOOLS}
     assert all(c.node_id is None for c in contract.cells if c.operation not in bound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
@@ -208,6 +211,73 @@ def test_debug_session_covers_every_advertised_transport(inventory: Inventory) -
             f"{_tool_prefix(provider)}/debug.start_session/{mode}/functional"
             for mode in support.debug_transports
         }
+
+
+_CORE_TOOLS = {
+    "fixtures.validate",
+    "projects.list",
+    "session.whoami",
+    "systems.profile_examples",
+    "tools.invoke",
+    "tools.search",
+}
+_SPLIT = {
+    3095: {
+        *(f"images.{n}" for n in ("delete", "describe", "kernel_config", "list", "upload")),
+        *(f"shapes.{n}" for n in ("delete", "list", "set")),
+        *(f"resources.{n}" for n in ("availability", "describe", "list")),
+    },
+    3096: {
+        *(
+            f"investigations.{n}"
+            for n in (
+                "close",
+                "complete_rootfs_upload",
+                "get",
+                "link",
+                "list",
+                "open",
+                "set",
+                "unlink",
+            )
+        ),
+        *(
+            f"artifacts.{n}"
+            for n in (
+                "create_investigation_upload",
+                "create_run_upload",
+                "fetch_raw",
+                "get",
+                "list",
+            )
+        ),
+    },
+    3097: {
+        *(f"runs.{n}" for n in ("bind", "complete_build", "create", "get", "list", "set")),
+        "systems.get",
+        "systems.list",
+        *(f"jobs.{n}" for n in ("cancel", "list", "wait")),
+    },
+    3098: {
+        *(f"allocations.{n}" for n in ("list", "release", "renew", "request", "wait")),
+        *(f"accounting.{n}" for n in ("estimate", "report", "set_budget", "set_quota", "usage")),
+        "reports.generate",
+    },
+}
+
+
+def test_core_tools_follow_the_approved_split(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+    owned = {owner: {c.operation for c in cells if c.owner == owner} for owner in (2811, *_SPLIT)}
+    assert owned == {2811: _CORE_TOOLS, **_SPLIT}
+    assert len([c for c in cells if c.owner == 2811]) == 56
+    overrides = {g.owner: set(g.role_overrides) for g in load_mapping().groups if g.owner in _SPLIT}
+    assert overrides == {
+        3095: set(),
+        3096: set(),
+        3097: {"jobs.cancel", "jobs.wait"},
+        3098: {"allocations.release", "allocations.wait"},
+    }
 
 
 def _tool_prefix(provider: str) -> str:

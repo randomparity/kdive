@@ -6,6 +6,71 @@ version = 1
 owner = 2811
 execution = "service"
 [groups.tools]
+"fixtures.validate" = "Compare validated profiles and architectures with the configured fixture catalog."
+"projects.list" = "Compare grants and roles against the authenticated principal's real memberships."
+"session.whoami" = "Compare returned identity and grants with the authenticated test token."
+"systems.profile_examples" = "Validate each provider example against its current profile contract."
+"tools.invoke" = "Invoke a valid underlying operation through the gateway and verify its independent effect."
+"tools.search" = "Find registered tools by name and concept and compare their schemas with direct exposure."
+
+[[groups]]
+owner = 3095
+execution = "service"
+[groups.tools]
+"images.delete" = "Verify the private catalog entry is removed without deleting unrelated entries."
+"images.describe" = "Compare identity, provenance and computed capabilities with the selected image."
+"images.kernel_config" = "Download the configuration and compare its content digest with the image provenance."
+"images.list" = "Verify publication and project-scope filtering against real catalog records."
+"images.upload" = "Verify quarantine, supplied content and project-private catalog ownership."
+"resources.availability" = "Compare free capacity, shape fit and queue depth with controlled resource state."
+"resources.describe" = "Compare the resource and advertised capability details with independent inventory."
+"resources.list" = "Compare visible resources with independently seeded inventory."
+"shapes.delete" = "Verify the named shape disappears while other presets remain."
+"shapes.list" = "Compare shape names and resource dimensions with configured presets."
+"shapes.set" = "Read the created or updated preset and use its resource dimensions in admission."
+
+[[groups]]
+owner = 3096
+execution = "service"
+[groups.tools]
+"artifacts.create_investigation_upload" = "PUT bytes to the issued target and verify investigation ownership."
+"artifacts.create_run_upload" = "PUT declared build bytes and compare stored content and run ownership."
+"artifacts.fetch_raw" = "Download the selected version and compare its bytes with the known raw fixture."
+"artifacts.get" = "Compare returned byte windows, literal search and redaction against a known artifact."
+"artifacts.list" = "Compare visible artifact identities and order with the seeded system artifacts."
+"investigations.close" = "Read terminal state and the persisted closing summary."
+"investigations.complete_rootfs_upload" = "Verify finalized rootfs content digest and the published profile handle."
+"investigations.get" = "Read back the independently seeded investigation fields and relationships."
+"investigations.link" = "Read the added tracker reference and verify its investigation ownership."
+"investigations.list" = "Verify visible investigations, filtering and stable newest-first order."
+"investigations.open" = "Read the new investigation and verify its project ownership."
+"investigations.set" = "Read the changed title/description and unchanged unrelated fields."
+"investigations.unlink" = "Verify only the selected tracker reference disappears."
+
+[[groups]]
+owner = 3097
+execution = "service"
+[groups.tools]
+"jobs.cancel" = "Observe the operation-specific terminal cancellation effect and protected-state retention."
+"jobs.list" = "Compare job state/kind/ownership filters with seeded durable jobs."
+"jobs.wait" = "Observe durable job progress through its terminal state with the expected effect."
+"runs.bind" = "Read the ready system/allocation binding and unchanged uploaded build identity."
+"runs.complete_build" = "Compare validated artifact digests, build metadata and succeeded build state."
+"runs.create" = "Read the bound or unbound run and its investigation/target relationships."
+"runs.get" = "Compare run, build and separate install/boot step states with durable records."
+"runs.list" = "Verify project/system/investigation/state filters against seeded runs."
+"runs.set" = "Read the changed or cleared outcome note without changing lifecycle state."
+"systems.get" = "Compare system state, allocation, run links and capabilities with durable records."
+"systems.list" = "Verify project/allocation/state/shape filters against seeded systems."
+
+[groups.role_overrides]
+"jobs.cancel" = ["server", "worker", "reconciler", "authority"]
+"jobs.wait" = ["server", "worker"]
+
+[[groups]]
+owner = 3098
+execution = "service"
+[groups.tools]
 "accounting.estimate" = "Compare the estimate with the configured coefficients and requested time window."
 "accounting.report" = "Compare granted-project and auditor-wide rollups with seeded ledger charges."
 "accounting.set_budget" = "Read back the changed limit and unchanged spent amount; observe subsequent admission."
@@ -16,54 +81,11 @@ execution = "service"
 "allocations.renew" = "Read the extended absolute expiry and verify renewal bounds."
 "allocations.request" = "Observe a granted or queued allocation and the matching budget/quota debit."
 "allocations.wait" = "Observe the seeded allocation's transition and bounded polling completion."
-"artifacts.create_investigation_upload" = "PUT bytes to the issued target and verify investigation ownership."
-"artifacts.create_run_upload" = "PUT declared build bytes and compare stored content and run ownership."
-"artifacts.fetch_raw" = "Download the selected version and compare its bytes with the known raw fixture."
-"artifacts.get" = "Compare returned byte windows, literal search and redaction against a known artifact."
-"artifacts.list" = "Compare visible artifact identities and order with the seeded system artifacts."
-"fixtures.validate" = "Compare validated profiles and architectures with the configured fixture catalog."
-"images.delete" = "Verify the private catalog entry is removed without deleting unrelated entries."
-"images.describe" = "Compare identity, provenance and computed capabilities with the selected image."
-"images.kernel_config" = "Download the configuration and compare its content digest with the image provenance."
-"images.list" = "Verify publication and project-scope filtering against real catalog records."
-"images.upload" = "Verify quarantine, supplied content and project-private catalog ownership."
-"investigations.close" = "Read terminal state and the persisted closing summary."
-"investigations.complete_rootfs_upload" = "Verify finalized rootfs content digest and the published profile handle."
-"investigations.get" = "Read back the independently seeded investigation fields and relationships."
-"investigations.link" = "Read the added tracker reference and verify its investigation ownership."
-"investigations.list" = "Verify visible investigations, filtering and stable newest-first order."
-"investigations.open" = "Read the new investigation and verify its project ownership."
-"investigations.set" = "Read the changed title/description and unchanged unrelated fields."
-"investigations.unlink" = "Verify only the selected tracker reference disappears."
-"jobs.cancel" = "Observe the operation-specific terminal cancellation effect and protected-state retention."
-"jobs.list" = "Compare job state/kind/ownership filters with seeded durable jobs."
-"jobs.wait" = "Observe durable job progress through its terminal state with the expected effect."
-"projects.list" = "Compare grants and roles against the authenticated principal's real memberships."
 "reports.generate" = "Download and parse the report; compare sections with seeded records and ledger totals."
-"resources.availability" = "Compare free capacity, shape fit and queue depth with controlled resource state."
-"resources.describe" = "Compare the resource and advertised capability details with independent inventory."
-"resources.list" = "Compare visible resources with independently seeded inventory."
-"runs.bind" = "Read the ready system/allocation binding and unchanged uploaded build identity."
-"runs.complete_build" = "Compare validated artifact digests, build metadata and succeeded build state."
-"runs.create" = "Read the bound or unbound run and its investigation/target relationships."
-"runs.get" = "Compare run, build and separate install/boot step states with durable records."
-"runs.list" = "Verify project/system/investigation/state filters against seeded runs."
-"runs.set" = "Read the changed or cleared outcome note without changing lifecycle state."
-"session.whoami" = "Compare returned identity and grants with the authenticated test token."
-"shapes.delete" = "Verify the named shape disappears while other presets remain."
-"shapes.list" = "Compare shape names and resource dimensions with configured presets."
-"shapes.set" = "Read the created or updated preset and use its resource dimensions in admission."
-"systems.get" = "Compare system state, allocation, run links and capabilities with durable records."
-"systems.list" = "Verify project/allocation/state/shape filters against seeded systems."
-"systems.profile_examples" = "Validate each provider example against its current profile contract."
-"tools.invoke" = "Invoke a valid underlying operation through the gateway and verify its independent effect."
-"tools.search" = "Find registered tools by name and concept and compare their schemas with direct exposure."
 
 [groups.role_overrides]
 "allocations.release" = ["server", "worker", "reconciler", "authority"]
 "allocations.wait" = ["server", "reconciler"]
-"jobs.cancel" = ["server", "worker", "reconciler", "authority"]
-"jobs.wait" = ["server", "worker"]
 
 [[groups]]
 owner = 2812
@@ -224,5 +246,19 @@ kernel = true
 "image-smoke" = "tests/integration/test_image_smoke_live.py::test_image_smoke"
 "deep-lifecycle/local-libvirt/longterm" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 "deep-lifecycle/local-libvirt/stable" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
+"tool/fixtures.validate/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/fixtures.validate/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/projects.list/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/projects.list/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/session.whoami/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/session.whoami/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/systems.profile_examples/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/systems.profile_examples/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.invoke/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.invoke/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.invoke/default/validation" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.search/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.search/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.search/default/validation" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
 "deep-lifecycle/remote-libvirt/longterm" = "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
 "deep-lifecycle/remote-libvirt/stable" = "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
