@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -35,11 +36,13 @@ requires_curl = pytest.mark.skipif(
 )
 
 
-def _run(*args: str, path: str = "/usr/bin:/bin") -> subprocess.CompletedProcess[str]:
+def _run(
+    *args: str, path: str = "/usr/bin:/bin", env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     assert BASH is not None, "bash is required to run the helper"
     return subprocess.run(
         [BASH, str(HELPER), *args],
-        env={"PATH": path},
+        env={"PATH": path, **(env or {})},
         capture_output=True,
         text=True,
         check=False,
@@ -108,3 +111,124 @@ def test_unknown_subcommand_exits_deterministic() -> None:
     proc = _run("wat")
     assert proc.returncode == 1
     assert "unknown subcommand" in proc.stderr
+
+
+# The base image's default BLS options, as `grubby --copy-default` hands them to the kdive slot. The
+# crashkernel= range is what a Rocky 10 image ships (#3094).
+_DEFAULT_ARGS = "ro root=UUID=0000 crashkernel=1G-4G:192M,4G-64G:256M,64G-:512M rhgb"
+_KVER = "6.18.54-kdive-test"
+
+# A grubby that models the one slot the helper writes: --copy-default prepends the default's
+# options, --update-kernel=TITLE=kdive --remove-args=<key> drops <key> and <key>=*. Any other
+# --update-kernel target is not the slot. Every call is logged.
+_GRUBBY_STUB = """#!/bin/bash
+state="$STUB_STATE"
+echo "$*" >>"$state/grubby.log"
+case "$1" in
+--info=ALL) exit 0 ;;
+--add-kernel=*)
+  args="" copy=0
+  for a in "$@"; do
+    case "$a" in --args=*) args="${a#--args=}" ;; --copy-default) copy=1 ;; esac
+  done
+  [ "$copy" = 1 ] && args="$(cat "$state/default_args") $args"
+  echo "$args" >"$state/slot_args"
+  ;;
+--update-kernel=TITLE=kdive)
+  [ -z "${STUB_FAIL_UPDATE:-}" ] || exit 1
+  key="${2#--remove-args=}" kept=()
+  for tok in $(cat "$state/slot_args"); do
+    case "$tok" in "$key" | "$key"=*) ;; *) kept+=("$tok") ;; esac
+  done
+  echo "${kept[*]}" >"$state/slot_args"
+  ;;
+*) exit 1 ;;
+esac
+"""
+
+
+def _stub_guest(tmp_path: Path) -> tuple[str, dict[str, str]]:
+    """Stub every host-mutating command the install path runs; return its PATH and env.
+
+    `rm` passes through only inside the test's TMPDIR, so the helper's own scratch cleanup still
+    runs while its `rm -rf /lib/modules/<ver>` never touches the host.
+    """
+    real_rm = shutil.which("rm")
+    assert real_rm is not None
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "default_args").write_text(_DEFAULT_ARGS + "\n")
+    bodies = {
+        "grubby": _GRUBBY_STUB,
+        "systemctl": '#!/bin/bash\necho "$*" >>"$STUB_STATE/systemctl.log"\n',
+        "rm": f'#!/bin/bash\ncase "${{@: -1}}" in "$TMPDIR"/*) exec {real_rm} "$@" ;; esac\n',
+    }
+    for name in ("dracut", "depmod", "install", "cp"):
+        bodies[name] = "#!/bin/bash\nexit 0\n"
+    for name, body in bodies.items():
+        stub = stubs / name
+        stub.write_text(body)
+        stub.chmod(0o755)
+    env = {"STUB_STATE": str(state), "TMPDIR": str(scratch)}
+    return f"{stubs}:/usr/bin:/bin", env
+
+
+def _bundle(tmp_path: Path) -> str:
+    src = tmp_path / "bundle-src"
+    (src / "boot").mkdir(parents=True)
+    (src / "boot" / "vmlinuz").write_bytes(b"kernel")
+    (src / "lib" / "modules" / _KVER).mkdir(parents=True)
+    bundle = tmp_path / "bundle.tar.gz"
+    with tarfile.open(bundle, "w:gz") as tar:
+        tar.add(src / "boot", arcname="boot")
+        tar.add(src / "lib", arcname="lib")
+    return f"file://{bundle}"
+
+
+def _install(tmp_path: Path, cmdline: str, method: str, **extra_env: str) -> tuple[int, str]:
+    path, env = _stub_guest(tmp_path)
+    url = _bundle(tmp_path)
+    args = ["install", "--url", url, "--cmdline", cmdline, "--method", method]
+    proc = _run(*args, path=path, env={**env, **extra_env})
+    return proc.returncode, proc.stderr
+
+
+def _state(tmp_path: Path, name: str) -> str:
+    log = tmp_path / "state" / name
+    return log.read_text() if log.exists() else ""
+
+
+@requires_curl
+def test_non_kdump_install_drops_the_inherited_crashkernel(tmp_path: Path) -> None:
+    """A gdbstub slot must not keep the image default's reservation (#3094).
+
+    With it, the guest reserves crash memory, and boot()'s #1610 gate waits for a kdump that a
+    non-kdump Run never arms. The rest of the default (root=) and the requested args survive.
+    """
+    rc, err = _install(tmp_path, "console=ttyS0 nokaslr", "gdbstub")
+    assert rc == 0, err
+    slot = _state(tmp_path, "slot_args").split()
+    assert not [tok for tok in slot if "crashkernel=" in tok]
+    assert {"root=UUID=0000", "console=ttyS0", "nokaslr"} <= set(slot)
+
+
+@requires_curl
+def test_kdump_install_keeps_its_requested_crashkernel(tmp_path: Path) -> None:
+    """A kdump install runs as before: no removal, its reservation stays, kdump is enabled."""
+    rc, err = _install(tmp_path, "console=ttyS0 crashkernel=256M", "kdump")
+    assert rc == 0, err
+    assert "crashkernel=256M" in _state(tmp_path, "slot_args").split()
+    assert "--remove-args" not in _state(tmp_path, "grubby.log")
+    assert "enable kdump.service" in _state(tmp_path, "systemctl.log")
+
+
+@requires_curl
+def test_failed_crashkernel_removal_exits_deterministic(tmp_path: Path) -> None:
+    """A grubby that cannot edit the slot is an image defect like every other grubby step."""
+    rc, err = _install(tmp_path, "console=ttyS0 nokaslr", "gdbstub", STUB_FAIL_UPDATE="1")
+    assert rc == 1
+    assert "crashkernel" in err
