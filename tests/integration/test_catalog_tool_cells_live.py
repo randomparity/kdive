@@ -156,8 +156,9 @@ def _staged_image() -> _Image:
                 return _Image(entry, qcow2)
     raise ScenarioStop(
         Outcome.BLOCKED,
-        "systems.toml declares no public local-libvirt staged-path image with its build-fs "
-        "siblings; stage one with examples/local-libvirt/build-image.sh fedora-kdive-ready-44",
+        "the exported KDIVE_SYSTEMS_TOML declares no public local-libvirt staged-path image with "
+        "its build-fs siblings (a live tier reads only an exported path); stage one with "
+        "examples/local-libvirt/build-image.sh fedora-kdive-ready-44",
     )
 
 

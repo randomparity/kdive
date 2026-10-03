@@ -736,7 +736,11 @@ Before the first lane, stage the public image the image cells read, once per hos
 re-registers it on the next bring-up's reconcile. Without it the image cells record `blocked`.
 Run pytest in a shell that sourced `examples/local-libvirt/env.sh`: the cells read the object
 store (`KDIVE_S3_*`, `AWS_*`), `KDIVE_LIBVIRT_URI` and the funded `KDIVE_PROJECT`, beside
-`KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`.
+`KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`. Also export
+`KDIVE_SYSTEMS_TOML=~/.config/kdive/systems.toml`: the test session sandboxes the XDG default and
+keeps only an exported path for a live tier (`tests/conftest.py`). The core
+`systems.profile_examples` cell reads the same file, so once an image is declared both carriers
+need it.
 
 Unlike the core cells, these write and remove state. Each cell works in a fresh `cov-<hex>`
 project and proves its cleanup with a snapshot that adds that project's private images and the
