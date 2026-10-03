@@ -25,7 +25,7 @@ import struct
 import tarfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, LiteralString, cast
 from uuid import UUID
@@ -850,8 +850,18 @@ _FUNCTIONAL: dict[str, Callable[..., Awaitable[dict[str, object]]]] = {
 _SYSTEM_TOOLS = frozenset({"artifacts.get", "artifacts.list"})
 _READERS = frozenset({"investigations.get", "investigations.list", *_SYSTEM_TOOLS})
 _RUN_TARGETS = frozenset({"artifacts.create_run_upload", "artifacts.fetch_raw"})
-# A non-member gets the answer an absent owner gets (artifacts/uploads.py _create_upload,
-# complete_rootfs_upload.py); investigations.open names its project, so it is denied outright.
+# List tools that answer an empty page instead of rejecting; #3108 decides their evidence.
+_FILTERED = frozenset(
+    {
+        ("investigations.list", "authorization"),
+        ("investigations.list", "project-isolation"),
+        ("artifacts.list", "project-isolation"),
+    }
+)
+_FILTERED_OWNER = "#3108"
+# A non-member of the three upload tools gets configuration_error, the answer an absent owner
+# gets (artifacts/uploads.py _create_upload, complete_rootfs_upload.py); their cells compare it
+# with an absent-owner twin. investigations.open names its project, so it is denied outright.
 _ISOLATION = {
     "artifacts.create_investigation_upload": ErrorCategory.CONFIGURATION_ERROR,
     "artifacts.create_run_upload": ErrorCategory.CONFIGURATION_ERROR,
@@ -927,12 +937,17 @@ def _rejection(tool: str, boundary: Boundary, project: str) -> Rejection:
     args = _valid(tool, project)
     if boundary == "authentication":
         return Rejection(args, _viewer(project))
+    filtered = _FILTERED_OWNER if (tool, boundary) in _FILTERED else None
     if boundary == "project-isolation":
         category = _ISOLATION.get(tool, ErrorCategory.NOT_FOUND)
-        return Rejection(args, _stranger(), frozenset({category.value}))
+        # _valid names an absent owner, so it is the twin the real owner's answer must match.
+        twin = args if category is ErrorCategory.CONFIGURATION_ERROR else None
+        categories = frozenset({category.value})
+        return Rejection(args, _stranger(), categories, filtered_by=filtered, absent_twin=twin)
     if tool in _SYSTEM_TOOLS:
         return Rejection(args, _member(_funded_project()))
-    return Rejection(args, _member(project) if tool in _READERS else _viewer(project))
+    grants = _member(project) if tool in _READERS else _viewer(project)
+    return Rejection(args, grants, filtered_by=filtered)
 
 
 def _target_setup(
@@ -988,9 +1003,7 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     rejection = _rejection(tool, boundary, project)
     setup = None
     if system is not None:
-        rejection = Rejection(
-            await _system_args(tool, db_url, system), rejection.grants, rejection.categories
-        )
+        rejection = replace(rejection, args=await _system_args(tool, db_url, system))
     elif targeted and tool != "investigations.open":
         setup = _target_setup(base_url, issuer, project, tool)
     await prove_rejection(run, caller, boundary, rejection, snapshot, setup=setup)
