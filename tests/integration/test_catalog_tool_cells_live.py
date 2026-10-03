@@ -361,7 +361,8 @@ async def _kernel_config(caller: HttpCaller, grants: Grants, *, db_url: str) -> 
     )
     async with httpx.AsyncClient(timeout=60.0) as http:
         response = await http.get(env.refs["download_uri"])
-    response.raise_for_status()
+    # The status alone: an HTTPStatusError would echo the presigned URL and its signature.
+    assert response.status_code == 200, f"config download answered HTTP {response.status_code}"
     expected = config_sibling_path(image.qcow2).read_bytes()
     assert hashlib.sha256(response.content).digest() == hashlib.sha256(expected).digest()
     assert env.data.get("size_bytes") == len(expected), "size_bytes is not the config's"
