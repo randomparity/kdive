@@ -407,7 +407,6 @@ class _Investigation:
     """A fixture investigation, the Runs to cancel and the unadopted object keys to purge."""
 
     id: str
-    project: str
     caller: HttpCaller
     token: str
     runs: list[str] = field(default_factory=list)
@@ -465,7 +464,7 @@ async def _investigation(
         "external_refs": list(refs),
     }
     env = one(await fixture.call("investigations.open", args, token))
-    async with _closing(_Investigation(env.object_id, project, fixture, token)) as inv:
+    async with _closing(_Investigation(env.object_id, fixture, token)) as inv:
         yield inv
 
 
@@ -682,7 +681,7 @@ async def _open(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str,
     }
     env = one(await caller.call("investigations.open", args, caller.token(grants), discover=True))
     fixture = HttpCaller("direct", caller.base_url, caller.issuer)
-    inv = _Investigation(env.object_id, project, fixture, fixture.token(_contributor(project)))
+    inv = _Investigation(env.object_id, fixture, fixture.token(_contributor(project)))
     async with _closing(inv):
         expected = {**args, "summary": None, "state": "open"}
         assert _row_view(await _investigation_row(db_url, inv.id)) == expected
