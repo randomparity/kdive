@@ -757,6 +757,35 @@ whole shapes catalog to the per-project one:
 A cell killed mid-run can leave any of these behind; `demo-down.sh --wipe --yes` clears them.
 Queue depth is compared but not driven (#3106).
 
+#### Investigation and artifact tool cells (#3096)
+
+`tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell` carries the
+260 cells of `investigations.{open,get,list,set,link,unlink,close,complete_rootfs_upload}` and
+`artifacts.{create_investigation_upload,create_run_upload,fetch_raw,get,list}` on the same harness,
+lanes, bindings and assembly; run all three carriers in each lane's pytest command. The
+[design](../../workflow/specs/2026-10-02-investigation-tool-cells-design.md) lists what each
+functional cell compares and with which independent source. Its environment is the catalog
+carrier's (the sourced `env.sh`, `KDIVE_DATABASE_URL`, `KDIVE_SYSTEMS_TOML`), and it needs the
+same staged `fedora-kdive-ready-44` image plus KVM on the host.
+
+Investigations cannot be deleted, so each cell works in a fresh `cov-<hex>` project and proves its
+cleanup by closing what it opened: its investigations end `closed` and its Runs `canceled` (or
+`succeeded`, for the `artifacts.fetch_raw` build). The snapshot keeps every live investigation,
+live Run and the upload manifests and artifact rows they own; closed and ended ones are history.
+
+- The upload cells PUT 4 KiB of random bytes through the presigned URL. Bytes nothing adopted are
+  purged; a finalized rootfs and the `fetch_raw` build (a synthetic kernel bundle and vmlinux
+  accepted by `runs.complete_build`) are left to the reclaim the close schedules, which runs after
+  the reconciler's one-day grace.
+- `artifacts.list` and `artifacts.get` read the console parts of one System per lane, provisioned
+  in `KDIVE_PROJECT` on first use (about a minute to `ready` plus a minute for its console part to
+  settle) and released at the end of the module, with its domain and disks proven gone.
+- `investigations.list` authorization and project-isolation and `artifacts.list`
+  project-isolation fail: those tools answer an empty page instead of rejecting the call (#3108).
+
+A cell killed mid-run can leave an open investigation, a created Run or the System;
+`demo-down.sh --wipe --yes` clears them, as it clears the history above.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
