@@ -18,7 +18,7 @@ import hashlib
 import json
 import os
 import secrets
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -204,6 +204,30 @@ def _purge(key: str) -> bool:
     return not _versions(key)
 
 
+Removal = Callable[[], Awaitable[list[str]]]
+
+
+async def _attempt(remove: Removal) -> list[str]:
+    try:
+        return await remove()
+    except Exception as exc:  # noqa: BLE001 - reported as a cleanup problem, never raised over the cell
+        return [repr(exc)]
+
+
+@asynccontextmanager
+async def _cleaning(remove: Removal, what: str) -> AsyncIterator[None]:
+    """Run ``remove`` on exit; a failed body keeps its error and gains the cleanup problems."""
+    try:
+        yield
+    except BaseException as exc:
+        problems = await _attempt(remove)
+        if problems:
+            exc.add_note(f"cleanup of {what} also failed: {problems}")
+        raise
+    problems = await _attempt(remove)
+    assert not problems, f"cleanup of {what} failed: {problems}"
+
+
 @dataclass
 class _Upload:
     """A quarantined object for ``project`` and the object keys a cell must remove."""
@@ -223,13 +247,9 @@ async def _uploading(
     key = f"uploads/q/{project}/{_UPLOAD_NAME}.qcow2"
     await asyncio.to_thread(_put_quarantined, image.qcow2, key)
     upload = _Upload(project, image.entry.arch, key, {key})
-    try:
+    remove = partial(_remove_upload, base_url, issuer, db_url, upload)
+    async with _cleaning(remove, f"{project}'s upload"):
         yield upload
-    except BaseException:
-        await _remove_upload(base_url, issuer, db_url, upload)  # the body's error stays the cause
-        raise
-    problems = await _remove_upload(base_url, issuer, db_url, upload)
-    assert not problems, f"cleanup of {project}'s upload failed: {problems}"
 
 
 async def _remove_upload(
@@ -437,12 +457,25 @@ async def _shapes_list(caller: HttpCaller, grants: Grants, *, db_url: str) -> di
     return {"shapes": [s["name"] for s in expected]}
 
 
-async def _drop_shape(caller: HttpCaller, project: str, name: str, db_url: str) -> None:
-    """Remove ``name`` if it is still in the catalog."""
-    if await _rows(db_url, "SELECT 1 FROM system_shapes WHERE name = %s", (name,)):
-        operator = HttpCaller("direct", caller.base_url, caller.issuer)
-        token = operator.token(_platform_operator(project))
-        one(await operator.call("shapes.delete", {"name": name}, token))
+@asynccontextmanager
+async def _owned_shape(
+    base_url: str, issuer: OidcIssuer, db_url: str, project: str
+) -> AsyncIterator[str]:
+    """A fresh ``cov-`` shape name; removed on exit if the body left it in the catalog."""
+    name = f"cov-{secrets.token_hex(4)}"
+    operator = HttpCaller("direct", base_url, issuer)
+    token = operator.token(_platform_operator(project))
+
+    async def remove() -> list[str]:
+        if not await _rows(db_url, "SELECT 1 FROM system_shapes WHERE name = %s", (name,)):
+            return []
+        result = await operator.call("shapes.delete", {"name": name}, token)
+        if isinstance(result, ToolResponse) and result.status == "deleted":
+            return []
+        return [f"shapes.delete {name}: {getattr(result, 'detail', result)}"]
+
+    async with _cleaning(remove, f"shape {name}"):
+        yield name
 
 
 async def _visible_resources(db_url: str, projects: tuple[str, ...]) -> Rows:
@@ -540,14 +573,18 @@ async def _granted(
     token = operator.token(Grants(f"{project}-cov", (project,), {project: "contributor"}))
     env = one(await operator.call("allocations.request", {"project": project, **sizing}, token))
     assert env.status == "granted", f"allocations.request answered {env.status}"
-    try:
+    remove = partial(_release, operator, token, db_url, env.object_id)
+    async with _cleaning(remove, f"allocation {env.object_id}"):
         yield await _allocation(db_url, env.object_id)
-    finally:
-        released = one(
-            await operator.call("allocations.release", {"allocation_id": env.object_id}, token)
-        )
-        assert released.status == "released", f"release answered {released.status}"
-        assert (await _allocation(db_url, env.object_id))["state"] == "released"
+
+
+async def _release(caller: HttpCaller, token: str, db_url: str, allocation_id: str) -> list[str]:
+    """Release ``allocation_id``; what kept it from reaching ``released``."""
+    result = await caller.call("allocations.release", {"allocation_id": allocation_id}, token)
+    state = (await _allocation(db_url, allocation_id))["state"]
+    if isinstance(result, ToolResponse) and result.status == "released" and state == "released":
+        return []
+    return [f"release of {allocation_id} answered {getattr(result, 'detail', result)}, {state}"]
 
 
 async def _set_shape(
@@ -566,51 +603,49 @@ def _open_hosts(expected: Mapping[str, object]) -> list[dict[str, Any]]:
 
 
 async def _shapes_set(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
-    expected = await _availability_expected(db_url, grants.projects)
+    funded = _funded_project()
+    # Admission places in the funded project, so its ceiling is over the hosts that project sees.
+    expected = await _availability_expected(db_url, (funded,))
     if not _open_hosts(expected):
         raise ScenarioStop(Outcome.BLOCKED, "no schedulable host with headroom to admit a shape")
     hosts = cast(dict[str, dict[str, Any]], expected["hosts"]).values()
-    # Above every visible host's ceiling, so admission must refuse it on size alone.
     ceiling = max(cast(int, h["vcpus"]) for h in hosts if h["vcpus"] is not None)
-    name, token = f"cov-{secrets.token_hex(4)}", caller.token(grants)
-    over = {"name": name, "vcpus": ceiling + 1, "memory_mb": 1024, "disk_gb": 1}
-    within = {**over, "vcpus": 1}
-    funded = _funded_project()
     admitter = HttpCaller("direct", caller.base_url, caller.issuer)
     request = admitter.token(Grants(f"{funded}-cov", (funded,), {funded: "contributor"}))
-    try:
+    token, project = caller.token(grants), grants.projects[0]
+    async with _owned_shape(caller.base_url, caller.issuer, db_url, project) as name:
+        over = {"name": name, "vcpus": ceiling + 1, "memory_mb": 1024, "disk_gb": 1}
         await _set_shape(caller, token, over, db_url)
         refused = await admitter.call(
             "allocations.request", {"project": funded, "shape": name}, request
         )
+        if isinstance(refused, ToolResponse) and refused.status == "granted":
+            problems = await _release(admitter, request, db_url, refused.object_id)
+            raise AssertionError(f"admission granted {over} above every ceiling; {problems}")
         assert isinstance(refused, ToolResponse), f"admission answered {refused}"
         assert refused.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert refused.data.get("field") == "vcpus", f"admission refused {refused.data}"
         assert refused.data.get("requested") == str(ceiling + 1)
-        await _set_shape(caller, token, within, db_url)
+        await _set_shape(caller, token, {**over, "vcpus": 1}, db_url)
         async with _granted(caller.base_url, caller.issuer, db_url, {"shape": name}) as grant:
             sized = {k: grant[k] for k in ("shape", "requested_vcpus", "requested_memory_gb")}
             assert sized == {"shape": name, "requested_vcpus": 1, "requested_memory_gb": 1}
             assert grant["requested_disk_gb"] == 1, "admission did not size the disk by the shape"
             allocation = str(grant["id"])
-    finally:
-        await _drop_shape(caller, grants.projects[0], name, db_url)
     return {"shape": name, "refused_vcpus": ceiling + 1, "owned": [name, allocation]}
 
 
 async def _shapes_delete(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
-    name, token = f"cov-{secrets.token_hex(4)}", caller.token(grants)
+    token, project = caller.token(grants), grants.projects[0]
     operator = HttpCaller("direct", caller.base_url, caller.issuer)
-    shape = {"name": name, "vcpus": 1, "memory_mb": 1024, "disk_gb": 1}
-    one(await operator.call("shapes.set", shape, operator.token(grants)))
-    try:
+    async with _owned_shape(caller.base_url, caller.issuer, db_url, project) as name:
+        shape = {"name": name, "vcpus": 1, "memory_mb": 1024, "disk_gb": 1}
+        one(await operator.call("shapes.set", shape, operator.token(grants)))
         before = await _rows(db_url, _SHAPES)
         env = one(await caller.call("shapes.delete", {"name": name}, token, discover=True))
         assert env.status == "deleted", f"shapes.delete answered {env.status}"
         after = await _rows(db_url, _SHAPES)
         assert after == [r for r in before if r["name"] != name], "other presets changed"
-    finally:
-        await _drop_shape(caller, grants.projects[0], name, db_url)
     return {"deleted": name, "remaining": [r["name"] for r in after], "owned": [name]}
 
 
@@ -742,6 +777,10 @@ _GATED = {"images.delete", "images.upload", "shapes.delete", "shapes.set"}
 def _functional_grants(tool: str, project: str) -> Grants:
     if tool.startswith("shapes.") and tool != "shapes.list":
         return _platform_operator(project)
+    if tool == "resources.availability":
+        # The fixture allocation lands on a host the funded project sees; so must the cell.
+        funded = _funded_project()
+        return Grants(f"{project}-viewer", (project, funded), {project: "viewer", funded: "viewer"})
     return _operator(project) if tool in _WRITERS else _viewer(project)
 
 
@@ -758,9 +797,9 @@ def _valid(tool: str, project: str) -> dict[str, object]:
             "quarantine_key": f"uploads/q/{project}/absent.qcow2",
         },
         "resources.describe": {"resource_id": _ABSENT_ID},
-        # A real preset: only the boundary keeps these from rewriting or removing it.
-        "shapes.set": {"name": "small", "vcpus": 64, "memory_mb": 65536, "disk_gb": 1},
-        "shapes.delete": {"name": "small"},
+        # Aimed at the cov- shape _shape_setup provides: only the boundary keeps these from
+        # rewriting or removing it.
+        "shapes.set": {"vcpus": 64, "memory_mb": 65536, "disk_gb": 1},
     }
     return table.get(tool, {})
 
@@ -803,6 +842,36 @@ def _image_setup(
     return setup()
 
 
+def _shape_setup(
+    base_url: str, issuer: OidcIssuer, db_url: str, project: str
+) -> AbstractAsyncContextManager[Mapping[str, object]]:
+    """A ``cov-`` shape for a rejected ``shapes.set``/``shapes.delete`` to aim at."""
+
+    @asynccontextmanager
+    async def setup() -> AsyncIterator[Mapping[str, object]]:
+        async with _owned_shape(base_url, issuer, db_url, project) as name:
+            operator = HttpCaller("direct", base_url, issuer)
+            shape = {"name": name, "vcpus": 1, "memory_mb": 1024, "disk_gb": 1}
+            one(
+                await operator.call(
+                    "shapes.set", shape, operator.token(_platform_operator(project))
+                )
+            )
+            yield {"name": name}
+
+    return setup()
+
+
+_SETUPS = {
+    ("images.delete", "authorization"): _image_setup,
+    ("images.delete", "project-isolation"): _image_setup,
+    ("shapes.delete", "authentication"): _shape_setup,
+    ("shapes.delete", "authorization"): _shape_setup,
+    ("shapes.set", "authentication"): _shape_setup,
+    ("shapes.set", "authorization"): _shape_setup,
+}
+
+
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> None:
     cell = run.cell
     caller = HttpCaller(cast(Exposure, cell.exposure), base_url, issuer)
@@ -818,9 +887,8 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     rejection = Rejection(
         args(cell.operation, project), _rejection_grants(cell.operation, boundary, project)
     )
-    setup = None
-    if cell.operation == "images.delete" and boundary in ("authorization", "project-isolation"):
-        setup = partial(_image_setup, base_url, issuer, db_url, project)
+    factory = _SETUPS.get((cell.operation, boundary))
+    setup = partial(factory, base_url, issuer, db_url, project) if factory else None
     await prove_rejection(run, caller, boundary, rejection, snapshot, setup=setup)
 
 

@@ -92,7 +92,7 @@ database (read-only), `systems.toml` with the build-fs siblings, the test host's
 | `shapes.delete` | a `cov-` shape created first is gone and every other row is unchanged |
 | `resources.list` | ids, kind, status, arch, vCPUs and memory equal the database rows visible to the caller (global, owned or allow-listed) |
 | `resources.describe` | each visible resource's kind, status, pool, cost class, host URI, arch, vCPUs, memory and transports equal its row; the local discovered host's vCPUs and memory equal this host's CPU count and `MemTotal` |
-| `resources.availability` | three reads — idle, holding one 1-vCPU allocation, after its release — each equal the database per host (cap, in-use as granted/active/releasing allocations, headroom, schedulability, and `fits` as the shapes whose vCPUs and memory fit a schedulable host with headroom) and in queue depth (`requested` rows); the held host's in-use rises by one and the released read equals the idle one |
+| `resources.availability` | as a viewer of the cell's and the funded project (the fixture lands on a host the funded project sees), three reads — idle, holding one 1-vCPU allocation, after its release — each equal the database per host (cap, in-use as granted/active/releasing allocations, headroom, schedulability, and `fits` as the shapes whose vCPUs and memory fit a schedulable host with headroom) and in queue depth (`requested` rows); the held host's in-use rises by one and the released read equals the idle one |
 
 ### Rejection cells
 
@@ -100,11 +100,15 @@ database (read-only), `systems.toml` with the build-fs siblings, the test host's
 |---|---|---|
 | authentication | all 11 | viewer of the cell's project; valid arguments that change nothing for the issued-token control (an absent quarantine key, an unknown image id, a shape write the viewer may not make) |
 | validation | all but `shapes.list` | a missing required argument or a mistyped `request` field; the token holds the lowest grant that makes the tool visible (operator for `images.{upload,delete}`, `platform_operator` for `shapes.{set,delete}`, viewer otherwise), because `tools.invoke` reports `field_errors` only for a visible tool |
-| authorization | `images.{upload,delete}`, `shapes.{set,delete}` | viewer (not operator) of the image's project; `platform_auditor` without `platform_operator`, aimed at a real preset |
+| authorization | `images.{upload,delete}`, `shapes.{set,delete}` | viewer (not operator) of the image's project; `platform_auditor` without `platform_operator` |
 | project-isolation | `images.{upload,delete}` | a member of another project only |
 
-The two `images.delete` cells need a private image: `setup` uploads one as the project's operator
-and deletes it on exit. Every category accepted is `authorization_denied`.
+Two `images.delete` cells need a private image: `setup` uploads one as the project's operator and
+deletes it on exit. The `shapes.set` and `shapes.delete` authentication and authorization cells aim
+at a `cov-` shape `setup` creates and removes, so a fail-open boundary can only touch that row,
+never a seeded preset. Every category accepted is `authorization_denied`. Every fixture's cleanup
+runs on a failed body too, and its problems are attached to the body's error rather than replacing
+it.
 
 ### Failure model
 
