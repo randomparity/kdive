@@ -172,6 +172,17 @@ All slow/host seams — the TLS connection opener, the guest-agent round-trip, t
 — are injected, so unit tests drive the full install/boot orchestration and every error path with
 no libvirt host; the real curl/tar/grub/reboot mechanics run only under the `live_vm` gate.
 
+### Amendment (2026-10-02): the helper drops an inherited crashkernel= (#3094)
+
+This qualifies Decision 2's claim that the `crashkernel=` token is present iff `request.method`
+is `kdump`. That held for the cmdline the worker sends, not for the slot the reference helper
+wrote: it adds the slot with `grubby --copy-default`, which also copies the base image's default
+arguments. Rocky 10 images default to a `crashkernel=` range, so a `gdbstub` System reserved
+crash memory and `boot()`'s kdump-arming gate (#1610) waited for a capture kernel nothing armed,
+failing `BOOT_TIMEOUT`. The helper now removes `crashkernel=` from the `kdive` slot (by title)
+when the requested cmdline carries none, so the iff holds for the booted cmdline. A kdump install
+is unchanged. Images staged before this change keep the old helper until rebuilt.
+
 ## Consequences
 
 - **Zero core/port change.** `RemoteLibvirtInstall` satisfies the unchanged Installer/Booter
