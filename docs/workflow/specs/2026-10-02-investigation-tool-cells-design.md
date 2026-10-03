@@ -28,18 +28,27 @@ In scope:
 
 1. A live carrier, `tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell`.
    It is parametrized over the 260 cells and framed by `run_tool_cell`, `prove_functional` and
-   `prove_rejection`, with no change to `tool_cells.py`.
-2. 65 `[implementations]` entries binding group 3096's scenarios to that node. The contract test
+   `prove_rejection`.
+2. Two backward-compatible fields on the harness's `Rejection` (`tool_cells.py`), each with unit
+   tests in `test_tool_cells.py`. The orchestrator directed both on 2026-10-03.
+   - `filtered_by`: when a call returns a successful envelope with no items, the cell stops
+     `blocked`, naming the owning issue. Any other answer runs the normal rejection assertion,
+     so a tool that starts rejecting qualifies.
+   - `absent_twin`: inside the snapshot bracket, the rejected call is repeated with arguments
+     naming an owner that does not exist. Both answers must match in status, category, detail
+     and data once every string argument is masked.
+3. 65 `[implementations]` entries binding group 3096's scenarios to that node. The contract test
    names the node and the tools.
-3. A runbook section beside the core and catalog ones.
-4. A live run of both configurations on a disposable lab host, re-proving #2811's 56 cells and
+4. A runbook section beside the core and catalog ones.
+5. A live run of both configurations on a disposable lab host, re-proving #2811's 56 cells and
    #3095's 152.
 
 Out of scope (operator-approved, 2026-10-03): catalog/config tools (#3095), run/system/job tools
 (#3097), allocation/accounting/report tools (#3098), CLI (#3099), and recovery-tool cells plus a
 lane with a reachable worker-death authority (#2812). The carrier may call `runs.create`,
 `runs.complete_build`, `runs.cancel`, `allocations.request`, `allocations.release` and
-`systems.provision` as fixtures. There is no product, `contract.py`, harness or ADR change.
+`systems.provision` as fixtures. There is no product, `contract.py` or ADR change. The harness
+changes only as item 2 describes.
 
 ### Live snapshot
 
@@ -172,16 +181,22 @@ Notes on the table:
 - **Non-member `configuration_error`.** For a non-member, the three upload tools return the same
   `configuration_error` they return for an absent owner (`mcp/tools/catalog/artifacts/uploads.py`
   `_create_upload`, `complete_rootfs_upload.py`). The isolation is real and leaks nothing, so
-  `configuration_error` is the closed set for those cells. The target is a valid, live owner,
-  so the boundary is the only reason left for the call to fail. For `complete_rootfs_upload`, the
+  `configuration_error` is the closed set for those cells. The category alone could hide a
+  misconfiguration, so each of these three isolation cells also passes `absent_twin`, built from
+  the same arguments with an absent owner id. The real owner's answer must be indistinguishable
+  from the absent owner's in status, category, detail shape and data, and the protected state
+  must be unchanged across both calls. The target is a valid, live owner, so the boundary is the
+  only reason left for the call to fail. For `complete_rootfs_upload`, the
   setup also mints a window and PUTs bytes into it. A finalize that skipped the boundary would
   then adopt the bytes and change the snapshot, rather than fail on the missing manifest with the
   same category.
 - **Filtering list tools.** `investigations.list` (authorization, project-isolation) and
   `artifacts.list` (project-isolation) filter instead of rejecting: the caller gets an empty `ok`
   page (`services/investigations/read.py`, `services/artifacts/listing.py`). ADR-0722 §3 cannot be
-  met by these 12 cells. They run through the harness and fail honestly, recording the empty page.
-  #3108 decides what isolation evidence a filtering list tool owes. These cells are not coverage.
+  met by these 12 cells. They pass `filtered_by="#3108"`, so an empty `ok` page stops the cell
+  `blocked`, naming #3108. That records a known and owned cause rather than an unknown failure.
+  A real rejection still runs the normal assertion and qualifies. #3108 decides what isolation
+  evidence a filtering list tool owes. These cells are never coverage while they stop `blocked`.
 
 ## Failure model
 
@@ -219,6 +234,8 @@ Notes on the table:
 
 | Contract | Mode | Evidence |
 |---|---|---|
+| `Rejection.filtered_by` | focused-test | `test_tool_cells.py`: an empty page stops `blocked` naming the owner; a rejection still qualifies; a non-empty page fails `was not rejected` |
+| `Rejection.absent_twin` | focused-test | `test_tool_cells.py`: an identical absent-owner answer passes and is recorded; a different `data.reason` fails `an absent owner` |
 | bindings | focused-test | `test_coverage_contract.py`: the 260 group-3096 cells bind to the new node, and the unbound set shrinks by exactly them |
 | live snapshot and fixtures | task-test-not-applicable | they act only against a live stack's database and object store; proven by the two-lane lab run (`qualify` over the tool cells) |
 | live cells | task-test-not-applicable | the cells need a live stack; proven by the same run |

@@ -781,9 +781,13 @@ live Run and the upload manifests and artifact rows they own; closed and ended o
   in `KDIVE_PROJECT` on first use (about a minute to `ready` plus a minute for its console part to
   settle) and released at the end of the module, with its domain and disks proven gone.
 - `investigations.list` authorization and project-isolation and `artifacts.list`
-  project-isolation fail: those tools answer an empty page instead of rejecting the call (#3108).
+  project-isolation record `blocked`, naming #3108: those tools answer an empty page instead of
+  rejecting the call. pytest still reports these cells as failed, because the cell did not prove
+  its kind. If the product starts rejecting, they run the normal assertion and qualify.
+- The three upload tools' project-isolation cells accept `configuration_error` only when it is
+  indistinguishable from the answer for a nonexistent owner, called in the same cell.
 
-A lane's expected failures are exactly those 12 cells (6 per lane). The System is released in a
+A lane's expected pytest failures are exactly those 12 blocked cells (6 per lane). The System is released in a
 module finalizer outside every cell, so a failed reclaim shows only as an `ERROR at teardown` of
 `test_investigation_tool_cell`; record that line, if present, with the run's result.
 

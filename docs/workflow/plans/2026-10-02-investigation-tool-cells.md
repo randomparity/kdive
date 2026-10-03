@@ -4,7 +4,8 @@ Goal: bind and prove the 260 contract cells of owner group 3096's 13 tools on th
 harness, in both configurations and both exposures.
 
 Architecture: one new live carrier, `tests/integration/test_investigation_tool_cells_live.py`,
-parametrized over the group's cells and framed by the unchanged `tool_cells.py` harness. It adds a
+parametrized over the group's cells and framed by the `tool_cells.py` harness, which gains two
+`Rejection` fields (`filtered_by`, `absent_twin`; orchestrator-directed 2026-10-03). It adds a
 live-state snapshot, investigation, Run and session-System fixtures, and one functional body per
 tool. There are 65 `[implementations]` entries, a contract-test update and a runbook section.
 Design: [spec](../specs/2026-10-02-investigation-tool-cells-design.md); decision record ADR-0722.
@@ -17,8 +18,8 @@ map: the carrier (~975 lines), 65 binding lines, the contract test (~15) and the
 
 ## Global Constraints
 
-- No product source change, no `contract.py` change, no harness (`tool_cells.py`) change and no
-  new dependency.
+- No product source change, no `contract.py` change and no new dependency. The harness
+  (`tool_cells.py`) gains only the two backward-compatible `Rejection` fields that Task 0 adds.
 - ADR-0722 (with its 2026-10-02 amendment) governs exposure, configuration proof, rejection rules
   and the protected-state snapshot. The #2811 and #3095 cells keep their exact behaviour.
 - Line length 100. `just lint`, `just type` and `just test-changed` must be green before each
@@ -27,18 +28,60 @@ map: the carrier (~975 lines), 65 binding lines, the contract test (~15) and the
   afterwards.
 - Public text names no host, address, user or lab identifier.
 - Deferred: #3108, which decides what isolation evidence a filtering list tool owes. Its 12
-  cells stay bound and fail.
+  cells stay bound and record `blocked`, naming #3108, while the product filters.
 
 ## File map
 
 | File | Today | After |
 |---|---|---|
+| `tests/integration/live_stack/tool_cells.py` | ADR-0722 harness | + `Rejection.filtered_by` and `Rejection.absent_twin` (criteria 2, 4) |
+| `tests/integration/live_stack/test_tool_cells.py` | harness unit tests | + three tests for the two fields |
 | `tests/integration/test_investigation_tool_cells_live.py` | — | the group-3096 carrier (criteria 1-4) |
 | `scripts/coverage_campaign/obligations.toml` | core and catalog bindings | + 65 group-3096 bindings (criterion 5) |
 | `tests/scripts/test_coverage_contract.py` | core and catalog nodes asserted | + the investigation node and tools (criterion 5) |
 | `docs/operating/runbooks/live-testing.md` | core and catalog tool-cell sections | + the investigation carrier section (criterion 6) |
 
-No ownership transition is involved: the harness is reused as-is, and no path becomes obsolete.
+No ownership transition is involved, and no path becomes obsolete.
+
+## Task 0 — harness fields
+
+Files: modify `tests/integration/live_stack/tool_cells.py` and
+`tests/integration/live_stack/test_tool_cells.py`.
+
+Interfaces produced (consumed by Task 2):
+
+```python
+@dataclass(frozen=True)
+class Rejection:
+    args: Mapping[str, object]
+    grants: Grants
+    categories: frozenset[str] = frozenset({"authorization_denied"})
+    filtered_by: str | None = None
+    absent_twin: Mapping[str, object] | None = None
+```
+
+Behaviour in `_observe`, for the authorization and project-isolation boundaries only:
+
+- `filtered_by` set and a successful envelope with no items: raise
+  `ScenarioStop(Outcome.BLOCKED, "...; <filtered_by> owns the decision")`.
+- Any other answer: the existing category assertion.
+- `absent_twin` set, after the category passes: call the tool again with those arguments and the
+  same token, then assert that `_answer(result, args) == _answer(twin, absent_twin)`. `_answer`
+  is a SHA-256 of the object id, status, category, detail and data, with every string argument
+  masked, plus the message-free shape.
+
+Verification:
+
+- `filtered_by`. Mode: focused-test.
+  - Tests: `test_filtering_list_stops_blocked_naming_its_owner` and
+    `test_filtering_list_that_rejects_still_qualifies`.
+  - Red: `TypeError: unexpected keyword argument 'filtered_by'`.
+  - Green: `uv run python -m pytest tests/integration/live_stack/test_tool_cells.py -q -k filtering`
+    reports 2 passed.
+- `absent_twin`. Mode: focused-test.
+  - Test: `test_absent_twin_must_answer_identically`.
+  - Red: `TypeError: unexpected keyword argument 'absent_twin'`.
+  - Green: the same file with `-k twin` reports 1 passed.
 
 ## Task 1 — bindings and the contract test
 
@@ -186,7 +229,7 @@ import struct
 import tarfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, LiteralString, cast
 from uuid import UUID
@@ -1011,8 +1054,18 @@ _FUNCTIONAL: dict[str, Callable[..., Awaitable[dict[str, object]]]] = {
 _SYSTEM_TOOLS = frozenset({"artifacts.get", "artifacts.list"})
 _READERS = frozenset({"investigations.get", "investigations.list", *_SYSTEM_TOOLS})
 _RUN_TARGETS = frozenset({"artifacts.create_run_upload", "artifacts.fetch_raw"})
-# A non-member gets the answer an absent owner gets (artifacts/uploads.py _create_upload,
-# complete_rootfs_upload.py); investigations.open names its project, so it is denied outright.
+# List tools that answer an empty page instead of rejecting; #3108 decides their evidence.
+_FILTERED = frozenset(
+    {
+        ("investigations.list", "authorization"),
+        ("investigations.list", "project-isolation"),
+        ("artifacts.list", "project-isolation"),
+    }
+)
+_FILTERED_OWNER = "#3108"
+# A non-member of the three upload tools gets configuration_error, the answer an absent owner
+# gets (artifacts/uploads.py _create_upload, complete_rootfs_upload.py); their cells compare it
+# with an absent-owner twin. investigations.open names its project, so it is denied outright.
 _ISOLATION = {
     "artifacts.create_investigation_upload": ErrorCategory.CONFIGURATION_ERROR,
     "artifacts.create_run_upload": ErrorCategory.CONFIGURATION_ERROR,
@@ -1088,12 +1141,17 @@ def _rejection(tool: str, boundary: Boundary, project: str) -> Rejection:
     args = _valid(tool, project)
     if boundary == "authentication":
         return Rejection(args, _viewer(project))
+    filtered = _FILTERED_OWNER if (tool, boundary) in _FILTERED else None
     if boundary == "project-isolation":
         category = _ISOLATION.get(tool, ErrorCategory.NOT_FOUND)
-        return Rejection(args, _stranger(), frozenset({category.value}))
+        # _valid names an absent owner, so it is the twin the real owner's answer must match.
+        twin = args if category is ErrorCategory.CONFIGURATION_ERROR else None
+        categories = frozenset({category.value})
+        return Rejection(args, _stranger(), categories, filtered_by=filtered, absent_twin=twin)
     if tool in _SYSTEM_TOOLS:
         return Rejection(args, _member(_funded_project()))
-    return Rejection(args, _member(project) if tool in _READERS else _viewer(project))
+    grants = _member(project) if tool in _READERS else _viewer(project)
+    return Rejection(args, grants, filtered_by=filtered)
 
 
 def _target_setup(
@@ -1149,9 +1207,7 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     rejection = _rejection(tool, boundary, project)
     setup = None
     if system is not None:
-        rejection = Rejection(
-            await _system_args(tool, db_url, system), rejection.grants, rejection.categories
-        )
+        rejection = replace(rejection, args=await _system_args(tool, db_url, system))
     elif targeted and tool != "investigations.open":
         setup = _target_setup(base_url, issuer, project, tool)
     await prove_rejection(run, caller, boundary, rejection, snapshot, setup=setup)
@@ -1186,7 +1242,7 @@ Steps:
      `fedora-kdive-ready-44` image and KVM;
    - the cleanup model: closed investigations, ended Runs, the live snapshot;
    - the upload, build and session-System fixtures and their reclaim;
-   - the 12 cells that fail pending #3108;
+   - the 12 cells that record `blocked` pending #3108;
    - that the wipe clears everything a killed cell leaves behind.
 2. Run `just docs-check`; it is green. Commit `docs(runbook): run the investigation tool cells`.
 
@@ -1210,13 +1266,14 @@ Steps:
       evidence root, with `KDIVE_SYSTEMS_TOML` and
       `KDIVE_DATABASE_URL=$KDIVE_MIGRATION_DATABASE_URL` exported.
 
-   Expected per lane, out of 468 collected cells: 228 passed, 6 failed (the #3108 cells) and
+   Expected per lane, out of 468 collected cells: 228 passed, 6 failed (the #3108 cells, which
+   pytest fails and whose evidence records `blocked`) and
    234 skipped (the other configuration).
 4. Assemble the evidence (`python -m tests.integration.live_stack.evidence assemble`), then
    qualify (`python -m scripts.coverage_campaign qualify`). Expected:
    - #2811's 56 cells and #3095's 152 cells are `yes`;
    - group 3096's 248 cells are `yes`;
-   - the 12 #3108 cells are not.
+   - the 12 #3108 cells are `blocked`.
 5. Check for leftovers:
    - no libvirt domain;
    - no open `cov-` investigation or `created` Run;
