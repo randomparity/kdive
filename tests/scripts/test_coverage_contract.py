@@ -57,6 +57,7 @@ def test_native_deep_families_and_foreign_tcg_stay_distinct(inventory: Inventory
 
 _IMAGE_SMOKE_NODE = "tests/integration/test_image_smoke_live.py::test_image_smoke"
 _CORE_NODE = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+_CATALOG_NODE = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _REMOTE_DEEP_NODE = (
     "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
@@ -120,7 +121,9 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     }
     core = [c for c in contract.cells if c.operation in _CORE_TOOLS]
     assert len(core) == 56 and {c.node_id for c in core} == {_CORE_NODE}
-    bound = {"image-smoke", "deep-lifecycle", "host-install", *_CORE_TOOLS}
+    catalog = [c for c in contract.cells if c.operation in _SPLIT[3095]]
+    assert len(catalog) == 152 and {c.node_id for c in catalog} == {_CATALOG_NODE}
+    bound = {"image-smoke", "deep-lifecycle", "host-install", *_CORE_TOOLS, *_SPLIT[3095]}
     assert all(c.node_id is None for c in contract.cells if c.operation not in bound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
