@@ -12,8 +12,9 @@ Architecture: two backward-compatible extensions to `tests/integration/live_stac
 Tech stack: Python 3.14, pytest, fastmcp client (`kdive.mcp.dev_harness`), psycopg 3, boto3, httpx
 — all already dependencies (`pyproject.toml`); nothing is added.
 
-Expected implementation size: 650–800 changed lines (L) — the carrier (~520), harness
-extensions and their tests (~90), 38 binding lines, the contract test (~10) and the runbook (~35).
+Expected implementation size: 950–1050 changed lines (L) — the carrier listing below (~830),
+harness extensions and their tests (~110), 38 binding lines, the contract test (~5) and the
+runbook (~35).
 
 ## Global Constraints
 
@@ -64,14 +65,16 @@ Verification:
   `owned == []` and `effect` carries `owned`. Green:
   `uv run pytest tests/integration/live_stack/test_tool_cells.py -q -k owned`.
 - `prove_rejection` setup bracket — Mode: focused-test. Contract: overrides reach the rejected
-  call, `cleanup` records the owned override values, and state left by the setup fails `cleanup`.
-  Tests `test_setup_overrides_reach_the_call` and `test_setup_left_state_fails_cleanup`; red
+  call, `cleanup` records the owned override values, state left by the setup fails `cleanup`, and
+  a call that changes state inside the setup fails `unchanged-state`. Tests
+  `test_setup_overrides_reach_the_call`, `test_setup_left_state_fails_cleanup` and
+  `test_setup_call_changing_state_fails_unchanged_state`; red
   before the change: `TypeError: unexpected keyword argument 'setup'`. Green:
   `uv run pytest tests/integration/live_stack/test_tool_cells.py -q -k setup`.
 
 Steps:
 
-1. Add the three tests below to `test_tool_cells.py` (imports: `from contextlib import
+1. Add the four tests below to `test_tool_cells.py` (imports: `from contextlib import
    asynccontextmanager`, `from collections.abc import AsyncIterator`, `from typing import cast`,
    and `prove_functional`, `HttpCaller` from `tool_cells`). Run the two focused commands: red.
 
@@ -105,8 +108,8 @@ def _setup(state: list[int], *, leak: bool = False) -> tool_cells.Setup:
 
 
 def test_setup_overrides_reach_the_call(tmp_path: Path) -> None:
-    run, state = _run(tmp_path, "authentication"), []
-    caller = _Caller("direct", result=ToolResponse.denied("x", missing_roles=None))
+    run, state = _run(tmp_path, "authorization"), []
+    caller = _Caller("direct", result=ToolResponse.denied("x"))
 
     async def snap() -> object:
         return list(state)
@@ -122,8 +125,8 @@ def test_setup_overrides_reach_the_call(tmp_path: Path) -> None:
 
 
 def test_setup_left_state_fails_cleanup(tmp_path: Path) -> None:
-    run, state = _run(tmp_path, "authentication"), []
-    caller = _Caller("direct", result=ToolResponse.denied("x", missing_roles=None))
+    run, state = _run(tmp_path, "authorization"), []
+    caller = _Caller("direct", result=ToolResponse.denied("x"))
 
     async def snap() -> object:
         return list(state)
@@ -140,11 +143,38 @@ def test_setup_left_state_fails_cleanup(tmp_path: Path) -> None:
             )
         )
     assert "unchanged-state" in run.assertions and "cleanup" not in run.assertions
+
+
+def test_setup_call_changing_state_fails_unchanged_state(tmp_path: Path) -> None:
+    run, state = _run(tmp_path, "authentication"), []
+
+    class _Writing(_Caller):
+        async def call(
+            self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
+        ) -> ToolResponse | list[ToolResponse]:
+            state.append(2)
+            return ToolResponse.denied("x")
+
+    async def snap() -> object:
+        return list(state)
+
+    with pytest.raises(AssertionError, match="protected state changed"):
+        asyncio.run(
+            prove_rejection(
+                run,
+                _Writing("direct"),
+                "authorization",
+                Rejection({}, _GRANTS),
+                snap,
+                setup=_setup(state),
+            )
+        )
+    assert "unchanged-state" not in run.assertions and "cleanup" not in run.assertions
 ```
 
-   `ToolResponse.denied(object_id, missing_roles=...)` is the existing constructor used by
-   `src/kdive/mcp/tools/catalog/shapes.py` (`_denied`); its category is `authorization_denied`,
-   the `Rejection` default.
+   `ToolResponse.denied(object_id)` is the existing constructor (`src/kdive/mcp/responses.py`;
+   `missing_roles` defaults to an empty tuple); its category is `authorization_denied`, the
+   `Rejection` default.
 
 2. In `tool_cells.py`, import `AbstractAsyncContextManager` and `nullcontext` from `contextlib`
    and `replace` from `dataclasses`; add after `Snapshot`:
@@ -225,7 +255,7 @@ Verification:
 
 - catalog bindings — Mode: focused-test. Contract: all 152 group-3095 cells carry the catalog
   node and only the bound operations carry nodes. Test: extend
-  `test_pending_cells_have_owned_assertions_but_no_invented_nodes` (it asserts `len(core) == 56`, in
+  `test_mapping_binds_only_the_carried_cells` (the test asserting `len(core) == 56`, in
   `tests/scripts/test_coverage_contract.py`); red before the obligations edit:
   `assert {None} == {'tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell'}`.
   Green: `uv run pytest tests/scripts/test_coverage_contract.py -q`.
@@ -235,7 +265,14 @@ Verification:
 
 Steps:
 
-1. In `tests/scripts/test_coverage_contract.py`, add
+1. Generate the scenario keys before any edit (``build_contract`` rejects an implementation whose
+   node file is absent, so the order below matters):
+   `uv run python -c "from scripts.coverage_campaign.contract import build_contract; print('\n'.join(sorted({c.scenario_id for c in build_contract().cells if c.owner == 3095})))"`
+   — expect 38 lines.
+2. Create the carrier with the content below. `uv run pytest
+   tests/integration/test_catalog_tool_cells_live.py -q` without a stack: every cell skips
+   (`KDIVE_STACK_BASE_URL unset`), proving collection; `just lint && just type` green.
+3. In `tests/scripts/test_coverage_contract.py`, add
    `_CATALOG_NODE = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"`
    beside `_CORE_NODE`, and in the test containing `assert len(core) == 56` add, after it:
 
@@ -244,17 +281,12 @@ Steps:
     assert len(catalog) == 152 and {c.node_id for c in catalog} == {_CATALOG_NODE}
 ```
 
-   and add `*_SPLIT[3095]` to the `bound` set on the next line. (`_SPLIT` is defined later in the
-   module; it is read at call time.) Run: red.
-2. Append to `[implementations]` in `obligations.toml`, after the core entries, one line per
-   group-3095 scenario (38), sorted, each `= "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"`.
-   Generate the keys with
-   `uv run python -c "from scripts.coverage_campaign.contract import build_contract; print('\n'.join(sorted({c.scenario_id for c in build_contract().cells if c.owner == 3095})))"`.
+   and add `*_SPLIT[3095]` to the `bound` set on the next line (`_SPLIT` is a module constant
+   read at call time). Run `uv run pytest tests/scripts/test_coverage_contract.py -q`: red.
+4. Append to `[implementations]` in `obligations.toml`, after the core entries, the 38 keys from
+   step 1, each `= "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"`.
    Run the contract tests: green.
-3. Create the carrier with the content below. Then `uv run pytest
-   tests/integration/test_catalog_tool_cells_live.py -q` without a stack: every cell skips
-   (`KDIVE_STACK_BASE_URL unset`), proving collection; `just lint && just type` green.
-4. Commit `test(live): prove the catalog and configuration tool cells (#3095)`.
+5. Commit `test(live): prove the catalog and configuration tool cells (#3095)`.
 
 Carrier content:
 
@@ -336,8 +368,8 @@ TOOLS = (
 )
 Rows = list[dict[str, Any]]
 _UPLOAD_NAME = "cov-upload"
-# What the ADR-0048 upload reassembly stamps on its object (src/kdive/artifacts/uploads/reassembly.py);
-# the upload service refuses an object without it.
+# What the ADR-0048 upload reassembly stamps on its object
+# (src/kdive/artifacts/uploads/reassembly.py); the upload service refuses an object without it.
 _UPLOAD_METADATA = {"sensitivity": "sensitive", "retention-class": "build"}
 _ABSENT_ID = "00000000-0000-4000-8000-000000000000"
 # Allocation states that hold a host slot, and the queued one (ADR-0069).
@@ -351,9 +383,11 @@ _DIGEST: LiteralString = (
 
 async def _rows(db_url: str, query: LiteralString, params: tuple[object, ...] = ()) -> Rows:
     """``query``'s rows from a read-only session on the evidence database."""
-    async with await psycopg.AsyncConnection.connect(db_url, row_factory=dict_row) as conn:
+    async with await psycopg.AsyncConnection.connect(db_url) as conn:
         await conn.set_read_only(True)
-        return list(await (await conn.execute(query, params)).fetchall())
+        async with conn.cursor(row_factory=dict_row) as cursor:
+            await cursor.execute(query, params)
+            return list(await cursor.fetchall())
 
 
 async def _catalog_state(db_url: str, project: str) -> dict[str, list[object]]:
@@ -447,13 +481,19 @@ def _put_quarantined(source: Path, key: str) -> None:
     _s3().upload_file(str(source), os.environ["KDIVE_S3_BUCKET"], key, ExtraArgs=extra)
 
 
-def _purge(key: str) -> None:
-    """Delete every version and delete marker of ``key``."""
+def _versions(key: str) -> list[str]:
+    """The version ids, delete markers included, stored under exactly ``key``."""
+    listing = _s3().list_object_versions(Bucket=os.environ["KDIVE_S3_BUCKET"], Prefix=key)
+    items = [*listing.get("Versions", []), *listing.get("DeleteMarkers", [])]
+    return [str(item["VersionId"]) for item in items if item["Key"] == key]
+
+
+def _purge(key: str) -> bool:
+    """Delete every version of ``key``; whether none is left."""
     client, bucket = _s3(), os.environ["KDIVE_S3_BUCKET"]
-    listing = client.list_object_versions(Bucket=bucket, Prefix=key)
-    for item in [*listing.get("Versions", []), *listing.get("DeleteMarkers", [])]:
-        if item["Key"] == key:
-            client.delete_object(Bucket=bucket, Key=key, VersionId=item["VersionId"])
+    for version in _versions(key):
+        client.delete_object(Bucket=bucket, Key=key, VersionId=version)
+    return not _versions(key)
 
 
 @dataclass
@@ -470,24 +510,39 @@ class _Upload:
 async def _uploading(
     base_url: str, issuer: OidcIssuer, db_url: str, project: str
 ) -> AsyncIterator[_Upload]:
-    """Quarantine the staged image's bytes for ``project``; on exit remove its images and objects."""
+    """Quarantine the staged image's bytes for ``project``; on exit remove its images, objects."""
     image = _staged_image()
     key = f"uploads/q/{project}/{_UPLOAD_NAME}.qcow2"
     await asyncio.to_thread(_put_quarantined, image.qcow2, key)
     upload = _Upload(project, image.entry.arch, key, {key})
     try:
         yield upload
-    finally:
-        rows = await _rows(
-            db_url, "SELECT id, object_key FROM image_catalog WHERE owner = %s", (project,)
-        )
-        operator = HttpCaller("direct", base_url, issuer)
-        token = operator.token(_operator(project))
-        for row in rows:
-            one(await operator.call("images.delete", {"image_id": str(row["id"])}, token))
-            upload.object_keys.add(str(row["object_key"]))
-        for object_key in sorted(upload.object_keys):
-            await asyncio.to_thread(_purge, object_key)
+    except BaseException:
+        await _remove_upload(base_url, issuer, db_url, upload)  # the body's error stays the cause
+        raise
+    problems = await _remove_upload(base_url, issuer, db_url, upload)
+    assert not problems, f"cleanup of {project}'s upload failed: {problems}"
+
+
+async def _remove_upload(
+    base_url: str, issuer: OidcIssuer, db_url: str, upload: _Upload
+) -> list[str]:
+    """Delete ``upload.project``'s images, then purge every owned object; what could not go."""
+    problems: list[str] = []
+    rows = await _rows(
+        db_url, "SELECT id, object_key FROM image_catalog WHERE owner = %s", (upload.project,)
+    )
+    operator = HttpCaller("direct", base_url, issuer)
+    token = operator.token(_operator(upload.project))
+    for row in rows:
+        upload.object_keys.add(str(row["object_key"]))
+        result = await operator.call("images.delete", {"image_id": str(row["id"])}, token)
+        if not isinstance(result, ToolResponse) or result.error_category is not None:
+            problems.append(f"images.delete {row['id']}: {getattr(result, 'detail', result)}")
+    for object_key in sorted(upload.object_keys):
+        if not await asyncio.to_thread(_purge, object_key):
+            problems.append(f"object {object_key} still has versions")
+    return problems
 
 
 async def _register(
@@ -550,13 +605,22 @@ async def _describe(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[
         "state": "registered",
         "capabilities": sorted(cap.value for cap in entry.capabilities),
     }
-    observed = {k: env.data.get(k) for k in expected}
+    observed: dict[str, object] = {k: env.data.get(k) for k in expected}
     observed["capabilities"] = sorted(cast(list[str], observed["capabilities"]))
     assert observed == expected, f"describe {observed} != systems.toml {expected}"
     digest = await asyncio.to_thread(_sha256_file, image.qcow2)
     assert env.data.get("digest") == f"sha256:{digest}", "digest is not the qcow2 file's"
-    assert env.data.get("provenance") == image.provenance, "provenance is not the sidecar's"
-    return {"image": entry.name, "equal_inventory": sorted(expected), "digest_of_file": True}
+    provenance = image.provenance
+    assert env.data.get("provenance") == provenance, "provenance is not the sidecar's"
+    signals = cast(dict[str, dict[str, object]], env.data.get("capability_signals"))
+    computed = {
+        "makedumpfile_version": signals["kdump"].get("makedumpfile_version"),
+        "drgn_version": signals["live_drgn"].get("drgn_version"),
+        "boot_kernel_count": signals["direct_kernel"].get("boot_kernel_count"),
+    }
+    recorded = {k: provenance.get(k) for k in computed}
+    assert computed == recorded, f"capability signals {computed} != sidecar {recorded}"
+    return {"image": entry.name, "equal_inventory": sorted(expected), "signals": computed}
 
 
 async def _kernel_config(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
@@ -741,32 +805,89 @@ async def _availability_expected(db_url: str, projects: tuple[str, ...]) -> dict
     return {"hosts": hosts, "queued": queued, "pcie_shapes": pcie}
 
 
-async def _fits_now(caller: HttpCaller, token: str, shape: str) -> list[str]:
-    args = {"request": {"shape": shape}}
-    env = one(await caller.call("resources.availability", args, token))
-    return cast(list[str], env.data.get("fits_now"))
+def _funded_project() -> str:
+    """The project the bring-up onboarded with budget and quota (``KDIVE_PROJECT``)."""
+    project = os.environ.get("KDIVE_PROJECT")
+    assert project, "KDIVE_PROJECT is unset; source examples/local-libvirt/env.sh"
+    return project
+
+
+async def _allocation(db_url: str, allocation_id: str) -> dict[str, Any]:
+    rows = await _rows(db_url, "SELECT * FROM allocations WHERE id = %s", (allocation_id,))
+    assert len(rows) == 1, f"allocation {allocation_id} has {len(rows)} rows"
+    return rows[0]
+
+
+@asynccontextmanager
+async def _granted(
+    base_url: str, issuer: OidcIssuer, db_url: str, sizing: Mapping[str, object]
+) -> AsyncIterator[dict[str, Any]]:
+    """A granted allocation of ``sizing`` in the funded project; released and checked on exit.
+
+    The allocation row stays as history in the funded project (ADR-0069 keeps released rows);
+    the cleanup proof is its ``released`` state and the host occupancy it gives back.
+    """
+    project = _funded_project()
+    operator = HttpCaller("direct", base_url, issuer)
+    token = operator.token(Grants(f"{project}-cov", (project,), {project: "contributor"}))
+    env = one(await operator.call("allocations.request", {"project": project, **sizing}, token))
+    assert env.status == "granted", f"allocations.request answered {env.status}"
+    try:
+        yield await _allocation(db_url, env.object_id)
+    finally:
+        released = one(
+            await operator.call("allocations.release", {"allocation_id": env.object_id}, token)
+        )
+        assert released.status == "released", f"release answered {released.status}"
+        assert (await _allocation(db_url, env.object_id))["state"] == "released"
+
+
+async def _set_shape(
+    caller: HttpCaller, token: str, shape: Mapping[str, object], db_url: str
+) -> None:
+    """``shapes.set`` ``shape`` and read it back from the catalog."""
+    env = one(await caller.call("shapes.set", dict(shape), token, discover=True))
+    assert dict(env.data) == shape, f"shapes.set answered {env.data}"
+    rows = await _rows(db_url, _SHAPES)
+    assert [_shape_data(r) for r in rows if r["name"] == shape["name"]] == [shape]
+
+
+def _open_hosts(expected: Mapping[str, object]) -> list[dict[str, Any]]:
+    hosts = cast(dict[str, dict[str, Any]], expected["hosts"])
+    return [h for h in hosts.values() if h["schedulable"] and h["headroom"] >= 1]
 
 
 async def _shapes_set(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
     expected = await _availability_expected(db_url, grants.projects)
-    hosts = cast(dict[str, dict[str, Any]], expected["hosts"])
-    open_hosts = [h for h in hosts.values() if h["schedulable"] and h["headroom"] >= 1]
-    if not open_hosts:
+    if not _open_hosts(expected):
         raise ScenarioStop(Outcome.BLOCKED, "no schedulable host with headroom to admit a shape")
-    ceiling = max(h["vcpus"] for h in open_hosts)
+    hosts = cast(dict[str, dict[str, Any]], expected["hosts"]).values()
+    # Above every visible host's ceiling, so admission must refuse it on size alone.
+    ceiling = max(cast(int, h["vcpus"]) for h in hosts if h["vcpus"] is not None)
     name, token = f"cov-{secrets.token_hex(4)}", caller.token(grants)
     over = {"name": name, "vcpus": ceiling + 1, "memory_mb": 1024, "disk_gb": 1}
     within = {**over, "vcpus": 1}
+    funded = _funded_project()
+    admitter = HttpCaller("direct", caller.base_url, caller.issuer)
+    request = admitter.token(Grants(f"{funded}-cov", (funded,), {funded: "contributor"}))
     try:
-        for shape, fits in ((over, False), (within, True)):
-            env = one(await caller.call("shapes.set", shape, token, discover=True))
-            assert dict(env.data) == shape, f"shapes.set answered {env.data}"
-            rows = await _rows(db_url, _SHAPES)
-            assert [_shape_data(r) for r in rows if r["name"] == name] == [shape]
-            assert (name in await _fits_now(caller, token, name)) is fits, f"{shape} fit {not fits}"
+        await _set_shape(caller, token, over, db_url)
+        refused = await admitter.call(
+            "allocations.request", {"project": funded, "shape": name}, request
+        )
+        assert isinstance(refused, ToolResponse), f"admission answered {refused}"
+        assert refused.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert refused.data.get("field") == "vcpus", f"admission refused {refused.data}"
+        assert refused.data.get("requested") == str(ceiling + 1)
+        await _set_shape(caller, token, within, db_url)
+        async with _granted(caller.base_url, caller.issuer, db_url, {"shape": name}) as grant:
+            sized = {k: grant[k] for k in ("shape", "requested_vcpus", "requested_memory_gb")}
+            assert sized == {"shape": name, "requested_vcpus": 1, "requested_memory_gb": 1}
+            assert grant["requested_disk_gb"] == 1, "admission did not size the disk by the shape"
+            allocation = str(grant["id"])
     finally:
         await _drop_shape(caller, grants.projects[0], name, db_url)
-    return {"shape": name, "over_ceiling_refused": ceiling + 1, "updated_fits": 1, "owned": [name]}
+    return {"shape": name, "refused_vcpus": ceiling + 1, "owned": [name, allocation]}
 
 
 async def _shapes_delete(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
@@ -830,6 +951,11 @@ async def _resources_describe(
         env = one(await caller.call("resources.describe", args, token, discover=True))
         fields = ("kind", "pool", "cost_class", "host_uri")
         assert {k: env.data.get(k) for k in fields} == {k: row[k] for k in fields}
+        caps = cast(dict[str, object], row["capabilities"])
+        assert _resource_view(env.data) == _resource_view(caps), "capabilities differ from the row"
+        transports = caps.get("transports")
+        if isinstance(transports, list):
+            assert env.data.get("transports") == ",".join(str(t) for t in transports)
         assert env.status == row["status"], f"status {env.status} != {row['status']}"
         if row["kind"] == "local-libvirt" and row["host_uri"] == local_uri:
             assert env.data.get("vcpus") == os.cpu_count(), "vcpus is not this host's CPU count"
@@ -839,9 +965,12 @@ async def _resources_describe(
     return {"resources": len(rows), "host_facts_equal": True}
 
 
-async def _availability(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
-    env = one(await caller.call("resources.availability", {}, caller.token(grants), discover=True))
-    expected = await _availability_expected(db_url, grants.projects)
+async def _compare_availability(
+    caller: HttpCaller, token: str, db_url: str, projects: tuple[str, ...]
+) -> dict[str, object]:
+    """One ``resources.availability`` read compared with the database; the expectation."""
+    env = one(await caller.call("resources.availability", {}, token, discover=True))
+    expected = await _availability_expected(db_url, projects)
     hosts = cast(dict[str, dict[str, Any]], expected["hosts"])
     pcie = cast(set[str], expected["pcie_shapes"])
     fields = ("schedulable", "cap", "in_use", "headroom")
@@ -858,7 +987,31 @@ async def _availability(caller: HttpCaller, grants: Grants, *, db_url: str) -> d
     assert queue.get("total") == expected["queued"], f"queue depth {queue} != {expected['queued']}"
     union = set().union(*(h["fits"] for h in hosts.values()))
     assert set(cast(list[str], env.data.get("fits_now"))) - pcie == union
-    return {"hosts": len(hosts), "queued": expected["queued"], "fits_now": sorted(union)}
+    return expected
+
+
+async def _availability(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
+    """Compare the idle fleet, then the fleet holding one allocation this cell controls."""
+    token = caller.token(grants)
+    idle = await _compare_availability(caller, token, db_url, grants.projects)
+    if not _open_hosts(idle):
+        raise ScenarioStop(Outcome.BLOCKED, "no schedulable host with headroom to allocate on")
+    sizing = {"vcpus": 1, "memory_gb": 1, "disk_gb": 1}
+    async with _granted(caller.base_url, caller.issuer, db_url, sizing) as grant:
+        held = await _compare_availability(caller, token, db_url, grants.projects)
+        host = str(grant["resource_id"])
+        before = cast(dict[str, dict[str, Any]], idle["hosts"])[host]
+        during = cast(dict[str, dict[str, Any]], held["hosts"])[host]
+        assert during["in_use"] == before["in_use"] + 1, "the grant did not occupy its host"
+        allocation = str(grant["id"])
+    after = await _compare_availability(caller, token, db_url, grants.projects)
+    assert after["hosts"] == idle["hosts"], "the released allocation did not free its host"
+    return {
+        "hosts": len(cast(dict[str, object], idle["hosts"])),
+        "held_host": host,
+        "queued": idle["queued"],
+        "owned": [allocation],
+    }
 
 
 _FUNCTIONAL = {
@@ -875,6 +1028,7 @@ _FUNCTIONAL = {
     "shapes.set": _shapes_set,
 }
 _WRITERS = {"images.delete", "images.list", "images.upload"}
+_GATED = {"images.delete", "images.upload", "shapes.delete", "shapes.set"}
 
 
 def _functional_grants(tool: str, project: str) -> Grants:
@@ -885,7 +1039,7 @@ def _functional_grants(tool: str, project: str) -> Grants:
 
 def _valid(tool: str, project: str) -> dict[str, object]:
     """Arguments that change nothing for the cell's issued-token control call."""
-    return {
+    table: dict[str, dict[str, object]] = {
         "images.delete": {"image_id": _ABSENT_ID},
         "images.describe": {"image_id": _ABSENT_ID},
         "images.kernel_config": {"image_id": _ABSENT_ID},
@@ -899,21 +1053,26 @@ def _valid(tool: str, project: str) -> dict[str, object]:
         # A real preset: only the boundary keeps these from rewriting or removing it.
         "shapes.set": {"name": "small", "vcpus": 64, "memory_mb": 65536, "disk_gb": 1},
         "shapes.delete": {"name": "small"},
-    }.get(tool, {})
+    }
+    return table.get(tool, {})
 
 
 def _invalid(tool: str, project: str) -> dict[str, object]:
     """Schema-invalid arguments: a missing required argument or a mistyped ``request`` field."""
-    return {
+    table: dict[str, dict[str, object]] = {
         "images.list": {"request": {"limit": "many"}},
         "images.upload": {"project": project},
         "resources.availability": {"request": {"include_devices": "maybe"}},
         "resources.list": {"request": {"limit": "many"}},
         "shapes.set": {"name": "cov-invalid"},
-    }.get(tool, {})
+    }
+    return table.get(tool, {})
 
 
 def _rejection_grants(tool: str, boundary: Boundary, project: str) -> Grants:
+    if boundary == "validation" and tool in _GATED:
+        # tools.invoke reports field_errors only for a tool the token can see (ADR-0722 §3).
+        return _functional_grants(tool, project)
     if boundary == "project-isolation":
         return _operator(f"cov-{secrets.token_hex(4)}")
     if boundary == "authorization" and tool.startswith("shapes."):
@@ -970,11 +1129,14 @@ File: `docs/operating/runbooks/live-testing.md`, the tool-cell section added by 
 Verification: runbook section — Mode: task-test-not-applicable. Surface: operator prose. Reason:
 no executable consumer reads it; `just docs-check` covers its links and paths.
 
-Steps: add a subsection naming the catalog carrier, its precondition
+Steps: add a subsection naming the catalog carrier; its precondition
 (`examples/local-libvirt/build-image.sh fedora-kdive-ready-44` after the first `demo-up.sh`; the
-image survives `demo-down.sh --wipe` because it is a host file and the reconcile re-registers it),
-that it writes and removes a `cov-` shape and project-private images plus their objects, and the
-pytest command (both carriers in one invocation per lane). Run `just docs-check`; commit
+image is a host file, so a wiped stack re-registers it on the next bring-up's reconcile); the
+environment its process needs (`source examples/local-libvirt/env.sh` for the stack, issuer,
+`KDIVE_S3_*`, `AWS_*`, `KDIVE_LIBVIRT_URI` and `KDIVE_PROJECT`, plus `KDIVE_DATABASE_URL` set to
+the migration DSN); that it writes and removes a `cov-` shape, project-private images and their
+objects, and a released allocation in the funded project; and the pytest command running both
+carriers in one invocation per lane. Run `just docs-check`; commit
 `docs(runbook): run the catalog tool cells`.
 
 ## Task 4 — live proof
@@ -985,11 +1147,15 @@ Steps on the disposable lab host, at the pushed branch head:
 
 1. Ship the branch, `just sync`, `just build-capture-bootstrap-manifest`, write bindings with
    `python -m tests.integration.live_stack.tool_cells bindings --candidate <HEAD> --out inputs.json`.
-2. Per lane (`default`, then `recovery` with `KDIVE_WORKER_DEATH_VERIFIER=docker`): `demo-up.sh`,
-   confirm each `/readyz` reports HEAD, then run both carriers with `KDIVE_DATABASE_URL` set to the
-   migration DSN and one `KDIVE_ARTIFACT_DIR`.
-3. Assemble once, `qualify --inputs inputs.json --results results.json`; expect every
+2. Lane `default`: `demo-up.sh`; if `systems.toml` declares no staged image, run
+   `build-image.sh fedora-kdive-ready-44` and confirm its catalog row is `registered`; confirm each
+   `/readyz` reports HEAD; run both carriers in a shell that sourced `env.sh`, with
+   `KDIVE_DATABASE_URL` set to the migration DSN and one `KDIVE_ARTIFACT_DIR`.
+3. Lane `recovery`: re-run `demo-up.sh` with `KDIVE_WORKER_DEATH_VERIFIER=docker` on the same
+   stack (no wipe between lanes, as the #2811 proof did), confirm `/readyz`, run both carriers
+   again into the same `KDIVE_ARTIFACT_DIR`.
+4. Assemble once, `qualify --inputs inputs.json --results results.json`; expect every
    group-3095 and #2811 cell `yes` (208 = 152 + 56).
-4. A failing cell caused by product behaviour: file a `status:needs-triage` issue linked to #3095
+5. A failing cell caused by product behaviour: file a `status:needs-triage` issue linked to #3095
    and leave the cell failed; never bend the assertion to pass it.
-5. `demo-down.sh --wipe --yes`; update the private lab state notes.
+6. `demo-down.sh --wipe --yes`; update the private lab state notes.

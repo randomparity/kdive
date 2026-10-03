@@ -58,7 +58,19 @@ reassembly writes such an object with metadata `sensitivity=sensitive`,
 without it. The carrier PUTs the precondition image's qcow2 bytes with that metadata to
 `uploads/q/<project>/<name>.qcow2` through boto3 (credentials from the stack's `AWS_*`), and
 deletes every version of that key and of the registered image's published object when the cell
-ends. The published object would otherwise wait for the reconciler's leaked-object sweep.
+ends, then lists each key and fails `cleanup` if a version remains. The published object would
+otherwise wait for the reconciler's leaked-object sweep. A cleanup failure after a failed body
+does not replace the body's error.
+
+### Admission fixtures
+
+Two observations need admission and occupied capacity: `shapes.set` ("use its resource dimensions
+in admission") and `resources.availability` ("controlled resource state"). Both use
+`allocations.request` and `allocations.release` as fixtures, as the operator, in the project the
+bring-up funded (`KDIVE_PROJECT`); those tools' own cells stay with #3098. Admission is
+synchronous: a grant or a refusal returns at once, and a release answers `released`. The released
+row stays as history in the funded project, outside the cell's snapshot; the fixture proves its
+cleanup by the `released` state and the occupancy it gives back.
 
 ### Functional effects
 
@@ -68,28 +80,24 @@ database (read-only), `systems.toml` with the build-fs siblings, the test host's
 
 | Tool | Effect asserted |
 |---|---|
-| `images.describe` | identity, format, root device, visibility and capabilities equal the `systems.toml` block; `digest` is the SHA-256 of the qcow2 file; `provenance` equals the sidecar's |
+| `images.describe` | identity, format, root device, visibility and capabilities equal the `systems.toml` block; `digest` is the SHA-256 of the qcow2 file; `provenance` equals the sidecar's; the computed `capability_signals` carry the sidecar's makedumpfile and drgn versions and boot-kernel count |
 | `images.kernel_config` | the presigned download's SHA-256 and length equal `<qcow2>.config`'s; `default_kernel_version` equals the sidecar's |
 | `images.list` | after the cell uploads a private image to project A, A's viewer lists exactly the public rows plus A's rows (database), including the new image; a viewer of a fresh project B lists exactly the public rows |
 | `images.upload` | the row is `registered`, `private`, owned by the project, its digest equals the uploaded bytes' SHA-256 and its provenance names the quarantine key; the published object exists; another project's viewer gets `not_found` from `images.describe` |
 | `images.delete` | the uploaded row is gone and every other `image_catalog` id is unchanged; `images.describe` answers `not_found` |
 | `shapes.list` | names, dimensions and PCIe match equal the `system_shapes` rows, sorted by name |
-| `shapes.set` | a `cov-` shape set above the largest schedulable host's vCPU ceiling is listed with those dimensions and absent from `resources.availability(shape=…)` `fits_now`; re-set within the ceiling it is listed updated and present in `fits_now`; then it is deleted |
+| `shapes.set` | a `cov-` shape set one vCPU above every visible host's ceiling reads back from the catalog, and admission refuses it naming `vcpus`; re-set to 1 vCPU, 1 GiB, 1 GB it reads back updated and admission grants an allocation sized exactly so; the allocation is released and the shape deleted |
 | `shapes.delete` | a `cov-` shape created first is gone and every other row is unchanged |
 | `resources.list` | ids, kind, status, arch, vCPUs and memory equal the database rows visible to the caller (global, owned or allow-listed) |
-| `resources.describe` | each visible resource's kind, status, pool, cost class and host URI equal its row; the local discovered host's vCPUs and memory equal this host's CPU count and `MemTotal` |
-| `resources.availability` | per host: cap, in-use (granted/active/releasing allocations), headroom and schedulability equal the database; `fits` equals the shapes whose vCPUs and memory fit a schedulable host with headroom; queue depth equals the count of `requested` allocations |
-
-`resources.availability` is the only admission read a group-3095 tool can reach: it applies
-admission's size-ceiling predicate (`src/kdive/mcp/tools/catalog/availability.py`). Proving a
-granted allocation belongs to `allocations.request` (#3098).
+| `resources.describe` | each visible resource's kind, status, pool, cost class, host URI, arch, vCPUs, memory and transports equal its row; the local discovered host's vCPUs and memory equal this host's CPU count and `MemTotal` |
+| `resources.availability` | three reads — idle, holding one 1-vCPU allocation, after its release — each equal the database per host (cap, in-use as granted/active/releasing allocations, headroom, schedulability, and `fits` as the shapes whose vCPUs and memory fit a schedulable host with headroom) and in queue depth (`requested` rows); the held host's in-use rises by one and the released read equals the idle one |
 
 ### Rejection cells
 
 | Boundary | Tools | Grants and arguments |
 |---|---|---|
 | authentication | all 11 | viewer of the cell's project; valid arguments that change nothing for the issued-token control (an absent quarantine key, an unknown image id, a shape write the viewer may not make) |
-| validation | all but `shapes.list` | a missing required argument or a mistyped `request` field |
+| validation | all but `shapes.list` | a missing required argument or a mistyped `request` field; the token holds the lowest grant that makes the tool visible (operator for `images.{upload,delete}`, `platform_operator` for `shapes.{set,delete}`, viewer otherwise), because `tools.invoke` reports `field_errors` only for a visible tool |
 | authorization | `images.{upload,delete}`, `shapes.{set,delete}` | viewer (not operator) of the image's project; `platform_auditor` without `platform_operator`, aimed at a real preset |
 | project-isolation | `images.{upload,delete}` | a member of another project only |
 
@@ -106,7 +114,10 @@ and deletes it on exit. Every category accepted is `authorization_denied`.
    objects behind (the stack is wiped after the proof); concurrent writers to the catalog are not
    modelled (one carrier runs at a time); a remote-libvirt host's facts are compared only with its
    row; a shape with a PCIe match is left out of the `fits` comparison (the seeded presets carry
-   none).
+   none); queue depth is compared with the database but not driven (on the lab stack a second
+   request with `on_capacity="queue"` answered `quota_exceeded`, not a queued row); the provider
+   capability planes of `resources.describe` are recorded but not compared (no source but the
+   provider runtime); released fixture allocations stay as history in the funded project.
 4. **Covered elsewhere:** the recovery tools' cells (#2812); the upload ingest that produces a
    quarantined object (the `artifacts.*` upload tools, #3096).
 
@@ -115,7 +126,7 @@ and deletes it on exit. Every category accepted is `authorization_denied`.
 | Contract | Mode | Evidence |
 |---|---|---|
 | `prove_functional` owned resources | focused-test | `test_tool_cells.py`: a body returning `owned` records it under `cleanup` and not under `effect` |
-| `prove_rejection` setup bracket | focused-test | `test_tool_cells.py`: overrides reach the call; a setup that leaves state fails `cleanup`; a call that changes state fails `unchanged-state` |
+| `prove_rejection` setup bracket | focused-test | `test_tool_cells.py`: overrides reach the call; a setup that leaves state fails `cleanup`; a call that changes state under a setup fails `unchanged-state` |
 | catalog bindings | focused-test | `test_coverage_contract.py`: the 152 group-3095 cells bind to the new node; unbound set shrinks by exactly them |
 | live cells | task-test-not-applicable | the cells need a live stack; proven by the two-lane lab run, `qualify` over 208 tool cells |
 | runbook section | task-test-not-applicable | prose; `just docs-check` covers links and paths |
