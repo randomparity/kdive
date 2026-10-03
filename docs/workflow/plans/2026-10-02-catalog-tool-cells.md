@@ -108,7 +108,7 @@ def _setup(state: list[int], *, leak: bool = False) -> tool_cells.Setup:
 
 
 def test_setup_overrides_reach_the_call(tmp_path: Path) -> None:
-    run, state = _run(tmp_path, "authorization"), []
+    run, state = _run(tmp_path, "authentication"), []
     caller = _Caller("direct", result=ToolResponse.denied("x"))
 
     async def snap() -> object:
@@ -125,7 +125,7 @@ def test_setup_overrides_reach_the_call(tmp_path: Path) -> None:
 
 
 def test_setup_left_state_fails_cleanup(tmp_path: Path) -> None:
-    run, state = _run(tmp_path, "authorization"), []
+    run, state = _run(tmp_path, "authentication"), []
     caller = _Caller("direct", result=ToolResponse.denied("x"))
 
     async def snap() -> object:

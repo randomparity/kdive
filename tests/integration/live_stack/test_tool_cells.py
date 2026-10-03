@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -23,11 +25,13 @@ from tests.integration.live_stack.scenario import CellRun
 from tests.integration.live_stack.tool_cells import (
     RECOVERY_TOOLS,
     Grants,
+    HttpCaller,
     Rejection,
     bindings,
     claims_of,
     configuration_of,
     forge,
+    prove_functional,
     prove_rejection,
     rejected_by_validation,
 )
@@ -228,6 +232,99 @@ def test_changed_state_fails_the_rejection(tmp_path: Path) -> None:
             )
         )
     assert "unchanged-state" not in run.assertions
+
+
+def _artifact(run: CellRun, assertion: str) -> dict[str, object]:
+    path = run.writer.root / "artifacts" / run.assertions[assertion]
+    return cast(dict[str, object], json.loads(path.read_text()))
+
+
+def test_functional_owned_moves_to_cleanup(tmp_path: Path) -> None:
+    run = _run(tmp_path, "functional")
+
+    async def body(caller: HttpCaller, grants: Grants) -> dict[str, object]:
+        return {"rows": 2, "owned": ["cov-shape"]}
+
+    caller = cast(HttpCaller, _Caller("direct"))
+    asyncio.run(prove_functional(run, caller, _GRANTS, body, _snapshot(1, 1)))
+    assert _artifact(run, "cleanup")["owned"] == ["cov-shape"]
+    assert "owned" not in _artifact(run, "effect") and _artifact(run, "effect")["rows"] == 2
+
+
+def _setup(state: list[int], *, leak: bool = False) -> tool_cells.Setup:
+    @asynccontextmanager
+    async def setup() -> AsyncIterator[Mapping[str, object]]:
+        state.append(1)
+        yield {"image_id": "img-1"}
+        if not leak:
+            state.pop()
+
+    return setup
+
+
+def test_setup_overrides_reach_the_call(tmp_path: Path) -> None:
+    run, state = _run(tmp_path, "authentication"), []
+    caller = _Caller("direct", result=ToolResponse.denied("x"))
+
+    async def snap() -> object:
+        return list(state)
+
+    asyncio.run(
+        prove_rejection(
+            run, caller, "authorization", Rejection({"a": 1}, _GRANTS), snap, setup=_setup(state)
+        )
+    )
+    assert caller.calls == [("tools.search", {"a": 1, "image_id": "img-1"})]
+    assert _artifact(run, "cleanup")["owned"] == ["img-1"]
+    assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
+
+
+def test_setup_left_state_fails_cleanup(tmp_path: Path) -> None:
+    run, state = _run(tmp_path, "authentication"), []
+    caller = _Caller("direct", result=ToolResponse.denied("x"))
+
+    async def snap() -> object:
+        return list(state)
+
+    with pytest.raises(AssertionError, match="left state behind"):
+        asyncio.run(
+            prove_rejection(
+                run,
+                caller,
+                "authorization",
+                Rejection({}, _GRANTS),
+                snap,
+                setup=_setup(state, leak=True),
+            )
+        )
+    assert "unchanged-state" in run.assertions and "cleanup" not in run.assertions
+
+
+def test_setup_call_changing_state_fails_unchanged_state(tmp_path: Path) -> None:
+    run, state = _run(tmp_path, "authentication"), []
+
+    class _Writing(_Caller):
+        async def call(
+            self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
+        ) -> ToolResponse | list[ToolResponse]:
+            state.append(2)
+            return ToolResponse.denied("x")
+
+    async def snap() -> object:
+        return list(state)
+
+    with pytest.raises(AssertionError, match="protected state changed"):
+        asyncio.run(
+            prove_rejection(
+                run,
+                _Writing("direct"),
+                "authorization",
+                Rejection({}, _GRANTS),
+                snap,
+                setup=_setup(state),
+            )
+        )
+    assert "unchanged-state" not in run.assertions and "cleanup" not in run.assertions
 
 
 def test_forge_keeps_claims_and_changes_signature() -> None:
