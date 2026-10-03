@@ -233,6 +233,8 @@ def test_filtering_list_stops_blocked_naming_its_owner(tmp_path: Path) -> None:
         )
     assert stop.value.outcome is Outcome.BLOCKED
     assert "authorization" not in run.assertions
+    retained = json.loads((run.writer.root / "artifacts" / run.artifacts[-1]).read_text())
+    assert retained["filtered_by"] == "#3108" and "empty page" in retained["blocked"]
 
 
 def test_filtering_list_that_rejects_still_qualifies(tmp_path: Path) -> None:

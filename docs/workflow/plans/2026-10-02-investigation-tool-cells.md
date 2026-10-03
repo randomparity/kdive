@@ -63,7 +63,8 @@ class Rejection:
 Behaviour in `_observe`, for the authorization and project-isolation boundaries only:
 
 - `filtered_by` set and a successful envelope with no items: raise
-  `ScenarioStop(Outcome.BLOCKED, "...; <filtered_by> owns the decision")`.
+  `ScenarioStop(Outcome.BLOCKED, "...; <filtered_by> owns the decision")`; `prove_rejection` first
+  retains an artifact naming `filtered_by` and the stop reason on the record.
 - Any other answer: the existing category assertion.
 - `absent_twin` set, after the category passes: call the tool again with those arguments and the
   same token, then assert that `_answer(result, args) == _answer(twin, absent_twin)`. `_answer`

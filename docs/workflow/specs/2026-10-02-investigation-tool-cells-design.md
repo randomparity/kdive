@@ -194,7 +194,9 @@ Notes on the table:
   `artifacts.list` (project-isolation) filter instead of rejecting: the caller gets an empty `ok`
   page (`services/investigations/read.py`, `services/artifacts/listing.py`). ADR-0722 §3 cannot be
   met by these 12 cells. They pass `filtered_by="#3108"`, so an empty `ok` page stops the cell
-  `blocked`, naming #3108. That records a known and owned cause rather than an unknown failure.
+  `blocked`. The harness retains an artifact on the record naming #3108 and the answer. The
+  record's impediment is still the run frame's generic `missing-prerequisite`, which only the
+  frame could change. This records a known and owned cause rather than an unknown failure.
   A real rejection still runs the normal assertion and qualifies. #3108 decides what isolation
   evidence a filtering list tool owes. These cells are never coverage while they stop `blocked`.
 

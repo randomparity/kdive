@@ -366,7 +366,16 @@ async def prove_rejection(
     async with context as overrides:
         effective = replace(rejection, args={**rejection.args, **overrides})
         before = await snapshot()
-        observation = await _observe(caller, operation, boundary, effective)
+        try:
+            observation = await _observe(caller, operation, boundary, effective)
+        except ScenarioStop as stop:
+            # The record's impediment is the generic missing-prerequisite; this artifact names
+            # the owner and what the call answered.
+            blocked = {"cell": run.cell.id, "boundary": boundary, "blocked": str(stop)}
+            run.artifacts.append(
+                run.writer.artifact({**blocked, "filtered_by": rejection.filtered_by})
+            )
+            raise
         run.prove(boundary, {"exposure": caller.exposure, **observation})
         after = await snapshot()
         assert after == before, f"protected state changed across the rejected {operation}"
