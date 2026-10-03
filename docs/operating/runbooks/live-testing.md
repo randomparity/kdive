@@ -783,6 +783,10 @@ live Run and the upload manifests and artifact rows they own; closed and ended o
 - `investigations.list` authorization and project-isolation and `artifacts.list`
   project-isolation fail: those tools answer an empty page instead of rejecting the call (#3108).
 
+A lane's expected failures are exactly those 12 cells (6 per lane). The System is released in a
+module finalizer outside every cell, so a failed reclaim shows only as an `ERROR at teardown` of
+`test_investigation_tool_cell`; record that line, if present, with the run's result.
+
 A cell killed mid-run can leave an open investigation, a created Run or the System;
 `demo-down.sh --wipe --yes` clears them, as it clears the history above.
 

@@ -659,6 +659,7 @@ async def _pages(
         cursor = env.data.get("next_cursor")
         if not env.data.get("truncated") or not cursor:
             return ids
+        assert cursor != request.get("cursor"), f"{tool} repeated its cursor"
         request = {**request, "cursor": cursor}
 
 
@@ -879,8 +880,8 @@ async def _complete_rootfs_upload(
         )
         assert not manifests, "the finalize left its upload manifest"
     pending = (await _investigation_row(db_url, inv.id))["rootfs_cleanup_pending_at"]
-    assert pending is not None, "the close did not schedule the rootfs reclaim"
-    return {"handle_is_digest": True, "close_scheduled_reclaim": True, "owned": [inv.id, key]}
+    assert pending is not None, "the close did not mark the rootfs reclaim pending"
+    return {"handle_is_digest": True, "close_marked_pending": True, "owned": [inv.id, key]}
 
 
 async def _fetch_raw(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
@@ -898,10 +899,12 @@ async def _fetch_raw(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict
         assert (env.data.get("asset"), env.data.get("size_bytes")) == ("vmlinux", len(vmlinux))
     run = await _rows(db_url, "SELECT state FROM runs WHERE id = %s", (run_id,))
     pending = (await _investigation_row(db_url, inv.id))["cleanup_pending_at"]
-    assert run[0]["state"] == "succeeded" and pending is not None, "the build is not handed off"
+    assert run[0]["state"] == "succeeded" and pending is not None, (
+        "the build did not succeed or the close marked no GC"
+    )
     return {
         "bytes_equal": len(vmlinux),
-        "close_scheduled_build_gc": True,
+        "close_marked_pending": True,
         "owned": [inv.id, run_id],
     }
 
