@@ -3112,3 +3112,18 @@ def test_role_creates_the_server_debug_directory() -> None:
         "mode": "0750",
         "follow": False,
     }
+
+
+def test_local_worker_host_packages_provision_pahole_per_family() -> None:
+    """A BTF kernel build needs `pahole`, and the live worker host play does not include
+    libvirt_stack, so this role must install its provider on every family (#2734)."""
+    defaults = _yaml(DEFAULTS)
+    providers = {
+        "live_vm_host_packages": "pahole",
+        "local_worker_host_packages_redhat": "dwarves",
+        "local_worker_host_packages_suse": "dwarves",
+    }
+    for family_list, provider in providers.items():
+        packages = defaults[family_list]
+        assert isinstance(packages, list)
+        assert provider in packages, family_list
