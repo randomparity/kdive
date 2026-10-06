@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -14,10 +15,10 @@ from typing import cast
 import pytest
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.dev_harness import LiveStackToolError, make_keypair
+from kdive.mcp.dev_harness import LiveStackToolError, OidcIssuer, make_keypair
 from kdive.mcp.responses import ToolResponse
 from kdive.serialization import JsonValue
-from scripts.coverage_campaign.contract import build_contract
+from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import scenario, tool_cells
 from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
@@ -422,22 +423,137 @@ def test_forge_keeps_claims_and_changes_signature() -> None:
     assert header["kid"] == "issuer-key-1"
 
 
-def test_bindings_cover_bound_tool_cells() -> None:
+def _cell(operation: str, provider: str, arch: str, kind: str = "functional") -> Cell:
+    return next(
+        c
+        for c in build_contract().cells
+        if c.operation == operation
+        and c.provider == provider
+        and c.guest_arch == arch
+        and c.kind == kind
+    )
+
+
+def _bound(cell: Cell) -> Cell:
+    return replace(cell, node_id="tests/x.py::test_x")
+
+
+def test_bindings_cover_bound_tool_cells(tmp_path: Path) -> None:
     contract = build_contract()
     whoami = [c for c in contract.cells if c.operation == "session.whoami"]
-    bound = [replace(c, node_id="tests/x.py::test_x") for c in whoami]
+    bound = [_bound(c) for c in whoami]
     unbound = replace(whoami[0], node_id=None, id="unbound")
-    provider = next(c for c in contract.cells if c.provider == "local-libvirt")
-    native = replace(provider, node_id="tests/x.py::test_x")
+    native = _bound(_cell("systems.ssh_info", "local-libvirt", "x86_64"))
+    foreign = _bound(_cell("systems.ssh_info", "local-libvirt", "ppc64le"))
+    remote = _bound(_cell("systems.ssh_info", "remote-libvirt", "x86_64"))
+    image = tmp_path / "image.qcow2"
+    image.write_bytes(b"lane")
     inputs = bindings(
         "a" * 40,
         host_os="fedora:44",
         host_arch="x86_64",
         matrix=contract.matrix_sha256,
-        cells=[*bound, unbound, native],
+        cells=[*bound, unbound, native, foreign, remote],
+        staged=lambda _name: image,
     )
-    assert set(inputs.cells) == {c.id for c in bound}
-    assert {c.accelerator for c in inputs.cells.values()} == {"none"}
+    assert set(inputs.cells) == {c.id for c in bound} | {native.id}
+    assert {inputs.cells[c.id].accelerator for c in bound} == {"none"}
+    lane = inputs.cells[native.id]
+    assert (lane.guest_os, lane.guest_arch, lane.accelerator) == ("fedora:44", "x86_64", "kvm")
+    assert lane.image_sha256 == hashlib.sha256(b"lane").hexdigest()
+
+
+def test_kernel_inputs_bind_only_declaring_cells() -> None:
+    kernel = {"kernel_sha256": "c" * 64, "kernel_build_id": "d" * 40}
+    install = _bound(_cell("runs.install", "local-libvirt", "x86_64"))
+    ssh_info = _bound(_cell("systems.ssh_info", "local-libvirt", "x86_64"))
+    inputs = bindings(
+        "a" * 40,
+        host_os="fedora:44",
+        host_arch="x86_64",
+        matrix="b" * 64,
+        cells=[install, ssh_info],
+        staged=lambda _name: None,
+        kernel=kernel,
+    )
+    assert inputs.cells[install.id].kernel_sha256 == "c" * 64
+    assert inputs.cells[install.id].kernel_build_id == "d" * 40
+    assert inputs.cells[install.id].image_sha256 is None
+    assert inputs.cells[ssh_info.id].kernel_sha256 is None
+
+
+def test_declared_authority_fails_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sha = "a" * 40
+    roles = {"server": sha, "worker": sha, "reconciler": sha}
+    identity = RunIdentity(sha, "b" * 64, "fedora:44", "x86_64", True, roles)
+    monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
+    monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
+    monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
+    cell = _bound(_cell("runs.install", "local-libvirt", "x86_64"))
+    assert "authority" in cell.roles
+
+    async def body(run: CellRun, *_: object) -> None:
+        for name in cell.assertions:
+            run.prove(name, {})
+
+    with pytest.raises(AssertionError, match="missing:authority"):
+        scenario.run_cell(cell, body)
+
+
+def test_foreign_arch_cell_skips_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_stack() -> str:
+        raise AssertionError("the stack must not be read")
+
+    monkeypatch.setattr(tool_cells, "require_stack", no_stack)
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
+    cell = _cell("systems.ssh_info", "local-libvirt", "ppc64le")
+
+    async def never(*_: object) -> None:
+        raise AssertionError("the scenario must not run")
+
+    with pytest.raises(pytest.skip.Exception, match="ppc64le"):
+        tool_cells.run_tool_cell(cell, never)
+
+
+def test_lane_target_prepares_once_and_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    issuer = cast(OidcIssuer, object())
+    target = tool_cells.LaneTarget("cov-t", "alloc", "sys", {"guest_arch": "x86_64"}, ("a" * 64,))
+
+    async def prepared(_run: CellRun, _target: CellRun, url: str, *_: object) -> object:
+        calls.append(url)
+        return target
+
+    monkeypatch.setattr(tool_cells, "_TARGETS", {})
+    monkeypatch.setattr(tool_cells, "_provision_target", prepared)
+    for run in (_run(tmp_path, "authentication"), _run(tmp_path, "authentication")):
+        assert asyncio.run(tool_cells.lane_target(run, "u1", issuer, "db")) is target
+        assert run.observed["guest_arch"] == "x86_64"
+        assert run.artifacts == ["a" * 64]
+    assert calls == ["u1"]
+
+    async def blocked(_run: CellRun, into: CellRun, *_: object) -> object:
+        into.artifacts.append("b" * 64)
+        raise ScenarioStop(Outcome.BLOCKED, "no lane image")
+
+    monkeypatch.setattr(tool_cells, "_provision_target", blocked)
+    for _ in range(2):
+        run = _run(tmp_path, "authentication")
+        with pytest.raises(ScenarioStop, match="no lane image"):
+            asyncio.run(tool_cells.lane_target(run, "u2", issuer, "db"))
+        assert run.artifacts == ["b" * 64]
+
+    async def broken(*_: object) -> object:
+        raise RuntimeError("provision failed")
+
+    monkeypatch.setattr(tool_cells, "_provision_target", broken)
+    with pytest.raises(AssertionError, match="provision failed"):
+        asyncio.run(tool_cells.lane_target(_run(tmp_path, "authentication"), "u3", issuer, "db"))
 
 
 def test_run_cell_records_the_proven_outcome(
