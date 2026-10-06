@@ -85,7 +85,6 @@ _LOCAL_WORKER_CHECKS = {
     DEPMOD_TOOLCHAIN_ID,
 }
 _DENIED = ErrorCategory.AUTHORIZATION_DENIED.value
-_UNAVAILABLE = WORKER_UNAVAILABLE_DETAIL
 _SIZING = {"vcpus": 1, "memory_gb": 1, "disk_gb": 1}
 _SETTLE_ATTEMPTS = 3
 _PAGED_JOBS = 5
@@ -172,11 +171,13 @@ _AUDIT_ROWS: LiteralString = (
 )
 
 
-def _audit_view(data: Mapping[str, object]) -> dict[str, object]:
+def _trail_view(data: Mapping[str, object]) -> dict[str, object]:
+    """A served audit or invocation row, its timestamp parsed."""
     return {**data, "ts": _when(data["ts"])}
 
 
-def _audit_row(row: Mapping[str, object]) -> dict[str, object]:
+def _trail_row(row: Mapping[str, object]) -> dict[str, object]:
+    """A stored audit or invocation row as the tools serve it: NULL becomes ``""``."""
     return {k: (row[k] if k == "ts" else _text(row[k])) for k in row}
 
 
@@ -191,7 +192,7 @@ async def _audit(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str
         request = {"scope": "project", "project": target, "limit": limit}
         denied = await actor.call("audit.query", {"request": request}, member_token)
         assert isinstance(denied, ToolResponse) and denied.error_category == _DENIED, denied
-    rows = [_audit_row(r) for r in await _rows(db_url, _AUDIT_ROWS, (member.subject,))]
+    rows = [_trail_row(r) for r in await _rows(db_url, _AUDIT_ROWS, (member.subject,))]
     assert [r["project"] for r in rows] == [other, project, project], rows
     assert {r["transition"] for r in rows} == {"denied"} and {r["tool"] for r in rows} == {
         "audit.query"
@@ -203,11 +204,11 @@ async def _audit(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str
         {"scope": "project", "project": project, "principal": member.subject},
         token,
     )
-    assert [_audit_view(i.data) for i in scoped] == [r for r in rows if r["project"] == project]
+    assert [_trail_view(i.data) for i in scoped] == [r for r in rows if r["project"] == project]
     everywhere = await _pages(
         caller, "audit.query", {"scope": "all-projects", "principal": member.subject}, token
     )
-    assert [_audit_view(i.data) for i in everywhere] == rows
+    assert [_trail_view(i.data) for i in everywhere] == rows
     return {"principal_rows": len(rows), "project_rows": len(scoped), "projects": 2}
 
 
@@ -418,7 +419,9 @@ async def _jobs(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str,
     )
     before = await _rows(db_url, newest)
     diagnosed = await _diagnose(caller, token)
-    unavailable = [i.data["check"] for i in diagnosed.items if i.data["detail"] == _UNAVAILABLE]
+    unavailable = [
+        i.data["check"] for i in diagnosed.items if i.data["detail"] == WORKER_UNAVAILABLE_DETAIL
+    ]
     assert not unavailable, f"the worker did not run {unavailable}; no job of this cell to list"
     known = (await _rows(db_url, newest))[0]
     assert [known] != before, "the diagnostics call enqueued no new worker-check job"
@@ -467,10 +470,7 @@ async def _trail(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str
     denied = await actor.call("inventory.list", {}, token)
     assert isinstance(denied, ToolResponse) and denied.error_category == _DENIED, denied
     session = f"{known.subject}-sess"
-    rows = [
-        {k: (row[k] if k == "ts" else _text(row[k])) for k in row}
-        for row in await _rows(db_url, _TRAIL, (session,))
-    ]
+    rows = [_trail_row(row) for row in await _rows(db_url, _TRAIL, (session,))]
     assert [(r["tool"], r["outcome"]) for r in rows] == [
         ("inventory.list", "denied"),
         ("session.whoami", "ok"),
@@ -480,7 +480,7 @@ async def _trail(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str
         (known.subject, "operator-cli", config.require(CLI_CLIENT_ID), args_digest({}))
     }
     pages = await _pages(caller, "ops.tool_trail", {"agent_session": session}, caller.token(grants))
-    assert [{**i.data, "ts": _when(i.data["ts"])} for i in pages] == rows
+    assert [_trail_view(i.data) for i in pages] == rows
     return {"calls": len(rows), "paged": len(pages)}
 
 
