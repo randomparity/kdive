@@ -830,17 +830,19 @@ needs `CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_BLK=y`, and `CONFIG_EXT4_FS=y`. The 
 reach the guest over SSH (console parts, first-boot host keys, and
 `test_spine_live_script_over_the_wire`) also need `CONFIG_VIRTIO_NET`; build it in (`=y`), or
 with `=m` make sure the guest loads the module before SSH starts, or the SSH banner exchange
-times out. `test_spine_live_script_over_the_wire` also needs `CONFIG_DEBUG_INFO_BTF=y`
-with a DWARF choice, the kdump crash-capture symbols its preflight names (`ppc64le_defconfig`
-already sets them), and a guest drgn that can read the BTF; see
+times out. The preflight of `test_spine_live_script_over_the_wire` also requires
+`CONFIG_DEBUG_INFO_BTF=y` with a DWARF choice and the kdump crash-capture symbols it names
+(`ppc64le_defconfig` already sets them). Passing that proof also needs matching DWARF debug
+information readable inside the guest: no released drgn reads kernel BTF, so
+`CONFIG_DEBUG_INFO_BTF` alone does not make drgn-live work (#3121); see
 [live and host-side debug information](../external-build-upload.md#choosing-your-kernel-config).
 
 The pinned debug fragment, `fixtures/kernel/debug.config`, sets all of these with `VIRTIO_NET=y`,
 so a ppc64le tree from `scripts/kernel_fixtures.py build --arch ppc64le` passes the kernel
 preflight of both proofs. BTF generation needs host `pahole`; the `local_worker_host` role
-installs the package that provides it. The guest side is separate: the drgn in the
-`fedora-kdive-ready-44-ppc64le` image cannot load the kernel's BTF, so on that image the live-script
-proof stops at `introspect-script` with `debuginfo_unloadable` whatever the kernel config.
+installs the package that provides it. The guest side is separate: without matching DWARF
+debug information readable inside the guest, the live-script proof stops at `introspect-script`
+with `debuginfo_unloadable` whatever the kernel config (#3121).
 
 To validate all four crash-capture methods against such a host, see the
 [four-method live run](four-method-live-run.md). Never hand-install a host

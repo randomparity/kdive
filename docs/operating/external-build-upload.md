@@ -144,7 +144,7 @@ CONFIG_FAULT_INJECTION_DEBUG_FS=y # the interface every site above registers thr
 CONFIG_DEBUG_FS=y                 # ... which in turn needs debugfs and sysfs
 CONFIG_SYSFS=y
 CONFIG_DEBUG_INFO_DWARF5=y  # host-side DWARF symbols; also needed when generating BTF
-CONFIG_DEBUG_INFO_BTF=y     # BTF: what in-guest drgn-live reads
+CONFIG_DEBUG_INFO_BTF=y     # BTF; no released drgn reads it - drgn-live needs DWARF
 CONFIG_PROVE_LOCKING=y      # lockdep
 CONFIG_DEBUG_ATOMIC_SLEEP=y # separate from lockdep: catches sleeping in atomic context
 ```
@@ -153,8 +153,8 @@ This is a starting point, not the whole menu. `resource://kdive/contracts/extern
 the per-feature `CONFIG_*` manifest — sanitizers, lock debugging, ftrace, BPF tracing, fault
 injection and coverage — each with what it finds and what it costs.
 
-**Live and host-side debug information have different consumers.** Guest drgn needs usable BTF
-at `/sys/kernel/btf/vmlinux` or matching debug information already readable inside the guest.
+**Live and host-side debug information have different consumers.** Guest drgn needs matching
+DWARF debug information already readable inside the guest; no released drgn reads kernel BTF.
 Building DWARF into the host's `vmlinux` does not place that file in the guest. For offline
 `introspect.from_vmcore` and host GDB, upload the matching unstripped `vmlinux` as described below.
 
@@ -169,8 +169,8 @@ When you do build a DWARF-heavy kernel, an operator can point `KDIVE_INSTALL_SCR
 mount to keep the large, short-lived install intermediates off the staging disk (mind the RAM
 tradeoff — see the config reference).
 
-`CONFIG_DEBUG_INFO_BTF=y` also needs a guest drgn build that can load the resulting BTF.
-If live introspection reports `debuginfo_unloadable`, use a compatible guest image/drgn build.
+`CONFIG_DEBUG_INFO_BTF=y` alone does not make drgn-live work.
+If live introspection reports `debuginfo_unloadable`, the guest lacks matching debug information.
 Uploading host `vmlinux` alone does not repair the guest helper's debug-info search. A missing
 warning is not proof of usable guest symbols; check the actual introspection result.
 
