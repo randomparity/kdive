@@ -54,8 +54,13 @@ on an uploaded kernel.
 - drgn-live now needs a `vmlinux` upload of hundreds of MB, and guest disks must hold it (#3125).
 - Images built before this change keep the old `-s /sys/kernel/btf/vmlinux` flag. drgn's CLI
   still loads default debug info after `-s` (`load_debug_info(args.symbols, default=True,
-  main=True)` in `drgn/cli.py` of 0.0.25 and 0.2.0). The real-guest result is added to this item
-  before this record is accepted.
+  main=True)` in `drgn/cli.py` of 0.0.25 and 0.2.0). Observed on 2026-10-06 on native POWER9
+  KVM-HV: a `fedora-kdive-ready-44-ppc64le` guest with the old helper, drgn `0.2.0-1.fc44`,
+  kernel `7.2.8-g9a66fdc0d7fd` with `/sys/kernel/btf/vmlinux` readable and the matching
+  `vmlinux` at `/usr/lib/debug/lib/modules/7.2.8-g9a66fdc0d7fd/vmlinux`.
+  `kdive-drgn run-script 120` printed `7.2.8-g9a66fdc0d7fd` from `init_uts_ns` (exit 0, 1.4 s),
+  and the probe `prog['init_task']` exited 0 in 0.6 s. Images with older drgn builds (0.0.22,
+  0.0.25) are not verified with the old helper.
 
 ## Considered & rejected
 
