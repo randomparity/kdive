@@ -17,9 +17,10 @@ The `live-testing.md` native spine section owns the operator-facing statement of
 kernel configuration. It names what each proof needs: `CONFIG_VIRTIO_PCI=y`,
 `CONFIG_VIRTIO_BLK=y`, and `CONFIG_EXT4_FS=y` for the ext4 guest root;
 `CONFIG_VIRTIO_NET` for the SSH proofs, built in or as a module the guest loads
-before SSH; and `CONFIG_DEBUG_INFO_BTF=y` with a DWARF choice for the live-script
-proof's preflight, stating that passing that proof also needs matching DWARF debug
-information readable inside the guest (#3121). It agrees with the spine kernel preflight
+before SSH; the kdump crash-capture symbols for the proofs that capture a vmcore; and
+`CONFIG_DEBUG_INFO_BTF=y` with `CONFIG_DEBUG_INFO_DWARF4=y` or `CONFIG_DEBUG_INFO_DWARF5=y`
+for the live-script proof's preflight, stating that passing that proof also needs
+matching DWARF debug information readable inside the guest (#3121). It agrees with the spine kernel preflight
 (`2026-09-24-spine-kernel-preflight-design.md`), which already enforces these
 symbols and accepts `VIRTIO_NET=y` or `=m`; this change does not alter the
 preflight. It states that the pinned `fixtures/kernel/debug.config` fragment used
