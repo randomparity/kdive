@@ -71,73 +71,37 @@ def test_absent_config_fails_open_to_no_warning():
     assert _call(config=None, has_uploaded_vmlinux=False) is None
 
 
-def test_config_with_btf_produces_no_warning():
-    cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"})
-    assert _call(config=cfg, has_uploaded_vmlinux=False) is None
-
-
-def test_config_with_dwarf_but_no_btf_still_warns():
-    # In-guest drgn-live reads BTF, not the kernel .config's DWARF (the DWARF vmlinux is not on the
-    # guest rootfs). A DWARF-only config with no uploaded vmlinux is still blind, so it must warn.
-    cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"})
-    warning = _call(config=cfg, has_uploaded_vmlinux=False)
-    assert warning is not None
-    assert warning["missing"] == ["DEBUG_INFO_BTF"]
-
-
-def test_config_lacking_btf_warns_and_names_btf():
-    cfg = all_builtin({"DEBUG_INFO", "DEBUG_KERNEL"})  # no BTF
-    warning = _call(config=cfg, has_uploaded_vmlinux=False)
+@pytest.mark.parametrize(
+    "symbols",
+    [
+        pytest.param({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"}, id="btf-only"),
+        pytest.param({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"}, id="dwarf-only"),
+        pytest.param(set(), id="empty"),
+    ],
+)
+def test_external_build_without_vmlinux_warns_and_names_vmlinux(symbols: set[str]):
+    # ADR-0723: no released drgn reads kernel BTF, so DEBUG_INFO_BTF plays no part.
+    warning = _call(config=all_builtin(symbols), has_uploaded_vmlinux=False)
     assert warning is not None
     assert warning["reason"] == MISSING_DEBUGINFO_REASON
-    assert warning["missing"] == ["DEBUG_INFO_BTF"]
-    assert "vmlinux" in warning["remediation"]
-
-
-def test_the_missing_debuginfo_remediation_names_a_dwarf_member_and_not_btf_alone():
-    # #1855. The warning keys on BTF, and that stays: it asks whether in-guest drgn can read
-    # /sys/kernel/btf, which is a different question from whether the kernel carries DWARF. But
-    # "enable CONFIG_DEBUG_INFO_BTF" on its own is advice a DEBUG_INFO=n kernel cannot follow -
-    # lib/Kconfig.debug:398 puts BTF inside `if DEBUG_INFO` (:325-455) and it selects nothing, so
-    # a fragment setting it alone is discarded by olddefconfig and the rebuild changes nothing.
-    # The remediation has to name the DWARF choice member that has to be picked first.
-    cfg = all_builtin({"DEBUG_KERNEL"})  # DEBUG_INFO=n: the unfollowable case
-    warning = _call(config=cfg, has_uploaded_vmlinux=False)
-    assert warning is not None
+    assert warning["missing"] == ["vmlinux"]
     remediation = cast(str, warning["remediation"])
-    # the prerequisite, by at least one settable choice member the agent can put in a fragment
-    assert "CONFIG_DEBUG_INFO_DWARF5" in remediation
-    # and the symbol the warning is actually keyed on, so the advice stays a two-step instruction
-    # rather than being replaced by the prerequisite
-    assert "CONFIG_DEBUG_INFO_BTF" in remediation
-    # the reason the order matters, so an agent that already has BTF in its fragment understands
-    # why the rebuild dropped it rather than reading the two names as interchangeable
-    assert "olddefconfig" in remediation
-    # unchanged escape hatch: a host vmlinux resolves symbols without touching the kernel config
     assert "vmlinux" in remediation
+    assert "does not read kernel BTF" in remediation
 
 
-def test_the_debuginfo_warning_still_keys_on_btf_alone_not_on_the_dwarf_prerequisite():
-    # The coupling #1855 must NOT "fix". A kernel carrying DWARF but no BTF is a complete debuginfo
-    # build for an offline vmcore and gdb, and in-guest drgn-live is still blind on it, so this
-    # seam must keep firing there - naming DWARF in the remediation may not turn into keying on it.
-    cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"})
-    warning = _call(config=cfg, has_uploaded_vmlinux=False)
-    assert warning is not None
-    assert warning["missing"] == ["DEBUG_INFO_BTF"]
-    # and the inverse: BTF present with no DWARF member named at all is silent, which is what
-    # proves the DWARF symbols are remediation prose here and not a second condition
-    btf_only = all_builtin({"DEBUG_INFO", "DEBUG_INFO_BTF"})
-    assert _call(config=btf_only, has_uploaded_vmlinux=False) is None
+@pytest.mark.parametrize("symbols", [{"DEBUG_INFO_BTF"}, {"DEBUG_INFO_DWARF5"}, set()])
+def test_any_config_with_an_uploaded_vmlinux_is_silent(symbols: set[str]):
+    assert _call(config=all_builtin(symbols), has_uploaded_vmlinux=True) is None
 
 
-def test_unloadable_warning_is_distinct_reason_naming_btf():
-    # The runtime-probe payload (ADR-0329) is a distinct reason from the static gate, but shares the
-    # {reason, missing, remediation} shape and keys on the same BTF symbol.
+def test_unloadable_warning_is_distinct_reason_naming_vmlinux():
+    # The runtime-probe payload (ADR-0329) is a distinct reason from the static gate but shares the
+    # {reason, missing, remediation} shape.
     warning = debuginfo_unloadable_warning()
     assert warning["reason"] == DEBUGINFO_UNLOADABLE_REASON
     assert warning["reason"] != MISSING_DEBUGINFO_REASON
-    assert warning["missing"] == ["DEBUG_INFO_BTF"]
+    assert warning["missing"] == ["vmlinux"]
     assert "vmlinux" in cast(str, warning["remediation"])
 
 

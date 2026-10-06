@@ -412,7 +412,6 @@ class DebugSessionHandlers:
             introspector=probe.introspector,
             transport_handle=str(handle),
             private_key=private_key,
-            has_uploaded_vmlinux=False,
         )
         return replace(plan.request, missing_debuginfo=warning)
 
@@ -510,11 +509,11 @@ def _runtime_probe(
 ) -> _RuntimeProbe | None:
     """Build the post-open runtime probe only when it can still change the verdict (ADR-0335).
 
-    Confined to the gap the static config check cannot cover: a drgn-live attach whose static
-    warning is silent (BTF advertised, or no config) and whose Run uploaded no host vmlinux. gdbstub
-    (symbolizes host-side), a Run that already warns, or an uploaded vmlinux pay nothing new.
+    Confined to a drgn-live attach whose static warning is silent, whether or not a vmlinux was
+    uploaded (ADR-0723: the guest may not have staged it). gdbstub (symbolizes host-side) and a Run
+    that already warns pay nothing new.
     """
-    if transport != _DRGN_LIVE or static_warning is not None or run.debuginfo_ref is not None:
+    if transport != _DRGN_LIVE or static_warning is not None:
         return None
     return _RuntimeProbe(system_id=system.id, introspector=introspector)
 

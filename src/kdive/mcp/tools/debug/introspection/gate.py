@@ -1,12 +1,12 @@
 """Runtime drgn-live symbol-resolution probe (ADR-0329, ADR-0335).
 
-The static config check (:func:`kdive.kernel_config.gate.debuginfo_warning`) proves BTF is
-*advertised* by the uploaded ``.config``, never that the running guest's drgn can load it. This
-module adds the runtime signal: a fixed one-line drgn lookup over the existing ``run_script`` seam
-that finds a session blind even when the config looked healthy. Both the live-introspection
-handlers and the ``debug.start_session`` attach seam call :func:`augment_with_runtime_probe` to fill
-the exact gap the static check cannot cover, so the probe's gating and fail-open semantics have one
-source of truth.
+The static config check (:func:`kdive.kernel_config.gate.debuginfo_warning`) proves only that no
+``vmlinux`` was uploaded, never that the running guest's drgn can resolve symbols from the one that
+was (ADR-0723). This module adds the runtime signal: a fixed one-line drgn lookup over the existing
+``run_script`` seam that finds a session blind even when a ``vmlinux`` was uploaded. Both the
+live-introspection handlers and the ``debug.start_session`` attach seam call
+:func:`augment_with_runtime_probe` to fill the exact gap the static check cannot cover, so the
+probe's gating and fail-open semantics have one source of truth.
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ from kdive.security.secrets.system_bootstrap_key import materialized_private_key
 from kdive.serialization import JsonValue
 
 # A drgn-live runtime resolution probe: a bare lookup of a stable kernel global. On a kernel whose
-# in-guest drgn cannot load debuginfo/BTF the lookup raises, the guest wrapper exits non-zero, and
-# run_script surfaces DEBUG_ATTACH_FAILURE — the signal that the session is blind even when the
-# uploaded .config advertised BTF (the static config check cannot see this).
+# in-guest drgn cannot load a DWARF vmlinux the lookup raises, the guest wrapper exits non-zero, and
+# run_script surfaces DEBUG_ATTACH_FAILURE — the signal that the session is blind even when a
+# vmlinux was uploaded (the static check cannot see whether the guest staged it).
 RESOLUTION_PROBE_SCRIPT = "prog['init_task']\n"
 _PROBE_TIMEOUT_SEC = 10.0
 
@@ -33,18 +33,16 @@ async def augment_with_runtime_probe(
     introspector: LiveIntrospector,
     transport_handle: str,
     private_key: str,
-    has_uploaded_vmlinux: bool,
 ) -> dict[str, JsonValue] | None:
     """Add the runtime resolution signal to the static config warning (ADR-0329, ADR-0335).
 
-    The static config check is authoritative when it already warns (no BTF advertised, no vmlinux)
-    or when a host vmlinux was uploaded (drgn resolves from it). Only when it is silent for a
-    vmlinux-less Run — BTF advertised, or no config uploaded — can the session still be blind at
-    runtime; probe it and return ``debuginfo_unloadable`` when resolution provably failed. The
-    extra round-trip is confined to exactly that gap. Shared by the ``introspect.*`` seams and the
+    The static check is authoritative when it already warns (no vmlinux uploaded). Whenever it is
+    silent — a vmlinux was uploaded, or no config was — the session can still be blind at runtime
+    (the vmlinux may not be staged in the guest); probe it and return ``debuginfo_unloadable`` when
+    resolution provably failed. Shared by the ``introspect.*`` seams and the
     ``debug.start_session`` attach seam so both compute the same warning.
     """
-    if static_warning is not None or has_uploaded_vmlinux:
+    if static_warning is not None:
         return static_warning
     resolved = await probe_symbol_resolution(
         introspector, transport_handle=transport_handle, private_key=private_key

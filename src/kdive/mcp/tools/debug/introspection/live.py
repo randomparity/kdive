@@ -136,18 +136,16 @@ async def _resolve_live_introspection_context(
             )
             # A live introspection over a debuginfo-less kernel resolves no symbols but does not
             # raise, so the handlers warn instead of reporting blind success (ADR-0322). The static
-            # config check keys on the uploaded .config; a runtime probe covers the gap where BTF
-            # is advertised but the guest drgn cannot actually load it (ADR-0329).
-            has_vmlinux = resolved.debuginfo_ref is not None
+            # check keys on the vmlinux upload; the runtime probe always follows it, covering a
+            # vmlinux the guest cannot actually load from (ADR-0329, ADR-0723).
             warning = await debuginfo_warning(
-                conn, resolved.run_id, has_uploaded_vmlinux=has_vmlinux
+                conn, resolved.run_id, has_uploaded_vmlinux=resolved.debuginfo_ref is not None
             )
             warning = await augment_with_runtime_probe(
                 warning,
                 introspector=runtime.live_introspector,
                 transport_handle=resolved.transport_handle,
                 private_key=private_key,
-                has_uploaded_vmlinux=has_vmlinux,
             )
             resolved = resolved._replace(missing_debuginfo=warning)
         except CategorizedError as exc:
