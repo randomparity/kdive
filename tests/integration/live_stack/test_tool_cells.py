@@ -548,6 +548,16 @@ def test_lane_target_prepares_once_and_replays(
             asyncio.run(tool_cells.lane_target(run, "u2", issuer, "db"))
         assert run.artifacts == ["b" * 64]
 
+    async def unsettled(_run: CellRun, into: CellRun, *_: object) -> object:
+        into.prove("cleanup", {"system": "torn_down"})
+        raise AssertionError("kept changing")
+
+    monkeypatch.setattr(tool_cells, "_provision_target", unsettled)
+    run = _run(tmp_path, "authentication")
+    with pytest.raises(AssertionError, match="kept changing"):
+        asyncio.run(tool_cells.lane_target(run, "u4", issuer, "db"))
+    assert len(run.artifacts) == 1
+
     async def broken(*_: object) -> object:
         raise RuntimeError("provision failed")
 

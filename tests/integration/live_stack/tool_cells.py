@@ -739,7 +739,8 @@ async def lane_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: s
         try:
             cached = await _provision_target(run, target, base_url, issuer, db_url)
         except Exception as exc:  # noqa: BLE001 - remembered and replayed for every cell
-            cached = _Failed(exc, tuple(target.artifacts))
+            # A cleanup the target already proved is evidence too, beside any cleanup attempt.
+            cached = _Failed(exc, (*target.artifacts, *target.assertions.values()))
         _TARGETS[base_url] = cached
     if isinstance(cached, _Failed):
         run.artifacts.extend(cached.artifacts)
@@ -782,6 +783,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args.out.write_text(inputs.model_dump_json(indent=1) + "\n", encoding="utf-8")
     print(f"wrote {len(inputs.cells)} tool-cell binding(s)")
+    unstaged = sum(
+        c.guest_arch is not None and c.image_sha256 is None for c in inputs.cells.values()
+    )
+    if unstaged:
+        print(
+            f"{unstaged} provider binding(s) have no image digest: stage "
+            f"{LANE_IMAGES.get(host_arch)} and declare it in KDIVE_SYSTEMS_TOML first"
+        )
     return 0
 
 
