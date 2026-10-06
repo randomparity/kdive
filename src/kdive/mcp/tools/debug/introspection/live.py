@@ -137,20 +137,24 @@ async def _resolve_live_introspection_context(
             # A live introspection over a debuginfo-less kernel resolves no symbols but does not
             # raise, so the handlers warn instead of reporting blind success (ADR-0322). The static
             # check keys on the vmlinux upload; the runtime probe always follows it, covering a
-            # vmlinux the guest cannot actually load from (ADR-0329, ADR-0723).
+            # vmlinux the guest cannot actually load from (ADR-0329, #3121).
             warning = await debuginfo_warning(
                 conn, resolved.run_id, has_uploaded_vmlinux=resolved.debuginfo_ref is not None
             )
-            warning = await augment_with_runtime_probe(
-                warning,
-                introspector=runtime.live_introspector,
-                transport_handle=resolved.transport_handle,
-                private_key=private_key,
-            )
-            resolved = resolved._replace(missing_debuginfo=warning)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(session_id, exc)
-    return LiveDrgnContext(resolved, runtime, private_key)
+    # The probe starts drgn in the guest and can take its full timeout, so it runs with the pooled
+    # connection already returned: concurrent slow guests must not starve the pool.
+    try:
+        warning = await augment_with_runtime_probe(
+            warning,
+            introspector=runtime.live_introspector,
+            transport_handle=resolved.transport_handle,
+            private_key=private_key,
+        )
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(session_id, exc)
+    return LiveDrgnContext(resolved._replace(missing_debuginfo=warning), runtime, private_key)
 
 
 def _session_config_error() -> CategorizedError:
