@@ -905,10 +905,10 @@ with `=m` make sure the guest loads the module before SSH starts, or the SSH ban
 times out. The proofs that capture a vmcore (`test_spine_over_the_wire`, the install cmdline
 sweep, and `test_spine_live_script_over_the_wire`) need the kdump crash-capture symbols their
 preflight names (`ppc64le_defconfig` already sets them). The preflight of
-`test_spine_live_script_over_the_wire` also requires `CONFIG_DEBUG_INFO_BTF=y` with
-`CONFIG_DEBUG_INFO_DWARF4=y` or `CONFIG_DEBUG_INFO_DWARF5=y`. Passing that proof also needs
-matching DWARF debug information readable inside the guest: no released drgn reads kernel BTF, so
-`CONFIG_DEBUG_INFO_BTF` alone does not make drgn-live work (#3121); see
+`test_spine_live_script_over_the_wire` also requires `CONFIG_DEBUG_INFO_DWARF4=y` or
+`CONFIG_DEBUG_INFO_DWARF5=y` and uploads `vmlinux` with the build, which kdive stages in the guest
+for drgn. It no longer requires `CONFIG_DEBUG_INFO_BTF`: no released drgn reads kernel BTF (#3121);
+see
 [live and host-side debug information](../external-build-upload.md#choosing-your-kernel-config).
 
 The pinned debug fragment, `fixtures/kernel/debug.config`, sets the virtio, ext4 and debug-info
@@ -916,8 +916,8 @@ symbols with `VIRTIO_NET=y`, and `ppc64le_defconfig` supplies the kdump ones, so
 from `scripts/kernel_fixtures.py build --arch ppc64le` passes the kernel preflight of every spine
 proof listed above. BTF generation needs host `pahole`; the `local_worker_host` role installs the
 package that provides it. The guest side is separate: without matching DWARF debug information
-readable inside the guest, the live-script proof stops at `introspect-script` with
-`debuginfo_unloadable` whatever the kernel config (#3121).
+readable inside the guest, the live-script proof stops at `attach-drgn-live`, whose response
+carries a `debuginfo_unloadable` warning, whatever the kernel config (#3121).
 
 To validate all four crash-capture methods against such a host, see the
 [four-method live run](four-method-live-run.md). Never hand-install a host

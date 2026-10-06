@@ -169,16 +169,16 @@ def test_live_drgn_capable_with_recent_version_and_tooling() -> None:
     assert set(block) == {"drgn_version", "capability", "min_drgn_required", "note", "basis"}
     assert block["capability"] == "capable"
     assert block["drgn_version"] == "0.0.33"
-    assert block["min_drgn_required"] == "0.0.31"
+    assert block["min_drgn_required"] is None
     assert block["basis"] == "build_verified"
 
 
-def test_live_drgn_incapable_with_old_version() -> None:
+def test_live_drgn_old_version_is_capable_with_vmlinux_note() -> None:
     block = render_live_drgn_signal(
         _entry([Capability.DRGN], {"drgn_version": "0.0.22"}), DEFAULT_KERNEL_BASIS
     )
-    assert block["capability"] == "incapable"
-    assert block["note"]  # an actionable note pointing at the threshold
+    assert block["capability"] == "capable"
+    assert "vmlinux" in str(block["note"])
 
 
 def test_live_drgn_not_applicable_without_tooling() -> None:

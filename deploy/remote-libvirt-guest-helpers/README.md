@@ -59,9 +59,10 @@ A missing core is different from a failed transfer. Follow the
 [postmortem guide](../../docs/guide/toolsets/postmortem.md) for the user-facing capture flow.
 
 The drgn fixed reports produce JSON. `run-script <timeout>` consumes the caller's script
-from stdin and runs it under the supplied timeout. The helper explicitly selects readable
-`/sys/kernel/btf/vmlinux`; otherwise it falls back to drgn's debug-info search. Live analysis
-needs a working drgn with usable BTF or matching kernel debug information, plus the guest
+from stdin and runs it under the supplied timeout. The helper runs `drgn -k` without `-s`: no released drgn reads kernel BTF, so drgn's default
+debug-info search finds the DWARF vmlinux the install path stages at
+`/usr/lib/debug/lib/modules/<release>/vmlinux` ([ADR-0723](../../docs/adr/0723-drgn-live-reads-a-staged-dwarf-vmlinux.md)).
+Live analysis needs a working drgn, that staged vmlinux, plus the guest
 access prerequisites in the [introspection guide](../../docs/guide/toolsets/introspect.md).
 Shared report producers live under
 [`providers/shared/debug_common`](../../src/kdive/providers/shared/debug_common/).

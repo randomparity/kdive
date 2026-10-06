@@ -252,27 +252,14 @@ def test_debuginfo_summary_names_use_case_and_cost():
     assert "omit" in summary
 
 
-def test_debuginfo_summary_sends_the_in_guest_drgn_reader_to_btf_rather_than_stopping_at_dwarf():
-    # #1855 took DEBUG_INFO_BTF out of this entry's clause, which is right - a DWARF build is what
-    # gdb and an offline vmcore need, and AND-ing BTF in would tell those readers otherwise. But
-    # the summary's first sentence sells "live drgn" too, and in-guest drgn-live resolves from
-    # /sys/kernel/btf, not from the .config's DWARF (the DWARF vmlinux is not on the guest rootfs -
-    # gate.py says exactly this, and is why debuginfo_warning keys on BTF). With BTF gone from the
-    # clause, the entry named it nowhere at all: an agent enabling DWARF5 for a live drgn session
-    # satisfied every clause here and found out at debug.start_session, one build/install/boot
-    # later. The clause stays DWARF-only; the summary carries the pointer.
+def test_debuginfo_summary_names_the_uploaded_vmlinux_the_in_guest_drgn_reads():
+    # #3121: no released drgn reads kernel BTF. In-guest drgn-live reads the Run's uploaded DWARF
+    # vmlinux, so a DWARF .config alone leaves that session blind and the summary must say so.
     summary = feature_requirement("debuginfo").summary.lower()
-    assert "debug_info_btf" in summary
-    assert "/sys/kernel/btf" in summary
-    # named as the other entry's, so the reader can find it rather than being left to search
-    assert "bpf_tracing" in summary
-    # and the consequence of stopping at DWARF, or the pointer reads as an optional extra
-    assert "resolve a symbol" in summary
-    # the escape hatch the seam itself offers, so the two surfaces agree
     assert "vmlinux" in summary
-    # ...without the entry claiming BTF is required for what this feature IS for: the clause must
-    # stay satisfiable by DWARF alone, which is the half #1855 settled and this prose may not
-    # quietly undo.
+    assert "does not read kernel btf" in summary
+    assert "/sys/kernel/btf" not in summary
+    assert "resolve a symbol" in summary
     cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"})
     assert unmet_advertised_clauses(cfg, feature_requirement("debuginfo")) == ()
 
@@ -1814,28 +1801,15 @@ def test_the_three_invariants_report_a_seam_evaluated_feature_and_spare_the_othe
     assert "serial_console" not in _SEAM_SUPPLIES
 
 
-def test_bpf_tracing_publishes_the_one_clause_the_drgn_live_seam_really_checks():
-    # ADR-0548 rules 1 and 3, and the whole of #1901. `bpf_tracing` advertises five clauses and a
-    # seam reads exactly one of them, so the entry stays `unchecked` (true of the other four) and
-    # the exception rides in `also_checked`. The scoped statement is only worth serving if it is
-    # the seam's own values, so pin it to gate.py's two module constants rather than to a literal
-    # copied here - a registry that claims a symbol or a reason the seam does not emit is #1861 in
-    # a new key.
-    from kdive.kernel_config import gate
-
+def test_no_entry_carries_also_checked_since_drgn_live_stopped_reading_btf():
+    # #3121: bpf_tracing's BTF clause was the only also_checked in the registry, and it described
+    # the drgn-live seam keying on DEBUG_INFO_BTF. That seam now keys on the vmlinux upload, so the
+    # registry has nothing to scope; ScopedEnforcement stays as unused vocabulary.
+    assert all(not f.also_checked for f in FEATURE_REQUIREMENTS)
     entry = feature_requirement("bpf_tracing")
     assert entry.enforcement is Enforcement.UNCHECKED
-    (scoped,) = entry.also_checked
-    assert scoped.clause.symbols == {gate._BTF_SYMBOL}
-    assert scoped.reason == gate.MISSING_DEBUGINFO_REASON
-    assert scoped.enforcement is Enforcement.RUNTIME_ADVISORY
-    # Non-vacuity on both halves of the pin: the constants must be the real ones and not empty,
-    # and the clause must really be one of the five the entry advertises rather than a lookalike
-    # the agent never sees in `requirements`.
-    assert gate._BTF_SYMBOL == "DEBUG_INFO_BTF"
-    assert gate.MISSING_DEBUGINFO_REASON == "missing_debuginfo"
-    assert scoped.clause in entry.advertised
-    assert len(entry.advertised) == 5
+    assert "also_checked" not in entry.summary
+    assert "kdive reads none of these symbols" in entry.summary
 
 
 def test_the_modules_wiring_the_debuginfo_seam_are_the_ones_surfaces_at_speaks_for():
@@ -1869,8 +1843,6 @@ def test_the_modules_wiring_the_debuginfo_seam_are_the_ones_surfaces_at_speaks_f
         "mcp/tools/debug/sessions/lifecycle.py",
         "mcp/tools/debug/introspection/live.py",
     }
-    (scoped,) = feature_requirement("bpf_tracing").also_checked
-    assert scoped.surfaces_at == ("debug.start_session", "introspect.run", "introspect.script")
 
 
 def test_runtime_advisory_cannot_label_a_whole_entry():
@@ -1934,26 +1906,12 @@ def test_a_scoped_statement_cannot_be_vacuous():
         assert ScopedEnforcement(btf, allowed, "r", ("debug.start_session",)).enforcement is allowed
 
 
-def test_the_manifest_renders_the_scoped_statement_only_where_there_is_one():
-    # The rendered half of ADR-0548 rule 1: the key is absent from every entry with nothing to
-    # qualify, so fifteen of sixteen entries render byte-identically to before (rule 4's reason
-    # for leaving schema_version alone).
+def test_the_manifest_renders_no_also_checked_key_on_any_entry():
     entries = {e["feature"]: e for e in feature_manifest()}
-    assert [f for f, e in entries.items() if "also_checked" in e] == ["bpf_tracing"]
-    (element,) = cast(list[dict[str, JsonValue]], entries["bpf_tracing"]["also_checked"])
-    assert element == {
-        "symbols": ["DEBUG_INFO_BTF"],
-        "enforcement": "runtime_advisory",
-        "reason": "missing_debuginfo",
-        "surfaces_at": ["debug.start_session", "introspect.run", "introspect.script"],
-    }
-    # The element carries the same clause shape as `requirements` and `refuses_on`, so its
-    # optional keys are omitted at their defaults exactly as theirs are.
-    assert "built_in" not in element and "arch" not in element
-    # `debuginfo` is the entry #1901 explicitly leaves alone: its clauses are the DWARF choice
-    # members and no seam reads them, so `unchecked` is accurate for it under any reading.
+    assert entries
+    assert [f for f, e in entries.items() if "also_checked" in e] == []
+    # `debuginfo` is DWARF-only and no seam reads its clauses, so `unchecked` is accurate for it.
     assert entries["debuginfo"]["enforcement"] == Enforcement.UNCHECKED.value
-    assert "also_checked" not in entries["debuginfo"]
 
 
 def test_the_unchecked_legend_points_at_the_key_that_qualifies_it():

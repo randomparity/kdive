@@ -136,23 +136,25 @@ async def _resolve_live_introspection_context(
             )
             # A live introspection over a debuginfo-less kernel resolves no symbols but does not
             # raise, so the handlers warn instead of reporting blind success (ADR-0322). The static
-            # config check keys on the uploaded .config; a runtime probe covers the gap where BTF
-            # is advertised but the guest drgn cannot actually load it (ADR-0329).
-            has_vmlinux = resolved.debuginfo_ref is not None
+            # check keys on the vmlinux upload; the runtime probe always follows it, covering a
+            # vmlinux the guest cannot actually load from (ADR-0329, #3121).
             warning = await debuginfo_warning(
-                conn, resolved.run_id, has_uploaded_vmlinux=has_vmlinux
+                conn, resolved.run_id, has_uploaded_vmlinux=resolved.debuginfo_ref is not None
             )
-            warning = await augment_with_runtime_probe(
-                warning,
-                introspector=runtime.live_introspector,
-                transport_handle=resolved.transport_handle,
-                private_key=private_key,
-                has_uploaded_vmlinux=has_vmlinux,
-            )
-            resolved = resolved._replace(missing_debuginfo=warning)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(session_id, exc)
-    return LiveDrgnContext(resolved, runtime, private_key)
+    # The probe starts drgn in the guest and can take its full timeout, so it runs with the pooled
+    # connection already returned: concurrent slow guests must not starve the pool.
+    try:
+        warning = await augment_with_runtime_probe(
+            warning,
+            introspector=runtime.live_introspector,
+            transport_handle=resolved.transport_handle,
+            private_key=private_key,
+        )
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(session_id, exc)
+    return LiveDrgnContext(resolved._replace(missing_debuginfo=warning), runtime, private_key)
 
 
 def _session_config_error() -> CategorizedError:
@@ -261,6 +263,21 @@ async def _introspect_live_session(
     )
 
 
+def _script_too_large(response_id: str, script: str) -> ToolResponse | None:
+    """Reject an oversize script before any guest round trip (context probe included)."""
+    script_bytes = len(script.encode("utf-8"))
+    if script_bytes <= _MAX_SCRIPT_BYTES:
+        return None
+    return _config_error(
+        response_id,
+        data={
+            "reason": "script_too_large",
+            "script_bytes": script_bytes,
+            "max_bytes": _MAX_SCRIPT_BYTES,
+        },
+    )
+
+
 async def introspect_script(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
@@ -273,6 +290,8 @@ async def introspect_script(
 ) -> ToolResponse:
     """Run a caller drgn script over a `live` drgn-live DebugSession; return capped stdout."""
     with bind_context(principal=ctx.principal):
+        if (too_large := _script_too_large(session_id, script)) is not None:
+            return too_large
         resolved = await _resolve_live_introspection_context(
             pool=pool,
             resolver=resolver,
@@ -329,16 +348,6 @@ async def _run_live_script(
     private_key: str,
 ) -> ToolResponse:
     """Clamp the timeout, run the script off-loop, shape the response."""
-    script_bytes = len(script.encode("utf-8"))
-    if script_bytes > _MAX_SCRIPT_BYTES:
-        return _config_error(
-            response_id,
-            data={
-                "reason": "script_too_large",
-                "script_bytes": script_bytes,
-                "max_bytes": _MAX_SCRIPT_BYTES,
-            },
-        )
     clamped = _clamp_timeout(timeout_sec)
     try:
         with materialized_private_key(private_key) as key_path:

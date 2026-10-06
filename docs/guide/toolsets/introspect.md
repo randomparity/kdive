@@ -16,8 +16,10 @@ Check the execution path and guest prerequisites:
   key. Remote-libvirt invokes that helper through the guest agent. The provider must
   support the requested live operation and its guest channel must be reachable.
 - The guest needs the KDIVE helper, drgn, access to its running kernel's `/proc/kcore`, and
-  usable matching debug information for typed lookups. The helper explicitly loads
-  `/sys/kernel/btf/vmlinux` when present, otherwise uses drgn's default debug-info search.
+  usable matching debug information for typed lookups. drgn does not read kernel BTF; it reads
+  the DWARF `vmlinux` uploaded with the Run's build, staged in the guest under
+  `/usr/lib/debug/lib/modules/<release>/`, through its default debug-info search. kdive stages it
+  on the local-libvirt legacy install path; other install paths do not stage it yet.
   Live kernel access requires `CONFIG_PROC_KCORE=y`; see the
   [drgn support matrix](https://drgn.readthedocs.io/en/stable/support_matrix.html#kernel-configuration).
 - Inspect any `data.missing_debuginfo` warning from attach or introspection. Successful

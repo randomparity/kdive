@@ -56,7 +56,7 @@ class RootfsCatalogEntry:
             computed live-drgn-introspection predicate (:mod:`kdive.images.drgn_support`, ADR-0328).
             drgn is installed unpinned from distro repos, so the version varies sharply by image
             family; a snapshot, not live upstream truth. The live-introspection capability is
-            *computed* from this against the BTF-capability threshold, not stored as a bit.
+            *computed* from this (#3121), not stored as a bit.
             ``None`` records an explicit catalog value of ``"absent"`` for a distribution whose
             official repositories do not provide drgn; omitting the catalog field remains invalid.
     """

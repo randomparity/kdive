@@ -4,6 +4,8 @@
 
 Accepted (2026-08-05)
 
+> **Amended by [ADR-0723](0723-drgn-live-reads-a-staged-dwarf-vmlinux.md) (#3121):** `bpf_tracing` no longer carries `also_checked`; no entry currently does.
+
 ## Context
 
 [ADR-0546](0546-manifest-states-where-an-omission-surfaces.md) replaced the manifest's `gated`

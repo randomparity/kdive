@@ -6,6 +6,8 @@
 - **Spec:** [drgn-live missing_debuginfo](../archive/superpowers/specs/2026-07-09-introspect-missing-debuginfo-1064-design.md)
 - **Builds on:** ADR-0322 (drgn-live `missing_debuginfo` warning), ADR-0240 (live drgn `run_script`)
 
+> **Amended by [ADR-0723](0723-drgn-live-reads-a-staged-dwarf-vmlinux.md) (#3121):** the probe runs whenever the static warning is silent, including with an uploaded vmlinux, not only when the `.config` advertises BTF, and drgn-live reads the staged DWARF vmlinux.
+
 ## Context
 
 ADR-0322 added a non-fatal `missing_debuginfo` warning so a blind drgn-live session is no longer
