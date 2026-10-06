@@ -826,10 +826,11 @@ the host arch, whatever the image env vars hold), and the gdbstub debug proofs u
 
 The spine's kernel preflight reads the tree's `.config` and stops before boot when a proof's
 requirement is missing. The direct-boot image has an ext4 root on a virtio disk, so every proof
-needs `CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_BLK=y`, and `CONFIG_EXT4_FS=y`. The SSH proofs
-(console parts and `test_spine_live_script_over_the_wire`) also need `CONFIG_VIRTIO_NET`; build it
-in (`=y`), or with `=m` make sure the guest loads the module before SSH starts, or the SSH banner
-exchange times out. `test_spine_live_script_over_the_wire` also needs `CONFIG_DEBUG_INFO_BTF=y`
+needs `CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_BLK=y`, and `CONFIG_EXT4_FS=y`. The proofs that
+reach the guest over SSH (console parts, first-boot host keys, and
+`test_spine_live_script_over_the_wire`) also need `CONFIG_VIRTIO_NET`; build it in (`=y`), or
+with `=m` make sure the guest loads the module before SSH starts, or the SSH banner exchange
+times out. `test_spine_live_script_over_the_wire` also needs `CONFIG_DEBUG_INFO_BTF=y`
 with a DWARF choice, and a guest drgn that can read the BTF; see
 [live and host-side debug information](../external-build-upload.md#choosing-your-kernel-config).
 
