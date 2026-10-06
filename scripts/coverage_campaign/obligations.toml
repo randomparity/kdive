@@ -92,39 +92,51 @@ owner = 2812
 execution = "service"
 [groups.tools]
 "audit.query" = "Compare project and auditor-wide audit rows with known attributed operations."
-"images.extend" = "Read the re-armed expiry without changing image contents or ownership."
-"images.prune_expired" = "Verify only expired entries are pruned and referenced/live entries are retained."
-"inventory.clear_override" = "Observe the file-owned value restored by the next reconcile."
 "inventory.list" = "Compare cross-project system/allocation totals with known durable state."
-"ops.build_uses_list" = "Compare protected build-use rows and fence identities with known active and orphaned uses."
 "ops.diagnostics" = "Compare diagnostic findings with deliberately healthy and unavailable prerequisites."
 "ops.export_cost_classes" = "Parse the exported fragment and compare coefficients with the pricing table."
 "ops.export_systems_toml" = "Parse the exported inventory and compare records and optional writeback bytes."
 "ops.jobs_list" = "Compare cross-project queue depths and bounded pages with known durable jobs."
-"ops.recover_build_use" = "Verify authorized recovery releases only the exactly fenced use after terminal evidence."
+"ops.tool_trail" = "Compare attributed invocation rows and paging with known calls."
+"secrets.list" = "Compare reference presence with configured sources and verify no secret values appear."
+
+[[groups]]
+owner = 3110
+execution = "service"
+[groups.tools]
+"images.extend" = "Read the re-armed expiry without changing image contents or ownership."
+"images.prune_expired" = "Verify only expired entries are pruned and referenced/live entries are retained."
+"inventory.clear_override" = "Observe the file-owned value restored by the next reconcile."
 "ops.reconcile_now" = "Observe the selected drift repair and retention of protected live resources."
 "ops.reconcile_systems" = "Compare resulting catalog records with the source configuration and prune policy."
 "ops.set_cost_class_coeff" = "Read the changed coefficient and verify the next charge uses it."
 "ops.set_host_capacity" = "Observe new placement obey the cap while existing allocations remain."
 "ops.set_queue_paused" = "Verify worker claim activity stops and resumes with the recorded pause state."
-"ops.tool_trail" = "Compare attributed invocation rows and paging with known calls."
 "resources.deregister" = "Verify the selected resource is removed under its lifecycle contract."
 "resources.drain" = "Verify cordoning and operation-specific allocation release without new placement."
 "resources.register" = "Read the registered resource and compare kind, capacity and ownership."
 "resources.renew" = "Read the changed resource expiry and unchanged inventory identity."
 "resources.set_scheduling" = "Verify placement follows scheduling state without changing health."
 "resources.set_status" = "Read changed health while scheduling/cordon state remains unchanged."
-"secrets.list" = "Compare reference presence with configured sources and verify no secret values appear."
 
 [groups.role_overrides]
 "inventory.clear_override" = ["server", "reconciler"]
-"ops.recover_build_use" = ["server", "worker", "authority"]
 "ops.reconcile_now" = ["server", "worker", "reconciler", "authority"]
 "ops.set_queue_paused" = ["server", "worker"]
 "resources.drain" = ["server", "worker", "reconciler", "authority"]
 
 [[groups]]
-owner = 2812
+owner = 3111
+execution = "service"
+[groups.tools]
+"ops.build_uses_list" = "Compare protected build-use rows and fence identities with known active and orphaned uses."
+"ops.recover_build_use" = "Verify authorized recovery releases only the exactly fenced use after terminal evidence."
+
+[groups.role_overrides]
+"ops.recover_build_use" = ["server", "worker", "authority"]
+
+[[groups]]
+owner = 3112
 execution = "provider"
 authority = true
 [groups.tools]
@@ -365,3 +377,34 @@ kernel = true
 "tool/investigations.unlink/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
 "deep-lifecycle/remote-libvirt/longterm" = "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
 "deep-lifecycle/remote-libvirt/stable" = "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
+"tool/audit.query/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/audit.query/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/audit.query/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/audit.query/default/project-isolation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/audit.query/default/validation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/inventory.list/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/inventory.list/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/inventory.list/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/inventory.list/default/validation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.diagnostics/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.diagnostics/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.diagnostics/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.diagnostics/default/validation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.export_cost_classes/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.export_cost_classes/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.export_cost_classes/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.export_systems_toml/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.export_systems_toml/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.export_systems_toml/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.export_systems_toml/default/validation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.jobs_list/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.jobs_list/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.jobs_list/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.jobs_list/default/validation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.tool_trail/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.tool_trail/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.tool_trail/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.tool_trail/default/validation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/secrets.list/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/secrets.list/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/secrets.list/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
