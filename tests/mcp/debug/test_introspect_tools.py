@@ -1057,8 +1057,7 @@ def test_script_over_size_cap_is_configuration_error(migrated_url: str) -> None:
         assert resp.data["reason"] == "script_too_large"
         assert isinstance(resp.data["script_bytes"], int)
         assert isinstance(resp.data["max_bytes"], int)
-        # rejected before the caller's script reached the seam; only the resolution probe ran
-        assert port.kwargs.get("script") == introspect_gate.RESOLUTION_PROBE_SCRIPT
+        assert port.kwargs == {}  # rejected before any guest round trip, probe included
 
     asyncio.run(_run())
 
