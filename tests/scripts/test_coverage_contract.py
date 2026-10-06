@@ -296,6 +296,56 @@ def test_core_tools_follow_the_approved_split(inventory: Inventory) -> None:
     }
 
 
+_OPERATOR_TOOLS = {
+    "audit.query",
+    "inventory.list",
+    "ops.diagnostics",
+    "ops.export_cost_classes",
+    "ops.export_systems_toml",
+    "ops.jobs_list",
+    "ops.tool_trail",
+    "secrets.list",
+}
+_OPERATOR_SPLIT = {
+    3110: {
+        "images.extend",
+        "images.prune_expired",
+        "inventory.clear_override",
+        *(f"ops.{n}" for n in ("reconcile_now", "reconcile_systems", "set_cost_class_coeff")),
+        *(f"ops.{n}" for n in ("set_host_capacity", "set_queue_paused")),
+        *(f"resources.{n}" for n in ("deregister", "drain", "register", "renew")),
+        *(f"resources.{n}" for n in ("set_scheduling", "set_status")),
+    },
+    3111: {"ops.build_uses_list", "ops.recover_build_use"},
+    3112: {
+        "ops.force_release",
+        "ops.force_teardown",
+        "ops.resolve_recovery_orphan",
+        "systems.resolve_external_boot_conflict",
+    },
+}
+
+
+def test_operator_tools_follow_the_approved_split(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+    split = {*_OPERATOR_SPLIT[3110], *_OPERATOR_SPLIT[3111], *_OPERATOR_SPLIT[3112]}
+    ops = [c for c in cells if c.operation in _OPERATOR_TOOLS | split]
+    owned = {o: {c.operation for c in ops if c.owner == o} for o in (2812, *_OPERATOR_SPLIT)}
+    assert owned == {2812: _OPERATOR_TOOLS, **_OPERATOR_SPLIT}
+    assert len([c for c in cells if c.owner == 2812]) == 124
+    glass = [c for c in cells if c.operation in _OPERATOR_SPLIT[3112]]
+    assert {c.owner for c in glass if c.guest_arch == "ppc64le"} == {2818}
+    assert {c.owner for c in glass if c.guest_arch == "x86_64"} == {3112}
+    overrides = {g.owner: set(g.role_overrides) for g in load_mapping().groups}
+    assert overrides[3110] == {
+        "inventory.clear_override",
+        "ops.reconcile_now",
+        "ops.set_queue_paused",
+        "resources.drain",
+    }
+    assert overrides[3111] == {"ops.recover_build_use"}
+
+
 def _tool_prefix(provider: str) -> str:
     return "tool/remote-libvirt" if provider == "remote-libvirt" else "tool"
 
