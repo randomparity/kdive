@@ -738,6 +738,7 @@ def test_spine_live_script_over_the_wire() -> None:
                         require_network=True,
                         require_live_debug=True,
                         require_kdump=True,
+                        with_vmlinux=True,
                     )
                 for step in ("install", "boot"):
                     async with phase(step):
@@ -750,6 +751,9 @@ def test_spine_live_script_over_the_wire() -> None:
                         ),
                         "attach-drgn-live",
                     )
+                    assert "missing_debuginfo" not in env.data, (
+                        f"drgn-live attach lacked DWARF: {env.data!r}"
+                    )
                     session_id = env.object_id
                 async with phase("introspect-script"):
                     env = ok(
@@ -761,6 +765,9 @@ def test_spine_live_script_over_the_wire() -> None:
                             timeout_sec=30.0,
                         ),
                         "introspect-script",
+                    )
+                    assert "missing_debuginfo" not in env.data, (
+                        f"introspect.script lacked DWARF: {env.data!r}"
                     )
                     output = data_str(env, "output")
                     assert "DRGN_LIVE_PROOF" in output, f"proof marker missing: {output!r}"
