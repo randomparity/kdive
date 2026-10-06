@@ -824,20 +824,19 @@ the host arch, whatever the image env vars hold), and the gdbstub debug proofs u
 
 #### Native POWER spine kernel configuration
 
-Check the built tree's `.config` after `olddefconfig` before using it as `KDIVE_KERNEL_SRC`.
-The direct-boot spine image has an ext4 root on a virtio disk, so build in
-`CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_BLK=y`, and `CONFIG_EXT4_FS=y`. The SSH-dependent
-console-parts and `test_spine_live_script_over_the_wire` proofs also need
-`CONFIG_VIRTIO_NET=y`, or a matching virtio-net module in the guest root filesystem or
-initramfs that loads before SSH starts. A booted guest with no loaded network driver
-cannot complete the SSH banner exchange.
+The spine's kernel preflight reads the tree's `.config` and stops before boot when a proof's
+requirement is missing. The direct-boot image has an ext4 root on a virtio disk, so every proof
+needs `CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_BLK=y`, and `CONFIG_EXT4_FS=y`. The SSH proofs
+(console parts and `test_spine_live_script_over_the_wire`) also need `CONFIG_VIRTIO_NET`; build it
+in (`=y`), or with `=m` make sure the guest loads the module before SSH starts, or the SSH banner
+exchange times out. `test_spine_live_script_over_the_wire` also needs `CONFIG_DEBUG_INFO_BTF=y`
+with a DWARF choice, and a guest drgn that can read the BTF; see
+[live and host-side debug information](../external-build-upload.md#choosing-your-kernel-config).
 
-For `test_spine_live_script_over_the_wire`, also build with `CONFIG_DEBUG_INFO_BTF=y`
-and a DWARF debug-info choice (`CONFIG_DEBUG_INFO_DWARF4=y` or
-`CONFIG_DEBUG_INFO_DWARF5=y`). BTF generation needs host `pahole`; the
-`local_worker_host` Ansible role installs its distribution package. The guest drgn
-build must be able to read the resulting `/sys/kernel/btf/vmlinux`; host-side
-`vmlinux` DWARF alone does not give the guest live debug information.
+The pinned debug fragment, `fixtures/kernel/debug.config`, sets all of these with `VIRTIO_NET=y`,
+so a ppc64le tree from `scripts/kernel_fixtures.py build --arch ppc64le` satisfies both proofs.
+BTF generation needs host `pahole`; the `local_worker_host` role installs the package that
+provides it.
 
 To validate all four crash-capture methods against such a host, see the
 [four-method live run](four-method-live-run.md). Never hand-install a host

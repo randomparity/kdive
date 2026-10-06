@@ -10,21 +10,27 @@ BTF cannot supply the guest drgn script's debug information. The host role also 
 
 ## Scope
 
-The `live-testing.md` native spine paragraph owns the required kernel configuration.
-State that this direct-boot tree needs `CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_BLK=y`,
-and `CONFIG_EXT4_FS=y` for its ext4 guest root. The existing spine preflight checks
-fixtures, not these config symbols; the operator must check the built `.config`.
-State that SSH proofs need `CONFIG_VIRTIO_NET=y`, or a matching module available
-in the guest root filesystem or initramfs and loaded before SSH. The
-live-script proof additionally needs
-`CONFIG_DEBUG_INFO_BTF=y`, its DWARF prerequisite, a compatible guest drgn build,
-and host `pahole` during the kernel build. Refer to the exact proof names.
+The `live-testing.md` native spine section owns the operator-facing statement of the
+kernel configuration. It names what each proof needs: `CONFIG_VIRTIO_PCI=y`,
+`CONFIG_VIRTIO_BLK=y`, and `CONFIG_EXT4_FS=y` for the ext4 guest root;
+`CONFIG_VIRTIO_NET` for the SSH proofs, built in or as a module the guest loads
+before SSH; and `CONFIG_DEBUG_INFO_BTF=y` with a DWARF choice for the live-script
+proof. It agrees with the spine kernel preflight
+(`2026-09-24-spine-kernel-preflight-design.md`), which already enforces these
+symbols and accepts `VIRTIO_NET=y` or `=m`; this change does not alter the
+preflight. It states that the pinned `fixtures/kernel/debug.config` fragment used
+by `scripts/kernel_fixtures.py` already sets every symbol, with `VIRTIO_NET=y`. It
+links to the external-build guide's debug-information section for the guest drgn
+and BTF compatibility rules instead of restating them.
 
 The external-build guide links operators to this native spine configuration beside
-its general kernel-config advice. The `local_worker_host` family package lists add
-the distribution package that supplies `pahole`: `pahole` on Debian/Ubuntu and
-`dwarves` on Red Hat/openSUSE/SLES. Existing OS package tasks consume those lists. No
-new validator, guest image, build profile, or package abstraction is introduced.
+its general kernel-config advice; both copies of the guide stay byte-identical. The
+`local_worker_host` family package lists add the distribution package that
+supplies `pahole`: `pahole` on Debian/Ubuntu and `dwarves` on Red Hat/openSUSE/SLES.
+The live worker host play does not include `libvirt_stack`, which already declares
+`pahole`, so a converged live worker host otherwise lacks it. Existing OS package
+tasks consume those lists. No new validator, guest image, build profile, or package
+abstraction is introduced.
 
 ## Success
 
@@ -51,9 +57,9 @@ new validator, guest image, build profile, or package abstraction is introduced.
 
 ## Validation
 
-- Package contract: Mode: focused-test. Check the three family package lists
-  name packages that supply `pahole`; expected red is a missing package entry;
-  green command: `just lint-ansible`.
+- Package contract: Mode: focused-test. `deploy/ansible/tests/run-local-worker-host.py`
+  pins the Ubuntu list to its baseline plus `pahole`; expected red is a missing
+  entry.
 - Operator prose: Mode: task-test-not-applicable. No executable consumer parses
   the runbook or guide's instructional wording; manually inspect the rendered
   config list and link, then run `just docs-links`.
