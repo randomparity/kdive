@@ -49,6 +49,9 @@ validation boundaries).
    - A cell that declares the `authority` role keeps it: `run_cell` already records
      `missing:authority` and fails the parameter, and `qualify` reports `deployed-role-missing`.
      A unit test pins that for a provider cell.
+   - Kernel-input identity is recorded by the cell body that boots the kernel: `Guest.observed`
+     is the cell's `run.observed`, so a kernel-declaring body (#3119) writes the kernel fields it
+     observed there. No body of this change boots a kernel, so none writes them.
    - `run_tool_cell` skips, without a record, a provider cell whose host architecture is not this
      host's.
    - `on_lane_system`: the functional frame. It wraps `on_catalog_system` (fresh funded project,
@@ -99,9 +102,10 @@ libvirt domain and disk files, the guest itself over SSH, and `resources.availab
   reports `active`.
 - `systems.reprovision`: the cell writes a marker file in the guest, then reprovisions with the
   same catalog profile and waits for `ready`. After a fresh frame key is authorized (the new
-  install has no prior key), the guest answers with a new `boot_id` and no marker. Each owned disk
-  either no longer exists or is a different file (a new inode), and the new domain's disks join
-  the owned set the cleanup proves absent.
+  install has no prior key), the guest answers with a new `boot_id` and no marker: the old
+  root disk's contents are gone. The overlay is recreated at the same path by design
+  (`local_libvirt` `reprovision` is teardown then provision), so storage identity is not compared;
+  the new domain's disks join the owned set the cleanup proves absent.
 - `systems.teardown`: the cell's call tears the System down; the cell drains the job and waits for
   `torn_down`. The worker's libvirt no longer defines the domain and every owned disk is absent.
   The frame's cleanup then releases the allocation and proves capacity returned to its value
@@ -122,7 +126,8 @@ needs one) or, for `systems.provision`, the target's Allocation with the lane ca
 
 The `gateway` validation cells of `systems.provision` and `systems.reprovision` fail under the
 amendment's rule (their binding failures are re-enveloped without `field_errors`), four cells in
-all. They are recorded as failing, not covered, until a decision names their evidence.
+all. They are recorded as failing, not covered, until a decision names their evidence; no issue
+owns that decision yet, so it is reported as a follow-up candidate at hand-off.
 
 ## Failure model
 
@@ -132,14 +137,18 @@ all. They are recorded as failing, not covered, until a decision names their evi
    - CI, which runs only the unit and contract tests.
 2. **Invariants and assets at stake:**
    - honest per-cell outcomes; a contract whose ownership matches the operator's split;
-   - the host left as found: every System the cells create is torn down, its domain undefined,
-     its disks removed and its capacity returned, proven per cell.
+   - the host left as found: every System a completing cell creates is torn down, its domain
+     undefined, its disks removed and its capacity returned, proven per cell.
 3. **Accepted failure classes:**
    - A cell killed mid-run can leave a System and its allocation; `demo-down.sh --wipe --yes`
      clears them, as for the earlier carriers.
    - Torn-down Systems, released allocations, their ledger rows and audit rows stay as history.
    - The four `gateway` validation cells of `provision`/`reprovision` fail (above).
-   - A failed `lane_target` fails every rejection cell of the lane; it is not retried.
+   - A cell that fails before its cleanup proof records only a best-effort cleanup attempt
+     (`cleanup_attempt`); whatever it leaves is cleared by the post-run
+     `demo-down.sh --wipe --yes`, which the live proof runs.
+   - A failed `lane_target` fails every rejection cell of the lane; it is not retried. Each of
+     those records carries the target's cleanup-attempt artifact.
    - Concurrent carriers on one stack are not modelled; capacity comparisons assume this carrier
      is the only allocator.
 4. **Covered elsewhere:** run/image tools (#3119), remote cells (#3080), ppc64le cells (#2818),
@@ -154,6 +163,7 @@ all. They are recorded as failing, not covered, until a decision names their evi
 | ownership split, flags and routing | focused-test | `test_coverage_contract.py`: owner sets of 3062 and 3119, 3080 still 216, ppc64le to 2818, the six tools' roles and inputs |
 | bindings of provider cells | focused-test | `test_tool_cells.py`: native local cells bound with guest, accelerator and image digest; foreign-arch and remote cells unbound; service cells unchanged |
 | kernel inputs and authority role | focused-test | `test_tool_cells.py`: a bound cell declaring kernel inputs gets the supplied kernel fields, one that does not gets none; a provider cell declaring `authority` fails its parameter on a stack without that role |
+| `lane_target` memo | focused-test | `test_tool_cells.py`: a stubbed preparation runs once per stack; a blocked one replays `blocked`, a failed one replays a failure carrying its artifacts |
 | foreign-arch skip | focused-test | `test_tool_cells.py`: `run_tool_cell` skips a ppc64le cell on x86_64 before any stack read |
 | `on_catalog_system` provision override | focused-test | existing frame tests stay green; the override is exercised live |
 | carrier bindings | focused-test | `test_coverage_contract.py`: the 30 scenarios bind to the new node |

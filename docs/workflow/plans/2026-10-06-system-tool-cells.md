@@ -25,7 +25,9 @@ Expected implementation size: 700–900 changed lines (L) — carrier (~400), fr
   snapshot; ADR-0715 governs evidence identity. Existing carriers keep their behaviour and their
   tests stay green; `on_catalog_system`'s existing callers pass no new argument.
 - Keep `obligations.toml` edits additive around other groups: campaign 6460ad12693e may land
-  #3097/#3098 rows in `[implementations]` concurrently. Refresh the base before publishing.
+  #3097/#3098 rows in `[implementations]` concurrently. Refresh the base before the live proof
+  (an `obligations.toml` change moves `matrix_sha256`), and again before publishing; a later
+  refresh that changes the mapping leaves the run record naming its candidate as superseded.
 - Line length 100; `just lint`, `just type` and focused pytest (or `just test-changed`) green
   before each commit; `git fetch origin main && just records` before pushing.
 - Live proof only on the disposable lab host, both lanes, at a committed deployed head; wipe the
@@ -159,9 +161,38 @@ LaneBody = Callable[[Guest], Awaitable[dict[str, object]]]
 async def on_lane_system(run, base_url, issuer, db_url, *, project: str, body: LaneBody,
                          provision: Provision = provision_catalog) -> None
 @dataclass(frozen=True) class LaneTarget: project, allocation_id, system_id, observed, artifacts
-async def lane_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> LaneTarget
-def bindings(candidate, *, host_os, host_arch, matrix, cells, staged=staged_image,
-             kernel: Mapping[str, str] | None = None) -> InputBindings
+@dataclass(frozen=True)
+class _Failed:
+    """A lane target preparation that raised, and the artifacts its cleanup attempt left."""
+
+    error: Exception
+    artifacts: tuple[str, ...]
+
+
+async def lane_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> LaneTarget:
+    """The stack's rejection target, provisioned, observed and reclaimed on first use.
+
+    Every role check of the System tools runs before any state check, so a torn-down System and
+    a released Allocation are valid targets that no background work changes. A failed or
+    blocked preparation is remembered and replayed, with its cleanup-attempt artifacts, for every
+    later cell rather than retried.
+    """
+    cached = _TARGETS.get(base_url)
+    if cached is None:
+        target = CellRun(run.cell, run.writer)
+        try:
+            cached = await _provision_target(run, target, base_url, issuer, db_url)
+        except Exception as exc:  # noqa: BLE001 - remembered and replayed for every cell
+            cached = _Failed(exc, tuple(target.artifacts))
+        _TARGETS[base_url] = cached
+    if isinstance(cached, _Failed):
+        run.artifacts.extend(cached.artifacts)
+        if isinstance(cached.error, ScenarioStop):
+            raise ScenarioStop(cached.error.outcome, str(cached.error))
+        raise AssertionError(f"the lane target could not be prepared: {cached.error!r}")
+    run.observed |= cached.observed
+    run.artifacts.extend(cached.artifacts)
+    return cached
 ```
 
 Consumed from the codebase (verified present): `scenario.on_catalog_system`, `authorize_ssh`,
@@ -185,7 +216,11 @@ Verification:
 - Contract: foreign-arch skip. `Mode: focused-test` — `test_foreign_arch_cell_skips_first`:
   a ppc64le local cell skips before `require_stack` is called (monkeypatched to raise). Red:
   `require_stack` raises.
-- Contract: `on_lane_system`, `lane_target`, `provision` override. `Mode:
+- Contract: `lane_target` memo. `Mode: focused-test` — `test_lane_target_prepares_once_and_replays`:
+  with `_provision_target` stubbed, a successful preparation runs once for two cells and both
+  carry its observed context; a blocked stub replays `ScenarioStop(BLOCKED)` and a failing stub an
+  `AssertionError`, each run carrying the stub's artifacts. Red: `lane_target` undefined.
+- Contract: `on_lane_system`, `lane_target` provisioning, `provision` override. `Mode:
   task-test-not-applicable` — they drive a live server, worker libvirt and a guest over SSH;
   nothing below that surface observes them meaningfully; proven by the live run (Task 4).
 
@@ -291,6 +326,44 @@ def test_foreign_arch_cell_skips_first(monkeypatch: pytest.MonkeyPatch) -> None:
         tool_cells.run_tool_cell(cell, never)
 ```
 
+```python
+def test_lane_target_prepares_once_and_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    target = tool_cells.LaneTarget("cov-t", "alloc", "sys", {"guest_arch": "x86_64"}, ("a" * 64,))
+
+    async def prepared(_run: CellRun, _target: CellRun, url: str, *_: object) -> object:
+        calls.append(url)
+        return target
+
+    monkeypatch.setattr(tool_cells, "_TARGETS", {})
+    monkeypatch.setattr(tool_cells, "_provision_target", prepared)
+    first, second = _run(tmp_path, "authentication"), _run(tmp_path, "authentication")
+    for run in (first, second):
+        assert asyncio.run(tool_cells.lane_target(run, "u1", object(), "db")) is target
+        assert run.observed["guest_arch"] == "x86_64" and run.artifacts == ["a" * 64]
+    assert calls == ["u1"]
+
+    async def failed(_run: CellRun, into: CellRun, *_: object) -> object:
+        into.artifacts.append("b" * 64)
+        raise ScenarioStop(Outcome.BLOCKED, "no lane image")
+
+    monkeypatch.setattr(tool_cells, "_provision_target", failed)
+    for _ in range(2):
+        run = _run(tmp_path, "authentication")
+        with pytest.raises(ScenarioStop, match="no lane image"):
+            asyncio.run(tool_cells.lane_target(run, "u2", object(), "db"))
+        assert run.artifacts == ["b" * 64]
+
+    async def broken(*_: object) -> object:
+        raise RuntimeError("provision failed")
+
+    monkeypatch.setattr(tool_cells, "_provision_target", broken)
+    with pytest.raises(AssertionError, match="provision failed"):
+        asyncio.run(tool_cells.lane_target(_run(tmp_path, "authentication"), "u3", object(), "db"))
+```
+
 (Imports to add: `hashlib`, `Cell` from `scripts.coverage_campaign.contract`.)
 
 2. Run; expect the binding, kernel and skip tests red, the authority test green.
@@ -316,7 +389,7 @@ async def provision_catalog(
 4. `tool_cells.py`: update the module docstring for the provider frame; add constants
    `LANE_IMAGES = {"x86_64": "fedora-kdive-ready-44"}`, `IDENTITY_PROBE = PROBE + '; printf
    "product_uuid=%s\\n" "$(cat /sys/class/dmi/id/product_uuid)"'`, `_SETTLE_S = 15.0`,
-   `_SETTLE_ATTEMPTS = 8`, `_TARGETS: dict[str, LaneTarget | Exception] = {}`; at the top of
+   `_SETTLE_ATTEMPTS = 8`, `_TARGETS: dict[str, LaneTarget | _Failed] = {}`; at the top of
    `run_tool_cell`:
 
 ```python
@@ -407,7 +480,8 @@ class Guest:
     """A ``ready`` lane System as a provider cell's body sees it.
 
     ``owned`` is the frame's list of host paths the cleanup proves absent; a body that makes the
-    System own more appends to it.
+    System own more appends to it. ``observed`` is the cell's recorded context: a body that boots
+    a kernel writes the kernel fields it observed there.
     """
 
     op: LiveStackClient
@@ -419,6 +493,7 @@ class Guest:
     key: Path
     probe: dict[str, str]
     owned: list[str]
+    observed: dict[str, object]
     scratch: Path
 
 
@@ -445,7 +520,9 @@ async def on_lane_system(
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             endpoint, key, probe = await observe_guest(run, op, system_id, root / "frame", entry)
-            guest = Guest(op, project, system_id, name, entry, endpoint, key, probe, owned, root)
+            guest = Guest(
+                op, project, system_id, name, entry, endpoint, key, probe, owned, run.observed, root
+            )
             observed = await body(guest)
         run.prove("effect", {"exposure": run.cell.exposure, **observed})
 
@@ -497,11 +574,11 @@ async def _settled(db_url: str, project: str) -> None:
 
 
 async def _provision_target(
-    run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
+    run: CellRun, target: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
 ) -> LaneTarget:
+    """Provision, observe and reclaim the target; ``target`` collects its own evidence."""
     name, entry = lane_image()
     project = f"cov-{secrets.token_hex(4)}"
-    target = CellRun(run.cell, run.writer)
     seen: list[str] = []
 
     async def observe(op: LiveStackClient, system_id: str, _owned: list[str]) -> None:
@@ -726,20 +803,6 @@ def _keys(result: subprocess.CompletedProcess[str]) -> set[str]:
     return {_key_id(line) for line in lines if not line.startswith("#")}
 
 
-def _inode(path: str) -> int:
-    try:
-        return os.stat(path).st_ino
-    except PermissionError:
-        out = subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
-            ["sudo", "-n", "stat", "-c", "%i", "--", path],
-            capture_output=True,
-            text=True,
-            timeout=10.0,
-            check=True,
-        )
-        return int(out.stdout.strip())
-
-
 def _defined(system_id: str) -> bool:
     try:
         domain_xml(system_id)
@@ -823,22 +886,21 @@ async def _reprovision(caller: HttpCaller, token: str, guest: Guest) -> dict[str
     marked = await asyncio.to_thread(ssh, guest.endpoint, guest.key, f"touch {_MARKER}")
     assert marked.returncode == 0, f"marker write exited {marked.returncode}"
     old = list(guest.owned)
-    inodes = {path: _inode(path) for path in old}
     profile = catalog_profile(guest.entry, guest.image, f"{guest.project}-unread")
     args = {"system_id": guest.system_id, "profile": profile}
     env = await _call(caller, "systems.reprovision", args, token)
     await drain_job(guest.op, "reprovision", env.object_id)
     await await_system_state(guest.op, "reprovision", guest.system_id, "ready")
     guest.owned.extend(p for p in domain_disks(domain_xml(guest.system_id)) if p not in old)
-    kept = [p for p in old if not disk_absent(p) and _inode(p) == inodes[p]]
-    assert not kept, f"owned disk(s) survived the reprovision: {kept}"
-    endpoint, key = await authorize_ssh(guest.op, guest.system_id, guest.scratch / "after", "cov")
+    after = guest.scratch / "after"
+    after.mkdir()
+    endpoint, key = await authorize_ssh(guest.op, guest.system_id, after, "cov")
     probe = await asyncio.to_thread(ssh_probe, endpoint, key)
     assert probe.get("boot_id") != guest.probe.get("boot_id"), "the guest did not reboot"
     assert os_matches(guest.entry, probe), "the replacement guest is not the catalog image"
     marker = await asyncio.to_thread(ssh, endpoint, key, f"test -e {_MARKER}")
     assert marker.returncode == 1, "the old install's marker survived the reprovision"
-    return {"ready": True, "boot_id_changed": True, "marker": "absent", "disks_replaced": len(old)}
+    return {"ready": True, "boot_id_changed": True, "marker": "absent", "disks": len(guest.owned)}
 
 
 async def _teardown(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
@@ -962,7 +1024,9 @@ Steps:
    root), what cells leave behind, the four expected `gateway` validation failures, and a
    "Last run" record.
 2. On the lab guest: push the branch head, check it out, `just build-capture-bootstrap-manifest`,
-   bindings, then per lane `~/up-2811.sh <lane>`, check `/readyz` `ready` on the worker, run the
+   bindings, then per lane `examples/local-libvirt/demo-up.sh` (default) or
+   `KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh` (recovery), check
+   `/readyz` `ready` on the worker, run the
    carrier, assemble, `qualify`; grep the 120 rows. Wipe the stack (`demo-down.sh --wipe --yes`)
    and confirm no domain remains.
 3. Fill the "Last run" record with candidate SHA and outcome counts; commit
