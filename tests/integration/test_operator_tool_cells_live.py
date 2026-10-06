@@ -237,8 +237,9 @@ async def _granted(caller: HttpCaller, db_url: str) -> AsyncIterator[dict[str, A
     operator = HttpCaller("direct", caller.base_url, caller.issuer)
     token = operator.token(Grants(f"{funded}-{_fresh()}", (funded,), {funded: "contributor"}))
     env = one(await operator.call("allocations.request", {"project": funded, **_SIZING}, token))
-    assert env.status == "granted", f"allocations.request answered {env.status}"
     try:
+        # A queued request is released too, or it would be granted later and hold capacity.
+        assert env.status == "granted", f"allocations.request answered {env.status}"
         yield (await _rows(db_url, _ALLOCATION, (env.object_id,)))[0]
     except BaseException:
         await _release(operator, token, db_url, env.object_id)
