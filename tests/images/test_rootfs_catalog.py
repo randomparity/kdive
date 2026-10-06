@@ -53,7 +53,7 @@ _EXPECTED_MAKEDUMPFILE: dict[str, str] = {
 # 2026-07-12). drgn ships unpinned from distro repos (rhel: EPEL, debian: python3-drgn), so this is
 # the per-image operand of the computed live-drgn-introspection predicate (ADR-0328): it must match
 # the structured ``drgn_version`` field in rootfs_catalog.toml. The capability is computed
-# (drgn_support) against the 0.0.31 BTF-capability threshold, not stored.
+# (drgn_support) not stored (ADR-0723).
 _EXPECTED_DRGN: dict[str, str | None] = {
     "fedora-kdive-ready-43": "0.1.0",
     "fedora-kdive-ready-43-cloud": "0.2.0",
@@ -202,26 +202,15 @@ def test_catalog_drgn_versions_match_snapshot() -> None:
         assert cat[name].drgn_version == version, name
 
 
-_LIVE_DRGN_BELOW_THRESHOLD_ROWS = {
-    "debian-kdive-ready-12",
-    "ubuntu-kdive-ready-24.04",
-}
-
-
 def test_catalog_live_drgn_status_matches_tooling_and_version_evidence() -> None:
-    """Absent tooling is not applicable; installed versions resolve against the BTF floor."""
+    """Absent tooling is not applicable; installed versions are capable."""
     cat = load_rootfs_catalog()
     for name in _EXPECTED_DRGN:
         entry = cat[name]
         family = family_for(entry.family)
         tooling = Capability.DRGN in family.capabilities(entry.kind, entry.distro, entry.version)
         cap = live_drgn_capability(drgn_version=entry.drgn_version, drgn_tooling=tooling)
-        if entry.drgn_version is None:
-            expected = "not_applicable"
-        elif name in _LIVE_DRGN_BELOW_THRESHOLD_ROWS:
-            expected = "incapable"
-        else:
-            expected = "capable"
+        expected = "not_applicable" if entry.drgn_version is None else "capable"
         assert cap.status == expected, name
 
 
@@ -231,7 +220,7 @@ def test_ppc64le_row_drgn_version_is_capability_meaningful() -> None:
     Restates, named explicitly for the ppc64le row (grep-able against the #1150 acceptance
     criterion "drgn_version stays meaningful for ppc64le rows"), the invariant the generic loops
     above cover across all rows: the value is non-empty and computes a ``capable`` live-drgn
-    verdict (parses and clears the BTF floor). The parse/floor machinery lives in
+    verdict (the version parses). The parse machinery lives in
     ``drgn_support``; this asserts it, it does not re-implement it.
     """
     row = load_rootfs_catalog()["fedora-kdive-ready-44-ppc64le"]

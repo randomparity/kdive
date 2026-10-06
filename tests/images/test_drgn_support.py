@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from kdive.images.drgn_support import (
-    BTF_CAPABLE_DRGN,
     DrgnVersion,
     live_drgn_capability,
 )
@@ -36,24 +35,13 @@ def test_ordering_is_total() -> None:
     assert DrgnVersion(0, 0, 22) < DrgnVersion(0, 0, 31) < DrgnVersion(0, 1, 0)
 
 
-def test_threshold_is_0_0_31() -> None:
-    assert DrgnVersion(0, 0, 31) == BTF_CAPABLE_DRGN
-
-
-def test_capable_at_and_above_threshold() -> None:
-    for version in ("0.0.31", "0.0.33", "0.1.0"):
+def test_any_parsed_version_is_capable_and_names_the_vmlinux_upload() -> None:
+    for version in ("0.0.22", "0.0.31", "0.2.0"):
         cap = live_drgn_capability(drgn_version=version, drgn_tooling=True)
         assert cap.status == "capable", version
-        assert cap.min_drgn_required == "0.0.31"
-        assert cap.note == ""
-
-
-def test_incapable_below_threshold() -> None:
-    cap = live_drgn_capability(drgn_version="0.0.22", drgn_tooling=True)
-    assert cap.status == "incapable"
-    assert cap.drgn_version == "0.0.22"
-    assert cap.min_drgn_required == "0.0.31"
-    assert "0.0.22" in cap.note and "0.0.31" in cap.note
+        assert cap.drgn_version == version
+        assert cap.min_drgn_required is None
+        assert "vmlinux" in cap.note
 
 
 def test_not_applicable_without_tooling() -> None:

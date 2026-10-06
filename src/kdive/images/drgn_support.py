@@ -1,22 +1,16 @@
-"""Computed live-drgn-introspection capability predicate and its BTF-capability threshold.
+"""Computed live-drgn-introspection capability predicate (ADR-0723).
 
-In-guest drgn introspects the running kernel using the guest's own BTF
-(``/sys/kernel/btf/vmlinux``, from ``CONFIG_DEBUG_INFO_BTF``) rather than uploaded DWARF; whether
-that works end to end depends on the drgn build shipped in the image. The path of least resistance
-lands on single-kernel distro images installing drgn unpinned from distro repos, so the shipped
-version varies sharply by image family — an agent cannot tell before provisioning whether that
-drgn can actually introspect the kernel it will boot.
+In-guest drgn reads the Run's uploaded DWARF vmlinux staged in the guest; no released drgn reads
+kernel BTF, so the shipped drgn version does not gate the capability. An image that carries the
+drgn tooling and records a parseable drgn version is ``capable``, and the note tells the agent the
+matching vmlinux must be uploaded with the build.
 
-This module is the single, pure (no I/O) home for the BTF-capability rule and the capability an
-agent reads from ``images.describe`` before provisioning. It mirrors the kdump-capability
-predicate (:mod:`kdive.images.kdump_support`): a build-recorded drgn version is the per-image
-operand, and the predicate degrades to a non-confident ``unverified`` when the operand is absent or
-unparseable, so metadata that predates the signal never reports a confident-but-wrong answer.
-
-The threshold is a curated *lower* bound: drgn's ability to debug the running kernel without full
-DWARF (kallsyms symbol index, ORC-from-core-dump unwinding, and the module API for BTF-backed
-finders) reached practical usability at 0.0.31. It is a policy floor, not upstream truth, and may
-be raised as drgn's BTF support matures — the release highlights are the human reference.
+This module is the single, pure (no I/O) home for that rule and the capability an agent reads from
+``images.describe`` before provisioning. It mirrors the kdump-capability predicate
+(:mod:`kdive.images.kdump_support`): the build-recorded drgn version is the
+per-image operand, and the predicate degrades to a non-confident ``unverified`` when the operand is
+absent or unparseable, so metadata that predates the signal never reports a confident-but-wrong
+answer.
 """
 
 from __future__ import annotations
@@ -27,7 +21,10 @@ from dataclasses import dataclass
 _TRIPLE_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _PAIR_RE = re.compile(r"(\d+)\.(\d+)")
 
-DRGN_RELEASE_HIGHLIGHTS_URL = "https://drgn.readthedocs.io/en/latest/release_highlights.html"
+_VMLINUX_NOTE = (
+    "drgn-live reads the Run's uploaded DWARF vmlinux staged in the guest; upload the "
+    "kernel's matching vmlinux with the build (drgn does not read kernel BTF)"
+)
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -64,12 +61,6 @@ class DrgnVersion:
         return f"{self.major}.{self.minor}.{self.patch}"
 
 
-#: The curated minimum drgn that can introspect a live kernel from its in-guest BTF without
-#: uploaded DWARF (drgn 0.0.31, the DWARFless-kernel-debugging milestone). A policy floor, revised
-#: as drgn's BTF support matures; the release highlights are the human reference.
-BTF_CAPABLE_DRGN: DrgnVersion = DrgnVersion(0, 0, 31)
-
-
 @dataclass(frozen=True, slots=True)
 class LiveDrgnCapability:
     """The computed live-introspection capability of an image's shipped drgn.
@@ -77,10 +68,10 @@ class LiveDrgnCapability:
     Attributes:
         status: ``capable``, ``incapable``, ``unverified``, or ``not_applicable``.
         drgn_version: The image's recorded drgn version as stored, or ``None`` when absent.
-        min_drgn_required: The BTF-capability threshold (``"0.0.31"``), or ``None`` when the
-            image has no drgn tooling or the version is unknown.
-        note: A human-actionable note (with the release-highlights pointer) for a non-``capable``
-            status, else ``""``.
+        min_drgn_required: Always ``None``; kept so the signal's keys stay stable now that no
+            drgn version floor exists.
+        note: A human-actionable note: the vmlinux upload requirement for ``capable``, the
+            remedy for ``unverified``, else ``""``.
     """
 
     status: str
@@ -98,9 +89,8 @@ def live_drgn_capability(*, drgn_version: str | None, drgn_tooling: bool) -> Liv
 
     Returns:
         The capability. ``not_applicable`` when the image has no drgn tooling; ``unverified``
-        when the version is unknown or unparseable; otherwise ``capable`` (the shipped drgn is at
-        or above the BTF-capability threshold) or ``incapable`` (below it — it cannot introspect
-        the live kernel from in-guest BTF alone).
+        when the version is unknown or unparseable; otherwise ``capable``. ``incapable`` remains
+        a valid status value but is never returned.
     """
     if not drgn_tooling:
         return LiveDrgnCapability(
@@ -117,7 +107,7 @@ def live_drgn_capability(*, drgn_version: str | None, drgn_tooling: bool) -> Liv
             note="the image's drgn version is not recorded; rebuild the image to capture it",
         )
     try:
-        drgn = DrgnVersion.parse(drgn_version)
+        DrgnVersion.parse(drgn_version)
     except ValueError:
         return LiveDrgnCapability(
             status="unverified",
@@ -125,20 +115,6 @@ def live_drgn_capability(*, drgn_version: str | None, drgn_tooling: bool) -> Liv
             min_drgn_required=None,
             note=f"stored drgn version {drgn_version!r} is unrecognized",
         )
-    if drgn >= BTF_CAPABLE_DRGN:
-        return LiveDrgnCapability(
-            status="capable",
-            drgn_version=drgn_version,
-            min_drgn_required=str(BTF_CAPABLE_DRGN),
-            note="",
-        )
     return LiveDrgnCapability(
-        status="incapable",
-        drgn_version=drgn_version,
-        min_drgn_required=str(BTF_CAPABLE_DRGN),
-        note=(
-            f"drgn {drgn} predates BTF-based live kernel introspection (needs "
-            f">= {BTF_CAPABLE_DRGN}); this image cannot introspect a booted kernel from its "
-            f"in-guest BTF without uploaded debuginfo — see {DRGN_RELEASE_HIGHLIGHTS_URL}"
-        ),
+        status="capable", drgn_version=drgn_version, min_drgn_required=None, note=_VMLINUX_NOTE
     )
