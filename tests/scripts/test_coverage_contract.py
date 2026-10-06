@@ -61,6 +61,7 @@ _CATALOG_NODE = "tests/integration/test_catalog_tool_cells_live.py::test_catalog
 _INVESTIGATION_NODE = (
     "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
 )
+_OPERATOR_NODE = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _REMOTE_DEEP_NODE = (
     "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
@@ -129,6 +130,8 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     investigation = [c for c in contract.cells if c.operation in _SPLIT[3096]]
     assert len(investigation) == 260
     assert {c.node_id for c in investigation} == {_INVESTIGATION_NODE}
+    operator = [c for c in contract.cells if c.operation in _OPERATOR_TOOLS]
+    assert len(operator) == 124 and {c.node_id for c in operator} == {_OPERATOR_NODE}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -136,6 +139,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_CORE_TOOLS,
         *_SPLIT[3095],
         *_SPLIT[3096],
+        *_OPERATOR_TOOLS,
     }
     assert all(c.node_id is None for c in contract.cells if c.operation not in bound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
