@@ -16,30 +16,22 @@
 #   run-script [timeout_sec]
 #             Read a drgn script from STDIN (never argv, so the single-program allowlist is
 #             unchanged), stage it to a temp file, and run
-#             `timeout <timeout_sec> drgn -k -s /sys/kernel/btf/vmlinux -q` (the `-s` flag is
-#             omitted when that path does not exist). stdout is the script's output, byte-capped +
+#             `timeout <timeout_sec> drgn -k -q`. stdout is the script's output, byte-capped +
 #             platform-secret-redacted worker-side.
 #
 # Each prints ONE JSON object that the worker passes verbatim to
 # debug_common.introspect.assemble_report as the matching section, so the shape MUST match the
 # worker-side helper_tasks/helper_modules/helper_sysinfo producers. drgn runs against the LIVE
-# kernel (-k: /proc/kcore + the running kernel's debuginfo, explicitly loaded from
-# /sys/kernel/btf/vmlinux when present — see below). A non-zero exit (drgn cannot attach, e.g.
+# kernel (-k: /proc/kcore + the running kernel's staged DWARF debuginfo, found by drgn's default
+# search — see below). A non-zero exit (drgn cannot attach, e.g.
 # missing kernel debuginfo) is the worker's DEBUG_ATTACH_FAILURE; undecodable stdout is its
 # INFRASTRUCTURE_FAILURE.
 set -euo pipefail
 
-# Explicitly point drgn at the running kernel's BTF when present, mirroring the offline path's
-# explicit load_debug_info() (src/kdive/providers/shared/debug_common/drgn_program.py). Bare
-# `drgn -k` relies on version-sensitive auto-load and silently resolves nothing on guest drgn
-# builds that predate reliable BTF auto-detection (BBR F1 / issue #1090). `-s` is omitted (drgn
-# falls back to its own default debug-info search) when the BTF file is absent.
-# KDIVE_BTF_PATH is a test-only override; production guests always resolve the real BTF path.
-btf_path="${KDIVE_BTF_PATH:-/sys/kernel/btf/vmlinux}"
+# No `-s`: no released drgn reads kernel BTF (ADR-0723, #3121). drgn's default debug-info search
+# reads /usr/lib/debug/lib/modules/$(uname -r)/vmlinux, the DWARF vmlinux the install path stages
+# (ADR-0221).
 drgn_args=(-k)
-if [[ -r "$btf_path" ]]; then
-  drgn_args+=(-s "$btf_path")
-fi
 
 helper="${1:-}"
 case "$helper" in
