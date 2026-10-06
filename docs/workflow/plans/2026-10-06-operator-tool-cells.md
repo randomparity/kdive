@@ -150,8 +150,8 @@ rejection, snapshot)`, `project_state(db_url, project)`, `boundary_of(cell)`, `t
 `SECRET_REF_ID` (`kdive.diagnostics.checks`), `WORKER_UNAVAILABLE_DETAIL`
 (`kdive.diagnostics.contracts`), the four `*_ID` constants in
 `kdive.diagnostics.contributions.multiarch_gdb`, `args_digest` (`kdive.security.audit`),
-`read_secret_file(root, ref)` (`kdive.security.secrets.secrets`), `INVENTORY_WRITEBACK` and
-`SECRETS_ROOT` (`kdive.config.core_settings`), `CLI_CLIENT_ID` (`kdive.config.cli_settings`),
+`read_secret_file(root, ref)` (`kdive.security.secrets.secrets`), `SECRETS_ROOT`
+(`kdive.config.core_settings`), `CLI_CLIENT_ID` (`kdive.config.cli_settings`),
 `load_inventory_optional`, `systems_toml_path`. Each was confirmed at `2aca4de60`.
 
 Verification:
@@ -170,7 +170,7 @@ cells* are the normative assertions each function implements):
 |---|---|
 | `_rows(db_url, query, params)` | read-only `psycopg` session, `dict_row` rows |
 | `_functional_grants(tool, project)` | `audit.query`: admin of P + `platform_auditor`; `inventory.list`, `ops.tool_trail`: `platform_auditor`; else `platform_operator` |
-| `_pages(caller, tool, request, token)` | every item, `limit=1` per page via `next_cursor`; `discover` on the first page; fails past 200 pages |
+| `_pages(caller, tool, request, token, *, most=200)` | items, `limit=1` per page via `next_cursor`, until no cursor; `discover` on the first page; stops after `most` pages when `most` is below 200, and fails past 200 otherwise |
 | `_settled(observe, read)` | `read()`, `observe()`, `read()`; returns when both reads agree, else retries, failing after 3 |
 | `_audit` | three viewer denials (`audit.query` project form: P twice, P2 once) → `audit_log` rows by subject; project form equals P's rows, all-projects form equals all three, as `ts` datetimes and `""` for NULL |
 | `_granted(caller, db_url)` | `allocations.request` 1 vCPU / 1 GiB / 1 GB in `KDIVE_PROJECT` as contributor; must be `granted`; released on exit and checked `released`; released best-effort if the body raised |
@@ -178,10 +178,10 @@ cells* are the normative assertions each function implements):
 | `_diagnose(caller, token)` | default run; any `provider == "remote-libvirt"` item stops the cell `blocked` |
 | `_diagnostics` | checks equal `{secret_ref, multiarch_gdb, pseries_fadump, guest_arch_accel, depmod_toolchain}`; `secret_ref` pass; no worker check carries `WORKER_UNAVAILABLE_DETAIL`; `has_failure`/`has_error` match statuses; `git rev-parse HEAD` starts with `service_version.commit`; `with_egress=true` returns one `error` item `diagnostics` whose detail contains "could not be assembled" |
 | `_export_cost` | `tomllib` parse of `data.toml` `cost_class` equals `cost_class_coefficients` rows (`name`, `str(coeff)`) by name |
-| `_export_systems` | `KDIVE_INVENTORY_WRITEBACK` unset; same cost-class equality; declared `local_libvirt` and `image` names ⊆ exported; `persist=true` answers `configuration_error` containing "writeback is disabled" |
-| `_jobs` | `_diagnose` first; the newest `diagnostics_worker_check` job is the known job; `_settled` listing (limit 200): `depth_*` equal `GROUP BY state`, rows equal `jobs` rows (`id`, kind, state, `authorizing->>'project'`, attempt as text, worker or `""`); known job present under a project the token does not hold; `_settled` paging of the known job's state equals the database order |
+| `_export_systems` | same cost-class equality; declared `local_libvirt` and `image` names ⊆ exported; never passes `persist` |
+| `_jobs` | `_diagnose` first; the newest `diagnostics_worker_check` job is the known job; `_settled` listing (limit 200): `depth_*` equal `GROUP BY state`, rows equal `jobs` rows (`id`, kind, state, `authorizing->>'project'`, attempt as text, worker or `""`); known job present under a project the token does not hold; `_settled` first five `limit=1` pages of the known job's state equal that state's five newest rows |
 | `_trail` | unique viewer token calls `projects.list`, `session.whoami`, `inventory.list` (denied); `tool_invocation` rows of its session are `(inventory.list, denied), (session.whoami, ok), (projects.list, ok)` with subject, `operator-cli`, the CLI client id and `args_digest({})`; paged trail equals them |
-| `_configured_secrets()` / `_secrets` | secret settings' values: a value resolving under `KDIVE_SECRETS_ROOT` is a reference and its content a secret, else the value is a secret; labels sorted, unique, ⊆ `{<process-global>, <scoped>} ∪ refs`; no secret in `model_dump_json()` |
+| `_lane_secrets()` / `_secrets` | each secret setting's value, plus the content of each value that resolves under `KDIVE_SECRETS_ROOT`; none in `model_dump_json()`; labels sorted, unique, ⊆ `{<process-global>, <scoped>}`; then `ScenarioStop(Outcome.BLOCKED, …)` naming the missing positive presence control |
 | `_valid` / `_invalid` | `audit.query` `{"request": {"scope": "project", "project": P}}` / `{"request": {"scope": "galaxy"}}`; `ops.diagnostics` `{}` / `{"with_egress": "maybe"}`; `ops.export_systems_toml` `{}` / `{"persist": "maybe"}`; others `{}` / `{"request": {"limit": "many"}}` |
 | `_rejection_grants` | validation: functional grants; project-isolation: admin of a fresh project; authorization: `platform_auditor` for operator-gated tools, else viewer of P; authentication: viewer of P |
 | `_scenario` / `test_operator_tool_cell` | the #3095 pattern: fresh P, `project_state` snapshot, `prove_functional` with `partial(body, db_url=db_url)` or `prove_rejection`; parametrized over `tool_cells(TOOLS)` |
@@ -228,13 +228,18 @@ Steps:
 1. Add `#### Read-only operator tool cells (#2812)` after the #3096 section: the carrier node, the
    124 cells, that it runs on the same lanes, bindings and assembly, the catalog carrier's
    environment (sourced `env.sh`, `KDIVE_DATABASE_URL`, `KDIVE_SYSTEMS_TOML`), the one
-   `KDIVE_PROJECT` allocation it takes and releases, the history rows it leaves, that
-   `KDIVE_INVENTORY_WRITEBACK` must stay unset, and a `Last run` paragraph filled from step 3.
+   `KDIVE_PROJECT` allocation it takes and releases, the history rows it leaves, and that the
+   `secrets.list` functional cells stop `blocked`. No `Last run` paragraph yet.
 2. `just docs-check`; expect exit 0. Commit `docs(runbook): run the read-only operator tool cells`.
-3. On the lab guest at the committed head: regenerate `inputs.json` with the `tool_cells
+3. Refresh onto `origin/main` (merge, never rebase a pushed branch) and rerun Tasks 1-2's focused
+   tests, so the candidate's matrix includes any concurrently landed bindings.
+4. On the lab guest at that committed head: regenerate `inputs.json` with the `tool_cells
    bindings` command; bring up the `default` lane, run the carrier with
    `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`; bring up the
-   `KDIVE_WORKER_DEATH_VERIFIER=docker` lane, run it again; `evidence assemble`, then `qualify`.
-   Expect 62 cells recorded per lane and the 124 rows of these tools qualified; a failing or
-   blocked cell is recorded as observed, never retried into a pass.
-4. Wipe the lab stack.
+   `KDIVE_WORKER_DEATH_VERIFIER=docker` lane and run it again; `evidence assemble`, then `qualify`.
+   Expect 62 cells recorded per lane: every rejection cell and every functional cell except
+   `secrets.list` qualified, the four `secrets.list` functional cells `blocked`. A failing or
+   blocked cell is recorded as observed, never retried into a pass. Wipe the lab stack.
+5. Add the `Last run` paragraph naming the candidate SHA, the host class, both lanes and the
+   per-lane outcome counts, and commit it as a docs-only change after the candidate. A later base
+   refresh that changes `scripts.coverage_campaign check`'s matrix line repeats steps 4-5.

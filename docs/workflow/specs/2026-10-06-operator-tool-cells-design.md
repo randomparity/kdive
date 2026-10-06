@@ -28,7 +28,9 @@ configurations, two exposures) this change proves. The rest moves to sibling own
    `prove_rejection`. `[implementations]` binds the 31 scenarios to it.
 4. A runbook section beside the other tool-cell carriers, and a live run of both lanes.
 
-No product, harness, ADR or migration change.
+No product, harness, ADR or migration change. ADR-0722's Consequences and ADR-0715 name #2812
+for the recovery and authority-routed tools; that is point-in-time, and `obligations.toml` is
+authoritative after the split.
 
 ### Grants
 
@@ -68,26 +70,29 @@ with a separate token whose subject and agent session are unique to the cell.
   `cost_class_coefficients` rows (name and exact decimal string), in name order.
 - `ops.export_systems_toml`: the parsed export's `[[cost_class]]` entries equal those rows. Every
   `[[local_libvirt]]` and `[[image]]` name the configured `systems.toml` declares appears in the
-  export. With `persist=true` and writeback unset in the lane, the tool answers
-  `configuration_error` naming the disabled writeback, so no bytes are written. A lane with
-  `KDIVE_INVENTORY_WRITEBACK` set fails the cell rather than writing.
+  export. The cell never passes `persist`: the tool writes only through the server's writeback
+  setting, which the test process cannot see.
 - `ops.jobs_list`: the diagnostics call above enqueues a worker-check job under the provider's
   project, which the caller does not hold. The listing's depth fields equal
   `SELECT state, count(*) FROM jobs GROUP BY state`. Its rows (kind, state, project, attempt,
-  worker) equal the newest database rows and include that job. Paging the job's state with
-  `limit=1` yields the database order. Background jobs move, so the comparison reads the database
-  before and after the call and retries, up to three times, until both reads agree.
+  worker) equal the newest database rows and include that job. The first five pages of the job's
+  state at `limit=1` equal that state's five newest rows. Background jobs move, so each
+  comparison reads the database before and after the calls and retries, up to three times, until
+  both reads agree.
 - `ops.tool_trail`: the unique token calls `projects.list`, `session.whoami` and `inventory.list`
   over `direct`. The last is denied because the token holds no platform role. Filtered to that
   agent session, the trail returns exactly three rows, newest first, with these tools, outcomes
   `denied, ok, ok`, the subject, `actor=operator-cli`, the CLI client id, and the `args_digest`
   of `{}`. Every row equals its database row, and paging with `limit=1` yields the same three.
-- `secrets.list`: the configured sources are the `KDIVE_*` settings marked secret in the lane
-  environment the test process shares with the server. A value that resolves under
-  `KDIVE_SECRETS_ROOT` is a reference, and its file content is a secret; any other value (a DSN,
-  a token) is itself a secret. `data.secrets` is sorted and duplicate-free, and each label is
-  `<process-global>`, `<scoped>` or one of those references. No secret appears anywhere in the
-  serialized envelope.
+- `secrets.list`: the secrets are the values of the `KDIVE_*` settings marked secret in the lane
+  environment, plus the file content of each such value that resolves under `KDIVE_SECRETS_ROOT`.
+  None appears anywhere in the serialized envelope. `data.secrets` is sorted and duplicate-free,
+  and each label is `<process-global>` or `<scoped>`: a string scope comes only from a
+  remote-libvirt artifact channel, which no local lane configures. Presence has no positive
+  control here. The server registers a secret only when it resolves one through a file-ref
+  backend or loads a System's bootstrap key for a debug or introspection session, and the cell
+  can cause neither cheaply. So after the leak check the cell stops `blocked`, naming the missing
+  control. It does not record success.
 
 ### Rejection cells
 
@@ -103,7 +108,7 @@ with a separate token whose subject and agent session are unique to the cell.
 1. **Actors and deployments:**
    - an operator running the live tier on a disposable lab host, with one stack per lane (the
      `default` lane, and the `recovery` lane started with `KDIVE_WORKER_DEATH_VERIFIER=docker`),
-     local-libvirt only and writeback unset;
+     local-libvirt only;
    - CI, which runs only the unit and contract tests.
 2. **Invariants and assets at stake:**
    - honest per-cell outcomes, and a contract whose ownership matches the operator's split;
@@ -113,14 +118,12 @@ with a separate token whose subject and agent session are unique to the cell.
    - Audit, platform-audit and tool-invocation rows the cells cause, the released allocation, and
      the finished diagnostics job stay as history. The snapshot excludes the audit tables
      (ADR-0722 §4), and the stack wipe after the proof removes them.
-   - The server's secret registry fills lazily, so `secrets.list` presence is checked as a subset
-     of the configured sources, not equality. A secret held only in the server's memory and never
-     configured is outside what the test can know, and so is a `systems.toml` reference, which
-     no local-libvirt lane declares.
-   - `ops.export_systems_toml` writeback is not driven. The lanes leave it disabled, and the
-     observation calls it optional.
+   - `secrets.list` presence is not proven: its functional cells stop `blocked` (see above), and
+     the lane records them as such.
+   - `ops.export_systems_toml` writeback is not driven. The observation calls it optional, and
+     a `persist` call on a server whose writeback is set would overwrite its inventory target.
    - Concurrent carriers on one stack are not modelled. The jobs comparison retries only
-     background queue movement.
+     background queue movement, and it bounds the paged state to five rows.
    - The `provider` argument of `ops.diagnostics` is not driven. The service factory ignores it
      (`diagnostics/service.py` `default_service_factory`), and that is reported as a follow-up.
 4. **Covered elsewhere:**
