@@ -5,7 +5,7 @@ Three consumers share :func:`load_effective_config` here:
 - the crash-capture arming seams (install crashkernel reservation, kdump vmcore fetch) **refuse**
   when the config provably lacks the crash-capture symbols;
 - the drgn-live debug seams (``debug.start_session``, live ``introspect.*``) **warn** — never
-  refuse — when no host ``vmlinux`` was uploaded for a Run with an uploaded config (ADR-0723); and
+  refuse — when no host ``vmlinux`` was uploaded for a Run with an uploaded config (#3121); and
 - ``runs.complete_build`` **warns** — never refuses — when the config provably lacks the
   boot-required ``rootfs_mount`` symbols the guest needs to mount its root filesystem, and when it
   lacks the ``crash_capture_rhel_guest`` symbols and the target image is, or may be, RHEL-family
@@ -90,7 +90,7 @@ _NO_EFFECTIVE_CONFIG_REMEDIATION = (
 )
 
 MISSING_DEBUGINFO_REASON = "missing_debuginfo"
-# No released drgn reads kernel BTF (ADR-0723): in-guest drgn-live resolves symbols from the Run's
+# No released drgn reads kernel BTF (#3121): in-guest drgn-live resolves symbols from the Run's
 # uploaded DWARF vmlinux, staged under /usr/lib/debug. The kernel .config therefore plays no part.
 _DEBUGINFO_REMEDIATION = (
     "upload the kernel's matching vmlinux (built with CONFIG_DEBUG_INFO_DWARF5, "
@@ -258,7 +258,7 @@ async def missing_effective_config_nudge(
 async def debuginfo_warning(
     conn: AsyncConnection, run_id: UUID, *, has_uploaded_vmlinux: bool
 ) -> dict[str, JsonValue] | None:
-    """Non-fatal ``missing_debuginfo`` warning for a drgn-live seam, or ``None`` (ADR-0723).
+    """Non-fatal ``missing_debuginfo`` warning for a drgn-live seam, or ``None`` (#3121).
 
     Returns ``None`` when a host ``vmlinux``/``debuginfo_ref`` was uploaded (the guest stages it for
     drgn) and when no ``effective_config`` was uploaded or it cannot be read/trusted
@@ -277,7 +277,7 @@ async def debuginfo_warning(
 
 
 def debuginfo_unloadable_warning() -> dict[str, JsonValue]:
-    """The runtime-probe ``debuginfo_unloadable`` warning payload (ADR-0723).
+    """The runtime-probe ``debuginfo_unloadable`` warning payload (#3121).
 
     Emitted by the drgn-live introspect seams when a runtime symbol probe proves the in-guest drgn
     cannot resolve a stable kernel symbol, whether or not a ``vmlinux`` was uploaded (it may not

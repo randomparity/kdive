@@ -131,7 +131,7 @@ class _RuntimeProbe:
     """Inputs for the post-open drgn-live runtime debuginfo probe (ADR-0335).
 
     Present only when a runtime probe can still change the verdict: a drgn-live attach whose static
-    warning is silent, with or without an uploaded vmlinux (ADR-0723).
+    warning is silent, with or without an uploaded vmlinux (#3121).
     The probe runs after the transport opens because the transport handle does not exist where the
     static warning is computed (:meth:`DebugSessionHandlers._prepare_attach_request`).
     """
@@ -509,7 +509,7 @@ def _runtime_probe(
     """Build the post-open runtime probe only when it can still change the verdict (ADR-0335).
 
     Confined to a drgn-live attach whose static warning is silent, whether or not a vmlinux was
-    uploaded (ADR-0723: the guest may not have staged it). gdbstub (symbolizes host-side) and a Run
+    uploaded (#3121: the guest may not have staged it). gdbstub (symbolizes host-side) and a Run
     that already warns pay nothing new.
     """
     if transport != _DRGN_LIVE or static_warning is not None:

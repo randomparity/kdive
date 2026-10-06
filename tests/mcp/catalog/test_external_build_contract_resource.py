@@ -158,7 +158,7 @@ def test_every_requirements_element_is_a_clause_object_keyed_by_symbols() -> Non
 
     # The entry's own key vocabulary is bounded for the same reason a clause's is: a new key is a
     # shape change an agent has to be told about, and `gated` must not come back (#1867).
-    # `also_checked` joined with #1901; none carries one since ADR-0723, the key stays legal.
+    # `also_checked` joined with #1901; none carries one since #3121, the key stays legal.
     for entry in features:
         assert set(entry) <= {
             "feature",
@@ -347,7 +347,7 @@ def test_resource_reads_back_generated_json() -> None:
 
 
 def test_the_served_bpf_tracing_entry_no_longer_claims_kdive_checks_btf() -> None:
-    # ADR-0723: no released drgn reads kernel BTF, so the drgn-live seam stopped keying on
+    # #3121: no released drgn reads kernel BTF, so the drgn-live seam stopped keying on
     # DEBUG_INFO_BTF and bpf_tracing lost the only `also_checked` in the registry. The served entry
     # must say so rather than keep promising a missing_debuginfo warning for omitting BTF.
     manifest = _doc()["feature_config_requirements"]

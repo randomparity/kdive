@@ -623,7 +623,7 @@ def test_run_live_loads_and_materializes_the_per_system_bootstrap_key(migrated_u
     resp, port = asyncio.run(_run())
     assert resp.status != "error"
     assert port.key_path_existed_during_call is True
-    # The always-on resolution probe (ADR-0723) and the helper each materialize their own key.
+    # The always-on resolution probe (#3121) and the helper each materialize their own key.
     assert len(port.key_paths_seen) == 2
     for key_path in port.key_paths_seen:
         assert key_path  # a real path was passed, not empty/None
@@ -1293,7 +1293,7 @@ def test_run_live_static_warning_skips_runtime_probe(migrated_url: str) -> None:
 
 
 def test_run_live_uploaded_vmlinux_runs_runtime_probe(migrated_url: str) -> None:
-    # ADR-0723: an uploaded vmlinux silences the static gate only; the guest may not have staged it,
+    # #3121: an uploaded vmlinux silences the static gate only; the guest may not have staged it,
     # so the probe still runs and a failed probe yields debuginfo_unloadable.
     async def _run() -> tuple[ToolResponse, _ProbeIntrospector]:
         async with _pool(migrated_url) as pool:

@@ -1,4 +1,4 @@
-"""Computed live-drgn-introspection capability predicate (ADR-0723).
+"""Computed live-drgn-introspection capability predicate (#3121).
 
 In-guest drgn reads the Run's uploaded DWARF vmlinux staged in the guest; no released drgn reads
 kernel BTF, so the shipped drgn version does not gate the capability. An image that carries the

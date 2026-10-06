@@ -2,7 +2,7 @@
 
 The static config check (:func:`kdive.kernel_config.gate.debuginfo_warning`) proves only that no
 ``vmlinux`` was uploaded, never that the running guest's drgn can resolve symbols from the one that
-was (ADR-0723). This module adds the runtime signal: a fixed one-line drgn lookup over the existing
+was (#3121). This module adds the runtime signal: a fixed one-line drgn lookup over the existing
 ``run_script`` seam that finds a session blind even when a ``vmlinux`` was uploaded. Both the
 live-introspection handlers and the ``debug.start_session`` attach seam call
 :func:`augment_with_runtime_probe` to fill the exact gap the static check cannot cover, so the

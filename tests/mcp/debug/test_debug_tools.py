@@ -1051,7 +1051,7 @@ def test_start_session_drgn_live_warns_when_config_lacks_debuginfo(migrated_url:
 def test_start_session_drgn_live_btf_config_without_vmlinux_still_warns(migrated_url: str) -> None:
     from tests.kernel_config.config_fixtures import all_builtin
 
-    # ADR-0723: BTF in the config plays no part; with no vmlinux uploaded the gate warns.
+    # #3121: BTF in the config plays no part; with no vmlinux uploaded the gate warns.
     cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"})
 
     async def _run() -> None:
@@ -1282,7 +1282,7 @@ def test_start_session_drgn_live_static_warning_skips_runtime_probe(migrated_url
 
 
 def test_start_session_drgn_live_uploaded_vmlinux_runs_runtime_probe(migrated_url: str) -> None:
-    # ADR-0723: an uploaded vmlinux silences the static gate only; the probe still runs and a
+    # #3121: an uploaded vmlinux silences the static gate only; the probe still runs and a
     # failed probe yields debuginfo_unloadable.
     async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
         async with open_pool(migrated_url) as pool:

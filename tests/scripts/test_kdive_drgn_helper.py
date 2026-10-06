@@ -69,7 +69,7 @@ def _run_helper(tmp_path, *args, stdin=None):
 
 
 def test_helper_never_passes_symbols_flag(tmp_path) -> None:
-    """#3121 / ADR-0723: no released drgn reads kernel BTF, so every mode runs `drgn -k -q` and
+    """#3121: no released drgn reads kernel BTF, so every mode runs `drgn -k -q` and
     leaves symbol lookup to drgn's default search of the staged /usr/lib/debug vmlinux. The
     environment holds a readable fake BTF file, which the helper must ignore.
     """

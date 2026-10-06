@@ -80,7 +80,7 @@ def test_absent_config_fails_open_to_no_warning():
     ],
 )
 def test_external_build_without_vmlinux_warns_and_names_vmlinux(symbols: set[str]):
-    # ADR-0723: no released drgn reads kernel BTF, so DEBUG_INFO_BTF plays no part.
+    # #3121: no released drgn reads kernel BTF, so DEBUG_INFO_BTF plays no part.
     warning = _call(config=all_builtin(symbols), has_uploaded_vmlinux=False)
     assert warning is not None
     assert warning["reason"] == MISSING_DEBUGINFO_REASON

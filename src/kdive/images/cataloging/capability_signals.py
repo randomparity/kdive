@@ -141,7 +141,7 @@ def render_live_drgn_signal(
     Reads the build-recorded ``provenance["drgn_version"]`` (``None`` when absent or not a string)
     and whether the image carries the ``drgn`` tooling tag, then computes whether the shipped drgn
     is ``capable`` of live introspection; the note names the Run's uploaded DWARF vmlinux that
-    drgn-live reads (ADR-0723). The answer is a static image property, not a target-kernel matrix,
+    drgn-live reads (#3121). The answer is a static image property, not a target-kernel matrix,
     so ``_target_kernel`` is accepted for the uniform signal signature and ignored. A reader never
     raises on image data — a missing or unparseable stored version degrades to ``unverified``.
     """

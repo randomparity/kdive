@@ -53,7 +53,7 @@ _EXPECTED_MAKEDUMPFILE: dict[str, str] = {
 # 2026-07-12). drgn ships unpinned from distro repos (rhel: EPEL, debian: python3-drgn), so this is
 # the per-image operand of the computed live-drgn-introspection predicate (ADR-0328): it must match
 # the structured ``drgn_version`` field in rootfs_catalog.toml. The capability is computed
-# (drgn_support) not stored (ADR-0723).
+# (drgn_support) not stored (#3121).
 _EXPECTED_DRGN: dict[str, str | None] = {
     "fedora-kdive-ready-43": "0.1.0",
     "fedora-kdive-ready-43-cloud": "0.2.0",

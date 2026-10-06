@@ -253,7 +253,7 @@ def test_debuginfo_summary_names_use_case_and_cost():
 
 
 def test_debuginfo_summary_names_the_uploaded_vmlinux_the_in_guest_drgn_reads():
-    # ADR-0723: no released drgn reads kernel BTF. In-guest drgn-live reads the Run's uploaded DWARF
+    # #3121: no released drgn reads kernel BTF. In-guest drgn-live reads the Run's uploaded DWARF
     # vmlinux, so a DWARF .config alone leaves that session blind and the summary must say so.
     summary = feature_requirement("debuginfo").summary.lower()
     assert "vmlinux" in summary
@@ -1802,7 +1802,7 @@ def test_the_three_invariants_report_a_seam_evaluated_feature_and_spare_the_othe
 
 
 def test_no_entry_carries_also_checked_since_drgn_live_stopped_reading_btf():
-    # ADR-0723: bpf_tracing's BTF clause was the only also_checked in the registry, and it described
+    # #3121: bpf_tracing's BTF clause was the only also_checked in the registry, and it described
     # the drgn-live seam keying on DEBUG_INFO_BTF. That seam now keys on the vmlinux upload, so the
     # registry has nothing to scope; ScopedEnforcement stays as unused vocabulary.
     assert all(not f.also_checked for f in FEATURE_REQUIREMENTS)
