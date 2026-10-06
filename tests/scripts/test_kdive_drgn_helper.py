@@ -47,7 +47,15 @@ def _run_helper(tmp_path, *args, stdin=None):
     )
     fake_drgn.chmod(0o755)
 
-    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+    # A readable fake BTF file at the path the pre-#3121 helper reacted to, so the test bites on
+    # hosts without /sys/kernel/btf/vmlinux (macOS) too.
+    btf_file = tmp_path / "vmlinux"
+    btf_file.write_text("fake-btf")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "KDIVE_BTF_PATH": str(btf_file),
+    }
 
     proc = subprocess.run(
         ["bash", str(HELPER), *args],
@@ -62,7 +70,8 @@ def _run_helper(tmp_path, *args, stdin=None):
 
 def test_helper_never_passes_symbols_flag(tmp_path) -> None:
     """#3121 / ADR-0723: no released drgn reads kernel BTF, so every mode runs `drgn -k -q` and
-    leaves symbol lookup to drgn's default search of the staged /usr/lib/debug vmlinux.
+    leaves symbol lookup to drgn's default search of the staged /usr/lib/debug vmlinux. The
+    environment holds a readable fake BTF file, which the helper must ignore.
     """
     for index, (args, stdin) in enumerate(
         [(("run-script", "7"), b"print(1)\n"), (("sysinfo",), None)]
