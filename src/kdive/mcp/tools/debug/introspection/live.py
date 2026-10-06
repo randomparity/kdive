@@ -259,6 +259,21 @@ async def _introspect_live_session(
     )
 
 
+def _script_too_large(response_id: str, script: str) -> ToolResponse | None:
+    """Reject an oversize script before any guest round trip (context probe included)."""
+    script_bytes = len(script.encode("utf-8"))
+    if script_bytes <= _MAX_SCRIPT_BYTES:
+        return None
+    return _config_error(
+        response_id,
+        data={
+            "reason": "script_too_large",
+            "script_bytes": script_bytes,
+            "max_bytes": _MAX_SCRIPT_BYTES,
+        },
+    )
+
+
 async def introspect_script(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
@@ -271,6 +286,8 @@ async def introspect_script(
 ) -> ToolResponse:
     """Run a caller drgn script over a `live` drgn-live DebugSession; return capped stdout."""
     with bind_context(principal=ctx.principal):
+        if (too_large := _script_too_large(session_id, script)) is not None:
+            return too_large
         resolved = await _resolve_live_introspection_context(
             pool=pool,
             resolver=resolver,
@@ -327,16 +344,6 @@ async def _run_live_script(
     private_key: str,
 ) -> ToolResponse:
     """Clamp the timeout, run the script off-loop, shape the response."""
-    script_bytes = len(script.encode("utf-8"))
-    if script_bytes > _MAX_SCRIPT_BYTES:
-        return _config_error(
-            response_id,
-            data={
-                "reason": "script_too_large",
-                "script_bytes": script_bytes,
-                "max_bytes": _MAX_SCRIPT_BYTES,
-            },
-        )
     clamped = _clamp_timeout(timeout_sec)
     try:
         with materialized_private_key(private_key) as key_path:

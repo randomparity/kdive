@@ -131,7 +131,7 @@ class _RuntimeProbe:
     """Inputs for the post-open drgn-live runtime debuginfo probe (ADR-0335).
 
     Present only when a runtime probe can still change the verdict: a drgn-live attach whose static
-    config check is silent (BTF advertised, or no config) and whose Run uploaded no host vmlinux.
+    warning is silent, with or without an uploaded vmlinux (ADR-0723).
     The probe runs after the transport opens because the transport handle does not exist where the
     static warning is computed (:meth:`DebugSessionHandlers._prepare_attach_request`).
     """
@@ -383,7 +383,7 @@ class DebugSessionHandlers:
             connector=resources.connector,
             missing_debuginfo=missing,
         )
-        probe = _runtime_probe(run, system, transport, missing, resources.live_introspector)
+        probe = _runtime_probe(system, transport, missing, resources.live_introspector)
         return _AttachPlan(request=request, probe=probe)
 
     async def _augment_after_open(
@@ -501,7 +501,6 @@ class DebugSessionHandlers:
 
 
 def _runtime_probe(
-    run: Run,
     system: System,
     transport: DebugTransportKind,
     static_warning: dict[str, JsonValue] | None,

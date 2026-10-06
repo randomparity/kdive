@@ -17,7 +17,7 @@ Use `images.describe` for the selected image's package versions, boot layout, an
 | --- | --- |
 | `kdump` | Whether the recorded makedumpfile version and tooling support the target kernel. Guest crash-capture configuration is still required. |
 | `direct_kernel` | Whether the recorded non-rescue kernel count is exactly one, so direct-kernel provisioning can select a baseline kernel. |
-| `live_drgn` | Whether the shipped drgn can read the Run's uploaded DWARF `vmlinux` staged in the guest (drgn does not read kernel BTF). `capable` still needs that upload. |
+| `live_drgn` | Whether the shipped drgn can read the Run's uploaded DWARF `vmlinux` staged in the guest (drgn does not read kernel BTF). `capable` still needs that upload, and only install paths that stage it (today the local-libvirt legacy install) make it readable. |
 
 `unverified` means the signal lacks usable evidence; it neither proves readiness nor diagnoses
 a broken image. A present operand's `basis` distinguishes `build_verified` from

@@ -222,7 +222,7 @@ family = "debian"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.2"  # bookworm
-drgn_version = "0.0.22"  # bookworm (python3-drgn 0.0.22-1); < 0.0.31 -> live_drgn incapable
+drgn_version = "0.0.22"  # bookworm (python3-drgn 0.0.22-1)
 source = { kind = "cloud-image", url = "https://cloud.debian.org/images/cloud/bookworm/20260615-2510/debian-12-genericcloud-amd64-20260615-2510.qcow2", sha256 = "59f936c9f8f9b467585c126661370c14ccfffe824928a066da282788cc3d330c" }  # pragma: allowlist secret
 
 [[image]]
@@ -242,7 +242,7 @@ source = { kind = "cloud-image", url = "https://cloud.debian.org/images/cloud/tr
 # cloud-images.ubuntu.com/releases/<codename>/ (never the rotating `release/` alias); the file is
 # qcow2 despite its `.img` suffix. Versions verified against packages.ubuntu.com on 2026-09-07:
 # makedumpfile 1.7.5 (noble) / 1.7.7 (resolute), both < 1.7.9 -> host_dump for a v7.0 kernel;
-# python3-drgn 0.0.25 (noble, < 0.0.31 -> live_drgn incapable) / 0.0.33 (resolute).
+# python3-drgn 0.0.25 (noble) / 0.0.33 (resolute).
 [[image]]
 name = "ubuntu-kdive-ready-24.04"
 distro = "ubuntu"
@@ -251,7 +251,7 @@ family = "debian"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.5"  # noble (1:1.7.5-1)
-drgn_version = "0.0.25"  # noble (python3-drgn 0.0.25-2build3, universe); < 0.0.31 -> live_drgn incapable
+drgn_version = "0.0.25"  # noble (python3-drgn 0.0.25-2build3, universe)
 source = { kind = "cloud-image", url = "https://cloud-images.ubuntu.com/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-amd64.img", sha256 = "d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30" }  # pragma: allowlist secret
 
 [[image]]

@@ -35,8 +35,9 @@ computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
 ``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a
 multi-kernel image does not burn an allocation on a fail-closed selection), and
 ``live_drgn`` (``capability`` ``capable`` when the shipped drgn can read the Run's uploaded
-DWARF ``vmlinux`` staged in the guest (drgn does not read kernel BTF, so upload ``vmlinux``
-with the build), ``unverified`` when the drgn version is not recorded or unparseable,
+DWARF ``vmlinux`` where the install path stages it, today the local-libvirt legacy install
+(drgn does not read kernel BTF, so upload ``vmlinux`` with the build), ``unverified`` when
+the drgn version is not recorded or unparseable,
 ``not_applicable`` when the image has no drgn tooling; ``incapable`` is no longer
 computed). A signal reads
 ``unverified`` whenever its operand was never recorded — the normal, honest state for an
