@@ -7,8 +7,9 @@ Proposed
 Supersedes [ADR-0322](0322-drgn-live-missing-debuginfo-warning.md). Amends
 [ADR-0328](0328-live-drgn-capability-signal.md) (the BTF floor),
 [ADR-0329](0329-drgn-live-runtime-debuginfo-probe.md) and
-[ADR-0335](0335-attach-runtime-debuginfo-probe.md) (when the probe runs). Extends
-[ADR-0221](0221-local-live-drgn-debuginfo-staging.md) to every install path.
+[ADR-0335](0335-attach-runtime-debuginfo-probe.md) (when the probe runs), and
+[ADR-0548](0548-scoped-enforcement-for-a-mixed-feature-entry.md) (`bpf_tracing` loses its `also_checked`).
+Extends [ADR-0221](0221-local-live-drgn-debuginfo-staging.md) to every install path.
 
 ## Context
 
@@ -36,22 +37,25 @@ on an uploaded kernel.
    `vmlinux`" and names `vmlinux` as missing. `DEBUG_INFO_BTF` plays no part in it.
 3. The runtime resolution probe runs whenever the static check is silent, including when a
    `vmlinux` was uploaded, because an install path may not stage it.
-4. `kdive-drgn` stops passing `-s /sys/kernel/btf/vmlinux`, and `KDIVE_BTF_PATH` is removed.
+4. `kdive-drgn` runs `drgn -k` and relies on drgn's default debug-info search.
+   `KDIVE_BTF_PATH` is removed.
 5. Every install path stages the uploaded `vmlinux`: the external-boot authority path (#3123)
    and remote-libvirt (#3124), with a guest free-space check (#3125).
 
 ## Consequences
 
-- Agents get a truthful signal before provisioning and a truthful warning at attach, on every
-  path, before #3123 and #3124 land.
-- Every drgn version with tooling reports `capable`, because any released drgn reads DWARF. A
-  drgn too old for a new kernel's structures is caught by the always-on probe, not by the signal.
-- An attach with an uploaded `vmlinux` costs one more probe round trip (at most 10 s).
+- Agents get a truthful signal before provisioning. On SSH-forward attaches they also get a
+  truthful warning, before #3123 lands. A remote guest-agent attach has no probe key, so it stays
+  silent until #3124 stages the `vmlinux`.
+- Every drgn version with tooling reports `capable`. The probe resolves one symbol, so it does not
+  detect a drgn too old for the kernel's structures; that residual is accepted.
+- Each drgn-live attach and each `introspect.*` call starts drgn once more for the probe. A DWARF
+  load longer than the probe's 10 s timeout reports `debuginfo_unloadable` on a working session.
 - drgn-live now needs a `vmlinux` upload of hundreds of MB, and guest disks must hold it (#3125).
-- Images built before this change keep the old `-s` flag. drgn still loads its default debug
-  info after a `-s` file and ignores a file that matches no module (`drgn/cli.py` `--symbols`
-  help and `default_symbols` handling, upstream `main`, 2026-10-06), so those images work once the
-  `vmlinux` is staged. The implementation proves this on a real guest.
+- Images built before this change keep the old `-s /sys/kernel/btf/vmlinux` flag. drgn's CLI
+  still loads default debug info after `-s` (`load_debug_info(args.symbols, default=True,
+  main=True)` in `drgn/cli.py` of 0.0.25 and 0.2.0). The real-guest result is added to this item
+  before this record is accepted.
 
 ## Considered & rejected
 
@@ -63,3 +67,6 @@ on an uploaded kernel.
   in every image, maintained by kdive.
 - **Add a `requires_debuginfo` value to `live_drgn`.** judgment: a published enum change that
   agents must absorb, for a dependency the note and the warning already state.
+- **Pass `-s /usr/lib/debug/lib/modules/$(uname -r)/vmlinux` explicitly.** judgment: it repeats
+  drgn's own default search and needs a new test-only path override; the guest proof checks the
+  default search directly.
