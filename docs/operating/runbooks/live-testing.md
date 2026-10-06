@@ -820,8 +820,8 @@ has nothing to compare with. pytest reports them as failed. `ops.export_systems_
 called with `persist`. A cell killed mid-run can leave its allocation granted;
 `demo-down.sh --wipe --yes` clears it with the history above.
 
-Last run: candidate `44503b3bf` (server, worker and reconciler at that SHA in both lanes), a
-disposable Fedora 44 x86_64 lab guest. Each lane recorded its 62 cells and skipped the other
+Last run: candidate `f1150fc13` (server, worker and reconciler at that SHA in both lanes), a
+disposable Fedora 44 x86_64 lab guest; an earlier run at `44503b3bf` gave the same result. Each lane recorded its 62 cells and skipped the other
 lane's 62; the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`. `qualify` reported
 120 of the 124 qualified, 28 `success` and 92 `rejection`, and the four `secrets.list`
 functional cells `blocked` with an empty listing and no secret served.
