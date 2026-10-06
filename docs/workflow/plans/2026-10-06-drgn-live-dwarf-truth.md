@@ -203,8 +203,8 @@ message); delete the `DEBUG_INFO_BTF` check in `spine.py`; add `with_vmlinux=Tru
 Files: `src/kdive/mcp/tools/catalog/images.py:245,403`; generated `docs/guide/reference/images.md`;
 `docs/guide/toolsets/{introspect,images}.md`, `docs/operating/external-build-upload.md` and their
 `_content` copies; `docs/operating/runbooks/live-testing.md:836`; ADR-0723; status lines on
-ADR-0322 (`- **Status:** Superseded by [ADR-0723](...)`) and an `> **Amended by [ADR-0723](...)**
-(#3121): ...` line under the header of ADR-0328, 0329, 0335 and 0548.
+ADR-0322 (status line `Superseded by ADR-0723`, linked to the record) and an `Amended by ADR-0723
+(#3121)` banner line, linked, under the header of ADR-0328, 0329, 0335 and 0548.
 
 Verification:
 - Mode: focused-test. Contract: served copies match and generated pages are current. Green:
