@@ -34,10 +34,11 @@ computed ``data.capability_signals`` (each signal keyed by name): ``kdump``
 (``status`` ``provisionable`` when ``/boot`` holds exactly one non-rescue kernel, else
 ``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a
 multi-kernel image does not burn an allocation on a fail-closed selection), and
-``live_drgn`` (``capability`` ``capable`` when the shipped drgn is new enough to introspect
-a booted kernel from the guest's own in-guest BTF, else ``incapable``/``unverified`` — read
-it before provisioning for live introspection so an image whose drgn cannot see the kernel
-does not burn an allocation). A signal reads
+``live_drgn`` (``capability`` ``capable`` when the shipped drgn can read the Run's uploaded
+DWARF ``vmlinux`` staged in the guest (drgn does not read kernel BTF, so upload ``vmlinux``
+with the build), ``unverified`` when the drgn version is not recorded or unparseable,
+``not_applicable`` when the image has no drgn tooling; ``incapable`` is no longer
+computed). A signal reads
 ``unverified`` whenever its operand was never recorded — the normal, honest state for an
 externally-baked image the operator has not attested and KDIVE has not built. When the
 operand *is* present, ``basis`` discloses its evidence: ``build_verified`` (recorded by a

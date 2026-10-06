@@ -221,9 +221,9 @@ See `resource://kdive/contracts/external-build` for the per-feature `CONFIG_*` m
 entry there carries an `enforcement` value saying where omitting its symbols surfaces — refused at
 upload, warned at upload, refused later on a booted kernel, warned later on a booted kernel, or
 never checked — and `enforcement_legend` in the same payload defines each value. An entry whose
-clauses are not all enforced at the same point also carries `also_checked`, naming the ones kdive
-does read and where, with `also_checked_legend` beside it. Read them before deciding what to skip:
-several features kdive never checks are still unrecoverable without a rebuild.
+clauses are not all enforced at the same point would also carry `also_checked`, naming the ones
+kdive does read and where, with `also_checked_legend` beside it; no entry currently does. Read
+the manifest before deciding what to skip: several features kdive never checks are still unrecoverable without a rebuild.
 
 ## The `kernel` artifact: one combined gzip tar
 

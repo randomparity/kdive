@@ -5,6 +5,8 @@
 - **Issue:** #1128
 - **Builds on:** ADR-0329 (runtime resolution probe on `introspect.*`), ADR-0322 (drgn-live `missing_debuginfo` warning), ADR-0315/ADR-0289 (per-System bootstrap key seeding)
 
+> **Amended by [ADR-0723](0723-drgn-live-reads-a-staged-dwarf-vmlinux.md) (#3121):** the attach probe runs unconditionally, and the in-guest debug information it checks is the staged DWARF vmlinux, not BTF.
+
 ## Context
 
 ADR-0329 added a runtime symbol-resolution probe so a blind drgn-live session — one whose uploaded

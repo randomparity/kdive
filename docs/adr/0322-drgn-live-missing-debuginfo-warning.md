@@ -1,6 +1,6 @@
 # ADR 0322 — Warn (not refuse) when a drgn-live session/introspect is blind for lack of debuginfo
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0723](0723-drgn-live-reads-a-staged-dwarf-vmlinux.md)
 - **Date:** 2026-07-09
 - **Issue:** #1064
 - **Spec:** [drgn-live missing_debuginfo](../archive/superpowers/specs/2026-07-09-introspect-missing-debuginfo-1064-design.md)
