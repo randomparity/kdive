@@ -238,7 +238,7 @@ Steps:
    `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`; bring up the
    `KDIVE_WORKER_DEATH_VERIFIER=docker` lane and run it again; `evidence assemble`, then `qualify`.
    Expect 62 cells recorded per lane: every rejection cell and every functional cell except
-   `secrets.list` qualified, the four `secrets.list` functional cells `blocked`. A failing or
+   `secrets.list` qualified, its two functional cells per lane (four in total) `blocked`. A failing or
    blocked cell is recorded as observed, never retried into a pass. Wipe the lab stack.
 5. Add the `Last run` paragraph naming the candidate SHA, the host class, both lanes and the
    per-lane outcome counts, and commit it as a docs-only change after the candidate. A later base
