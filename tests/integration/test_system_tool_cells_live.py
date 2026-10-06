@@ -88,11 +88,9 @@ _GATES = {
     "systems.teardown": "admin",
 }
 _BELOW: dict[str, str | None] = {"viewer": None, "contributor": "viewer", "admin": "contributor"}
-# The SSH tools answer an id outside the caller's projects with not_found, the others with
-# configuration_error; both are byte-identical to an absent id.
-_NOT_FOUND_TOOLS = frozenset(
-    {"systems.authorize_ssh_key", "systems.check_ssh_reachable", "systems.ssh_info"}
-)
+# Teardown answers an id outside the caller's projects with configuration_error, the others with
+# not_found; each answer is byte-identical to the one for an absent id.
+_CONFIG_ERROR_TOOLS = frozenset({"systems.teardown"})
 _HOSTFWD = re.compile(r"hostfwd=tcp:127\.0\.0\.1:(\d+)-:22")
 _MARKER = "/root/kdive-cov-marker"
 _LANE_VCPUS, _LANE_MEMORY_KIB = 2, 2 * 1024 * 1024
@@ -310,7 +308,9 @@ def _rejection(tool: str, boundary: Boundary, target: LaneTarget) -> Rejection:
     if boundary == "authorization":
         return Rejection(args, _grants(target.project, _BELOW[gate]))
     category = (
-        ErrorCategory.NOT_FOUND if tool in _NOT_FOUND_TOOLS else ErrorCategory.CONFIGURATION_ERROR
+        ErrorCategory.CONFIGURATION_ERROR
+        if tool in _CONFIG_ERROR_TOOLS
+        else ErrorCategory.NOT_FOUND
     )
     twin = _target_args(tool, target, str(uuid4()), str(uuid4()))
     return Rejection(args, _stranger(), frozenset({category.value}), absent_twin=twin)

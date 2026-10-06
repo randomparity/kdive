@@ -121,7 +121,7 @@ needs one) or, for `systems.provision`, the target's Allocation with the lane ca
 |---|---|---|
 | authentication | viewer of T; every issued-token control call is then refused by role or readiness without a write | HTTP 401 for the foreign signature; the issued token is not refused |
 | authorization | member of T without a role for `ssh_info` and `check_ssh_reachable`; viewer of T for the contributor tools; contributor of T for `teardown` | `authorization_denied` |
-| project-isolation | operator of a fresh project | `not_found` for the SSH tools, `configuration_error` for the others; in both cases indistinguishable from the answer for an absent id (`absent_twin`) |
+| project-isolation | operator of a fresh project | `configuration_error` for `teardown`, `not_found` for the others (observed on the lab stack); in both cases indistinguishable from the answer for an absent id (`absent_twin`) |
 | validation | the functional grants on T, with a mistyped `system_id` or `allocation_id` | ADR-0722 §3 as amended |
 
 The `gateway` validation cells of `systems.provision` and `systems.reprovision` fail under the
