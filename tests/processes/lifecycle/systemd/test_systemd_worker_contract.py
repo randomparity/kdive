@@ -290,3 +290,15 @@ def test_adding_the_recover_operation_moved_the_protocol_identity() -> None:
 
     assert lifecycle_protocol_identity() != four_operation_identity
     assert lifecycle_protocol_identity().startswith(f"{LIFECYCLE_PROTOCOL_VERSION}:")
+
+
+def test_start_settings_accept_only_an_absolute_inventory_path() -> None:
+    request = LifecycleRequest.model_validate(start_payload(systems_toml="/etc/kdive/systems.toml"))
+    assert request.settings is not None
+    assert request.settings.systems_toml == "/etc/kdive/systems.toml"
+    default = LifecycleRequest.model_validate(start_payload()).settings
+    assert default is not None
+    assert default.systems_toml is None
+
+    with pytest.raises(ValidationError, match="worker inventory path must be absolute"):
+        LifecycleRequest.model_validate(start_payload(systems_toml="systems.toml"))

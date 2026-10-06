@@ -10,11 +10,11 @@ readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
 # The RedHat family ships the host's OWN emulator here, off PATH: no EL package provides
 # /usr/bin/qemu-system-<arch> (ADR-0641). Overridable for tests, mirroring KDIVE_KVM_NODE.
 readonly QEMU_LIBEXEC="${KDIVE_QEMU_LIBEXEC:-/usr/libexec/qemu-kvm}"
-# The worker imports drgn + the libguestfs binding from the project venv, not system
-# python3. Probe the same interpreter the worker uses. Prefer the .venv sibling of this
-# script when present (in-repo dev loop) so `just check-local-libvirt` needs no env var;
-# fall back to system python3, which a host-services deployment overrides via
-# KDIVE_PYTHON=/opt/kdive/.venv/bin/python (or similar).
+# KDIVE_PYTHON is the checkout/CLI interpreter. Its guestfs and drgn imports serve
+# build-fs and CLI kdump tooling; this probe does not certify the installed worker.
+# Prefer the .venv sibling of this script when present (in-repo dev loop) so
+# `just check-local-libvirt` needs no env var; fall back to system python3, which a
+# host-services deployment overrides via KDIVE_PYTHON=/opt/kdive/.venv/bin/python.
 #
 # Path derived via parameter expansion, not `dirname` — the script's own tests run it under a
 # stubbed PATH containing only the test stubs (no coreutils), so an external `dirname` call fails.
@@ -34,9 +34,15 @@ else
   readonly PY="${KDIVE_PYTHON:-python3}"
 fi
 unset _repo_venv_py
+# The installed lifecycle worker's own venv, which provisions: baseline-kernel extraction imports
+# guestfs there (ADR-0272), so this probe is required whenever that venv exists.
+readonly LIFECYCLE_PY="${KDIVE_LIFECYCLE_PYTHON:-/opt/kdive-live-worker-lifecycle/.venv/bin/python}"
 # runs.install stages the kernel/initrd here before booting the System; must be writable
 # by the worker user and live under a path the qemu user can traverse (see the boot check).
 readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
+# The worker's image root; with INSTALL_STAGING it must carry svirt_image_t on an
+# SELinux-enforcing host, or a confined domain cannot write or map its disks (ADR-0640).
+readonly ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
 # libguestfs builds its supermin appliance from a host kernel under this dir; Debian/Ubuntu ship
 # /boot/vmlinuz-* root:0600, unreadable by a non-root worker, so build-fs fails (ADR-0222, #694).
 # ppc64le names the kernel /boot/vmlinux-* (ELF, no 'z') instead — probe both patterns so a POWER
@@ -48,10 +54,10 @@ readonly BOOT_DIR="${KDIVE_BOOT_DIR:-/boot}"
 # KDIVE_EFFECTIVE_UID overrides $EUID for tests, mirroring the KDIVE_KVM_NODE override.
 readonly LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
 readonly EFFECTIVE_UID="${KDIVE_EFFECTIVE_UID:-$EUID}"
-# The guestfs/drgn venv probe gates only the kdump capture method. A host that must capture
-# kdump cores (the CI runner, `just onboard`) keeps it as a FAIL; a first-run developer box can
-# downgrade it to a WARN with KDIVE_PREFLIGHT_KDUMP=optional, so the core provision/build/boot
-# lifecycle starts without the one-time libguestfs wiring. Every other check stays required.
+# The KDIVE_PYTHON guestfs/drgn probe covers the checkout's CLI tooling (build-fs, kdump). A host
+# that must capture kdump cores (the CI runner, `just onboard`) keeps it as a FAIL; a first-run
+# developer box can downgrade it to a WARN with KDIVE_PREFLIGHT_KDUMP=optional. Every other check,
+# including the lifecycle worker venv's guestfs probe, stays required.
 readonly KDUMP_PREFLIGHT="${KDIVE_PREFLIGHT_KDUMP:-required}"
 case "${KDUMP_PREFLIGHT}" in
 required | optional) ;;
@@ -145,6 +151,7 @@ _default_net_active() {
   [[ "$out" == *"Active:"*[Yy]es* ]]
 }
 _venv_imports_kdump_deps() { "${PY}" -c "import guestfs, drgn" >/dev/null 2>&1; }
+_lifecycle_venv_imports_guestfs() { "${LIFECYCLE_PY}" -c "import guestfs" >/dev/null 2>&1; }
 _host_kernels_readable() {
   local k found=0
   # A BOOT_DIR this user cannot list hides every kernel from the globs below, which would
@@ -159,6 +166,12 @@ _host_kernels_readable() {
   done
   ((found)) || return 0 # no kernels present: unusual layout, do not false-fail
   return 0
+}
+_selinux_enforcing() { _cmd getenforce && [[ "$(getenforce 2>/dev/null)" == Enforcing ]]; }
+_selinux_type() {
+  local type
+  IFS=: read -r _ _ type _ <<<"$(stat -c %C -- "$1" 2>/dev/null)"
+  printf "%s" "${type:-unknown}"
 }
 _dir_writable() {
   local dir="$1" probe
@@ -270,18 +283,28 @@ if _cmd virsh; then
   fi
 fi
 
-# ── Worker venv & host paths ─────────────────────────────────────────────────
-printf "\n%s\n" "-- Worker venv & host paths" >&2
+# ── KDIVE_PYTHON & host paths ─────────────────────────────────────────────────
+printf "\n%s\n" "-- KDIVE_PYTHON & host paths" >&2
 if _venv_imports_kdump_deps; then
-  note_ok "worker venv (${PY}) imports guestfs and drgn"
+  note_ok "KDIVE_PYTHON (${PY}) imports guestfs and drgn"
 elif [[ "${KDUMP_PREFLIGHT}" == "optional" ]]; then
   note_warn \
-    "worker venv (${PY}) cannot 'import guestfs, drgn' (local-libvirt kdump capture, ADR-0203); provision/build/boot and the other capture methods still work" \
-    "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\""
+    "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling from the checkout); the installed lifecycle venv is probed separately" \
+    "uv sync --group live (drgn); run just prepare-local-libvirt-host to link the matching guestfs binding into the checkout venv (on EL10, first enable CRB and source repositories so the host role can build its Python 3.14 binding) — see docs/operating/install.md"
 else
   note_fail \
-    "worker venv (${PY}) cannot 'import guestfs, drgn' (local-libvirt kdump capture, ADR-0203)" \
-    "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md, \"Wire the worker venv (drgn + libguestfs)\""
+    "KDIVE_PYTHON (${PY}) cannot 'import guestfs, drgn' (build-fs and CLI kdump tooling)" \
+    "uv sync --group live (drgn); run just prepare-local-libvirt-host to link the matching guestfs binding into the checkout venv (on EL10, first enable CRB and source repositories so the host role can build its Python 3.14 binding) — see docs/operating/install.md"
+fi
+
+if [[ ! -x "${LIFECYCLE_PY}" ]]; then
+  note_info "lifecycle worker venv (${LIFECYCLE_PY}) is not installed; its guestfs probe is skipped"
+elif _lifecycle_venv_imports_guestfs; then
+  note_ok "lifecycle worker venv (${LIFECYCLE_PY}) imports guestfs"
+else
+  note_fail \
+    "lifecycle worker venv (${LIFECYCLE_PY}) cannot 'import guestfs'; the worker needs it to provision (baseline-kernel extraction), build-fs, stage built kernels, external boot and local kdump capture" \
+    "run just prepare-local-libvirt-host to install the matching guestfs binding (on EL10, first enable CRB and source repositories so the host role can build its Python 3.14 binding); see docs/operating/install.md"
 fi
 
 if _host_kernels_readable; then
@@ -298,6 +321,18 @@ else
   note_fail \
     "install staging ${INSTALL_STAGING} is not a directory writable by the worker user (KDIVE_INSTALL_STAGING; runs.install stages the kernel/initrd here)" \
     "create it writable under a world-traversable path (NOT \$HOME, which a 0700 mode hides from the qemu user that boots the VM): sudo install -d -o \"\$USER\" ${INSTALL_STAGING}"
+fi
+
+if _selinux_enforcing; then
+  for dir in "${ROOTFS_DIR}" "${INSTALL_STAGING}"; do
+    label="$(_selinux_type "${dir}")"
+    if [[ "${label}" == svirt_image_t ]]; then
+      note_ok "${dir} is labeled svirt_image_t"
+    else
+      note_fail "${dir} is labeled ${label}, not svirt_image_t (SELinux enforcing; a confined domain cannot write or map its images, ADR-0640)" \
+        "on Fedora/Enterprise Linux run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which labels the default /var/lib/kdive/rootfs and /var/lib/kdive/install; for another path or distribution family run: source examples/local-libvirt/selinux-label.sh && kdive_label_svirt_image $(printf %q "${dir}")"
+    fi
+  done
 fi
 
 # Warn when the effective libvirt identity is non-root under qemu:///system: that identity

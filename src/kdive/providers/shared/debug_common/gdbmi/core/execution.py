@@ -11,6 +11,9 @@ from kdive.providers.ports.debug import (
     GdbMiAttachment,
     GdbStopRecord,
 )
+from kdive.providers.shared.debug_common.gdbmi.commands.watchpoints import (
+    watchpoint_insert_failure,
+)
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import MiRecord
 
 MAX_INTERACTIVE_WAIT_SEC = 60
@@ -84,7 +87,13 @@ class ExecutionControl:
         # The continue command's own reader can capture an early ``*stopped`` (a hot-path
         # breakpoint fires within milliseconds) alongside ``^running``. Scan those records
         # first; only poll the stream afresh when they hold no stop (ADR-0216, #711).
-        resumed = self._engine.execute_mi_command(attachment, verb)
+        try:
+            resumed = self._engine.execute_mi_command(attachment, verb)
+        except CategorizedError as exc:
+            insert_failure = watchpoint_insert_failure(exc, verb)
+            if insert_failure is None:
+                raise
+            raise insert_failure from exc
         stop = self._stop_from_records(resumed)
         if stop is None:
             stop = self.wait_for_stop(attachment, timeout_sec=bounded)

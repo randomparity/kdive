@@ -23,7 +23,8 @@ updates:
           - "*"
 
   # The root Dockerfile and docker-compose.yml pin base images (python, postgres,
-  # minio), and deploy/mock-oidc pins its JRE + Maven builder bases by digest. The
+  # minio), deploy/mock-oidc pins its JRE + Maven builder bases by digest, and the
+  # `just test-linux` image (tests/container) reuses the root Dockerfile's pins. The
   # docker ecosystem keeps those FROM/image pins current on the same weekly, grouped,
   # 7-day-cooldown cadence as the product code (dependabot does not recurse, so the
   # subdirectory is listed explicitly).
@@ -32,6 +33,7 @@ updates:
       - "/"
       - "/deploy/mock-oidc"
       - "/deploy/seaweedfs"
+      - "/tests/container"
     schedule:
       interval: "weekly"
     cooldown:

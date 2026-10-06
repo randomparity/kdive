@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import errno
 import hashlib
 import json
 import os
@@ -11,7 +13,7 @@ import tarfile
 import tempfile
 import unicodedata
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -22,9 +24,12 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kdive.build_artifacts import validation as build_validation
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
+    ProviderRecoveryRefusal,
+    SystemTeardownSupersededError,
 )
 from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
@@ -43,14 +48,20 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     RecoveryArchiveSink,
     RecoveryArchiveSource,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.selinux_policy import (
+    ModuleLabelPolicy,
+    guest_policy,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ClosedDomainInspection,
     ExpectedOperationOwnership,
+    InactiveGuest,
     LocalExternalBootOperationLease,
     LocalExternalBootSession,
     LocalExternalBootSessionFactory,
     LocalSystemTeardownInspection,
     LocalSystemTeardownSession,
+    StopMode,
     TreeCursor,
 )
 from kdive.providers.ports.external_boot import (
@@ -78,7 +89,9 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.providers.shared.external_boot_bounds import source_byte_limit as _source_byte_limit
 from kdive.providers.shared.libvirt_external_boot import (
+    boot_projection_element_identity,
     parse_projected_domain_xml,
+    preserved_element_identity,
     render_target_xml,
 )
 from kdive.store.objectstore import ObjectStore
@@ -156,6 +169,9 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     prior_power: Literal["running", "inactive"]
     capture: ModuleCapture
     phase: RecoveryPhase
+    # The module tree observed when this activation last published it with the domain inactive.
+    # libguestfs cannot open a running domain's disk, so a running domain reports this value.
+    inactive_modules: ComponentState | None = None
 
     @model_validator(mode="after")
     def _domain_xml_matches_digests(self) -> LocalRecoveryMetadataV1:
@@ -275,6 +291,15 @@ class LocalSystemTeardownIntentV1(LocalSystemTeardownAnchorV1):
             anchor.journal_digest,
         )
 
+    def anchor_subject_matches(self, anchor: LocalSystemTeardownAnchorV1) -> bool:
+        """Compare the subject fields an anchor carries; it has no reservation (#2921)."""
+        return (
+            self.binding,
+            self.plan_identity,
+            self.provider_kind,
+            self.authority_instance,
+        ) == (anchor.binding, anchor.plan_identity, anchor.provider_kind, anchor.authority_instance)
+
     def same_subject(self, other: LocalSystemTeardownIntentV1) -> bool:
         """Allow a fresh authority generation only for the exact same teardown subject."""
         return (
@@ -383,6 +408,7 @@ class TargetProjectionV1(_ClosedValue):
     kernel_filename: Literal["kernel"] = "kernel"
     modules_filename: Literal["modules"] = "modules"
     initrd_filename: Literal["initrd"] | None
+    whole_disk_root_uuid: Annotated[str, Field(min_length=1, max_length=255)] | None = None
 
     def canonical_bytes(self) -> bytes:
         return json.dumps(
@@ -399,6 +425,21 @@ class TargetProjectionV1(_ClosedValue):
 
 _PROJECTION_NAME = "target-projection.json"
 _PROJECTION_TEMPORARY_NAME = ".target-projection.next"
+# Every temporary the materialize, verify and projection-publish paths write into a digest
+# directory. A killed process leaves them behind; cleanup owns exactly these names (#2920).
+_OWNED_TEMPORARY_NAMES = frozenset(
+    {
+        ".bundle.next",
+        ".bundle.verify",
+        ".kernel.next",
+        # `extract_kernel_bundle` stages `.kernel.next` through `write_staged_bytes`.
+        ".kernel.next.part",
+        ".modules.next",
+        ".initrd.next",
+        ".initrd.verify",
+        _PROJECTION_TEMPORARY_NAME,
+    }
+)
 _MAX_PROJECTION_BYTES = 16_384
 _MAX_RECOVERY_METADATA_BYTES = 65_536
 
@@ -756,7 +797,7 @@ class _GuestfsTreeHandle(Protocol):  # pragma: no cover - live_vm (libguestfs bi
     def ln_s(self, target: str, linkname: str) -> None: ...
     def chmod(self, mode: int, path: str) -> None: ...
     def chown(self, owner: int, group: int, path: str) -> None: ...
-    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None: ...
+    def lsetxattr(self, xattr: str, val: str, vallen: int, path: str) -> None: ...
     def mv(self, source: str, destination: str) -> None: ...
     def rm_rf(self, path: str) -> None: ...
     def sync(self) -> None: ...
@@ -773,6 +814,7 @@ class LibguestfsAuthenticatedGuestTree:
         release: str,
         root: str,
         mutable: bool,
+        label_policy: ModuleLabelPolicy | None = None,
     ) -> None:
         expected_prefix = f"/lib/modules/.kdive-{binding.activation_id}-"
         live = f"/lib/modules/{release}"
@@ -787,6 +829,7 @@ class LibguestfsAuthenticatedGuestTree:
         self.release = release
         self.mutable = mutable
         self._root = root
+        self._label_policy = label_policy
 
     def root_kind(self) -> Literal["absent", "directory", "other"]:
         if not bool(self._guest.exists(self._root)):
@@ -818,6 +861,13 @@ class LibguestfsAuthenticatedGuestTree:
         with self._guest.open_regular(remote, size=size) as content:
             yield content
 
+    def prepare_restore(self, entries: Iterator[GuestTreeEntry]) -> None:
+        self._require_mutable()
+        for entry in entries:
+            for name, value in entry.xattrs.items():
+                _xattr_text(name, value)
+        self._guest.mkdir(self._root)
+
     def create_directory(self, entry: GuestTreeEntry) -> None:
         self._require_mutable()
         remote = self._remote(entry.path)
@@ -836,6 +886,8 @@ class LibguestfsAuthenticatedGuestTree:
         remote = self._remote(entry.path)
         self._guest.ln_s(entry.target, remote)
         self._guest.chown(entry.uid, entry.gid, remote)
+        self._apply_xattrs(remote, entry)
+        self._apply_label(remote, entry)
 
     def remove_all(self) -> None:
         self._require_mutable()
@@ -863,7 +915,9 @@ class LibguestfsAuthenticatedGuestTree:
             gid=value["st_gid"],
             size=value["st_size"] if kind == "regular" else 0,
             target=self._guest.readlink(remote) if kind == "symlink" else None,
-            xattrs_supported=True,
+            # With no xattrs, True and False describe the same content. Report False then, as
+            # the canonical module archive does, so an installed tree reads back unchanged.
+            xattrs_supported=bool(xattrs),
             xattrs={str(item["attrname"]): _xattr_bytes(item["attrval"]) for item in xattrs},
             link_count=value["st_nlink"],
         )
@@ -871,8 +925,20 @@ class LibguestfsAuthenticatedGuestTree:
     def _apply_metadata(self, remote: str, entry: GuestTreeEntry) -> None:
         self._guest.chmod(int(entry.mode, 8), remote)
         self._guest.chown(entry.uid, entry.gid, remote)
+        self._apply_xattrs(remote, entry)
+        self._apply_label(remote, entry)
+
+    def _apply_xattrs(self, remote: str, entry: GuestTreeEntry) -> None:
         for name, value in entry.xattrs.items():
-            self._guest.lsetxattr(name, value, len(value), remote)
+            self._guest.lsetxattr(name, _xattr_text(name, value), len(value), remote)
+
+    def _apply_label(self, remote: str, entry: GuestTreeEntry) -> None:
+        if self._label_policy is None:
+            return
+        label = self._label_policy.label(
+            f"/lib/modules/{self.release}/{entry.path}", _entry_mode(entry.kind, entry.mode)
+        )
+        self._guest.lsetxattr("security.selinux", label[:-1].decode("utf-8"), len(label), remote)
 
     def _remote(self, relative: str) -> str:
         return f"{self._root}/{_guest_relative(relative)}"
@@ -891,6 +957,27 @@ def _guest_relative(path: str) -> str:
     ):
         raise ValueError("guest-tree entry path is not a canonical relative path")
     return path
+
+
+def _xattr_text(name: str, value: bytes) -> str:
+    if name == "security.selinux":
+        if not value[:-1] or not value.endswith(b"\0") or b"\0" in value[:-1]:
+            raise ValueError("captured SELinux label is not a NUL-terminated context")
+        try:
+            return value[:-1].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("captured SELinux label is not UTF-8") from exc
+    remediation = (
+        "retained capture requires operator-assisted recovery; "
+        "retrying unchanged capture cannot fix it"
+    )
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"unsupported captured non-UTF-8 xattr: {remediation}") from exc
+    if "\0" in text:
+        raise ValueError(f"unsupported captured NUL-containing xattr: {remediation}")
+    return text
 
 
 def _xattr_bytes(value: str | bytes) -> bytes:
@@ -967,6 +1054,8 @@ class LocalExternalBootIO(Protocol):
         self,
         authority: OpaqueProviderRef,
         expected: ExpectedOperationOwnership,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
     ) -> AbstractContextManager[LocalExternalBootOperation]: ...
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
     def record_cleanup_quarantine(
@@ -1045,6 +1134,34 @@ class _ExactVersionDescriptorStore:
         return os.pread(self._descriptor, min(length, self._size - start), start)
 
 
+# local-libvirt's platform root device (ProviderRuntime.platform_root_cmdline, ADR-0183).
+_LOCAL_WHOLE_DISK_ROOT = "root=/dev/vda"
+
+
+def _whole_disk_root_uuid(plan: ExternalBootPlan) -> str | None:
+    """Return the filesystem UUID a plan naming the whole-disk root must prove, else ``None``.
+
+    A plan without an initrd names the local whole-disk device instead of the inspected
+    ``UUID=`` token (ADR-0583 amendment); prepare proves that filesystem fills the disk.
+    """
+    if f"root={plan.root.root}" in plan.platform_arguments:
+        return None
+    if _LOCAL_WHOLE_DISK_ROOT not in plan.platform_arguments:
+        raise ValueError(f"external-boot direct root must be local {_LOCAL_WHOLE_DISK_ROOT}")
+    if not plan.root.root.startswith("UUID="):
+        raise ValueError("external-boot direct root requires an inspected filesystem UUID")
+    return plan.root.root.removeprefix("UUID=")
+
+
+def _require_whole_disk_root(guest: InactiveGuest, projection: TargetProjectionV1) -> None:
+    expected = projection.whole_disk_root_uuid
+    if expected is not None and guest.whole_disk_root_uuid() != expected:
+        raise ValueError(
+            f"external-boot without an initrd needs root filesystem UUID={expected} to fill the "
+            "System disk; supply an initrd with the build or use a whole-disk rootfs"
+        )
+
+
 class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
     """Materialize exact object versions into one authenticated activation projection."""
 
@@ -1064,6 +1181,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             architecture=plan.architecture,
             cmdline=plan.cmdline,
             initrd_filename=None if plan.initrd is None else "initrd",
+            whole_disk_root_uuid=_whole_disk_root_uuid(plan),
         )
         with session.projection_directory(projection) as directory_fd:
             try:
@@ -1453,6 +1571,43 @@ def _installed_module_manifest(directory_fd: int) -> str:
         os.close(modules_fd)
 
 
+def _entry_mode(kind: str, mode: str) -> int:
+    file_type = {
+        "directory": stat.S_IFDIR,
+        "regular": stat.S_IFREG,
+        "symlink": stat.S_IFLNK,
+    }[kind]
+    return file_type | int(mode, 8)
+
+
+def _prepared_module_manifest(
+    descriptor: int, release: str, baseline: str, policy: ModuleLabelPolicy | None
+) -> str:
+    with os.fdopen(os.dup(descriptor), "rb") as source:
+        entries = recovery_validation._validate_archive(source)  # noqa: SLF001
+    if recovery_validation._manifest(entries)[1] != baseline:  # noqa: SLF001
+        raise ValueError("materialized module archive changed before preparation")
+    if policy is None:
+        return baseline
+    labelled = []
+    for entry in entries:
+        label = policy.label(
+            f"/lib/modules/{release}/{entry.path}", _entry_mode(entry.kind, entry.mode)
+        )
+        labelled.append(
+            entry.model_copy(
+                update={
+                    "xattrs_supported": True,
+                    "xattrs": {
+                        **entry.xattrs,
+                        "security.selinux": base64.b64encode(label).decode().rstrip("="),
+                    },
+                }
+            )
+        )
+    return recovery_validation._manifest(labelled)[1]  # noqa: SLF001
+
+
 def _cleanup_uncommitted_payloads(directory_fd: int, primary: BaseException) -> None:
     """Remove only exact private payload names while no projection commit exists."""
     try:
@@ -1466,17 +1621,7 @@ def _cleanup_uncommitted_payloads(directory_fd: int, primary: BaseException) -> 
         primary.add_note("uncommitted payload cleanup refused: projection is committed")
         return
     entries = set(os.listdir(directory_fd))
-    allowed = {
-        "kernel",
-        "modules",
-        "initrd",
-        ".bundle.next",
-        ".bundle.verify",
-        ".kernel.next",
-        ".modules.next",
-        ".initrd.next",
-        ".initrd.verify",
-    }
+    allowed = {"kernel", "modules", "initrd", *_OWNED_TEMPORARY_NAMES}
     if not entries <= allowed:
         primary.add_note("uncommitted payload cleanup refused: projection has unknown entries")
         return
@@ -1537,9 +1682,15 @@ class RealLocalExternalBootIO:
         self,
         authority: OpaqueProviderRef,
         expected: ExpectedOperationOwnership,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
     ) -> Iterator[LocalExternalBootOperation]:
         lease = self._resolve_operation_lease(authority)
-        session = self._session_factory.open(lease, expected)
+        session = (
+            self._session_factory.open(lease, expected)
+            if local_timing is None
+            else self._session_factory.open(lease, expected, local_timing=local_timing)
+        )
         operation = _RealLocalExternalBootOperation(
             self._recovery_root,
             self._materializer,
@@ -1625,7 +1776,18 @@ class RealLocalExternalBootIO:
             with RecoveryMetadataStore(self._recovery_root) as store:
                 retained = store.read_system_teardown(anchor.binding)
                 if retained is not None and not retained.intent.matches_anchor(anchor):
-                    raise ValueError("System teardown observation conflicts with retained intent")
+                    if (
+                        not retained.intent.anchor_subject_matches(anchor)
+                        or retained.intent.generation == anchor.generation
+                    ):
+                        raise ValueError(
+                            "System teardown observation conflicts with retained intent"
+                        )
+                    if retained.intent.generation > anchor.generation:
+                        raise SystemTeardownSupersededError
+                    # ADR-0620 (#2921): this generation never reached `begin`; the earlier
+                    # generation's record is not its own, so it observes as if absent.
+                    retained = None
                 recovery_absent = store.exact_recovery_absence(anchor.binding)
             completed_at = (
                 retained.completed_at
@@ -1663,7 +1825,9 @@ class RealLocalExternalBootIO:
                         target_state=metadata.target_state,
                     )
         if point.binding != intent.binding or point.plan_identity != intent.plan_identity:
-            raise ValueError("System teardown recovery point does not match retained intent")
+            raise ProviderRecoveryRefusal(
+                "System teardown recovery point does not match retained intent"
+            )
         return point
 
     def system_teardown_recovery_is_absent(
@@ -1821,12 +1985,14 @@ class _RealLocalExternalBootOperation:
             else:
                 _validate_preparation_owner(intent, materialization, binding)
                 _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
-        self._session.stop_and_require_inactive()
+        self._session.stop_and_require_inactive(mode="clean")
         with RecoveryMetadataStore(self._recovery_root) as store:
             owned_sink = store.recovery_archive_sink(reference, intent)
+        projection = self._session.reopen_projection(materialization.artifacts.kernel)
         primary: BaseException | None = None
         try:
             with self._session.guest() as guest:
+                _require_whole_disk_root(guest, projection)
                 tree = LibguestfsAuthenticatedGuestTree(
                     guest,
                     binding=binding,
@@ -1836,6 +2002,21 @@ class _RealLocalExternalBootOperation:
                 )
                 capture_sink, owned_sink = owned_sink, None
                 capture = self._recovery_writer.capture(tree, intent.release, capture_sink)
+                with guest_policy(guest) as policy:
+                    target_manifest = materialization.installed_module_tree
+                    if policy is not None:
+                        descriptor = self._session.open_projection_artifact(
+                            materialization.artifacts.modules, os.O_RDONLY
+                        )
+                        try:
+                            target_manifest = _prepared_module_manifest(
+                                descriptor,
+                                intent.release,
+                                materialization.installed_module_tree,
+                                policy,
+                            )
+                        finally:
+                            os.close(descriptor)
         except BaseException as exc:
             primary = exc
             raise
@@ -1847,7 +2028,7 @@ class _RealLocalExternalBootOperation:
                     if primary is None:
                         raise
                     primary.add_note(f"recovery archive sink cleanup failed: {cleanup!r}")
-        metadata = _complete_preparation_metadata(intent, materialization, capture)
+        metadata = _complete_preparation_metadata(intent, materialization, capture, target_manifest)
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.complete_preparation(reference, intent, metadata)
 
@@ -1878,24 +2059,30 @@ class _RealLocalExternalBootOperation:
             inspection = self._session.inspect_closed(projected=True)
         except Exception:  # noqa: BLE001 - an unreadable definition is a classification
             return LocalObservedState(definition=None, modules=None, active=None)
-        modules: ComponentState | None
-        try:
-            with self._session.guest() as opened_guest:
-                tree = LibguestfsAuthenticatedGuestTree(
-                    cast(_GuestfsTreeHandle, opened_guest),
-                    binding=metadata.binding,
-                    release=metadata.release,
-                    root=f"/lib/modules/{metadata.release}",
-                    mutable=False,
-                )
-                modules = self._recovery_writer.observe(tree, metadata.release)
-        except Exception:  # noqa: BLE001 - an unreadable module tree is a classification
-            modules = None
+        modules: ComponentState | None = metadata.inactive_modules
+        if not inspection.active:
+            try:
+                with self._session.guest() as opened_guest:
+                    modules = self._observe_modules(opened_guest, metadata)
+            except Exception:  # noqa: BLE001 - an unreadable module tree is a classification
+                modules = None
         return LocalObservedState(
             definition=inspection.source_boot_identity,
             modules=modules,
             active=inspection.active,
         )
+
+    def _observe_modules(
+        self, guest: InactiveGuest, metadata: LocalRecoveryMetadataV1
+    ) -> ComponentState:
+        tree = LibguestfsAuthenticatedGuestTree(
+            cast(_GuestfsTreeHandle, guest),
+            binding=metadata.binding,
+            release=metadata.release,
+            root=f"/lib/modules/{metadata.release}",
+            mutable=False,
+        )
+        return self._recovery_writer.observe(tree, metadata.release)
 
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         if self._host_state(metadata) != ("source", False):
@@ -1904,41 +2091,51 @@ class _RealLocalExternalBootOperation:
         prior = _layout_component(metadata.source_state.modules)
         with self._session.guest() as opened_guest:
             guest = cast(_GuestfsTreeHandle, opened_guest)
-            publication = _SessionModulePublicationIO(
-                guest,
-                metadata,
-                self._recovery_root,
-                self._recovery_writer,
-                self._session,
+            policy_context = (
+                guest_policy(opened_guest)
+                if metadata.phase == "pre-stop-intent"
+                else nullcontext(None)
             )
-            if metadata.phase == "pre-stop-intent":
-                before = ModuleLayout(prior, None, None)
-                staged = ModuleLayout(prior, desired, None)
-                layout = publication.observe_layout()
-                if layout == before:
-                    source = self._kernel_bundle_source(metadata)
-                    try:
-                        publication.create_staging()
-                        manifest = self._recovery_writer.install(
-                            publication.staging_tree(),
-                            metadata.release,
-                            source,
-                        )
-                    finally:
-                        source.close()
-                    if manifest != desired.manifest or publication.observe_layout() != staged:
-                        raise ValueError(
-                            "external-boot staged target modules do not match metadata"
-                        )
-                elif layout != staged:
-                    raise ValueError("external-boot target staging layout conflicts with metadata")
-                publication.guest_sync()
-                publication.record_phase(
-                    PublicationPhase.MOVE_READY if prior is not None else PublicationPhase.OLD_ASIDE
+            with policy_context as policy:
+                publication = _SessionModulePublicationIO(
+                    guest,
+                    metadata,
+                    self._recovery_root,
+                    self._recovery_writer,
+                    self._session,
+                    label_policy=policy,
                 )
-            self._finish_present_publication(publication, prior=prior, desired=desired)
-            completed = publication.metadata
-        self.record_phase(completed, "module-restored")
+                if metadata.phase == "pre-stop-intent":
+                    before = ModuleLayout(prior, None, None)
+                    staged = ModuleLayout(prior, desired, None)
+                    layout = publication.observe_layout()
+                    if layout == before:
+                        source = self._kernel_bundle_source(metadata)
+                        try:
+                            publication.create_staging()
+                            self._recovery_writer.install(
+                                publication.staging_tree(), metadata.release, source
+                            )
+                        finally:
+                            source.close()
+                        if publication.observe_layout() != staged:
+                            raise ValueError(
+                                "external-boot staged target modules do not match metadata"
+                            )
+                    elif layout != staged:
+                        raise ValueError(
+                            "external-boot target staging layout conflicts with metadata"
+                        )
+                    publication.guest_sync()
+                    publication.record_phase(
+                        PublicationPhase.MOVE_READY
+                        if prior is not None
+                        else PublicationPhase.OLD_ASIDE
+                    )
+                self._finish_present_publication(publication, prior=prior, desired=desired)
+                completed = publication.metadata
+                observed = self._observe_modules(opened_guest, completed)
+        self.record_phase(completed, "module-restored", inactive_modules=observed)
 
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
         while metadata.phase == "module-restored":
@@ -1971,6 +2168,9 @@ class _RealLocalExternalBootOperation:
         return observed
 
     def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+        if metadata.phase == "pre-stop-intent":
+            self._settle_unpublished_modules(metadata)
+            return
         self._stop_for_recovery(metadata)
         target = _present_component(metadata.target_state.modules, "target module state")
         desired = _layout_component(metadata.source_state.modules)
@@ -2000,7 +2200,6 @@ class _RealLocalExternalBootOperation:
                     if layout == ModuleLayout(target, None, None):
                         source = self._recovery_archive_source(metadata)
                         try:
-                            publication.create_staging()
                             manifest = self._recovery_writer.restore(
                                 publication.staging_tree(),
                                 metadata.release,
@@ -2032,7 +2231,31 @@ class _RealLocalExternalBootOperation:
                 assert desired is not None
                 self._finish_present_publication(publication, prior=target, desired=desired)
             completed = publication.metadata
-        self.record_phase(completed, "module-restored")
+            observed = self._observe_modules(opened_guest, completed)
+        self.record_phase(completed, "module-restored", inactive_modules=observed)
+
+    def _settle_unpublished_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+        """ADR-0707: an activation that never published keeps only its own staging name."""
+        if self._host_state(metadata) != ("source", False):
+            raise ProviderRecoveryRefusal(
+                "external-boot pre-stop recovery requires inactive source XML/power"
+            )
+        prior = _layout_component(metadata.source_state.modules)
+        with self._session.guest() as opened_guest:
+            publication = _SessionModulePublicationIO(
+                cast(_GuestfsTreeHandle, opened_guest),
+                metadata,
+                self._recovery_root,
+                self._recovery_writer,
+                self._session,
+            )
+            publication.discard_staging()
+            if publication.observe_layout() != ModuleLayout(prior, None, None):
+                raise ProviderRecoveryRefusal(
+                    "external-boot pre-stop module layout conflicts with metadata"
+                )
+            observed = self._observe_modules(opened_guest, metadata)
+        self.record_phase(metadata, "module-restored", inactive_modules=observed)
 
     def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
         while metadata.phase == "module-restored":
@@ -2065,11 +2288,19 @@ class _RealLocalExternalBootOperation:
             raise ValueError("external-boot restored power state conflicts with recovery metadata")
 
     def record_phase(
-        self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
+        self,
+        metadata: LocalRecoveryMetadataV1,
+        phase: RecoveryPhase,
+        *,
+        inactive_modules: ComponentState | None = None,
     ) -> LocalRecoveryMetadataV1:
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.record_phase(
-                _recovery_ref(metadata.binding), metadata.binding, metadata, phase
+                _recovery_ref(metadata.binding),
+                metadata.binding,
+                metadata,
+                phase,
+                inactive_modules=inactive_modules,
             )
 
     def cleanup_complete(self, recovery: RecoveryPoint) -> bool:
@@ -2092,12 +2323,17 @@ class _RealLocalExternalBootOperation:
         target_identity: str,
         authority: OpaqueProviderRef,
     ) -> PartialAbortResult:
-        return self._abort_preparation(
+        result = self._abort_preparation(
             binding,
             plan_identity,
             authority,
             expected_identities=(source_identity, target_identity),
+            restore_power=True,
         )
+        if result in {"removed", "absent"}:
+            with RecoveryMetadataStore(self._recovery_root) as store:
+                store.prune_empty_activation_parents(binding)
+        return result
 
     def abort_system_teardown_preparation(
         self,
@@ -2105,7 +2341,14 @@ class _RealLocalExternalBootOperation:
         plan_identity: Digest,
         authority: OpaqueProviderRef,
     ) -> PartialAbortResult:
-        return self._abort_preparation(binding, plan_identity, authority, expected_identities=None)
+        # The System is being torn down, so its prior running power is not restored (#2898).
+        result = self._abort_preparation(
+            binding, plan_identity, authority, expected_identities=None, restore_power=False
+        )
+        if result in {"removed", "absent"}:
+            with RecoveryMetadataStore(self._recovery_root) as store:
+                store.prune_empty_activation_parents(binding)
+        return result
 
     def _abort_preparation(
         self,
@@ -2114,6 +2357,7 @@ class _RealLocalExternalBootOperation:
         authority: OpaqueProviderRef,
         *,
         expected_identities: tuple[str, str] | None,
+        restore_power: bool,
     ) -> PartialAbortResult:
         with RecoveryMetadataStore(self._recovery_root) as store:
             partial = store.inspect_abortable_partial(binding, plan_identity, authority)
@@ -2131,8 +2375,8 @@ class _RealLocalExternalBootOperation:
                 ):
                     raise ValueError("recovery partial identity conflicts with teardown request")
                 _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
-                if intent.prior_power == "running":
-                    self._session.restore_power("running")
+                if restore_power and intent.prior_power == "running":
+                    self._session.restore_power()
                     readiness = self._session.readiness()
                     if not readiness.ok:
                         raise ValueError("source readiness failed while aborting preparation")
@@ -2146,14 +2390,9 @@ class _RealLocalExternalBootOperation:
             return store.exact_recovery_absence(binding)
 
     def _kernel_bundle_source(self, metadata: LocalRecoveryMetadataV1) -> KernelBundleSource:
-        ownership = ActivationOwnership(
-            system_id=metadata.binding.system_id,
-            run_id=metadata.binding.run_id,
+        descriptor = self._session.open_projection_artifact(
+            metadata.materialized_modules, os.O_RDONLY
         )
-        parts = _artifact_ref_parts(
-            metadata.materialized_modules, ownership, metadata.binding.activation_id
-        )
-        descriptor = self._session.open_artifact(parts[5], os.O_RDONLY)
         try:
             return KernelBundleSource(
                 descriptor,
@@ -2219,7 +2458,7 @@ class _RealLocalExternalBootOperation:
         inspection = self._session.inspect_closed(projected=True)
         if inspection.xml == metadata.source_xml.encode():
             return "source", inspection.active
-        if inspection.xml == metadata.target_xml.encode():
+        if _same_domain_definition(inspection.xml.decode(), metadata.target_xml):
             return "target", inspection.active
         raise ValueError("external-boot observed domain XML does not match recovery metadata")
 
@@ -2232,8 +2471,10 @@ class _RealLocalExternalBootOperation:
         if not active:
             self._session.require_inactive()
             return
+        # ADR-0681: only a target that reached `target-defined` stops cleanly, and only on KVM.
+        mode: StopMode = "clean-on-kvm" if metadata.phase == "target-defined" else "destroy"
         try:
-            self._session.stop_and_require_inactive()
+            self._session.stop_and_require_inactive(mode=mode)
         except Exception as primary:
             try:
                 after = self._host_state(metadata)
@@ -2262,12 +2503,15 @@ class _SessionModulePublicationIO:
         recovery_root: Path,
         writer: GuestRecoveryWriter,
         session: LocalExternalBootSession,
+        *,
+        label_policy: ModuleLabelPolicy | None = None,
     ) -> None:
         self._guest = guest
         self.metadata = metadata
         self._recovery_root = recovery_root
         self._writer = writer
         self._session = session
+        self._label_policy = label_policy
         base = f"/lib/modules/.kdive-{metadata.binding.activation_id}"
         self._live = f"/lib/modules/{metadata.release}"
         self._staging = f"{base}-staging"
@@ -2293,6 +2537,7 @@ class _SessionModulePublicationIO:
             release=self.metadata.release,
             root=self._staging,
             mutable=True,
+            label_policy=self._label_policy,
         )
 
     def move_live_to_old(self) -> None:
@@ -2306,6 +2551,11 @@ class _SessionModulePublicationIO:
 
     def remove_old(self) -> None:
         self._guest.rm_rf(self._old)
+
+    def discard_staging(self) -> None:
+        if self._guest.exists(self._staging):
+            self._guest.rm_rf(self._staging)
+            self._guest.sync()
 
     def guest_sync(self) -> None:
         self._guest.sync()
@@ -2363,6 +2613,7 @@ def _complete_preparation_metadata(
     intent: LocalPreStopIntentV1,
     materialization: ExternalBootMaterialization,
     capture: ModuleCapture,
+    target_manifest: str,
 ) -> LocalRecoveryMetadataV1:
     source_modules: ComponentState
     if isinstance(capture, AbsentModuleCapture):
@@ -2378,7 +2629,7 @@ def _complete_preparation_metadata(
             ),
             "target_state": ProviderStateIdentity(
                 definition=intent.target_boot,
-                modules=PresentComponentState(manifest=materialization.installed_module_tree),
+                modules=PresentComponentState(manifest=target_manifest),
             ),
             "capture": capture,
             "phase": "pre-stop-intent",
@@ -2533,8 +2784,21 @@ class LocalLibvirtExternalBoot:
             self._validate_metadata(point, metadata)
             return point
 
-    def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
+    def activate(
+        self,
+        recovery: RecoveryPoint,
+        authority: OpaqueProviderRef,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
+    ) -> None:
+        opening = (
+            self._io.open(authority, _expected_binding(recovery.binding))
+            if local_timing is None
+            else self._io.open(
+                authority, _expected_binding(recovery.binding), local_timing=local_timing
+            )
+        )
+        with opening as operation:
             metadata = self._reopen(operation, recovery)
             resumable = {
                 "pre-stop-intent",
@@ -2566,12 +2830,34 @@ class LocalLibvirtExternalBoot:
                 raise ValueError("external-boot target-defined evidence is required")
             return operation.observe_running(metadata)
 
-    def recover(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
+    def recover(
+        self,
+        recovery: RecoveryPoint,
+        authority: OpaqueProviderRef,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
+        restore_power: bool = True,
+    ) -> None:
+        """Resume recovery to ``recovered``, restoring prior power unless told not to.
+
+        System teardown passes ``restore_power=False`` (#2898): it destroys the domain next,
+        so a start would only boot a guest it is about to kill. ``define_source`` records
+        ``source-restored`` only over the inactive source definition, which is the state a
+        teardown needs, so that point is recorded ``recovered`` without a start.
+        """
+        opening = (
+            self._io.open(authority, _expected_binding(recovery.binding))
+            if local_timing is None
+            else self._io.open(
+                authority, _expected_binding(recovery.binding), local_timing=local_timing
+            )
+        )
+        with opening as operation:
             metadata = self._reopen(operation, recovery)
             if metadata.phase in {"recovered", "cleaned"}:
                 return
             if metadata.phase not in {
+                "pre-stop-intent",
                 "target-defined",
                 "move-ready",
                 "old-aside",
@@ -2585,7 +2871,7 @@ class LocalLibvirtExternalBoot:
                 "module-restored",
                 "source-restored",
             }:
-                raise ValueError("external-boot recovery phase is not resumable")
+                raise ProviderRecoveryRefusal("external-boot recovery phase is not resumable")
             if metadata.phase not in {"source-restored"}:
                 operation.recover_modules(metadata)
                 metadata = self._reopen(operation, recovery)
@@ -2593,7 +2879,10 @@ class LocalLibvirtExternalBoot:
                 operation.define_source(metadata)
                 metadata = self._reopen(operation, recovery)
             if metadata.phase == "source-restored":
-                operation.restore_power(metadata)
+                if restore_power:
+                    operation.restore_power(metadata)
+                else:
+                    operation.record_phase(metadata, "recovered")
 
     def cleanup_is_accounted(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> bool:
         """Whether accounted cleanup evidence for this exact point already exists.
@@ -2675,6 +2964,10 @@ class LocalLibvirtExternalBoot:
         proof: FinalizeCleanupProof,
         authority: OpaqueProviderRef,
     ) -> None:
+        if proof.binding != recovery.binding or proof.point_digest != self.point_digest(recovery):
+            raise ValueError("external-boot cleanup proof does not match recovery point")
+        # Pinned since ADR-0710's 2026-09-30 amendment: a session open creates nothing, so
+        # exact recovery absence stays provable after cleanup pruned the parents (#2898).
         with self._io.open(authority, _expected_binding(recovery.binding)):
             self._io.record_cleanup_quarantine(recovery, proof)
 
@@ -2704,12 +2997,14 @@ class LocalLibvirtExternalBoot:
         observed = self.observe_object(binding, authority)
         if observed.observed_digest != expected_observed_digest:
             raise ValueError("cleanup quarantine observation changed before delete")
-        receipt = self._io.read_cleanup_quarantine(binding.binding)
-        if receipt is not None:
-            current = self._quarantine_observation(receipt)
-            if current.observed_digest != expected_observed_digest or current.managed:
-                raise ValueError("cleanup quarantine observation changed before delete")
-            self._io.finalize_tombstone(receipt.tombstone.recovery_point, receipt.proof)
+        # The re-read and delete run under the pinned session (ADR-0710 amendment, 2026-10-01).
+        with self._io.open(authority, _expected_binding(binding.binding)):
+            receipt = self._io.read_cleanup_quarantine(binding.binding)
+            if receipt is not None:
+                current = self._quarantine_observation(receipt)
+                if current.observed_digest != expected_observed_digest or current.managed:
+                    raise ValueError("cleanup quarantine observation changed before delete")
+                self._io.finalize_tombstone(receipt.tombstone.recovery_point, receipt.proof)
         return self.observe_object(binding, authority)
 
     def adopt_object(
@@ -2721,10 +3016,12 @@ class LocalLibvirtExternalBoot:
         observed = self.observe_object(binding, authority)
         if observed.observed_digest != expected_observed_digest or not observed.present:
             raise ValueError("cleanup quarantine observation changed before adopt")
-        receipt = self._io.read_cleanup_quarantine(binding.binding)
-        if receipt is None:
-            raise ValueError("cleanup quarantine disappeared before adopt")
-        self._io.adopt_cleanup_quarantine(receipt)
+        # Pinned like delete_recovery_object (ADR-0710 amendment, 2026-10-01).
+        with self._io.open(authority, _expected_binding(binding.binding)):
+            receipt = self._io.read_cleanup_quarantine(binding.binding)
+            if receipt is None:
+                raise ValueError("cleanup quarantine disappeared before adopt")
+            self._io.adopt_cleanup_quarantine(receipt)
         return self.observe_object(binding, authority)
 
     def recovery_point(
@@ -2816,17 +3113,10 @@ class LocalLibvirtExternalBoot:
         # The authority supplies the anchored mutation-started proof as
         # ``AuthorityCommitContextV1`` (ADR-0592).  The local seam deliberately does not
         # decode it; it compares the closed owner/point fields and handles present or
-        # post-delete absence idempotently.
-        #
-        # ``authority`` is accepted and deliberately not used to open an operation session:
-        # ``test_real_adapter_finalization_replays_exact_proof_without_session`` asserts that
-        # finalization resolves no lease and opens no session, because this is a durable-store
-        # delete under the recovery root that needs no libvirt or guest access. What bounds it
-        # instead is the pair of comparisons above plus the store's own re-read of the
-        # tombstone. The residual — that the delete carries no lease pin, unlike its sibling
-        # calls — is recorded in the design's threat model rather than closed here, because
-        # the finalization seam's shape belongs to ADR-0586.
-        self._io.finalize_tombstone(recovery, proof)
+        # post-delete absence idempotently. The delete runs under the pinned session, as
+        # ``record_cleanup_quarantine`` does (ADR-0710 amendment, 2026-09-30).
+        with self._io.open(authority, _expected_binding(recovery.binding)):
+            self._io.finalize_tombstone(recovery, proof)
 
     def _reopen(
         self, operation: LocalExternalBootOperation, recovery: RecoveryPoint
@@ -2890,6 +3180,29 @@ class AbortablePartial:
     materialization: ExternalBootMaterialization | None
 
 
+def _same_authority_generation(left: OpaqueProviderRef, right: OpaqueProviderRef) -> bool:
+    """Whether two phase receipts belong to one authority generation.
+
+    One generation owns materialize, prepare, and activate (ADR-0608), but migration 0135 binds
+    each phase receipt to its own operation attempt: ``authority/<id>/<generation>/<attempt>``.
+    Receipts from different phases therefore agree on everything except the final segment.
+    """
+    return left.ref.rsplit("/", 1)[0] == right.ref.rsplit("/", 1)[0]
+
+
+def _same_domain_definition(observed_xml: str, expected_xml: str) -> bool:
+    """Whether libvirt's readback of a defined domain is the definition kdive rendered.
+
+    libvirt stores a defined domain in its own serialization and <os> child order, so the
+    target is compared by its ADR-0583 preserved and boot-projection identities, not by bytes.
+    """
+    observed = parse_projected_domain_xml(observed_xml)
+    expected = parse_projected_domain_xml(expected_xml)
+    return preserved_element_identity(observed) == preserved_element_identity(
+        expected
+    ) and boot_projection_element_identity(observed) == boot_projection_element_identity(expected)
+
+
 class LocalPreparationReceiptsV1(BaseModel):
     """Both phase receipts retained in one owner-bound canonical record."""
 
@@ -2909,7 +3222,7 @@ class LocalPreparationReceiptsV1(BaseModel):
         if any(
             item.binding != first.binding
             or item.plan_identity != first.plan_identity
-            or item.authority != first.authority
+            or not _same_authority_generation(item.authority, first.authority)
             for item in receipts[1:]
         ):
             raise ValueError("preparation receipts have conflicting ownership")
@@ -3002,6 +3315,15 @@ def _system_teardown_name(binding: ExternalBootActivationBinding) -> str:
     return f"{_SYSTEM_TEARDOWN_PREFIX}{binding.system_id}.json"
 
 
+class RecoveryIntentAbsentError(FileNotFoundError):
+    """The recovery directory exists but holds no ``intent.json``.
+
+    Cleanup deletes the intent by design, so a caller holding cleanup evidence may treat
+    this as an expected observation. Other absent files in the directory stay plain
+    ``FileNotFoundError``.
+    """
+
+
 def _read_private_file(directory_fd: int, name: str, *, sync: bool = False) -> bytes:
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
     try:
@@ -3020,6 +3342,28 @@ def _read_private_file(directory_fd: int, name: str, *, sync: bool = False) -> b
         return data
     finally:
         os.close(fd)
+
+
+def _unlink_owned_temporaries(directory_fd: int) -> None:
+    """Unlink the interrupted materialize/verify temporaries a digest directory may hold (#3011).
+
+    Only `_OWNED_TEMPORARY_NAMES` that are private regular files go; anything else is left so the
+    caller's `rmdir` stops and the entry is quarantined (ADR-0710).
+    """
+    removed = False
+    for name in sorted(_OWNED_TEMPORARY_NAMES):
+        try:
+            # lstat, not open: a FIFO or symlink under an owned name must not block or be followed.
+            status = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(status.st_mode) or status.st_mode & 0o077:
+            raise ValueError(f"owned temporary {name!r} is not a private regular file")
+        with suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=directory_fd)
+            removed = True
+    if removed:
+        os.fsync(directory_fd)
 
 
 class RecoveryMetadataStore:
@@ -3165,7 +3509,7 @@ class RecoveryMetadataStore:
             or receipt.materialization is None
             or receipt.binding != request.binding
             or receipt.plan_identity != request.plan.identity
-            or receipt.authority != request.authority
+            or not _same_authority_generation(receipt.authority, request.authority)
         ):
             raise ValueError("prepare requires a matching durable materialization receipt")
         return receipt.materialization
@@ -3397,6 +3741,8 @@ class RecoveryMetadataStore:
         binding: ExternalBootActivationBinding,
         expected: LocalRecoveryMetadataV1,
         phase: RecoveryPhase,
+        *,
+        inactive_modules: ComponentState | None = None,
     ) -> LocalRecoveryMetadataV1:
         self._require_open()
         name = recovery_directory_name(reference, binding)
@@ -3404,7 +3750,10 @@ class RecoveryMetadataStore:
         try:
             if self._read(directory_fd) != expected:
                 raise ValueError("recovery metadata changed before phase publication")
-            updated = expected.model_copy(update={"phase": phase})
+            update: dict[str, object] = {"phase": phase}
+            if inactive_modules is not None:
+                update["inactive_modules"] = inactive_modules
+            updated = expected.model_copy(update=update)
             temporary = ".intent.next"
             _replace_private_file(
                 directory_fd,
@@ -3502,6 +3851,7 @@ class RecoveryMetadataStore:
         except FileNotFoundError:
             # Absence is success only for the closed exact mutation-started proof
             # re-presented by #2140 for the still-current operation.
+            self.prune_empty_activation_parents(recovery.binding)
             return
         if actual != expected:
             raise ValueError("cleanup tombstone does not match recovery point")
@@ -3529,6 +3879,8 @@ class RecoveryMetadataStore:
         try:
             _open_private_directory(self._root_fd, name)
         except FileNotFoundError:
+            # A session opened before ADR-0710 re-created the parents cleanup pruned (#2898).
+            self.prune_empty_activation_parents(recovery.binding)
             return
         raise ValueError("cleanup tombstone remained after finalization")
 
@@ -3539,6 +3891,13 @@ class RecoveryMetadataStore:
         self._require_open()
         name = recovery_directory_name(recovery.recovery_ref, recovery.binding)
         tombstone = self._read_tombstone_named(name)
+        expected = CleanupTombstoneV1(
+            binding=recovery.binding,
+            recovery_point=recovery,
+            point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+        )
+        if tombstone != expected or proof.point_digest != expected.point_digest:
+            raise ValueError("cleanup tombstone does not match recovery point")
         receipt = CleanupQuarantineReceiptV1(tombstone=tombstone, proof=proof)
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
@@ -3659,7 +4018,19 @@ class RecoveryMetadataStore:
             pass
         else:
             os.close(complete_fd)
-            return "not-partial"
+            # A complete directory is only ever a renamed, filled partial, and only
+            # finalize_tombstone empties one, so an empty one is finalization interrupted
+            # before its rmdir (#2927). rmdir itself refuses any remaining entry.
+            try:
+                os.rmdir(name, dir_fd=self._root_fd)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                if error.errno == errno.ENOTEMPTY:
+                    return "not-partial"
+                raise
+            else:
+                os.fsync(self._root_fd)
         abort_receipt = self._read_optional_abort_receipt(abort_name)
         if abort_receipt is not None and abort_receipt != expected_abort:
             raise ValueError("partial abort receipt does not match teardown request")
@@ -3808,6 +4179,7 @@ class RecoveryMetadataStore:
                                     )
                                 os.unlink(_PROJECTION_NAME, dir_fd=digest_fd)
                                 os.fsync(digest_fd)
+                            _unlink_owned_temporaries(digest_fd)
                         finally:
                             os.close(digest_fd)
                     for item in parts:
@@ -3819,19 +4191,42 @@ class RecoveryMetadataStore:
                         os.fsync(activation_fd)
                 finally:
                     os.close(activation_fd)
-                with suppress(FileNotFoundError):
-                    os.rmdir(binding.activation_id, dir_fd=run_fd)
-                    os.fsync(run_fd)
             finally:
                 os.close(run_fd)
-            with suppress(FileNotFoundError):
-                os.rmdir(binding.run_id, dir_fd=system_fd)
-                os.fsync(system_fd)
         finally:
             os.close(system_fd)
-        with suppress(FileNotFoundError):
-            os.rmdir(binding.system_id, dir_fd=self._root_fd)
-            os.fsync(self._root_fd)
+        # Another activation or run may still share these parents (#2982).
+        self.prune_empty_activation_parents(binding)
+
+    def prune_empty_activation_parents(self, binding: ExternalBootActivationBinding) -> None:
+        """Remove the activation's `<system>/<run>/<activation>` directories only while empty.
+
+        A session opened before ADR-0710 created them on open, and a materialization
+        interrupted between its first artifact use and its digest `mkdir` leaves them; either
+        way they own nothing, yet exact recovery absence stays false while they exist (#2898,
+        #2926). Anything inside stops the walk: residue stays for quarantine.
+        """
+        chain = (binding.system_id, binding.run_id, binding.activation_id)
+        descriptors = [self._root_fd]
+        try:
+            for name in chain:
+                try:
+                    descriptors.append(_open_private_directory(descriptors[-1], name))
+                except FileNotFoundError:
+                    return
+            for parent_fd, name in reversed(tuple(zip(descriptors[:-1], chain, strict=True))):
+                try:
+                    os.rmdir(name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    if error.errno == errno.ENOTEMPTY:
+                        return
+                    raise
+                os.fsync(parent_fd)
+        finally:
+            for descriptor in descriptors[1:]:
+                os.close(descriptor)
 
     def _read_optional_abort_receipt(self, name: str) -> LocalPartialAbortReceiptV1 | None:
         try:
@@ -3955,7 +4350,10 @@ class RecoveryMetadataStore:
 
     @staticmethod
     def _read(directory_fd: int) -> LocalRecoveryMetadataV1:
-        data = _read_private_file(directory_fd, _INTENT_NAME)
+        try:
+            data = _read_private_file(directory_fd, _INTENT_NAME)
+        except FileNotFoundError as error:
+            raise RecoveryIntentAbsentError(_INTENT_NAME) from error
         metadata = LocalRecoveryMetadataV1.model_validate_json(data)
         if _metadata_bytes(metadata) != data:
             raise ValueError("recovery intent is not canonical JSON")

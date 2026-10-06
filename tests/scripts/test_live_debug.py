@@ -48,6 +48,111 @@ def _load_live_debug() -> ModuleType:
     return module
 
 
+def test_provision_commands_accept_rootfs_with_existing_default() -> None:
+    parser = _load_live_debug()._parser()
+    for command in ("stopped", "step"):
+        assert parser.parse_args([command]).rootfs == "fedora-kdive-ready-44"
+        assert parser.parse_args([command, "--rootfs", "custom-rootfs"]).rootfs == "custom-rootfs"
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_provision_checks_selected_rootfs_before_writes(
+    monkeypatch: pytest.MonkeyPatch, registered: bool
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_call(
+        _client: object, tool: str, args: dict[str, Any], _schemas: object
+    ) -> dict[str, Any]:
+        calls.append((tool, args))
+        if tool == "images.list":
+            return {
+                "status": "ok",
+                "items": [
+                    {
+                        "status": "registered" if registered else "defined",
+                        "data": {
+                            "provider": "local-libvirt",
+                            "name": "custom-rootfs",
+                            "arch": "x86_64",
+                        },
+                    }
+                ],
+                "data": {"truncated": False, "next_cursor": None},
+            }
+        if tool == "resources.list":
+            return {"items": [{"object_id": "resource-1"}]}
+        if tool == "investigations.open":
+            return {"object_id": "inv-1"}
+        if tool == "allocations.request":
+            return {"object_id": "alloc-1"}
+        if tool == "allocations.list":
+            return {"items": [{"object_id": "alloc-1"}]}
+        raise AssertionError(f"unexpected call: {tool}")
+
+    monkeypatch.setattr(live_debug_build, "_call", fake_call)
+    with pytest.raises((RuntimeError, AssertionError)) as exc:
+        asyncio.run(
+            live_debug_build._provision_boot_run(
+                cast(Any, object()),
+                live_debug_build._SchemaResolver(),
+                project="demo",
+                rootfs="custom-rootfs",
+            )
+        )
+    if registered:
+        assert "unexpected call: systems.provision" in str(exc.value)
+        profile = calls[-1][1]["profile"]
+        assert profile["provider"]["local-libvirt"]["rootfs"]["name"] == "custom-rootfs"
+    else:
+        assert "custom-rootfs" in str(exc.value)
+        assert "publish" in str(exc.value)
+        assert not any(tool in {"investigations.open", "allocations.request"} for tool, _ in calls)
+    assert calls[0] == ("images.list", {"scope": "public_baseline"})
+
+
+def test_provision_checks_next_catalog_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_call(
+        _client: object, tool: str, args: dict[str, Any], _schemas: object
+    ) -> dict[str, Any]:
+        calls.append((tool, args))
+        if tool == "images.list" and "cursor" not in args:
+            return {"status": "ok", "items": [], "data": {"truncated": True, "next_cursor": "p2"}}
+        if tool == "images.list":
+            return {
+                "status": "ok",
+                "items": [
+                    {
+                        "status": "registered",
+                        "data": {
+                            "provider": "local-libvirt",
+                            "name": "custom-rootfs",
+                            "arch": "x86_64",
+                        },
+                    }
+                ],
+                "data": {"truncated": False},
+            }
+        raise AssertionError(f"unexpected call: {tool}")
+
+    monkeypatch.setattr(live_debug_build, "_call", fake_call)
+    with pytest.raises(AssertionError, match="resources.list"):
+        asyncio.run(
+            live_debug_build._provision_boot_run(
+                cast(Any, object()),
+                live_debug_build._SchemaResolver(),
+                project="demo",
+                rootfs="custom-rootfs",
+            )
+        )
+    assert calls[:2] == [
+        ("images.list", {"scope": "public_baseline"}),
+        ("images.list", {"scope": "public_baseline", "cursor": "p2"}),
+    ]
+
+
 class _Envelope:
     def __init__(self, payload: dict[str, Any]) -> None:
         self._payload = payload

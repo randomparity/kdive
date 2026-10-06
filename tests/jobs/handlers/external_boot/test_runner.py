@@ -36,12 +36,13 @@ from pydantic import SecretStr
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.capacity.state import ExternalBootActivationState
+from kdive.domain.capacity.state import ExternalBootActivationState, JobState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs.authority_sender import _failure
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.runner import (
     COMMITTABLE_ERROR_CATEGORIES,
@@ -1216,19 +1217,36 @@ def test_a_successful_run_reaches_the_port_and_returns_the_built_result(
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
 
+@pytest.mark.parametrize("failure_kind", ["provider", "unprintable", "configuration"])
 def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation(
-    migrated_url: str, authority_role_dsns: Callable[[str], str], vehicle: Vehicle
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    vehicle: Vehicle,
+    caplog: pytest.LogCaptureFixture,
+    failure_kind: str,
 ) -> None:
-    """A provider raise is wrapped bound to the same allocation, and the message is dropped.
+    """A provider raise is bound to its allocation; its message stays out of the result.
 
     ``_authority_binding_matches`` is the worker's gate before the SQL boundary, so the wrap is
     driven through it rather than through a re-implementation of the same nine comparisons.
     """
     secret = "/var/lib/kdive/secret-path-that-must-not-travel"
     provider_identifier = "fault-inject://private-provider.example.internal/system-47"
-    raw_message = f"provider {provider_identifier} failed while reading {secret}"
+    raw_message = f"provider {provider_identifier} failed while reading {secret}: " + "x" * 9000
+
+    class UnprintableError(Exception):
+        def __str__(self) -> str:
+            raise ValueError("message rendering failed")
 
     def explode(_context: OperationContext) -> RunningKernelObservation:
+        if failure_kind == "unprintable":
+            raise UnprintableError()
+        if failure_kind == "configuration":
+            raise CategorizedError(
+                "authority: configuration-error",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                terminal=True,
+            )
         raise OSError(raw_message)
 
     async def body(seed: AsyncConnection, conn: AsyncConnection) -> None:
@@ -1238,6 +1256,7 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
             resolver=resolver_for(vehicle),
             acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
         )
+        ports.secret_registry.register(secret, scope=None)
 
         with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
             await _run(conn, case, ports=ports, call_port=explode)
@@ -1247,6 +1266,9 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
         result = failure.result.result
         assert isinstance(result, _FailureResult)
         assert result.failure_context.phase == "provider-call"
+        if failure_kind == "configuration":
+            assert result.error_category is ErrorCategory.CONFIGURATION_ERROR
+            assert result.terminal is True
         assert failure.result.journal_sequence > 0
         # `from None`, so the provider's own exception is not chained onto a renderable traceback.
         assert failure.__cause__ is None
@@ -1254,6 +1276,24 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
         assert raw_message not in serialized
         assert secret not in serialized
         assert provider_identifier not in serialized
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "kdive.jobs.handlers.external_boot.runner"
+        ]
+        assert len(warnings) == 1
+        warning = warnings[0].getMessage()
+        assert "phase=provider-call" in warning
+        assert secret not in warning
+        if failure_kind == "unprintable":
+            assert "exception=UnprintableError" in warning
+            assert warning.endswith("reason=<message unavailable>")
+        elif failure_kind == "configuration":
+            assert warning.endswith("reason=authority: configuration-error")
+        else:
+            assert "exception=OSError" in warning
+            assert "[REDACTED]" in warning
+            assert len(warning.split("reason=", 1)[1]) == 8192
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
@@ -1296,6 +1336,47 @@ def test_committable_categories_match_the_migration_exactly() -> None:
     )
 
 
+@pytest.mark.parametrize("marked", [True, False], ids=["marked", "unmarked"])
+def test_bound_failure_carries_the_provider_conflict_mark(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    vehicle: Vehicle,
+    marked: bool,
+) -> None:
+    """Only the authority's `provider-conflict` reason marks the bound context (#2901, ADR-0714)."""
+
+    def explode(_context: OperationContext) -> RunningKernelObservation:
+        if marked:
+            raise _failure("provider-conflict")
+        raise CategorizedError("x", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    async def body(seed: AsyncConnection, conn: AsyncConnection) -> None:
+        case = await seed_case(seed, vehicle, purpose="activate")
+        ports = _ports(
+            case,
+            resolver=resolver_for(vehicle),
+            acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+        )
+
+        with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
+            await _run(conn, case, ports=ports, call_port=explode)
+
+        result = excinfo.value.result.result
+        assert isinstance(result, _FailureResult)
+        assert result.failure_context.phase == "provider-call"
+        assert result.failure_context.authority_reason == ("provider-conflict" if marked else None)
+        committed = await queue.fail_external_boot(
+            conn,
+            _job(case),
+            excinfo.value.result,
+            incarnation_credential=SecretStr(case.credential),
+        )
+        assert isinstance(committed, Job)
+        assert committed.state is JobState.QUEUED
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
 @pytest.mark.parametrize(
     "category",
     list(ErrorCategory),
@@ -1308,7 +1389,7 @@ def test_every_provider_category_maps_to_a_committable_failure(
 ) -> None:
     """Enumerate the closed fault vocabulary and prove every result can be committed.
 
-    ``ErrorCategory`` has 24 members and the commit accepts 17. Copying an unaccepted one through
+    ``ErrorCategory`` has 25 members and the commit accepts 17. Copying an unaccepted one through
     raises SQLSTATE ``22023`` from inside the commit — and that call sits **outside**
     ``_finalize_handler``'s ``try/except``, so it escapes to ``_claim_loop`` and surfaces as
     ``run_once failed on lane %s`` with no job id. Nothing else catches it:

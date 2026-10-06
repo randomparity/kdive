@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CHECKER="$SCRIPT_DIR/check-records.sh"
 # Whether the scratch tree is this script's to delete. A caller who names one owns it, and
 # gets it back either way; the default one is ours and is cleaned up on a green run.
@@ -1490,6 +1490,18 @@ SH
   sed 's/^# 0001 — /# 0002 — /' "$d/docs/debt/0002-valid.md" >"$d/.rec"
   mv "$d/.rec" "$d/docs/debt/0002-valid.md"
   run_case "renumber with the H1 corrected" 0 - "$d" BASE_SHA="$b"
+
+  d=$(case_dir renumber_plain_h1)
+  sed 's/^# 0001 — /# 0001 /' "$d/docs/debt/0001-valid.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/debt/0001-valid.md"
+  git -C "$d" commit -aqm "use a plain numbered heading"
+  b=$(base_of "$d")
+  git -C "$d" mv docs/debt/0001-valid.md docs/debt/0002-valid.md
+  sed 's/^# 0001 /# 0002 /' "$d/docs/debt/0002-valid.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/debt/0002-valid.md"
+  run_case "renumber a plain numbered heading" 0 - "$d" BASE_SHA="$b"
+  printf '\nChanged decision text.\n' >>"$d/docs/debt/0002-valid.md"
+  run_case "plain heading renumber still rejects edits" 1 E-GONE "$d" BASE_SHA="$b"
 
   # The must-stay-red direction. The sentinel makes two records identical apart from their
   # number canonicalise identically, so without the candidate-absent-at-base condition a

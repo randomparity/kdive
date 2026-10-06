@@ -64,6 +64,55 @@ memory_mb = 65536
 The libvirt storage pool / network / machine knobs that the inventory model does not carry stay
 operational env settings (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `_NETWORK`, `_MACHINE`).
 
+### Delivering the inventory and TLS refs to the fixed workers
+
+The live stack's workers are the fixed `kdive-live-worker@N` slots (ADR-0574). Their accounts have
+no home directory, so they never see the XDG default `~/.config/kdive/systems.toml`. When the
+operator's inventory declares a `[[remote_libvirt]]` instance, `scripts/live-stack/worker-lifecycle.sh
+start` sends the path the operator's server and reconciler resolve to the root lifecycle witness.
+The witness writes it into each slot's environment as `KDIVE_SYSTEMS_TOML`. An inventory with no
+remote instance is not sent, so the request a local-only stack sends is unchanged.
+
+Place the inventory where the slot accounts can read it but cannot write it, and point the server
+and reconciler at it:
+
+```bash
+sudo install -o root -g root -m 0644 systems.toml /etc/kdive/systems.toml
+export KDIVE_SYSTEMS_TOML=/etc/kdive/systems.toml
+```
+
+Each check below fails before anything starts or stops:
+
+- **Launcher.** It refuses an inventory that any `kdive-worker-N` account cannot read, for example
+  one under a 0700 or 0750 home.
+- **Witness.** It inspects only metadata and never opens the file. It returns `invalid_request` /
+  `correct_request` when the path:
+  - is relative or not normalized;
+  - traverses a symlink;
+  - is not a regular file;
+  - can be written by a slot account, through any slot group or `kdive-live-libvirt`, or by other
+    users. This covers the file and every ancestor directory, except a sticky one such as `/tmp`.
+
+Adding or removing a `[[remote_libvirt]]` block takes effect at the next `worker-lifecycle.sh
+start`. Host entries are re-read on every operation, so replace the file atomically (write a
+sibling, then rename) rather than editing it in place. The delivered inventory also governs the
+fixed workers' other inventory-driven behavior, such as `[[local_libvirt]] guest_egress`.
+
+The TLS refs resolve under the fixed secrets root `/var/lib/kdive/secrets`. Workers never take
+another root, and the launcher refuses to start remote workers while `KDIVE_SECRETS_ROOT` names a
+different directory. Keep the remote client material in its own subdirectory:
+
+```text
+/var/lib/kdive/secrets                    root:root            0711
+/var/lib/kdive/secrets/remote-libvirt     root:kdive-live-libvirt 0750
+/var/lib/kdive/secrets/remote-libvirt/*   root:kdive-live-libvirt 0440
+```
+
+The Ansible `local_worker_host` role creates the secrets root. On an installer-only host, create it
+yourself with `sudo install -d -o root -g root -m 0711 /var/lib/kdive/secrets`. The installer adds both the slot accounts and the operator to `kdive-live-libvirt`. The refs then
+read `client_cert_ref = "remote-libvirt/clientcert.pem"`, and likewise for the key and CA. The
+launcher also checks that every slot account can traverse the secrets root.
+
 Confirm the worker host can actually reach libvirtd over TLS before running the spine:
 
 ```bash
@@ -105,6 +154,12 @@ bootstrap key over the guest agent at provision, so `systems.ssh_info` returns a
   worker pool (and any agent host that must SSH in) at the host firewall. The worker→guest SSH does
   not verify the guest host key (`StrictHostKeyChecking=no`), so the ACL is the trust boundary —
   see ADR-0291.
+- The base image must carry the SSH-forward return route (ADR-0721). Without it, the provider
+  host accepts TCP on the forward but the guest never answers, and `systems.authorize_ssh_key`
+  fails `transport_failure`. Rebuild a Fedora or Rocky image staged before that change with
+  `force_image_rebuild=true` (see the
+  [host setup's image section](remote-libvirt-host-setup.md#2-prepare-guest-images)). The Ubuntu
+  24.04 and bare images do not carry it yet (#3091).
 
 ## 3. Object-store reachability for the presigned PUT
 
@@ -200,3 +255,81 @@ Operator notes:
   leg additionally waits out the guest's crash→reboot→upload window.
 - **Record.** Attach the run log (the per-phase names identify any failing leg) as the recorded
   evidence that the remote spine reached 4/4.
+
+## 7. Remote deep lifecycle (#2810)
+
+`tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle` has one
+parameter for each `deep-lifecycle/remote-libvirt/x86_64` contract cell: four families times the
+two pinned baselines in `fixtures/kernel/baselines.toml`. Fedora runs on
+`fedora-kdive-remote-base-43` and Enterprise Linux on `rocky-10-kdive-remote-base`
+(`REMOTE_REPRESENTATIVES` in `tests/integration/live_stack/remote_lifecycle.py`). Debian and SUSE
+record `blocked`: the in-guest install helper is Fedora/RHEL-only (#3081) and there is no SUSE
+remote base image (#3082). A parameter provisions the representative, uploads its baseline's
+fixture kernel, completes the build, installs and boots it in the guest, reconnects over the SSH
+forward with the same key, checks the running release and GNU build ID against the fixture, reads
+the digest of the guest's `/boot/vmlinuz-<release>`, loads the `loop` module and compares its
+bytes with the uploaded copy, then releases and proves on the provider host that the domain is
+undefined, its volumes are gone and no new `kdive-*` domain remains, with kdive's capacity back to
+its starting value. The ppc64le remote cells share the node and stay `missing-result` for #2818.
+
+Topology and prerequisites, in addition to steps 1–4:
+
+- The control plane runs the stack at the candidate SHA, and pytest runs there: the evidence reads
+  the deployed role revisions from that host. The provider is a separate x86_64 host, used by
+  this lane alone while it runs (another allocation there fails the domain-set check).
+- Prepare the provider with the `libvirt_tls` and `libvirt_pool_net` roles and
+  `deploy/ansible/playbooks/image.yml` with
+  `host_images: [fedora-kdive-remote-base-43, rocky-10-kdive-remote-base]`, and stage both as
+  `[[image]]` entries. Images built before #3094 fail the `enterprise` cells at boot (the
+  [host setup's image section](remote-libvirt-host-setup.md#2-prepare-guest-images) says why):
+  rebuild them with `force_image_rebuild=true`. Declare exactly one `[[remote_libvirt]]`
+  instance, with `ssh_addr` and `ssh_range` (§2.1). Allow `ssh_addr:ssh_range` from the control
+  plane in the provider's firewall (a source-restricted firewalld rich rule, as `gdbstub_acl`
+  writes for the gdbstub range).
+- `REMOTE_PROVIDER_SSH=user@host` gives the test its own access to the provider host: an `ssh`
+  destination that works non-interactively from the control plane (key and known host entry),
+  whose user is in the provider's `libvirt` group. The test reads the host's `os-release`,
+  `uname -m` and `systemd-detect-virt` over it, hashes the base volume there with
+  `virsh vol-download`, and opens `qemu+ssh://<destination>/system` to observe domains and
+  volumes. It never reads the worker's TLS
+  material, and the evidence never records the destination.
+- Fixtures as in the [live-testing runbook](live-testing.md#deep-lifecycle-across-representative-guests-2809).
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix REMOTE_PROVIDER_SSH=<user>@<provider-host>
+export KDIVE_SYSTEMS_TOML=<the stack's systems.toml>  # live tests ignore the XDG default
+uv run python -m tests.integration.live_stack.remote_lifecycle bindings --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+uv run python -m pytest -m live_stack tests/integration/test_remote_deep_lifecycle_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+An unset or malformed `REMOTE_PROVIDER_SSH`, an unreachable provider host, a provider of another
+architecture, other than one `[[remote_libvirt]]` instance, an unstaged representative, or a
+missing or invalid fixture is `blocked` (`missing-prerequisite`). A cell blocked before the
+provider host is observed records the control-plane host, so `qualify` lists context-mismatch
+reasons beside `missing-prerequisite` for it; the pytest line names the actual cause. After an
+interrupted run, release the leftover allocation with `allocations.release` (or let the lease
+expire) and check the provider for a leftover `kdive-*` domain and its overlay volume.
+
+Last run: candidate `b5c5141c8` (server, worker and reconciler at that SHA; both base images rebuilt
+from it) on snapshot-capable disposable lab test hosts: an Ubuntu 26.04 x86_64 control plane and a
+separate Rocky Linux 10.2 x86_64 provider host, itself a KVM guest (`systemd-detect-virt` `kvm`;
+domains run with the `kvm` accelerator, nested). Fixtures `v6.18.54` (longterm) and `v7.2.8`
+(stable). Two provider-host steps existed only because of open defects and are not product coverage:
+firewalld installed and enabled before `site.yml` (#3083), and a runtime `DOCKER-USER` rule
+accepting forwarded traffic to and from `virbr0` so guests reach the object store past docker's
+`FORWARD` drop policy (#3093).
+
+| Cell (`deep-lifecycle/remote-libvirt/x86_64/…`) | Guest | Outcome | Failing assertion |
+|---|---|---|---|
+| `fedora/longterm`, `fedora/stable` | `fedora:43` | success | — |
+| `enterprise/longterm`, `enterprise/stable` | `rocky:10` | success | — |
+| `debian/longterm`, `debian/stable` | — | blocked | no Debian install helper (#3081) |
+| `suse/longterm`, `suse/stable` | — | blocked | no SUSE remote image (#3082) |
+
+`qualify` accepted the Fedora and Enterprise cells; the four blocked cells do not qualify, and
+also list context-mismatch reasons, because they stop before the provider host is observed.

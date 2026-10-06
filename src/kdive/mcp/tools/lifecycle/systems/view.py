@@ -19,7 +19,7 @@ from kdive.domain.operations.jobs import Job
 from kdive.domain.pcie import parse_match_spec
 from kdive.jobs import queue
 from kdive.log import bind_context
-from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse, validate_stored
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -30,6 +30,7 @@ from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_erro
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
+from kdive.mcp.tools._common import project_filter as _project_filter
 from kdive.mcp.tools.lifecycle._recovery import iso, provisioning_profile_summary
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -497,21 +498,6 @@ async def get_system(
         )
 
 
-def _viewer_projects(ctx: RequestContext) -> list[str]:
-    """Projects the caller may view: a member project with any granted role."""
-    return [p for p in ctx.projects if ctx.roles.get(p) is not None]
-
-
-def _project_filter(ctx: RequestContext, project: str | None) -> list[str]:
-    """Narrow the caller's readable projects to ``project`` (``allocations.list`` pattern).
-
-    An unreadable ``project`` returns an empty list rather than an error, so the caller
-    gets the same empty collection an absent project would (no existence signal).
-    """
-    readable = _viewer_projects(ctx)
-    return readable if project is None else [project] if project in readable else []
-
-
 @dataclass(frozen=True, slots=True)
 class _SystemFilters:
     """The validated, SQL-ready clauses and params for a :func:`list_systems` query."""
@@ -649,7 +635,7 @@ def _split_placement(row: dict[str, object]) -> tuple[System, str, str | None]:
     resource_kind = str(row.pop("resource_kind"))
     resource_id = row.pop("resource_id")
     resource_id_str = str(resource_id) if resource_id is not None else None
-    return System.model_validate(row), resource_kind, resource_id_str
+    return validate_stored(System, row), resource_kind, resource_id_str
 
 
 _SYSTEMS_LIST_TAG = "systems.list"

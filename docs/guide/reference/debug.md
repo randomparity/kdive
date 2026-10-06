@@ -14,7 +14,10 @@ breakpoint) to advance from. mode='into' steps one source line into called funct
 and 'over' return timed_out=True or a debug_attach_failure ("Cannot find bounds of
 current function"); use 'instruction' there. 'out' needs a frame that can return — in the
 outermost frame it fails with debug_attach_failure — and a frame that does not return
-within the wait interrupts back with timed_out=True.
+within the wait interrupts back with timed_out=True. Where the gdbstub cannot single-step
+(ppc64le under KVM), 'into', 'over' and 'instruction' return not_implemented with
+code single_step_unsupported before the target resumes; retrying the same mode does not
+succeed, so use 'out' or a breakpoint with debug.continue.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -252,8 +255,15 @@ Set a breakpoint on a live DebugSession via gdb-MI. Requires contributor.
 
 Set a hardware write watchpoint on a symbol/address for a live DebugSession.
 
-Watchpoints are hardware (debug-register) watchpoints: the stub may accept one yet never
-trap, surfacing as a debug.continue timeout rather than an error. Requires contributor.
+Watchpoints are hardware (debug-register) watchpoints. Where the gdbstub cannot insert
+one (ppc64le under KVM), the call returns not_implemented with code
+watchpoint_unsupported and arms nothing. A stub that refuses the insert itself returns
+the same code under debug_attach_failure. gdb inserts watchpoints on resume, so a
+watchpoint it cannot insert (a refusing stub, or too many armed watchpoints) fails the
+next resume, where gdb reports it as the resume's error, with debug_attach_failure and
+code watchpoint_insert_failed (data.verb, data.watchpoint); remove a watchpoint with
+debug.clear_watchpoint, then retry. A stub may also accept one yet never trap, which
+shows as a debug.continue timeout. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

@@ -6,8 +6,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -16,6 +18,7 @@ from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHe
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    _TAKEOVER_PHASES,
     GENESIS_DIGEST,
     AuthorityAcknowledgementV1,
     AuthorityCleanupEvidenceContextV1,
@@ -44,6 +47,8 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
     AuthorityTeardownSnapshot,
+    ProviderRecoveryRefusal,
+    SystemTeardownSupersededError,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootPreparationObservation,
@@ -59,6 +64,12 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.providers.system_authority.service import AuthoritySystemService
+from kdive.security.secrets.redaction import REDACTION
+from kdive.serialization import ServerFaultError
+
+_ERROR_MESSAGE_MAX = 512
+# Defence in depth for the fixed refusal text: every URL userinfo is masked.
+_URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,16 +322,69 @@ class AuthorityReleasePhaseRepository(Protocol):
     ) -> AuthorityBinding | None: ...
 
 
+JournalConflictReason = Literal[
+    "ack_watermark_missing",
+    "checkpoint_refused",
+    "completion_evidence_missing",
+    "finish_mutation_started_missing",
+    "head_absent_records_present",
+    "head_mismatch_observe",
+    "head_mismatch_recover",
+    "head_present_records_empty",
+    "head_unanchored_commit",
+    "head_unanchored_terminal",
+    "lane_failed_current_read",
+    "lane_failed_lifecycle",
+    "lane_failed_mutation",
+    "lane_failed_observe",
+    "lane_failed_takeover",
+    "lane_failed_terminal_preparation",
+    "latest_not_mutation_started",
+    "mutation_started_missing",
+    "observation_missing",
+    "observe_records_empty",
+    "orphan_binding_changed",
+    "orphan_binding_changed_after_disposition",
+    "orphan_digest_changed",
+    "orphan_selection_malformed",
+    "orphan_system_mismatch",
+    "pending_predecessor_missing",
+    "phase_not_replayable",
+    "predecessor_not_target",
+    "predecessor_operation_mismatch",
+    "preparation_plan_missing",
+    "release_phase_mismatch",
+    "replay_mutation_started_missing",
+    "suspended_state_mismatch",
+    "takeover_head_missing",
+    "takeover_head_missing_after_watermark",
+    "terminal_operation_mismatch",
+    "terminal_record_missing",
+    "terminal_replay_mismatch",
+    "unresolved_binding_mismatch",
+    "unresolved_head_missing",
+]
+"""Closed set naming the check behind a `journal_conflict`; a log field, never a metric label."""
+
+
 class AuthorityServiceError(RuntimeError):
     """Bounded failure safe to expose across the authority boundary."""
 
     def __init__(
         self,
-        category: Literal["unauthenticated", "superseded", "journal_conflict", "provider_conflict"],
+        category: Literal[
+            "unauthenticated",
+            "superseded",
+            "journal_conflict",
+            "provider_conflict",
+            "configuration_error",
+        ],
         *,
+        reason: JournalConflictReason | None = None,
         telemetry_recorded: bool = False,
     ):
         self.category = category
+        self.reason = reason
         self.telemetry_recorded = telemetry_recorded
         super().__init__(category)
 
@@ -468,6 +532,11 @@ class ExternalBootAuthorityService:
         self._proof_checkpoint = proof_checkpoint
         self._system_service = system_service
         self._lanes: dict[UUID, _Lane] = {}
+        self._anchors_open = asyncio.Event()
+        self._anchors_open.set()
+        self._anchors_drained = asyncio.Event()
+        self._anchors_drained.set()
+        self._anchors_in_flight = 0
         self._completion_tasks: set[asyncio.Task[object]] = set()
         self._accepting = True
         self._closed = False
@@ -507,6 +576,20 @@ class ExternalBootAuthorityService:
             self._closed = True
         if failure is not None:
             raise failure
+
+    @asynccontextmanager
+    async def quiesce_anchors(self) -> AsyncIterator[None]:
+        """Hold new anchors and wait out in-flight ones, so every lane file equals its head.
+
+        ADR-0584 amendment (#2899): only the periodic readiness check enters this, once per
+        failed check and inside its timeout; it is not reentrant.
+        """
+        self._anchors_open.clear()
+        try:
+            await self._anchors_drained.wait()
+            yield
+        finally:
+            self._anchors_open.set()
 
     def _track_completion(self, task: asyncio.Task[object]) -> None:
         self._completion_tasks.add(task)
@@ -555,11 +638,25 @@ class ExternalBootAuthorityService:
     async def _resolve_recovery_orphan(
         self, peer: AuthenticatedPeer, request: AuthorityRecoveryOrphanDispositionRequestV1
     ) -> AuthorityRecoveryOrphanDispositionResponseV1:
-        if self._recovery_orphans is None:
-            raise AuthorityServiceError("superseded")
-        if peer is None or not isinstance(peer.incarnation_id, UUID | str):
-            raise AuthorityServiceError("unauthenticated")
-        return await self._recovery_orphans.resolve_recovery_orphan(peer, request)
+        try:
+            if self._recovery_orphans is None:
+                raise AuthorityServiceError("superseded")
+            if peer is None or not isinstance(peer.incarnation_id, UUID | str):
+                raise AuthorityServiceError("unauthenticated")
+            return await self._recovery_orphans.resolve_recovery_orphan(peer, request)
+        except AuthorityServiceError as error:
+            if not error.telemetry_recorded:
+                labels = self._trusted_labels(None)
+                self._logger.warning(
+                    "authority recovery orphan rejected",
+                    extra={
+                        "provider_kind": labels[0],
+                        "authority_instance": labels[1],
+                        "category": error.category,
+                        "reason": error.reason,
+                    },
+                )
+            raise
 
     def _lane_journal(
         self, system_id: UUID, lane: _Lane
@@ -581,6 +678,7 @@ class ExternalBootAuthorityService:
         category: Literal["unauthenticated", "superseded", "journal_conflict"],
         *,
         labels: tuple[str, str] = ("untrusted", "unresolved"),
+        reason: JournalConflictReason | None = None,
     ) -> AuthorityServiceError:
         labels = self.metrics.reject_labels(labels, category)
         self._logger.warning(
@@ -589,9 +687,10 @@ class ExternalBootAuthorityService:
                 "provider_kind": labels[0],
                 "authority_instance": labels[1],
                 "category": category,
+                "reason": reason,
             },
         )
-        return AuthorityServiceError(category, telemetry_recorded=True)
+        return AuthorityServiceError(category, reason=reason, telemetry_recorded=True)
 
     def _ensure_rejection(
         self,
@@ -609,6 +708,7 @@ class ExternalBootAuthorityService:
                 "provider_kind": labels[0],
                 "authority_instance": labels[1],
                 "category": error.category,
+                "reason": error.reason,
             },
         )
         error.telemetry_recorded = True
@@ -727,6 +827,7 @@ class ExternalBootAuthorityService:
             and record.authority_instance == request.authority_instance
             and record.operation_identity == request.operation_identity
             and record.operation_digest == request.operation_digest
+            and record.local_timing == getattr(request, "local_timing", None)
         )
 
     async def _finalize_adapter(
@@ -748,13 +849,13 @@ class ExternalBootAuthorityService:
             None,
         )
         if started is None:
-            raise AuthorityServiceError("journal_conflict")
+            raise AuthorityServiceError("journal_conflict", reason="mutation_started_missing")
         try:
             await self._adapter.finalize(request, AuthorityCommitContextV1.for_record(started))
         except AuthorityServiceError:
             raise
-        except Exception:
-            raise self._provider_error(request) from None
+        except Exception as error:
+            raise self._provider_error(request, error) from None
 
     async def _publish_cleanup_quarantine(
         self,
@@ -784,10 +885,12 @@ class ExternalBootAuthorityService:
         head = await self._repository.read_head(binding)
         if head is None:
             if records:
-                raise AuthorityServiceError("journal_conflict")
+                raise AuthorityServiceError(
+                    "journal_conflict", reason="head_absent_records_present"
+                )
             return records
         if not records:
-            raise AuthorityServiceError("journal_conflict")
+            raise AuthorityServiceError("journal_conflict", reason="head_present_records_empty")
         last = records[-1]
         inherited_terminal = (
             last.phase is JournalPhase.TERMINAL
@@ -804,7 +907,7 @@ class ExternalBootAuthorityService:
             or (not inherited_terminal and last.generation != head.generation)
             or last.operation_identity != head.operation_identity
         ):
-            raise AuthorityServiceError("journal_conflict")
+            raise AuthorityServiceError("journal_conflict", reason="head_mismatch_recover")
         return records
 
     async def _observation_head_is_current(
@@ -816,7 +919,7 @@ class ExternalBootAuthorityService:
         repair, append, or truncate local history merely to make a provider read admissible.
         """
         if not records:
-            raise AuthorityServiceError("journal_conflict")
+            raise AuthorityServiceError("journal_conflict", reason="observe_records_empty")
         head = await self._repository.read_head(binding)
         last = records[-1]
         if (
@@ -830,9 +933,27 @@ class ExternalBootAuthorityService:
             or head.generation != last.generation
             or head.operation_identity != last.operation_identity
         ):
-            raise AuthorityServiceError("journal_conflict")
+            raise AuthorityServiceError("journal_conflict", reason="head_mismatch_observe")
 
     async def _anchor(
+        self,
+        binding: AuthorityBinding,
+        journal: FileAuthorityJournal,
+        records: list[JournalRecordV1],
+        record: JournalRecordV1,
+    ) -> list[JournalRecordV1]:
+        while not self._anchors_open.is_set():
+            await self._anchors_open.wait()
+        self._anchors_in_flight += 1
+        self._anchors_drained.clear()
+        try:
+            return await self._anchor_record(binding, journal, records, record)
+        finally:
+            self._anchors_in_flight -= 1
+            if self._anchors_in_flight == 0:
+                self._anchors_drained.set()
+
+    async def _anchor_record(
         self,
         binding: AuthorityBinding,
         journal: FileAuthorityJournal,
@@ -848,28 +969,58 @@ class ExternalBootAuthorityService:
             record,
         )
         if status != "advanced":
+            # ADR-0584 amendment (#2793): a definitive refusal means the head never accepted the
+            # record, so it is retracted; a failed retraction leaves it for the startup path.
+            lane = {"system_id": str(record.system_id), "sequence": record.sequence}
+            try:
+                journal.retract(record)
+            except (OSError, ValueError) as error:
+                self._logger.warning(
+                    "authority journal retraction failed: %s", type(error).__qualname__, extra=lane
+                )
+            else:
+                self._logger.warning(
+                    "authority journal retracted a refused record",
+                    extra=lane | {"digest": record_digest(record)},
+                )
             raise self._reject(
                 "superseded" if status == "superseded" else "journal_conflict",
                 labels=self._trusted_labels(binding),
+                reason=None if status == "superseded" else "checkpoint_refused",
             )
         self.metrics.record_checkpoint(record, time.perf_counter() - started)
         records.append(record)
         return records
 
     def _provider_error(
-        self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
+        self,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        error: Exception | None = None,
     ) -> AuthorityServiceError:
         labels = self.metrics.reject_labels(
             (request.provider_kind, request.authority_instance), "provider_conflict"
         )
-        self._logger.warning(
-            "authority provider boundary failed",
-            extra={
-                "provider_kind": labels[0],
-                "authority_instance": labels[1],
-                "category": "provider_conflict",
-            },
-        )
+        extra = {
+            "provider_kind": labels[0],
+            "authority_instance": labels[1],
+            "category": "provider_conflict",
+        }
+        # ADR-0707: the type is always logged; only a kdive-raised refusal's fixed text is,
+        # because adapter and foreign exception text is provider output (ADR-0584).
+        if error is None:
+            self._logger.warning("authority provider boundary failed", extra=extra)
+        elif isinstance(error, ProviderRecoveryRefusal):
+            message = _URL_USERINFO.sub(f"{REDACTION}@", str(error))[:_ERROR_MESSAGE_MAX]
+            self._logger.warning(
+                "authority provider boundary failed: %s: %s",
+                type(error).__qualname__,
+                message,
+                extra=extra,
+            )
+        else:
+            self._logger.warning(
+                "authority provider boundary failed: %s", type(error).__qualname__, extra=extra
+            )
         return AuthorityServiceError("provider_conflict", telemetry_recorded=True)
 
     async def _head_still_anchors(
@@ -914,11 +1065,18 @@ class ExternalBootAuthorityService:
             trusted_labels = self._trusted_labels(binding)
             journal = self._journal_factory(request.system_id)
             records = await self._recover(binding, journal)
-        except AuthorityServiceError, OSError, ValueError:
+        except (AuthorityServiceError, OSError, ValueError, ServerFaultError) as error:
             self.metrics.recovery_failed_labels(trusted_labels)
+            # Other errors log their class name alone: OSError/ValueError text can carry
+            # paths or payload fragments.
+            category, reason = (
+                (error.category, error.reason)
+                if isinstance(error, AuthorityServiceError)
+                else (type(error).__name__, None)
+            )
             self._logger.warning(
                 "authority recovery rejected",
-                extra={"category": "journal_conflict"},
+                extra={"category": category, "reason": reason},
             )
             return False
         finally:
@@ -1002,13 +1160,15 @@ class ExternalBootAuthorityService:
             )
         if record.operation in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}:
             if binding.preparation_plan is None:
-                raise AuthorityServiceError("journal_conflict")
+                raise AuthorityServiceError("journal_conflict", reason="preparation_plan_missing")
             values["plan"] = binding.preparation_plan
             return cast(
                 AuthorityMutationRequestV1,
                 AuthorityPreparationMutationRequestV1.model_validate(values),
             )
-        return AuthorityMutationRequestV1.model_validate(values)
+        return AuthorityMutationRequestV1.model_validate(
+            values | {"local_timing": record.local_timing}
+        )
 
     async def _recover_suspended(
         self,
@@ -1049,7 +1209,7 @@ class ExternalBootAuthorityService:
             or suspended.target_identity != prior.intended_target_identity
             or suspended.ownership_digest != ownership
         ):
-            raise AuthorityServiceError("journal_conflict")
+            raise AuthorityServiceError("journal_conflict", reason="suspended_state_mismatch")
         return await self._finish_recovery(binding, journal, records, prior)
 
     async def _finish_recovery(
@@ -1070,8 +1230,8 @@ class ExternalBootAuthorityService:
                 # Already a bounded category; re-classifying it as provider_conflict would
                 # lose a superseded verdict the adapter is entitled to reach.
                 raise
-            except Exception:
-                raise self._provider_error(request) from None
+            except Exception as error:
+                raise self._provider_error(request, error) from None
             records = await self._anchor(
                 binding,
                 journal,
@@ -1085,14 +1245,14 @@ class ExternalBootAuthorityService:
                 # Already a bounded category; re-classifying it as provider_conflict would
                 # lose a superseded verdict the adapter is entitled to reach.
                 raise
-            except Exception:
-                raise self._provider_error(request) from None
+            except Exception as error:
+                raise self._provider_error(request, error) from None
         elif prior.phase is JournalPhase.OBSERVED:
             if prior.observation is None:
-                raise AuthorityServiceError("journal_conflict")
+                raise AuthorityServiceError("journal_conflict", reason="observation_missing")
             observation = prior.observation
         else:
-            raise AuthorityServiceError("journal_conflict")
+            raise AuthorityServiceError("journal_conflict", reason="phase_not_replayable")
         if prior.phase is not JournalPhase.OBSERVED:
             records = await self._anchor(
                 binding,
@@ -1125,6 +1285,8 @@ class ExternalBootAuthorityService:
         records: list[JournalRecordV1],
     ) -> AuthorityObservationV1:
         if isinstance(request, AuthorityTeardownMutationRequestV1):
+            # A teardown's attempt id is fixed per operation identity, so earlier generations
+            # of the same teardown share it; only the authority generation names this anchor.
             started = next(
                 (
                     item
@@ -1132,11 +1294,15 @@ class ExternalBootAuthorityService:
                     if item.phase is JournalPhase.MUTATION_STARTED
                     and item.operation_identity == record.operation_identity
                     and item.attempt_id == record.attempt_id
+                    and item.authority_id == record.authority_id
+                    and item.generation == record.generation
                 ),
                 None,
             )
             if started is None:
-                raise AuthorityServiceError("journal_conflict")
+                raise AuthorityServiceError(
+                    "journal_conflict", reason="replay_mutation_started_missing"
+                )
             facts = await self._system_teardown_facts(
                 request, AuthorityCommitContextV1.for_record(started)
             )
@@ -1217,7 +1383,11 @@ class ExternalBootAuthorityService:
     ) -> AuthorityAcknowledgementV1:
         async with lane.lock:
             if lane.failed:
-                raise self._reject("journal_conflict", labels=self._trusted_labels(binding))
+                raise self._reject(
+                    "journal_conflict",
+                    labels=self._trusted_labels(binding),
+                    reason="lane_failed_takeover",
+                )
             confirmed = await self._repository.resolve_allocating(authenticated, request)
             if confirmed is None or confirmed != binding:
                 raise self._reject("superseded", labels=self._trusted_labels(binding))
@@ -1239,7 +1409,9 @@ class ExternalBootAuthorityService:
                 if acknowledgement is not None:
                     trusted = await self._repository.read_head(binding)
                     if trusted is None:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="takeover_head_missing"
+                        )
                     watermark = next(
                         (
                             record
@@ -1250,7 +1422,9 @@ class ExternalBootAuthorityService:
                         None,
                     )
                     if watermark is None:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="ack_watermark_missing"
+                        )
                     response = self._acknowledgement_response(
                         request, records[: acknowledgement.sequence], watermark, acknowledgement
                     )
@@ -1274,7 +1448,9 @@ class ExternalBootAuthorityService:
                         None,
                     )
                     if prior is None:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="pending_predecessor_missing"
+                        )
                     if pending.generation == request.generation:
                         if (
                             pending.authority_id != request.authority_id
@@ -1300,8 +1476,12 @@ class ExternalBootAuthorityService:
                     records = await self._anchor(binding, journal, records, watermark)
                 lane.watermark_generation = request.generation
                 active = lane.active
+                # Takeover records can share the suspended operation's identity (a System
+                # teardown's is fixed per activation); only operation phases say it is unresolved.
                 phases_by_operation = {
-                    record.operation_identity: record.phase for record in records[:-1]
+                    record.operation_identity: record.phase
+                    for record in records[:-1]
+                    if record.phase not in _TAKEOVER_PHASES
                 }
                 unresolved_restart = any(
                     phase
@@ -1320,7 +1500,7 @@ class ExternalBootAuthorityService:
                     unresolved = next(
                         record
                         for record in reversed(records[:-1])
-                        if phases_by_operation[record.operation_identity] == record.phase
+                        if phases_by_operation.get(record.operation_identity) == record.phase
                         and record.phase
                         in {
                             JournalPhase.ADMITTED,
@@ -1331,7 +1511,9 @@ class ExternalBootAuthorityService:
                     )
                     trusted_after_watermark = await self._repository.read_head(binding)
                     if trusted_after_watermark is None:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="takeover_head_missing_after_watermark"
+                        )
                     records = await self._recover_suspended(
                         binding,
                         journal,
@@ -1361,7 +1543,11 @@ class ExternalBootAuthorityService:
                 if lane.watermark_generation != request.generation:
                     raise AuthorityServiceError("superseded")
                 records = await self._recover(binding, journal, records)
-                phases = {record.operation_identity: record.phase for record in records}
+                phases = {
+                    record.operation_identity: record.phase
+                    for record in records
+                    if record.phase not in _TAKEOVER_PHASES
+                }
                 if any(
                     phase
                     in {
@@ -1422,7 +1608,9 @@ class ExternalBootAuthorityService:
             try:
                 async with lane.lock:
                     if lane.failed:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="lane_failed_observe"
+                        )
                     if lane.active is not None:
                         raise AuthorityServiceError("superseded")
                     journal, records = self._lane_journal(request.system_id, lane)
@@ -1452,7 +1640,9 @@ class ExternalBootAuthorityService:
                     prior = phases_by_operation.get(request.operation_identity)
                     if prior is not None and prior.phase is JournalPhase.TERMINAL:
                         if not self._operation_matches(prior, request) or prior.observation is None:
-                            raise AuthorityServiceError("journal_conflict")
+                            raise AuthorityServiceError(
+                                "journal_conflict", reason="terminal_replay_mismatch"
+                            )
                         try:
                             await self._finalize_adapter(request, records)
                         except AuthorityServiceError:
@@ -1471,6 +1661,7 @@ class ExternalBootAuthorityService:
                                 for record in reversed(records)
                                 if record.phase is JournalPhase.TERMINAL
                                 and record.operation == request.operation
+                                and record.activation_id == request.activation_id
                                 and record.generation < request.generation
                             ),
                             None,
@@ -1481,7 +1672,9 @@ class ExternalBootAuthorityService:
                                 or predecessor_record.observation is None
                                 or predecessor_record.observation.category != "target"
                             ):
-                                raise AuthorityServiceError("journal_conflict")
+                                raise AuthorityServiceError(
+                                    "journal_conflict", reason="predecessor_not_target"
+                                )
                             predecessor_receipt_identity = (
                                 predecessor_record.observation.composite_state
                             )
@@ -1502,7 +1695,9 @@ class ExternalBootAuthorityService:
                                 }
                             )
                             if not self._operation_matches(predecessor_record, predecessor):
-                                raise AuthorityServiceError("journal_conflict")
+                                raise AuthorityServiceError(
+                                    "journal_conflict", reason="predecessor_operation_mismatch"
+                                )
                     if request.purpose == "release" and request.operation in {
                         AuthorityOperation.RECOVER,
                         AuthorityOperation.CLEANUP,
@@ -1513,6 +1708,7 @@ class ExternalBootAuthorityService:
                                 for record in reversed(records)
                                 if record.phase is JournalPhase.TERMINAL
                                 and record.operation == request.operation
+                                and record.activation_id == request.activation_id
                                 and record.generation < request.generation
                             ),
                             None,
@@ -1545,7 +1741,9 @@ class ExternalBootAuthorityService:
                                 or prior_release_phase.observation.category != expected_outcome
                                 or not self._operation_matches(prior_release_phase, candidate)
                             ):
-                                raise AuthorityServiceError("journal_conflict")
+                                raise AuthorityServiceError(
+                                    "journal_conflict", reason="release_phase_mismatch"
+                                )
                             adopted_release_phase = prior_release_phase.observation
                     unresolved = next(
                         (
@@ -1564,7 +1762,9 @@ class ExternalBootAuthorityService:
                     if unresolved is not None:
                         head = await self._repository.read_head(binding)
                         if head is None:
-                            raise AuthorityServiceError("journal_conflict")
+                            raise AuthorityServiceError(
+                                "journal_conflict", reason="unresolved_head_missing"
+                            )
                         if head.suspended_operation is not None:
                             await self._recover_suspended(
                                 binding,
@@ -1587,7 +1787,9 @@ class ExternalBootAuthorityService:
                         ):
                             await self._finish_recovery(binding, journal, records, unresolved)
                         else:
-                            raise AuthorityServiceError("journal_conflict")
+                            raise AuthorityServiceError(
+                                "journal_conflict", reason="unresolved_binding_mismatch"
+                            )
                         raise AuthorityServiceError("provider_conflict")
                     records = await self._anchor(
                         binding,
@@ -1638,7 +1840,7 @@ class ExternalBootAuthorityService:
                 # reconciles it. That is the correct visible answer for a head the service
                 # cannot reconcile, not a state it should paper over.
                 if not await self._head_still_anchors(binding, context):
-                    raise AuthorityServiceError("journal_conflict")
+                    raise AuthorityServiceError("journal_conflict", reason="head_unanchored_commit")
                 if isinstance(request, AuthorityConflictResolutionRequestV1):
                     observed = await self._adapter.observe(request)
                     if (
@@ -1708,8 +1910,8 @@ class ExternalBootAuthorityService:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
                     raise
-                except Exception:
-                    raise self._provider_error(request) from None
+                except Exception as error:
+                    raise self._provider_error(request, error) from None
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(
@@ -1736,8 +1938,8 @@ class ExternalBootAuthorityService:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
                     raise
-                except Exception:
-                    raise self._provider_error(request) from None
+                except Exception as error:
+                    raise self._provider_error(request, error) from None
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(
@@ -1812,7 +2014,7 @@ class ExternalBootAuthorityService:
         try:
             async with lane.lock:
                 if lane.failed:
-                    raise AuthorityServiceError("journal_conflict")
+                    raise AuthorityServiceError("journal_conflict", reason="lane_failed_mutation")
                 journal, records = self._lane_journal(request.system_id, lane)
                 acknowledgements = [
                     record
@@ -1840,7 +2042,9 @@ class ExternalBootAuthorityService:
                         latest.phase is not JournalPhase.MUTATION_STARTED
                         or not self._operation_matches(latest, mutation)
                     ):
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="latest_not_mutation_started"
+                        )
                 else:
                     if lane.active is not None:
                         raise AuthorityServiceError("superseded")
@@ -1914,7 +2118,9 @@ class ExternalBootAuthorityService:
             try:
                 async with lane.lock:
                     if lane.failed:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="lane_failed_terminal_preparation"
+                        )
                     journal, records = self._lane_journal(request.system_id, lane)
                     acknowledgements = [
                         record
@@ -1942,7 +2148,9 @@ class ExternalBootAuthorityService:
                     )
                     if terminal is not None:
                         if not self._operation_matches(terminal, mutation):
-                            raise AuthorityServiceError("journal_conflict")
+                            raise AuthorityServiceError(
+                                "journal_conflict", reason="terminal_operation_mismatch"
+                            )
                         result = await host.execute(remote)
                         result.validate_terminal_for(remote.operation, request)
                         return result
@@ -2000,7 +2208,9 @@ class ExternalBootAuthorityService:
                         None,
                     )
                     if started is None:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="finish_mutation_started_missing"
+                        )
                     context = AuthorityCommitContextV1.for_record(started)
                 result = await host.execute(remote)
                 result.validate_terminal_for(remote.operation, request)
@@ -2008,13 +2218,15 @@ class ExternalBootAuthorityService:
                 if rechecked is None or not self._binding_matches(rechecked, mutation):
                     raise AuthorityServiceError("superseded")
                 if not await self._head_still_anchors(rechecked, context):
-                    raise AuthorityServiceError("journal_conflict")
+                    raise AuthorityServiceError(
+                        "journal_conflict", reason="head_unanchored_terminal"
+                    )
                 try:
                     await self._adapter.commit(mutation, context)
                 except AuthorityServiceError:
                     raise
-                except Exception:
-                    raise self._provider_error(request) from None
+                except Exception as error:
+                    raise self._provider_error(request, error) from None
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(
@@ -2027,8 +2239,8 @@ class ExternalBootAuthorityService:
                     observation = await self._adapter.observe(mutation)
                 except AuthorityServiceError:
                     raise
-                except Exception:
-                    raise self._provider_error(request) from None
+                except Exception as error:
+                    raise self._provider_error(request, error) from None
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(
@@ -2093,7 +2305,9 @@ class ExternalBootAuthorityService:
             try:
                 async with lane.lock:
                     if lane.failed:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="lane_failed_lifecycle"
+                        )
                     journal, records = self._lane_journal(request.system_id, lane)
                     records = await self._recover(trusted, journal, records)
                     acknowledgement = next(
@@ -2155,7 +2369,11 @@ class ExternalBootAuthorityService:
     ) -> AuthoritySystemTeardownFacts:
         if not isinstance(self._adapter, AuthoritySystemTeardownAdapter):
             raise AuthorityServiceError("provider_conflict")
-        facts = await self._adapter.observe_system_teardown(request, context)
+        try:
+            facts = await self._adapter.observe_system_teardown(request, context)
+        except SystemTeardownSupersededError:
+            # ADR-0620 (#2921): a later generation owns the host record; this one proves nothing.
+            raise AuthorityServiceError("superseded") from None
         if not isinstance(facts, AuthoritySystemTeardownFacts):
             raise AuthorityServiceError("provider_conflict")
         try:
@@ -2193,11 +2411,15 @@ class ExternalBootAuthorityService:
             records = list(journal.load())
         finally:
             journal.close()
+        # Bind this generation's own anchor: a recovered predecessor of the same teardown
+        # shares its operation identity and attempt id.
         operation_records = [
             record
             for record in records
             if record.operation_identity == request.operation_identity
             and record.attempt_id == request.attempt_id
+            and record.authority_id == request.authority_id
+            and record.generation == request.generation
         ]
         started = next(
             (
@@ -2225,7 +2447,7 @@ class ExternalBootAuthorityService:
             None,
         )
         if started is None or terminal is None or acknowledgement is None:
-            raise AuthorityServiceError("journal_conflict")
+            raise AuthorityServiceError("journal_conflict", reason="completion_evidence_missing")
         facts = await self._system_teardown_facts(
             request, AuthorityCommitContextV1.for_record(started)
         )
@@ -2285,7 +2507,9 @@ class ExternalBootAuthorityService:
             try:
                 async with lane.lock:
                     if lane.failed:
-                        raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError(
+                            "journal_conflict", reason="lane_failed_current_read"
+                        )
                     if lane.active is not None:
                         raise AuthorityServiceError("superseded")
                     _journal, records = self._lane_journal(request.system_id, lane)
@@ -2308,8 +2532,8 @@ class ExternalBootAuthorityService:
                         observation = await read(request)
                     except AuthorityServiceError:
                         raise
-                    except Exception:
-                        raise self._provider_error(request) from None
+                    except Exception as error:
+                        raise self._provider_error(request, error) from None
                     rechecked = await self._resolve_confirmed(
                         authenticated, request, acknowledgement
                     )
@@ -2351,8 +2575,8 @@ class ExternalBootAuthorityService:
             receipt = await self._adapter.preparation_receipt(request)
         except AuthorityServiceError:
             raise
-        except Exception:
-            raise self._provider_error(request) from None
+        except Exception as error:
+            raise self._provider_error(request, error) from None
         if receipt.identity != observation.composite_state:
             raise self._provider_error(request)
         journal = self._journal_factory(request.system_id)
@@ -2371,7 +2595,7 @@ class ExternalBootAuthorityService:
         finally:
             journal.close()
         if terminal is None:
-            raise AuthorityServiceError("journal_conflict")
+            raise AuthorityServiceError("journal_conflict", reason="terminal_record_missing")
         return AuthorityPreparationResponseV1(
             observation=observation,
             receipt=receipt,

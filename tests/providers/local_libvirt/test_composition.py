@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,6 +19,7 @@ from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.local_libvirt.lifecycle.boot import readiness as readiness_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
@@ -450,6 +452,27 @@ def test_production_builder_binds_anchored_readiness(seam: Path) -> None:
 
     assert factory._prepare_console is prepare_console_readiness_window
     assert isinstance(factory._readiness, LocalExternalBootReadiness)
+
+
+def test_authority_readiness_probes_domain_exit_on_the_provider_socket(
+    seam: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The authority's domains live in its session libvirtd; the system URI cannot see them.
+    calls: list[list[str]] = []
+    monkeypatch.setattr(readiness_module, "resolve_provider_tool", lambda tool: f"/usr/bin/{tool}")
+
+    def domstate(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="shut off", stderr="")
+
+    monkeypatch.setattr(readiness_module.subprocess, "run", domstate)
+    factory = composition.build_external_boot_session_mechanisms(
+        provider_socket=seam / "libvirt-sock"
+    ).factory
+    readiness = cast(LocalExternalBootReadiness, factory._readiness)
+
+    assert readiness._domain_exit_probe("kdive-abc").exited
+    assert calls[0][1:3] == ["-c", f"qemu+unix:///session?socket={seam / 'libvirt-sock'}"]
 
 
 def test_production_builder_binds_running_observer(seam: Path) -> None:

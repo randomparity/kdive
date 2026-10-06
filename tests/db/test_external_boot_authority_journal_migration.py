@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -29,7 +29,6 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_record_bytes,
     record_digest,
 )
-from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     ExternalBootAuthorityService,
@@ -38,6 +37,15 @@ from tests.db.external_boot_authority_support import (
     _allocate,
     _RoleDsns,
     _seed_case,
+)
+from tests.db.external_boot_journal_support import (
+    _DIGEST,
+    _advance_raw,
+    _database_repository,
+    _payload,
+    _promote,
+    _record,
+    _takeover_request,
 )
 from tests.providers.external_boot_authority.service_support import _Adapter
 
@@ -50,54 +58,6 @@ _FUNCTIONS = {
     "list_external_boot_authority_journal_heads(text)",
 }
 
-_DIGEST = "sha256:" + "d" * 64
-
-
-def _record(
-    case: Any,
-    authority: Any,
-    sequence: int,
-    previous_digest: str,
-    phase: JournalPhase,
-    **changes: object,
-) -> JournalRecordV1:
-    values: dict[str, object] = {
-        "authority_id": authority.authority_id,
-        "generation": authority.generation,
-        "system_id": case.system_id,
-        "activation_id": case.activation_id,
-        "run_id": case.run_id,
-        "plan_identity": "sha256:" + "a" * 64,
-        "purpose": case.purpose,
-        "operation": case.operation,
-        "provider_kind": case.provider_kind,
-        "authority_instance": case.authority_instance,
-        "operation_identity": case.operation_identity,
-        "operation_digest": authority.operation_digest,
-        "sequence": sequence,
-        "previous_digest": previous_digest,
-        "phase": phase,
-        "attempt_id": case.job_id,
-    }
-    if phase not in {
-        JournalPhase.WATERMARK_INSTALLED,
-        JournalPhase.TAKEOVER_SUPERSEDED,
-        JournalPhase.TAKEOVER_ACKNOWLEDGED,
-    }:
-        values |= {
-            "expected_source_identity": "source-a",
-            "intended_target_identity": "target-a",
-            "recovery_objects": (),
-        }
-    values.update(changes)
-    return JournalRecordV1.model_validate(values)
-
-
-def _payload(record: JournalRecordV1) -> dict[str, object]:
-    return record.model_dump(mode="json", by_alias=True) | {
-        "canonical_record": canonical_record_bytes(record).decode()
-    }
-
 
 def _canonicalize(payload: dict[str, object]) -> None:
     canonical = dict(payload)
@@ -105,29 +65,6 @@ def _canonicalize(payload: dict[str, object]) -> None:
     payload["canonical_record"] = json.dumps(
         canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     )
-
-
-def _advance_raw(
-    conn: psycopg.Connection,
-    case: Any,
-    authority: Any,
-    expected_sequence: int,
-    expected_digest: str,
-    payload: dict[str, object],
-) -> str:
-    row = conn.execute(
-        "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
-        (
-            case.worker_id,
-            authority.authority_id,
-            authority.generation,
-            expected_sequence,
-            expected_digest,
-            Jsonb(payload),
-        ),
-    ).fetchone()
-    assert row is not None
-    return row[0]
 
 
 def _head(conn: psycopg.Connection, case: Any, authority: Any) -> tuple[object, ...] | None:
@@ -158,35 +95,6 @@ def _seed_allocated(
     return case, authority
 
 
-def _database_repository(dsn: str) -> DatabaseAuthorityRepository:
-    @asynccontextmanager
-    async def connections():
-        connection = await psycopg.AsyncConnection.connect(dsn)
-        try:
-            yield connection
-        finally:
-            await connection.close()
-
-    return DatabaseAuthorityRepository(connections)
-
-
-def _takeover_request(case: Any, authority: Any) -> AuthorityTakeoverRequestV1:
-    return AuthorityTakeoverRequestV1(
-        authority_id=authority.authority_id,
-        generation=authority.generation,
-        system_id=case.system_id,
-        activation_id=case.activation_id,
-        run_id=case.run_id,
-        plan_identity="sha256:" + "a" * 64,
-        purpose=case.purpose,
-        operation=case.operation,
-        provider_kind=case.provider_kind,
-        authority_instance=case.authority_instance,
-        operation_identity=case.operation_identity,
-        operation_digest=authority.operation_digest,
-    )
-
-
 def _mutation_request(request: AuthorityTakeoverRequestV1) -> AuthorityMutationRequestV1:
     return AuthorityMutationRequestV1.model_validate(
         request.model_dump(mode="json", by_alias=True)
@@ -197,34 +105,6 @@ def _mutation_request(request: AuthorityTakeoverRequestV1) -> AuthorityMutationR
             "recovery_objects": [],
         }
     )
-
-
-def _promote(
-    migrated_url: str, case: Any, authority: Any, acknowledgement: JournalRecordV1
-) -> None:
-    with psycopg.connect(migrated_url) as conn:
-        conn.execute(
-            "UPDATE external_boot_authorities SET state='current', acknowledged_at=now() "
-            "WHERE id=%s",
-            (authority.authority_id,),
-        )
-        conn.execute(
-            "INSERT INTO external_boot_authority_acknowledgements "
-            "(authority_id,system_id,generation,authority_instance,operation_identity,"
-            "operation_digest,journal_sequence,journal_digest,positive_quiescence_digest) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (
-                authority.authority_id,
-                case.system_id,
-                authority.generation,
-                case.authority_instance,
-                case.operation_identity,
-                authority.operation_digest,
-                acknowledgement.sequence,
-                record_digest(acknowledgement),
-                _DIGEST,
-            ),
-        )
 
 
 def _allocate_successor(
@@ -439,6 +319,19 @@ def test_allocating_binding_can_create_and_read_exact_genesis_head(
         assert provider_authority.execute(
             "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
             (*advance_parameters, Jsonb(extra)),
+        ).fetchone() == ("conflict",)
+        takeover_with_timing = payload | {
+            "local_timing": {
+                "schema": "local-external-boot-timing-v1",
+                "accel": "kvm",
+                "console_window_s": 900,
+                "deadline_budget_s": 1200,
+            }
+        }
+        _canonicalize(takeover_with_timing)
+        assert provider_authority.execute(
+            "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
+            (*advance_parameters, Jsonb(takeover_with_timing)),
         ).fetchone() == ("conflict",)
         assert provider_authority.execute(
             "SELECT sequence, digest FROM read_external_boot_authority_journal_head(%s,%s,%s,%s)",
@@ -1007,6 +900,7 @@ def test_acknowledged_retry_proof_helper_is_private(migrated_url: str) -> None:
         ):
             for signature in (
                 "has_acknowledged_external_boot_retry_proof(jobs)",
+                "has_acknowledged_external_boot_no_mutation_head(jobs)",
                 "consume_acknowledged_external_boot_retry_proof(jobs)",
             ):
                 assert connection.execute(
@@ -1197,6 +1091,278 @@ def test_exhausted_job_validates_unanchored_successor_authorities(
             )
             == "advanced"
         )
+
+
+def _granted_attempt_head(
+    migrated_url: str,
+    role_dsns: _RoleDsns,
+    suffix: str,
+    *,
+    promote: bool,
+    acknowledge: bool = True,
+) -> tuple[Any, Any, JournalRecordV1]:
+    """Claim the one grant, end the granted attempt at a new head, and lapse its lease."""
+    case, _first, first_ack = _seed_exhausted_acknowledged_job(
+        migrated_url, role_dsns, suffix, promote=True
+    )
+    credential = b"g" * 32
+    worker_id = _register_worker(migrated_url, f"granted-{suffix}", credential)
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        claimed = worker.execute(
+            "SELECT id,attempt,max_attempts FROM claim_worker_job("
+            "%s,%s,interval '1 minute',ARRAY['default'])",
+            (worker_id, credential),
+        ).fetchone()
+        assert claimed == (case.job_id, 4, 4)
+        granted_case = replace(case, worker_id=worker_id, credential=credential, attempt=4)
+        granted = _allocate(worker, granted_case)
+    head = _acknowledge_successor(
+        role_dsns, granted_case, granted, first_ack, acknowledge=acknowledge
+    )
+    if acknowledge and promote:
+        _promote(migrated_url, granted_case, granted, head)
+    _lapse_lease(migrated_url, case.job_id)
+    return granted_case, granted, head
+
+
+def _acknowledge_successor(
+    role_dsns: _RoleDsns,
+    case: Any,
+    authority: Any,
+    predecessor_head: JournalRecordV1,
+    *,
+    acknowledge: bool = True,
+) -> JournalRecordV1:
+    attempt_id = str(authority.authority_id)
+    sequence = predecessor_head.sequence + 1
+    head = _record(
+        case,
+        authority,
+        sequence,
+        record_digest(predecessor_head),
+        JournalPhase.WATERMARK_INSTALLED,
+        attempt_id=attempt_id,
+    )
+    with psycopg.connect(role_dsns("kdive_provider_authority"), autocommit=True) as connection:
+        assert (
+            _advance_raw(
+                connection,
+                case,
+                authority,
+                predecessor_head.sequence,
+                record_digest(predecessor_head),
+                _payload(head),
+            )
+            == "advanced"
+        )
+        if acknowledge:
+            watermark = head
+            head = _record(
+                case,
+                authority,
+                sequence + 1,
+                record_digest(watermark),
+                JournalPhase.TAKEOVER_ACKNOWLEDGED,
+                watermark_sequence=sequence,
+                watermark_digest=record_digest(watermark),
+                attempt_id=attempt_id,
+            )
+            assert (
+                _advance_raw(
+                    connection, case, authority, sequence, record_digest(watermark), _payload(head)
+                )
+                == "advanced"
+            )
+    return head
+
+
+def _lapse_lease(migrated_url: str, job_id: UUID) -> None:
+    with psycopg.connect(migrated_url) as connection:
+        connection.execute(
+            "UPDATE jobs SET lease_expires_at=now()-interval '1 minute' WHERE id=%s", (job_id,)
+        )
+
+
+def _dead_letter_unowned(role_dsns: _RoleDsns) -> list[UUID]:
+    with psycopg.connect(role_dsns("kdive_reconciler"), autocommit=True) as reconciler:
+        rows = reconciler.execute(
+            "SELECT * FROM dead_letter_unowned_external_boot_jobs()"
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def _claimable_count(migrated_url: str, role_dsns: _RoleDsns, prefix: str) -> tuple[int, Any]:
+    credential = b"h" * 32
+    worker_id = _register_worker(migrated_url, prefix, credential)
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        count = worker.execute("SELECT count_claimable_worker_jobs(ARRAY['default'])").fetchone()
+        claimed = worker.execute(
+            "SELECT id FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+            (worker_id, credential),
+        ).fetchone()
+    assert count is not None
+    return count[0], claimed
+
+
+def _grant_predicates(migrated_url: str, job_id: UUID) -> tuple[bool, bool] | None:
+    with psycopg.connect(migrated_url) as connection:
+        return connection.execute(
+            "SELECT public.has_acknowledged_external_boot_no_mutation_head(j),"
+            "public.has_acknowledged_external_boot_retry_proof(j) "
+            "FROM public.jobs AS j WHERE j.id=%s",
+            (job_id,),
+        ).fetchone()
+
+
+@pytest.mark.parametrize("promote", [False, True])
+def test_granted_attempt_cannot_earn_a_second_grant(
+    migrated_url: str, authority_role_dsns: _RoleDsns, *, promote: bool
+) -> None:
+    """ADR-0711: the attempt a grant claimed stays exhausted despite its new acknowledged head."""
+    case, _granted, _head = _granted_attempt_head(
+        migrated_url, authority_role_dsns, "b" if promote else "c", promote=promote
+    )
+    assert _grant_predicates(migrated_url, case.job_id) == (True, False)
+    assert _claimable_count(migrated_url, authority_role_dsns, "past-the-bound") == (0, None)
+
+
+@pytest.mark.parametrize("promote", [False, True])
+def test_reconciler_dead_letters_a_job_past_the_grant_bound(
+    migrated_url: str, authority_role_dsns: _RoleDsns, *, promote: bool
+) -> None:
+    """ADR-0711: past the bound the job fails and its authority can no longer admit work."""
+    case, granted, head = _granted_attempt_head(
+        migrated_url, authority_role_dsns, "d" if promote else "e", promote=promote
+    )
+    assert _dead_letter_unowned(authority_role_dsns) == [case.job_id]
+    with psycopg.connect(migrated_url) as connection:
+        assert connection.execute(
+            "SELECT state,error_category FROM jobs WHERE id=%s", (case.job_id,)
+        ).fetchone() == ("failed", "lease_expired")
+        assert connection.execute(
+            "SELECT state FROM external_boot_authorities WHERE job_id=%s ORDER BY generation",
+            (case.job_id,),
+        ).fetchall() == [("superseded",), ("retired" if promote else "superseded",)]
+    admitted = _record(case, granted, head.sequence + 1, record_digest(head), JournalPhase.ADMITTED)
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        assert (
+            _advance_raw(
+                connection, case, granted, head.sequence, record_digest(head), _payload(admitted)
+            )
+            == "superseded"
+        )
+    assert _dead_letter_unowned(authority_role_dsns) == []
+
+
+@pytest.mark.parametrize("shape", ["unspent-grant", "unacknowledged-granted-attempt"])
+def test_dead_letter_skips_a_job_without_a_spent_grant_and_proof(
+    migrated_url: str, authority_role_dsns: _RoleDsns, shape: str
+) -> None:
+    """A live authority keeps its job unless the job is past the bound with a proof.
+
+    The unacknowledged shape pins a known residual (ADR-0711): a granted attempt that lapses
+    before its own acknowledged head stays `running`, as any exhausted job with a live authority.
+    """
+    if shape == "unspent-grant":
+        case, _authority, _ack = _seed_exhausted_acknowledged_job(
+            migrated_url, authority_role_dsns, "i", promote=True
+        )
+    else:
+        case, _authority, _ack = _granted_attempt_head(
+            migrated_url, authority_role_dsns, "j", promote=False, acknowledge=False
+        )
+    assert _dead_letter_unowned(authority_role_dsns) == []
+    with psycopg.connect(migrated_url) as connection:
+        assert connection.execute(
+            "SELECT state FROM jobs WHERE id=%s", (case.job_id,)
+        ).fetchone() == ("running",)
+
+
+def test_dead_letter_skips_while_a_commit_holds_the_authority_row(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """ADR-0711: NOWAIT skips a job whose authority row a commit holds; the next pass ends it."""
+    case, granted, _head = _granted_attempt_head(
+        migrated_url, authority_role_dsns, "m", promote=True
+    )
+    with psycopg.connect(migrated_url) as holder:
+        holder.execute(
+            "SELECT 1 FROM external_boot_authorities WHERE id=%s FOR UPDATE",
+            (granted.authority_id,),
+        )
+        assert _dead_letter_unowned(authority_role_dsns) == []
+    assert _dead_letter_unowned(authority_role_dsns) == [case.job_id]
+
+
+def test_dead_letter_rechecks_the_head_after_the_journal_lock(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """ADR-0711: an advance to `admitted` that holds the journal-head lock wins the race."""
+    case, granted, head = _granted_attempt_head(
+        migrated_url, authority_role_dsns, "p", promote=True
+    )
+    admitted = _record(case, granted, head.sequence + 1, record_digest(head), JournalPhase.ADMITTED)
+    with (
+        psycopg.connect(authority_role_dsns("kdive_provider_authority")) as advancer,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        assert (
+            _advance_raw(
+                advancer, case, granted, head.sequence, record_digest(head), _payload(admitted)
+            )
+            == "advanced"
+        )
+        pending = executor.submit(_dead_letter_unowned, authority_role_dsns)
+        with psycopg.connect(migrated_url, autocommit=True) as observer:
+            for _ in range(100):
+                waiting = observer.execute(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE wait_event_type='Lock' AND wait_event='advisory' "
+                    "AND query LIKE '%%dead_letter_unowned_external_boot_jobs%%'"
+                ).fetchone()
+                if waiting == (1,):
+                    break
+                time.sleep(0.05)
+            assert waiting == (1,)
+        advancer.commit()
+        assert pending.result(timeout=30) == []
+    with psycopg.connect(migrated_url) as connection:
+        assert connection.execute(
+            "SELECT state FROM jobs WHERE id=%s", (case.job_id,)
+        ).fetchone() == ("running",)
+
+
+def test_recycled_job_earns_a_grant_in_its_new_budget(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """ADR-0711: the bound reads only the current budget, which every recycle restarts."""
+    case, _granted, head = _granted_attempt_head(
+        migrated_url, authority_role_dsns, "k", promote=True
+    )
+    assert _dead_letter_unowned(authority_role_dsns) == [case.job_id]
+    credential = b"n" * 32
+    worker_id = _register_worker(migrated_url, "new-budget", credential)
+    with psycopg.connect(migrated_url) as connection:
+        # The queue.enqueue failed-job recycle (attempt 0, created_at reset), then the new
+        # budget's four ordinary claims.
+        connection.execute(
+            "UPDATE jobs SET state='running',attempt=4,max_attempts=4,worker_id=%s,"
+            "error_category=NULL,lease_expires_at=now()+interval '1 minute',"
+            "created_at=clock_timestamp() WHERE id=%s",
+            (worker_id, case.job_id),
+        )
+    recycled_case = replace(case, worker_id=worker_id, credential=credential)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        recycled = _allocate(worker, recycled_case)
+    _acknowledge_successor(authority_role_dsns, recycled_case, recycled, head)
+    _lapse_lease(migrated_url, case.job_id)
+    assert _grant_predicates(migrated_url, case.job_id) == (True, True)
+    assert _claimable_count(migrated_url, authority_role_dsns, "new-budget-grant") == (
+        1,
+        (case.job_id,),
+    )
 
 
 @pytest.mark.parametrize(

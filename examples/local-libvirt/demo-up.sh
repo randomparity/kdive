@@ -17,7 +17,7 @@
 # libvirt consumer shares the session daemon that contract published (env.sh).
 set -euo pipefail
 
-example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+example_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${example_dir}/../.." && pwd)"
 # shellcheck source=examples/local-libvirt/env.sh disable=SC1091
 source "${example_dir}/env.sh"
@@ -46,9 +46,10 @@ fi
 echo "operator ${USER}; libvirt ${KDIVE_LIBVIRT_URI}"
 
 # 2. Preflight — fail early with actionable fixes (KVM, libvirt, a writable install-staging
-#    directory). The worker venv's drgn/libguestfs imports gate only the kdump capture method,
-#    so a first-run box gets a WARN with the fix rather than a stop; export
-#    KDIVE_PREFLIGHT_KDUMP=required to insist on it.
+#    directory). The checkout interpreter's drgn/libguestfs imports serve only its CLI
+#    tooling, so a first-run box gets a WARN with the fix rather than a stop; export
+#    KDIVE_PREFLIGHT_KDUMP=required to insist on it. The lifecycle worker venv's guestfs probe
+#    stays a FAIL: that venv provisions.
 step "preflight (check-local-libvirt.sh)"
 KDIVE_PREFLIGHT_KDUMP="${KDIVE_PREFLIGHT_KDUMP:-optional}" \
   "${repo_root}/scripts/operations/check-local-libvirt.sh"
@@ -65,18 +66,21 @@ stack_args=()
 step "onboard project '${KDIVE_PROJECT}' (scripts/live-stack/onboard.sh)"
 "${repo_root}/scripts/live-stack/onboard.sh"
 
-# 5. Merge the MCP client config into the kernel tree (the directory you open your MCP client
-#    in). It references the token via ${KDIVE_TOKEN}, so the file holds no secret. An existing
+# 5. Merge the MCP client config into the demo workspace (the directory you open your MCP
+#    client in — KDIVE_DEMO_WORKSPACE, which defaults to the kernel tree but stays independent of
+#    it so a demo bring-up never rewrites a tree a live proof is using as its kernel fixture,
+#    #2760). It references the token via ${KDIVE_TOKEN}, so the file holds no secret. An existing
 #    .mcp.json is preserved: its first version is backed up to .mcp.json.bak (never overwritten
 #    on re-run) and only the `kdive` server entry is replaced — any other servers the user
 #    configured are kept.
-step "install MCP config into ${KDIVE_KERNEL_SRC:-<unset>}/.mcp.json"
-if [[ -z "${KDIVE_KERNEL_SRC:-}" ]]; then
-  echo "KDIVE_KERNEL_SRC is unset and ~/src/linux does not exist; clone a kernel tree there or" >&2
-  echo "export KDIVE_KERNEL_SRC, then re-run to install the .mcp.json (the stack is up)." >&2
+step "install MCP config into ${KDIVE_DEMO_WORKSPACE:-<unset>}/.mcp.json"
+if [[ -z "${KDIVE_DEMO_WORKSPACE:-}" ]]; then
+  echo "KDIVE_DEMO_WORKSPACE is unset (KDIVE_KERNEL_SRC is also unset and ~/src/linux does not" >&2
+  echo "exist); export KDIVE_DEMO_WORKSPACE (or KDIVE_KERNEL_SRC), then re-run to install the" >&2
+  echo ".mcp.json (the stack is up)." >&2
   exit 1
 fi
-"${KDIVE_PYTHON}" - "${example_dir}/mcp.json" "${KDIVE_KERNEL_SRC}/.mcp.json" <<'PY'
+"${KDIVE_PYTHON}" - "${example_dir}/mcp.json" "${KDIVE_DEMO_WORKSPACE}/.mcp.json" <<'PY'
 import json
 import shutil
 import sys
@@ -87,7 +91,7 @@ entry = json.loads(template_path.read_text())["mcpServers"]["kdive"]
 
 if not target_path.parent.is_dir():
     raise SystemExit(
-        f"kernel tree {target_path.parent} does not exist; set KDIVE_KERNEL_SRC to your "
+        f"workspace {target_path.parent} does not exist; set KDIVE_DEMO_WORKSPACE to your "
         "checkout (see README)"
     )
 
@@ -117,13 +121,14 @@ PY
 cat <<EOF
 
 local-libvirt stack is up.
-  MCP URL : ${KDIVE_STACK_BASE_URL}
-  Project : ${KDIVE_PROJECT} (admin)
-  Kernel  : ${KDIVE_KERNEL_SRC}
-  libvirt : ${KDIVE_LIBVIRT_URI}
-  Logs    : ${KDIVE_STACK_LOG_DIR} (daemons); scripts/live-stack/worker-lifecycle.sh diagnostics (workers)
-  Status  : ${repo_root}/scripts/live-stack/stack-status.sh
-  Stop    : ${example_dir}/demo-down.sh
+  MCP URL   : ${KDIVE_STACK_BASE_URL}
+  Project   : ${KDIVE_PROJECT} (admin)
+  Kernel    : ${KDIVE_KERNEL_SRC}
+  Workspace : ${KDIVE_DEMO_WORKSPACE} (.mcp.json)
+  libvirt   : ${KDIVE_LIBVIRT_URI}
+  Logs      : ${KDIVE_STACK_LOG_DIR} (daemons); scripts/live-stack/worker-lifecycle.sh diagnostics (workers)
+  Status    : ${repo_root}/scripts/live-stack/stack-status.sh
+  Stop      : ${example_dir}/demo-down.sh
 
 Next, in the shell you launch your MCP client from:
   export KDIVE_TOKEN=\$(${example_dir}/mint-token.sh)

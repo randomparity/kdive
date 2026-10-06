@@ -32,30 +32,36 @@ _fixture_files=(
 )
 
 _link_system_guestfs_binding() (
-  local venv_python="$1" system_site venv_site source system_minor venv_minor
+  local venv_python="$1" base_python system_site venv_site source
   local -a native_modules sources
-  # The binding is a C extension built for the system interpreter, so it is importable from the
-  # venv only when the two minor versions match. Ubuntu 26.04 and Fedora 44 both ship the
-  # project's 3.14 as /usr/bin/python3 and share it. Enterprise Linux ships 3.12 there and
-  # packages 3.14 separately, so its python3-libguestfs can never load in the worker's 3.14 venv
-  # — linking it anyway fails with "No module named 'libguestfsmod'" and used to abort host
-  # preparation entirely. Skip on a mismatch and say so: it costs only local kdump capture
-  # (ADR-0203), which is exactly how examples/local-libvirt/install-host.sh reports the same
-  # condition. A mismatch is a property of the host's packaging, not a broken install; where the
-  # versions DO match, every failure below stays fatal.
-  system_minor="$(/usr/bin/python3 -c 'import sys; print(sys.version_info[1])')"
-  venv_minor="$("$venv_python" -c 'import sys; print(sys.version_info[1])')"
-  if [[ $system_minor != "$venv_minor" ]]; then
-    echo "system python3 is 3.${system_minor} but the worker venv is 3.${venv_minor}; the distro" \
-      "guestfs binding cannot be shared. Local kdump capture is unavailable on this host;" \
-      "every other capture method and the whole build/boot/debug path are unaffected." >&2
-    return 0
-  fi
+  # The binding is a C extension for one interpreter ABI and has no PyPI package, so it is linked
+  # from the interpreter this venv was built on, whose site-packages is where a system package or a
+  # from-source build installs it. Ubuntu 26.04 and Fedora 44 ship the project's 3.14 as
+  # /usr/bin/python3 with the distro binding. Enterprise Linux ships 3.12 there, packages 3.14
+  # separately, and builds python3-libguestfs only for 3.12. The EL10 host role builds a
+  # matching-source 3.14 binding into the base interpreter before this installer runs. A binding
+  # copied into the venv by hand would not last either:
+  # _prepare_attested_runtime_root empties the runtime root on every run. This venv is the worker
+  # that provisions, and provisioning extracts the baseline kernel through the binding (ADR-0272),
+  # as do build-fs, built-kernel staging, external boot and local kdump capture, so a missing
+  # binding fails the install. Failing rather than warning is deliberate: the play runs this
+  # installer with its output censored and reports stderr only on a non-zero exit. The base is
+  # whichever python3.14 uv selected from PATH below, so a non-distro 3.14 earlier on PATH needs
+  # its own binding; the failure names that interpreter so the operator can see which one it was.
+  base_python="$(readlink -f -- "$venv_python")"
   system_site="$(
-    /usr/bin/python3 -c \
+    "$base_python" -c \
       'import guestfs, pathlib; print(pathlib.Path(guestfs.__file__).resolve().parent)'
   )" || {
-    echo "system Python cannot import the required guestfs binding" >&2
+    echo "$base_python, the interpreter the lifecycle worker venv is built on, cannot import" \
+      "the guestfs binding (error above), so there is nothing to link. The lifecycle worker" \
+      "needs it to provision (baseline-kernel extraction), build-fs, stage built kernels," \
+      "external boot and local kdump capture. Install the distribution's binding for that" \
+      "interpreter (python3-guestfs on Debian/Ubuntu, python3-libguestfs on Fedora), then" \
+      "re-run this installer. On Enterprise Linux 10, apply the local_worker_host role" \
+      "with CRB/CodeReady Builder and a distribution source repository enabled; it builds" \
+      "the matching Python 3.14 binding before worker installation" \
+      "(docs/operating/install.md)." >&2
     return 1
   }
   venv_site="$(
@@ -583,6 +589,33 @@ _resolve_uv_bin() {
   printf '%s\n' "$resolved"
 }
 
+# Append, never replace, an existing worker's supplementary groups: the local_worker_host role
+# adds each worker to the authority client group (ADR-0619) before the playbook runs this
+# installer, and a replacing `usermod -G` stripped it (#2925). Appending no longer prunes, so
+# refuse the memberships deploy/systemd/README.md says a worker never holds.
+_converge_worker_account() {
+  local worker="$1" libvirt_group="$2" control_group="$3" held group
+  local -a held_groups
+  getent group "$worker" >/dev/null || groupadd --system "$worker"
+  if ! getent passwd "$worker" >/dev/null; then
+    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
+      --gid "$worker" --groups "$libvirt_group,kvm" "$worker"
+    return
+  fi
+  held="$(id -nG "$worker")"
+  read -ra held_groups <<<"$held"
+  for group in "${held_groups[@]}"; do
+    case "$group" in
+    "$control_group" | sudo | wheel | docker)
+      echo "$worker belongs to the $group group, which a fixed worker must never hold;" \
+        "remove it with 'gpasswd -d $worker $group' and re-run this installer" >&2
+      return 1
+      ;;
+    esac
+  done
+  usermod -a -G "$libvirt_group,kvm" "$worker"
+}
+
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
   return 0
 fi
@@ -660,14 +693,7 @@ IFS=: read -r _ _ libvirt_group_gid _ < <(getent group "$libvirt_group")
 usermod -a -G "$control_group,$libvirt_group" "$operator"
 
 for slot in {1..8}; do
-  worker="kdive-worker-${slot}"
-  getent group "$worker" >/dev/null || groupadd --system "$worker"
-  if ! getent passwd "$worker" >/dev/null; then
-    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
-      --gid "$worker" --groups "$libvirt_group,kvm" "$worker"
-  else
-    usermod -G "$libvirt_group,kvm" "$worker"
-  fi
+  _converge_worker_account "kdive-worker-${slot}" "$libvirt_group" "$control_group"
 done
 
 install -d -o root -g root -m 0755 /usr/local/libexec /etc/kdive

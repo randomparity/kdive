@@ -8,10 +8,15 @@ boundary, not deep in provisioning.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "live-vm" / "mint-system.sh"
 
@@ -156,3 +161,81 @@ def test_onboard_database_failure_is_not_blamed_on_the_preflight(tmp_path: Path)
     # The die claims "its output above states the reason" — so the captured stdout must be there.
     assert "is NOT funded" in r.stderr
     assert not (provider_root / "live-vm-provisioned-rootfs.qcow2").exists()
+
+
+@pytest.mark.parametrize("mode", ["hardlink", "copy", "unreadable"])
+def test_mint_pins_staged_bytes_before_client_calls(tmp_path: Path, mode: str) -> None:
+    live_vm, provider_root = _mint_tree(tmp_path)
+    rootfs = tmp_path / "rootfs.qcow2"
+    content = b"staged rootfs bytes\x00\xff"
+    rootfs.write_bytes(content)
+    onboard = tmp_path / "scripts/live-stack/onboard.sh"
+    onboard.write_text("#!/bin/sh\necho 'export KDIVE_TOKEN=test-token'\n")
+    onboard.chmod(0o755)
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    if mode == "copy":
+        (commands / "ln").write_text("#!/bin/sh\nexit 1\n")
+        (commands / "ln").chmod(0o755)
+    calls = tmp_path / "calls.jsonl"
+    harness = tmp_path / "harness.py"
+    harness.write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "from types import SimpleNamespace\n"
+        "import kdive.mcp.dev_harness as harness\n"
+        "sys.argv = sys.argv[1:]\n"
+        "if os.environ['TEST_MODE'] == 'copy':\n"
+        "    Path(os.environ['KDIVE_LIVE_VM_ROOTFS']).write_bytes(b'changed source')\n"
+        "if os.environ['TEST_MODE'] == 'unreadable':\n"
+        "    Path(sys.argv[1]).unlink()\n"
+        "class Client:\n"
+        "    @classmethod\n"
+        "    def over_http(cls, *args): return cls()\n"
+        "    async def __aenter__(self): return self\n"
+        "    async def __aexit__(self, *args): pass\n"
+        "    async def call_tool(self, name, **kwargs):\n"
+        "        with open(os.environ['TEST_CALLS'], 'a') as f:\n"
+        "            f.write(json.dumps({'tool': name, **kwargs}) + '\\n')\n"
+        "        status = 'ready' if name == 'systems.get' else 'granted'\n"
+        "        return SimpleNamespace(status=status, object_id='allocation', "
+        "data={'system_id': 'system-fixture'})\n"
+        "harness.LiveStackClient = Client\n"
+        "exec(compile(sys.stdin.read(), '<mint-system>', 'exec'))\n"
+    )
+    python = commands / "python"
+    python.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{harness}" "$@"\n')
+    python.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(live_vm / "mint-system.sh")],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": str(commands) + os.pathsep + os.environ["PATH"],
+            "KDIVE_PYTHON": str(python),
+            "KDIVE_LIVE_VM_ROOTFS": str(rootfs),
+            "KDIVE_ROOTFS_DIR": str(provider_root),
+            "KDIVE_STACK_BASE_URL": "http://127.0.0.1:8000/mcp",
+            "TEST_MODE": mode,
+            "TEST_CALLS": str(calls),
+        },
+    )
+    if mode == "unreadable":
+        assert result.returncode != 0
+        assert not calls.exists(), "read failure must stop before allocation or other MCP calls"
+        return
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "system-fixture\n"
+    records = [json.loads(line) for line in calls.read_text().splitlines()]
+    # No investigation is opened: nothing closes it, so each mint leaked one (#2892).
+    assert [row["tool"] for row in records] == [
+        "allocations.request",
+        "systems.provision",
+        "systems.get",
+    ]
+    provision = next(row for row in records if row["tool"] == "systems.provision")
+    assert provision["profile"]["provider"]["local-libvirt"]["rootfs"] == {
+        "kind": "local",
+        "path": str(provider_root / "live-vm-provisioned-rootfs.qcow2"),
+        "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+    }

@@ -60,13 +60,28 @@ rejects symlink or non-directory entries without following them, and restores op
 on every exit. Stale removal rechecks file identity, process state, and the listener while locked;
 any unlink or postcondition failure blocks startup and names the exact paths to inspect.
 
-Only the configured operator belongs to `kdive-live-control`. Worker accounts keep distinct
-primary groups and receive the `kdive-live-libvirt` and `kvm` supplemental groups; they never
-belong to the control, sudo, or Docker groups. The distro `kvm` authority lets every worker read
+Only the configured operator belongs to `kdive-live-control`. Worker accounts keep distinct primary
+groups and receive the `kdive-live-libvirt` and `kvm` supplemental groups; they never belong to the
+control, sudo (or RedHat-family `wheel`), or Docker groups. The installer appends those groups to an
+existing worker account, keeping memberships other provisioning added, such as the authority client
+group, and refuses an account that holds one of those forbidden groups. It checks only those named
+groups and prunes no others; the `local_worker_host` role, which sets each worker's exact
+membership, is what removes any other group. The distro `kvm` authority lets every worker read
 `root:kvm` mode-`0640` host kernels for libguestfs and use `/dev/kvm` without making either
 world-accessible. The witness credential and service configuration are root-only beneath
 `/etc/kdive`; per-slot state is root-owned beneath `/var/lib/kdive/live-workers`, and each slot
 account can neither traverse nor replace a sibling slot.
+
+The `start` request may also carry one optional absolute inventory path (`systems_toml`, delivered
+as `KDIVE_SYSTEMS_TOML`). `scripts/live-stack/worker-lifecycle.sh` sends it only when the
+operator's inventory declares a `[[remote_libvirt]]` instance. Before it touches any slot, the
+witness checks the path with `lstat` alone and never opens the file. It rejects a relative or
+non-normalized path, a symlink anywhere along it, a non-regular file, and any file or ancestor
+directory that a slot account, any slot group, `kdive-live-libvirt`, or other users can write. A
+sticky directory is the one exception. The launcher separately checks that every slot can read
+the inventory. `KDIVE_SECRETS_ROOT`, `HOME`, and `XDG_CONFIG_HOME` are never passed. Workers
+resolve secret refs only under the fixed `/var/lib/kdive/secrets`. The
+[remote live-stack runbook](../../docs/operating/runbooks/remote-live-stack.md) gives the layout.
 
 Adding the operator to `kdive-live-control` does not refresh an already-running process's kernel
 group list. Interactive operators must start a new login session after installation before using

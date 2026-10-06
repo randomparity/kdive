@@ -54,8 +54,10 @@ cases rarely reach. Their order runs from the cheapest deterministic repro to th
 ## Architecture notes
 
 - Cases 19, 21, and 24 reproduce only on ppc64le (book3s64) guests. Run them on a POWER host.
-- Live gdbstub debug sessions are not yet proven on ppc64le guests (tracked by #2678). Run the `debug.*`
-  steps of the other cases on an x86_64 host until that gap closes.
+- On ppc64le guests under KVM-HV, live gdbstub debug sessions support breakpoints, `debug.advance`
+  mode `out`, and attach to a halted early-boot panic. Single-step advance modes (`into`, `over`,
+  `instruction`) and watchpoints that must fire across a resume are not supported there (#2942);
+  run `debug.*` steps that need them on an x86_64 host.
 - `introspect.run` and `introspect.script` need a live drgn session. Check
   `capability_signals.live_drgn` from `images.describe` for the guest image before a case
   depends on them.

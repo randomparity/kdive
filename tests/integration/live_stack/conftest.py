@@ -81,6 +81,7 @@ def require_stack() -> str:
 # Keep the probe's validated worker identities with its verdicts. A new worker must invalidate
 # a fresh result rather than inherit the earlier worker's build.
 _SKEW_CACHE: dict[str, SkewProbe] = {}
+_HEADER_PROBES: dict[str, SkewProbe] = {}
 
 
 def _enforce_stack_freshness(base_url: str) -> None:
@@ -88,10 +89,26 @@ def _enforce_stack_freshness(base_url: str) -> None:
     policy = skew_policy()
     if policy is SkewPolicy.OFF:
         return
-    cached = _SKEW_CACHE.get(base_url)
-    if cached is None or cached.worker_pids is None or running_worker_pids() != cached.worker_pids:
-        _SKEW_CACHE[base_url] = probe_stack_skew(base_url)
-    skip, warn = partition(_SKEW_CACHE[base_url].results, policy)
+    if policy is SkewPolicy.STRICT and (header_probe := _HEADER_PROBES.get(base_url)):
+        header_skip, _ = partition(header_probe.results, policy)
+        if header_skip:
+            pytest.skip(
+                "live-stack header probe was non-fresh: "
+                + "; ".join(str(result) for result in header_skip)
+                + "; rerun the proof after stack bring-up"
+            )
+    if policy is SkewPolicy.STRICT:
+        probe = probe_stack_skew(base_url)
+    else:
+        cached = _SKEW_CACHE.get(base_url)
+        if (
+            cached is None
+            or cached.worker_pids is None
+            or running_worker_pids() != cached.worker_pids
+        ):
+            _SKEW_CACHE[base_url] = probe_stack_skew(base_url)
+        probe = _SKEW_CACHE[base_url]
+    skip, warn = partition(probe.results, policy)
     for result in warn:
         warnings.warn(f"live-stack version skew — {result}", stacklevel=3)
     if skip:

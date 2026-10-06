@@ -15,7 +15,11 @@ from fastmcp.tools.function_tool import FunctionTool
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.capacity.state import InvestigationState, SystemState
+from kdive.domain.capacity.state import (
+    ExternalBootActivationState,
+    InvestigationState,
+    SystemState,
+)
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.investigations import registrar as inv_registered_tools
@@ -38,6 +42,7 @@ from kdive.mcp.tools.lifecycle.investigations.read import (
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.db_waits import wait_until_any_backend_waiting
+from tests.services.external_boot.conftest import seed_activation
 
 _SUMMARY = "root cause identified in xfs writeback; fix landed"
 
@@ -117,6 +122,7 @@ def test_close_wrapper_contract_describes_force_refusal() -> None:
     force_field = (schema["properties"]["force"].get("description") or "").lower()
     assert "admin" in force_field
     assert "tear" in force_field or "teardown" in force_field
+    assert "systems.teardown" in force_field
     # No ADR references leak into the agent-facing schema (issue #880).
     assert "adr" not in description and "adr" not in force_field
 
@@ -434,6 +440,21 @@ async def _mark_authority_owned(pool: AsyncConnectionPool, system_id: UUID) -> N
         )
 
 
+async def _seed_external_boot_bound_system(
+    pool: AsyncConnectionPool, inv_id: str, state: ExternalBootActivationState
+) -> UUID:
+    """Seed an activation (with its own System and Run) and bind that System to ``inv_id``."""
+    async with pool.connection() as conn:
+        seeded = await seed_activation(
+            conn, state=state, cleanup_complete=state is ExternalBootActivationState.ABANDONED
+        )
+        await conn.execute(
+            "UPDATE systems SET investigation_id = %s WHERE id = %s",
+            (inv_id, seeded.system_id),
+        )
+    return seeded.system_id
+
+
 async def _inv_markers(pool: AsyncConnectionPool, inv_id: str) -> dict[str, object]:
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -603,6 +624,49 @@ def test_close_force_refuses_reprovisioning_bound_system(migrated_url: str) -> N
             assert markers["state"] == "open"  # refused: nothing closed
             assert markers["rootfs_cleanup_pending_at"] is None
             assert await _teardown_dedup_keys(pool) == []  # all-or-nothing: no teardown enqueued
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "activation_state",
+    [ExternalBootActivationState.ABANDONED, ExternalBootActivationState.ACTIVE],
+)
+def test_close_force_refuses_external_boot_bound_system(
+    migrated_url: str, activation_state: ExternalBootActivationState
+) -> None:
+    """Force-close refuses a bound System with any external-boot activation (#3025).
+
+    The worker refuses an ordinary teardown for such a System, so the close refuses first, before
+    any write: no teardown for any bound System, no close, no cleanup marks, no close audit row.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            external = await _seed_external_boot_bound_system(pool, inv_id, activation_state)
+            await _seed_bound_system(pool, inv_id, SystemState.READY)
+            resp = await close_investigation(pool, _ctx(Role.ADMIN), inv_id, _SUMMARY, force=True)
+            assert resp.status == "error"
+            assert resp.error_category == "conflict"
+            assert resp.data["reason"] == "external_boot_system_teardown_required"
+            assert resp.data["external_boot_systems"] == [str(external)]
+            assert resp.detail is not None and str(external) in resp.detail
+            assert "systems.teardown" in resp.detail
+            assert "systems.teardown" in resp.suggested_next_actions
+            assert await _teardown_dedup_keys(pool) == []
+            markers = await _inv_markers(pool, inv_id)
+            assert markers["state"] == "open"
+            assert markers["cleanup_pending_at"] is None
+            assert markers["rootfs_cleanup_pending_at"] is None
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM audit_log "
+                    "WHERE object_id = %s AND tool = 'investigations.close'",
+                    (inv_id,),
+                )
+                row = await cur.fetchone()
+            assert row is not None and row["n"] == 0
 
     asyncio.run(_run())
 

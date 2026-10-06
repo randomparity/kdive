@@ -23,6 +23,7 @@ from psycopg.rows import dict_row
 from kdive.domain.capacity.state import ExternalBootActivationState as State
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.domain.external_boot_timing import timing_deadline
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.evidence import (
     authority_result,
@@ -109,7 +110,6 @@ async def _execute_remote_module_lifecycle(
             AuthorityOperation.RECOVER,
             AuthorityOperation.RESOLVE_CONFLICT,
             AuthorityOperation.CLEANUP,
-            AuthorityOperation.TEARDOWN,
         }
     ):
         return
@@ -211,6 +211,7 @@ def _derived_request(context: OperationContext, operation: str) -> AuthorityMuta
                     ),
                 )
             ),
+            "local_timing": context.local_timing,
         }
     )
 
@@ -424,7 +425,7 @@ def _mutation_request(context: OperationContext) -> AuthorityMutationRequestV1:
         NAMESPACE_URL, f"kdive/external-boot/{context.marker.operation_identity}"
     )
     objects = ()
-    if context.marker.operation in {"cleanup", "teardown"}:
+    if context.marker.operation == "cleanup":
         objects = (
             RecoveryObjectBindingV1(
                 system_id=context.marker.system_id,
@@ -449,6 +450,7 @@ def _mutation_request(context: OperationContext) -> AuthorityMutationRequestV1:
         "expected_source_identity": recovery.source_state.definition,
         "intended_target_identity": recovery.target_state.definition,
         "recovery_objects": objects,
+        "local_timing": context.local_timing,
     }
     if context.marker.expected_observed_composite is not None:
         values["expected_observed_composite"] = context.marker.expected_observed_composite
@@ -610,6 +612,7 @@ async def _teardown_prerequisites(
         "crashing",
         "crashed",
         "failed",
+        "tearing_down",
     }
     if (
         row is None
@@ -716,7 +719,12 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
                     terminal=True,
                 )
             return None
-        deadline = ports.clock() + ports.activation_readiness_timeout
+        deadline = timing_deadline(
+            ports.clock(),
+            int(context.local_timing.deadline_budget_s)
+            if context.local_timing is not None
+            else int(ports.activation_readiness_timeout.total_seconds()),
+        )
         return authority_result(
             context,
             {
@@ -1053,7 +1061,7 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
     """Route full System teardown through the authority's terminal proof receipt."""
 
     async def complete(context: OperationContext) -> ExternalBootDerivedTeardownCompletion:
-        executor = ports.teardown_executor
+        executor = context.teardown_executor
         if executor is None:
             raise _refuse("no external-boot authority teardown executor is configured")
         artifact_store = ports.artifact_store

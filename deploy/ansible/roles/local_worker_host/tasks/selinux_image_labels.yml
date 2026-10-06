@@ -1,0 +1,31 @@
+---
+# ADR-0640: under the unprivileged session daemon a confined svirt_t domain meets the static label
+# its images carry, and it may write and map only svirt_image_t. getenforce, not the selinux fact,
+# decides: the fact needs the libselinux Python binding, and a host missing it would silently skip
+# the labels this file exists to apply.
+- name: Read the SELinux mode
+  ansible.builtin.command:
+    argv: [getenforce]
+  register: local_worker_host_selinux_mode
+  changed_when: false
+  failed_when: false
+
+# semanage fcontext -a rewrites an existing rule for the same pattern, so a host carrying the old
+# virt_image_t rule converges too (ADR-0640).
+- name: Install the kdive image svirt_image_t fcontext rules
+  community.general.sefcontext:
+    target: "{{ item }}(/.*)?"
+    setype: svirt_image_t
+    state: present
+  loop: "{{ local_worker_host_svirt_image_directories }}"
+  when: local_worker_host_selinux_mode.stdout | default('') == 'Enforcing'
+
+# Plain restorecon, not -F: svirt_image_t is a customizable type, and -F would also reset the MCS
+# categories a privileged daemon gives a running domain's images.
+- name: Relabel the kdive image directories
+  ansible.builtin.command:
+    argv: [restorecon, -R, -v, "{{ item }}"]
+  loop: "{{ local_worker_host_svirt_image_directories }}"
+  register: local_worker_host_svirt_image_relabel
+  changed_when: "'Relabeled' in local_worker_host_svirt_image_relabel.stdout"
+  when: local_worker_host_selinux_mode.stdout | default('') == 'Enforcing'

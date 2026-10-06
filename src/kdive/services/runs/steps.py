@@ -426,9 +426,32 @@ def system_required_cmdline(
 
 
 def platform_owned_cmdline_token(cmdline: str | None) -> str | None:
+    """Return the first platform-owned token the kernel would honor as that exact parameter.
+
+    ``root=``/``console=``/``fadump=`` are matched by exact parameter name (the text before the
+    first ``=``, with one leading ``"`` stripped), not by substring, so a param whose name merely
+    contains an owned name — ``systemd.journald.forward_to_console=1``, ``netconsole=...``,
+    ``nfsroot=...`` — is not mistaken for ``console=``/``root=`` (#2758). The name strips a
+    leading quote because the kernel's own tokenizer does: ``next_arg()`` (``lib/cmdline.c``)
+    consumes a leading ``"`` before splitting name from value, so ``"console=ttyS1"`` still
+    reaches ``__setup("console=")`` as the exact parameter.
+
+    ``crashkernel=`` stays a raw substring match: unlike the other three, it is never parsed by
+    ``next_arg`` — ``parse_crashkernel()`` (``kernel/crash_reserve.c``) runs ``strstr()`` for
+    ``"crashkernel="`` over the whole raw ``boot_command_line`` before ordinary parameter
+    tokenization, so it matches the substring anywhere, including inside another parameter's
+    name or value (e.g. ``xcrashkernel=2G``, ``debug.crashkernel=2G``).
+    """
     if not cmdline:
         return None
-    return next((tok for tok in _PLATFORM_OWNED_CMDLINE_TOKENS if tok in cmdline), None)
+    names = {param.removeprefix('"').split("=", 1)[0] for param in cmdline.split()}
+    for tok in _PLATFORM_OWNED_CMDLINE_TOKENS:
+        if tok == "crashkernel=":
+            if tok in cmdline:
+                return tok
+        elif tok.removesuffix("=") in names:
+            return tok
+    return None
 
 
 async def cmdline_for(

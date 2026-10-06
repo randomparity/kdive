@@ -287,7 +287,7 @@ def build_external_boot_session_mechanisms(
         open_artifact_root=LocalArtifactRoot(root).open,
         open_guest=open_libguestfs_guest,
         prepare_console=prepare_console_readiness_window,
-        readiness=LocalExternalBootReadiness(),
+        readiness=LocalExternalBootReadiness(uri=uri),
         observe_running=LocalRunningObserver(),
         cleanup_payloads=LocalPayloadCleanup(root).cleanup,
         uri=uri,

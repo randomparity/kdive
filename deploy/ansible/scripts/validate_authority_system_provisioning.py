@@ -114,7 +114,7 @@ def _manifest_identities(document: dict[str, Any], provider_kind: str) -> set[st
         _allowed_keys(document, common | {"bases"}, {"guest_egress", "accel", "emulator"})
         if "guest_egress" in document and type(document["guest_egress"]) is not bool:
             _fail()
-        if "accel" in document and document["accel"] != "kvm":
+        if "accel" in document and document["accel"] not in ("kvm", "tcg"):
             _fail()
         emulator = document.get("emulator")
         if emulator is not None and (

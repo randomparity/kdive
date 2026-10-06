@@ -79,6 +79,13 @@ so this is a background op.
 
 Return a System the caller can view.
 
+``data.investigation_id`` is the owning Investigation's id, or ``null`` when unowned.
+``data.run_investigation_ids`` lists distinct Investigations with Runs on this System,
+across every Run state, ordered by their newest Run's creation time (newest first),
+capped at 20 ids per response. ``data.run_investigation_ids_truncated`` is ``true`` when
+more ids were omitted. Use ``runs.list(system_id=...)`` for the complete paginated Run
+history, including the remaining Investigation ids.
+
 ``data.accel`` is the host-derived accelerator resolved at admission — ``kvm`` (native)
 or ``tcg`` (foreign-arch emulation) — or ``null`` when the backing host advertised no
 guest-arch capability. Expect a ``tcg`` System to boot and run notably slower.
@@ -156,6 +163,11 @@ System already failed, retrying does not mint a new one — release this Allocat
 request a fresh one (`allocations.release`, then `allocations.request`) for a fresh
 System. Requires contributor on the Allocation's project.
 
+On local-libvirt the job succeeds, and the System reaches `ready`, only after the
+guest's first boot writes its readiness marker to the console — minutes on KVM, longer
+on an emulated arch. A guest that crashes or never writes it ends `failed` with
+`provisioning_failure`.
+
 A profile whose `arch` the backing host cannot boot is rejected `configuration_error`
 at admission — before any capacity is committed — naming the arches the host supports;
 pick one of those or an allocation on a host that offers the arch you need. A profile
@@ -201,7 +213,7 @@ rejected the same way, naming both; the section must match the resource you allo
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)
-    - `debug` (`object`, optional) — Per-System debug provisioning flags.  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument; ``fadump`` opts a ppc64le System into firmware-assisted dump (adds ``fadump=on`` to the boot cmdline, requires a ``crashkernel`` reservation, and a host QEMU that supports it).
+    - `debug` (`object`, optional) — Per-System debug provisioning flags.  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device (the x86_64 panic notification; ppc64le panics reach the host through the pseries firmware notifier) + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument; ``fadump`` opts a ppc64le System into firmware-assisted dump (adds ``fadump=on`` to the boot cmdline, requires a ``crashkernel`` reservation, and a host QEMU that supports it).
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
       - `fadump` (`boolean`, optional)
@@ -238,6 +250,21 @@ destructive_ops opt-in).
 The System's resource kind is fixed by its allocation, so a profile whose `provider`
 section names a different kind is rejected `configuration_error` before the System
 leaves `ready`, naming both; keep the section the System was provisioned with.
+
+On local-libvirt the job succeeds, and the System returns to `ready`, only after the
+rebuilt guest's first boot writes its readiness marker to the console — minutes on KVM,
+longer on an emulated arch. A guest that crashes or never writes it ends `failed` with
+`provisioning_failure`.
+
+A `ready` System whose teardown job is queued or running is refused with `conflict`
+(`reason: teardown_in_progress`) and left unchanged. The teardown normally ends the
+System; reprovision only if `systems.get` shows it still `ready` after the teardown job
+failed or was canceled.
+
+Re-applying a profile the System applied before runs a fresh attempt of that
+profile's job. While that job is queued or running, or for 15 minutes after it ended
+canceled, lease-lapsed, or on a retried attempt, the call is refused with `conflict`
+(`reason: reprovision_job_settling`, `job_id`) and the System stays `ready`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -276,7 +303,7 @@ leaves `ready`, naming both; keep the section the System was provisioned with.
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)
-    - `debug` (`object`, optional) — Per-System debug provisioning flags.  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument; ``fadump`` opts a ppc64le System into firmware-assisted dump (adds ``fadump=on`` to the boot cmdline, requires a ``crashkernel`` reservation, and a host QEMU that supports it).
+    - `debug` (`object`, optional) — Per-System debug provisioning flags.  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device (the x86_64 panic notification; ppc64le panics reach the host through the pseries firmware notifier) + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument; ``fadump`` opts a ppc64le System into firmware-assisted dump (adds ``fadump=on`` to the boot cmdline, requires a ``crashkernel`` reservation, and a host QEMU that supports it).
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
       - `fadump` (`boolean`, optional)
@@ -312,6 +339,13 @@ binding. It returns a queued job. Repeating the exact System, operation, and obs
 identity returns that same job. The worker freshly observes provider state and changes
 the activation only when the identity still matches; otherwise the job fails and leaves
 the conflict and its evidence intact. Poll with `jobs.wait`.
+
+`data.recovery_readiness_deadline` is an absolute server-clock timestamp for this
+request's recovery job. For local libvirt it contains the configured console readiness
+window, scaled for TCG; other providers retain their own deadline. Expiry fails the job
+without renewing it. Read `systems.get` for a fresh composite identity, then submit a
+new `systems.resolve_external_boot_conflict` request with a new idempotency key, or use
+`systems.teardown` if recovery is unavailable. The same key replays the original job.
 
 Requires admin on the System's project. Only an activation in `recovery_conflict` is
 admissible. `runs.get` reports the owning Run's current state; `systems.teardown` remains
@@ -401,7 +435,9 @@ completed job and the already-`torn_down` replay both name it in
 `suggested_next_actions`). If this System has external-boot history, the returned teardown
 job is authority-marked and the authority destroys its private artifacts before the
 durable terminal record commits. The authority route must remain configured; otherwise the
-tool returns `configuration_error` and enqueues no ordinary teardown job.
+tool returns `configuration_error` and enqueues no ordinary teardown job. A System without
+external-boot history that is mid-reprovision is refused with `conflict`
+(`current_status: reprovisioning`) and nothing is enqueued; retry once it settles.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

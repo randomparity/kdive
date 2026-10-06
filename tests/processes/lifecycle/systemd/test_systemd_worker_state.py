@@ -690,3 +690,52 @@ def test_discard_unrecoverable_propagates_unlink_failure(store: SlotStore, setti
 
     assert store.state_path.exists()
     assert store.credential_path.is_dir()
+
+
+# Today's rendering for start_payload(); the database URL is spliced in from the fixture so the
+# credential-shaped literal is not repeated here.
+_ENVIRONMENT_WITHOUT_INVENTORY = """\
+AWS_ACCESS_KEY_ID=access-key
+AWS_SECRET_ACCESS_KEY=secret-key
+KDIVE_BUILD_COMPONENT_ROOTS=/srv/kdive/fixtures
+KDIVE_BUILD_USER=builder
+KDIVE_BUILD_WORKSPACE=/var/lib/kdive/build
+KDIVE_DATABASE_URL={database_url}
+KDIVE_FIXTURE_CATALOG_PATH=/srv/kdive/fixtures/catalog.yaml
+KDIVE_HEALTH_BIND_ADDR=127.0.0.1:9465
+KDIVE_INSTALL_STAGING=/var/lib/kdive/install
+KDIVE_KERNEL_SRC=/srv/kdive
+KDIVE_LIBVIRT_URI='qemu+unix:///session?socket=/run/libvirt/virtqemud-sock'
+KDIVE_LOG_LEVEL=INFO
+KDIVE_ROOTFS_DIR=/var/lib/kdive/rootfs
+KDIVE_S3_BUCKET=kdive-artifacts
+KDIVE_S3_ENDPOINT_URL=http://minio:9000
+KDIVE_S3_REGION=us-east-1
+KDIVE_WORKER_ACCEPTED_LANES=default,state-fenced
+KDIVE_WORKER_INCARNATION_ID=local-systemd:kdive-live-worker@1.service:{generation}
+KDIVE_WORKER_INCARNATION_KIND=local
+KDIVE_WORKER_PYTHON=/usr/bin/python3
+KDIVE_WORKER_SOURCE_ROOT=/srv/kdive
+"""
+
+
+def test_environment_carries_the_inventory_only_when_one_is_sent(
+    store: SlotStore, started_state: SlotState
+) -> None:
+    """#3086: the inventory line is additive; a start without it renders today's file exactly."""
+    without = LifecycleRequest.model_validate(start_payload()).settings
+    with_inventory = LifecycleRequest.model_validate(
+        start_payload(systems_toml="/etc/kdive/systems.toml")
+    ).settings
+    assert without is not None
+    assert with_inventory is not None
+    today = _ENVIRONMENT_WITHOUT_INVENTORY.format(
+        database_url=without.worker_database_url.get_secret_value(), generation="a" * 32
+    )
+
+    assert store._environment(without, started_state) == today
+    rendered = store._environment(with_inventory, started_state)
+    assert rendered.splitlines() == sorted(
+        [*today.splitlines(), "KDIVE_SYSTEMS_TOML=/etc/kdive/systems.toml"]
+    )
+    assert "KDIVE_SECRETS_ROOT" not in rendered

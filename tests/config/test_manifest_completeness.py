@@ -54,3 +54,10 @@ def test_build_user_setting_registered() -> None:
     assert BUILD_USER.name == "KDIVE_BUILD_USER"
     assert BUILD_USER.processes == frozenset({"worker"})
     assert BUILD_USER.group == "build"
+
+
+def test_debug_dir_is_server_scoped() -> None:
+    # The MCP server's gdb-MI runtime writes the transcripts; no worker code reads it (#2955).
+    from kdive.config.core_settings import DEBUG_DIR
+
+    assert DEBUG_DIR.processes == frozenset({"server"})

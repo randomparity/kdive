@@ -14,12 +14,19 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, SystemPayload, TeardownPayload, load_payload
+from kdive.jobs.payloads import (
+    EXTERNAL_BOOT_AUTHORITY_MARKER_KEY,
+    Authorizing,
+    SystemPayload,
+    TeardownPayload,
+    load_payload,
+)
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemMarkerV1,
     AuthoritySystemOperation,
 )
 
+_AUTHORITY_MARKER_KEYS = frozenset({"authority_system_v1", EXTERNAL_BOOT_AUTHORITY_MARKER_KEY})
 _BINDING_SQL = "SELECT * FROM resolve_authority_system_control_binding(%s)"
 _OWNERSHIP_STATES = frozenset(
     {"provisioning", "ready", "teardown-requested", "torn-down", "activated", "repair-required"}
@@ -215,15 +222,29 @@ async def enqueue_control_teardown(
     conn: AsyncConnection,
     system: System,
     authorizing: Authorizing,
+    *,
+    recycle: queue.JobRecyclePolicy,
 ) -> Job:
-    """Route a System-locked control teardown through its current ownership contract."""
+    """Route a System-locked control teardown through its current ownership contract.
+
+    ``recycle`` governs the ordinary ``{uid}:teardown`` row only; each caller states its policy
+    (ADR-0435). The preactivation-authority branch ignores it. A recycle overwrites ``payload``,
+    so an authority-marked prior row always replays: its re-run belongs to the authority path
+    (#2917, ADR-0620), which keys on the marker.
+    """
     binding = await authority_system_binding(conn, system.id)
     if binding is not None and binding.ownership_state != "activated":
         return await enqueue_preactivation_teardown(conn, system, binding, authorizing)
+    dedup_key = _teardown_dedup_key(system.id)
+    if recycle is not queue.JobRecyclePolicy.NEVER:
+        prior = await _dedup_job(conn, dedup_key)
+        if prior is not None and _AUTHORITY_MARKER_KEYS & prior.payload.keys():
+            recycle = queue.JobRecyclePolicy.NEVER
     return await queue.enqueue(
         conn,
         JobKind.TEARDOWN,
         TeardownPayload(system_id=str(system.id)),
         authorizing,
-        _teardown_dedup_key(system.id),
+        dedup_key,
+        recycle=recycle,
     )

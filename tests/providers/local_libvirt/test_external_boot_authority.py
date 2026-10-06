@@ -11,6 +11,9 @@ import ast
 import asyncio
 import hashlib
 import inspect
+import logging
+import os
+import stat
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +23,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
@@ -53,15 +57,29 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     CleanupQuarantineReceiptV1,
     CleanupTombstoneV1,
     FinalizeCleanupProof,
+    GuestRecoveryWriter,
     LocalExternalBootIO,
+    LocalExternalBootMaterializer,
     LocalLibvirtExternalBoot,
     LocalObservedState,
+    LocalPartialAbortReceiptV1,
     LocalRecoveryMetadataV1,
     LocalSystemTeardownAnchorV1,
     LocalSystemTeardownIntentV1,
+    RealLocalExternalBootIO,
+    RecoveryIntentAbsentError,
+    RecoveryMetadataStore,
     RecoveryPhase,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalOperationLeaseScope
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    LocalExternalBootSessionFactory,
+    LocalExternalBootTimingConfigurationError,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    LocalArtifactRoot,
+    LocalOperationLane,
+    LocalOperationLeaseScope,
+)
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
@@ -79,7 +97,10 @@ from kdive.providers.ports.external_boot import (
 # The authority service's own repository double. Reused rather than reimplemented here:
 # a second implementation of `AuthorityRepository` in this package could drift from the
 # contract the service is actually tested against, which is the thing these tests rely on.
+from kdive.providers.shared.runtime_paths import overlay_path
 from tests.providers.external_boot_authority.service_support import _Repository
+from tests.providers.local_libvirt.lifecycle.boot.session_support import Conn, Domain, Guest
+from tests.providers.local_libvirt.lifecycle.boot.session_support import _xml as _session_xml
 from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
 
 pytestmark = pytest.mark.anyio
@@ -274,7 +295,7 @@ class _FakeIO:
             # `publish_tombstone` unlinked `intent.json`, so the real store can no longer
             # rebuild the record. Without this the double would exhibit "cleanup completed,
             # record still resolvable", which production cannot reach.
-            raise FileNotFoundError("intent.json")
+            raise RecoveryIntentAbsentError("intent.json")
         if self.reopen_fault:
             raise LookupError("libguestfs: /var/lib/kdive/secret.key unreadable")
         return self.metadata
@@ -511,6 +532,83 @@ async def test_system_teardown_recovers_and_cleans_owned_point_before_host_mutat
     assert result.complete
     assert io.actions.index("begin-system-teardown") < io.actions.index("finalize")
     assert io.actions.index("finalize") < io.actions.index("teardown-system")
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_finalizes_unfinalized_tombstone_without_recover() -> None:
+    """#2898: cleanup published the tombstone, then the attempt died before finalization.
+
+    The tombstone unlinked the intent, so recovering the point again could never succeed.
+    """
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    adapter = _adapter(io)
+
+    result = await adapter.execute_system_teardown(
+        _system_teardown_request(), _context(AuthorityOperation.TEARDOWN), _TEARDOWN_RESERVATION
+    )
+
+    assert result.complete
+    assert "reopen" not in io.actions
+    assert "cleanup" not in io.actions
+    assert io.actions.index("finalize") < io.actions.index("teardown-system")
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_settles_pre_stop_intent_activation() -> None:
+    io = _FakeIO(_metadata("pre-stop-intent"))
+    adapter = _adapter(io)
+    request = _system_teardown_request()
+    context = _context(AuthorityOperation.TEARDOWN)
+
+    result = await adapter.execute_system_teardown(request, context, _TEARDOWN_RESERVATION)
+
+    assert result.complete
+    assert io.actions.index("recover-modules") < io.actions.index("cleanup")
+    assert io.actions.index("cleanup") < io.actions.index("finalize")
+    assert io.actions.index("finalize") < io.actions.index("teardown-system")
+    adapter.close()
+
+
+@pytest.mark.parametrize(
+    "phase", ["pre-stop-intent", "target-defined", "module-restored", "source-restored"]
+)
+async def test_system_teardown_takeover_recovery_never_restores_power(
+    phase: RecoveryPhase,
+) -> None:
+    """#2898: a retained activation whose guest ran before is recovered without a start."""
+    io = _FakeIO(_metadata(phase))
+    adapter = _adapter(io)
+
+    result = await adapter.execute_system_teardown(
+        _system_teardown_request(), _context(AuthorityOperation.TEARDOWN), _TEARDOWN_RESERVATION
+    )
+
+    assert result.complete
+    assert "restore-power" not in io.actions
+    assert io.actions.index("phase:recovered") < io.actions.index("cleanup")
+    assert io.actions[-1] == "teardown-system"
+    adapter.close()
+
+
+async def test_fresh_system_teardown_reaches_no_power_seam() -> None:
+    io = _FakeIO()
+    io.recovery_absent = True
+    adapter = _adapter(io)
+
+    result = await adapter.execute_system_teardown(
+        _system_teardown_request(), _context(AuthorityOperation.TEARDOWN), _TEARDOWN_RESERVATION
+    )
+
+    assert result.complete
+    assert io.actions == [
+        "begin-system-teardown",
+        "system-teardown-recovery-absence",
+        "teardown-system",
+    ]
     adapter.close()
 
 
@@ -1059,6 +1157,44 @@ async def test_accepted_commit_points_drive_named_local_primitives() -> None:
     assert "define-target" in io.actions
 
 
+async def test_unrelated_local_configuration_error_maps_provider_conflict(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class MismatchedHostIO(_FakeIO):
+        def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+            del metadata
+            raise CategorizedError(
+                "local external-boot authority boot window differs; align server and host settings",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                terminal=True,
+            )
+
+    io = MismatchedHostIO(_metadata("pre-stop-intent"))
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).commit(_request(), _context(AuthorityOperation.ACTIVATE))
+
+    assert caught.value.category == "provider_conflict"
+    assert "align server and host settings" in caplog.text
+    assert "define-target" not in io.actions
+
+
+async def test_local_timing_refusal_maps_to_service_configuration_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class MismatchedHostIO(_FakeIO):
+        def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+            del metadata
+            raise LocalExternalBootTimingConfigurationError("host-only timing diagnostic")
+
+    io = MismatchedHostIO(_metadata("pre-stop-intent"))
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).commit(_request(), _context(AuthorityOperation.ACTIVATE))
+
+    assert caught.value.category == "configuration_error"
+    assert "host-only timing diagnostic" in caplog.text
+    assert "define-target" not in io.actions
+
+
 async def test_recover_drives_the_named_recovery_primitives() -> None:
     io = _FakeIO(_metadata("target-defined"))
     request = _request(purpose="recover", operation=AuthorityOperation.RECOVER)
@@ -1419,10 +1555,13 @@ async def test_a_deleting_commit_point_drives_cleanup_when_ownership_is_named(
     assert io.tombstone is True
 
 
-async def test_teardown_aborts_partial_and_hands_terminal_absence_to_recovery() -> None:
+@pytest.mark.parametrize("partial", ["removed", "absent"])
+async def test_teardown_aborts_partial_and_hands_terminal_absence_to_recovery(
+    partial: Literal["removed", "absent"],
+) -> None:
     io = _FakeIO()
     io.reopen_error = FileNotFoundError("intent.json")
-    io.partial_abort_result = "removed"
+    io.partial_abort_result = partial
     io.recovery_absent = True
     request = _request(
         purpose="teardown",
@@ -1508,6 +1647,90 @@ async def test_restarted_recovery_classifies_tombstone_before_absence_probe() ->
 
     assert observed.category == "absent"
     assert "recovery-absence" not in io.actions
+
+
+def _error_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+async def test_absent_intent_after_accounted_cleanup_logs_no_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        observed = await _adapter(io).observe_recovery(request, _recovery_context())
+
+    assert observed.category == "absent"
+    assert _error_records(caplog) == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(ValueError("recovery intent is not canonical JSON"), id="malformed"),
+        pytest.param(PermissionError("intent.json"), id="permission"),
+        pytest.param(FileNotFoundError("preparation.json"), id="other-file-absent"),
+    ],
+)
+async def test_unreadable_intent_after_cleanup_still_logs_error(
+    caplog: pytest.LogCaptureFixture, error: BaseException
+) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.reopen_error = error
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        observed = await _adapter(io).observe_recovery(request, _recovery_context())
+
+    assert observed.category == "absent"
+    messages = [record.getMessage() for record in _error_records(caplog)]
+    assert "external-boot recovery point is unresolvable" in messages
+    assert "external-boot provider state is unreadable" in messages
+
+
+async def test_absent_intent_without_cleanup_evidence_still_logs_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.intent_present = False
+    io.recovery_absent = True
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        await _adapter(io).observe_recovery(request, _recovery_context())
+
+    messages = [record.getMessage() for record in _error_records(caplog)]
+    assert "external-boot recovery point is unresolvable" in messages
+    assert "external-boot provider state is unreadable" in messages
+
+
+def test_only_the_intent_read_carries_the_typed_absence(tmp_path: Path) -> None:
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(RecoveryIntentAbsentError):
+            RecoveryMetadataStore._read(fd)
+        with pytest.raises(FileNotFoundError) as caught:
+            RecoveryMetadataStore._read_preparation(fd)
+        assert not isinstance(caught.value, RecoveryIntentAbsentError)
+    finally:
+        os.close(fd)
 
 
 async def test_release_without_cleanup_mutates_nothing() -> None:
@@ -1921,3 +2144,106 @@ async def test_a_cleanup_commit_finishes_an_interrupted_tombstone_without_reclea
 
     assert "cleanup" not in io.actions
     assert io.actions.count("finalize") == 1
+
+
+def _real_teardown_adapter(root: Path) -> LocalExternalBootAuthorityAdapter:
+    """The production adapter stack over a real recovery root; only libvirt is faked."""
+    events: list[str] = []
+    domain = Domain(events, _session_xml(overlay=overlay_path(SYSTEM_ID), system_id=SYSTEM_ID))
+    factory = LocalExternalBootSessionFactory(
+        connect=lambda: Conn(events, domain),
+        pin_lease=LocalOperationLane().pin,
+        open_artifact_root=LocalArtifactRoot(root).open,
+        open_guest=lambda: Guest(events),
+        worker_pid=4242,
+        open_overlay=lambda _path: os.open(os.devnull, os.O_RDONLY),
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=os.close,
+    )
+    scope = LocalOperationLeaseScope()
+    io = RealLocalExternalBootIO(
+        root,
+        cast(LocalExternalBootMaterializer, object()),
+        cast(GuestRecoveryWriter, object()),
+        scope.resolve,
+        factory,
+        32 * 1024**3,
+    )
+    return LocalExternalBootAuthorityAdapter(LocalLibvirtExternalBoot(io), scope)
+
+
+def _private_directory(path: Path) -> Path:
+    path.mkdir(mode=0o700)
+    path.chmod(0o700)
+    return path
+
+
+@pytest.mark.parametrize("start", ["nothing", "abort-receipt", "empty-complete", "empty-parents"])
+async def test_non_system_partial_abort_absence_holds_through_commit_and_observation(
+    tmp_path: Path, start: str
+) -> None:
+    """#2926: proving absence must not re-create the activation storage it checks for.
+
+    Every activation port opens a session; a session that created `<system>/<run>/<activation>`
+    made exact absence false, so this TEARDOWN ended in `provider_conflict`.
+    """
+    root = _private_directory(tmp_path / "recovery")
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+    recovery_name = f"{SYSTEM_ID}.{ACTIVATION_ID}"
+    if start == "abort-receipt":
+        receipt = LocalPartialAbortReceiptV1(
+            binding=_BINDING,
+            plan_identity=PLAN_IDENTITY,
+            authority=adapter_module._authority_ref(request),
+        )
+        path = root / f".{recovery_name}.abort.json"
+        path.write_bytes(receipt.model_dump_json(by_alias=True).encode())
+        path.chmod(0o600)
+    elif start == "empty-complete":
+        # #2927: finalization interrupted before its rmdir leaves this.
+        _private_directory(root / recovery_name)
+    elif start == "empty-parents":
+        # Left by a session opened before #2926.
+        for part in (
+            str(SYSTEM_ID),
+            f"{SYSTEM_ID}/{RUN_ID}",
+            f"{SYSTEM_ID}/{RUN_ID}/{ACTIVATION_ID}",
+        ):
+            _private_directory(root / part)
+    adapter = _real_teardown_adapter(root)
+
+    committed = await adapter.commit(request, _context(AuthorityOperation.TEARDOWN))
+    pending = await adapter.observe_recovery(request, _recovery_context())
+    fresh = _real_teardown_adapter(root)
+    observed = await fresh.observe_recovery(request, _recovery_context())
+
+    assert [committed.category, pending.category, observed.category] == ["absent"] * 3
+    assert list(root.iterdir()) == []
+    adapter.close()
+    fresh.close()
+
+
+async def test_non_system_partial_abort_keeps_activation_residue_quarantined(
+    tmp_path: Path,
+) -> None:
+    root = _private_directory(tmp_path / "recovery")
+    activation = root
+    for part in (SYSTEM_ID, RUN_ID, ACTIVATION_ID):
+        activation = _private_directory(activation / str(part))
+    (activation / "kernel").write_bytes(b"unauthenticated")
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+    adapter = _real_teardown_adapter(root)
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.commit(request, _context(AuthorityOperation.TEARDOWN))
+
+    assert (activation / "kernel").read_bytes() == b"unauthenticated"
+    adapter.close()

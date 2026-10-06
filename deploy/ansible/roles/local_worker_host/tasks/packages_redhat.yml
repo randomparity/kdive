@@ -5,6 +5,26 @@
     state: present
   tags: [authority_prerequisites]
 
+- name: Install the EL10 Python guestfs binding build prerequisites
+  ansible.builtin.dnf:
+    name: "{{ local_worker_host_guestfs_packages_el10 }}"
+    state: present
+  when:
+    - ansible_facts['distribution'] in ['RedHat', 'Rocky', 'AlmaLinux']
+    - ansible_facts['distribution_major_version'] | int == 10
+  tags: [authority_prerequisites]
+
+- name: Build the EL10 Python 3.14 guestfs binding from the matching signed source RPM
+  ansible.builtin.script: build-el10-guestfs-binding.sh
+  args:
+    executable: /bin/bash
+  register: local_worker_host_guestfs_binding_el10
+  changed_when: "'guestfs binding built' in local_worker_host_guestfs_binding_el10.stdout"
+  when:
+    - ansible_facts['distribution'] in ['RedHat', 'Rocky', 'AlmaLinux']
+    - ansible_facts['distribution_major_version'] | int == 10
+  tags: [authority_prerequisites]
+
 - name: Look for an existing container engine before installing one (RedHat)
   # Must run before anything in this play can create /usr/bin/docker. Installing the compose
   # plugin first would resolve its `(docker-cli or podman-docker)` dependency by pulling

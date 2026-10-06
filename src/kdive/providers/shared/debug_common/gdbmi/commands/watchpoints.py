@@ -22,6 +22,7 @@ _RUNNING_RE = re.compile(r"running", re.IGNORECASE)
 _NO_WATCHPOINT_RE = re.compile(
     r"does not support\b.*watchpoint|cannot set hardware watchpoint", re.IGNORECASE
 )
+_INSERT_FAILED_RE = re.compile(r"Could not insert hardware watchpoint (\d+)\.")
 
 
 class _WatchpointHost(Protocol):
@@ -140,3 +141,31 @@ class GdbMiWatchpointCommands:
 def _is_watchpoint_row(entry: dict[str, Any]) -> bool:
     kind = entry.get("type")
     return isinstance(kind, str) and "watchpoint" in kind.lower()
+
+
+def watchpoint_insert_failure(exc: CategorizedError, verb: str) -> CategorizedError | None:
+    """Code a resume ``^error`` for a watchpoint gdb could not insert, else ``None``.
+
+    The same text comes from a stub that cannot insert one and from exhausted debug registers,
+    so the code names the failed insert, not a missing capability (ADR 0712, 2026-09-30).
+    """
+    if exc.category is not ErrorCategory.DEBUG_ATTACH_FAILURE:
+        return None
+    payload = exc.details.get("payload")
+    msg = payload.get("msg") if isinstance(payload, dict) else None
+    match = _INSERT_FAILED_RE.search(msg) if isinstance(msg, str) else None
+    if match is None:
+        return None
+    number = match.group(1)
+    return CategorizedError(
+        f"gdb/MI could not insert hardware watchpoint {number} on resume: the target cannot "
+        "insert a hardware watchpoint, or too many are armed; remove one with "
+        "debug.clear_watchpoint (see debug.list_watchpoints), then retry",
+        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+        details={
+            **exc.details,
+            "code": "watchpoint_insert_failed",
+            "verb": verb,
+            "watchpoint": number,
+        },
+    )

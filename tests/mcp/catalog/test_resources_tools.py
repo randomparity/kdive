@@ -12,6 +12,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
+from fastmcp import Client, FastMCP
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
@@ -22,8 +23,10 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.middleware.server_fault import SERVER_FAULT_DETAIL, ServerFaultMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
+from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_failure
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.resource_registration import register_discovered_resource
@@ -198,6 +201,40 @@ def test_list_malformed_resource_row_degrades_to_infrastructure_failure(
         )
 
     asyncio.run(_run())
+
+
+def test_describe_over_a_corrupt_row_is_a_server_fault_envelope(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A repository rebuild of a corrupt stored row is a server fault, not an argument error (#3009).
+    fastmcp_logger = logging.getLogger("fastmcp")
+    fastmcp_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG)
+
+    async def _run() -> Any:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            async with pool.connection() as conn:
+                await conn.execute("UPDATE resources SET capabilities = '[]'::jsonb")
+            app: FastMCP = FastMCP("t")
+            app.add_middleware(ServerFaultMiddleware())
+
+            @app.tool(name="resources.describe")
+            async def describe() -> ToolResponse:
+                return await catalog_resources_tools.describe_resource(pool, CTX, res_id)
+
+            async with Client(app) as client:
+                return await client.call_tool("resources.describe", {}, raise_on_error=False)
+
+    try:
+        result = asyncio.run(_run())
+    finally:
+        fastmcp_logger.removeHandler(caplog.handler)
+    assert not result.is_error
+    envelope = result.structured_content
+    assert envelope["error_category"] == ErrorCategory.INFRASTRUCTURE_FAILURE.value
+    assert envelope["detail"] == SERVER_FAULT_DETAIL
+    assert not [r for r in caplog.records if "Invalid arguments for tool" in r.getMessage()]
 
 
 def test_describe_adds_pool_cost_host(migrated_url: str) -> None:
@@ -903,7 +940,9 @@ def test_set_scheduling_denied_for_auditor_is_audited(migrated_url: str) -> None
 
 
 def test_classify_released_is_released_status() -> None:
-    item = resources_tools._classify_drain_release("a-1", ReleaseOutcome(released=True))
+    item = resources_tools._classify_drain_release(
+        "a-1", ReleaseOutcome(released=True), _ADMIN, "proj"
+    )
     assert item.object_id == "a-1"
     assert item.status == "released"
     assert item.error_category is None
@@ -919,6 +958,8 @@ def test_classify_stale_handle_is_skipped_with_status() -> None:
         ReleaseOutcome(
             released=False, category=ErrorCategory.STALE_HANDLE, current_status="expired"
         ),
+        _ADMIN,
+        "proj",
     )
     assert item.status == "skipped"
     assert item.error_category is None
@@ -931,6 +972,8 @@ def test_classify_failed_with_status_carries_current_status() -> None:
         ReleaseOutcome(
             released=False, category=ErrorCategory.CONFIGURATION_ERROR, current_status="active"
         ),
+        _ADMIN,
+        "proj",
     )
     assert item.status == "error"
     assert item.error_category == "configuration_error"
@@ -943,10 +986,107 @@ def test_classify_failed_without_status_omits_current_status() -> None:
     item = resources_tools._classify_drain_release(
         "a-4",
         ReleaseOutcome(released=False, category=ErrorCategory.CONFIGURATION_ERROR),
+        _ADMIN,
+        "proj",
     )
     assert item.status == "error"
     assert item.error_category == "configuration_error"
     assert "current_status" not in item.data
+
+
+_TEARDOWN_REQUIRED = ReleaseOutcome(
+    released=False,
+    category=ErrorCategory.CONFLICT,
+    details={"reason": "external_boot_system_teardown_required", "system_id": "sys-1"},
+    detail=(
+        "allocations.release is denied while System sys-1 has external-boot history and is "
+        "not torn down; run systems.teardown first (ADR-0620)"
+    ),
+    next_actions=("systems.teardown", "systems.get"),
+)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (
+            _TEARDOWN_REQUIRED,
+            "break-glass release is denied while System sys-1 has external-boot history and "
+            "is not torn down; run ops.force_teardown first (ADR-0620)",
+        ),
+        (
+            ReleaseOutcome(
+                released=False,
+                category=ErrorCategory.CONFLICT,
+                details={
+                    "reason": "external_boot_restricted",
+                    "activation_id": "act-1",
+                    "activation_state": "active",
+                    "system_id": "sys-2",
+                    "owning_run_id": "run-1",
+                },
+                detail="allocations.release is denied ...; systems.teardown is admitted ...",
+                next_actions=("runs.get", "runs.release_external_boot", "systems.teardown"),
+            ),
+            "break-glass release is denied while external-boot activation act-1 holds System "
+            "sys-2 in active; ops.force_teardown is admitted while the activation is active",
+        ),
+        (
+            ReleaseOutcome(
+                released=False,
+                category=ErrorCategory.CONFLICT,
+                details={
+                    "reason": "external_boot_restricted",
+                    "activation_id": "act-2",
+                    "activation_state": "torn_down",
+                    "system_id": "sys-3",
+                    "owning_run_id": "run-2",
+                },
+                detail="allocations.release is denied ...; no exit is admitted ...",
+                next_actions=("runs.get",),
+            ),
+            "break-glass release is denied while external-boot activation act-2 holds System "
+            "sys-3 in torn_down; no exit is admitted while the activation is torn_down",
+        ),
+        (
+            ReleaseOutcome(
+                released=False,
+                category=ErrorCategory.CONFLICT,
+                details={
+                    "reason": "authority_system_preactivation_mutation_fenced",
+                    "system_id": "sys-4",
+                },
+                detail="allocations.release is denied before the authority-owned System's ...",
+                next_actions=("systems.get", "systems.teardown"),
+            ),
+            "break-glass release is denied before authority-owned System sys-4's first "
+            "activation; run ops.force_teardown",
+        ),
+        (
+            ReleaseOutcome(
+                released=False,
+                category=ErrorCategory.CONFLICT,
+                details={"reason": "some_future_reason"},
+                detail="allocations.release is denied ...; run systems.teardown",
+                next_actions=("systems.teardown",),
+            ),
+            "break-glass release is denied by external-boot admission (some_future_reason)",
+        ),
+    ],
+)
+def test_classify_breakglass_denial_names_breakglass_exit(
+    outcome: ReleaseOutcome, expected: str
+) -> None:
+    """#3047: the detail names the exit the break-glass caller can invoke, as next actions do."""
+    item = resources_tools._classify_drain_release("a-5", outcome, _ADMIN, "proj")
+    assert item.error_category == "conflict"
+    assert item.detail == expected
+
+
+def test_project_release_failure_keeps_service_detail() -> None:
+    """#3047: only the break-glass render rewrites the detail; allocations.release keeps it."""
+    resp = release_failure("a-6", _TEARDOWN_REQUIRED, _ADMIN, "proj")
+    assert resp.detail == _TEARDOWN_REQUIRED.detail
 
 
 # ---- resources.drain: handler (DB-backed) ------------------------------------------

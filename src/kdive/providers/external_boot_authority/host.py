@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import hashlib
+import logging
 import os
 import pwd
 import re
@@ -10,8 +13,8 @@ import socket
 import stat
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import AsyncIterator, Awaitable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -29,9 +32,13 @@ from kdive.db.external_boot_authority_journal import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.device_identity import RemoteDeviceIdentityService
-from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.journal import (
+    RETRACTED_DIRECTORY,
+    FileAuthorityJournal,
+    TornTail,
+)
 from kdive.providers.external_boot_authority.proof_barrier import AuthorityProofBarrier
-from kdive.providers.external_boot_authority.protocol import record_digest
+from kdive.providers.external_boot_authority.protocol import JournalRecordV1, record_digest
 from kdive.providers.external_boot_authority.settings import (
     AUTHORITY_CLIENT_GID,
     AUTHORITY_DENIED_IDENTITIES,
@@ -53,6 +60,7 @@ from kdive.providers.external_boot_authority.transport import (
     AuthorityListener,
     AuthorityNetworkListener,
     SocketLockBusyError,
+    acquire_socket_lock,
     authority_server_name,
     health_tls_context,
     serve_authority_network_transport,
@@ -84,6 +92,7 @@ JOURNAL_DIRECTORY_MODE = 0o700
 PROVIDER_DIRECTORY_MODE = 0o700
 PROVIDER_SOCKET_MODE = 0o700
 MAX_JOURNAL_LANES = 4_096
+_log = logging.getLogger(__name__)
 _DATABASE_DSN_MAX_BYTES = 4_096
 _DIAGNOSTIC_MAX_BYTES = 192
 _SAFE_DIAGNOSTIC = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -114,6 +123,13 @@ class HostReadinessError(CategorizedError):
             category=ErrorCategory.READINESS_FAILURE,
             details={"component": safe_component, "reason": safe_reason},
         )
+
+
+class _LaneVanished(HostReadinessError):
+    """A listed lane that no longer exists; a retraction racing the listing produces it."""
+
+    def __init__(self) -> None:
+        super().__init__("journal", "unsafe-tree")
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,6 +445,20 @@ def _journal_identity(status: os.stat_result) -> _JournalIdentity:
     )
 
 
+def _validate_retracted_directory(config: AuthorityHostConfig, root_fd: int) -> None:
+    """Admit the reserved evidence directory (ADR-0584 amendment) without reading inside it."""
+    try:
+        status = os.stat(RETRACTED_DIRECTORY, dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        raise HostReadinessError("journal", "unsafe-tree") from None
+    if (
+        not stat.S_ISDIR(status.st_mode)
+        or status.st_uid != config.authority_uid
+        or stat.S_IMODE(status.st_mode) != 0o700
+    ):
+        raise HostReadinessError("journal", "unsafe-tree")
+
+
 def _local_lanes(
     config: AuthorityHostConfig, root_fd: int
 ) -> dict[str, tuple[str, _JournalIdentity]]:
@@ -437,6 +467,9 @@ def _local_lanes(
         names = os.listdir(root_fd)
     except OSError:
         raise HostReadinessError("journal", "unsafe-tree") from None
+    if RETRACTED_DIRECTORY in names:
+        _validate_retracted_directory(config, root_fd)
+        names.remove(RETRACTED_DIRECTORY)
     if len(names) > MAX_JOURNAL_LANES:
         raise HostReadinessError("journal", "lane-limit")
     for name in names:
@@ -445,6 +478,8 @@ def _local_lanes(
         system_id = name.removesuffix(".jsonl")
         try:
             status = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise _LaneVanished from None
         except OSError:
             raise HostReadinessError("journal", "unsafe-tree") from None
         if (
@@ -461,6 +496,89 @@ def _local_lanes(
             raise HostReadinessError("journal", "unsafe-tree") from None
         lanes[system_id] = (name, _journal_identity(status))
     return lanes
+
+
+def _head_matches(record: JournalRecordV1, head: JournalHead, config: AuthorityHostConfig) -> bool:
+    return (
+        head.authority_instance == config.authority_instance
+        and record.authority_instance == head.authority_instance
+        and record.system_id == head.system_id
+        and record.sequence == head.sequence
+        and record_digest(record) == head.digest
+        and record.phase is head.phase
+        and record.authority_id == head.authority_id
+        and record.generation == head.generation
+        and record.operation_identity == head.operation_identity
+    )
+
+
+def _unanchored_tail(
+    config: AuthorityHostConfig,
+    system_id: str,
+    records: tuple[JournalRecordV1, ...],
+    head: JournalHead | None,
+) -> JournalRecordV1 | None:
+    """Return the one final record the head never accepted, or None (ADR-0584 amendment)."""
+    if head is None:
+        if (
+            len(records) == 1
+            and records[0].authority_instance == config.authority_instance
+            and str(records[0].system_id) == system_id
+        ):
+            return records[0]
+        return None
+    if len(records) == head.sequence + 1 and _head_matches(records[-2], head, config):
+        return records[-1]
+    return None
+
+
+def _torn_tail_is_unanchored(
+    config: AuthorityHostConfig, records: tuple[JournalRecordV1, ...], head: JournalHead | None
+) -> bool:
+    """A torn line follows the head's own record, or is all a headless lane holds (#2983)."""
+    if head is None:
+        return not records
+    return bool(records) and _head_matches(records[-1], head, config)
+
+
+def _retract_unanchored_tail(
+    config: AuthorityHostConfig,
+    system_id: str,
+    head: JournalHead | None,
+    *,
+    retract: bool,
+    deadline: float | None = None,
+) -> JournalRecordV1 | TornTail | None:
+    journal: FileAuthorityJournal | None = None
+    try:
+        journal = FileAuthorityJournal(
+            config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
+        )
+        records, torn = journal.load_recovering(deadline=deadline)
+        if torn is not None:
+            if not _torn_tail_is_unanchored(config, records, head):
+                raise HostReadinessError("journal", "invalid-lane")
+            if retract:
+                try:
+                    journal.remove_torn_tail()
+                except OSError as error:
+                    _log.warning(
+                        "authority journal could not remove a torn final line at startup",
+                        extra={"system_id": system_id, "errno": errno.errorcode.get(error.errno)},
+                    )
+                    raise
+            return torn
+        tail = _unanchored_tail(config, system_id, records, head)
+        if tail is not None and retract:
+            journal.retract(tail)
+        return tail
+    except TimeoutError:
+        raise HostReadinessError("journal", "validation-timeout") from None
+    except OSError, ValueError:
+        raise HostReadinessError("journal", "invalid-lane") from None
+    finally:
+        if journal is not None:
+            journal.close()
 
 
 def _restore_journal_inventory(
@@ -495,18 +613,7 @@ def _restore_journal_inventory(
             records = journal.load(deadline=deadline)
             if not records:
                 raise HostReadinessError("journal", "head-mismatch")
-            terminal = records[-1]
-            if (
-                head.authority_instance != config.authority_instance
-                or terminal.authority_instance != head.authority_instance
-                or terminal.system_id != head.system_id
-                or terminal.sequence != head.sequence
-                or record_digest(terminal) != head.digest
-                or terminal.phase is not head.phase
-                or terminal.authority_id != head.authority_id
-                or terminal.generation != head.generation
-                or terminal.operation_identity != head.operation_identity
-            ):
+            if not _head_matches(records[-1], head, config):
                 raise HostReadinessError("journal", "head-mismatch")
             validated[system_id] = evidence
         except HostReadinessError:
@@ -527,11 +634,38 @@ def restore_journal_inventory(config: AuthorityHostConfig, heads: tuple[JournalH
     _restore_journal_inventory(config, heads, {}, deadline=None)
 
 
+def _is_head_divergence(error: HostReadinessError) -> bool:
+    return error.component == "journal" and error.reason in {"head-mismatch", "inventory-mismatch"}
+
+
+def _is_invalid_lane(error: HostReadinessError) -> bool:
+    return error.component == "journal" and error.reason == "invalid-lane"
+
+
+def _may_be_in_flight_anchor(error: HostReadinessError) -> bool:
+    """What a lane mid-append, mid-advance, or mid-retraction shows (ADR-0584 amendments)."""
+    return _is_head_divergence(error) or isinstance(error, _LaneVanished) or _is_invalid_lane(error)
+
+
 @dataclass(slots=True)
 class JournalInventoryValidator:
     """Reuse unchanged lane evidence while keeping journal parsing off the event loop."""
 
     _cache: dict[str, tuple[_JournalIdentity, JournalHead]] = field(default_factory=dict)
+    # Armed by the running host for its periodic checks only (ADR-0584 amendment, #2899).
+    anchor_quiescence: Callable[[], AbstractAsyncContextManager[None]] | None = None
+
+    async def validate_current(self, config: AuthorityHostConfig) -> None:
+        """Validate the lanes against freshly read heads, once more with anchors quiesced."""
+        try:
+            await self.validate(config, await _database_heads(config))
+        except HostReadinessError as error:
+            if self.anchor_quiescence is None or not _may_be_in_flight_anchor(error):
+                raise
+            # An anchor between its append and the end of its advance or retraction looks exactly
+            # like this.
+            async with self.anchor_quiescence():
+                await self.validate(config, await _database_heads(config))
 
     async def validate(self, config: AuthorityHostConfig, heads: tuple[JournalHead, ...]) -> None:
         deadline = time.monotonic() + JOURNAL_VALIDATION_TIMEOUT_SECONDS
@@ -1077,6 +1211,94 @@ async def _database_heads(config: AuthorityHostConfig) -> tuple[JournalHead, ...
     return heads
 
 
+async def _lane_heads(
+    connection: AsyncConnection, config: AuthorityHostConfig
+) -> dict[str, JournalHead]:
+    try:
+        heads = await list_journal_heads(connection, config.authority_instance)
+    except Exception:
+        raise HostReadinessError("database", "inventory-failed") from None
+    return {str(head.system_id): head for head in heads}
+
+
+async def _reconcile_journal_tails(config: AuthorityHostConfig) -> None:
+    """At startup only, retract each lane's one unanchored final record (ADR-0584 amendment).
+
+    The request-socket lock excludes a live authority for this instance; the System's advisory
+    lock, the key the head-advance function takes, excludes a head advance still in flight.
+    """
+    try:
+        lock = acquire_socket_lock(config.request_socket.with_suffix(".lock"), config.authority_uid)
+    except SocketLockBusyError:
+        raise HostReadinessError("journal", "reconcile-busy") from None
+    except OSError:
+        raise HostReadinessError("journal", "unsafe-path") from None
+    try:
+        async with _database_connection(config) as connection:
+            async with connection.transaction():
+                await check_database_role(connection)
+                heads = await _lane_heads(connection, config)
+            root_fd = _validate_journal_root(config)
+            try:
+                local = _local_lanes(config, root_fd)
+            finally:
+                os.close(root_fd)
+            # Lane loads stop at their own deadline, inside the readiness timeout, so a slow
+            # load fails in its thread instead of being abandoned while it still holds work.
+            deadline = time.monotonic() + JOURNAL_VALIDATION_TIMEOUT_SECONDS
+            for system_id in local:
+                if not await asyncio.to_thread(
+                    _retract_unanchored_tail,
+                    config,
+                    system_id,
+                    heads.get(system_id),
+                    retract=False,
+                    deadline=deadline,
+                ):
+                    continue
+                try:
+                    async with connection.transaction():
+                        await connection.execute(
+                            "SELECT pg_advisory_xact_lock("
+                            "hashtextextended('kdive:system:' || %s::text, 2126))",
+                            (system_id,),
+                        )
+                        head = (await _lane_heads(connection, config)).get(system_id)
+                        tail = await asyncio.to_thread(
+                            _retract_unanchored_tail,
+                            config,
+                            system_id,
+                            head,
+                            retract=True,
+                            deadline=deadline,
+                        )
+                except HostReadinessError:
+                    raise
+                except Exception:
+                    raise HostReadinessError("journal", "reconcile-failed") from None
+                if isinstance(tail, TornTail):
+                    _log.warning(
+                        "authority journal removed a torn final line at startup",
+                        extra={
+                            "system_id": system_id,
+                            "offset": tail.offset,
+                            "length": len(tail.data),
+                            "sha256": hashlib.sha256(tail.data).hexdigest(),
+                        },
+                    )
+                elif tail is not None:
+                    _log.warning(
+                        "authority journal retracted an unanchored record at startup",
+                        extra={
+                            "system_id": system_id,
+                            "sequence": tail.sequence,
+                            "digest": record_digest(tail),
+                        },
+                    )
+    finally:
+        os.close(lock)
+
+
 async def _check_provider_socket(config: AuthorityHostConfig) -> None:
     try:
         validate_protected_parents(config.provider_socket, config.authority_uid)
@@ -1119,8 +1341,7 @@ async def _check_static_authority_host(
         raise HostReadinessError("identity", "uid-mismatch")
     await asyncio.to_thread(_validate_access_boundary, config)
     validate_credential_paths(config)
-    heads = await _database_heads(config)
-    await (journal_validator or JournalInventoryValidator()).validate(config, heads)
+    await (journal_validator or JournalInventoryValidator()).validate_current(config)
     await _check_provider_socket(config)
     if system_installation is _UNPINNED_SYSTEM_INSTALLATION:
         return await asyncio.to_thread(_load_system_installation, config)
@@ -1624,9 +1845,17 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
 
     try:
         system_installation = _load_system_installation(config)
-        await _bounded_readiness_check(
-            _check_static_authority_host(config, journal_validator, system_installation)
-        )
+        try:
+            await _bounded_readiness_check(
+                _check_static_authority_host(config, journal_validator, system_installation)
+            )
+        except HostReadinessError as error:
+            if not (_is_head_divergence(error) or _is_invalid_lane(error)):
+                raise
+            await _bounded_readiness_check(_reconcile_journal_tails(config))
+            await _bounded_readiness_check(
+                _check_static_authority_host(config, journal_validator, system_installation)
+            )
         if config.proof_socket is not None:
             try:
                 proof_barrier = AuthorityProofBarrier(config.proof_socket)
@@ -1638,6 +1867,8 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
             if proof_barrier is not None
             else _build_mutation_service(config, system_installation=system_installation)
         )
+        if mutation_service is not None:
+            journal_validator.anchor_quiescence = mutation_service.quiesce_anchors
         try:
             listener = await serve_authority_transport(
                 config,

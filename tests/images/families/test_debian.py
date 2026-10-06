@@ -10,11 +10,12 @@ image bakes no authorized key (ADR-0289, #963).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from kdive.images.families.base import CustomizeContext
 from kdive.images.families.debian import DebianFamily
-from kdive.images.families.steps import InstallPackages, RunCommand, Step
+from kdive.images.families.steps import InstallPackages, RunCommand, Step, UploadFile
 from kdive.images.planes._build_common import (
     DRGN_MARKER_GUEST_PATH,
     MAKEDUMPFILE_MARKER_GUEST_PATH,
@@ -146,8 +147,13 @@ def test_debian_steps_bake_cloud_init_and_drop_sshd_keygen(tmp_path: Path) -> No
 
 def test_debug_steps_touch_no_selinux_and_stage_no_nm_keyfile(tmp_path: Path) -> None:
     # Debian has no /etc/selinux/config and no NetworkManager — neither must be touched (#824).
-    text = rendered(_steps(_ctx(tmp_path, is_cloud_image=True)))
-    assert "selinux" not in text.lower()
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True))
+    guest_steps = [
+        replace(step, host_src=Path("/host-source")) if isinstance(step, UploadFile) else step
+        for step in steps
+    ]
+    assert "selinux" not in rendered(guest_steps).lower()
+    text = rendered(steps)
     assert "NetworkManager" not in text and "kdive-ssh-nic" not in text
 
 

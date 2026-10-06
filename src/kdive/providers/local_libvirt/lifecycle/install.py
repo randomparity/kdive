@@ -11,11 +11,12 @@ domain (`kdive-{system_id}`, minted by the provisioning plane, ADR-0025):
   initrd is fetched and no `<initrd>` element is emitted. `defineXML`s the domain with a
   direct-kernel `<os>` (`<kernel>`/[`<initrd>`]/`<cmdline>`). The `<os>` is built with
   `xml.etree.ElementTree` (no string interpolation), so a `cmdline` value cannot inject XML.
-- `boot(system_id)` power-cycles the domain into the staged `<kernel>` (`destroy` if running,
-  then `create`) and polls the run-readiness preflight within a bounded window: the System
-  never answering is `boot_timeout`; answering-but-failing a check is `readiness_failure`; a
-  libvirt error starting the domain is `infrastructure_failure` — it crosses the libvirtd
-  socket, so a daemon restart can heal it and the queue must be free to retry (ADR-0483).
+- `boot(system_id)` power-cycles the domain into the staged `<kernel>` (a bounded clean
+  shutdown if running, `destroy` only as the fallback, then `create`; ADR-0679) and polls the
+  run-readiness preflight within a bounded window: the System never answering is
+  `boot_timeout`; answering-but-failing a check is `readiness_failure`; a libvirt error
+  starting the domain is `infrastructure_failure` — it crosses the libvirtd socket, so a
+  daemon restart can heal it and the queue must be free to retry (ADR-0483).
 
 DB-free: it owns no Postgres — the `runs.*` install/boot handlers drive the step ledger.
 The slow, host-bound seams (libvirt connect, object-store fetch, kdump/readiness checks, the
@@ -28,8 +29,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import time
 import xml.etree.ElementTree as ET  # noqa: S405 - constructs/edits self-owned domain XML only
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -45,26 +47,28 @@ from kdive.config.core_settings import INSTALL_SCRATCH, INSTALL_STAGING
 from kdive.config.registry import Setting
 from kdive.domain.capture import KDUMP_FAMILY
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.crash_signatures import is_crash_signature
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
     _RealGuestKernelWriter,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
-    _POLL_INTERVAL_SECONDS,
-    ProbeFailure,
+    Readiness,
     ReadinessResult,
     _real_readiness,
+    boot_window_polls,
+    poll_readiness,
+    readiness_failure_details,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
 from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
+from kdive.providers.local_libvirt.lifecycle.power import clean_shutdown_bound_s, power_off
 from kdive.providers.local_libvirt.lifecycle.storage import (
     _prepare_console_log,
     console_log_path,
     overlay_path,
 )
-from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIRT_URI
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
 from kdive.providers.shared.runtime_paths import domain_name_for
@@ -74,26 +78,13 @@ from kdive.store.objectstore import ObjectStore
 _log = logging.getLogger(__name__)
 
 
-# The boot window is derived from KDIVE_LIBVIRT_BOOT_WINDOW_S (default 900 s) divided by the
-# _POLL_INTERVAL_SECONDS cadence (5 s) — 180 polls at the default.  boot()._await_ready loops
-# the poll count; _real_readiness owns the per-poll cadence.  The window accommodates the
-# kdive-ready signal ordering After=kdump.service (#817): a crash-capture guest does not report
-# ready until kdump.service has built the capture initramfs and kexec-loaded it, which on POWER9
-# takes several minutes on the first dracut run.  It is a ceiling, not a fixed wait —
-# _await_ready returns the instant the marker appears, so the wider window costs nothing on a
-# fast boot and the _CRASH_SIGNATURE fail-fast still surfaces a panicked boot immediately.
-# Operators on very fast hosts can tighten it; operators on slow hosts (POWER, large kdump
-# initramfs) can widen it — all without rebuilding the image.
-def _boot_window_polls() -> int:
-    """Return the number of readiness polls for the configured boot window."""
-    return math.ceil(config.require(LIBVIRT_BOOT_WINDOW_S) / _POLL_INTERVAL_SECONDS)
-
-
 class _LibvirtDomain(Protocol):
     def XMLDesc(self, flags: int) -> str: ...  # noqa: N802 - mirrors the libvirt binding name
-    def isActive(self) -> int: ...  # noqa: N802 - mirrors the libvirt binding name
     def create(self) -> int: ...
     def destroy(self) -> int: ...
+    def shutdown(self) -> int: ...
+    # The binding annotates ``state`` as ``str`` but returns ``[state, reason]``.
+    def state(self, flags: int = 0) -> Sequence[object]: ...
 
 
 class _LibvirtConn(Protocol):
@@ -105,7 +96,6 @@ class _LibvirtConn(Protocol):
 type Connect = Callable[[], _LibvirtConn]
 type Fetch = Callable[[str, Path, str | None], None]
 type StreamFetch = Callable[[str, str | None], contextlib.AbstractContextManager[StreamedArtifact]]
-type Readiness = Callable[[UUID], ReadinessResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,11 +169,15 @@ class LocalLibvirtBooter:
         readiness: Readiness,
         boot_window_polls: int,
         prepare_console: Callable[[UUID], None],
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._connect = connect
         self._readiness = readiness
         self._boot_window_polls = boot_window_polls
         self._prepare_console = prepare_console
+        self._sleep = sleep
+        self._clock = clock
 
     def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
         """Power-cycle the domain into the staged kernel and confirm run-readiness.
@@ -192,7 +186,8 @@ class LocalLibvirtBooter:
         is scaled by ``tcg_deadline_multiplier(accel)`` (ADR-0341): a KVM guest keeps the base
         window, while a TCG or unknown/``None`` accelerator gets the generous scaled window so
         a slow emulated boot is not timed out spuriously. The window is a ceiling, not a fixed
-        wait — a fast boot still returns the instant the readiness marker appears.
+        wait — a fast boot still returns the instant the readiness marker appears. The same
+        ``accel`` scales the clean-shutdown bound of a running domain (ADR-0679).
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` if the domain is absent or libvirt
@@ -205,14 +200,18 @@ class LocalLibvirtBooter:
         conn = _open(self._connect, "to boot")
         try:
             domain = _lookup(conn, domain_name)
-            self._power_cycle(domain, domain_name, system_id)
+            self._power_cycle(domain, domain_name, system_id, accel)
         finally:
             _close(conn)
         polls = math.ceil(self._boot_window_polls * tcg_deadline_multiplier(accel))
         self._await_ready(system_id, polls)
 
-    def force_off_if_active(self, system_id: UUID) -> None:
-        """Destroy the System's domain if it is running before a rw overlay mount."""
+    def force_off_if_active(self, system_id: UUID, *, accel: str | None = None) -> None:
+        """Power the System's domain off if it is running, before a rw overlay mount.
+
+        A clean shutdown first, ``destroy`` as the fallback (ADR-0679); ``accel`` scales the
+        shutdown bound as it does for ``boot``.
+        """
         domain_name = domain_name_for(system_id)
         conn = _open(self._connect, "to force-off before module injection")
         try:
@@ -221,8 +220,8 @@ class LocalLibvirtBooter:
             except libvirt.libvirtError:
                 return
             try:
-                if domain.isActive():
-                    domain.destroy()
+                bound_s = clean_shutdown_bound_s(accel)
+                power_off(domain, domain_name, bound_s, self._sleep, self._clock)
             except libvirt.libvirtError as exc:
                 raise CategorizedError(
                     "failed to force-off the System domain before module injection",
@@ -232,11 +231,12 @@ class LocalLibvirtBooter:
         finally:
             _close(conn)
 
-    def _power_cycle(self, domain: _LibvirtDomain, domain_name: str, system_id: UUID) -> None:
+    def _power_cycle(
+        self, domain: _LibvirtDomain, domain_name: str, system_id: UUID, accel: str | None
+    ) -> None:
         try:
-            if domain.isActive():
-                domain.destroy()
-            # Truncate after destroy, before create: the fresh window must hold only this
+            power_off(domain, domain_name, clean_shutdown_bound_s(accel), self._sleep, self._clock)
+            # Truncate after the power-off, before create: the fresh window must hold only this
             # boot, and the worker-owned inode must exist before the daemon opens it
             # (ADR-0576, #1940).
             self._prepare_console(system_id)
@@ -245,46 +245,22 @@ class LocalLibvirtBooter:
             raise _libvirt_transport_failure("power-cycling", domain_name) from exc
 
     def _await_ready(self, system_id: UUID, polls: int) -> None:
-        first_probe_error: ProbeFailure | None = None
-        for _ in range(polls):
-            result = self._readiness(system_id)
-            if first_probe_error is None and result.probe_error is not None:
-                first_probe_error = result.probe_error
-            if result.answered:
-                if result.ok:
-                    return
-                raise CategorizedError(
-                    "System booted but a run-readiness check failed",
-                    category=ErrorCategory.READINESS_FAILURE,
-                    details=self._boot_failure_details(
-                        system_id, first_probe_error, result.crash_signature
-                    ),
-                )
-        raise CategorizedError(
-            "System did not become ready within the boot window",
-            category=ErrorCategory.BOOT_TIMEOUT,
-            details=self._boot_failure_details(system_id, first_probe_error),
-        )
-
-    @staticmethod
-    def _boot_failure_details(
-        system_id: UUID,
-        first_probe_error: ProbeFailure | None,
-        crash_signature: str | None = None,
-    ) -> dict[str, object]:
-        """The System plus closed probe and crash reasons, as JSON scalars (ADR-0594, #2691).
-
-        ``crash_signature`` is the pre-marker crash literal the readiness scan matched; the
-        worker persists it as ``failure_detail_crash_signature`` for ``runs.get`` to read back.
-        Only a literal in the scanner's closed vocabulary is written, because ``jobs.get`` and
-        ``jobs.wait`` publish ``failure_context`` without a read-side filter.
-        """
-        details: dict[str, object] = {"system_id": str(system_id)}
-        if first_probe_error is not None:
-            details["probe_error"] = first_probe_error.value
-        if crash_signature is not None and is_crash_signature(crash_signature):
-            details["crash_signature"] = crash_signature
-        return details
+        outcome = poll_readiness(self._readiness, system_id, polls)
+        result = outcome.result
+        if result is None:
+            raise CategorizedError(
+                "System did not become ready within the boot window",
+                category=ErrorCategory.BOOT_TIMEOUT,
+                details=readiness_failure_details(system_id, outcome.first_probe_error),
+            )
+        if not result.ok:
+            raise CategorizedError(
+                "System booted but a run-readiness check failed",
+                category=ErrorCategory.READINESS_FAILURE,
+                details=readiness_failure_details(
+                    system_id, outcome.first_probe_error, result.crash_signature
+                ),
+            )
 
 
 class LocalLibvirtInstaller:
@@ -421,6 +397,7 @@ class LocalLibvirtInstaller:
                     request.debuginfo_ref,
                     versions.get("vmlinux"),
                     vmlinux,
+                    request.accel,
                 )
                 modules_injected = True
             return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
@@ -431,7 +408,8 @@ class LocalLibvirtInstaller:
             # after boot/vmlinuz, or an inject/initrd failure — yet the domain is only redefined
             # *after* staging returns, so a staging failure never references either. Reclaim both
             # (only on the error path — on success they are the durable <kernel>/<initrd> for the
-            # System's lifetime) so an abandoned, not-retried install leaves nothing behind.
+            # System's lifetime, reclaimed by its teardown with all of <staging_root>/<system_id>/)
+            # so an abandoned, not-retried install leaves nothing behind.
             # Best-effort/idempotent; a retry re-writes them anyway.
             for orphan in (kernel_path, staging_dir / "initrd"):
                 with contextlib.suppress(OSError):
@@ -481,6 +459,7 @@ class LocalLibvirtInstaller:
         debuginfo_ref: str | None,
         debuginfo_version_id: str | None,
         vmlinux: Path,
+        accel: str | None,
     ) -> None:
         """Force-off the domain, then stage the built kernel into its overlay (ADR-0203/0207).
 
@@ -499,7 +478,8 @@ class LocalLibvirtInstaller:
 
         Ordered force-off → fetch → inject: a rw libguestfs mount of a live qcow2 corrupts it,
         and ``runs.install`` can target an already-booted System (ADR-0026 §7 recovery), so the
-        domain is destroyed (idempotent) before the writer touches the overlay. Injection itself
+        domain is powered off (idempotent; a clean shutdown scaled by ``accel``, then ``destroy``
+        as the fallback, ADR-0679) before the writer touches the overlay. Injection itself
         is idempotent (clobber + re-extract; the kernel upload truncates/creates), so a retried
         install self-heals a partial write.
 
@@ -514,7 +494,7 @@ class LocalLibvirtInstaller:
                 category=ErrorCategory.MISSING_DEPENDENCY,
                 details={"system_id": str(system_id)},
             )
-        self._booter.force_off_if_active(system_id)
+        self._booter.force_off_if_active(system_id, accel=accel)
         vmlinux_ref: Path | None = None
         if debuginfo_ref is not None:
             self._fetch_modules(debuginfo_ref, vmlinux, debuginfo_version_id)
@@ -612,12 +592,16 @@ class LocalLibvirtInstall:
         scratch_root: Path | None = None,
         fetch_modules: Fetch | None = None,
         kernel_writer: GuestKernelWriter | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         booter = LocalLibvirtBooter(
             connect=connect,
             readiness=readiness,
             boot_window_polls=boot_window_polls,
             prepare_console=prepare_console,
+            sleep=sleep,
+            clock=clock,
         )
         self._installer = LocalLibvirtInstaller(
             connect=connect,
@@ -657,7 +641,7 @@ class LocalLibvirtInstall:
             ),
             readiness=_real_readiness,
             staging_root=staging_root,
-            boot_window_polls=_boot_window_polls(),
+            boot_window_polls=boot_window_polls(),
             prepare_console=lambda sid: _prepare_console_log(console_log_path(sid)),
             scratch_root=scratch_root,
             fetch_modules=lambda ref, dest, version_id: _stage_object(

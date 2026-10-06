@@ -32,6 +32,7 @@ from pydantic import SecretStr, TypeAdapter
 
 import kdive.jobs.handlers.external_boot.lifecycle as lifecycle_module  # noqa: F401
 from kdive.domain.capacity.state import ExternalBootActivationState, SystemState
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import (
     ExternalBootReleaseEvidenceV1,
     ExternalBootTeardownEvidenceV1,
@@ -55,9 +56,11 @@ from kdive.jobs.worker import _authority_binding_matches
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityAcknowledgementV1,
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityTakeoverRequestV1,
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownProofV1,
     AuthorityTeardownResponseV1,
@@ -843,7 +846,10 @@ def test_cmdline_failure_redacts_before_authority_persistence(
 
 @pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict"])
 def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
-    migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    operation: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A non-terminal authority category cannot be promoted to lifecycle evidence."""
     spec = CASES[operation]
@@ -857,6 +863,20 @@ def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
         payload = excinfo.value.result.result
         assert isinstance(payload, _FailureResult)
         assert payload.failure_context.phase == "commit"
+        assert payload.failure_context.model_dump(exclude_none=True) == {"phase": "commit"}
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "kdive.jobs.handlers.external_boot.runner"
+        ]
+        assert len(warnings) == 1
+        warning = warnings[0].getMessage()
+        assert str(case.job_id) in warning
+        assert str(case.vehicle.activation_id) in warning
+        assert "phase=commit" in warning
+        assert "exception=CategorizedError" in warning
+        assert f"authority observed 'conflict' for {operation!r}" in warning
+        assert "authority observed" not in excinfo.value.result.model_dump_json(by_alias=True)
         # The mutation happened; what is refused is *recording* it as a good terminal state.
         row = await _activation_row(seed, case.vehicle.activation_id)
         expected_state = (
@@ -1031,6 +1051,123 @@ def test_teardown_quarantine_retains_core_owned_state(
         assert await _job_state(seed, case.job_id) == "queued"
 
     _drive(migrated_url, authority_role_dsns, "teardown", body)
+
+
+async def _teardown_credit_counts(
+    conn: AsyncConnection, case: SeededCase
+) -> tuple[int, int, int, int]:
+    """Ready reservations, release credits, teardown receipts and authority rows for the case."""
+    row = await _one(
+        conn,
+        "SELECT "
+        "(SELECT count(*) FROM external_boot_reservations WHERE activation_id = %s) AS ready, "
+        "(SELECT count(*) FROM external_boot_reservation_releases WHERE activation_id = %s) "
+        "AS credits, "
+        "(SELECT count(*) FROM external_boot_teardown_receipts WHERE job_id = %s) AS receipts, "
+        "(SELECT count(*) FROM external_boot_authorities WHERE activation_id = %s) AS authorities",
+        (
+            case.vehicle.activation_id,
+            case.vehicle.activation_id,
+            case.job_id,
+            case.vehicle.activation_id,
+        ),
+    )
+    return row["ready"], row["credits"], row["receipts"], row["authorities"]
+
+
+def _drive_ready_reservation_teardown(
+    migrated_url: str, body: Callable[[AsyncConnection, SeededCase], Awaitable[None]]
+) -> None:
+    """Seed the retained-fixture shape: an activating activation holding a ready reservation."""
+
+    async def _main() -> None:
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose="teardown",
+                operation="teardown",
+                activation_state="activating",
+                with_reservation=True,
+            )
+            assert await _teardown_credit_counts(seed, case) == (1, 0, 0, 0)
+            await body(seed, case)
+
+    asyncio.run(_main())
+
+
+def test_factory_only_teardown_uses_the_per_call_executor(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """Production assembly wires only a client factory; teardown must use the per-call client."""
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        acknowledger = RecordingAcknowledger(authority_role_dsns("kdive_provider_authority"))
+        executor = _TeardownExecutor(seed)
+        requests: list[AuthorityTeardownMutationRequestV1] = []
+
+        class Client:
+            async def acknowledge(
+                self, request: AuthorityTakeoverRequestV1
+            ) -> AuthorityAcknowledgementV1:
+                return await acknowledger.acknowledge(request)
+
+            async def execute_teardown(
+                self, request: AuthorityTeardownMutationRequestV1
+            ) -> AuthorityTeardownResponseV1:
+                requests.append(request)
+                return await executor.execute_teardown(request)
+
+        ports = ExternalBootHandlerPorts(
+            resolver=resolver_for(case.vehicle),
+            incarnation_credential=SecretStr(case.credential),
+            secret_registry=SecretRegistry(),
+            artifact_store=INERT_OBJECT_STORE,
+            authority_client_factory=cast(Any, lambda _binding, _marker, _deadline: Client()),
+        )
+        handler = build_operations(ports).get("teardown")
+        assert handler is not None
+        marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            result = await handler(worker, _job(case), marker)
+            assert result.result.operation == "teardown"
+            # A retry of the finished job is refused before admission, so it cannot credit again.
+            with pytest.raises(CategorizedError) as retried:
+                await handler(worker, _job(case), marker)
+        assert retried.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+        assert len(requests) == 1
+        assert await _system_state(seed, case.vehicle.system_id) == "torn_down"
+        assert await _job_state(seed, case.job_id) == "succeeded"
+        assert await _teardown_credit_counts(seed, case) == (0, 1, 1, 1)
+
+    _drive_ready_reservation_teardown(migrated_url, body)
+
+
+def test_teardown_without_factory_or_executor_fails_closed(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """Missing teardown wiring refuses before any authority teardown request or credit."""
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        handler = build_operations(_ports(case, case.vehicle, authority_role_dsns)).get("teardown")
+        assert handler is not None
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            with pytest.raises(CategorizedError) as caught:
+                await handler(
+                    worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+                )
+
+        # Refused before allocation: a bound ExternalBootAuthorityFailure would mean an authority
+        # generation was consumed and acknowledged for a teardown that could never run.
+        assert not isinstance(caught.value, ExternalBootAuthorityFailure)
+        assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+        assert caught.value.terminal is True
+        assert await _system_state(seed, case.vehicle.system_id) == "failed"
+        assert await _teardown_credit_counts(seed, case) == (1, 0, 0, 0)
+
+    _drive_ready_reservation_teardown(migrated_url, body)
 
 
 def test_teardown_runs_for_ready_system_with_active_activation(

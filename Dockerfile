@@ -105,6 +105,8 @@ COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/src /app/src
 COPY --from=builder /app/scripts/generate/build-capture-bootstrap-manifest.py /usr/local/libexec/build-capture-bootstrap-manifest.py
+# Checkout modes must not make root-owned fingerprint inputs replaceable (ADR-0705).
+RUN chmod -R a+rX,go-w /app/src /usr/local/libexec/build-capture-bootstrap-manifest.py
 # Put the venv on PATH before verification so the bare `drgn` check resolves.
 # PYTHONPATH backs the editable project install at the copied src path.
 ENV PATH=/opt/venv/bin:$PATH PYTHONPATH=/app/src \

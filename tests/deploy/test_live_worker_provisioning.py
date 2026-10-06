@@ -293,6 +293,7 @@ def test_witness_venv_install_pins_grpc_system_openssl_and_zlib() -> None:
         task for task in tasks if task["name"] == "Install KDIVE into the lifecycle witness venv"
     )
     assert install["environment"] == {
+        "UV_PROJECT_ENVIRONMENT": "/opt/kdive-live-worker-lifecycle/.venv",
         "GRPC_PYTHON_BUILD_SYSTEM_OPENSSL": "1",
         "GRPC_PYTHON_BUILD_SYSTEM_ZLIB": "1",
     }
@@ -588,6 +589,10 @@ def test_live_authority_system_installation_precedes_readiness_and_scopes_writes
         in rendered
     )
     assert "system-provisioning/local/rootfs/bases" not in rendered
+    # libguestfs builds its appliance from /lib/modules, which ProtectKernelModules hides.
+    assert "ProtectKernelModules=no" in rendered
+    # supermin unpacks a base image that carries setuid/setgid entries.
+    assert "RestrictSUIDSGID=no" in rendered
 
 
 def test_existing_worker_provider_contract_is_preserved() -> None:
@@ -666,6 +671,42 @@ def test_authority_group_verification_tracks_local_mutation_kvm_requirement() ->
             )
             is expected_failure
         )
+
+
+@pytest.mark.parametrize(
+    ("extra_group", "expected_failure"),
+    [
+        (None, False),
+        ("kdive-live-control", True),
+        ("sudo", True),
+        ("wheel", True),
+        ("docker", True),
+    ],
+)
+def test_worker_group_verification_refuses_installer_refused_groups(
+    extra_group: str | None, expected_failure: bool
+) -> None:
+    tasks = yaml.safe_load(_text(VERIFY_TASKS))
+    task = next(
+        item for item in tasks if item.get("name") == "Read every fixed worker account's groups"
+    )
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["bool"] = bool
+    failed = environment.compile_expression(task["failed_when"])
+    groups = ["kdive-live-libvirt", "kvm", "kdive-provider-authority-client"]
+    if extra_group is not None:
+        groups.append(extra_group)
+
+    assert (
+        failed(
+            live_vm_host_worker_group_results={"stdout": " ".join(groups)},
+            live_vm_host_worker_libvirt_group="kdive-live-libvirt",
+            live_vm_host_worker_control_group="kdive-live-control",
+            live_vm_host_worker_authority_enabled=True,
+            live_vm_host_authority_client_group="kdive-provider-authority-client",
+        )
+        is expected_failure
+    )
 
 
 @pytest.mark.parametrize(
@@ -838,6 +879,119 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     assert "PGDATABASE:" not in tasks
 
 
+def test_authority_teardown_removes_the_user_manager_memlock_drop_in() -> None:
+    document: object = yaml.safe_load(_text(AUTHORITY_TEARDOWN))
+    assert isinstance(document, list)
+    tasks = cast(list[dict[str, object]], cast(dict[str, object], document[0])["tasks"])
+    drop_in = (
+        "/etc/systemd/system/user@{{ ansible_facts.getent_passwd[authority_account][1] }}"
+        ".service.d/kdive-memlock.conf"
+    )
+    known = "ansible_facts.getent_passwd[authority_account] | default(none) is not none"
+    removal = next(
+        t for t in tasks if t["name"] == "Remove the authority user manager memlock drop-in"
+    )
+    assert removal["ansible.builtin.file"] == {"path": drop_in, "state": "absent"}
+    assert removal["when"] == known
+    inspect = next(t for t in tasks if t["name"] == "Inspect the removed memlock drop-in")
+    assert inspect["ansible.builtin.stat"] == {"path": drop_in}
+    assert inspect["when"] == known
+    check = next(t for t in tasks if t["name"] == "Assert the memlock drop-in is absent")
+    assert check["when"] == known
+    assert tasks.index(removal) < tasks.index(inspect) < tasks.index(check)
+
+
+def _teardown_tasks() -> list[dict[str, object]]:
+    document: object = yaml.safe_load(_text(AUTHORITY_TEARDOWN))
+    assert isinstance(document, list)
+    return cast(list[dict[str, object]], cast(dict[str, object], document[0])["tasks"])
+
+
+KNOWN_AUTHORITY = "ansible_facts.getent_passwd[authority_account] | default(none) is not none"
+
+
+def test_authority_teardown_passwd_guards_tolerate_a_missing_account() -> None:
+    # getent with fail_key: false records a missing account as a None entry, so a membership
+    # test passes and indexing the entry fails on a host without the account (#2891).
+    tasks = _teardown_tasks()
+    assert " in ansible_facts.getent_passwd" not in yaml.safe_dump(tasks, width=10**6)
+    indexing = [
+        t for t in tasks if "getent_passwd[authority_account][1]" in yaml.safe_dump(t, width=10**6)
+    ]
+    assert len(indexing) >= 9
+    for task in indexing:
+        when = task["when"]
+        first = when if isinstance(when, str) else cast(list[str], when)[0]
+        assert first == KNOWN_AUTHORITY, task["name"]
+    known = Environment(undefined=StrictUndefined).compile_expression(KNOWN_AUTHORITY)
+    account = "kdive-provider-authority"
+    missing = {"getent_passwd": {account: None}}
+    assert known(authority_account=account, ansible_facts=missing) is False
+    present = {"getent_passwd": {account: ["x", "981"]}}
+    assert known(authority_account=account, ansible_facts=present) is True
+    check = next(
+        t for t in tasks if t["name"] == "Assert authority services and processes are inactive"
+    )
+    clauses = cast(list[str], cast(dict[str, object], check["ansible.builtin.assert"])["that"])
+    for clause in clauses[1:]:
+        evaluate = Environment(undefined=StrictUndefined).compile_expression(clause)
+        assert evaluate(authority_account=account, ansible_facts=missing) is True
+
+
+def test_authority_teardown_restarts_a_user_manager_holding_the_retired_ceiling() -> None:
+    # Removing the drop-in only changes the unit's configured limit; a lingering authority user
+    # manager keeps its unlimited ceiling until it restarts (ADR-0708).
+    tasks = _teardown_tasks()
+    named = {cast(str, t["name"]): t for t in tasks}
+    manager = "user@{{ ansible_facts.getent_passwd[authority_account][1] }}.service"
+    pid = named["Read the authority user manager main PID"]
+    configured = named["Read the authority user manager configured memlock limit"]
+    running = named["Read the authority user manager running memlock limit"]
+    restart = named["Restart the authority user manager to retire its memlock ceiling"]
+    show = ["/usr/bin/systemctl", "show"]
+    assert cast(dict[str, list[str]], pid["ansible.builtin.command"])["argv"] == [
+        *show,
+        "--property=MainPID",
+        "--value",
+        manager,
+    ]
+    assert cast(dict[str, list[str]], configured["ansible.builtin.command"])["argv"] == [
+        *show,
+        "--property=LimitMEMLOCK",
+        "--value",
+        manager,
+    ]
+    assert cast(dict[str, list[str]], running["ansible.builtin.command"])["argv"] == [
+        "/usr/bin/prlimit",
+        "--memlock",
+        "--noheadings",
+        "--output=HARD",
+        f"--pid={{{{ {pid['register']}.stdout }}}}",
+    ]
+    # prlimit localizes "unlimited" through gettext.
+    assert running["environment"] == {"LC_ALL": "C"}
+    assert restart["ansible.builtin.systemd_service"] == {"name": manager, "state": "restarted"}
+    running_pid = f'{pid["register"]}.stdout not in ["", "0"]'
+    assert running["when"] == [KNOWN_AUTHORITY, running_pid]
+    assert restart["when"] == [
+        KNOWN_AUTHORITY,
+        running_pid,
+        f"{running['register']}.stdout | trim == 'unlimited'",
+        f"{configured['register']}.stdout | trim != 'infinity'",
+    ]
+    order = [
+        named["Assert authority services and processes are inactive"],
+        named["Remove the authority user manager memlock drop-in"],
+        named["Reload systemd after authority unit removal"],
+        named["Assert the authority database LOGIN is revoked"],
+        pid,
+        configured,
+        running,
+        restart,
+    ]
+    assert [tasks.index(t) for t in order] == sorted(tasks.index(t) for t in order)
+
+
 def test_authority_teardown_reports_login_revocation_only_on_transition() -> None:
     document: object = yaml.safe_load(_text(AUTHORITY_TEARDOWN))
     assert isinstance(document, list)
@@ -923,8 +1077,9 @@ def test_ansible_installs_witness_venv_in_clean_host_order() -> None:
         "/opt/kdive-live-worker-lifecycle/.venv"
     )
     install = (
-        "{{ live_vm_host_uv_bin }} pip install --python "
-        "/opt/kdive-live-worker-lifecycle/.venv/bin/python --reinstall-package kdive /opt/kdive"
+        "{{ live_vm_host_uv_bin }} sync --locked --no-editable --no-dev --group live "
+        "--reinstall-package kdive --project {{ live_vm_venv }} "
+        "--python /opt/kdive-live-worker-lifecycle/.venv/bin/python"
     )
     assert commands.index(create) < commands.index(install)
     assert "path: /opt/kdive-live-worker-lifecycle" in tasks
@@ -934,6 +1089,25 @@ def test_ansible_installs_witness_venv_in_clean_host_order() -> None:
     assert "dest: /opt/kdive-live-worker-lifecycle/revision" in tasks
     assert 'mode: "0444"' in tasks
     assert "Symlink the libguestfs binding into the lifecycle worker venv" in tasks
+
+
+def test_witness_venv_is_built_with_the_live_group_and_verified_to_import_drgn() -> None:
+    """`drgn` lives only in the `live` dependency group; the role once omitted it (#2956)."""
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    names = [task["name"] for task in tasks]
+    install = tasks[names.index("Install KDIVE into the lifecycle witness venv")]
+    assert "--group live" in install["ansible.builtin.command"]["cmd"]
+    assert "--locked" in install["ansible.builtin.command"]["cmd"]
+
+    verify = tasks[names.index("Verify the lifecycle witness venv imports drgn")]
+    assert verify["ansible.builtin.command"]["argv"] == [
+        "/opt/kdive-live-worker-lifecycle/.venv/bin/python",
+        "-c",
+        "import drgn",
+    ]
+    assert names.index("Install KDIVE into the lifecycle witness venv") < names.index(
+        "Verify the lifecycle witness venv imports drgn"
+    )
 
 
 def test_ansible_bakes_checkout_identity_before_installing_fixed_worker_runtime() -> None:
@@ -990,7 +1164,161 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert source.index(ownership) < source.index(harden)
     assert "getent group kvm >/dev/null" in source
     assert '--groups "$libvirt_group,kvm"' in source
-    assert 'usermod -G "$libvirt_group,kvm" "$worker"' in source
+    assert 'usermod -a -G "$libvirt_group,kvm" "$worker"' in source
+    assert 'usermod -G "$libvirt_group,kvm"' not in source
+
+
+def _run_worker_account_convergence(
+    tmp_path: Path, *, existing_groups: str
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run ``_converge_worker_account`` for an existing account against stub account tools.
+
+    Returns the result and the recorded ``usermod`` invocations.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    usermod_log = tmp_path / "usermod.log"
+    stubs = {
+        "getent": "exit 0",
+        "groupadd": "exit 97",
+        "useradd": "exit 97",
+        "usermod": f'printf "%s\\n" "$*" >>{usermod_log}',
+        "id": f'[[ "$*" == "-nG kdive-worker-1" ]] || exit 97; echo "{existing_groups}"',
+    }
+    for name, body in stubs.items():
+        stub = bin_dir / name
+        stub.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
+        stub.chmod(0o755)
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            'set -euo pipefail; source "$1"; PATH="$2:$PATH"; '
+            "_converge_worker_account kdive-worker-1 kdive-live-libvirt kdive-live-control",
+            "bash",
+            str(INSTALLER),
+            str(bin_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result, usermod_log.read_text(encoding="utf-8") if usermod_log.exists() else ""
+
+
+def test_installer_keeps_an_existing_worker_authority_client_membership(tmp_path: Path) -> None:
+    """The installer appends its groups; replacing them dropped the authority client group.
+
+    The local_worker_host role adds each worker to the authority client group (ADR-0619) before
+    the playbook runs this installer, so a replacing ``usermod -G`` stripped the membership and
+    every worker attempt failed ``authority: tls-secret-unavailable`` (#2925).
+    """
+    result, usermod_calls = _run_worker_account_convergence(
+        tmp_path,
+        existing_groups="kdive-worker-1 kdive-live-libvirt kvm kdive-provider-authority-client",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert usermod_calls == "-a -G kdive-live-libvirt,kvm kdive-worker-1\n"
+
+
+@pytest.mark.parametrize("forbidden", ["kdive-live-control", "sudo", "wheel", "docker"])
+def test_installer_refuses_a_worker_holding_a_forbidden_group(
+    tmp_path: Path, forbidden: str
+) -> None:
+    """Appending no longer prunes, so a forbidden membership is refused before any change.
+
+    deploy/systemd/README.md promises workers never belong to the control, sudo, or Docker
+    groups; the replacing ``usermod -G`` used to enforce that on the standalone path (#2925).
+    """
+    result, usermod_calls = _run_worker_account_convergence(
+        tmp_path, existing_groups=f"kdive-worker-1 kvm {forbidden}"
+    )
+
+    assert result.returncode != 0
+    assert usermod_calls == ""
+    assert f"kdive-worker-1 belongs to the {forbidden} group" in result.stderr
+    assert f"gpasswd -d kdive-worker-1 {forbidden}" in result.stderr
+
+
+def _run_guestfs_link(
+    tmp_path: Path, *, base_imports_guestfs: bool
+) -> subprocess.CompletedProcess[str]:
+    """Run ``_link_system_guestfs_binding`` for a venv whose python links to a stub base.
+
+    The stub answers as the base interpreter when invoked by its own path and as the venv when
+    invoked through the venv symlink, as ``readlink -f`` separates them in the installer.
+    """
+    binding = tmp_path / "base-site"
+    binding.mkdir()
+    (binding / "guestfs.py").write_text("", encoding="utf-8")
+    (binding / "libguestfsmod.cpython-399-x86_64-linux-gnu.so").write_text("", encoding="utf-8")
+    venv_site = tmp_path / "venv-site"
+    venv_site.mkdir()
+    base_python = tmp_path / "python3.99"
+    base_import = f"echo {binding}" if base_imports_guestfs else "echo DlopenFailed >&2; exit 1"
+    base_python.write_text(
+        "#!/bin/bash\n"
+        f"if [[ $0 == {base_python} ]]; then\n"
+        f'  case "$2" in *"import guestfs, pathlib"*) {base_import} ;; *) exit 97 ;; esac\n'
+        "  exit\n"
+        "fi\n"
+        'case "$2" in\n'
+        f"  *sysconfig*) echo {venv_site} ;;\n"
+        f"  'import guestfs') [[ -L {venv_site}/guestfs.py ]] ;;\n"
+        "  *) exit 97 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    base_python.chmod(0o755)
+    venv_python = tmp_path / "venv-python"
+    venv_python.symlink_to(base_python)
+    return subprocess.run(
+        ["/bin/bash", "-c", 'source "$1"; _link_system_guestfs_binding "$2"', "bash"]
+        + [str(INSTALLER), str(venv_python)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_guestfs_link_uses_the_venv_base_interpreter_binding(tmp_path: Path) -> None:
+    """The binding comes from the interpreter the venv is built on, not /usr/bin/python3.
+
+    On Ubuntu 26.04 and Fedora 44 the two are the same interpreter; on Enterprise Linux
+    /usr/bin/python3 is 3.12 while the venv is 3.14, so only the venv's own base interpreter can
+    hold a binding the venv can load (#2781).
+    """
+    result = _run_guestfs_link(tmp_path, base_imports_guestfs=True)
+
+    assert result.returncode == 0, result.stderr
+    linked = {path.name: path.readlink() for path in (tmp_path / "venv-site").iterdir()}
+    assert linked == {
+        "guestfs.py": tmp_path / "base-site" / "guestfs.py",
+        "libguestfsmod.cpython-399-x86_64-linux-gnu.so": (
+            tmp_path / "base-site" / "libguestfsmod.cpython-399-x86_64-linux-gnu.so"
+        ),
+    }
+
+
+def test_guestfs_link_fails_loud_without_a_base_interpreter_binding(tmp_path: Path) -> None:
+    """The worker venv provisions, so a missing binding is a failed install.
+
+    ADR-0272 makes the binding a provision prerequisite; reporting only lost kdump capture and
+    exiting 0 left an EL host "prepared" that failed every provision (#2781).
+    """
+    result = _run_guestfs_link(tmp_path, base_imports_guestfs=False)
+
+    assert result.returncode != 0
+    for needed_by in ("provision", "build-fs", "external boot", "kdump capture"):
+        assert needed_by in result.stderr, result.stderr
+    assert "unaffected" not in result.stderr
+    assert str(tmp_path / "python3.99") in result.stderr
+    assert "re-run this installer" in result.stderr
+    # The interpreter's own import error is relayed: an installed binding that fails to load
+    # must not read as an absent one.
+    assert result.stderr.index("DlopenFailed") < result.stderr.index("cannot import")
+    assert not list((tmp_path / "venv-site").iterdir())
 
 
 def test_installer_builds_the_worker_venv_locked_with_the_live_group() -> None:
@@ -1666,6 +1994,90 @@ def test_local_worker_host_packages_provision_openssl_and_zlib_headers_per_famil
     assert "zlib-devel" in redhat_packages
     assert "libopenssl-devel" in suse_packages
     assert "zlib-devel" in suse_packages
+
+
+def test_local_worker_host_packages_provision_pip_module_prerequisites_per_family() -> None:
+    """tasks/uv.yml runs ansible.builtin.pip against /usr/bin/python3, which imports both pip
+    and packaging there; python3-pip does not pull packaging in on Fedora 44 (#2906)."""
+    defaults = _yaml(DEFAULTS)
+    for family_list in (
+        "live_vm_host_packages",
+        "local_worker_host_packages_redhat",
+        "local_worker_host_packages_suse",
+    ):
+        packages = defaults[family_list]
+        assert isinstance(packages, list)
+        assert {"python3-pip", "python3-packaging"} <= set(packages), family_list
+
+
+def test_redhat_worker_provisions_python_headers_for_locked_venv() -> None:
+    defaults = _yaml(DEFAULTS)
+    packages = defaults["local_worker_host_packages_redhat"]
+    assert isinstance(packages, list)
+    assert "python3-devel" in packages
+
+
+def test_el10_guestfs_builder_runs_after_its_host_dependencies() -> None:
+    defaults = _yaml(LOCAL_WORKER / "defaults/main.yml")
+    packages = defaults["local_worker_host_guestfs_packages_el10"]
+    assert isinstance(packages, list)
+    assert {
+        "python3.14",
+        "python3.14-devel",
+        "libguestfs-devel",
+        "dnf-plugins-core",
+        "rpm-build",
+        "cpio",
+    } <= set(packages)
+    tasks = yaml.safe_load((LOCAL_WORKER / "tasks/packages_redhat.yml").read_text())
+    install = next(task for task in tasks if task["name"].startswith("Install the EL10 Python"))
+    build = next(task for task in tasks if task["name"].startswith("Build the EL10 Python"))
+    assert tasks.index(install) < tasks.index(build)
+    assert (
+        install["when"]
+        == build["when"]
+        == [
+            "ansible_facts['distribution'] in ['RedHat', 'Rocky', 'AlmaLinux']",
+            "ansible_facts['distribution_major_version'] | int == 10",
+        ]
+    )
+    assert build["ansible.builtin.script"] == "build-el10-guestfs-binding.sh"
+    assert (LOCAL_WORKER / "files/build-el10-guestfs-binding.sh").is_file()
+
+
+def test_el10_rootfs_tools_are_provisioned_without_changing_other_redhat_hosts() -> None:
+    tasks = yaml.safe_load(_text(ROLE.parent / "libvirt_stack/tasks/main.yml"))
+    tools = next(task for task in tasks if task["name"] == "Install EL10 rootfs build tools")
+    assert tools["ansible.builtin.dnf"]["name"] == "guestfs-tools"
+    assert tools["when"] == [
+        "ansible_facts['distribution'] in ['RedHat', 'Rocky', 'AlmaLinux']",
+        "ansible_facts['distribution_major_version'] | int == 10",
+    ]
+
+
+def test_local_host_links_el10_binding_into_checkout_venv() -> None:
+    play = yaml.safe_load(_text(LOCAL_PLAY))[0]
+    python = Environment(undefined=StrictUndefined).from_string(
+        play["vars"]["local_libvirt_host_guestfs_python"]
+    )
+    for distribution, major, expected in (
+        ("Rocky", "10", "/usr/bin/python3.14"),
+        ("RedHat", "10", "/usr/bin/python3.14"),
+        ("AlmaLinux", "10", "/usr/bin/python3.14"),
+        ("Fedora", "44", "/usr/bin/python3"),
+        ("Rocky", "9", "/usr/bin/python3"),
+    ):
+        facts = {"distribution": distribution, "distribution_major_version": major}
+        assert python.render(ansible_facts=facts).strip() == expected
+
+    tasks = play["tasks"]
+    named = {task["name"]: task for task in tasks}
+    source = named["Read the system guestfs module directory"]
+    site = named["Read the project venv site-packages directory"]
+    link = named["Link the system guestfs binding into the project venv"]
+    verify = named["Verify the linked guestfs binding imports from the project venv"]
+    assert source["ansible.builtin.command"]["argv"][0] == "{{ local_libvirt_host_guestfs_python }}"
+    assert tasks.index(source) < tasks.index(site) < tasks.index(link) < tasks.index(verify)
 
 
 def test_provider_authority_host_packages_provision_openssl_and_zlib_headers_per_family() -> None:
@@ -2638,3 +3050,65 @@ def test_session_libvirtd_unit_depends_on_a_runtime_root_it_cannot_create() -> N
     # pairing should be revisited rather than left as two mechanisms for one invariant.
     assert "RuntimeDirectory=" not in unit
     assert "ExecStartPre=" not in unit
+
+
+@pytest.mark.parametrize("pip_version", [None, "21.2.3", "23.0.1", "25.0.1"])
+@pytest.mark.parametrize("managed", [False, True])
+def test_uv_probe_harness_oracle_handles_hosts_without_system_pip(
+    pip_version: str | None,
+    managed: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Exercise the embedded oracle without running the entire Ansible harness. Its real
+    # system-Python invocation is covered by just test-ansible; pip is not a dev dependency.
+    import ast
+    import sysconfig
+
+    tree = ast.parse((ROOT / "deploy/ansible/tests/run-local-worker-host.py").read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "uv_break_system_packages_probe_matches_host"
+    )
+    script = next(
+        ast.literal_eval(node.value)
+        for node in function.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "check_script" for target in node.targets
+        )
+    )
+
+    def pip_probe(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args[1:] == ["-I", "-m", "pip", "--version"]
+        if pip_version is None and kwargs.get("check"):
+            raise subprocess.CalledProcessError(1, args)
+        return subprocess.CompletedProcess(
+            args,
+            1 if pip_version is None else 0,
+            "" if pip_version is None else f"pip {pip_version} from /system/pip (python 3.14)",
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", pip_probe)
+        patch.setattr(sysconfig, "get_path", lambda _: "/system/stdlib")
+        patch.setattr(os.path, "exists", lambda path: managed)
+        exec(script, {})
+    expected = managed or pip_version in {"23.0.1", "25.0.1"}
+    assert capsys.readouterr().out.strip() == str(expected).lower()
+
+
+def test_role_creates_the_server_debug_directory() -> None:
+    """The operator starts the host server and may lack passwordless sudo (#1293, #2955)."""
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    task = next(t for t in tasks if t["name"] == "Create the server debug transcript directory")
+    assert task["ansible.builtin.file"] == {
+        "path": "/var/lib/kdive/debug",
+        "state": "directory",
+        "owner": "{{ live_vm_host_operator_user }}",
+        "group": "{{ live_vm_host_operator_user }}",
+        "mode": "0750",
+        "follow": False,
+    }

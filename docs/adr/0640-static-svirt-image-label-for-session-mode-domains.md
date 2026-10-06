@@ -138,6 +138,21 @@ rather than re-deriving it, so the customizable-type caveat below does not reach
   live proof: a plain `restorecon` refused with `not reset as customized by admin`, and `-F`
   relabeled the same file. `virt_content_t` is customizable on the same footing.
 
+### Amendment (2026-09-25): the host play owns the two parent rules (#2779)
+
+This amends the ownership named in the "three fcontext rules" consequence above, not the
+decision. `install-host.sh` no longer applies anything: since #2437 it only runs
+`just prepare-local-libvirt-host`, and that play did not take the two parent rules over, so a host
+prepared that way carried neither label. The `local_worker_host` role in
+`deploy/ansible/playbooks/local-libvirt-host.yml` now owns `/var/lib/kdive/rootfs(/.*)?` and
+`/var/lib/kdive/install(/.*)?`. On every RedHat-family host it installs
+`policycoreutils-python-utils`; where `getenforce` reports `Enforcing` it also writes both rules
+with `community.general.sefcontext`, which converges an existing rule as `semanage fcontext -a`
+does, and then runs a plain `restorecon -R` on each directory. `build-image.sh` still owns the nested
+`/var/lib/kdive/rootfs/local(/.*)?` rule, and the play does not write it.
+`just check-local-libvirt` now fails on an enforcing host when either directory is not
+`svirt_image_t`.
+
 ## Considered & rejected
 
 - **`security_driver = "none"` in the session daemon config (#2424 option 3).** judgment: a

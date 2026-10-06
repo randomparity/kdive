@@ -16,10 +16,12 @@ live_vm_host_packages:  # noqa: var-naming[no-role-prefix]
   - pahole            # BTF generation for native spine kernels (#2734)
   - kmod               # depmod: host-side kernel module indexing (ADR-0346, #2300, #2331)
   - python3-guestfs    # the system libguestfs binding, built for Ubuntu 26.04's Python 3.14
+  - libselinux1        # host evaluation of guest file-context policy for external boot (ADR-0691)
   - elfutils           # eu-readelf: the live-vm store scripts read the kernel/debuginfo build-id (#1292)
   - debuginfod         # debuginfod-find: fetch matching vmlinux debuginfo by build-id (#1292)
   - git
   - python3-pip        # Ubuntu ships no pip for the system python; uv needs it
+  - python3-packaging  # ansible.builtin.pip imports it on /usr/bin/python3 (tasks/uv.yml, #2906)
   - python3-dev        # Python.h: uv builds drgn + libvirt-python from source
   - build-essential    # gcc/make: uv builds drgn + libvirt-python from source
   - pkg-config
@@ -81,10 +83,13 @@ local_worker_host_packages_redhat:
   - dwarves            # pahole: BTF generation for native spine kernels (#2734)
   - kmod
   - python3-libguestfs
+  - libselinux         # host evaluation of guest file-context policy for external boot (ADR-0691)
   - elfutils
   - elfutils-debuginfod-client
   - git
   - python3-pip
+  - python3-packaging   # ansible.builtin.pip imports it on /usr/bin/python3 (#2906)
+  - python3-devel       # Python.h: uv builds libvirt-python from source
   - gcc
   - make
   - pkgconf-pkg-config
@@ -95,6 +100,25 @@ local_worker_host_packages_redhat:
   - libkdumpfile-devel
   - openssl-devel       # grpcio source build on ppc64le (no wheel, no BoringSSL target, #2666)
   - zlib-devel          # grpcio source build on ppc64le (paired with openssl-devel above, #2666)
+  - policycoreutils-python-utils  # semanage + the seobject bindings sefcontext needs (ADR-0640)
+
+# EL10 has Python 3.14 in AppStream but python3-libguestfs targets system Python 3.12.
+# The source binding builder needs CRB/CodeReady Builder and a configured source repository.
+local_worker_host_guestfs_packages_el10:
+  - python3.14
+  - python3.14-devel
+  - libguestfs-devel
+  - dnf-plugins-core
+  - rpm-build
+  - cpio
+
+# The two parent image directories this role labels svirt_image_t on an SELinux-enforcing RedHat
+# host (ADR-0640, #2779). The nested /var/lib/kdive/rootfs/local rule belongs to build-image.sh
+# and must not be added here: local fcontext rules match last-wins in file_contexts.local, so a
+# second writer would change which rule wins.
+local_worker_host_svirt_image_directories:
+  - /var/lib/kdive/rootfs
+  - /var/lib/kdive/install
 
 # Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
 # testcontainers gate, split into engine and compose halves because they carry different gates.
@@ -133,10 +157,12 @@ local_worker_host_packages_suse:
   - dwarves            # pahole: BTF generation for native spine kernels (#2734)
   - kmod
   - python3-libguestfs
+  - libselinux1        # host evaluation of guest file-context policy for external boot (ADR-0691)
   - elfutils
   - debuginfod-client
   - git
   - python3-pip
+  - python3-packaging   # ansible.builtin.pip imports it on /usr/bin/python3 (#2906)
   - gcc
   - make
   - pkg-config

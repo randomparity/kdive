@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -11,6 +12,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
@@ -22,6 +24,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
@@ -49,7 +52,9 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
 )
+from kdive.serialization import ServerFaultError
 from tests.providers.external_boot_authority.service_support import (
+    _DIGEST_A,
     _DIGEST_B,
     _Adapter,
     _FailingAppendJournal,
@@ -59,6 +64,29 @@ from tests.providers.external_boot_authority.service_support import (
     _takeover,
 )
 from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
+
+
+def test_journal_replay_binds_the_local_timing_snapshot() -> None:
+    timing = LocalExternalBootTimingV1(accel="tcg", console_window_s=9000, deadline_budget_s=12000)
+    legacy = _mutation(_takeover())
+    request = legacy.model_copy(update={"local_timing": timing})
+    record = ExternalBootAuthorityService._record(request, [], JournalPhase.ADMITTED)
+    assert record.local_timing == timing
+    assert ExternalBootAuthorityService._operation_matches(record, request)
+    changed = request.model_copy(
+        update={
+            "local_timing": LocalExternalBootTimingV1(
+                accel="tcg", console_window_s=10000, deadline_budget_s=13000
+            )
+        }
+    )
+    assert not ExternalBootAuthorityService._operation_matches(record, changed)
+    assert not ExternalBootAuthorityService._operation_matches(
+        record, request.model_copy(update={"local_timing": None})
+    )
+    legacy_record = ExternalBootAuthorityService._record(legacy, [], JournalPhase.ADMITTED)
+    assert ExternalBootAuthorityService._operation_matches(legacy_record, legacy)
+    assert "local_timing" not in legacy_record.model_dump(mode="json", by_alias=True)
 
 
 class _PreparationAdapter:
@@ -361,6 +389,132 @@ async def test_preparation_uses_authenticated_lane_and_exact_receipt(tmp_path: P
     assert response.journal_digest == record_digest(terminal)
     assert adapter.calls == ["commit:materialize", "observe"]
     assert repository.records[-1].phase is JournalPhase.TERMINAL
+
+
+def _materialize(
+    takeover: AuthorityTakeoverRequestV1, operation_identity: str
+) -> AuthorityPreparationMutationRequestV1:
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    return AuthorityPreparationMutationRequestV1(
+        **takeover.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={"operation", "operation_identity", "operation_digest", "plan_identity"},
+        ),
+        operation="materialize",
+        operation_identity=operation_identity,
+        operation_digest="sha256:" + "c" * 64,
+        plan_identity=plan.identity,
+        attempt_id=uuid4(),
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(),
+        plan=plan,
+    )
+
+
+def _materialized(request: AuthorityPreparationMutationRequestV1) -> _PreparationAdapter:
+    return _PreparationAdapter(
+        ExternalBootPreparationObservation(
+            state="materialized",
+            binding=ExternalBootActivationBinding(
+                system_id=str(request.system_id),
+                run_id=str(request.run_id),
+                activation_id=str(request.activation_id),
+            ),
+            plan_identity=request.plan_identity,
+            authority=OpaqueProviderRef(
+                ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+            ),
+            operation_identity=request.operation_identity,
+            materialization=external_boot_materialization(request.plan),
+        )
+    )
+
+
+async def _lane_with_terminal_materialize(
+    tmp_path: Path,
+) -> tuple[
+    ExternalBootAuthorityService, _Repository, AuthenticatedPeer, AuthorityTakeoverRequestV1
+]:
+    service, repository, _adapter, peer, takeover = _service(tmp_path)
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    takeover = takeover.model_copy(update={"plan_identity": plan.identity})
+    repository.request = repository.allocating_request = takeover
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    first = _materialize(takeover, "materialize-a")
+    service._adapter = cast(Any, _materialized(first))
+    await service.execute_preparation(peer, first)
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    return service, repository, peer, takeover
+
+
+async def _successor(
+    service: ExternalBootAuthorityService,
+    repository: _Repository,
+    peer: AuthenticatedPeer,
+    successor: AuthorityTakeoverRequestV1,
+) -> None:
+    repository.current = False
+    repository.request = repository.allocating_request = successor
+    await service.acknowledge_takeover(peer, successor)
+    repository.current = True
+
+
+@pytest.mark.anyio
+async def test_another_activations_terminal_preparation_is_not_a_predecessor(
+    tmp_path: Path,
+) -> None:
+    """#2968: a reused System's lane holds the prior activation's records; they are history."""
+    service, repository, peer, takeover = await _lane_with_terminal_materialize(tmp_path)
+    run_id = uuid4()
+    successor = takeover.model_copy(
+        update={
+            "authority_id": uuid4(),
+            "generation": 2,
+            "activation_id": uuid4(),
+            "run_id": run_id,
+            "plan_identity": external_boot_plan(takeover.system_id, run_id).identity,
+            "operation_identity": "takeover-b",
+        }
+    )
+    await _successor(service, repository, peer, successor)
+    second = _materialize(successor, "materialize-b")
+    service._adapter = cast(Any, _materialized(second))
+
+    await service.execute_preparation(peer, second)
+
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert repository.records[-1].activation_id == successor.activation_id
+
+
+@pytest.mark.anyio
+async def test_same_activation_predecessor_mismatch_still_refuses(tmp_path: Path) -> None:
+    """The activation scope must not skip a takeover's own predecessor check (ADR-0713)."""
+    service, repository, peer, takeover = await _lane_with_terminal_materialize(tmp_path)
+    run_id = uuid4()
+    successor = takeover.model_copy(
+        update={
+            "authority_id": uuid4(),
+            "generation": 2,
+            "run_id": run_id,
+            "plan_identity": external_boot_plan(takeover.system_id, run_id).identity,
+            "operation_identity": "takeover-b",
+        }
+    )
+    await _successor(service, repository, peer, successor)
+    drifted = _materialize(successor, "materialize-b")
+    records = len(repository.records)
+
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.execute_preparation(peer, drifted)
+
+    assert (refused.value.category, refused.value.reason) == (
+        "journal_conflict",
+        "predecessor_operation_mismatch",
+    )
+    assert len(repository.records) == records
 
 
 @pytest.mark.anyio
@@ -1069,6 +1223,94 @@ async def test_readiness_requires_exact_local_and_trusted_head(
     assert "authority_instance" not in rejection.__dict__
 
 
+def _rejection_records(caplog: pytest.LogCaptureFixture, message: str) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.message == message]
+
+
+@pytest.mark.anyio
+async def test_readiness_rejection_logs_category_and_bounded_reason(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, repository, _, peer, request = _service(tmp_path)
+    repository.head = None
+    await service.acknowledge_takeover(peer, request)
+
+    async def refuse(*_: Any) -> Any:
+        raise AuthorityServiceError("journal_conflict", reason="orphan_digest_changed")
+
+    monkeypatch.setattr(service, "_recover", refuse)
+    assert not await service.readiness(peer, request)
+
+    (record,) = _rejection_records(caplog, "authority recovery rejected")
+    assert (record.__dict__["category"], record.__dict__["reason"]) == (
+        "journal_conflict",
+        "orphan_digest_changed",
+    )
+
+
+@pytest.mark.anyio
+async def test_readiness_oserror_logs_class_name_never_message(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _, peer, request = _service(tmp_path)
+
+    async def fail(*_: Any) -> Any:
+        raise OSError("/secret/path/payload")
+
+    monkeypatch.setattr(service, "_recover", fail)
+    assert not await service.readiness(peer, request)
+
+    (record,) = _rejection_records(caplog, "authority recovery rejected")
+    assert (record.__dict__["category"], record.__dict__["reason"]) == ("OSError", None)
+    assert "/secret/path" not in repr(record.__dict__)
+
+
+class _RefusingOrphans:
+    def set_serializer(self, serializer: Any) -> None:
+        pass
+
+    async def resolve_recovery_orphan(self, peer: Any, request: Any) -> Any:
+        raise AuthorityServiceError("journal_conflict", reason="orphan_system_mismatch")
+
+
+@pytest.mark.anyio
+async def test_refused_orphan_disposition_logs_category_and_reason_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _, _, peer, _ = _service(tmp_path)
+    service._recovery_orphans = _RefusingOrphans()  # type: ignore[assignment]  # noqa: SLF001
+    orphan_request = AuthorityRecoveryOrphanDispositionRequestV1(
+        request_id=uuid4(), job_id=uuid4(), job_attempt=1
+    )
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await service.resolve_recovery_orphan(peer, orphan_request)
+
+    (record,) = _rejection_records(caplog, "authority recovery orphan rejected")
+    assert (record.__dict__["category"], record.__dict__["reason"]) == (
+        "journal_conflict",
+        "orphan_system_mismatch",
+    )
+    assert (record.__dict__["provider_kind"], record.__dict__["authority_instance"]) == (
+        "untrusted",
+        "unresolved",
+    )
+
+
+@pytest.mark.anyio
+async def test_readiness_fails_closed_on_a_corrupt_stored_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The journal's binding rebuild raises ServerFaultError on a corrupt row (#3009).
+    service, repository, _, peer, request = _service(tmp_path)
+
+    async def _corrupt(*_: object) -> None:
+        raise ServerFaultError("stored ExternalBootPlan failed validation")
+
+    monkeypatch.setattr(repository, "resolve_allocating", _corrupt)
+    assert not await service.readiness(peer, request)
+    assert service.metrics.recovery_failures == {("untrusted", "unresolved"): 1}
+
+
 @pytest.mark.anyio
 async def test_unauthenticated_readiness_cannot_allocate_metric_coordinates(
     tmp_path: Path,
@@ -1095,7 +1337,10 @@ async def test_failed_checkpoint_never_reaches_provider_and_fails_closed(tmp_pat
         await service.acknowledge_takeover(peer, request)
     assert adapter.calls == []
     assert repository.head is None
-    assert not await service.readiness(peer, request)
+    # ADR-0584 amendment (#2793): the refused record is retracted, so the lane again equals
+    # its (absent) trusted head instead of stranding an unanchored record.
+    assert not (tmp_path / f"{request.system_id}.journal").exists()
+    assert await service.readiness(peer, request)
     assert service.metrics.checkpoints == {}
     assert service.metrics.rejections == {
         (request.provider_kind, request.authority_instance, "journal_conflict"): 1
@@ -1666,6 +1911,82 @@ async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: 
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("operation", "category"),
+    [(AuthorityOperation.RECOVER, "source"), (AuthorityOperation.CLEANUP, "absent")],
+)
+async def test_takeover_recovered_local_timed_release_phase_is_adopted_by_successor(
+    tmp_path: Path,
+    operation: AuthorityOperation,
+    category: Literal["source", "absent"],
+) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    root = _takeover().model_copy(
+        update={"purpose": "release", "operation": AuthorityOperation.RELEASE}
+    )
+    repository = _Repository(peer, root)
+
+    class ReleaseAdapter(_Adapter):
+        async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+            await super().observe(request)
+            return AuthorityObservationV1(
+                observation_id=uuid4(), category=category, composite_state=_DIGEST_A
+            )
+
+    adapter = ReleaseAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, root)
+    repository.current = True
+    timing = LocalExternalBootTimingV1(accel="tcg", console_window_s=900, deadline_budget_s=1200)
+    first = _mutation(root).model_copy(
+        update={
+            "operation": operation,
+            "operation_identity": f"release-{operation.value}-1",
+            "local_timing": timing,
+        }
+    )
+    adapter.fail_commit = True
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, first)
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+    successor = root.model_copy(
+        update={"authority_id": uuid4(), "generation": 2, "operation_identity": "takeover-b"}
+    )
+    repository.allocating_request = successor
+    repository.current = False
+    await service.acknowledge_takeover(peer, successor)
+    recovered = next(
+        record
+        for record in reversed(repository.records)
+        if record.phase is JournalPhase.TERMINAL
+        and record.operation_identity == first.operation_identity
+    )
+    assert recovered.local_timing == timing
+
+    repository.request = successor
+    repository.current = True
+    adapter.fail_commit = False
+    retry = first.model_copy(
+        update={
+            "authority_id": successor.authority_id,
+            "generation": 2,
+            "attempt_id": uuid4(),
+            "operation_identity": f"release-{operation.value}-2",
+            "operation_digest": _DIGEST_A,
+        }
+    )
+    observation = await service.execute_mutation(peer, retry)
+
+    assert observation == recovered.observation
+    assert adapter.calls.count(f"commit:{operation.value}") == 1
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("divergence", ["missing", "operation", "phase"])
 async def test_restart_rejects_divergent_trusted_continuation_before_recovery_access(
     tmp_path: Path, divergence: str
@@ -1792,6 +2113,7 @@ async def test_a_head_disagreeing_under_the_same_operation_identity_refuses_the_
         await service.execute_mutation(peer, _mutation(request))
 
     assert caught.value.category == "journal_conflict"
+    assert caught.value.reason == "head_unanchored_commit"
     assert adapter.commit_contexts == []
     assert not any(call.startswith("commit:") for call in adapter.calls)
 
@@ -1815,3 +2137,98 @@ async def test_a_head_moved_by_a_concurrent_takeover_still_lets_the_commit_finis
     await service.execute_mutation(peer, _mutation(request))
 
     assert len(adapter.commit_contexts) == 1
+
+
+class _FailingRetractJournal(FileAuthorityJournal):
+    def retract(self, record: JournalRecordV1) -> None:
+        raise OSError("injected retraction failure")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "category"), [("superseded", "superseded"), ("conflict", "journal_conflict")]
+)
+async def test_refused_anchor_retracts_its_record(
+    tmp_path: Path,
+    status: Literal["superseded", "conflict"],
+    category: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    lane = tmp_path / f"{takeover.system_id}.journal"
+    anchored = lane.read_bytes()
+    repository.advance_status = status
+
+    with caplog.at_level("WARNING"), pytest.raises(AuthorityServiceError, match=category):
+        await service.execute_mutation(peer, _mutation(takeover))
+
+    (rejected,) = [r for r in caplog.records if r.message == "authority request rejected"]
+    assert rejected.__dict__["category"] == category
+    assert rejected.__dict__["reason"] == ("checkpoint_refused" if status == "conflict" else None)
+    labels = (takeover.provider_kind, takeover.authority_instance, category)
+    assert set(service.metrics.rejections) == {labels}
+    assert lane.read_bytes() == anchored
+    assert adapter.calls == []
+    assert [path.name.split(".")[1] for path in (tmp_path / "retracted").iterdir()] == [
+        str(len(repository.records) + 1)
+    ]
+
+
+@pytest.mark.anyio
+async def test_lane_anchors_again_after_a_superseded_refusal(tmp_path: Path) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    repository.advance_status = "superseded"
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_mutation(peer, _mutation(takeover))
+    repository.advance_status = "advanced"
+
+    observation = await service.execute_mutation(peer, _mutation(takeover))
+
+    assert observation.category == "target"
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+
+
+@pytest.mark.anyio
+async def test_anchor_error_keeps_the_unanchored_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service, repository, _adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    lane = tmp_path / f"{takeover.system_id}.journal"
+    anchored = lane.read_bytes()
+
+    async def lost_advance(*_args: object) -> str:
+        raise RuntimeError("advance outcome unknown")
+
+    monkeypatch.setattr(repository, "advance", lost_advance)
+    with pytest.raises(RuntimeError, match="outcome unknown"):
+        await service.execute_mutation(peer, _mutation(takeover))
+
+    assert lane.read_bytes().startswith(anchored)
+    assert len(lane.read_bytes().splitlines()) == len(anchored.splitlines()) + 1
+    assert not (tmp_path / "retracted").exists()
+
+
+@pytest.mark.anyio
+async def test_retraction_failure_still_raises_the_refusal(tmp_path: Path) -> None:
+    _unused, repository, adapter, peer, takeover = _service(tmp_path)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: _FailingRetractJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    lane = tmp_path / f"{takeover.system_id}.journal"
+    anchored = lane.read_bytes()
+    repository.advance_status = "conflict"
+
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await service.execute_mutation(peer, _mutation(takeover))
+
+    assert len(lane.read_bytes().splitlines()) == len(anchored.splitlines()) + 1

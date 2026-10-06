@@ -146,6 +146,9 @@ kdump path not armed) is `readiness_failure` ("up but wrong"). A hard libvirt er
 is a constructor parameter, so the handler is unit-testable without a host or a real wait
 and the salvaged v1 checks land behind one seam.
 
+> **Amended by [ADR-0679](0679-local-libvirt-clean-power-off.md) (#2757):** boot stops a
+> running domain with a bounded clean shutdown; `destroy` is the fallback.
+
 ### 7. Idempotency reuses the build mechanisms; install/boot use the `run_step` helper directly
 
 `runs.install`/`runs.boot` enqueue with `dedup_key = f"{run_id}:install"` /

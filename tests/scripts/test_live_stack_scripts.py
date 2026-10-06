@@ -925,12 +925,67 @@ def _published_contract(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 def _sourced(script: Path, snippet: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Source `script` and run `snippet` under exactly `env` (no ambient merge)."""
     return subprocess.run(
-        ["bash", "-c", f'source "{script}"\n{snippet}'],
+        ["bash", "-c", f'source "{script}" || exit $?\n{snippet}'],
         capture_output=True,
         text=True,
         check=False,
         env=env,
     )
+
+
+@pytest.mark.parametrize(
+    "script",
+    (ROOT / "scripts/live-stack/env.sh", ROOT / "examples/local-libvirt/env.sh"),
+)
+@pytest.mark.parametrize(
+    ("options", "expected_pipefail"),
+    (("set +e +u\nset +o pipefail", "off"), ("set -euo pipefail", "on")),
+)
+def test_sourced_env_preserves_caller_options_and_exports(
+    tmp_path: Path, script: Path, options: str, expected_pipefail: str
+) -> None:
+    _, staged = _published_contract(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'{options}\nbefore=$-\nsource "{script}"\n'
+            '[[ "$-" == "$before" ]] || exit 17\n'
+            "if shopt -qo pipefail; then actual_pipefail=on; else actual_pipefail=off; fi\n"
+            '[[ "$actual_pipefail" == "$expected_pipefail" ]] || exit 18\n'
+            'bash -c \'[[ -n "$KDIVE_LIBVIRT_URI" && -n "$KDIVE_SERVER_DATABASE_URL" ]]\'',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**staged, "expected_pipefail": expected_pipefail},
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "script",
+    (ROOT / "scripts/live-stack/env.sh", ROOT / "examples/local-libvirt/env.sh"),
+)
+def test_sourced_env_propagates_required_libvirt_failure_with_errexit_off(
+    tmp_path: Path, script: Path
+) -> None:
+    _, staged = _broken_contract(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'set +e +u\nset +o pipefail\nsource "{script}"\n'
+            'status=$?\nprintf "%s|%s" "$status" "$-"',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=staged,
+    )
+    status, options = result.stdout.split("|", 1)
+    assert int(status) != 0
+    assert "e" not in options and "u" not in options
 
 
 def test_live_stack_libvirt_uri_reaches_child_processes(tmp_path: Path) -> None:
@@ -2075,9 +2130,7 @@ def test_libvirt_uri_parser_is_safe_to_source_twice() -> None:
 
 
 def test_local_libvirt_example_env_resolves_the_published_endpoint(tmp_path: Path) -> None:
-    """The example wrapper keeps working once the live-stack env owns the resolution: it must
-    still source cleanly under `set -euo pipefail` (demo-up.sh sources it first and does nothing
-    otherwise) and still reach its own values past the shared block."""
+    """The example wrapper reaches its own values after the shared endpoint resolution block."""
     _, staged = _published_contract(tmp_path)
     staged.pop("KDIVE_PROJECT", None)
     result = _sourced(
@@ -2138,6 +2191,74 @@ def test_local_libvirt_example_guest_image_override_wins_on_ppc64le(tmp_path: Pa
     assert result.stdout == "/custom/path.qcow2"
 
 
+def test_local_libvirt_example_demo_workspace_defaults_to_kernel_src(tmp_path: Path) -> None:
+    """#2760: with no explicit override, KDIVE_DEMO_WORKSPACE (where demo-up.sh installs
+    .mcp.json) must fall back to KDIVE_KERNEL_SRC, so a developer who has no separate workspace
+    tree sees the unchanged pre-#2760 behavior."""
+    _, staged = _published_contract(tmp_path)
+    kernel_src = tmp_path / "linux"
+    kernel_src.mkdir()
+    staged["KDIVE_KERNEL_SRC"] = str(kernel_src)
+    staged.pop("KDIVE_DEMO_WORKSPACE", None)
+    result = _sourced(
+        ROOT / "examples/local-libvirt/env.sh",
+        'bash -c \'printf "%s" "${KDIVE_DEMO_WORKSPACE-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(kernel_src)
+
+
+def test_local_libvirt_example_demo_workspace_override_wins(tmp_path: Path) -> None:
+    """#2760: an explicit KDIVE_DEMO_WORKSPACE must win over KDIVE_KERNEL_SRC, which is the whole
+    point -- it lets a demo bring-up install .mcp.json somewhere other than a tree a live proof
+    is using as its kernel fixture."""
+    _, staged = _published_contract(tmp_path)
+    kernel_src = tmp_path / "linux"
+    kernel_src.mkdir()
+    workspace = tmp_path / "workspace"
+    staged["KDIVE_KERNEL_SRC"] = str(kernel_src)
+    staged["KDIVE_DEMO_WORKSPACE"] = str(workspace)
+    result = _sourced(
+        ROOT / "examples/local-libvirt/env.sh",
+        'bash -c \'printf "%s" "${KDIVE_DEMO_WORKSPACE-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(workspace)
+
+
+def test_local_libvirt_example_demo_workspace_stays_unset_with_no_kernel_src(
+    tmp_path: Path,
+) -> None:
+    """When KDIVE_KERNEL_SRC itself resolves to nothing (unset and ~/src/linux does not exist),
+    KDIVE_DEMO_WORKSPACE must also stay unset rather than defaulting to an empty string --
+    demo-up.sh's own unset check is what reports the actionable error."""
+    _, staged = _published_contract(tmp_path)
+    staged["HOME"] = str(tmp_path)
+    staged.pop("KDIVE_KERNEL_SRC", None)
+    staged.pop("KDIVE_DEMO_WORKSPACE", None)
+    result = _sourced(
+        ROOT / "examples/local-libvirt/env.sh",
+        'bash -c \'printf "%s" "${KDIVE_DEMO_WORKSPACE-unset}"\'',
+        staged,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "unset"
+
+
+def test_demo_up_installs_mcp_json_into_demo_workspace_not_kernel_src() -> None:
+    """#2760: `.mcp.json` must land in KDIVE_DEMO_WORKSPACE, independent of KDIVE_KERNEL_SRC --
+    the same tree the live_vm/live_stack proofs use as their kernel fixture -- so a demo bring-up
+    can no longer add files to a tree a proof run also uses."""
+    text = (ROOT / "examples/local-libvirt/demo-up.sh").read_text()
+    assert (
+        '"${KDIVE_PYTHON}" - "${example_dir}/mcp.json" "${KDIVE_DEMO_WORKSPACE}/.mcp.json"' in text
+    )
+    assert "KDIVE_KERNEL_SRC}/.mcp.json" not in text
+    assert 'if [[ -z "${KDIVE_DEMO_WORKSPACE:-}" ]]; then' in text
+
+
 def test_demo_up_guest_image_hint_names_the_shared_catalog_entry() -> None:
     """The "no guest image yet" hint must reuse env.sh's arch-derived guest_image_name (#2669)
     rather than hardcoding the x86_64 catalog entry, so the build hint and the runtime default
@@ -2156,9 +2277,8 @@ def test_client_urls_derive_from_the_configurable_ports() -> None:
     assert "http://localhost:${KDIVE_OIDC_PORT}/default" in env
 
 
-def test_live_stack_scripts_are_strict_bash() -> None:
+def test_executable_live_stack_scripts_are_strict_bash() -> None:
     for name in (
-        "env.sh",
         "apply-migrations.sh",
         "stack-services.sh",
         "stack-down.sh",
@@ -3331,7 +3451,11 @@ def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> 
 def test_lifecycle_launcher_covers_required_worker_settings_and_authority_geometry() -> None:
     from kdive.processes.lifecycle.systemd.systemd_worker_contract import WorkerSettings
 
-    program = LIFECYCLE.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    program = next(
+        chunk.split("\nPY\n", 1)[0]
+        for chunk in LIFECYCLE.read_text().split("<<'PY'\n")[1:]
+        if "LifecycleRequest.model_validate" in chunk
+    )
     dictionaries = [node for node in ast.walk(ast.parse(program)) if isinstance(node, ast.Dict)]
     settings_keys = next(
         keys
@@ -3345,9 +3469,166 @@ def test_lifecycle_launcher_covers_required_worker_settings_and_authority_geomet
         for name in WorkerSettings.model_fields
         if name.startswith("authority_") or name == "external_boot_capacity_bytes"
     }
-    assert required | authority <= settings_keys
+    assert required | authority | {"systems_toml"} <= settings_keys
     assert settings_keys <= WorkerSettings.model_fields.keys()
     assert "libvirt_recovery_root" not in settings_keys
+
+
+_REMOTE_INVENTORY = """schema_version = 2
+
+[[image]]
+provider = "remote-libvirt"
+name = "remote-base"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+[image.source]
+kind = "staged"
+volume = "remote-base.qcow2"
+
+[[remote_libvirt]]
+name = "remote-a"
+uri = "qemu+tls://host.example/system"
+gdb_addr = "192.0.2.10"
+gdbstub_range = "47000:47099"
+client_cert_ref = "remote-libvirt/clientcert.pem"
+client_key_ref = "remote-libvirt/clientkey.pem"  # pragma: allowlist secret
+ca_cert_ref = "remote-libvirt/cacert.pem"
+base_image = "remote-base"
+cost_class = "remote"
+vcpus = 2
+memory_mb = 2048
+"""
+
+
+def _lifecycle_start_with_inventory(
+    tmp_path: Path,
+    inventory: str | None,
+    *,
+    access_ok: bool = True,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """Run `request start 1` with the launcher's inventory resolution and a stubbed socket."""
+    systems_toml = tmp_path / "systems.toml"
+    if inventory is not None:
+        systems_toml.write_text(inventory, encoding="utf-8")
+    probe = tmp_path / "request-probe"
+    access_log = tmp_path / "access-log"
+    (tmp_path / "sitecustomize.py").write_text(
+        "import os\n"
+        "from kdive.processes.lifecycle.systemd import systemd_worker_control as control\n"
+        "from kdive.processes.lifecycle.systemd.systemd_worker_contract import LifecycleResponse\n"
+        "def request_path(path, request):\n"
+        "    with open(os.environ['INVENTORY_PROBE'], 'w') as handle:\n"
+        "        handle.write(repr(request.settings.systems_toml))\n"
+        "    return LifecycleResponse(ok=True, code='ok', message='ok', retry_action='none')\n"
+        "control.request_path = request_path\n",
+        encoding="utf-8",
+    )
+    env: dict[str, str] = {
+        **os.environ,
+        "PYTHONPATH": str(tmp_path),
+        "KDIVE_PYTHON": sys.executable,
+        "INVENTORY_PROBE": str(probe),
+        "KDIVE_SYSTEMS_TOML": str(systems_toml),
+        "KDIVE_ROOTFS_DIR": "/tmp/rootfs",
+        "KDIVE_BUILD_WORKSPACE": "/tmp/build",
+        "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
+        "KDIVE_INSTALL_STAGING": "/tmp/install",
+        "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
+        "KDIVE_KERNEL_SRC": "/tmp/kernel",
+        "KDIVE_WORKER_DATABASE_URL": "postgresql://worker-member/kdive",
+        "AWS_ACCESS_KEY_ID": "access-key",
+        "AWS_SECRET_ACCESS_KEY": "secret-key",  # pragma: allowlist secret
+        **(extra_env or {}),
+    }
+    if "KDIVE_SECRETS_ROOT" not in (extra_env or {}):
+        env.pop("KDIVE_SECRETS_ROOT", None)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"\n'
+            'uri="$2" log="$3" access_ok="$4"\n'
+            "require_compatible_lifecycle() { :; }\n"
+            "require_start_prerequisites() { :; }\n"
+            'load_published_libvirt_uri() { printf %s "$uri"; }\n'
+            'require_worker_path_access() { printf "%s %s\\n" "$1" "$2" >>"$log"; '
+            "[[ $access_ok == yes ]]; }\n"
+            "request start 1",
+            "bash",
+            str(LIFECYCLE),
+            "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+            str(access_log),
+            "yes" if access_ok else "no",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    return result, probe, access_log
+
+
+def test_lifecycle_start_sends_the_inventory_when_a_remote_instance_is_declared(
+    tmp_path: Path,
+) -> None:
+    result, probe, access_log = _lifecycle_start_with_inventory(tmp_path, _REMOTE_INVENTORY)
+
+    assert result.returncode == 0, result.stderr
+    assert probe.read_text() == repr(str(tmp_path / "systems.toml"))
+    assert access_log.read_text().splitlines() == [
+        f"{tmp_path / 'systems.toml'} r",
+        "/var/lib/kdive/secrets x",
+    ]
+
+
+@pytest.mark.parametrize("inventory", [None, "schema_version = 2\n"])
+def test_lifecycle_start_omits_the_inventory_for_a_local_only_stack(
+    tmp_path: Path, inventory: str | None
+) -> None:
+    result, probe, access_log = _lifecycle_start_with_inventory(tmp_path, inventory)
+
+    assert result.returncode == 0, result.stderr
+    assert probe.read_text() == "None"
+    assert not access_log.exists()
+
+
+def test_lifecycle_start_refuses_a_non_default_secrets_root_with_a_remote_instance(
+    tmp_path: Path,
+) -> None:
+    result, probe, _ = _lifecycle_start_with_inventory(
+        tmp_path, _REMOTE_INVENTORY, extra_env={"KDIVE_SECRETS_ROOT": str(tmp_path / "secrets")}
+    )
+
+    assert result.returncode == 2
+    assert "KDIVE_SECRETS_ROOT" in result.stderr
+    assert not probe.exists()
+
+
+def test_lifecycle_start_refuses_a_relative_inventory_with_a_remote_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "relative.toml").write_text(_REMOTE_INVENTORY, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    result, probe, _ = _lifecycle_start_with_inventory(
+        tmp_path, None, extra_env={"KDIVE_SYSTEMS_TOML": "relative.toml"}
+    )
+
+    assert result.returncode == 2
+    assert "KDIVE_SYSTEMS_TOML" in result.stderr
+    assert not probe.exists()
+
+
+def test_lifecycle_start_refuses_an_inventory_a_slot_cannot_read(tmp_path: Path) -> None:
+    result, probe, access_log = _lifecycle_start_with_inventory(
+        tmp_path, _REMOTE_INVENTORY, access_ok=False
+    )
+
+    assert result.returncode != 0
+    assert access_log.read_text().splitlines() == [f"{tmp_path / 'systems.toml'} r"]
+    assert not probe.exists()
 
 
 def test_lifecycle_start_rejects_mismatched_authority_geometry_before_request() -> None:
@@ -4111,6 +4392,7 @@ def test_backends_stage_waits_only_on_the_long_running_backends(tmp_path: Path) 
     assert result.returncode == 0, result.stderr
     wait = [ln for ln in log.read_text().splitlines() if "--wait" in ln]
     assert len(wait) == 1, wait
+    assert "--no-recreate" in wait[0], wait[0]
     assert wait[0].endswith("postgres seaweedfs oidc"), wait[0]
     assert "seaweedfs-init" not in wait[0]
 
@@ -4169,13 +4451,54 @@ def test_services_stage_reconciles_the_app_tier(tmp_path: Path) -> None:
     symptom is a 401 that reads as an auth bug. The run fails later on the fake checkout's absent
     worker-lifecycle.sh; what is asserted is what reached `docker` before that.
     """
-    _, log = _run_stack_services(tmp_path, "--stage", "services", "--skip-libvirt")
+    _, log = _run_stack_services(
+        tmp_path,
+        "--stage",
+        "services",
+        "--skip-libvirt",
+        env_extra={"KDIVE_DEBUG_DIR": str(tmp_path)},
+    )
     recorded = log.read_text()
     assert "rm -sf migrate server worker reconciler" in recorded
     # The reconcile is the contract; this is the guard on the harness itself. --skip-libvirt is
     # legal under --stage services (only --stage backends rejects it), so the stage gate is still
     # exercised while the privileged block stays unreached.
     assert "REFUSED" not in recorded, f"bring-up attempted a privileged call: {recorded}"
+
+
+def _services_up_to_host_processes(tmp_path: Path, debug_dir: Path) -> str:
+    """Run `--skip-libvirt` bring-up and stop at `restart_host_processes`' first line.
+
+    `KDIVE_WORKER_COUNT=bad` fails `configured_worker_count` before any process is touched, so the
+    run ends right after the debug-dir step. Returns the recorded invocation log.
+    """
+    _, log = _run_stack_services(
+        tmp_path,
+        "--skip-libvirt",
+        env_extra={
+            "KDIVE_SKIP_OBS": "1",
+            "KDIVE_DEBUG_DIR": str(debug_dir),
+            "KDIVE_WORKER_COUNT": "bad",
+        },
+    )
+    return log.read_text()
+
+
+def test_services_bring_up_creates_the_debug_dir(tmp_path: Path) -> None:
+    """The host server writes debug transcripts there and nothing else creates it (#2955)."""
+    user = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    debug_dir = tmp_path / "debug"
+    recorded = _services_up_to_host_processes(tmp_path, debug_dir)
+    expected = f"REFUSED sudo install -d -o {user} -g {user} -m 0750 {debug_dir}\n"
+    assert expected in recorded, recorded
+
+
+def test_services_bring_up_skips_a_writable_debug_dir(tmp_path: Path) -> None:
+    """A pre-provisioned operator-owned dir needs no sudo, which the account may lack (#1293)."""
+    debug_dir = tmp_path / "debug"
+    debug_dir.mkdir()
+    recorded = _services_up_to_host_processes(tmp_path, debug_dir)
+    assert str(debug_dir) not in recorded, recorded
 
 
 @pytest.mark.parametrize("operation", ("status", "stop", "diagnostics", "recover"))

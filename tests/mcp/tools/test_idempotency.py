@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import cast
 
+import pytest
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
+from kdive.jobs import queue
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.support import _idempotency
 
@@ -136,3 +140,18 @@ def test_keyed_mutation_maps_cross_kind_key_collision_to_conflict(migrated_url: 
         assert resp.data["reason"] == "idempotency_key_in_use"
 
     asyncio.run(scenario())
+
+
+def test_dedup_replay_refuses_a_clock_dependent_recycle_policy() -> None:
+    """#2889: whether a lapsed final attempt recycles is decided only in enqueue's UPDATE."""
+    assert queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED not in _idempotency._RECYCLED
+
+    async def _run() -> None:
+        with pytest.raises(ValueError, match="database clock"):
+            await _idempotency.dedup_replay(
+                cast(AsyncConnection, None),
+                "dk",
+                recycle=queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED,
+            )
+
+    asyncio.run(_run())

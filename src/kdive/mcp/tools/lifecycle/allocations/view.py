@@ -19,7 +19,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
 from kdive.mcp.exposure import tool_visible, visible_next_actions
-from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.responses import InvalidEnvelopeError, JsonValue, ToolResponse
 from kdive.mcp.tools._common import (
     DEFAULT_LIST_LIMIT,
     MAX_WAIT_S,
@@ -35,6 +35,7 @@ from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_erro
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
+from kdive.mcp.tools._common import project_filter as _project_filter
 from kdive.mcp.tools.lifecycle.allocations.common import (
     POLL_INTERVAL_S,
     envelope_for_allocation,
@@ -111,16 +112,6 @@ class AllocationsListRequest:
     cursor: str | None = None
 
 
-def _viewer_projects(ctx: RequestContext) -> list[str]:
-    """Projects the caller may view: a member project with any granted role."""
-    return [p for p in ctx.projects if ctx.roles.get(p) is not None]
-
-
-def _project_filter(ctx: RequestContext, project: str | None) -> list[str]:
-    readable = _viewer_projects(ctx)
-    return readable if project is None else [project] if project in readable else []
-
-
 async def list_allocations(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
@@ -179,7 +170,7 @@ async def list_allocations(
                         Allocation.model_validate(row), ctx, server_time=server_time
                     )
                 )
-            except ValueError:
+            except ValueError, InvalidEnvelopeError:
                 _log.warning("allocation row violates the response invariant; degraded")
                 responses.append(
                     ToolResponse.failure(

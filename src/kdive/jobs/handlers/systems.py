@@ -27,7 +27,10 @@ from kdive.domain.capacity.state import IllegalTransition, SnapshotState, System
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
-from kdive.domain.lifecycle.rules import PROVISION_SUPERSEDED_SYSTEM_STATES
+from kdive.domain.lifecycle.rules import (
+    PROVISION_SUPERSEDED_SYSTEM_STATES,
+    TERMINAL_SYSTEM_STATES,
+)
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.connectivity.ssh_authorize import authorize_ssh_key_handler
@@ -701,17 +704,28 @@ async def teardown_handler(
     resolver: ProviderResolver,
     artifact_store: RetiredKeyBatchDeleter,
 ) -> str | None:
-    """Destroy the domain, reclaim console artifacts, and drive the System ``-> torn_down``."""
+    """Destroy the domain, reclaim console artifacts, and drive the System ``-> torn_down``.
+
+    A terminal System (``torn_down`` or ``failed``) takes no state transition: its provider and
+    core reclaim re-run idempotently and it keeps its state, so a teardown queued behind a
+    provision that failed reclaims the leftovers instead of attempting the illegal
+    ``failed -> tearing_down`` move (ADR-0435 amendment, #2908). A ``reprovisioning`` System has
+    no teardown edge either, so a teardown that races a reprovision fails once as a terminal
+    ``conflict`` rather than burning attempts; ``systems.teardown`` re-runs it after the
+    reprovision settles (#2928). Any external-boot activation, restricting or completed, refuses
+    the same way: the authority still owns the host domain, and only the authority-marked teardown
+    that ``systems.teardown`` enqueues may destroy it (ADR-0620, #2966).
+    """
     system_id = UUID(load_payload(job, TeardownPayload).system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
             return None
-        activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_restricting_for_system(conn, system_id)
+        activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system_id)
         if activation is not None:
             raise CategorizedError(
-                "ordinary teardown is fenced by external-boot authority while an activation "
-                "restricts this System",
+                "ordinary teardown is fenced by external-boot authority: the provider-host "
+                "authority owns this System's host domain (ADR-0620); run systems.teardown",
                 category=ErrorCategory.CONFLICT,
                 details={
                     "reason": "external_boot_teardown_not_supported",
@@ -720,8 +734,16 @@ async def teardown_handler(
                 },
                 terminal=True,
             )
+        if system.state is SystemState.REPROVISIONING:
+            raise CategorizedError(
+                "teardown refused: the System is mid-reprovision and has no teardown transition; "
+                "re-run systems.teardown once it is ready or failed",
+                category=ErrorCategory.CONFLICT,
+                details={"current_status": system.state.value},
+                terminal=True,
+            )
         domain_name = system.domain_name or domain_name_for(system_id)
-        if system.state not in {SystemState.TEARING_DOWN, SystemState.TORN_DOWN}:
+        if system.state not in {SystemState.TEARING_DOWN, *TERMINAL_SYSTEM_STATES}:
             await SYSTEMS.update_state(conn, system_id, SystemState.TEARING_DOWN)
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)

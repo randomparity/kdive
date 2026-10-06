@@ -67,6 +67,27 @@ def test_closed_cas_failure_rejects_crossed_action_or_terminal() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("category", "valid"), [("infrastructure_failure", True), ("boot_timeout", False)]
+)
+def test_authority_reason_requires_infrastructure_failure(category: str, valid: bool) -> None:
+    result = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "fail",
+            "error_category": category,
+            "failure_context": {"phase": "commit", "authority_reason": "provider-conflict"},
+            "terminal": False,
+        }
+    )
+    if valid:
+        failure = ExternalBootAuthorityFailureV1.model_validate(result)
+        assert cast(Any, failure.result).failure_context.authority_reason == "provider-conflict"
+    else:
+        with pytest.raises(ValidationError, match="authority reason"):
+            ExternalBootAuthorityFailureV1.model_validate(result)
+
+
 def test_authority_executor_protocol_has_mutation_contract() -> None:
     assert get_type_hints(ExternalBootAuthorityExecutor.execute) == {
         "request": AuthorityMutationRequestV1,
@@ -418,6 +439,9 @@ def test_worker_does_not_continue_a_mismatched_or_superseded_deadline(monkeypatc
         marker["operation_identity"] = "different"
         complete = AsyncMock(return_value=queue.ExternalBootCommitStatus.SUPERSEDED)
         monkeypatch.setattr(queue, "complete_external_boot", complete)
+        monkeypatch.setattr(
+            queue, "external_boot_attempt_is_running", AsyncMock(return_value=False)
+        )
 
         mismatched = await _worker()._finalize_handler(_job(marker), _span(), _task_result(carrier))
         superseded = await _worker()._finalize_handler(
@@ -858,3 +882,48 @@ def test_worker_preserves_ordinary_completion(monkeypatch) -> None:
         authority.assert_not_awaited()
 
     asyncio.run(exercise())
+
+
+async def _finalize_superseded_failure(monkeypatch, attempt_is_running: AsyncMock) -> Job:
+    carrier = _failure(terminal=False)
+    job = _job(_marker(carrier))
+    monkeypatch.setattr(
+        queue,
+        "fail_external_boot",
+        AsyncMock(return_value=queue.ExternalBootCommitStatus.SUPERSEDED),
+    )
+    monkeypatch.setattr(queue, "external_boot_attempt_is_running", attempt_is_running)
+    continued = await _worker()._finalize_handler(
+        job, _span(), _task_result(error=ExternalBootAuthorityFailure(carrier))
+    )
+    assert continued is False
+    attempt_is_running.assert_awaited_once()
+    return job
+
+
+def test_worker_names_a_refused_commit_for_a_running_attempt(monkeypatch, caplog) -> None:
+    job = asyncio.run(_finalize_superseded_failure(monkeypatch, AsyncMock(return_value=True)))
+
+    assert (
+        f"external boot job {job.id} attempt {job.attempt} is still running but its commit was "
+        "refused (worker credential, allocation or state precondition); result dropped"
+    ) in caplog.messages
+    assert not any("was reclaimed" in message for message in caplog.messages)
+
+
+def test_worker_keeps_the_reclaim_line_after_a_reclaim(monkeypatch, caplog) -> None:
+    job = asyncio.run(_finalize_superseded_failure(monkeypatch, AsyncMock(return_value=False)))
+
+    assert f"external boot job {job.id} was reclaimed; result dropped" in caplog.messages
+    assert not any("still running" in message for message in caplog.messages)
+
+
+def test_worker_survives_an_unreadable_attempt_state(monkeypatch, caplog) -> None:
+    job = asyncio.run(
+        _finalize_superseded_failure(monkeypatch, AsyncMock(side_effect=OSError("pool closed")))
+    )
+
+    assert (
+        f"external boot job {job.id} commit superseded; attempt state unreadable; result dropped"
+    ) in caplog.messages
+    assert not any("was reclaimed" in message for message in caplog.messages)

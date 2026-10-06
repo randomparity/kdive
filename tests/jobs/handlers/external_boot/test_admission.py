@@ -31,6 +31,7 @@ from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import BootPayload, TeardownPayload, dump_payload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.external_boot_authority.protocol import Purpose
 from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 from tests.db.remote_module_attempt_obligations_support import _evidence
 from tests.jobs.handlers.external_boot.conftest import resolver_for
@@ -191,6 +192,31 @@ def test_preparing_with_fixed_server_route_needs_no_direct_provider_ports(
             operation_identity="activate-with-fixed-route",
             resolver=provider_resolver(external_boot=None, external_boot_preparation=None),
             preparation_plan=vehicle.plan,
+        )
+        assert kind is JobKind.BOOT
+        assert payload.external_boot_authority_v1 is not None
+        assert payload.external_boot_authority_v1.authority_instance == AUTHORITY_INSTANCE
+
+    _drive(migrated_url, body)
+
+
+def test_release_with_fixed_server_route_needs_no_direct_provider_ports(
+    migrated_url: str,
+) -> None:
+    # An authority deployment's server never binds the provider port; every later operation on
+    # an activation it admitted must route to the same fixed authority, not only preparation.
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(conn, vehicle, purpose="release", activation_state="active")
+        config_registry.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": AUTHORITY_INSTANCE})
+        kind, payload = await build_external_boot_payload(
+            conn,
+            activation_id=vehicle.activation_id,
+            purpose="release",
+            operation="release",
+            provider_kind="local-libvirt",
+            authority_instance=AUTHORITY_INSTANCE,
+            operation_identity="release-with-fixed-route",
+            resolver=provider_resolver(external_boot=None, external_boot_preparation=None),
         )
         assert kind is JobKind.BOOT
         assert payload.external_boot_authority_v1 is not None
@@ -440,6 +466,77 @@ def test_the_teardown_purpose_is_the_only_one_that_yields_the_teardown_kind(
     _drive(migrated_url, body)
 
 
+@pytest.mark.parametrize("purpose", ["activate", "teardown"])
+def test_only_teardown_admits_a_preparing_activation_without_its_plan(
+    migrated_url: str, purpose: Purpose
+) -> None:
+    """#2961: teardown never prepares, so it has no preparation plan to carry."""
+
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(
+            conn,
+            vehicle,
+            purpose=purpose,
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+
+        async def build() -> tuple[JobKind, BootPayload | TeardownPayload]:
+            return await build_external_boot_payload(
+                conn,
+                activation_id=vehicle.activation_id,
+                purpose=purpose,
+                operation=purpose,
+                provider_kind="local-libvirt",
+                authority_instance=AUTHORITY_INSTANCE,
+                operation_identity=f"{purpose}-1",
+                resolver=resolver_for(vehicle),
+            )
+
+        if purpose == "activate":
+            with pytest.raises(CategorizedError, match="requires its durable preparation plan"):
+                await build()
+            return
+        kind, payload = await build()
+        assert kind is JobKind.TEARDOWN
+        assert isinstance(payload, TeardownPayload)
+
+    _drive(migrated_url, body)
+
+
+def test_teardown_still_refuses_a_supplied_plan_that_does_not_match(migrated_url: str) -> None:
+    """#2961: teardown needs no plan, but a plan it is given is identity-checked."""
+
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(
+            conn,
+            vehicle,
+            purpose="teardown",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+        foreign = vehicle.plan.model_copy(
+            update={"ownership": vehicle.plan.ownership.model_copy(update={"run_id": str(uuid4())})}
+        )
+
+        with pytest.raises(CategorizedError, match="plan does not match the activation"):
+            await build_external_boot_payload(
+                conn,
+                activation_id=vehicle.activation_id,
+                purpose="teardown",
+                operation="teardown",
+                provider_kind="local-libvirt",
+                authority_instance=AUTHORITY_INSTANCE,
+                operation_identity="teardown-1",
+                resolver=resolver_for(vehicle),
+                preparation_plan=foreign,
+            )
+
+    _drive(migrated_url, body)
+
+
 def test_the_built_payload_survives_dump_and_load(migrated_url: str) -> None:
     """What the helper returns must be enqueueable, so it goes through the real chokepoint."""
 
@@ -458,8 +555,83 @@ def test_the_built_payload_survives_dump_and_load(migrated_url: str) -> None:
         )
 
         dumped = dump_payload(kind, payload)
-        assert set(dumped) == {"run_id", "external_boot_authority_v1"}
+        assert set(dumped) == {"run_id", "external_boot_authority_v1", "local_timing"}
+        assert dumped["local_timing"]["console_window_s"] == 9000
+        assert dumped["local_timing"]["deadline_budget_s"] == 12000
         decoded = load_payload(build_job(kind, dumped), BootPayload)
         assert decoded == payload
+
+    _drive(migrated_url, body)
+
+
+@pytest.mark.parametrize(
+    ("activation_state", "receipts", "refusal"),
+    [
+        ("preparing", 0, None),
+        ("preparing", 1, None),
+        ("preparing", 2, "PREP evidence is ambiguous"),
+        ("recovery_failed", 0, "no retained PREP evidence"),
+    ],
+    ids=["none", "one", "two", "recovery-failed"],
+)
+def test_remote_preparing_teardown_prep_receipt(
+    migrated_url: str, activation_state: str, receipts: int, refusal: str | None
+) -> None:
+    """#3016: only a preparing activation's teardown may lack the PREP receipt."""
+
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        preparing = activation_state == "preparing"
+        await seed_case(
+            conn,
+            vehicle,
+            purpose="teardown",
+            activation_state=activation_state,
+            attempt_state="recovering" if preparing else "failed",
+            with_materialization=not preparing,
+            with_recovery_point=not preparing,
+        )
+        await conn.execute(
+            "UPDATE resources SET kind='remote-libvirt' WHERE id=("
+            "SELECT a.resource_id FROM systems s JOIN allocations a ON a.id=s.allocation_id "
+            "WHERE s.id=%s)",
+            (vehicle.system_id,),
+        )
+        await conn.execute(
+            "UPDATE runs SET target_kind='remote-libvirt' WHERE id=%s", (vehicle.run_id,)
+        )
+        repository = RemoteModuleAttemptObligationRepository()
+        for nonce in ("1" * 32, "2" * 32)[:receipts]:
+            attempt = ModuleAttempt(vehicle.system_id, vehicle.run_id, nonce)
+            await repository.open_mutation_obligation(conn, attempt)
+            await repository.record_terminal_evidence(conn, attempt, _evidence(attempt))
+            await repository.open_reap_obligation(conn, attempt)
+        local = resolver_for(vehicle).resolve(ResourceKind.LOCAL_LIBVIRT)
+
+        async def build() -> tuple[JobKind, BootPayload | TeardownPayload]:
+            return await build_external_boot_payload(
+                conn,
+                activation_id=vehicle.activation_id,
+                purpose="teardown",
+                operation="teardown",
+                provider_kind="remote-libvirt",
+                authority_instance=AUTHORITY_INSTANCE,
+                operation_identity="teardown-remote",
+                resolver=ProviderResolver({ResourceKind.REMOTE_LIBVIRT: local}),
+            )
+
+        if refusal is not None:
+            with pytest.raises(CategorizedError, match=refusal):
+                await build()
+            return
+        kind, payload = await build()
+        assert kind is JobKind.TEARDOWN
+        assert isinstance(payload, TeardownPayload)
+        if receipts == 0:
+            assert payload.remote_module_attempt_v1 is None
+        else:
+            assert payload.remote_module_attempt_v1 is not None
+            assert payload.remote_module_attempt_v1.module_attempt_obligation.operation_nonce == (
+                "1" * 32
+            )
 
     _drive(migrated_url, body)

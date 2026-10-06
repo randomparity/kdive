@@ -14,6 +14,7 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools.debug.operations.runtime import (
+    CapabilityRequirement,
     DebugRuntimeResolver,
     _EngineOp,
     _gdbmi_maturity,
@@ -21,6 +22,7 @@ from kdive.mcp.tools.debug.operations.runtime import (
     run_engine_op_with_resolver,
 )
 from kdive.providers.ports.debug import GdbMiAttachment, GdbMiEngine, GdbStopRecord
+from kdive.providers.shared.debug_common.gdbmi.policy.capabilities import DebugCapability
 from kdive.serialization import JsonValue
 
 _ADVANCE_TOOL = "debug.advance"
@@ -37,6 +39,26 @@ _ADVANCE_CALLS: dict[str, _AdvanceCall] = {
     "instruction": lambda engine, att, timeout: engine.step_instruction(att, timeout_sec=timeout),
     "out": lambda engine, att, timeout: engine.finish(att, timeout_sec=timeout),
 }
+
+
+# The modes that single-step the vCPU; a target without that capability refuses them before any
+# resume (ADR-0712). `out` runs to a return breakpoint instead.
+_SINGLE_STEP_MODES = frozenset({"into", "over", "instruction"})
+
+
+def _advance_requirement(mode: str) -> CapabilityRequirement | None:
+    if mode not in _SINGLE_STEP_MODES:
+        return None
+    return CapabilityRequirement(
+        capability=DebugCapability.SINGLE_STEP,
+        code="single_step_unsupported",
+        detail=(
+            "this target cannot single-step the vCPU; use debug.advance mode='out', or set a "
+            "breakpoint and debug.continue"
+        ),
+        next_actions=("debug.advance", "debug.set_breakpoint", "debug.continue"),
+        data={"mode": mode},
+    )
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver) -> None:
@@ -200,7 +222,10 @@ def _register_debug_advance(
         and 'over' return timed_out=True or a debug_attach_failure ("Cannot find bounds of
         current function"); use 'instruction' there. 'out' needs a frame that can return — in the
         outermost frame it fails with debug_attach_failure — and a frame that does not return
-        within the wait interrupts back with timed_out=True."""
+        within the wait interrupts back with timed_out=True. Where the gdbstub cannot single-step
+        (ppc64le under KVM), 'into', 'over' and 'instruction' return not_implemented with
+        code single_step_unsupported before the target resumes; retrying the same mode does not
+        succeed, so use 'out' or a breakpoint with debug.continue."""
         return await run_engine_op_with_resolver(
             pool,
             current_context(),
@@ -208,4 +233,5 @@ def _register_debug_advance(
             runtime,
             _advance_op(session_id, mode, timeout_sec),
             audit=_op_audit(_ADVANCE_TOOL, f"advance:{mode}", mode=mode, timeout_sec=timeout_sec),
+            requires=_advance_requirement(mode),
         )

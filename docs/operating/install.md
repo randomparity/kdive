@@ -98,8 +98,8 @@ without a `PATH`, that packaged `depmod` in `/usr/sbin` is what this release mak
 ### From source
 
 Source development targets Linux with Python 3.14 managed by `uv`.
-Install the [host prerequisites](#development-and-ci-toolchain) first, including `uv`, `just`,
-and `prek`. Then clone the repository and run its setup recipe:
+Bootstrap with Git, Bash >= 4.4, `uv`, and `just`, and put `uv tool dir --bin` on `PATH`.
+Then clone the repository and run its developer setup recipe:
 
 ```bash
 git clone https://github.com/randomparity/kdive
@@ -107,9 +107,38 @@ cd kdive
 just setup
 ```
 
-The recipe checks host dependencies, syncs the locked environment, builds the capture-bootstrap
-manifest, and installs the development hooks. Choose a [run mode](#run-modes) below to configure
-backends and start the processes.
+The recipe installs the complete developer toolchain before syncing the locked environment,
+building the capture-bootstrap manifest, installing Ansible collections, and installing and
+running the commit hooks. Native libraries and tools come from distribution packages (root
+or sudo required); pinned user tools go into `uv tool dir --bin`. These include `prek`,
+ShellCheck, shfmt, actionlint, Helm, gitleaks, and promtool. Docker and Compose are required
+for developer setup, as are the compiler and native headers exercised by the tests.
+Go tools build natively, and POWER builds ShellCheck with Cabal when no release binary exists.
+
+An installation failure or inaccessible Docker daemon fails setup before dependency sync.
+Setup preserves an existing Docker installation and does not change group membership or
+start services: follow the reported access/startup remedy, then rerun setup. Distributions
+without a known Docker engine package require an operator-configured engine or reachable
+Docker context. The full installer runs on Linux; use a Linux development VM from macOS.
+
+`just check-deps` keeps its lighter report and optional per-tier fixes for repository users;
+`just check-deps --setup` verifies all developer requirements without installing them.
+Live VM provisioning, guest images, and host worker services remain separate operator steps.
+Choose a [run mode](#run-modes) below to configure backends and start the processes.
+
+Test recipes use `uv`; hooks manage their Python/Go environments. Ansible regression tests
+may inspect `/usr/bin/python3` to check host provisioning behavior, but do not require system
+`pip`. See [ADR-0694](../adr/0694-complete-developer-setup.md).
+
+The manifest recipe removes group-write permission from current-user-owned bootstrap files
+and their ancestor directories, including checkout parents and external Python installations
+(such as uv-managed Python), and the staging directory's ancestors. This supports a `0002`
+umask without weakening runtime attestation. It logs each changed path, preserves sticky
+shared directories, and does not change files owned by another user or remove world-write
+permission. Remaining unsafe permissions still fail the build. For an intentionally
+group-writable shared checkout, use a private checkout and interpreter instead. Direct manifest
+`build` calls only change these permissions when passed `--prepare-permissions`; `verify`
+and runtime verification never repair permissions.
 
 ### Container image
 
@@ -147,7 +176,9 @@ Running the code from source, and reproducing the `just ci` gate, needs a build
 toolchain in addition to the runtime backends. `libvirt-python` has no prebuilt wheels
 and compiles against the system libvirt **and Python** headers, so those headers must be
 present before `uv sync`. `just check-deps` reports gaps and may offer remediation when run
-interactively; inspect its proposed actions before accepting them.
+interactively; inspect its proposed actions before accepting them. Developers should run
+`just setup` to install these dependencies and the remaining developer tools automatically.
+The package examples below are for manual preparation.
 
 **Debian / Ubuntu:**
 
@@ -177,7 +208,7 @@ or syncing the environment. Then install [uv](https://docs.astral.sh/uv/) and th
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv tool install rust-just
-uv tool install prek
+just setup
 ```
 
 #### Bash and GNU tools (all hosts; Homebrew on macOS)
@@ -237,13 +268,23 @@ See [remote-libvirt](providers/remote-libvirt.md) for remote-provider requiremen
 From a complete KDIVE checkout, prepare a local-libvirt host with the canonical Ansible-backed
 recipe. It passes `--ask-become-pass`, so it requires an interactive become password and cannot run
 unattended: the play installs distribution packages and writes system units as root, and this
-repository holds no sudo credential to supply on the operator's behalf. It reads the
-lifecycle-witness database URL from the environment, so the URL is not a process argument:
+repository holds no sudo credential to supply on the operator's behalf. On a host whose sudo
+policy needs no password, an empty line on standard input answers the prompt; the
+[host-installation producer](../development/coverage-qualification.md#host-installation-producer)
+runs the recipe that way. It reads the lifecycle-witness database URL from the environment, so
+the URL is not a process argument:
 
 ```bash
 export KDIVE_LIFECYCLE_WITNESS_DATABASE_URL='<witness database URL>'
 just prepare-local-libvirt-host
 ```
+
+Before running the play, the recipe checks that the Ansible collections its roles need
+(`deploy/ansible/requirements.yml`) can be resolved from `~/.ansible/collections` — the same tree
+`just install-ansible-collections` installs to. Ansible resolves every module in an imported task
+file at parse time, so a missing collection would otherwise break the play immediately, even for a
+task guarded to run on a different host family. If a collection is missing, the recipe fails fast
+and names `just install-ansible-collections` to run first.
 
 The recipe installs and configures the local virtualization stack, worker lifecycle, project venv,
 guestfs binding, and — on Debian and Ubuntu, which ship them `root:root 0600` — the `/boot` kernel
@@ -273,14 +314,16 @@ ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' \
 
 | Family | Host-preparation status | Limits and proof strength |
 |---|---|---|
-| Debian / Ubuntu | Supported | Structurally checked. Ubuntu 26.04 live apply remains operator-provided and is not recorded by this checkout. |
-| Fedora | Supported | Structurally checked; no live apply is claimed. |
-| RHEL / Rocky | Supported with a guestfs limit | Structurally checked; their system Python does not provide the matching Python 3.14 `python3-guestfs` binding. The recipe reports the mismatch and continues, but build-fs and local kdump capture are unavailable from that venv. |
-| SLES / openSUSE | Supported | Structurally checked; no live apply is claimed. |
+| Debian / Ubuntu | Admitted, subject to the Python 3.14 guestfs binding check | Ubuntu 26.04 has a matching system binding. Other releases need the same check; no separate live apply is recorded here. |
+| Fedora | Admitted, subject to the Python 3.14 guestfs binding check | Fedora 44 has a matching system binding; no live apply is claimed here. |
+| RHEL / Rocky / AlmaLinux | EL10 admitted with matching-source binding build; other releases need an import check | EL10 packages Python 3.14 in AppStream but `python3-libguestfs` for system Python 3.12. Enable CRB/CodeReady Builder and a distribution source repository before host preparation. The role builds the 3.14 binding from the signed source RPM matching installed `libguestfs`, outside the recreated worker venv; the installer then verifies the linked import. A build failure stops preparation. See [local-libvirt](providers/local-libvirt.md#family-differences-that-matter) and the [support table](platform-support.md#host-and-guest-distributions) for live proof status. |
+| SLES / openSUSE Tumbleweed | Admitted, subject to the Python 3.14 guestfs binding check | Structurally checked; no live apply is claimed. openSUSE Leap is a cataloged guest, not an admitted worker host. |
 
 For foreign-architecture emulator packages and their availability, use the
 [per-distro emulator table](platform-support.md#cross-architecture-guests); package names are
 intentionally not duplicated here.
+For each distro's separate host and guest status, see the
+[host and guest distribution table](platform-support.md#host-and-guest-distributions).
 
 ## Run modes
 

@@ -287,7 +287,9 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                 run_id = env.object_id
 
             async with phase("upload-build"):
-                await build_and_upload_kernel(op, run_id=run_id, arch=arch)
+                await build_and_upload_kernel(
+                    op, run_id=run_id, arch=arch, root_fs="ext4", require_network=True
+                )
 
             for step in ("install", "boot"):
                 async with phase(step):

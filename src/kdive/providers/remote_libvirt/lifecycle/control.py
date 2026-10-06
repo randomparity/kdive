@@ -1,7 +1,7 @@
 """Remote-libvirt Control plane: power + force_crash over qemu+tls (ADR-0084).
 
 `RemoteLibvirtControl` realizes the `Controller` port against the remote host. The
-domain operations (create/destroy/reset/reboot/injectNMI) match `LocalLibvirtControl`;
+domain operations (create/destroy/reset/resume/reboot/injectNMI) match `LocalLibvirtControl`;
 only the connection lifecycle differs — the mutual-TLS materialize->connect->cleanup of
 `remote_connection` (ADR-0077). DB-free, keyed on the provider domain name. No shared
 layer with `local_libvirt` (ADR-0076). All host seams are injected; `libvirt.open` runs
@@ -18,7 +18,7 @@ import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, assert_never
 
 import libvirt
 
@@ -60,6 +60,7 @@ class _Domain(Protocol):
     def destroy(self) -> int: ...
     def reset(self, flags: int) -> int: ...
     def reboot(self, flags: int) -> int: ...
+    def resume(self) -> int: ...
     def injectNMI(self, flags: int) -> int: ...  # noqa: N802 - libvirt binding name
     def sendKey(  # noqa: N802 - libvirt binding name
         self, codeset: int, holdtime: int, keycodes: list[int], nkeycodes: int, flags: int
@@ -109,7 +110,7 @@ class RemoteLibvirtControl:
         return cls(secret_registry=secret_registry, config_factory=config_factory)
 
     def power(self, domain_name: str, action: PowerAction) -> None:
-        """Drive the domain's power state; idempotent ``on``/``off`` swallow the post-state.
+        """Drive the domain's power state; idempotent on/off/resume swallow the post-state.
 
         Raises:
             CategorizedError: ``CONTROL_FAILURE`` if the domain is absent or a
@@ -191,14 +192,18 @@ class RemoteLibvirtControl:
                 self._idempotent(domain.destroy, "stopping", domain_name)
             elif action is PowerAction.RESET:
                 domain.reset(0)
-            else:  # PowerAction.CYCLE
+            elif action is PowerAction.RESUME:
+                self._idempotent(domain.resume, "resuming", domain_name)
+            elif action is PowerAction.CYCLE:
                 domain.reboot(0)
+            else:
+                assert_never(action)
         except libvirt.libvirtError as exc:
             raise self._control_failure(f"{action.value}-ing", domain_name) from exc
 
     @staticmethod
     def _idempotent(call: Callable[[], int], verb: str, domain_name: str) -> None:
-        """Run an on/off call, swallowing the "already in target state" error as success."""
+        """Run an on/off/resume call, swallowing the achieved-state error as success."""
         try:
             call()
         except libvirt.libvirtError as exc:

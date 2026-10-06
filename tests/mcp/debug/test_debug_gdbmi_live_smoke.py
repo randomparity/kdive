@@ -71,6 +71,16 @@ from tests.mcp.debug.session_support import (
 from tests.mcp.systems_support import provider_resolver
 from tests.support.domain_ownership import drop_ownership_metadata
 
+# gdb's program-counter register per native guest arch: POWER gdb has ``pc``, not ``nip`` (#2739).
+_PC_REGISTER = {"x86_64": "rip", "ppc64le": "pc"}
+# ``debug.advance`` modes grouped by what the vCPU must do: single-step, or run to a return.
+_ADVANCE_MODE_GROUPS = {"single-step": ("into", "over", "instruction"), "finish": ("out",)}
+# The pseries gdbstub under KVM cannot single-step or insert a hardware watchpoint (#2739), so
+# kdive refuses those requests before the guest resumes (ADR-0712). Each entry is the code the
+# proof expects instead of a stop.
+_REFUSED_ADVANCE_GROUPS = {("ppc64le", "single-step"): "single_step_unsupported"}
+_REFUSED_WATCHPOINT_ARCHES = frozenset({"ppc64le"})
+
 
 @dataclass(frozen=True, slots=True)
 class _ModuleFixture:
@@ -186,9 +196,12 @@ def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
 
 @pytest.mark.live_vm
 @pytest.mark.live_vm_throwaway
+@pytest.mark.parametrize("group", list(_ADVANCE_MODE_GROUPS))
 def test_live_vm_debug_advance_modes(  # pragma: no cover - live_vm
     live_debug_surface: _LiveDebugSurface,
+    group: str,
 ) -> None:
+    arch = live_debug_surface.profile["arch"]
     rootfs_contract = require_live_vm_throwaway("qemu:///session", session_required=True)
     bzimage_contract = require_live_vm_bzimage()
     vmlinux = require_live_vm_vmlinux().vmlinux
@@ -212,7 +225,16 @@ def test_live_vm_debug_advance_modes(  # pragma: no cover - live_vm
             ssh_port=ssh_port,
             wait_timeout_s=180.0,
         ):
-            asyncio.run(_drive_advance_modes(live_debug_surface, vmlinux, ssh_port))
+            asyncio.run(
+                _drive_advance_modes(
+                    live_debug_surface,
+                    vmlinux,
+                    ssh_port,
+                    modes=_ADVANCE_MODE_GROUPS[group],
+                    pc_register=_PC_REGISTER[arch],
+                    refusal=_REFUSED_ADVANCE_GROUPS.get((arch, group)),
+                )
+            )
 
 
 def _stepping_domain_xml(tmp_path: Path) -> str:
@@ -230,6 +252,28 @@ def _panicking_domain_xml(tmp_path: Path) -> str:
         disk=tmp_path / "garbage.qcow2",
         console=tmp_path / "console.log",
     )
+
+
+def test_advance_mode_groups_cover_each_mode_once() -> None:
+    modes = [mode for group in _ADVANCE_MODE_GROUPS.values() for mode in group]
+    assert sorted(modes) == sorted(["into", "over", "instruction", "out"])
+
+
+@pytest.mark.parametrize(
+    ("arch", "register", "refusals"),
+    [("x86_64", "rip", {}), ("ppc64le", "pc", {"single-step": "single_step_unsupported"})],
+)
+def test_advance_proof_expects_refusal_only_for_ppc64le_single_step(
+    arch: str, register: str, refusals: dict[str, str]
+) -> None:
+    """x86_64 advances in all four modes; ppc64le expects the single-step refusal (ADR-0712)."""
+    assert _PC_REGISTER[arch] == register
+    expected = {
+        group: code
+        for group in _ADVANCE_MODE_GROUPS
+        if (code := _REFUSED_ADVANCE_GROUPS.get((arch, group))) is not None
+    }
+    assert expected == refusals
 
 
 @pytest.mark.parametrize("render", [_stepping_domain_xml, _panicking_domain_xml])
@@ -423,43 +467,134 @@ async def _drive_gdbmi_smoke(
         assert isinstance(instruction_count, int)
         assert instruction_count > 0
 
-        watch = await _call_tool(
-            client,
-            "debug.set_watchpoint",
-            {"session_id": session_id, "symbol": "jiffies_64", "byte_count": 8},
-        )
-        assert watch.status == "watching", watch
-        listed = await _call_tool(client, "debug.list_watchpoints", {"session_id": session_id})
-        assert listed.status == "listed", listed
-        watchpoint_count = listed.data["count"]
-        assert isinstance(watchpoint_count, int)
-        assert watchpoint_count >= 1
-        cleared = await _call_tool(
-            client,
-            "debug.clear_watchpoint",
-            {"session_id": session_id, "number": watch.data["number"]},
-        )
-        assert cleared.status == "cleared", cleared
+        if surface.profile["arch"] in _REFUSED_WATCHPOINT_ARCHES:
+            await _assert_watchpoint_refused(client, session_id)
+        else:
+            await _set_list_clear_watchpoint(client, session_id)
 
         modules = await _call_tool(client, "debug.list_modules", {"session_id": session_id})
         assert modules.status == "listed", modules
         await _load_module_symbols_when_configured(client, session_id, modules, module_fixture)
 
 
-async def _drive_advance_modes(surface: _LiveDebugSurface, vmlinux: Path, ssh_port: int) -> None:
+async def _set_list_clear_watchpoint(client: Client[Any], session_id: str) -> None:
+    watch = await _call_tool(
+        client,
+        "debug.set_watchpoint",
+        {"session_id": session_id, "symbol": "jiffies_64", "byte_count": 8},
+    )
+    assert watch.status == "watching", watch
+    listed = await _call_tool(client, "debug.list_watchpoints", {"session_id": session_id})
+    assert listed.status == "listed", listed
+    watchpoint_count = listed.data["count"]
+    assert isinstance(watchpoint_count, int)
+    assert watchpoint_count >= 1
+    cleared = await _call_tool(
+        client,
+        "debug.clear_watchpoint",
+        {"session_id": session_id, "number": watch.data["number"]},
+    )
+    assert cleared.status == "cleared", cleared
+
+
+async def _assert_watchpoint_refused(client: Client[Any], session_id: str) -> None:
+    """The refusal arms nothing and leaves the guest halted, so its registers stay readable."""
+    watch = await _call_tool(
+        client,
+        "debug.set_watchpoint",
+        {"session_id": session_id, "symbol": "jiffies_64", "byte_count": 8},
+    )
+    assert watch.status == "error", watch
+    assert watch.error_category == "not_implemented", watch
+    assert watch.data["code"] == "watchpoint_unsupported", watch
+    listed = await _call_tool(client, "debug.list_watchpoints", {"session_id": session_id})
+    assert listed.status == "listed", listed
+    assert listed.data["count"] == 0, listed
+    registers = await _call_tool(
+        client, "debug.read_registers", {"session_id": session_id, "registers": ["pc"]}
+    )
+    assert registers.status == "read", registers
+
+
+async def _drive_advance_modes(
+    surface: _LiveDebugSurface,
+    vmlinux: Path,
+    ssh_port: int,
+    *,
+    modes: tuple[str, ...],
+    pc_register: str,
+    refusal: str | None,
+) -> None:
     async with surface.session(vmlinux=vmlinux) as live:
-        for mode in ("into", "over", "instruction", "out"):
-            await _exercise_advance_mode(live.client, live.session_id, mode, ssh_port)
+        if refusal is not None:
+            await _assert_advance_modes_refused(
+                live.client, live.session_id, modes, ssh_port, pc_register, refusal
+            )
+        else:
+            for mode in modes:
+                await _exercise_advance_mode(
+                    live.client, live.session_id, mode, ssh_port, pc_register
+                )
 
         transitions = await _advance_audit_transitions(live.pool, live.session_id)
-        assert sorted(transitions) == sorted(
-            ["advance:into", "advance:over", "advance:instruction", "advance:out"]
+        expected = [] if refusal is not None else [f"advance:{mode}" for mode in modes]
+        assert sorted(transitions) == sorted(expected)
+
+
+async def _assert_advance_modes_refused(
+    client: Client[Any],
+    session_id: str,
+    modes: tuple[str, ...],
+    ssh_port: int,
+    pc_register: str,
+    refusal: str,
+) -> None:
+    """Every refused mode leaves the guest halted at the same pc (ADR-0712).
+
+    The guest stops once and the breakpoint is cleared before any advance: continuing from a pc
+    that holds an inserted breakpoint makes gdb step over it, which this stub cannot do.
+    """
+    await _stop_at_vfs_read(client, session_id, ssh_port)
+    before = await _read_instruction_pointer(client, session_id, pc_register)
+    for mode in modes:
+        refused = await _call_tool(
+            client,
+            "debug.advance",
+            {"session_id": session_id, "mode": mode, "timeout_sec": 30.0},
         )
+        assert refused.status == "error", refused
+        assert refused.error_category == "not_implemented", refused
+        assert refused.data["code"] == refusal, refused
+        after = await _read_instruction_pointer(client, session_id, pc_register)
+        assert after == before, f"mode={mode} moved {pc_register} ({before} -> {after})"
 
 
 async def _exercise_advance_mode(
-    client: Client[Any], session_id: str, mode: str, ssh_port: int
+    client: Client[Any], session_id: str, mode: str, ssh_port: int, pc_register: str
 ) -> None:
+    await _stop_at_vfs_read(client, session_id, ssh_port)
+    before = await _read_instruction_pointer(client, session_id, pc_register)
+    advanced = await _call_tool(
+        client,
+        "debug.advance",
+        {"session_id": session_id, "mode": mode, "timeout_sec": 30.0},
+    )
+    _assert_nonterminal_stop(advanced)
+    assert advanced.error_category is None, advanced
+    assert advanced.suggested_next_actions == [
+        "debug.read_registers",
+        "debug.backtrace",
+        "debug.advance",
+        "debug.continue",
+    ]
+    after = await _read_instruction_pointer(client, session_id, pc_register)
+    assert after != before, f"mode={mode} did not advance {pc_register} ({before} -> {after})"
+    if mode == "out":
+        assert advanced.data["reason"] == "function-finished", advanced
+
+
+async def _stop_at_vfs_read(client: Client[Any], session_id: str, ssh_port: int) -> None:
+    """Run to a ``vfs_read`` breakpoint hit, then clear the breakpoint."""
     breakpoint_number: str | None = None
     try:
         breakpoint = await _call_tool(
@@ -480,25 +615,6 @@ async def _exercise_advance_mode(
         )
         assert cleared.status == "cleared", cleared
         breakpoint_number = None
-
-        before = await _read_instruction_pointer(client, session_id)
-        advanced = await _call_tool(
-            client,
-            "debug.advance",
-            {"session_id": session_id, "mode": mode, "timeout_sec": 30.0},
-        )
-        _assert_nonterminal_stop(advanced)
-        assert advanced.error_category is None, advanced
-        assert advanced.suggested_next_actions == [
-            "debug.read_registers",
-            "debug.backtrace",
-            "debug.advance",
-            "debug.continue",
-        ]
-        after = await _read_instruction_pointer(client, session_id)
-        assert after != before, f"mode={mode} did not advance rip ({before} -> {after})"
-        if mode == "out":
-            assert advanced.data["reason"] == "function-finished", advanced
     finally:
         if breakpoint_number is not None:
             cleared = await _call_tool(
@@ -559,14 +675,14 @@ def _assert_nonterminal_stop(response: ToolResponse) -> None:
     assert not reason.startswith("exited"), response
 
 
-async def _read_instruction_pointer(client: Client[Any], session_id: str) -> str:
+async def _read_instruction_pointer(client: Client[Any], session_id: str, register: str) -> str:
     response = await _call_tool(
         client,
         "debug.read_registers",
-        {"session_id": session_id, "registers": ["rip"]},
+        {"session_id": session_id, "registers": [register]},
     )
     assert response.status == "read", response
-    instruction_pointer = response.data.get("rip")
+    instruction_pointer = response.data.get(register)
     assert isinstance(instruction_pointer, str) and instruction_pointer, response
     return instruction_pointer
 
@@ -589,7 +705,9 @@ async def _start_live_session(
     profile: dict[str, Any],
 ) -> str:
     alloc_id = await granted_allocation(pool)
-    sys_id = await seed_system(pool, alloc_id, SystemState.READY, profile=profile)
+    # The live domains render with the default `kvm` accelerator; the System records it so the
+    # debug capability table sees the same target the proof boots (ADR-0712).
+    sys_id = await seed_system(pool, alloc_id, SystemState.READY, profile=profile, accel="kvm")
     run_id = await seed_run(pool, sys_id, boot_result=boot_result)
     handlers = _session_handlers(runtime_resolver)
     resp = await handlers.start_session(pool, request_context(), run_id=run_id, transport="gdbstub")

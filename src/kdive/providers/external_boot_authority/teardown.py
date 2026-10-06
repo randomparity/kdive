@@ -14,6 +14,26 @@ from kdive.providers.ports.external_boot import OpaqueProviderRef
 
 type AuthorityTeardownReservationDisposition = Literal["pending", "ready", "released"]
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+type ProviderRecoveryRefusalReason = Literal[
+    "external-boot recovery phase is not resumable",
+    "System teardown recovery point does not match retained intent",
+    "external-boot pre-stop recovery requires inactive source XML/power",
+    "external-boot pre-stop module layout conflicts with metadata",
+]
+
+
+class ProviderRecoveryRefusal(ValueError):
+    """A kdive-raised recovery or binding refusal whose fixed text may be logged (ADR-0707).
+
+    The reason is a closed set of literals, so the text never carries provider output.
+    """
+
+    def __init__(self, reason: ProviderRecoveryRefusalReason) -> None:
+        super().__init__(reason)
+
+
+class SystemTeardownSupersededError(Exception):
+    """The retained teardown record belongs to a later generation of the same subject (#2921)."""
 
 
 class AuthorityTeardownReservationV1(BaseModel):

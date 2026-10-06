@@ -1,24 +1,44 @@
 from __future__ import annotations
 
 import errno
+import importlib
 import io
+import logging
 import os
 import queue
 import selectors
 import stat
+import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from typing import cast
+from typing import Any, BinaryIO, Literal, cast
 from uuid import UUID
 
 import libvirt
 import pytest
+from pydantic import SecretStr
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
+from kdive.jobs.authority_sender import AuthorityRequestSender
+from kdive.providers.external_boot_authority import transport
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCommitContextV1,
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+    AuthorityOperation,
+)
+from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
+from kdive.providers.local_libvirt.lifecycle.boot import session as session_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
+    LocalLibvirtExternalBoot,
+    TargetProjectionStore,
     TargetProjectionV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
@@ -33,11 +53,14 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ExpectedOperationOwnership,
     LocalExternalBootOperationLease,
+    LocalExternalBootSession,
     LocalExternalBootSessionFactory,
+    LocalExternalBootTimingConfigurationError,
     OpenArtifactRoot,
     OperationOwnership,
     PinnedOperationOwnership,
     PinOperationLease,
+    StopMode,
     _ConcreteSession,
     _Find0TreeCursor,
     open_authority_system_teardown,
@@ -46,9 +69,12 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RecoveryPoint,
     RunningKernelObservation,
 )
 from kdive.providers.shared.libvirt_external_boot import boot_projection_identity
+from tests.providers.external_boot_authority.service_support import _mutation, _takeover
 from tests.providers.local_libvirt.external_boot_support import _metadata
 from tests.providers.local_libvirt.fakes import libvirt_error
 from tests.providers.local_libvirt.lifecycle.boot.session_support import (
@@ -61,6 +87,8 @@ from tests.providers.local_libvirt.lifecycle.boot.session_support import (
     Guest,
     _xml,
 )
+
+_SESSION_LOGGER = "kdive.providers.local_libvirt.lifecycle.boot.session"
 
 
 class FakeLease:
@@ -190,6 +218,53 @@ def test_teardown_session_validates_both_xml_views_and_removes_only_owned_system
     assert sibling_baseline.is_dir()
 
 
+@pytest.mark.parametrize(
+    ("error_code", "inactive", "accepted"),
+    [
+        (libvirt.VIR_ERR_OPERATION_INVALID, True, True),
+        (libvirt.VIR_ERR_OPERATION_INVALID, False, False),
+        (libvirt.VIR_ERR_INTERNAL_ERROR, True, False),
+    ],
+)
+@pytest.mark.parametrize("authority", [False, True])
+def test_teardown_destroy_accepts_only_proven_inactive_race(
+    tmp_path: Path, error_code: int, inactive: bool, accepted: bool, authority: bool
+) -> None:
+    events: list[str] = []
+
+    class RacingDomain(_TeardownDomain):
+        def destroy(self) -> int:
+            self.events.append("domain.destroy")
+            self.active = not inactive
+            raise libvirt_error(error_code)
+
+    domain = RacingDomain(events)
+    factory, overlay, baseline = _teardown_factory(tmp_path, events, domain)
+    session = (
+        open_authority_system_teardown(
+            lambda: _TeardownConn(events, domain), SYSTEM_ID, str(overlay), str(baseline)
+        )
+        if authority
+        else factory.open_teardown(_lease(), _expected())
+    )
+    if accepted:
+        session.destroy()
+        session.undefine()
+        session.remove_overlay()
+        session.remove_baseline()
+        assert "domain.undefine:2" in events
+        assert not overlay.exists()
+        assert not baseline.exists()
+    else:
+        with pytest.raises(libvirt.libvirtError) as exc:
+            session.destroy()
+        assert exc.value.get_error_code() == error_code
+        assert not any(event.startswith("domain.undefine") for event in events)
+        assert overlay.exists()
+        assert baseline.exists()
+    session.close()
+
+
 @pytest.mark.parametrize("view", ["live", "inactive"])
 def test_teardown_session_rejects_xml_ownership_mismatch_before_mutation(
     tmp_path: Path, view: str
@@ -268,7 +343,6 @@ def test_authority_teardown_rejects_a_sibling_overlay_attachment(tmp_path: Path)
         )
 
     assert "domain.list:0" in events
-    assert events.count("domain.close") == 2
     assert "connection.close" in events
 
 
@@ -378,6 +452,87 @@ def test_projection_directory_is_binding_confined_and_closes_descriptor(tmp_path
     changed = projection.model_copy(update={"plan_identity": "sha256:" + "b" * 64})
     with pytest.raises(ValueError, match="different target projection"):
         session.projection_directory(changed).__enter__()
+    session.close()
+
+
+def test_reopen_projection_reads_the_published_projection_through_the_session(
+    tmp_path: Path,
+) -> None:
+    activation = tmp_path / "activation"
+    activation.mkdir(mode=0o700)
+    overlay = tmp_path / "overlay"
+    overlay.write_bytes(b"qcow")
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: os.open(activation, os.O_RDONLY | os.O_DIRECTORY),
+        open_guest=lambda: Guest(events),
+        open_overlay=lambda _path: os.open(overlay, os.O_RDONLY),
+    )
+    session = factory.open(_lease(), _expected())
+    projection = TargetProjectionV1(
+        ownership={"system_id": BINDING.system_id, "run_id": BINDING.run_id},
+        activation_id=BINDING.activation_id,
+        plan_identity="sha256:" + "a" * 64,
+        architecture="x86_64",
+        cmdline="root=UUID=x",
+        initrd_filename=None,
+    )
+    with session.projection_directory(projection) as descriptor:
+        TargetProjectionStore.publish_at(descriptor, projection)
+    digest = projection.digest.removeprefix("sha256:")
+    kernel = OpaqueProviderRef(
+        ref=f"local-artifact-v2/{BINDING.system_id}/{BINDING.run_id}/"
+        f"{BINDING.activation_id}/{digest}/kernel"
+    )
+
+    assert session.reopen_projection(kernel) == projection
+    session.close()
+
+
+def test_projection_artifact_opens_the_payload_inside_its_digest_directory(
+    tmp_path: Path,
+) -> None:
+    activation = tmp_path / "activation"
+    activation.mkdir(mode=0o700)
+    overlay = tmp_path / "overlay"
+    overlay.write_bytes(b"qcow")
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: os.open(activation, os.O_RDONLY | os.O_DIRECTORY),
+        open_guest=lambda: Guest(events),
+        open_overlay=lambda _path: os.open(overlay, os.O_RDONLY),
+    )
+    session = factory.open(_lease(), _expected())
+    projection = TargetProjectionV1(
+        ownership={"system_id": BINDING.system_id, "run_id": BINDING.run_id},
+        activation_id=BINDING.activation_id,
+        plan_identity="sha256:" + "a" * 64,
+        architecture="x86_64",
+        cmdline="root=UUID=x",
+        initrd_filename=None,
+    )
+    with session.projection_directory(projection) as descriptor:
+        payload = os.open("modules", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=descriptor)
+        os.write(payload, b"module tree")
+        os.close(payload)
+    digest = projection.digest.removeprefix("sha256:")
+    prefix = f"local-artifact-v2/{BINDING.system_id}/{BINDING.run_id}"
+
+    modules = session.open_projection_artifact(
+        OpaqueProviderRef(ref=f"{prefix}/{BINDING.activation_id}/{digest}/modules"), os.O_RDONLY
+    )
+    try:
+        assert os.read(modules, 64) == b"module tree"
+    finally:
+        os.close(modules)
+    with pytest.raises(ValueError, match="cross-owner"):
+        session.open_projection_artifact(
+            OpaqueProviderRef(ref=f"{prefix}/{UUID(int=9)}/{digest}/modules"), os.O_RDONLY
+        )
     session.close()
 
 
@@ -537,8 +692,18 @@ def _stream_session(
         close_overlay_descriptor=lambda _fd: events.append("overlay.close"),
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
-    session = cast(_ConcreteSession, factory.open(selected_lease, _expected()))
+    session = _with_artifact_root(factory.open(selected_lease, _expected()))
     return session, selected_lease
+
+
+def _with_artifact_root(session: LocalExternalBootSession) -> _ConcreteSession:
+    """Open the artifact root a session otherwise opens on first artifact use (ADR-0710).
+
+    For tests about the root's ownership snapshot or its place in the close order.
+    """
+    concrete = cast(_ConcreteSession, session)
+    concrete._artifact_root()
+    return concrete
 
 
 def _recording_pin_lease(
@@ -638,6 +803,49 @@ def test_find0_tree_streams_one_multilevel_walk_and_byte_sorts_after_completion(
     assert not producer.output_path.parent.exists()
     assert producer.cancel_requested.is_set()
     assert producer.producer_finished.is_set()
+    session.close()
+
+
+@pytest.mark.parametrize(
+    ("root", "expected"),
+    [("/dev/sda", "5795121d-bbb3-4d47-9636-aa90ec4208af"), ("/dev/sda1", None)],
+)
+def test_guest_reports_the_root_filesystem_uuid_only_when_it_fills_the_disk(
+    root: str, expected: str | None
+) -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [])
+    producer.root = root
+    producer.filesystem_uuids = {root: "5795121d-bbb3-4d47-9636-aa90ec4208af"}
+    session, _lease_value = _stream_session(events, producer)
+
+    with session.guest() as guest:
+        assert guest.whole_disk_root_uuid() == expected
+    session.close()
+
+
+def test_find0_tree_accepts_libguestfs_rooted_entries() -> None:
+    # libguestfs 1.58 find0 writes each entry below the directory with a leading "/".
+    events: list[str] = []
+    producer = Find0Guest(events, [b"/modules.dep", b"/kernel", b"/kernel/a.ko"])
+    session, _lease_value = _stream_session(events, producer)
+
+    with session.guest() as guest, guest.open_tree("/lib/modules/6.12.0", limit=3) as entries:
+        assert [entry.path for entry in entries] == ["kernel", "kernel/a.ko", "modules.dep"]
+    session.close()
+
+
+def test_find0_tree_rejects_an_empty_leading_segment() -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [b"//kernel"])
+    session, _lease_value = _stream_session(events, producer)
+
+    with (
+        session.guest() as guest,
+        pytest.raises(ValueError, match="canonical relative path"),
+        guest.open_tree("/lib/modules/6.12.0", limit=1) as entries,
+    ):
+        list(entries)
     session.close()
 
 
@@ -1733,7 +1941,6 @@ def test_cursor_close_racing_session_close_keeps_producer_owned_until_join() -> 
     assert events.count("guest.close") == 1
     assert events.count("artifact.close") == 1
     assert events.count("overlay.close") == 1
-    assert events.count("domain.close") == 1
     assert events.count("connection.close") == 1
     assert events.count("pin.close") == 1
     assert pin_observations == [(True, 1, False)]
@@ -1791,7 +1998,6 @@ def test_guest_close_racing_session_close_keeps_producer_owned_until_join() -> N
     assert events.count("guest.close") == 1
     assert events.count("artifact.close") == 1
     assert events.count("overlay.close") == 1
-    assert events.count("domain.close") == 1
     assert events.count("connection.close") == 1
     assert events.count("pin.close") == 1
     assert pin_observations == [(True, 1, False)]
@@ -1865,14 +2071,169 @@ def test_repeated_cursor_close_waits_for_faulting_teardown_owner() -> None:
     assert lease.pins == 0
 
 
+@pytest.fixture
+def regular_storage(monkeypatch: pytest.MonkeyPatch) -> list[tuple[BinaryIO, list[int]]]:
+    original = tempfile.TemporaryFile
+    opened: list[tuple[BinaryIO, list[int]]] = []
+
+    @contextmanager
+    def tracked(mode: Literal["w+b"]) -> Iterator[BinaryIO]:
+        with original(mode) as content:
+            sizes: list[int] = []
+            opened.append((content, sizes))
+            try:
+                yield content
+            finally:
+                content.flush()
+                sizes.append(os.fstat(content.fileno()).st_size)
+
+    monkeypatch.setattr(session_module.tempfile, "TemporaryFile", tracked)
+    return opened
+
+
+@pytest.mark.parametrize(
+    "payload,size,short_read,error",
+    [
+        (b"", 0, False, False),
+        (b"a\0\xff", 3, False, False),
+        (b"x" * (1024 * 1024 + 1), 1024 * 1024 + 1, False, False),
+        (b"abcdef", 6, True, False),
+        (b"too long", 3, False, True),
+        (b"nonempty", 0, False, True),
+        (b"short", 6, False, True),
+    ],
+    ids=["empty", "binary", "multi-chunk", "short-read", "overrun", "zero-overrun", "truncated"],
+)
+def test_guest_regular_bounded_bytes_and_cleanup(
+    payload: bytes,
+    size: int,
+    short_read: bool,
+    error: bool,
+    regular_storage: list[tuple[BinaryIO, list[int]]],
+) -> None:
+    requests: list[int] = []
+
+    class ReadGuest(Find0Guest):
+        def pread(self, path: str, count: int, offset: int) -> bytes:
+            requests.append(count)
+            return payload[offset : offset + (min(count, 2) if short_read else count)]
+
+        def download(self, remotefilename: str, filename: str) -> None:
+            Path(filename).write_bytes(payload)
+
+    session, _ = _stream_session([], ReadGuest([], []))
+    try:
+        with session.guest() as guest:
+            if error:
+                with (
+                    pytest.raises(ValueError, match="content changed"),
+                    guest.open_regular("/input", size=size),
+                ):
+                    pytest.fail("partial content was exposed")
+            else:
+                with guest.open_regular("/input", size=size) as content:
+                    assert content.read() == payload
+                    assert not content.closed
+    finally:
+        session.close()
+    assert regular_storage and all(f.closed for f, _ in regular_storage)
+    assert all(stored[0] <= size for _, stored in regular_storage)
+    assert requests and max(requests) <= 1024 * 1024
+
+
+@pytest.mark.parametrize("fault", ["binding", "oversized", "caller", "negative"])
+def test_guest_regular_bounded_failure_cleanup(
+    fault: str, regular_storage: list[tuple[BinaryIO, list[int]]]
+) -> None:
+    class FaultGuest(Find0Guest):
+        def pread(self, path: str, count: int, offset: int) -> bytes:
+            if fault == "oversized":
+                return b"x" * (count + 1)
+            if fault == "binding" and offset:
+                raise OSError("read fault")
+            return b"abc"[offset : offset + min(count, 1)]
+
+    session, _ = _stream_session([], FaultGuest([], []))
+    try:
+        with session.guest() as guest:
+            error = OSError if fault in {"binding", "caller"} else ValueError
+            with (
+                pytest.raises(error),
+                guest.open_regular("/input", size=-1 if fault == "negative" else 3),
+            ):
+                raise OSError("caller fault")
+    finally:
+        session.close()
+    if fault == "negative":
+        assert regular_storage == []
+    else:
+        assert regular_storage and all(f.closed for f, _ in regular_storage)
+        assert all(sizes[0] <= 3 for _, sizes in regular_storage)
+        assert regular_storage[0][1] == [{"oversized": 0, "binding": 1, "caller": 3}[fault]]
+
+
+@pytest.fixture(scope="module")
+def read_appliance() -> Iterator[Any]:
+    # Explicit selection requires the installed binding and appliance; failures do not skip.
+    guestfs = importlib.import_module("guestfs")
+    guest = guestfs.GuestFS(python_return_dict=True)
+    try:
+        guest.add_drive_scratch(128 * 1024 * 1024)
+        guest.launch()
+        guest.part_disk("/dev/sda", "mbr")
+        guest.mkfs("ext4", "/dev/sda1")
+        guest.mount("/dev/sda1", "/")
+        yield guest
+    finally:
+        guest.close()
+
+
+@pytest.mark.live_vm
+@pytest.mark.parametrize("case", ["exact", "empty", "grown", "truncated", "missing"])
+def test_live_guest_regular_bounded_read(
+    case: str,
+    read_appliance: Any,
+    tmp_path: Path,
+    regular_storage: list[tuple[BinaryIO, list[int]]],
+) -> None:
+    payload = b"" if case == "empty" else b"a\0\xff" * (400 * 1024)
+    source = tmp_path / "source"
+    source.write_bytes(payload)
+    read_appliance.upload(str(source), "/input")
+    declared = len(payload) + {"grown": -1, "truncated": 1}.get(case, 0)
+
+    class ApplianceGuest(Find0Guest):
+        def pread(self, path: str, count: int, offset: int) -> bytes:
+            return read_appliance.pread(path, count, offset)
+
+    session, _ = _stream_session([], ApplianceGuest([], []))
+    try:
+        with session.guest() as guest:
+            if case in {"exact", "empty"}:
+                with guest.open_regular("/input", size=declared) as content:
+                    assert content.read() == payload
+            else:
+                error = RuntimeError if case == "missing" else ValueError
+                with (
+                    pytest.raises(error),
+                    guest.open_regular(
+                        "/missing" if case == "missing" else "/input", size=declared
+                    ),
+                ):
+                    pytest.fail("failed read yielded content")
+    finally:
+        session.close()
+    assert regular_storage and all(f.closed for f, _ in regular_storage)
+    assert all(sizes[0] <= declared for _, sizes in regular_storage)
+
+
 def test_guest_regular_stream_transfer_exposes_no_host_path_and_closes_on_success() -> None:
     events: list[str] = []
 
     class StreamGuest(Guest):
-        def download(self, remotefilename: str, filename: str) -> None:
-            self.events.append(f"guest.download:{remotefilename}")
-            with open(filename, "wb") as destination:
-                destination.write(b"elf")
+        def pread(self, path: str, count: int, offset: int) -> bytes:
+            self.events.append(f"guest.pread:{path}")
+            return b"elf"[offset : offset + count]
 
         def upload(self, filename: str, remotefilename: str) -> None:
             with open(filename, "rb") as source:
@@ -1896,7 +2257,7 @@ def test_guest_regular_stream_transfer_exposes_no_host_path_and_closes_on_succes
             assert content.read() == b"elf"
         guest.create_regular(io.BytesIO(b"new"), "/lib/modules/staging/a.ko", size=3)
 
-    assert "guest.download:/lib/modules/6.12.0/a.ko" in events
+    assert "guest.pread:/lib/modules/6.12.0/a.ko" in events
     assert "guest.upload:/lib/modules/staging/a.ko:b'new'" in events
     assert not any("/tmp/" in event for event in events)
     session.close()
@@ -1929,10 +2290,8 @@ def test_concrete_find0_orders_produce_identical_recovery_identity(tmp_path: Pat
             del path
             return []
 
-        def download(self, remotefilename: str, filename: str) -> None:
-            del remotefilename
-            with open(filename, "wb") as destination:
-                destination.write(b"elf")
+        def pread(self, path: str, count: int, offset: int) -> bytes:
+            return b"elf"[offset : offset + count]
 
     captures: list[ModuleArchiveCapture] = []
     for name, order in (
@@ -1966,6 +2325,120 @@ def test_concrete_find0_orders_produce_identical_recovery_identity(tmp_path: Pat
     assert captures[0].archive_sha256 == captures[1].archive_sha256
 
 
+class _Clock:
+    """A fake monotonic clock that ``sleep`` advances, so a power-off bound needs no real wait."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _running(events: list[str], domain_type: str | None, *, honours: bool = True) -> Domain:
+    domain = Domain(events, _xml(domain_type=domain_type), honours_shutdown=honours)
+    domain.active = True
+    return domain
+
+
+def test_clean_stop_requests_shutdown() -> None:
+    events: list[str] = []
+    domain = _running(events, "kvm")
+    session = _factory(events, domain).open(_lease(), _expected())
+    session.stop_and_require_inactive(mode="clean")
+    assert "domain.shutdown" in events
+    assert "domain.destroy" not in events
+    assert not domain.active
+    session.close()
+
+
+@pytest.mark.parametrize(
+    ("domain_type", "mode", "sleeps"),
+    [
+        ("kvm", "clean", 60),
+        (None, "clean", 120),
+        ("qemu", "clean", 120),
+        ("kvm", "clean-on-kvm", 60),
+    ],
+)
+def test_clean_stop_bound(domain_type: str | None, mode: StopMode, sleeps: int) -> None:
+    events: list[str] = []
+    domain = _running(events, domain_type, honours=False)
+    clock = _Clock()
+    session = _factory(events, domain, clock=clock).open(_lease(), _expected())
+    session.stop_and_require_inactive(mode=mode)
+    power = [event for event in events if event in {"domain.shutdown", "domain.destroy"}]
+    assert len(clock.sleeps) == sleeps
+    assert power == ["domain.shutdown"] * (sleeps // 10) + ["domain.destroy"]
+    session.close()
+
+
+@pytest.mark.parametrize(
+    ("domain_type", "mode", "path"),
+    [(None, "clean-on-kvm", "destroy-unaccelerated"), ("kvm", "destroy", "destroy-unready")],
+)
+def test_hard_stop_destroys_at_once(
+    domain_type: str | None, mode: StopMode, path: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    events: list[str] = []
+    domain = _running(events, domain_type)
+    clock = _Clock()
+    session = _factory(events, domain, clock=clock).open(_lease(), _expected())
+    with caplog.at_level(logging.WARNING, logger=_SESSION_LOGGER):
+        session.stop_and_require_inactive(mode=mode)
+    assert "domain.destroy" in events
+    assert "domain.shutdown" not in events
+    assert clock.sleeps == []
+    assert f"power-off kdive-{SYSTEM_ID}: {path}" in caplog.text
+    session.close()
+
+
+@pytest.mark.parametrize(
+    ("final_active", "error_code", "accepted"),
+    [
+        (False, libvirt.VIR_ERR_OPERATION_INVALID, True),
+        (True, libvirt.VIR_ERR_OPERATION_INVALID, False),
+        (False, libvirt.VIR_ERR_INTERNAL_ERROR, False),
+    ],
+)
+def test_hard_stop_accepts_only_raced_shutoff(
+    final_active: bool, error_code: int, accepted: bool
+) -> None:
+    events: list[str] = []
+
+    class RacedDomain(Domain):
+        def destroy(self) -> int:
+            events.append("domain.destroy")
+            self.active = final_active
+            raise libvirt_error(error_code)
+
+    domain = RacedDomain(events, _xml(domain_type="kvm"))
+    domain.active = True
+    session = _factory(events, domain).open(_lease(), _expected())
+    if accepted:
+        session.stop_and_require_inactive(mode="destroy")
+    else:
+        with pytest.raises(libvirt.libvirtError) as exc:
+            session.stop_and_require_inactive(mode="destroy")
+        assert exc.value.get_error_code() == error_code
+    assert events.count("domain.destroy") == 1
+    session.close()
+
+
+def test_stop_leaves_an_inactive_domain_untouched() -> None:
+    events: list[str] = []
+    session = _factory(events).open(_lease(), _expected())
+    session.stop_and_require_inactive(mode="clean")
+    assert "domain.shutdown" not in events
+    assert "domain.destroy" not in events
+    session.close()
+
+
 def _factory(
     events: list[str],
     domain: Domain | None = None,
@@ -1973,8 +2446,10 @@ def _factory(
     pin_lease: PinOperationLease = LANE.pin,
     prepare_console: Callable[[UUID], ConsoleReadinessWindow] | None = None,
     readiness: Callable[[UUID, ConsoleReadinessWindow], ReadinessResult] | None = None,
+    clock: _Clock | None = None,
 ) -> LocalExternalBootSessionFactory:
     selected = domain or Domain(events)
+    fake_clock = clock or _Clock()
     return LocalExternalBootSessionFactory(
         connect=lambda: events.append("connection.open") or Conn(events, selected),
         pin_lease=pin_lease,
@@ -1987,6 +2462,8 @@ def _factory(
         close_descriptor=lambda _fd: events.append("artifact.close"),
         prepare_console=prepare_console,
         readiness=readiness,
+        sleep=fake_clock.sleep,
+        clock=fake_clock,
     )
 
 
@@ -1999,6 +2476,147 @@ def test_factory_pins_before_open_and_lease_cannot_release_while_session_live() 
         lease.release()
     session.close()
     lease.release()
+
+
+@pytest.mark.parametrize(
+    ("accel", "window", "message"),
+    [
+        ("tcg", 9000, "accelerator"),
+        ("kvm", 901, "boot window"),
+    ],
+)
+def test_factory_rejects_timing_disagreement_before_provider_mutation(
+    accel: Literal["kvm", "tcg"], window: int, message: str
+) -> None:
+    events: list[str] = []
+    domain = Domain(events, xml=_xml(domain_type="kvm"))
+    timing = LocalExternalBootTimingV1(
+        accel=accel, console_window_s=window, deadline_budget_s=12000
+    )
+    config.load({})
+    try:
+        with pytest.raises(LocalExternalBootTimingConfigurationError, match=message) as caught:
+            _factory(events, domain).open(_lease(), _expected(), local_timing=timing)
+    finally:
+        config.reset()
+    assert "domain.create" not in events
+    assert "artifact.open" not in events
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    fix = (
+        "correct the System accelerator" if accel == "tcg" else "align KDIVE_LIBVIRT_BOOT_WINDOW_S"
+    )
+    assert fix in str(caught.value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("accel", "window", "host_detail"),
+    [
+        ("tcg", 9000, "correct the System accelerator"),
+        ("kvm", 901, "align KDIVE_LIBVIRT_BOOT_WINDOW_S"),
+    ],
+)
+async def test_real_timing_refusal_crosses_authority_wire_without_host_detail(
+    accel: Literal["kvm", "tcg"], window: int, host_detail: str
+) -> None:
+    events: list[str] = []
+    domain = Domain(events, xml=_xml(domain_type="kvm"))
+    factory = _factory(events, domain)
+    timing = LocalExternalBootTimingV1(
+        accel=accel, console_window_s=window, deadline_budget_s=12000
+    )
+
+    class Ports:
+        def activate(
+            self,
+            _point: RecoveryPoint,
+            _authority: OpaqueProviderRef,
+            *,
+            local_timing: LocalExternalBootTimingV1 | None,
+        ) -> None:
+            session = factory.open(_lease(), _expected(), local_timing=local_timing)
+            session.close()
+            pytest.fail("mismatched timing must refuse before a provider operation")
+
+    adapter = LocalExternalBootAuthorityAdapter(cast(LocalLibvirtExternalBoot, Ports()))
+    responses: list[bytes] = []
+
+    class Service:
+        async def execute_mutation(
+            self, _peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
+        ) -> AuthorityObservationV1:
+            adapter._apply(
+                AuthorityOperation.ACTIVATE,
+                cast(RecoveryPoint, object()),
+                OpaqueProviderRef(ref="authority/test"),
+                cast(AuthorityCommitContextV1, object()),
+                request,
+            )
+            pytest.fail("mismatched timing must refuse before an observation")
+
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class Transport:
+        async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+            del deadline
+            response = await transport._dispatch(
+                envelope, authenticate, cast(transport.AuthorityService, Service())
+            )
+            responses.append(response)
+            return response
+
+    request = _mutation(_takeover()).model_copy(update={"local_timing": timing})
+    sender = AuthorityRequestSender(Transport, lambda: SecretStr("worker"))
+    config.load({})
+    try:
+        with pytest.raises(CategorizedError, match="^authority: configuration-error$") as caught:
+            await sender.execute_mutation(request, deadline=1.0)
+    finally:
+        config.reset()
+        adapter.close()
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.terminal is True
+    assert responses == [b'{"category":"configuration-error","status":"error"}']
+    assert host_detail not in responses[0].decode()
+    assert host_detail not in str(caught.value)
+    assert "domain.create" not in events
+    assert "artifact.open" not in events
+
+
+def test_factory_accepts_matching_snapshot_and_unknown_accelerator() -> None:
+    events: list[str] = []
+    domain = Domain(events, xml=_xml(domain_type="kvm"))
+    timing = LocalExternalBootTimingV1(accel=None, console_window_s=9000, deadline_budget_s=12000)
+    config.load({})
+    try:
+        session = _factory(events, domain).open(_lease(), _expected(), local_timing=timing)
+        session.close()
+    finally:
+        config.reset()
+
+
+def test_snapshotted_window_reaches_console_creator() -> None:
+    events: list[str] = []
+    received: list[int | None] = []
+
+    def prepare(_system_id: UUID, *, window_s: int | None = None) -> ConsoleReadinessWindow:
+        received.append(window_s)
+        return cast(ConsoleReadinessWindow, _Window(events, "snapshot"))
+
+    domain = Domain(events, xml=_xml(domain_type="kvm"))
+    timing = LocalExternalBootTimingV1(accel="kvm", console_window_s=900, deadline_budget_s=1200)
+    config.load({})
+    try:
+        session = _factory(events, domain, prepare_console=prepare).open(
+            _lease(), _expected(), local_timing=timing
+        )
+        session.start()
+        session.close()
+    finally:
+        config.reset()
+    assert received == [900]
 
 
 class _Window:
@@ -2208,6 +2826,24 @@ def test_released_lease_opens_nothing() -> None:
     with pytest.raises(RuntimeError, match="released"):
         _factory(events).open(lease, _expected())
     assert events == []
+
+
+def test_inspection_reads_the_persistent_definition_of_a_running_domain() -> None:
+    # A running domain's live XML adds runtime-only facts (id, aliases, pty paths). Prepare
+    # records the definition while the guest runs and activate compares it after the stop.
+    events: list[str] = []
+    inactive = _xml()
+    live = inactive.replace("<domain>", "<domain id='14'>").replace(
+        '<target dev="vda" bus="virtio"/>', '<target dev="vda" bus="virtio"/><alias name="disk0"/>'
+    )
+    domain = Domain(events, live, inactive_xml=inactive)
+    domain.active = True
+    session = _factory(events, domain).open(_lease(), _expected())
+
+    assert session.inspect_closed().xml == inactive.encode()
+    domain.active = False
+    assert session.inspect_closed().xml == inactive.encode()
+    session.close()
 
 
 def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
@@ -2598,13 +3234,11 @@ def test_only_one_guest_context_and_power_start_reject_while_open() -> None:
     with pytest.raises(RuntimeError, match="guest context"):
         session.start()
     with pytest.raises(RuntimeError, match="guest context"):
-        session.restore_power("running")
+        session.restore_power()
     defines = events.count("domain.define")
-    closes = events.count("domain.close")
     with pytest.raises(RuntimeError, match="guest context"):
         session.define_xml(_xml())
     assert events.count("domain.define") == defines
-    assert events.count("domain.close") == closes
     assert "domain.create" not in events
     first.__exit__(None, None, None)
     with session.guest():
@@ -2615,15 +3249,14 @@ def test_only_one_guest_context_and_power_start_reject_while_open() -> None:
 def test_close_poisons_wrappers_and_releases_pin_last() -> None:
     events: list[str] = []
     lease = _lease()
-    session = _factory(events).open(lease, _expected())
+    session = _with_artifact_root(_factory(events).open(lease, _expected()))
     retained = session.guest()
     guest = retained.__enter__()
     session.close()
-    assert events[-5:] == [
+    assert events[-4:] == [
         "guest.shutdown",
         "guest.close",
         "artifact.close",
-        "domain.close",
         "connection.close",
     ]
     lease.release()
@@ -2635,18 +3268,13 @@ def test_close_poisons_wrappers_and_releases_pin_last() -> None:
 def test_close_faults_do_not_skip_cleanup_or_pin_release() -> None:
     events: list[str] = []
 
-    class FaultingDomain(Domain):
-        def free(self) -> None:
-            super().free()
-            raise OSError("domain close")
-
     class FaultingConn(Conn):
         def close(self) -> None:
             super().close()
             raise OSError("connection close")
 
     lease = _lease()
-    domain = FaultingDomain(events)
+    domain = Domain(events)
 
     def fault_overlay_close(_fd: int) -> None:
         events.append("overlay.close")
@@ -2662,16 +3290,11 @@ def test_close_faults_do_not_skip_cleanup_or_pin_release() -> None:
         close_overlay_descriptor=fault_overlay_close,
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
-    session = factory.open(lease, _expected())
+    session = _with_artifact_root(factory.open(lease, _expected()))
     with pytest.raises(ExceptionGroup) as raised:
         session.close()
-    assert len(raised.value.exceptions) == 3
-    assert events[-4:] == [
-        "artifact.close",
-        "overlay.close",
-        "domain.close",
-        "connection.close",
-    ]
+    assert len(raised.value.exceptions) == 2
+    assert events[-3:] == ["artifact.close", "overlay.close", "connection.close"]
     lease.release()
 
 
@@ -2722,7 +3345,7 @@ def test_overlay_descriptor_rejects_symlink_and_nonregular_before_guest(mode: in
     with pytest.raises(ValueError, match="regular"):
         factory.open(_lease(), _expected())
     assert "guest.open" not in events
-    assert events[-3:] == ["overlay.close", "domain.close", "connection.close"]
+    assert events[-2:] == ["overlay.close", "connection.close"]
 
 
 def test_guest_attaches_retained_overlay_fd_despite_path_replacement() -> None:
@@ -2773,7 +3396,7 @@ def test_partial_construction_closes_every_acquired_resource_and_pin_last() -> N
     lease = _lease()
     with pytest.raises(ValueError, match="overlay"):
         _factory(events, domain).open(lease, _expected())
-    assert events[-2:] == ["domain.close", "connection.close"]
+    assert events[-1] == "connection.close"
     lease.release()
 
 
@@ -2811,11 +3434,14 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     session.start()
     assert session.readiness() == ReadinessResult(True, True)
     assert session.observe_running() == observation
-    session.restore_power("inactive")
+    creates = events.count("domain.create")
+    session.restore_power()
+    assert events.count("domain.create") == creates
+    session.stop_and_require_inactive(mode="destroy")
     session.cleanup_payloads(_metadata().model_copy(update={"binding": BINDING}))
-    session.restore_power("running")
+    session.restore_power()
     assert domain.active
-    session.restore_power("inactive")
+    session.stop_and_require_inactive(mode="destroy")
     assert not domain.active
     assert not hasattr(session.inspect_closed().overlay, "path")
     assert not hasattr(session, "artifact_root_descriptor")
@@ -2825,7 +3451,7 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     for call in (
         session.readiness,
         session.observe_running,
-        lambda: session.restore_power("running"),
+        session.restore_power,
         lambda: session.cleanup_payloads(_metadata().model_copy(update={"binding": BINDING})),
     ):
         with pytest.raises(RuntimeError, match="closed"):
@@ -2876,7 +3502,7 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
     session.start()
     session.readiness()
     session.observe_running()
-    session.restore_power("inactive")
+    session.stop_and_require_inactive(mode="destroy")
     session.cleanup_payloads(_metadata().model_copy(update={"binding": original_binding}))
     assert observed_ids == [SYSTEM_ID, SYSTEM_ID]
     assert cleaned == [original_binding]
@@ -2913,7 +3539,7 @@ def test_pinner_mutation_cannot_change_atomic_ownership_snapshot() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(lease, _expected())
+    session = _with_artifact_root(factory.open(lease, _expected()))
     assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
     assert events.count(f"domain.open:kdive-{SYSTEM_ID}") == 1
     assert events.count(f"artifact-owner:{SYSTEM_ID}:{BINDING.activation_id}") == 1
@@ -2945,7 +3571,7 @@ def test_artifact_callback_cannot_redirect_snapshot_by_mutating_caller_lease() -
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(lease, _expected())
+    session = _with_artifact_root(factory.open(lease, _expected()))
     assert received[0].system_id == SYSTEM_ID
     assert received[0].binding == BINDING
     assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
@@ -2975,40 +3601,12 @@ def test_artifact_callback_type_is_pin_free_and_cannot_release_lane() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(lease, _expected())
+    session = _with_artifact_root(factory.open(lease, _expected()))
     assert received == [OperationOwnership(SYSTEM_ID, BINDING)]
     with pytest.raises(RuntimeError, match="pinned"):
         lease.release()
     session.close()
     lease.release()
-
-
-def test_define_frees_distinct_prior_domain_reference() -> None:
-    events: list[str] = []
-    prior = Domain(events)
-    replacement = Domain(events)
-
-    class ReplacingConn(Conn):
-        def defineXML(self, xml: str) -> Domain:  # noqa: N802
-            self.events.append("domain.define")
-            replacement.xml = xml
-            return replacement
-
-    factory = LocalExternalBootSessionFactory(
-        pin_lease=LANE.pin,
-        connect=lambda: ReplacingConn(events, prior),
-        open_artifact_root=lambda _lease: 41,
-        open_guest=lambda: Guest(events),
-        open_overlay=lambda _path: 40,
-        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
-        close_overlay_descriptor=lambda _fd: None,
-        close_descriptor=lambda _fd: None,
-    )
-    session = factory.open(_lease(), _expected())
-    session.define_xml(_xml())
-    assert events[-2:] == ["domain.define", "domain.close"]
-    session.close()
-    assert events.count("domain.close") == 2
 
 
 def test_guest_and_descriptor_close_faults_still_release_pin_last() -> None:
@@ -3033,13 +3631,13 @@ def test_guest_and_descriptor_close_faults_still_release_pin_last() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=fault_descriptor,
     )
-    session = factory.open(lease, _expected())
+    session = _with_artifact_root(factory.open(lease, _expected()))
     retained = session.guest()
     retained.__enter__()
     with pytest.raises(ExceptionGroup) as raised:
         session.close()
     assert len(raised.value.exceptions) == 2
-    assert events[-2:] == ["domain.close", "connection.close"]
+    assert events[-1] == "connection.close"
     lease.release()
 
 
@@ -3084,3 +3682,26 @@ def test_guest_open_failures_preserve_primary_and_cleanup(fault_at: str) -> None
         lease.release()
     session.close()
     lease.release()
+
+
+@pytest.mark.parametrize(
+    ("seam", "binding"),
+    [
+        (session_module._TeardownDomain, libvirt.virDomain),
+        (session_module._Connection, libvirt.virConnect),
+    ],
+)
+def test_session_libvirt_seams_name_only_methods_the_real_binding_has(
+    seam: type, binding: type
+) -> None:
+    # The fakes implement whatever the seam declares, so a method the real binding lacks only
+    # fails on a live host (virDomain has no free(); handles are released by __del__).
+    declared = {
+        name
+        for protocol in seam.__mro__
+        if getattr(protocol, "_is_protocol", False)
+        for name in vars(protocol)
+        if not name.startswith("_")
+    }
+    assert declared
+    assert sorted(name for name in declared if not hasattr(binding, name)) == []

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 from pathlib import Path
@@ -12,10 +13,13 @@ import pytest
 
 from kdive.providers.external_boot_authority.journal import (
     DEFAULT_MAX_JOURNAL_BYTES,
+    RETRACTED_DIRECTORY,
     FileAuthorityJournal,
+    TornTail,
 )
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
+    MAX_MESSAGE_BYTES,
     JournalPhase,
     JournalRecordV1,
     RecoveryObjectBindingV1,
@@ -748,3 +752,225 @@ def test_superseded_watermark_cannot_later_be_acknowledged(tmp_path: Path) -> No
     path.write_bytes(before + canonical_record_bytes(stale_acknowledgement) + b"\n")
     with pytest.raises(ValueError, match="already superseded"):
         journal.load()
+
+
+def _two_record_lane(
+    tmp_path: Path,
+) -> tuple[FileAuthorityJournal, JournalRecordV1, JournalRecordV1]:
+    journal = FileAuthorityJournal(tmp_path, "lane.jsonl")
+    first = _record()
+    second = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        watermark_digest=record_digest(first),
+    )
+    journal.append(first)
+    journal.append(second)
+    return journal, first, second
+
+
+def _evidence(tmp_path: Path, record: JournalRecordV1) -> Path:
+    digest = record_digest(record).removeprefix("sha256:")
+    return tmp_path / RETRACTED_DIRECTORY / f"{record.system_id}.{record.sequence}.{digest}.jsonl"
+
+
+def test_retract_removes_the_final_record_and_preserves_its_bytes(tmp_path: Path) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+
+    journal.retract(second)
+
+    lane = tmp_path / "lane.jsonl"
+    assert lane.read_bytes() == canonical_record_bytes(first) + b"\n"
+    evidence = _evidence(tmp_path, second)
+    assert evidence.read_bytes() == canonical_record_bytes(second) + b"\n"
+    assert stat.S_IMODE(evidence.stat().st_mode) == 0o600
+    assert stat.S_IMODE(evidence.parent.stat().st_mode) == 0o700
+    assert journal.load() == (first,)
+    journal.append(second)
+    assert journal.load() == (first, second)
+
+
+def test_retract_of_the_only_record_unlinks_the_lane(tmp_path: Path) -> None:
+    journal = FileAuthorityJournal(tmp_path, "lane.jsonl")
+    first = _record()
+    journal.append(first)
+
+    journal.retract(first)
+
+    assert not (tmp_path / "lane.jsonl").exists()
+    assert _evidence(tmp_path, first).read_bytes() == canonical_record_bytes(first) + b"\n"
+    assert journal.load() == ()
+    journal.append(first)
+    assert journal.load() == (first,)
+
+
+def test_retract_accepts_identical_existing_evidence(tmp_path: Path) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+    evidence = _evidence(tmp_path, second)
+    evidence.parent.mkdir(mode=0o700)
+    evidence.write_bytes(canonical_record_bytes(second) + b"\n")
+    evidence.chmod(0o600)
+
+    journal.retract(second)
+
+    assert journal.load() == (first,)
+
+
+def test_retract_replaces_a_partial_evidence_write(tmp_path: Path) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+    evidence = _evidence(tmp_path, second)
+    evidence.parent.mkdir(mode=0o700)
+    partial = evidence.with_name(f".{evidence.name}.partial")
+    partial.write_bytes(b"torn")
+    partial.chmod(0o600)
+
+    journal.retract(second)
+
+    assert evidence.read_bytes() == canonical_record_bytes(second) + b"\n"
+    assert not partial.exists()
+    assert journal.load() == (first,)
+
+
+def test_retract_refuses_a_record_that_is_not_the_tail(tmp_path: Path) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+
+    with pytest.raises(ValueError, match="final record"):
+        journal.retract(first)
+
+    assert journal.load() == (first, second)
+    assert not (tmp_path / RETRACTED_DIRECTORY).exists()
+
+
+def test_retract_refuses_a_changed_file(tmp_path: Path) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+    lane = tmp_path / "lane.jsonl"
+    original = lane.read_bytes()
+    changed = original.replace(b'"purpose":"recover"', b'"purpose":"release"')
+    lane.write_bytes(changed)
+
+    with pytest.raises(ValueError, match="changed since validation"):
+        journal.retract(second)
+
+    assert lane.read_bytes() == changed
+
+
+@pytest.mark.parametrize("shape", ["symlink", "file", "mode"])
+def test_retract_refuses_an_unsafe_evidence_directory(tmp_path: Path, shape: str) -> None:
+    journal, first, second = _two_record_lane(tmp_path)
+    directory = tmp_path / RETRACTED_DIRECTORY
+    if shape == "symlink":
+        target = tmp_path / "elsewhere"
+        target.mkdir(mode=0o700)
+        directory.symlink_to(target)
+    elif shape == "file":
+        directory.write_text("")
+    else:
+        directory.mkdir()
+        directory.chmod(0o755)
+
+    with pytest.raises(OSError):
+        journal.retract(second)
+
+    assert journal.load() == (first, second)
+
+
+def _torn_lane(tmp_path: Path) -> tuple[FileAuthorityJournal, JournalRecordV1, bytes]:
+    _, first, second = _two_record_lane(tmp_path)
+    torn = canonical_record_bytes(second)[:40]
+    (tmp_path / "lane.jsonl").write_bytes(canonical_record_bytes(first) + b"\n" + torn)
+    return FileAuthorityJournal(tmp_path, "lane.jsonl"), first, torn
+
+
+def _torn_evidence(tmp_path: Path, torn: bytes) -> Path:
+    return tmp_path / RETRACTED_DIRECTORY / f"lane.torn.{hashlib.sha256(torn).hexdigest()}"
+
+
+def test_load_recovering_returns_a_torn_final_line(tmp_path: Path) -> None:
+    journal, first, torn = _torn_lane(tmp_path)
+    offset = len(canonical_record_bytes(first)) + 1
+    assert journal.load_recovering() == ((first,), TornTail(offset, torn))
+    with pytest.raises(ValueError, match="partial final record"):
+        journal.load()
+    assert FileAuthorityJournal(tmp_path, "other.jsonl").load_recovering() == ((), None)
+
+
+@pytest.mark.parametrize("defect", ["oversized", "empty", "non-final"])
+def test_load_recovering_refuses_every_other_defect(tmp_path: Path, defect: str) -> None:
+    _, first, second = _two_record_lane(tmp_path)
+    head = canonical_record_bytes(first) + b"\n"
+    tail = {
+        "oversized": b"x" * (MAX_MESSAGE_BYTES + 1),
+        "empty": b"\n" + canonical_record_bytes(second)[:40],
+        "non-final": canonical_record_bytes(second)[:40] + b"\n" + b"{",
+    }[defect]
+    (tmp_path / "lane.jsonl").write_bytes(head + tail)
+    with pytest.raises(ValueError):
+        FileAuthorityJournal(tmp_path, "lane.jsonl").load_recovering()
+
+
+def test_remove_torn_tail_preserves_then_truncates(tmp_path: Path) -> None:
+    journal, first, torn = _torn_lane(tmp_path)
+    journal.load_recovering()
+    journal.remove_torn_tail()
+    assert (tmp_path / "lane.jsonl").read_bytes() == canonical_record_bytes(first) + b"\n"
+    evidence = _torn_evidence(tmp_path, torn)
+    assert evidence.read_bytes() == torn
+    assert stat.S_IMODE(evidence.stat().st_mode) == 0o600
+    assert journal.load() == (first,)
+
+
+def test_remove_torn_tail_of_a_torn_only_lane_unlinks(tmp_path: Path) -> None:
+    torn = canonical_record_bytes(_record())[:40]
+    lane = tmp_path / "lane.jsonl"
+    lane.write_bytes(torn)
+    lane.chmod(0o600)
+    journal = FileAuthorityJournal(tmp_path, "lane.jsonl")
+    records, tail = journal.load_recovering()
+    assert records == () and tail == TornTail(0, torn)
+    journal.remove_torn_tail()
+    assert not lane.exists()
+    assert _torn_evidence(tmp_path, torn).read_bytes() == torn
+
+
+def test_zero_byte_lane_is_torn_only_when_recovering(tmp_path: Path) -> None:
+    lane = tmp_path / "lane.jsonl"
+    lane.write_bytes(b"")
+    lane.chmod(0o600)
+    journal = FileAuthorityJournal(tmp_path, "lane.jsonl")
+    assert journal.load() == ()
+    assert journal.load_recovering() == ((), TornTail(0, b""))
+    journal.remove_torn_tail()
+    assert not lane.exists()
+    assert _torn_evidence(tmp_path, b"").read_bytes() == b""
+
+
+def test_remove_torn_tail_refuses_a_changed_lane(tmp_path: Path) -> None:
+    journal, _, _ = _torn_lane(tmp_path)
+    journal.load_recovering()
+    lane = tmp_path / "lane.jsonl"
+    lane.write_bytes(lane.read_bytes() + b"more")
+    with pytest.raises(ValueError, match="changed since validation"):
+        journal.remove_torn_tail()
+    assert lane.read_bytes().endswith(b"more")
+    assert not (tmp_path / RETRACTED_DIRECTORY).exists()
+
+
+def test_remove_torn_tail_requires_its_recovery_load(tmp_path: Path) -> None:
+    journal, _, _ = _torn_lane(tmp_path)
+    with pytest.raises(ValueError, match="recovery load"):
+        journal.remove_torn_tail()
+    journal.load_recovering()
+    journal.remove_torn_tail()
+    with pytest.raises(ValueError, match="recovery load"):
+        journal.remove_torn_tail()
+
+
+def test_append_refuses_after_a_torn_recovery_load(tmp_path: Path) -> None:
+    journal, first, _ = _torn_lane(tmp_path)
+    journal.load_recovering()
+    before = (tmp_path / "lane.jsonl").read_bytes()
+    second = _record(2, record_digest(first), phase=JournalPhase.ADMITTED)
+    with pytest.raises(ValueError, match="partial final record"):
+        journal.append(second)
+    assert (tmp_path / "lane.jsonl").read_bytes() == before

@@ -7,14 +7,16 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -28,13 +30,27 @@ from kdive.providers.external_boot_authority.host import (
     run_authority_host,
     validate_credential_paths,
 )
-from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.journal import FileAuthorityJournal, TornTail
 from kdive.providers.external_boot_authority.protocol import (
+    MAX_MESSAGE_BYTES,
+    AuthorityObservationV1,
     AuthorityOperation,
+    AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     canonical_record_bytes,
     record_digest,
+)
+from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
+    AuthorityServiceError,
+    ExternalBootAuthorityService,
+)
+from tests.providers.external_boot_authority.service_support import (
+    _Adapter,
+    _mutation,
+    _Repository,
+    _takeover,
 )
 
 
@@ -972,6 +988,9 @@ def test_host_shares_one_mutation_service_between_listeners(
 
         async def close(self) -> None:
             self.closed = True
+
+        def quiesce_anchors(self) -> None:
+            return None
 
     service = Service()
     received: list[tuple[object | None, object | None]] = []
@@ -1936,3 +1955,732 @@ def test_authority_host_cli_commands_parse() -> None:
     assert build_parser().parse_args(["check-external-boot-authority-host"]).command == (
         "check-external-boot-authority-host"
     )
+
+
+def _chain(config: AuthorityHostConfig, system_id: UUID, count: int) -> list[JournalRecordV1]:
+    common: dict[str, object] = {
+        "authority_id": uuid4(),
+        "generation": 1,
+        "system_id": system_id,
+        "activation_id": uuid4(),
+        "run_id": uuid4(),
+        "plan_identity": "sha256:" + "2" * 64,
+        "purpose": "activate",
+        "operation": AuthorityOperation.ACTIVATE,
+        "provider_kind": "local-libvirt",
+        "authority_instance": config.authority_instance,
+        "operation_identity": "operation-a",
+        "operation_digest": "sha256:" + "3" * 64,
+        "attempt_id": uuid4(),
+    }
+    first = JournalRecordV1.model_validate(
+        common
+        | {
+            "sequence": 1,
+            "previous_digest": "sha256:" + "0" * 64,
+            "phase": JournalPhase.WATERMARK_INSTALLED,
+        }
+    )
+    second = JournalRecordV1.model_validate(
+        common
+        | {
+            "sequence": 2,
+            "previous_digest": record_digest(first),
+            "phase": JournalPhase.TAKEOVER_ACKNOWLEDGED,
+            "watermark_sequence": 1,
+            "watermark_digest": record_digest(first),
+        }
+    )
+    third = JournalRecordV1.model_validate(
+        common
+        | {
+            "sequence": 3,
+            "previous_digest": record_digest(second),
+            "phase": JournalPhase.ADMITTED,
+            "expected_source_identity": "sha256:" + "4" * 64,
+            "intended_target_identity": "sha256:" + "5" * 64,
+            "recovery_objects": (),
+        }
+    )
+    return [first, second, third][:count]
+
+
+def _write_lane(config: AuthorityHostConfig, records: list[JournalRecordV1]) -> Path:
+    lane = config.journal_dir / f"{records[0].system_id}.jsonl"
+    lane.write_bytes(b"".join(canonical_record_bytes(record) + b"\n" for record in records))
+    lane.chmod(0o600)
+    return lane
+
+
+def _head_of(record: JournalRecordV1) -> JournalHead:
+    return JournalHead(
+        authority_instance=record.authority_instance,
+        system_id=record.system_id,
+        sequence=record.sequence,
+        digest=record_digest(record),
+        phase=record.phase,
+        authority_id=record.authority_id,
+        generation=record.generation,
+        operation_identity=record.operation_identity,
+        pending_takeover=None,
+        suspended_operation=None,
+    )
+
+
+@pytest.mark.parametrize(("count", "anchored"), [(2, 1), (3, 2), (1, 0)])
+def test_startup_retracts_one_record_chained_to_the_head(
+    tmp_path: Path, count: int, anchored: int
+) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), count)
+    lane = _write_lane(config, records)
+    heads = (_head_of(records[anchored - 1]),) if anchored else ()
+    with pytest.raises(HostReadinessError, match="journal: (head|inventory)-mismatch"):
+        restore_journal_inventory(config, heads)
+
+    tail = host._retract_unanchored_tail(  # noqa: SLF001
+        config, str(records[0].system_id), heads[0] if heads else None, retract=True
+    )
+
+    assert tail == records[-1]
+    evidence = next((config.journal_dir / "retracted").iterdir())
+    assert evidence.read_bytes() == canonical_record_bytes(records[-1]) + b"\n"
+    if anchored:
+        restore_journal_inventory(config, heads)
+    else:
+        assert not lane.exists()
+        restore_journal_inventory(config, ())
+
+
+@pytest.mark.parametrize("case", ["equal", "two-record-suffix", "moved-head", "foreign-instance"])
+def test_startup_keeps_every_other_file_head_difference(tmp_path: Path, case: str) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 3)
+    head: JournalHead | None = {
+        "equal": _head_of(records[2]),
+        "two-record-suffix": _head_of(records[0]),
+        "moved-head": replace(_head_of(records[1]), digest="sha256:" + "9" * 64),
+        "foreign-instance": None,
+    }[case]
+    if case == "foreign-instance":
+        records = [records[0].model_copy(update={"authority_instance": "authority-b"})]
+    lane = _write_lane(config, records)
+    before = lane.read_bytes()
+
+    tail = host._retract_unanchored_tail(  # noqa: SLF001
+        config, str(records[0].system_id), head, retract=True
+    )
+
+    assert tail is None
+    assert lane.read_bytes() == before
+    assert not (config.journal_dir / "retracted").exists()
+    if case != "equal":
+        with pytest.raises(HostReadinessError, match="journal: (head|inventory)-mismatch"):
+            restore_journal_inventory(config, (head,) if head is not None else ())
+
+
+def _write_torn_lane(
+    config: AuthorityHostConfig,
+    complete: list[JournalRecordV1],
+    torn: JournalRecordV1,
+    length: int = 40,
+) -> tuple[Path, bytes]:
+    lane = config.journal_dir / f"{torn.system_id}.jsonl"
+    partial = canonical_record_bytes(torn)[:length]
+    lane.write_bytes(b"".join(canonical_record_bytes(r) + b"\n" for r in complete) + partial)
+    lane.chmod(0o600)
+    return lane, partial
+
+
+@pytest.mark.parametrize(("complete", "length"), [(2, 40), (0, 40), (0, 0)])
+def test_startup_recovers_a_torn_unanchored_tail(
+    tmp_path: Path, complete: int, length: int
+) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 3)
+    lane, partial = _write_torn_lane(config, records[:complete], records[complete], length)
+    head = _head_of(records[complete - 1]) if complete else None
+    system_id = str(records[0].system_id)
+
+    probe = host._retract_unanchored_tail(config, system_id, head, retract=False)  # noqa: SLF001
+    assert isinstance(probe, TornTail)
+    assert probe.data == partial
+    assert lane.read_bytes().endswith(partial)
+    tail = host._retract_unanchored_tail(config, system_id, head, retract=True)  # noqa: SLF001
+
+    assert tail == probe
+    assert next((config.journal_dir / "retracted").iterdir()).read_bytes() == partial
+    if head is not None:
+        restore_journal_inventory(config, (head,))
+    else:
+        assert not lane.exists()
+        restore_journal_inventory(config, ())
+
+
+@pytest.mark.parametrize(
+    ("complete", "anchored", "moved"),
+    [(2, 1, False), (1, 2, False), (1, 0, False), (0, 1, False), (2, 2, True)],
+    ids=["after-unanchored-record", "head-ahead", "headless-record", "head-no-record", "moved"],
+)
+def test_startup_refuses_every_other_torn_tail(
+    tmp_path: Path, complete: int, anchored: int, moved: bool
+) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 3)
+    lane, _ = _write_torn_lane(config, records[:complete], records[complete])
+    head = _head_of(records[anchored - 1]) if anchored else None
+    if moved and head is not None:
+        head = replace(head, digest="sha256:" + "9" * 64)
+    before = lane.read_bytes()
+
+    with pytest.raises(HostReadinessError, match="journal: invalid-lane"):
+        host._retract_unanchored_tail(  # noqa: SLF001
+            config, str(records[0].system_id), head, retract=True
+        )
+
+    assert lane.read_bytes() == before
+    assert not (config.journal_dir / "retracted").exists()
+
+
+@pytest.mark.parametrize("defect", [b"x" * (MAX_MESSAGE_BYTES + 1), b"{\n{"])
+def test_startup_refuses_a_corrupt_lane(tmp_path: Path, defect: bytes) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 1)
+    lane = _write_lane(config, records)
+    lane.write_bytes(lane.read_bytes() + defect)
+    before = lane.read_bytes()
+
+    with pytest.raises(HostReadinessError, match="journal: invalid-lane"):
+        host._retract_unanchored_tail(  # noqa: SLF001
+            config, str(records[0].system_id), _head_of(records[0]), retract=True
+        )
+
+    assert lane.read_bytes() == before
+    assert not (config.journal_dir / "retracted").exists()
+
+
+def test_reconcile_refuses_while_another_authority_holds_the_socket_lock(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.request_socket.parent.mkdir(mode=0o700)
+    held = transport.acquire_socket_lock(
+        config.request_socket.with_suffix(".lock"), config.authority_uid
+    )
+    try:
+        with pytest.raises(HostReadinessError, match="journal: reconcile-busy"):
+            asyncio.run(host._reconcile_journal_tails(config))  # noqa: SLF001
+    finally:
+        os.close(held)
+
+
+@pytest.mark.parametrize(
+    ("failure", "reconciles"),
+    [
+        (HostReadinessError("journal", "head-mismatch"), True),
+        (HostReadinessError("journal", "inventory-mismatch"), True),
+        (HostReadinessError("journal", "invalid-lane"), True),
+        (HostReadinessError("database", "connection-failed"), False),
+    ],
+)
+def test_startup_reconciles_only_after_a_journal_head_difference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: HostReadinessError,
+    reconciles: bool,
+) -> None:
+    config = _config(tmp_path)
+    reconciled: list[AuthorityHostConfig] = []
+    checks = 0
+
+    async def check(*_args: object) -> None:
+        nonlocal checks
+        checks += 1
+        raise failure if checks == 1 else HostReadinessError("stop", "after-reconcile")
+
+    async def reconcile(value: AuthorityHostConfig) -> None:
+        reconciled.append(value)
+
+    monkeypatch.setattr(host, "_load_system_installation", lambda _config: None)
+    monkeypatch.setattr(host, "_check_static_authority_host", check)
+    monkeypatch.setattr(host, "_reconcile_journal_tails", reconcile)
+    monkeypatch.setattr(host, "_notify_systemd", lambda _message: None)
+
+    with pytest.raises(HostReadinessError) as caught:
+        asyncio.run(run_authority_host(config))
+
+    assert reconciled == ([config] if reconciles else [])
+    assert caught.value.reason == ("after-reconcile" if reconciles else failure.reason)
+
+
+@pytest.mark.parametrize("torn", [False, True], ids=["record", "torn"])
+def test_standalone_check_never_retracts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, torn: bool
+) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 2)
+    if torn:
+        lane, _ = _write_torn_lane(config, records[:1], records[1])
+    else:
+        lane = _write_lane(config, records)
+    before = lane.read_bytes()
+    config.request_socket.parent.mkdir(mode=0o700)
+
+    async def heads(_config: AuthorityHostConfig) -> tuple[JournalHead, ...]:
+        return (_head_of(records[0]),)
+
+    monkeypatch.setattr(host, "_validate_access_boundary", lambda _config: None)
+    monkeypatch.setattr(host, "_database_heads", heads)
+    monkeypatch.setattr(host, "_load_system_installation", lambda _config: None)
+    monkeypatch.setattr(host, "validate_socket_parent", lambda *_args: None)
+
+    reason = "invalid-lane" if torn else "head-mismatch"
+    with pytest.raises(HostReadinessError, match=f"journal: {reason}"):
+        asyncio.run(host.check_authority_host_once(config))
+
+    assert lane.read_bytes() == before
+    assert not (config.journal_dir / "retracted").exists()
+
+
+def test_lane_inventory_admits_the_reserved_evidence_directory(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    evidence = config.journal_dir / "retracted"
+    evidence.mkdir(mode=0o700)
+    nested = evidence / f"{uuid4()}.jsonl"
+    nested.write_bytes(b"not a lane\n")
+    nested.chmod(0o600)
+
+    restore_journal_inventory(config, ())
+
+
+@pytest.mark.parametrize("shape", ["symlink", "file", "mode", "foreign-owner", "other-directory"])
+def test_lane_inventory_rejects_an_unsafe_evidence_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str
+) -> None:
+    config = _config(tmp_path)
+    evidence = config.journal_dir / "retracted"
+    if shape == "symlink":
+        target = tmp_path / "elsewhere"
+        target.mkdir(mode=0o700)
+        evidence.symlink_to(target)
+    elif shape == "file":
+        evidence.write_bytes(b"")
+        evidence.chmod(0o700)
+    elif shape == "mode":
+        evidence.mkdir()
+        evidence.chmod(0o750)
+    elif shape == "other-directory":
+        (config.journal_dir / "retracted-extra").mkdir(mode=0o700)
+    else:
+        evidence.mkdir(mode=0o700)
+        real_stat = host.os.stat
+
+        def foreign_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            status = real_stat(path, *args, **kwargs)
+            if path != "retracted":
+                return status
+            fields = list(status)
+            fields[stat.ST_UID] = config.authority_uid + 1
+            return os.stat_result(fields)
+
+        monkeypatch.setattr(host.os, "stat", foreign_stat)
+
+    with pytest.raises(HostReadinessError, match="journal: unsafe-tree"):
+        restore_journal_inventory(config, ())
+
+
+def test_startup_retraction_stops_at_its_load_deadline(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 1)
+    lane = _write_lane(config, records)
+    before = lane.read_bytes()
+
+    with pytest.raises(HostReadinessError, match="journal: validation-timeout"):
+        host._retract_unanchored_tail(  # noqa: SLF001
+            config, str(records[0].system_id), None, retract=True, deadline=0.0
+        )
+
+    assert lane.read_bytes() == before
+
+
+def _anchoring_service(
+    config: AuthorityHostConfig,
+) -> tuple[
+    ExternalBootAuthorityService, _Repository, AuthenticatedPeer, AuthorityTakeoverRequestV1
+]:
+    """A real service over the fake repository, journaling into the host's lane directory."""
+    peer = AuthenticatedPeer(uuid4())
+    request = _takeover().model_copy(update={"authority_instance": config.authority_instance})
+    repository = _Repository(peer, request)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(
+            config.journal_dir, f"{system_id}.jsonl"
+        ),
+        adapter=_Adapter(),
+    )
+    return service, repository, peer, request
+
+
+def _patch_trusted_heads(monkeypatch: pytest.MonkeyPatch, repository: _Repository) -> None:
+    async def heads(_config: AuthorityHostConfig) -> tuple[JournalHead, ...]:
+        return () if repository.head is None else (repository.head,)
+
+    monkeypatch.setattr(host, "_database_heads", heads)
+
+
+def _signal_failed_validation(
+    monkeypatch: pytest.MonkeyPatch, armed: list[object]
+) -> asyncio.Event:
+    failed = asyncio.Event()
+    validate = host.JournalInventoryValidator.validate
+
+    async def observed(
+        validator: host.JournalInventoryValidator,
+        config: AuthorityHostConfig,
+        heads: tuple[JournalHead, ...],
+    ) -> None:
+        # getattr keeps the race runnable on a build without the hook, where it must fail with
+        # journal: head-mismatch rather than here.
+        armed.append(getattr(validator, "anchor_quiescence", None))
+        try:
+            await validate(validator, config, heads)
+        except HostReadinessError:
+            failed.set()
+            raise
+
+    monkeypatch.setattr(host.JournalInventoryValidator, "validate", observed)
+    return failed
+
+
+class _Stop(Exception):
+    """Ends the host loop once the periodic check under test has run."""
+
+
+def test_periodic_check_waits_out_an_anchor_between_append_and_advance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#2899: the periodic check overlapping `_anchor` no longer exits the host."""
+    config = replace(_config(tmp_path), authority_instance="host-a")
+    armed: list[object] = []
+    periodic_checks = 0
+
+    class Listener:
+        def validate(self) -> None:
+            return None
+
+        async def start_serving(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    async def serve(*_args: object, **_kwargs: object) -> Listener:
+        return Listener()
+
+    async def healthy(*_args: object) -> None:
+        return None
+
+    async def scenario() -> None:
+        service, repository, peer, request = _anchoring_service(config)
+        failed = _signal_failed_validation(monkeypatch, armed)
+        mutation: asyncio.Task[AuthorityObservationV1] | None = None
+        sleep = asyncio.sleep
+
+        async def interval(delay: float) -> None:
+            nonlocal mutation, periodic_checks
+            if delay != host.READINESS_INTERVAL_SECONDS:
+                return await sleep(delay)
+            periodic_checks += 1
+            if periodic_checks == 2:
+                assert mutation is not None
+                assert (await mutation).category == "target"
+                raise _Stop
+            await service.acknowledge_takeover(peer, request)
+            repository.current = True
+            repository.pause_phase = JournalPhase.ADMITTED
+            repository.phase_release.clear()
+            mutation = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+            await repository.phase_entered.wait()
+
+            async def finish_anchor() -> None:
+                await failed.wait()
+                repository.phase_release.set()
+
+            asyncio.get_running_loop().create_task(finish_anchor())
+
+        monkeypatch.setattr(host.asyncio, "sleep", interval)
+        monkeypatch.setattr(host, "_build_mutation_service", lambda *_args, **_kwargs: service)
+        _patch_trusted_heads(monkeypatch, repository)
+        with pytest.raises(_Stop):
+            await run_authority_host(config)
+        # Startup is unarmed; the periodic check fails once, then passes under quiescence.
+        assert armed == [None, service.quiesce_anchors, service.quiesce_anchors]
+
+    monkeypatch.setattr(host, "_validate_access_boundary", lambda _config: None)
+    monkeypatch.setattr(host, "_check_provider_socket", healthy)
+    monkeypatch.setattr(host, "_load_system_installation", lambda _config: None)
+    monkeypatch.setattr(host, "serve_authority_transport", serve)
+    monkeypatch.setattr(host, "check_tls_health", healthy)
+    monkeypatch.setattr(host, "_notify_systemd", lambda _message: None)
+    asyncio.run(scenario())
+    assert periodic_checks == 2
+
+
+class _CountingQuiescence:
+    def __init__(self) -> None:
+        self.entered = 0
+
+    @asynccontextmanager
+    async def __call__(self) -> AsyncIterator[None]:
+        self.entered += 1
+        yield
+
+
+@pytest.mark.parametrize("case", ["head-mismatch", "inventory-mismatch"])
+def test_periodic_check_still_refuses_a_divergence_that_persists_under_quiescence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
+) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 2)
+    _write_lane(config, records)
+    trusted = (_head_of(records[0]),)
+    if case == "inventory-mismatch":
+        trusted = (_head_of(records[1]), _head(uuid4()))
+    reads = 0
+
+    async def heads(_config: AuthorityHostConfig) -> tuple[JournalHead, ...]:
+        nonlocal reads
+        reads += 1
+        return trusted
+
+    monkeypatch.setattr(host, "_database_heads", heads)
+    quiescence = _CountingQuiescence()
+    validator = host.JournalInventoryValidator(anchor_quiescence=quiescence)
+    asyncio.run(validator.validate(config, (_head_of(records[1]),)))
+    cached = dict(validator._cache)  # noqa: SLF001
+    assert cached
+
+    with pytest.raises(HostReadinessError, match=f"journal: {case}"):
+        asyncio.run(validator.validate_current(config))
+
+    assert (reads, quiescence.entered) == (2, 1)
+    assert validator._cache == cached  # noqa: SLF001 - a divergent view never becomes evidence
+
+
+def test_unarmed_check_never_quiesces(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 2)
+    _write_lane(config, records)
+    reads = 0
+
+    async def heads(_config: AuthorityHostConfig) -> tuple[JournalHead, ...]:
+        nonlocal reads
+        reads += 1
+        return (_head_of(records[0]),)
+
+    monkeypatch.setattr(host, "_database_heads", heads)
+    with pytest.raises(HostReadinessError, match="journal: head-mismatch"):
+        asyncio.run(host.JournalInventoryValidator().validate_current(config))
+    assert reads == 1
+
+
+def test_periodic_quiescence_wait_is_bounded_by_the_readiness_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = replace(_config(tmp_path), authority_instance="host-a")
+    monkeypatch.setattr(host, "READINESS_CHECK_TIMEOUT_SECONDS", 0.2)
+
+    async def scenario() -> None:
+        service, repository, peer, request = _anchoring_service(config)
+        _patch_trusted_heads(monkeypatch, repository)
+        await service.acknowledge_takeover(peer, request)
+        repository.current = True
+        repository.pause_phase = JournalPhase.ADMITTED
+        repository.phase_release.clear()
+        mutation = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+        await repository.phase_entered.wait()
+        validator = host.JournalInventoryValidator(anchor_quiescence=service.quiesce_anchors)
+
+        with pytest.raises(HostReadinessError, match="readiness: timeout"):
+            await host._bounded_readiness_check(validator.validate_current(config))  # noqa: SLF001
+
+        repository.pause_phase = None
+        repository.phase_release.set()
+        async with asyncio.timeout(5):
+            assert (await mutation).category == "target"
+            await validator.validate_current(config)
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_anchor_leaves_the_service_quiescible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = replace(_config(tmp_path), authority_instance="host-a")
+
+    async def scenario() -> None:
+        service, repository, peer, request = _anchoring_service(config)
+
+        async def unreachable(*_args: object) -> str:
+            raise OSError("injected head-advance failure")
+
+        monkeypatch.setattr(repository, "advance", unreachable)
+        with pytest.raises(OSError, match="injected"):
+            await service.acknowledge_takeover(peer, request)
+        async with asyncio.timeout(5):
+            async with service.quiesce_anchors():
+                pass
+            with pytest.raises(RuntimeError, match="inside"):
+                async with service.quiesce_anchors():
+                    raise RuntimeError("failure inside the quiesced check")
+        assert service._anchors_open.is_set()  # noqa: SLF001 - new anchors are admitted again
+
+    asyncio.run(scenario())
+
+
+def test_periodic_check_retries_an_anchor_torn_mid_append(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#2933: a load that reads an anchor's half-written record retries under quiescence."""
+    config = replace(_config(tmp_path), authority_instance="host-a")
+    half_written = threading.Event()
+    first_load_done = threading.Event()
+    first_load: list[str] = []
+    write = os.write
+    restore = host._restore_journal_inventory  # noqa: SLF001
+
+    def tearing_write(descriptor: int, data: bytes) -> int:
+        if (
+            threading.current_thread() is not threading.main_thread()
+            or half_written.is_set()
+            or bytes(data[:1]) != b"{"
+        ):
+            return write(descriptor, data)
+        written = write(descriptor, data[: len(data) // 2])
+        half_written.set()
+        assert first_load_done.wait(5)
+        return written
+
+    def first_load_after_tear(*args: Any, **kwargs: Any) -> None:
+        if first_load_done.is_set():
+            return restore(*args, **kwargs)
+        assert half_written.wait(5)
+        try:
+            return restore(*args, **kwargs)
+        except HostReadinessError as error:
+            first_load.append(str(error))
+            raise
+        finally:
+            first_load_done.set()
+
+    async def scenario() -> None:
+        service, repository, peer, request = _anchoring_service(config)
+        _patch_trusted_heads(monkeypatch, repository)
+        await service.acknowledge_takeover(peer, request)
+        repository.current = True
+        monkeypatch.setattr(host.os, "write", tearing_write)
+        monkeypatch.setattr(host, "_restore_journal_inventory", first_load_after_tear)
+        validator = host.JournalInventoryValidator(anchor_quiescence=service.quiesce_anchors)
+        # FIFO task order: the check submits its load before the mutation's append blocks.
+        check = asyncio.create_task(validator.validate_current(config))
+        mutation = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+        async with asyncio.timeout(10):
+            await check
+            assert (await mutation).category == "target"
+
+    asyncio.run(scenario())
+    assert first_load == ["journal: invalid-lane"]
+
+
+def test_periodic_check_retries_a_lane_retracted_mid_listing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#2933: a refused first record's lane unlinked between listing and stat retries."""
+    config = replace(_config(tmp_path), authority_instance="host-a")
+    listed = threading.Event()
+    retracted = threading.Event()
+    listdir = os.listdir
+
+    def pausing_listdir(path: Any) -> list[str]:
+        names = listdir(path)
+        if (
+            isinstance(path, int)
+            and threading.current_thread() is not threading.main_thread()
+            and not listed.is_set()
+        ):
+            listed.set()
+            assert retracted.wait(5)
+        return names
+
+    async def scenario() -> None:
+        service, repository, peer, request = _anchoring_service(config)
+        _patch_trusted_heads(monkeypatch, repository)
+        repository.advance_status = "superseded"
+        repository.pause_phase = JournalPhase.WATERMARK_INSTALLED
+        repository.phase_release.clear()
+        takeover = asyncio.create_task(service.acknowledge_takeover(peer, request))
+        await repository.phase_entered.wait()
+        lane = config.journal_dir / f"{request.system_id}.jsonl"
+        assert lane.exists()
+        monkeypatch.setattr(host.os, "listdir", pausing_listdir)
+        validator = host.JournalInventoryValidator(anchor_quiescence=service.quiesce_anchors)
+        check = asyncio.create_task(validator.validate_current(config))
+        async with asyncio.timeout(10):
+            assert await asyncio.to_thread(listed.wait, 5)
+            repository.phase_release.set()
+            with pytest.raises(AuthorityServiceError, match="superseded"):
+                await takeover
+            assert not lane.exists()
+            retracted.set()
+            await check
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("case", "armed", "reason", "reads", "entered"),
+    [
+        ("torn", True, "invalid-lane", 2, 1),
+        ("mode", True, "unsafe-tree", 1, 0),
+        ("vanished", False, "unsafe-tree", 1, 0),
+    ],
+)
+def test_periodic_check_refuses_a_persistent_lane_fault(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case: str,
+    armed: bool,
+    reason: str,
+    reads: int,
+    entered: int,
+) -> None:
+    config = _config(tmp_path)
+    records = _chain(config, uuid4(), 2)
+    lane = _write_lane(config, records)
+    if case == "torn":
+        lane.write_bytes(lane.read_bytes()[:-1])
+    elif case == "mode":
+        lane.chmod(0o644)
+    else:
+        listdir = os.listdir
+        absent = f"{uuid4()}.jsonl"
+
+        def listing(path: Any) -> list[str]:
+            names = listdir(path)
+            return [*names, absent] if isinstance(path, int) else names
+
+        monkeypatch.setattr(host.os, "listdir", listing)
+    heads_read = 0
+
+    async def heads(_config: AuthorityHostConfig) -> tuple[JournalHead, ...]:
+        nonlocal heads_read
+        heads_read += 1
+        return (_head_of(records[-1]),)
+
+    monkeypatch.setattr(host, "_database_heads", heads)
+    quiescence = _CountingQuiescence()
+    validator = host.JournalInventoryValidator(anchor_quiescence=quiescence if armed else None)
+    with pytest.raises(HostReadinessError, match=f"journal: {reason}"):
+        asyncio.run(validator.validate_current(config))
+    assert (heads_read, quiescence.entered) == (reads, entered)

@@ -11,6 +11,69 @@ The validator rejects a malformed upload with a precise message, but only **afte
 upload round-trip — so the cost of getting the shape wrong is a wasted upload, not just an
 error. Each rule below names the rejection it prevents.
 
+## Reusable pinned qualification fixtures
+
+The external fixture builder selects the exact LTS and stable commits in
+[`baselines.toml`](../../fixtures/kernel/baselines.toml) and layers
+[the debug config fragment](../../fixtures/kernel/debug.config) on the native architecture's defconfig.
+It requires a native Linux host, Git, GCC, make, binutils, bc, Perl, bison, flex, pahole,
+and the ELF/OpenSSL development headers. The `libvirt_stack` Ansible role declares these
+packages for Debian, Red Hat and SUSE families. Native POWER execution is tracked by
+[#2818](https://github.com/randomparity/kdive/issues/2818); this change qualifies x86_64.
+
+Check free disk/RAM and choose `--jobs` for the host. Run builds serially, outside the KDIVE
+service. From the repository root, with `fixture_root` set to an absolute private directory:
+
+```bash
+for baseline in longterm stable; do
+  uv run python scripts/kernel_fixtures.py build \
+    --baseline "$baseline" --arch x86_64 --jobs 8 \
+    --source "$fixture_root/$baseline-source" --output "$fixture_root/$baseline"
+  uv run python scripts/kernel_fixtures.py verify \
+    --baseline "$baseline" --arch x86_64 --output "$fixture_root/$baseline"
+done
+```
+
+An existing source must match the pin and have no tracked changes or untracked source files.
+The output must be new and separate from source. A failed build leaves diagnostic output but
+no valid manifest; retry with a new output path. The manifest binds source, config, toolchain,
+builder commit, GNU build ID and artifact hashes. Keep the source tree too: the existing upload
+packager invokes `modules_install` through the output directory's generated Makefile. Verification
+checks that Makefile's linkage and the retained source commit/cleanliness before packaging. Retained
+vmlinux and modules are unstripped; only the packager's staged module copies are stripped.
+
+For a cold repeat, run the same commands with a different `fixture_root`, which creates fresh
+source and output directories. Compare both manifests' source/config/toolchain and artifact
+hashes and retain both records. Debug paths are normalized, but mutable package repositories
+are not a promise of identical bytes. A changed toolchain/output produces a new fixture identity
+requiring upload qualification. Raw logs, package inventories and binaries may contain private
+machine paths; keep them private and redact shared reports.
+
+The upload proof uses real HTTP and storage, with unbound Runs and no VM. Prepare an isolated
+copy of the [live-stack backends](runbooks/live-stack.md), a candidate host server, and a mock
+OIDC issuer. Workers and reconciler are not involved in this upload-only scenario. Configure the
+ordinary `KDIVE_STACK_BASE_URL`, `KDIVE_OIDC_*`, `KDIVE_S3_*` and AWS credentials for those services,
+then set the test's inputs:
+
+```bash
+export KDIVE_FIXTURE_ROOT="$fixture_root"
+export KDIVE_FIXTURE_EVIDENCE="$fixture_root/upload-evidence"
+export KDIVE_FIXTURE_CANDIDATE="$(git rev-parse HEAD)"
+export KDIVE_FIXTURE_HEALTH_URL=http://localhost:9464/readyz
+# Read-only evidence access to the isolated test database, not the server's runtime authority:
+export KDIVE_FIXTURE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"
+uv run python -m pytest tests/integration/test_kernel_fixtures_live.py -m live_stack -q
+```
+
+The evidence directory must be new for each run. Missing inputs, failed prerequisites and unknown
+or mismatched server revisions fail the selected tests. Each result records fixture/candidate
+identity, terminal build state, stored byte digests and investigation closure. The upload
+subdirectory retains the exact submitted bundle, effective config and declarations/completion
+result. Both parametrized cases must pass; a skipped test is not proof. Afterward stop the
+candidate server and remove only that isolated deployment's backing containers and volumes;
+retain fixture/evidence files. Record and verify this teardown before publishing qualification
+results. Upload success does not claim boot, module loading or debugger behavior.
+
 ## Choosing your kernel config
 
 **The kernel config is yours to choose.** Because you build the kernel locally, you decide
@@ -21,7 +84,8 @@ For the native POWER live-stack spine, use the
 [spine kernel configuration](runbooks/live-testing.md#native-power-spine-kernel-configuration)
 before building the tree used as `KDIVE_KERNEL_SRC`.
 There is no allowed-config allowlist and no required-symbol gate: enable what the
-investigation needs. One non-blocking exception: if you upload an `effective_config` that does not
+investigation needs. Two non-blocking exceptions read an uploaded `effective_config`; the RHEL-family
+kdump one is described with its symbol set below. The first: if the config does not
 carry the symbols needed to mount the root filesystem and boot (`VIRTIO_BLK` for the `/dev/vda`
 root device, plus `EXT4_FS` **or** `XFS_FS` for the filesystem on it), `runs.complete_build` still
 succeeds but returns a `data.missing_boot_config` advisory naming the missing symbols, so a kernel
@@ -129,9 +193,20 @@ CONFIG_BLK_DEV_LOOP=y
 All `=y`, not `=m`: a crash initramfs must not depend on the primary kernel loading modules first.
 A stock `x86_64_defconfig` supplies none of them. This set is filesystem- and initramfs-dependent,
 not universal — a guest with a different root filesystem or initramfs scheme needs a different set,
-so kdive advertises it and never refuses on it. Missing any one of these fails only at capture
-time, after the crash, when the guest and the evidence are gone; each omission masks the next, so
-build the whole set in at once.
+so kdive never refuses on it. Missing any one of these fails only at capture time, after the
+crash, when the guest and the evidence are gone; each omission masks the next, so build the whole
+set in at once.
+
+kdive checks the set for you when you upload an `effective_config`: `runs.complete_build` still
+succeeds but returns a `data.rhel_guest_crash_config` advisory naming the missing symbols. Its
+`guest_family` is `rhel` when the Run's System boots a registered catalog image whose recorded
+os-release is Fedora, RHEL, Rocky, AlmaLinux or CentOS Stream. It is `unknown` when kdive cannot
+tell the guest's OS — the Run is not bound to a System yet, or the System boots a `local`,
+`artifact` or `upload` rootfs — and then the advisory applies only if your guest is RHEL-family.
+A known non-RHEL image, or a config carrying the whole set, draws nothing. The advisory checks
+only that each symbol is enabled: `=m` silences it, so it does not replace the `=y` advice above. If a kdump capture
+still finds no core, the failed `capture_vmcore` job carries a `failure_detail_kernel_config_hint`
+pointing back at this set.
 
 **Whatever the guest family**, a crash-config refusal names only symbols you can set. `KEXEC_CORE`
 and `VMCORE_INFO` are missing from the lists above, from the manifest, and from the refusal:
@@ -221,9 +296,19 @@ Run this external packaging recipe from a built kernel tree, with `MODROOT` poin
 staging root you passed to
 `make modules_install INSTALL_MOD_PATH=…`:
 
+For a local-libvirt install that injects modules (kdump or debuginfo), the limit is **2 GiB
+(2,147,483,648 bytes)** of cumulative uncompressed regular-file content under
+`lib/modules/<release>/` in one uploaded kernel bundle. KDIVE measures the exact uploaded
+version during `runs.complete_build` and checks that measurement before the install provider
+extracts modules. An over-limit install fails with a configuration error. Strip modules during
+staging as shown below; if the tree still exceeds the limit, reduce the module set, rebuild the
+archive, and upload it again. External boot has a separate module bound.
+
 ```bash
 KBUILD=.                 # the built kernel tree (contains arch/x86/boot/bzImage)
 MODROOT=/tmp/modstage    # INSTALL_MOD_PATH from `make modules_install` (holds lib/modules/<release>)
+
+make -C "$KBUILD" modules_install INSTALL_MOD_PATH="$MODROOT" INSTALL_MOD_STRIP=1
 
 tar -czf kernel.tar.gz \
   --exclude='*/build' --exclude='*/source' \
@@ -256,6 +341,8 @@ powerpc has no bzImage — the boot member is the **stripped** ELF kernel. Strip
 ```bash
 KBUILD=.                 # the built kernel tree (contains the top-level vmlinux)
 MODROOT=/tmp/modstage    # INSTALL_MOD_PATH from `make modules_install`
+
+make -C "$KBUILD" modules_install INSTALL_MOD_PATH="$MODROOT" INSTALL_MOD_STRIP=1
 
 "${CROSS_COMPILE}strip" -s "$KBUILD/vmlinux" -o /tmp/vmlinuz   # stripped, bootable, tens of MB
 
@@ -295,7 +382,7 @@ tar -tzf kernel.tar.gz | head    # boot/vmlinuz must be first; lib/modules/<rele
 | Name | When to upload | Notes |
 |---|---|---|
 | `vmlinux` | to enable kernel-debugging / DWARF introspection | the uncompressed kernel ELF with debug info. If you upload it you **must** declare a `build_id` in `runs.complete_build`, and it must match the ELF's GNU build-id note, or the upload is rejected. |
-| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. On a direct-kernel target `=m` counts as missing unless you also upload an `initrd`; on a `disk-image` target it does not, because the guest builds its own initramfs. |
+| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. On a direct-kernel target `=m` counts as missing unless you also upload an `initrd`; on a `disk-image` target it does not, because the guest builds its own initramfs. A config missing the RHEL-family kdump set (`crash_capture_rhel_guest`) draws a non-blocking `rhel_guest_crash_config` advisory when the target is, or may be, RHEL-family. |
 | `initrd` | when booting needs a specific initramfs | the initial ramdisk image. On a direct-kernel target, uploading one also silences the built-in requirement above, since the modules then have somewhere to load from. A `disk-image` target never reads it — that lane boots through the guest's own bootloader and builds its initramfs in-guest — so upload one there only to record it. |
 
 ## The upload flow

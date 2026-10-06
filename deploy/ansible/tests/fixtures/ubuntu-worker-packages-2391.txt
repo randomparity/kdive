@@ -6,10 +6,12 @@ kdump-tools
 gdb
 kmod
 python3-guestfs
+libselinux1
 elfutils
 debuginfod
 git
 python3-pip
+python3-packaging
 python3-dev
 build-essential
 pkg-config

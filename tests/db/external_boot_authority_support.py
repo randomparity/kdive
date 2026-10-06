@@ -87,6 +87,52 @@ def _activation_evidence(system_id: UUID, run_id: UUID, activation_id: UUID) -> 
     )
 
 
+def _prepare_purpose_state(conn: psycopg.Connection, case: _AuthorityCase, purpose: str) -> None:
+    terminal = Jsonb(
+        {
+            "schema": "external-boot-terminal-evidence-v1",
+            "activation_id": str(case.activation_id),
+            "system_id": str(case.system_id),
+            "outcome": "active" if purpose == "recover" else "abandoned",
+        }
+    )
+    if purpose == "recover":
+        conn.execute(
+            "UPDATE external_boot_activations SET state='active', terminal_evidence=%s, "
+            "activation_readiness_deadline=now() WHERE id=%s",
+            (terminal, case.activation_id),
+        )
+    elif purpose == "resolve-conflict":
+        attempt_id = uuid4()
+        conn.execute(
+            "INSERT INTO external_boot_recovery_attempts "
+            "(activation_id, attempt_number, attempt_id, authority_generation, recovery_basis, "
+            "recovery_readiness_deadline, state, conflict_evidence) "
+            "VALUES (%s, 1, %s, 1, 'recovery_point', now(), 'conflict', %s)",
+            (
+                case.activation_id,
+                attempt_id,
+                Jsonb(
+                    {
+                        "schema": "external-boot-conflict-evidence-v1",
+                        "activation_id": str(case.activation_id),
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            "UPDATE external_boot_activations "
+            "SET state='recovery_conflict', current_attempt_id=%s WHERE id=%s",
+            (attempt_id, case.activation_id),
+        )
+    elif purpose == "release":
+        conn.execute(
+            "UPDATE external_boot_activations SET state='abandoned', materialization=NULL, "
+            "recovery_point=NULL, terminal_evidence=%s WHERE id=%s",
+            (terminal, case.activation_id),
+        )
+
+
 def _seed_case(
     conn: psycopg.Connection,
     *,
@@ -262,6 +308,40 @@ def _seed_case(
         authority_instance=authority_instance,
         operation=operation,
         operation_identity=operation_identity,
+    )
+
+
+def _set_real_state(conn: psycopg.Connection, case: _AuthorityCase, activation: str) -> None:
+    """Move the legacy failed-System teardown seed to a live System with a pre-active activation."""
+    conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (case.system_id,))
+    conn.execute("UPDATE runs SET state = 'succeeded' WHERE id = %s", (case.run_id,))
+    conn.execute(
+        "UPDATE external_boot_activations SET state = %s, current_attempt_id = NULL, "
+        "pre_recovery_evidence = NULL, terminal_evidence = NULL, recovery_point = %s, "
+        "activation_readiness_deadline = CASE WHEN %s = 'activating' "
+        "THEN now() + interval '5 minutes' END WHERE id = %s",
+        (
+            activation,
+            Jsonb(
+                {
+                    "schema": "external-boot-recovery-v1",
+                    "binding": {
+                        "system_id": str(case.system_id),
+                        "run_id": str(case.run_id),
+                        "activation_id": str(case.activation_id),
+                    },
+                    "plan_identity": _PLAN,
+                }
+            ),
+            activation,
+            case.activation_id,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO external_boot_reservations "
+        "(activation_id, store_identity, owner_key, reserved_bytes, state, ready_at) "
+        "VALUES (%s, 'store/private', 'owner/private', 4096, 'ready', now())",
+        (case.activation_id,),
     )
 
 

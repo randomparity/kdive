@@ -1,4 +1,4 @@
-"""Public recovery request replay and fixed server-clock deadlines (ADR-0583)."""
+"""Public recovery replay and persisted server-clock deadlines (ADRs 0583, 0684)."""
 
 import hashlib
 import json
@@ -7,10 +7,11 @@ from datetime import timedelta
 from psycopg import AsyncConnection
 
 from kdive.domain.errors import ErrorCategory
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, timing_deadline
 from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
 from kdive.jobs.payloads import RecoveryRequestV1
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import ToolResponse, validate_stored
 
 MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES = 255
 
@@ -20,7 +21,7 @@ def recovery_response(job: Job, object_key: str, object_id: str) -> ToolResponse
     data = {**response.data, object_key: object_id}
     recorded = job.payload.get("recovery_request_v1")
     if recorded is not None:
-        metadata = RecoveryRequestV1.model_validate(recorded)
+        metadata = validate_stored(RecoveryRequestV1, recorded)
         data["recovery_readiness_deadline"] = metadata.readiness_deadline.isoformat().replace(
             "+00:00", "Z"
         )
@@ -64,7 +65,7 @@ async def recovery_request(
     dedup_key = "external-boot-request:" + hashlib.sha256(key_bytes).hexdigest()
     existing = await queue.get_by_dedup_key(conn, dedup_key)
     if existing is not None:
-        metadata = RecoveryRequestV1.model_validate(existing.payload.get("recovery_request_v1"))
+        metadata = validate_stored(RecoveryRequestV1, existing.payload.get("recovery_request_v1"))
         if metadata.request_identity != identity:
             return (
                 dedup_key,
@@ -85,3 +86,20 @@ async def recovery_request(
         request_identity=identity, readiness_deadline=row[0] + timedelta(minutes=5)
     )
     return dedup_key, metadata, None
+
+
+async def local_recovery_metadata(
+    conn: AsyncConnection,
+    metadata: RecoveryRequestV1,
+    timing: LocalExternalBootTimingV1,
+) -> RecoveryRequestV1:
+    """Replace a new request's provisional deadline using one database clock reading."""
+    row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+    if row is None:
+        raise RuntimeError("recovery request could not read the server clock")
+    return metadata.model_copy(
+        update={
+            "readiness_deadline": timing_deadline(row[0], timing.deadline_budget_s),
+            "local_timing": timing,
+        }
+    )

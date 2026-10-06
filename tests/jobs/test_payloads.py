@@ -11,6 +11,7 @@ import pytest
 from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.domain.operations.sysrq import SysRqCommand
 from kdive.jobs.payloads import (
@@ -69,6 +70,29 @@ def test_recovery_request_requires_digest_and_aware_deadline() -> None:
             request_identity="not-a-digest",
             readiness_deadline=datetime(2026, 9, 6, tzinfo=UTC),
         )
+
+
+def test_local_recovery_timing_round_trips_and_legacy_request_remains_readable() -> None:
+    values = {
+        "request_identity": "sha256:" + "a" * 64,
+        "readiness_deadline": datetime(2026, 9, 26, tzinfo=UTC),
+    }
+    timing = LocalExternalBootTimingV1(accel="tcg", console_window_s=9000, deadline_budget_s=12000)
+    new = RecoveryRequestV1(**values, local_timing=timing)
+    assert (
+        RecoveryRequestV1.model_validate(new.model_dump(mode="json", by_alias=True)).local_timing
+        == timing
+    )
+    assert RecoveryRequestV1(**values).local_timing is None
+
+
+@pytest.mark.parametrize(
+    ("window", "budget"),
+    [(0, 1200), (1200, 1200), (1201, 1200), (900, 10**20)],
+)
+def test_local_recovery_timing_rejects_invalid_bounds(window: int, budget: int) -> None:
+    with pytest.raises(ValueError):
+        LocalExternalBootTimingV1(accel="kvm", console_window_s=window, deadline_budget_s=budget)
 
 
 def test_authority_system_provision_marker_round_trips_exactly() -> None:

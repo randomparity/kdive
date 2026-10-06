@@ -7,7 +7,10 @@ need are defined here exactly once rather than duplicated.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
+
+import libvirt
 
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
 
@@ -26,6 +29,7 @@ def _xml(
     overlay: str = OVERLAY,
     system_id: UUID = SYSTEM_ID,
     channel: str = "valid",
+    domain_type: str | None = None,
 ) -> str:
     channels = {
         "valid": (
@@ -40,8 +44,9 @@ def _xml(
             '<channel type="unix"><target type="pty" name="org.qemu.guest_agent.0"/></channel>'
         ),
     }[channel]
+    opening = "<domain>" if domain_type is None else f'<domain type="{domain_type}">'
     return (
-        "<domain><name>kdive-" + str(system_id) + "</name><metadata>"
+        opening + "<name>kdive-" + str(system_id) + "</name><metadata>"
         '<kdive:system xmlns:kdive="https://kdive.dev/libvirt/1">'
         + str(system_id)
         + "</kdive:system></metadata><os><kernel>/old</kernel><cmdline>root=x</cmdline></os>"
@@ -58,11 +63,14 @@ class Domain:
         xml: str | None = None,
         *,
         inactive_xml: str | None = None,
+        honours_shutdown: bool = True,
     ) -> None:
         self.events = events
         self.xml = xml or _xml()
-        self.inactive_xml = inactive_xml or self.xml
+        # None: the running and persistent definitions agree (libvirt after define or stop).
+        self.inactive_xml = inactive_xml
         self.active = False
+        self.honours_shutdown = honours_shutdown
 
     def name(self) -> str:
         start = self.xml.index("<name>") + len("<name>")
@@ -70,7 +78,9 @@ class Domain:
 
     def XMLDesc(self, flags: int) -> str:  # noqa: N802
         self.events.append(f"domain.xml:{flags}")
-        return self.inactive_xml if flags == 2 else self.xml
+        if flags == 2 and self.inactive_xml is not None:
+            return self.inactive_xml
+        return self.xml
 
     def isActive(self) -> int:  # noqa: N802
         self.events.append("domain.active")
@@ -81,13 +91,20 @@ class Domain:
         self.active = False
         return 0
 
+    def shutdown(self) -> int:
+        self.events.append("domain.shutdown")
+        if self.honours_shutdown:
+            self.active = False
+        return 0
+
+    def state(self, flags: int = 0) -> Sequence[object]:
+        del flags
+        return [libvirt.VIR_DOMAIN_RUNNING if self.active else libvirt.VIR_DOMAIN_SHUTOFF, 0]
+
     def create(self) -> int:
         self.events.append("domain.create")
         self.active = True
         return 0
-
-    def free(self) -> None:
-        self.events.append("domain.close")
 
 
 class Conn:
@@ -102,6 +119,7 @@ class Conn:
     def defineXML(self, xml: str) -> Domain:  # noqa: N802
         self.events.append("domain.define")
         self.domain.xml = xml
+        self.domain.inactive_xml = None
         return self.domain
 
     def close(self) -> None:
@@ -111,6 +129,8 @@ class Conn:
 class Guest:
     def __init__(self, events: list[str]) -> None:
         self.events = events
+        self.root = "/dev/sda1"
+        self.filesystem_uuids: dict[str, str] = {}
 
     def add_drive_opts(self, overlay: str, *, format: str) -> None:
         self.events.append(f"guest.drive:{overlay}:{format}")
@@ -120,7 +140,10 @@ class Guest:
 
     def inspect_os(self) -> list[str]:
         self.events.append("guest.inspect")
-        return ["/dev/sda1"]
+        return [self.root]
+
+    def vfs_uuid(self, mountable: str) -> str:
+        return self.filesystem_uuids.get(mountable, "")
 
     def mount(self, device: str, mountpoint: str) -> None:
         self.events.append(f"guest.mount:{device}:{mountpoint}")
@@ -150,6 +173,10 @@ class Guest:
     def download(self, remotefilename: str, filename: str) -> None:
         self.events.append(f"download:{remotefilename}:{filename}")
 
+    def pread(self, path: str, count: int, offset: int) -> bytes:
+        self.events.append(f"pread:{path}:{count}:{offset}")
+        return b""
+
     def mkdir(self, path: str) -> None:
         self.events.append(f"mkdir:{path}")
 
@@ -165,7 +192,7 @@ class Guest:
     def chown(self, owner: int, group: int, path: str) -> None:
         self.events.append(f"chown:{owner}:{group}:{path}")
 
-    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None:
+    def lsetxattr(self, xattr: str, val: bytes | str, vallen: int, path: str) -> None:
         self.events.append(f"xattr:{xattr}:{val!r}:{vallen}:{path}")
 
     def rm_rf(self, path: str) -> None:

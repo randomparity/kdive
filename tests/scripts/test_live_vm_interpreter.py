@@ -13,9 +13,11 @@ live-stack script family (scripts/live-stack/lib.sh).
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -104,8 +106,8 @@ def test_builder_runs_build_fs_under_the_venv_not_path_python3(tmp_path: Path) -
     assert result.stdout.strip() == "beef01"
 
 
-def _require_module(interpreter: Path) -> subprocess.CompletedProcess[str]:
-    snippet = f'source "{_LIB}" && require_kdive_module'
+def _fixture_inputs(interpreter: Path) -> subprocess.CompletedProcess[str]:
+    snippet = f'source "{_LIB}" && fixture_inputs "fedora-kdive-ready-44"'
     return subprocess.run(
         [_BASH, "-c", snippet],
         capture_output=True,
@@ -115,19 +117,27 @@ def _require_module(interpreter: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_require_kdive_module_accepts_an_interpreter_that_imports_kdive(tmp_path: Path) -> None:
+def test_fixture_inputs_uses_the_selected_interpreter(tmp_path: Path) -> None:
     interpreter = tmp_path / "python"
-    _stub(interpreter, "exit 0")
-    assert _require_module(interpreter).returncode == 0
+    _stub(interpreter, 'printf "%s\\n" "$@"')
+    result = _fixture_inputs(interpreter)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        str(_ROOT / "scripts" / "live_vm_fixtures.py"),
+        "inputs",
+        ".",
+        "fedora-kdive-ready-44",
+    ]
 
 
-def test_require_kdive_module_dies_when_the_interpreter_cannot_import_kdive(tmp_path: Path) -> None:
+def test_fixture_inputs_dies_when_the_interpreter_cannot_import_kdive(tmp_path: Path) -> None:
     """`command -v` proves the binary exists; only an import proves the venv carries kdive."""
     interpreter = tmp_path / "python"
-    _stub(interpreter, 'echo "No module named kdive" >&2; exit 1')
-    result = _require_module(interpreter)
+    # -S removes the editable install so the real helper encounters a missing kdive import.
+    _stub(interpreter, f'exec {shlex.quote(sys.executable)} -S "$@"')
+    result = _fixture_inputs(interpreter)
     assert result.returncode != 0
-    assert str(interpreter) in result.stderr  # names WHICH interpreter is wrong
+    assert sys.executable in result.stderr  # names WHICH interpreter is wrong
     assert "uv sync" in result.stderr  # and how to fix it
 
 
@@ -141,4 +151,4 @@ def test_consumers_preflight_the_same_interpreter_they_build_with() -> None:
         body = (_ROOT / "scripts" / "live-vm" / name).read_text()
         assert "$(kdive_python)" in body, f"{name} does not preflight the resolved interpreter"
         assert "KDIVE_PYTHON:-python3" not in body, f"{name} still defaults to a bare python3"
-        assert "require_kdive_module" in body, f"{name} does not probe kdive importability"
+        assert "fixture_inputs" in body, f"{name} does not validate the builder inputs"

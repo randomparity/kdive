@@ -12,6 +12,7 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools.debug.operations.runtime import (
+    CapabilityRequirement,
     DebugRuntimeResolver,
     _EngineOp,
     _gdbmi_maturity,
@@ -19,7 +20,17 @@ from kdive.mcp.tools.debug.operations.runtime import (
     run_engine_op_with_resolver,
 )
 from kdive.providers.ports.debug import GdbMiAttachment, GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.policy.capabilities import DebugCapability
 from kdive.serialization import JsonValue
+
+# A target that cannot insert a hardware watchpoint refuses before one is armed, because gdb
+# inserts it only on the next resume, which then fails (ADR-0712).
+_WATCHPOINT_REQUIREMENT = CapabilityRequirement(
+    capability=DebugCapability.HW_WATCHPOINT,
+    code="watchpoint_unsupported",
+    detail="this target cannot insert a hardware watchpoint; set a breakpoint and debug.continue",
+    next_actions=("debug.set_breakpoint", "debug.continue"),
+)
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver) -> None:
@@ -101,8 +112,15 @@ def _register_debug_set_watchpoint(
     ) -> ToolResponse:
         """Set a hardware write watchpoint on a symbol/address for a live DebugSession.
 
-        Watchpoints are hardware (debug-register) watchpoints: the stub may accept one yet never
-        trap, surfacing as a debug.continue timeout rather than an error. Requires contributor.
+        Watchpoints are hardware (debug-register) watchpoints. Where the gdbstub cannot insert
+        one (ppc64le under KVM), the call returns not_implemented with code
+        watchpoint_unsupported and arms nothing. A stub that refuses the insert itself returns
+        the same code under debug_attach_failure. gdb inserts watchpoints on resume, so a
+        watchpoint it cannot insert (a refusing stub, or too many armed watchpoints) fails the
+        next resume, where gdb reports it as the resume's error, with debug_attach_failure and
+        code watchpoint_insert_failed (data.verb, data.watchpoint); remove a watchpoint with
+        debug.clear_watchpoint, then retry. A stub may also accept one yet never trap, which
+        shows as a debug.continue timeout. Requires contributor.
         """
         return await run_engine_op_with_resolver(
             pool,
@@ -116,6 +134,7 @@ def _register_debug_set_watchpoint(
                 address=None if address is None else f"0x{address:x}",
                 byte_count=byte_count,
             ),
+            requires=_WATCHPOINT_REQUIREMENT,
         )
 
 

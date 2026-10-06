@@ -42,7 +42,7 @@
 set -euo pipefail
 
 # Captured before the cd to the repository root, so a relative invocation still resolves.
-SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+SELF_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 SELF_FILE="$SELF_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 failed=0
@@ -181,7 +181,11 @@ section_body() {
 # back in would reinstate the renumbering deadlock, because the two sides of a renumbering
 # comparison have different filenames by definition.
 canonicalise() {
-  LC_ALL=C awk '
+  # Renumber comparisons supply the logical filename, including for a temporary base blob.
+  # Only that filename's number may be stripped from a heading without punctuation.
+  local name=${2:-}
+  name=${name##*/}
+  LC_ALL=C awk -v number="${name%%-*}" '
     /^[[:space:]]*(- )?(target|review-by):/ {
       sub(/^[[:space:]]*(- )?/, "")
       print
@@ -194,7 +198,10 @@ canonicalise() {
       sub(/^[[:space:]]*/, "", rest)
       sub(/:[[:space:]]*$/, "", rest)
       if (hashes == "#") {
-        sub(/^(adr )?[0-9]+[[:space:]]*(\.|:|-|—)[[:space:]]*/, "<n> ", rest)
+        if (!sub(/^(adr )?[0-9]+[[:space:]]*(\.|:|-|—)[[:space:]]*/, "<n> ", rest) &&
+            number ~ /^[0-9]+$/ && index(rest, number " ") == 1) {
+          rest = "<n> " substr(rest, length(number) + 2)
+        }
       }
       print hashes " " rest
       next
@@ -459,7 +466,7 @@ renumbered_elsewhere() {
     rm -f "$tmp"
     return 1
   fi
-  blob_canon=$(canonicalise "$tmp")
+  blob_canon=$(canonicalise "$tmp" "$path")
   rm -f "$tmp"
   [ -n "$records" ] || return 1
 
@@ -468,7 +475,7 @@ renumbered_elsewhere() {
     [ -f "$candidate" ] || continue
     tracked_in_index "$candidate" || continue
     git cat-file -e "${base}:${candidate}" 2>/dev/null && continue
-    if [ "$blob_canon" = "$(canonicalise "$candidate")" ]; then
+    if [ "$blob_canon" = "$(canonicalise "$candidate" "$candidate")" ]; then
       printf '%s' "$candidate"
       return 0
     fi

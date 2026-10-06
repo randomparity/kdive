@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
 import pytest
@@ -48,12 +50,272 @@ def _live_client(client: _FakeClient) -> Any:
     return cast(Any, client)
 
 
+_BOOT_CONFIG = b"CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_EXT4_FS=y\n"
+
+
+@pytest.mark.parametrize(
+    ("arch", "boot_member", "make_arch"),
+    [("x86_64", "arch/x86/boot/bzImage", "x86"), ("ppc64le", "vmlinux", "powerpc")],
+)
+def test_combined_kernel_tar_ignores_caller_kbuild_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arch: str,
+    boot_member: str,
+    make_arch: str,
+) -> None:
+    kernel_src = tmp_path / "kernel"
+    boot = kernel_src / boot_member
+    boot.parent.mkdir(parents=True)
+    boot.write_bytes(b"built")
+    for name, value in {
+        "ARCH": "wrong",
+        "INSTALL_MOD_STRIP": "wrong",
+        "CROSS_COMPILE": "wrong-",
+        "KBUILD_OUTPUT": "wrong",
+        "INSTALL_MOD_DIR": "wrong",
+    }.items():
+        monkeypatch.setenv(name, value)
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def record(command: list[str], *, check: bool, env: dict[str, str] | None = None) -> None:
+        assert check
+        calls.append((command, env))
+
+    monkeypatch.setattr(spine.subprocess, "run", record)
+    spine.combined_kernel_tar(kernel_src, tmp_path, arch=arch)
+    make_command, make_env = next((cmd, env) for cmd, env in calls if cmd[0] == "make")
+    assert f"ARCH={make_arch}" in make_command
+    assert make_env == {
+        name: value
+        for name, value in os.environ.items()
+        if name in {"PATH", "HOME", "LANG", "LANGUAGE"} or name.startswith("LC_")
+    }
+
+
+@pytest.mark.parametrize("missing", ["VIRTIO_PCI", "VIRTIO_BLK", "EXT4_FS"])
+def test_spine_config_refuses_missing_built_in(tmp_path: Path, missing: str) -> None:
+    config = _BOOT_CONFIG.replace(f"CONFIG_{missing}=y".encode(), f"CONFIG_{missing}=m".encode())
+    (tmp_path / ".config").write_bytes(config)
+
+    with pytest.raises(SpinePhaseError, match=f"CONFIG_{missing}=y"):
+        spine.check_spine_kernel_config(tmp_path, "ppc64le", "upload-build")
+
+
+def test_spine_config_refuses_missing_config(tmp_path: Path) -> None:
+    with pytest.raises(SpinePhaseError, match=r"\.config"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build")
+
+
+def test_spine_config_scopes_filesystem_to_guest(tmp_path: Path) -> None:
+    (tmp_path / ".config").write_bytes(
+        b"CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_XFS_FS=y\n"
+    )
+    assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build")
+    with pytest.raises(SpinePhaseError, match="CONFIG_EXT4_FS=y"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", root_fs="ext4")
+    with pytest.raises(SpinePhaseError, match="CONFIG_EXT4_FS=y"):
+        spine.check_spine_kernel_config(tmp_path, "ppc64le", "upload-build")
+
+
+def test_spine_config_network_module_route_is_caller_scoped(tmp_path: Path) -> None:
+    config = tmp_path / ".config"
+    config.write_bytes(_BOOT_CONFIG)
+    assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build")
+    with pytest.raises(SpinePhaseError, match="CONFIG_VIRTIO_NET"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_network=True)
+    config.write_bytes(_BOOT_CONFIG + b"CONFIG_VIRTIO_NET=m\n")
+    assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_network=True)
+
+
+def test_spine_config_live_debug_requires_btf_and_dwarf(tmp_path: Path) -> None:
+    config = tmp_path / ".config"
+    config.write_bytes(_BOOT_CONFIG + b"CONFIG_DEBUG_INFO_DWARF5=y\n")
+    with pytest.raises(SpinePhaseError, match="CONFIG_DEBUG_INFO_BTF=y"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_live_debug=True)
+
+    config.write_bytes(_BOOT_CONFIG + b"CONFIG_DEBUG_INFO_BTF=y\n")
+    with pytest.raises(
+        SpinePhaseError, match="CONFIG_DEBUG_INFO_DWARF4=y or CONFIG_DEBUG_INFO_DWARF5=y"
+    ):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_live_debug=True)
+
+    config.write_bytes(_BOOT_CONFIG + b"CONFIG_DEBUG_INFO_BTF=y\nCONFIG_DEBUG_INFO_DWARF5=y\n")
+    assert spine.check_spine_kernel_config(
+        tmp_path, "x86_64", "upload-build", require_live_debug=True
+    )
+
+
+@pytest.mark.parametrize("arch,required", [("x86_64", "FW_CFG_SYSFS"), ("ppc64le", "CRASH_DUMP")])
+def test_spine_config_kdump_respects_arch(tmp_path: Path, arch: str, required: str) -> None:
+    (tmp_path / ".config").write_bytes(
+        _BOOT_CONFIG
+        + b"CONFIG_KEXEC_FILE=y\nCONFIG_CRASH_DUMP=y\nCONFIG_PROC_VMCORE=y\n"
+        + b"CONFIG_RELOCATABLE=y\n"
+        if arch == "x86_64"
+        else _BOOT_CONFIG + b"CONFIG_KEXEC_FILE=y\nCONFIG_PROC_VMCORE=y\nCONFIG_RELOCATABLE=y\n"
+    )
+    with pytest.raises(SpinePhaseError, match=f"CONFIG_{required}"):
+        spine.check_spine_kernel_config(tmp_path, arch, "upload-build", require_kdump=True)
+
+
+def test_spine_upload_rejects_config_before_staging_or_upload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / ".config").write_bytes(b"CONFIG_VIRTIO_PCI=m\n")
+    monkeypatch.setenv(spine.KERNEL_TREE_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        spine, "accepted_run_upload_names", lambda _contract: ["kernel", "effective_config"]
+    )
+    stage = Mock(side_effect=AssertionError("staging reached"))
+    monkeypatch.setattr(spine, "combined_kernel_tar", stage)
+    client = SimpleNamespace(
+        read_text_resource=AsyncMock(return_value="{}"),
+        call_tool=AsyncMock(side_effect=AssertionError("upload reached")),
+    )
+
+    with pytest.raises(SpinePhaseError, match="CONFIG_VIRTIO_PCI=y"):
+        asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
+    (tmp_path / ".config").write_bytes(_BOOT_CONFIG + b"CONFIG_VIRTIO_NET=y\n")
+    with pytest.raises(SpinePhaseError, match="CONFIG_DEBUG_INFO_BTF=y"):
+        asyncio.run(
+            spine.build_and_upload_kernel(
+                cast(Any, client), run_id="run-1", require_live_debug=True
+            )
+        )
+    with pytest.raises(SpinePhaseError, match="CONFIG_KEXEC"):
+        asyncio.run(
+            spine.build_and_upload_kernel(cast(Any, client), run_id="run-1", require_kdump=True)
+        )
+    stage.assert_not_called()
+    client.call_tool.assert_not_called()
+
+
+def _upload_item(name: str) -> ToolResponse:
+    return ToolResponse.success(name, "pending", data={"name": name})
+
+
+@pytest.mark.parametrize("retain", [False, True])
+def test_spine_upload_sends_the_tree_config_as_effective_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retain: bool
+) -> None:
+    # #2762: the spine uploads its own .config, so runs.complete_build's config advisories run on
+    # the live path instead of failing open on an absent config.
+    config = _BOOT_CONFIG + b"CONFIG_VIRTIO_NET=y\n"
+    (tmp_path / ".config").write_bytes(config)
+    kernel_tar = tmp_path / "kernel.tar"
+    kernel_tar.write_bytes(b"tar")
+    (tmp_path / "vmlinux").write_bytes(b"debug")
+    monkeypatch.setenv(spine.KERNEL_TREE_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        spine, "accepted_run_upload_names", lambda _c: ["kernel", "effective_config", "vmlinux"]
+    )
+    monkeypatch.setattr(spine, "combined_kernel_tar", lambda *_a, **_k: kernel_tar)
+    monkeypatch.setattr(spine, "elf_build_id", lambda _p: "abcdef")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def _scalar(client: object, name: str, **args: object) -> ToolResponse:
+        calls.append((name, args))
+        if name == "artifacts.create_run_upload":
+            items = [_upload_item(name) for name in ("kernel", "effective_config", "vmlinux")]
+            return ToolResponse.collection("run-1", "pending", items)
+        return ToolResponse.success("run-1", "succeeded")
+
+    put: dict[str, bytes] = {}
+
+    async def _put(item: ToolResponse, path: Path) -> None:
+        put[str(item.data["name"])] = path.read_bytes()
+
+    monkeypatch.setattr(spine, "scalar", _scalar)
+    monkeypatch.setattr(spine, "put_presigned", _put)
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+
+    if retain:
+        monkeypatch.setenv(spine.KERNEL_TREE_ENV, "/absent")
+        asyncio.run(
+            spine.build_and_upload_kernel(
+                cast(Any, client),
+                run_id="run-1",
+                kernel_tree=tmp_path,
+                evidence_dir=tmp_path / "evidence",
+                with_vmlinux=True,
+            )
+        )
+        evidence = json.loads((tmp_path / "evidence/upload.json").read_text())
+        assert evidence["build_id"] == "abcdef"
+        assert evidence["result"]["status"] == "succeeded"
+        assert {a["name"] for a in evidence["artifacts"]} == {
+            "kernel",
+            "effective_config",
+            "vmlinux",
+        }
+        assert put["vmlinux"] == b"debug"
+    else:
+        asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
+
+    decls = cast(list[dict[str, object]], calls[0][1]["artifacts"])
+    by_name = {d["name"]: d for d in decls}
+    assert by_name["effective_config"]["size_bytes"] == len(config)
+    assert put["effective_config"] == config
+    assert calls[-1][0] == "runs.complete_build"
+
+
+def test_spine_upload_requires_the_contract_to_accept_effective_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / ".config").write_bytes(_BOOT_CONFIG)
+    monkeypatch.setenv(spine.KERNEL_TREE_ENV, str(tmp_path))
+    monkeypatch.setattr(spine, "accepted_run_upload_names", lambda _c: ["kernel"])
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+    with pytest.raises(SpinePhaseError, match="effective_config"):
+        asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
+
+
 def _job(status: str, *, category: ErrorCategory | None = None) -> ToolResponse:
     return ToolResponse(
         object_id="job-1",
         status=status,
         error_category=category.value if category else None,
     )
+
+
+@pytest.mark.parametrize(
+    ("arch", "boot_member", "make_arch"),
+    [("x86_64", "arch/x86/boot/bzImage", "x86"), ("ppc64le", "vmlinux", "powerpc")],
+)
+def test_combined_kernel_tar_strips_staged_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arch: str,
+    boot_member: str,
+    make_arch: str,
+) -> None:
+    kernel_src = tmp_path / "kernel-src"
+    boot = kernel_src / boot_member
+    boot.parent.mkdir(parents=True, exist_ok=True)
+    boot.write_bytes(b"built")
+    calls: list[list[str]] = []
+
+    def record(cmd: list[str], *, check: bool, env: dict[str, str] | None = None) -> None:
+        assert check
+        if cmd[0] == "make":
+            assert env is not None
+        calls.append(cmd)
+
+    monkeypatch.setattr(spine.subprocess, "run", record)
+    spine.combined_kernel_tar(kernel_src, tmp_path, arch=arch)
+    make_calls = [cmd for cmd in calls if cmd[0] == "make"]
+    assert make_calls == [
+        [
+            "make",
+            "-C",
+            str(kernel_src),
+            "modules_install",
+            f"INSTALL_MOD_PATH={tmp_path / 'modstage'}",
+            f"ARCH={make_arch}",
+            "INSTALL_MOD_STRIP=1",
+        ]
+    ]
 
 
 def _system(status: str, *, category: ErrorCategory | None = None) -> ToolResponse:

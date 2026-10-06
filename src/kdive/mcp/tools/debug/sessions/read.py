@@ -21,7 +21,7 @@ from kdive.db.repositories import DEBUG_SESSIONS, RUNS
 from kdive.domain.capacity.state import DebugSessionState
 from kdive.domain.lifecycle.records import DebugSession
 from kdive.log import bind_context
-from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse, validate_stored
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -31,6 +31,7 @@ from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_erro
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
+from kdive.mcp.tools._common import viewer_projects as _viewer_projects
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.debug.sessions import ACTIVE_SESSION_STATES
@@ -88,11 +89,6 @@ async def get_session(
             run = await RUNS.get(conn, session.run_id)
         system_id = run.system_id if run is not None else None
         return session_envelope(session, system_id=system_id)
-
-
-def _viewer_projects(ctx: RequestContext) -> list[str]:
-    """Projects the caller may view: a member project with any granted role."""
-    return [p for p in ctx.projects if ctx.roles.get(p) is not None]
 
 
 def _build_filters(
@@ -188,7 +184,7 @@ def _split_system_id(row: dict[str, object]) -> tuple[DebugSession, UUID | None]
     """Separate the joined ``join_system_id`` from the session columns before validation."""
     raw = row.pop("join_system_id")
     system_id = raw if isinstance(raw, UUID) else None
-    return DebugSession.model_validate(row), system_id
+    return validate_stored(DebugSession, row), system_id
 
 
 def _sessions_collection(

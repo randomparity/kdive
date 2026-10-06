@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import subprocess  # noqa: S404 - virsh domstate uses fixed argv, no shell  # nosec B404
 import time
 from collections.abc import Callable
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import NamedTuple
 from uuid import UUID
 
 import kdive.config as config
-from kdive.domain.lifecycle.crash_signatures import first_crash_signature
+from kdive.domain.lifecycle.crash_signatures import first_crash_signature, is_crash_signature
 from kdive.providers.local_libvirt.lifecycle.host_tool_search import (
     PROVIDER_TOOL_SEARCH_PATH,
     resolve_provider_tool,
@@ -30,6 +32,15 @@ _VIRSH = "virsh"
 
 _READINESS_MARKER = "kdive-ready"
 _MAX_CONSOLE_WINDOW_BYTES = 2 * 1024 * 1024
+
+# Complete 7-bit ECMA-48 escape sequences, removed before the marker and crash scans (#2907):
+# control strings (DCS/OSC/SOS/PM/APC) ended by ST or BEL on their own line, CSI, and other ESC
+# sequences. An unterminated sequence stays, so the removal never spans a line.
+ESCAPE_SEQUENCE = re.compile(
+    r"\x1b[P\]X^_][^\x07\x1b\n]*(?:\x07|\x1b\\)"
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"
+    r"|\x1b(?![\[\]PX^_])[ -/]*[0-~]"
+)
 
 _log = logging.getLogger(__name__)
 
@@ -65,6 +76,77 @@ class ReadinessResult(NamedTuple):
     ok: bool
     probe_error: ProbeFailure | None = None
     crash_signature: str | None = None
+
+
+type Readiness = Callable[[UUID], ReadinessResult]
+
+
+class ReadinessOutcome(NamedTuple):
+    """How a readiness poll ended: the first answer, or ``None`` when the window elapsed."""
+
+    result: ReadinessResult | None
+    first_probe_error: ProbeFailure | None
+
+
+# The boot window is derived from KDIVE_LIBVIRT_BOOT_WINDOW_S (default 900 s) divided by the
+# _POLL_INTERVAL_SECONDS cadence (5 s) — 180 polls at the default. The poll loop counts polls;
+# _real_readiness owns the per-poll cadence. The window accommodates the kdive-ready signal
+# ordering After=kdump.service (#817): a crash-capture guest does not report ready until
+# kdump.service has built the capture initramfs and kexec-loaded it, which on POWER9 takes several
+# minutes on the first dracut run. It is a ceiling, not a fixed wait — the loop returns the instant
+# the marker appears, so the wider window costs nothing on a fast boot and the crash-signature
+# fail-fast still surfaces a panicked boot immediately. Operators on very fast hosts can tighten
+# it; operators on slow hosts (POWER, large kdump initramfs) can widen it — all without rebuilding
+# the image. The same window bounds the provision first-boot wait (ADR-0680).
+def boot_window_polls() -> int:
+    """Return the number of readiness polls for the configured boot window."""
+    return math.ceil(config.require(LIBVIRT_BOOT_WINDOW_S) / _POLL_INTERVAL_SECONDS)
+
+
+def poll_readiness(
+    readiness: Readiness,
+    system_id: UUID,
+    polls: int,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> ReadinessOutcome:
+    """Poll ``readiness`` until it answers, ``polls`` run out, or ``deadline`` passes (ADR-0680).
+
+    ``deadline`` is on ``clock`` and bounds wall-clock time when a probe itself is slow (a hung
+    ``virsh domstate`` costs its timeout on every poll); ``runs.boot`` passes none and keeps its
+    poll-count bound.
+    """
+    first_probe_error: ProbeFailure | None = None
+    for _ in range(polls):
+        if deadline is not None and clock() >= deadline:
+            break
+        result = readiness(system_id)
+        if first_probe_error is None and result.probe_error is not None:
+            first_probe_error = result.probe_error
+        if result.answered:
+            return ReadinessOutcome(result, first_probe_error)
+    return ReadinessOutcome(None, first_probe_error)
+
+
+def readiness_failure_details(
+    system_id: UUID,
+    first_probe_error: ProbeFailure | None,
+    crash_signature: str | None = None,
+) -> dict[str, object]:
+    """The System plus closed probe and crash reasons, as JSON scalars (ADR-0594, #2691).
+
+    ``crash_signature`` is the pre-marker crash literal the readiness scan matched; the worker
+    persists it as ``failure_detail_crash_signature`` for ``runs.get`` to read back. Only a
+    literal in the scanner's closed vocabulary is written, because ``jobs.get`` and ``jobs.wait``
+    publish ``failure_context`` without a read-side filter.
+    """
+    details: dict[str, object] = {"system_id": str(system_id)}
+    if first_probe_error is not None:
+        details["probe_error"] = first_probe_error.value
+    if crash_signature is not None and is_crash_signature(crash_signature):
+        details["crash_signature"] = crash_signature
+    return details
 
 
 class _DomainExitProbe(NamedTuple):
@@ -137,13 +219,18 @@ class ConsoleReadinessWindow:
         return self._descriptor
 
 
-def prepare_console_readiness_window(system_id: UUID) -> ConsoleReadinessWindow:
-    """Truncate and retain the validated console inode for one external boot."""
+def prepare_console_readiness_window(
+    system_id: UUID, *, multiplier: float = 1.0, window_s: int | None = None
+) -> ConsoleReadinessWindow:
+    """Truncate and retain a console inode for one boot's scaled readiness window."""
     path = console_log_path(system_id)
     descriptor = _open_validated_console_log(path, os.O_RDWR)
     try:
         os.ftruncate(descriptor, 0)
-        deadline = time.monotonic() + config.require(LIBVIRT_BOOT_WINDOW_S)
+        duration = (
+            window_s if window_s is not None else config.require(LIBVIRT_BOOT_WINDOW_S) * multiplier
+        )
+        deadline = time.monotonic() + duration
         return ConsoleReadinessWindow(path, descriptor, deadline=deadline)
     except BaseException:
         os.close(descriptor)
@@ -152,13 +239,22 @@ def prepare_console_readiness_window(system_id: UUID) -> ConsoleReadinessWindow:
 
 def _scan_console(data: bytes, marker: str) -> tuple[ConsoleVerdict, str | None]:
     """Classify a console capture and return the pre-marker crash literal it matched, if any."""
-    text = data.decode("utf-8", errors="replace")
+    raw = data.decode("utf-8", errors="replace")
+    text = ESCAPE_SEQUENCE.sub("", raw)
     marker_re = re.compile(rf"(?:^|[^\S\n]){re.escape(marker)}[^\S\n]*$", re.MULTILINE)
     marker_match = marker_re.search(text)
-    region = text if marker_match is None else text[: marker_match.start()]
-    crash = first_crash_signature(region)
-    if crash is not None:
-        return ConsoleVerdict.CRASHED, crash.group(0)
+    if marker_match is None:
+        regions = (text, raw)
+    else:
+        # Removal never spans a line, so the marker's line number is the same in both texts. The
+        # raw lines before it are scanned too: a torn escape introducer must not eat the first
+        # letter of a crash literal that follows it.
+        marker_line = text.count("\n", 0, marker_match.start())
+        regions = (text[: marker_match.start()], "\n".join(raw.split("\n")[:marker_line]))
+    for region in regions:
+        crash = first_crash_signature(region)
+        if crash is not None:
+            return ConsoleVerdict.CRASHED, crash.group(0)
     return (ConsoleVerdict.READY if marker_match is not None else ConsoleVerdict.PENDING), None
 
 
@@ -182,9 +278,14 @@ def _probe_failed(domain_name: str, failure: ProbeFailure, detail: str) -> _Doma
     return _DomainExitProbe(False, failure)
 
 
-def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cover - live_vm
-    """Return whether ``virsh domstate`` reports terminal state plus its classified failure."""
-    uri = config.require(LIBVIRT_URI)
+def _domain_exit_probe(
+    domain_name: str, *, uri: str | None = None
+) -> _DomainExitProbe:  # pragma: no cover - live_vm
+    """Return whether ``virsh domstate`` reports terminal state plus its classified failure.
+
+    ``uri`` names the libvirt connection that owns the domain; ``None`` is the configured one.
+    """
+    uri = config.require(LIBVIRT_URI) if uri is None else uri
     virsh = resolve_provider_tool(_VIRSH)
     if virsh is None:
         return _probe_failed(
@@ -243,11 +344,12 @@ class LocalExternalBootReadiness:
         *,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
-        domain_exit_probe: Callable[[str], _DomainExitProbe] = _domain_exit_probe,
+        domain_exit_probe: Callable[[str], _DomainExitProbe] | None = None,
+        uri: str | None = None,
     ) -> None:
         self._clock = clock
         self._sleep = sleep
-        self._domain_exit_probe = domain_exit_probe
+        self._domain_exit_probe = domain_exit_probe or partial(_domain_exit_probe, uri=uri)
 
     def __call__(self, system_id: UUID, window: ConsoleReadinessWindow) -> ReadinessResult:
         first_probe_error: ProbeFailure | None = None

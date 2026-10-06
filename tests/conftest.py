@@ -34,8 +34,10 @@ rotation instead of accumulating in ``/tmp`` until the filesystem runs out of in
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
@@ -60,6 +62,8 @@ from kdive.store.assembly import ObjectStoreAssembly, ObjectStoreFactory
 from kdive.store.objectstore import ObjectStore
 from tests._addopts_scrub import pytest_collection  # noqa: F401  registered as a conftest hook
 from tests.db.conftest import _cluster_global_role_lock, _MigratedWorkerDb
+from tests.integration.live_stack import conftest as stack_conftest
+from tests.integration.live_stack.skew import SkewPolicy, probe_stack_skew, skew_policy
 
 # Direct object-store boundary tests still need a complete configuration at collection time.
 # ``setdefault`` yields to a real ``KDIVE_S3_*`` in the developer's shell.
@@ -75,6 +79,77 @@ os.environ.setdefault("KDIVE_S3_BUCKET", _DUMMY_S3_BUCKET)
 _S3_ENDPOINT_URL = os.environ["KDIVE_S3_ENDPOINT_URL"]
 _S3_BUCKET = os.environ["KDIVE_S3_BUCKET"]
 _LOGIN_PASSWORD = "external-boot-authority-test"  # pragma: allowlist secret
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Capture live proof context even when pytest suppresses its header with ``-q``."""
+    base_url = os.environ.get("KDIVE_STACK_BASE_URL")
+    if base_url and skew_policy() is not SkewPolicy.OFF:
+        stack_conftest._HEADER_PROBES[base_url] = probe_stack_skew(base_url)
+    if session.config.option.verbose < 0 and (base_url or os.environ.get("KDIVE_KERNEL_SRC")):
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            for line in pytest_report_header():
+                reporter.write_line(line)
+
+
+def pytest_report_header() -> list[str]:
+    """Name the selected kernel build and probed app revisions in live proof output."""
+    lines = []
+    if kernel_src := os.environ.get("KDIVE_KERNEL_SRC"):
+        tree = Path(kernel_src).resolve()
+        lines.append(f"live kernel tree: {tree}")
+        lines.extend(_kernel_tree_identity_lines(tree))
+    base_url = os.environ.get("KDIVE_STACK_BASE_URL")
+    if not base_url or skew_policy() is SkewPolicy.OFF:
+        return lines
+    probe = stack_conftest._HEADER_PROBES.get(base_url) or probe_stack_skew(base_url)
+    stack_conftest._HEADER_PROBES[base_url] = probe
+    revisions = [
+        f"{result.process}="
+        + (
+            "not deployed"
+            if not result.applicable
+            else probe.revisions.get(result.process) or "unknown"
+        )
+        for result in probe.results
+    ]
+    lines.append("live-stack probed revisions: " + ", ".join(revisions))
+    return lines
+
+
+def _kernel_tree_identity_lines(tree: Path) -> list[str]:
+    """Report exact config and build identity without making header probes a test gate."""
+
+    def probe(*args: str) -> str | None:
+        try:
+            result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=15)
+        except OSError, subprocess.TimeoutExpired:
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    release = probe("make", "-s", "-C", str(tree), "kernelrelease")
+    if release and "\n" in release:
+        release = None
+    lines = [f"live kernel release: {release or 'unavailable'}"]
+    try:
+        digest = hashlib.sha256((tree / ".config").read_bytes()).hexdigest()
+    except OSError:
+        digest = "unavailable"
+    lines.append(f"live kernel config sha256: {digest}")
+
+    top_level = probe("git", "-C", str(tree), "rev-parse", "--show-toplevel")
+    if top_level and Path(top_level).resolve() == tree:
+        description = probe("git", "-C", str(tree), "describe", "--always", "--dirty")
+        status = probe("git", "-C", str(tree), "status", "--porcelain")
+        lines.append(f"live kernel git describe: {description or 'unavailable'}")
+        lines.append(
+            "live kernel git dirty: "
+            + ("unavailable" if status is None else str(bool(status)).lower())
+        )
+    return lines
 
 
 @dataclass(frozen=True, slots=True)

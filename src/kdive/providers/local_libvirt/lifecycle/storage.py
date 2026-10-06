@@ -56,6 +56,24 @@ def _real_remove_baseline(baseline: str) -> None:
         ) from exc
 
 
+def _real_remove_install_staging(staging: str) -> None:
+    """Remove a System's install-staging directory; an absent directory is the achieved post-state.
+
+    The directory holds every installed Run's staged kernel/initrd (``<root>/<system_id>/<run_id>``)
+    the domain boots directly, so it lives exactly as long as the System (ADR-0060, ADR-0272).
+    """
+    try:
+        shutil.rmtree(staging)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise CategorizedError(
+            "failed to remove the per-System install staging directory",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"op": "remove_install_staging", "staging": Path(staging).name},
+        ) from exc
+
+
 def _real_make_overlay(base: str, overlay: str) -> None:
     """Create a qcow2 overlay and make it writable by the shared session-libvirt group."""
     qemu_img = resolve_provider_tool(_QEMU_IMG)
@@ -366,6 +384,10 @@ class ProvisioningFiles:
     prepare_console_log: PrepareConsoleLog = _prepare_console_log
     overlay_path_for: OverlayPathFor = overlay_path
     baseline_dir_for: BaselineDirFor = baseline_dir
+    remove_install_staging: RemoveBaseline = _real_remove_install_staging
+    # ``KDIVE_INSTALL_STAGING`` for the lane whose installs stage there; ``None`` (the authority
+    # lane and direct constructions) owns no install staging, so teardown reclaims none.
+    install_staging_root: str | None = None
 
     def prepare_overlay(
         self, system_id: UUID, *, base: str, disk_gb: int | None
@@ -404,3 +426,9 @@ class ProvisioningFiles:
 
     def remove_baseline_for_domain(self, domain_name: str) -> None:
         self.remove_baseline(self.baseline_dir_for(UUID(domain_name.removeprefix("kdive-"))))
+
+    def remove_install_staging_for_domain(self, domain_name: str) -> None:
+        if self.install_staging_root is None:
+            return
+        system_id = UUID(domain_name.removeprefix("kdive-"))
+        self.remove_install_staging(str(Path(self.install_staging_root) / str(system_id)))

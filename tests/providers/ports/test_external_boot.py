@@ -240,6 +240,38 @@ def test_plan_rejects_unknown_noncanonical_or_inconsistent_values(
         ExternalBootPlan.model_validate(data)
 
 
+def _direct_root_plan_data(platform_root: str) -> dict[str, object]:
+    data = _plan_data()
+    root = cast("dict[str, object]", data["root"])
+    data["root"] = {**root, "arguments": ["root=UUID=x", "rootfstype=ext4"]}
+    data["platform_arguments"] = [platform_root, "rootfstype=ext4"]
+    data["cmdline"] = f"{platform_root} rootfstype=ext4"
+    return data
+
+
+def test_plan_without_initrd_names_a_provider_whole_disk_root() -> None:
+    plan = ExternalBootPlan.model_validate(_direct_root_plan_data("root=/dev/vda"))
+
+    assert plan.cmdline == "root=/dev/vda rootfstype=ext4"
+    assert plan.root.root == "UUID=x"
+
+
+def test_plan_with_initrd_keeps_the_inspected_root_token() -> None:
+    data = _direct_root_plan_data("root=/dev/vda")
+    data["initrd"] = {"key": "i", "sha256": ZERO_DIGEST, "size_bytes": 1, "version": "v1"}
+
+    with pytest.raises(ValidationError, match="root arguments must occur exactly once"):
+        ExternalBootPlan.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "platform_root", ["root=PARTUUID=y", "root=/dev/vda/x", "root=/dev/", "root=/dev/../vda"]
+)
+def test_plan_direct_root_must_be_one_device_name(platform_root: str) -> None:
+    with pytest.raises(ValidationError, match="root arguments must occur exactly once"):
+        ExternalBootPlan.model_validate(_direct_root_plan_data(platform_root))
+
+
 @pytest.mark.parametrize("argument", ["=bad", "="])
 def test_plan_rejects_empty_platform_argument_keys(argument: str) -> None:
     data = _plan_data()

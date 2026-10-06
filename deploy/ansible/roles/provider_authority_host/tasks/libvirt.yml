@@ -7,6 +7,69 @@
     group: "{{ provider_authority_host_account }}"
     mode: "0700"
 
+# libvirt always sets RLIMIT_MEMLOCK for a ppc64 guest, and an unprivileged session daemon cannot
+# raise it past its hard limit. A user unit inherits the user manager's default 8 MiB ceiling, so
+# the manager is raised first and the unit then asks for the same limit (#2767). The fixed workers
+# get theirs from install-live-worker-lifecycle.sh's prlimit (#2376).
+- name: Create the authority user manager drop-in directory
+  ansible.builtin.file:
+    path: "/etc/systemd/system/user@{{ provider_authority_host_uid }}.service.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Raise the authority user manager memlock ceiling for ppc64 guests
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/user@{{ provider_authority_host_uid }}.service.d/kdive-memlock.conf"
+    content: |
+      [Service]
+      LimitMEMLOCK=infinity
+    owner: root
+    group: root
+    mode: "0644"
+  register: provider_authority_host_user_manager_memlock
+
+- name: Read the authority user manager main PID
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - --property=MainPID
+      - --value
+      - "user@{{ provider_authority_host_uid }}.service"
+  register: provider_authority_host_user_manager_pid
+  changed_when: false
+
+- name: Read the authority user manager locked-memory limit
+  ansible.builtin.command:
+    argv:
+      - prlimit
+      - --memlock
+      - --noheadings
+      - --output=HARD
+      - "--pid={{ provider_authority_host_user_manager_pid.stdout }}"
+  environment:
+    LC_ALL: C
+  register: provider_authority_host_user_manager_limit
+  changed_when: false
+  when: provider_authority_host_user_manager_pid.stdout not in ["", "0"]
+
+# Restarting the user manager stops every unit it runs, including a running session libvirtd;
+# the start task below brings the daemon back under the new ceiling. Not a handler: the daemon
+# must start under the raised ceiling in this play, before any handler flush. Keyed on the
+# running manager's limit as well, so a converge interrupted after the drop-in was written
+# still restarts the manager on the next run.
+- name: Restart the authority user manager to apply its memlock ceiling
+  ansible.builtin.systemd_service:
+    name: "user@{{ provider_authority_host_uid }}.service"
+    state: restarted
+    daemon_reload: true
+  when:  # noqa: no-handler
+    - >-
+      provider_authority_host_user_manager_memlock is changed
+      or provider_authority_host_user_manager_limit.stdout | default('') | trim != 'unlimited'
+
 - name: Install the dormant authority session-libvirtd user unit
   ansible.builtin.copy:
     dest: >-
@@ -20,6 +83,7 @@
       [Service]
       Type=forking
       Environment=XDG_RUNTIME_DIR=/run/kdive/provider-authority
+      LimitMEMLOCK=infinity
       ExecStart=/usr/sbin/libvirtd --daemon \
         --config /etc/kdive/libvirtd-external-boot-authority.conf \
         --pid-file /run/kdive/provider-authority/libvirt/libvirtd.pid

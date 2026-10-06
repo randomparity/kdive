@@ -91,6 +91,9 @@ gdbstub and SSH-forward passthroughs (ADR-0210/0218) are orthogonal and still co
   larger, separable change to the provision contract (provision becomes blocking, needs the readiness
   seam) and does not, by itself, make the guest boot. Rejected as the primary fix; a mis-selection
   guard via readiness-gating is noted as possible future work, not this issue.
+
+  > **Amended by [ADR-0680](0680-local-libvirt-provision-ready-after-first-boot.md) (#2771):**
+  > local-libvirt provision now reports `ready` only after the first boot's readiness marker.
 - **Extract from the live overlay instead of the base.** A rw mount of an overlay QEMU may hold open
   corrupts it (the very reason `_inject_built_modules` force-offs first); a read-only mount would still
   need the base reachable. Reading the base directly is simpler and safe for concurrent readers.

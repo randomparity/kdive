@@ -1,19 +1,21 @@
-"""Operation-scoped local-libvirt external-boot host capability (ADRs 0587, 0600)."""
+"""Operation-scoped local-libvirt external-boot host capability (ADRs 0587, 0600, 0704)."""
 
 from __future__ import annotations
 
 import errno
 import hashlib
 import json
+import logging
 import os
 import selectors
 import shutil
 import stat
 import tempfile
 import threading
+import time
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defused parse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol, cast
@@ -21,12 +23,23 @@ from uuid import UUID, uuid4
 
 import libvirt
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
 )
+from kdive.providers.local_libvirt.lifecycle.power import (
+    clean_shutdown_bound_s,
+    destroy_or_accept_shutoff,
+    power_off,
+)
 from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
+from kdive.providers.local_libvirt.settings import (
+    LIBVIRT_BOOT_WINDOW_S,
+    LIBVIRT_TCG_DEADLINE_MULTIPLIER,
+)
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,
@@ -54,6 +67,13 @@ if TYPE_CHECKING:
         LocalRecoveryMetadataV1,
         TargetProjectionV1,
     )
+
+_log = logging.getLogger(__name__)
+
+# ADR-0681: how an external-boot stop treats a running guest. `clean` asks it to shut down (60 s
+# on KVM, 120 s otherwise); `clean-on-kvm` does so only on KVM; `destroy` never does.
+type StopMode = Literal["clean", "clean-on-kvm", "destroy"]
+_UNACCELERATED_STOP_BOUND_S = 120.0
 
 
 @dataclass(frozen=True)
@@ -134,8 +154,9 @@ class RunningDomain(Protocol):
 class _Domain(RunningDomain, Protocol):
     def isActive(self) -> int: ...  # noqa: N802
     def destroy(self) -> int: ...
+    def shutdown(self) -> int: ...
+    def state(self, flags: int = 0) -> Sequence[object]: ...
     def create(self) -> int: ...
-    def free(self) -> object: ...
 
 
 class _TeardownDomain(_Domain, Protocol):
@@ -156,6 +177,7 @@ class _Guest(Protocol):
     def launch(self) -> None: ...
     def inspect_os(self) -> list[str]: ...
     def mount(self, device: str, mountpoint: str) -> None: ...
+    def vfs_uuid(self, mountable: str) -> str: ...
     def shutdown(self) -> None: ...
     def close(self) -> None: ...
     def find0(self, directory: str, files: str) -> None: ...
@@ -168,12 +190,13 @@ class _Guest(Protocol):
     def readlink(self, path: str) -> str: ...
     def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
     def download(self, remotefilename: str, filename: str) -> None: ...
+    def pread(self, path: str, count: int, offset: int) -> bytes: ...
     def mkdir(self, path: str) -> None: ...
     def upload(self, filename: str, remotefilename: str) -> None: ...
     def ln_s(self, target: str, linkname: str) -> None: ...
     def chmod(self, mode: int, path: str) -> None: ...
     def chown(self, owner: int, group: int, path: str) -> None: ...
-    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None: ...
+    def lsetxattr(self, xattr: str, val: str, vallen: int, path: str) -> None: ...
     def mv(self, source: str, destination: str) -> None: ...
     def rm_rf(self, path: str) -> None: ...
     def sync(self) -> None: ...
@@ -181,7 +204,7 @@ class _Guest(Protocol):
 
 type OpenGuest = Callable[[], _Guest]
 type ReadinessProbe = Callable[[UUID, ConsoleReadinessWindow], ReadinessResult]
-type PrepareConsole = Callable[[UUID], ConsoleReadinessWindow]
+type PrepareConsole = Callable[..., ConsoleReadinessWindow]
 type RunningObserver = Callable[[UUID, RunningDomain], RunningKernelObservation]
 type CleanupPayloads = Callable[[int, "LocalRecoveryMetadataV1"], None]
 type SystemPath = Callable[[UUID], str]
@@ -211,15 +234,16 @@ class LocalExternalBootSession(Protocol):
     def boot_identity(self, xml: str) -> str: ...
     def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection: ...
     def require_inactive(self) -> None: ...
-    def stop_and_require_inactive(self) -> None: ...
+    def stop_and_require_inactive(self, *, mode: StopMode) -> None: ...
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int: ...
+    def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int: ...
     def unlink_artifact(self, name: str) -> None: ...
     def guest(self) -> AbstractContextManager[InactiveGuest]: ...
     def define_xml(self, xml: str, *, projected: bool = False) -> None: ...
     def start(self) -> None: ...
     def readiness(self) -> ReadinessResult: ...
     def observe_running(self) -> RunningKernelObservation: ...
-    def restore_power(self, prior: Literal["running", "inactive"]) -> None: ...
+    def restore_power(self) -> None: ...
     def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def close(self) -> None: ...
 
@@ -262,16 +286,18 @@ class InactiveGuest(Protocol):
     def ln_s(self, target: str, linkname: str) -> None: ...
     def chmod(self, mode: int, path: str) -> None: ...
     def chown(self, owner: int, group: int, path: str) -> None: ...
-    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None: ...
+    def lsetxattr(self, xattr: str, val: str, vallen: int, path: str) -> None: ...
     def mv(self, source: str, destination: str) -> None: ...
     def rm_rf(self, path: str) -> None: ...
     def sync(self) -> None: ...
+    def whole_disk_root_uuid(self) -> str | None: ...
 
 
 class _GuestContext(AbstractContextManager[InactiveGuest]):
     def __init__(self, session: _ConcreteSession) -> None:
         self._session = session
         self._guest: _Guest | None = None
+        self._root: str | None = None
         self._cursors: set[_Find0TreeCursor] = set()
         self._closed = False
 
@@ -387,7 +413,7 @@ class _GuardedGuest:
     def chown(self, owner: int, group: int, path: str) -> None:
         self._handle().chown(owner, group, path)
 
-    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None:
+    def lsetxattr(self, xattr: str, val: str, vallen: int, path: str) -> None:
         self._handle().lsetxattr(xattr, val, vallen, path)
 
     def mv(self, source: str, destination: str) -> None:
@@ -399,6 +425,11 @@ class _GuardedGuest:
     def sync(self) -> None:
         self._handle().sync()
 
+    def whole_disk_root_uuid(self) -> str | None:
+        """Return the root filesystem UUID when that filesystem fills the one added disk."""
+        guest = self._handle()
+        return guest.vfs_uuid(_WHOLE_DISK) if self._owner._root == _WHOLE_DISK else None
+
     def _handle(self) -> _Guest:
         if self._owner._closed:
             raise RuntimeError("guest wrapper is closed")
@@ -406,6 +437,8 @@ class _GuardedGuest:
         return self._guest
 
 
+# libguestfs names the one drive the session adds /dev/sda; a partition root is /dev/sdaN.
+_WHOLE_DISK = "/dev/sda"
 _TREE_READ_CHUNK = 64 * 1024
 _MAX_TREE_PATH_BYTES = 4096
 
@@ -781,6 +814,8 @@ def _guest_tree_relative_bytes(value: bytes) -> str:
         path = value.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("guest-tree entry is not UTF-8") from exc
+    # libguestfs find0 writes each entry below the listed directory with one leading "/".
+    path = path.removeprefix("/")
     if (
         path.startswith("/")
         or unicodedata.normalize("NFC", path) != path
@@ -799,7 +834,7 @@ class _ConcreteSession:
         pin: LocalExternalBootOperationPin,
         connection: _Connection,
         domain: _Domain,
-        artifact_fd: int,
+        open_artifact_root: Callable[[], int],
         overlay: _BoundOverlay,
         open_guest: OpenGuest,
         fstat_overlay: Callable[[int], tuple[int, int, int]],
@@ -816,13 +851,18 @@ class _ConcreteSession:
         readiness: ReadinessProbe,
         observe_running: RunningObserver,
         cleanup_payloads: CleanupPayloads,
+        console_window_s: int | None,
+        kvm: bool,
+        sleep: Callable[[float], None],
+        clock: Callable[[], float],
     ) -> None:
         self._system_id = system_id
         self._binding = binding
         self._pin: LocalExternalBootOperationPin | None = pin
         self._connection: _Connection | None = connection
         self._domain: _Domain | None = domain
-        self._artifact_fd: int | None = artifact_fd
+        self._open_artifact_root = open_artifact_root
+        self._artifact_fd: int | None = None
         self._overlay = overlay
         self._open_guest = open_guest
         self._fstat_overlay = fstat_overlay
@@ -836,9 +876,13 @@ class _ConcreteSession:
         self._temporary_artifact_name = temporary_artifact_name
         self._worker_pid = worker_pid
         self._prepare_console = prepare_console
+        self._console_window_s = console_window_s
         self._readiness = readiness
         self._observe_running = observe_running
         self._cleanup_payloads = cleanup_payloads
+        self._kvm = kvm
+        self._sleep = sleep
+        self._clock = clock
         # Nested session/guest/cursor closes keep ownership until producer joins complete.
         self._lifecycle_lock = threading.RLock()
         self._guests: set[_GuestContext] = set()
@@ -862,18 +906,18 @@ class _ConcreteSession:
             or projection.activation_id != self._binding.activation_id
         ):
             raise ValueError("target projection does not match session ownership")
-        assert self._artifact_fd is not None
+        artifact_fd = self._artifact_root()
         digest_name = projection.digest.removeprefix("sha256:")
-        entries = os.listdir(self._artifact_fd)
+        entries = os.listdir(artifact_fd)
         if any(entry != digest_name for entry in entries):
             raise ValueError("activation already contains a different target projection")
         try:
-            os.mkdir(digest_name, mode=0o700, dir_fd=self._artifact_fd)
-            self._fsync_descriptor(self._artifact_fd)
+            os.mkdir(digest_name, mode=0o700, dir_fd=artifact_fd)
+            self._fsync_descriptor(artifact_fd)
         except FileExistsError:
             pass
         descriptor = self._open_relative(
-            self._artifact_fd,
+            artifact_fd,
             digest_name,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
             0,
@@ -893,6 +937,7 @@ class _ConcreteSession:
         """Read an exact projection selected by an owner-checked local artifact reference."""
         from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
             TargetProjectionStore,
+            TargetProjectionV1,
             _artifact_ref_parts,
         )
         from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
@@ -901,9 +946,8 @@ class _ConcreteSession:
         reference = artifact
         owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
         parts = _artifact_ref_parts(reference, owner, self._binding.activation_id)
-        assert self._artifact_fd is not None
         descriptor = self._open_relative(
-            self._artifact_fd,
+            self._artifact_root(),
             parts[4],
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
             0,
@@ -932,8 +976,7 @@ class _ConcreteSession:
         ):
             raise ValueError("target projection does not match session ownership")
         self._require_open_domain()
-        assert self._artifact_fd is not None
-        activation = os.readlink(f"/proc/self/fd/{self._artifact_fd}")
+        activation = os.readlink(f"/proc/self/fd/{self._artifact_root()}")
         return os.path.join(activation, projection.digest.removeprefix("sha256:"), name)
 
     def boot_identity(self, xml: str) -> str:
@@ -943,7 +986,10 @@ class _ConcreteSession:
 
     def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
         domain = self._require_open_domain()
-        xml = domain.XMLDesc(0)
+        # The persistent definition: a running domain's live XML adds runtime-only facts
+        # (id, aliases, pty paths) that disappear when it stops, so it cannot be compared across
+        # the stop that separates prepare from activate.
+        xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
         root = _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         active = _active(domain)
         return ClosedDomainInspection(
@@ -959,21 +1005,44 @@ class _ConcreteSession:
         if _active(self._require_open_domain()):
             raise RuntimeError("domain must be inactive before overlay mutation")
 
-    def stop_and_require_inactive(self) -> None:
+    def stop_and_require_inactive(self, *, mode: StopMode) -> None:
         domain = self._require_open_domain()
         if _active(domain):
-            domain.destroy()
+            name = domain_name_for(self._system_id)
+            if mode == "destroy" or (mode == "clean-on-kvm" and not self._kvm):
+                path = "destroy-unready" if mode == "destroy" else "destroy-unaccelerated"
+                _log.warning("power-off %s: %s", name, path)
+                destroy_or_accept_shutoff(domain)
+            else:
+                bound = clean_shutdown_bound_s("kvm") if self._kvm else _UNACCELERATED_STOP_BOUND_S
+                power_off(domain, name, bound, self._sleep, self._clock)
         self.require_inactive()
 
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int:
         self._require_open_domain()
-        assert self._artifact_fd is not None
-        return self._open_relative(self._artifact_fd, _relative_name(name), flags, mode)
+        return self._open_relative(self._artifact_root(), _relative_name(name), flags, mode)
+
+    def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
+        """Open one payload inside its owner-checked projection digest directory."""
+        from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
+            _artifact_ref_parts,
+        )
+        from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
+
+        self._require_open_domain()
+        owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
+        parts = _artifact_ref_parts(artifact, owner, self._binding.activation_id)
+        directory = self._open_relative(
+            self._artifact_root(), parts[4], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, 0
+        )
+        try:
+            return self._open_relative(directory, parts[5], flags, 0)
+        finally:
+            self._close_descriptor(directory)
 
     def unlink_artifact(self, name: str) -> None:
         self._require_open_domain()
-        assert self._artifact_fd is not None
-        self._unlink_relative(self._artifact_fd, _relative_name(name))
+        self._unlink_relative(self._artifact_root(), _relative_name(name))
 
     def guest(self) -> _GuestContext:
         self._require_open_domain()
@@ -984,11 +1053,7 @@ class _ConcreteSession:
         self.require_inactive()
         _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         assert self._connection is not None
-        prior = self._domain
-        replacement = self._connection.defineXML(xml)
-        self._domain = replacement
-        if prior is not None and prior is not replacement:
-            prior.free()
+        self._domain = self._connection.defineXML(xml)
 
     def start(self) -> None:
         self._require_no_guest_context()
@@ -1014,29 +1079,40 @@ class _ConcreteSession:
         domain = self._require_open_domain()
         return self._observe_running(self._system_id, domain)
 
-    def restore_power(self, prior: Literal["running", "inactive"]) -> None:
+    def restore_power(self) -> None:
         domain = self._require_open_domain()
-        if prior == "running":
-            self._require_no_guest_context()
-        active = _active(domain)
-        if prior == "running" and not active:
+        self._require_no_guest_context()
+        if not _active(domain):
             self._start_domain()
-        elif prior == "inactive" and active:
-            domain.destroy()
 
     def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
         self._require_open_domain()
-        assert self._artifact_fd is not None
         if metadata.binding != self._binding:
             raise ValueError("cleanup metadata does not match session ownership")
-        self._cleanup_payloads(self._artifact_fd, metadata)
+        self._cleanup_payloads(self._artifact_root(), metadata)
+
+    def _artifact_root(self) -> int:
+        """Open the activation artifact root on first use, which creates it (ADR-0710).
+
+        Session open does not, so a session that never touches an artifact leaves no
+        `<system>/<run>/<activation>` behind to defeat exact recovery absence (#2926).
+        """
+        with self._lifecycle_lock:
+            self._require_open_domain()
+            if self._artifact_fd is None:
+                self._artifact_fd = self._open_artifact_root()
+            return self._artifact_fd
 
     def _start_domain(self) -> None:
         prior, self._readiness_window = self._readiness_window, None
         self._readiness_result = None
         if prior is not None:
             prior.close()
-        window = self._prepare_console(self._system_id)
+        window = (
+            self._prepare_console(self._system_id)
+            if self._console_window_s is None
+            else self._prepare_console(self._system_id, window_s=self._console_window_s)
+        )
         try:
             self._require_open_domain().create()
         except BaseException:
@@ -1057,7 +1133,7 @@ class _ConcreteSession:
             artifact_fd, self._artifact_fd = self._artifact_fd, None
             readiness_window, self._readiness_window = self._readiness_window, None
             overlay_fd = self._overlay.descriptor
-            domain, self._domain = self._domain, None
+            self._domain = None
             connection, self._connection = self._connection, None
             pin, self._pin = self._pin, None
             for closer in (
@@ -1065,7 +1141,6 @@ class _ConcreteSession:
                 *(lambda fd=fd: self._close_descriptor(fd) for fd in projection_fds),
                 (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
                 lambda: self._close_overlay_descriptor(overlay_fd),
-                domain.free if domain is not None else None,
                 connection.close if connection is not None else None,
                 pin.close if pin is not None else None,
             ):
@@ -1095,6 +1170,7 @@ class _ConcreteSession:
                         "guest inspection must find exactly one operating-system root"
                     )
                 guest.mount(roots[0], "/")
+                wrapper._root = roots[0]
             except BaseException as exc:
                 for close_error in _attempt_guest_close(guest):
                     exc.add_note(f"cleanup failed: {close_error!r}")
@@ -1138,17 +1214,15 @@ class _ConcreteSession:
             self._fsync_descriptor(descriptor)
             closing, descriptor = descriptor, None
             self._close_transfer_descriptor(closing)
-            assert self._artifact_fd is not None
-            self._replace_relative(self._artifact_fd, temporary_name, final_name)
+            self._replace_relative(self._artifact_root(), temporary_name, final_name)
         except BaseException as exc:
             if descriptor is not None:
                 try:
                     self._close_transfer_descriptor(descriptor)
                 except Exception as close_error:
                     exc.add_note(f"cleanup failed: {close_error!r}")
-            assert self._artifact_fd is not None
             try:
-                self._unlink_relative(self._artifact_fd, temporary_name)
+                self._unlink_relative(self._artifact_root(), temporary_name)
             except FileNotFoundError:
                 pass
             except Exception as unlink_error:
@@ -1167,7 +1241,17 @@ class _ConcreteSession:
         if expected_size < 0:
             raise ValueError("guest regular size must be nonnegative")
         with tempfile.TemporaryFile("w+b") as local:
-            guest.download(guest_source, f"/proc/self/fd/{local.fileno()}")
+            offset = 0
+            while offset < expected_size:
+                count = min(1024 * 1024, expected_size - offset)
+                chunk = guest.pread(guest_source, count, offset)
+                if not chunk or len(chunk) > count:
+                    raise ValueError("guest regular content changed during download")
+                local.write(chunk)
+                offset += len(chunk)
+            if guest.pread(guest_source, 1, expected_size):
+                raise ValueError("guest regular content changed during download")
+            local.flush()
             if os.fstat(local.fileno()).st_size != expected_size:
                 raise ValueError("guest regular content changed during download")
             local.seek(0)
@@ -1231,6 +1315,13 @@ class _ConcreteSession:
         return self._domain
 
 
+class LocalExternalBootTimingConfigurationError(CategorizedError):
+    """One of the two timing mismatches refused before provider mutation."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, category=ErrorCategory.CONFIGURATION_ERROR, terminal=True)
+
+
 class LocalExternalBootSessionFactory:
     def __init__(
         self,
@@ -1256,6 +1347,8 @@ class LocalExternalBootSessionFactory:
         cleanup_payloads: CleanupPayloads | None = None,
         teardown_overlay_path: SystemPath = lambda system_id: overlay_path(system_id),
         teardown_baseline_path: SystemPath = lambda system_id: baseline_dir(system_id),
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._pin_lease = pin_lease
         self._connect = connect
@@ -1278,11 +1371,15 @@ class LocalExternalBootSessionFactory:
         self._cleanup_payloads = cleanup_payloads or _unconfigured_cleanup
         self._teardown_overlay_path = teardown_overlay_path
         self._teardown_baseline_path = teardown_baseline_path
+        self._sleep = sleep
+        self._clock = clock
 
     def open(
         self,
         lease: LocalExternalBootOperationLease,
         expected: ExpectedOperationOwnership,
+        *,
+        local_timing: LocalExternalBootTimingV1 | None = None,
     ) -> LocalExternalBootSession:
         ownership = self._pin_lease(lease)
         pin = ownership._pin
@@ -1308,7 +1405,6 @@ class LocalExternalBootSessionFactory:
         connection: _Connection | None = None
         domain: _Domain | None = None
         overlay_fd: int | None = None
-        artifact_fd: int | None = None
         try:
             connection = self._connect()
             expected_name = domain_name_for(system_id)
@@ -1325,6 +1421,24 @@ class LocalExternalBootSessionFactory:
             inactive_root = _parse_owned_xml(
                 inactive_xml, system_id, expected_overlay, projected=True
             )
+            if local_timing is not None:
+                xml_accel = inactive_root.get("type")
+                if local_timing.accel is not None and local_timing.accel != xml_accel:
+                    raise LocalExternalBootTimingConfigurationError(
+                        "local external-boot accelerator disagrees with inactive domain XML; "
+                        "correct the System accelerator or domain definition"
+                    )
+                host_window = resolve_local_timing(
+                    local_timing.accel,
+                    config.require(LIBVIRT_BOOT_WINDOW_S),
+                    config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER),
+                ).console_window_s
+                if host_window != local_timing.console_window_s:
+                    raise LocalExternalBootTimingConfigurationError(
+                        "local external-boot authority boot window differs from admitted window; "
+                        "align KDIVE_LIBVIRT_BOOT_WINDOW_S and "
+                        "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER across server and authority host"
+                    )
             _require_guest_agent_channel(inactive_root, system_id)
             xml = domain.XMLDesc(0)
             _parse_owned_xml(xml, system_id, expected_overlay, projected=True)
@@ -1333,14 +1447,13 @@ class LocalExternalBootSessionFactory:
             if not stat.S_ISREG(mode):
                 raise ValueError("System overlay descriptor is not a regular file")
             overlay = _BoundOverlay(device, inode, expected_overlay, overlay_fd)
-            artifact_fd = self._open_artifact_root(facts)
             return _ConcreteSession(
                 system_id=system_id,
                 binding=binding,
                 pin=pin,
                 connection=connection,
                 domain=domain,
-                artifact_fd=artifact_fd,
+                open_artifact_root=lambda: self._open_artifact_root(facts),
                 overlay=overlay,
                 open_guest=self._open_guest,
                 fstat_overlay=self._fstat_overlay,
@@ -1357,11 +1470,16 @@ class LocalExternalBootSessionFactory:
                 readiness=self._readiness,
                 observe_running=self._observe_running,
                 cleanup_payloads=self._cleanup_payloads,
+                console_window_s=(
+                    local_timing.console_window_s if local_timing is not None else None
+                ),
+                kvm=inactive_root.get("type") == "kvm",
+                sleep=self._sleep,
+                clock=self._clock,
             )
         except BaseException as exc:
             errors: list[Exception] = []
             for closer in (
-                (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
                 (
                     lambda: (
                         self._close_overlay_descriptor(overlay_fd)
@@ -1369,7 +1487,6 @@ class LocalExternalBootSessionFactory:
                         else None
                     )
                 ),
-                domain.free if domain is not None else None,
                 connection.close if connection is not None else None,
                 pin.close,
             ):
@@ -1429,42 +1546,37 @@ class _ConcreteSystemTeardownSession:
 
     def inspect(self) -> LocalSystemTeardownInspection:
         domain = self._lookup_owned()
-        try:
-            return LocalSystemTeardownInspection(
-                domain_absent=domain is None,
-                domain_validated=domain is not None,
-                overlay_absent=_path_kind(self._overlay, "regular") == "absent",
-                baseline_absent=_path_kind(self._baseline, "directory") == "absent",
-            )
-        finally:
-            if domain is not None:
-                domain.free()
+        return LocalSystemTeardownInspection(
+            domain_absent=domain is None,
+            domain_validated=domain is not None,
+            overlay_absent=_path_kind(self._overlay, "regular") == "absent",
+            baseline_absent=_path_kind(self._baseline, "directory") == "absent",
+        )
 
     def owned_xml(self) -> tuple[str, str]:
         """Read both exact owned XML views after applying the normal teardown ownership check."""
         domain = self._lookup_owned()
         if domain is None:
             raise ValueError("owned domain is absent")
-        try:
-            inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
-            live = domain.XMLDesc(0)
-            _parse_owned_xml(inactive, self._system_id, self._overlay)
-            _parse_owned_xml(live, self._system_id, self._overlay)
-            return inactive, live
-        finally:
-            domain.free()
+        inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+        live = domain.XMLDesc(0)
+        _parse_owned_xml(inactive, self._system_id, self._overlay)
+        _parse_owned_xml(live, self._system_id, self._overlay)
+        return inactive, live
 
     def destroy(self) -> None:
         domain = self._lookup_owned()
         if domain is None:
             return
-        try:
-            if _active(domain):
+        # Hard by design (ADR-0679): the overlay is reclaimed next, so no write is read again.
+        if _active(domain):
+            try:
                 domain.destroy()
-            if _active(domain):
-                raise RuntimeError("domain remained active after destroy")
-        finally:
-            domain.free()
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_OPERATION_INVALID or _active(domain):
+                    raise
+        if _active(domain):
+            raise RuntimeError("domain remained active after destroy")
 
     def undefine(self) -> None:
         domain = self._lookup_owned()
@@ -1477,8 +1589,6 @@ class _ConcreteSystemTeardownSession:
         except libvirt.libvirtError as exc:
             if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
                 raise
-        finally:
-            domain.free()
 
     def remove_overlay(self) -> None:
         if _path_kind(self._overlay, "regular") == "absent":
@@ -1520,14 +1630,10 @@ class _ConcreteSystemTeardownSession:
                 return None
             raise
         expected_overlay = self._overlay
-        try:
-            _parse_owned_xml(
-                domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), self._system_id, expected_overlay
-            )
-            _parse_owned_xml(domain.XMLDesc(0), self._system_id, expected_overlay)
-        except BaseException:
-            domain.free()
-            raise
+        _parse_owned_xml(
+            domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), self._system_id, expected_overlay
+        )
+        _parse_owned_xml(domain.XMLDesc(0), self._system_id, expected_overlay)
         return domain
 
 

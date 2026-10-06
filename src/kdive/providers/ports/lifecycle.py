@@ -80,6 +80,8 @@ class InstallRequest:
     initrd_ref: str | None = None
     debuginfo_ref: str | None = None
     artifact_versions: dict[str, str] | None = None
+    # The System's accelerator; scales an install-time guest power-off (ADR-0341, ADR-0679).
+    accel: str | None = None
 
 
 class Provisioner(Protocol):

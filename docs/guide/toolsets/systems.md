@@ -9,6 +9,8 @@ first, then provision the System. Read each tool's schema for exact parameters a
 with resource://kdive/docs/guide/toolsets/images.md, then call `systems.provision` with a granted
 Allocation and a matching provider/architecture profile. Provisioning requires contributor;
 it creates the System and returns a job. Poll `jobs.wait`, then check `systems.get` for READY.
+On local-libvirt that job lasts through the guest's first boot — minutes on KVM, longer on an
+emulated arch.
 There is one System per Allocation; repeating provision is not a way to create a second one.
 
 Choose provision-time debug flags before creating the guest. Enable `debug.gdbstub` for GDB;

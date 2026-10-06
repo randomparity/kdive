@@ -12,6 +12,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "operations" / "check-local-libvirt.sh"
 BASH = shutil.which("bash")
 
@@ -28,7 +30,13 @@ def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     # /usr/libexec/qemu-kvm, which qemu-kvm-core installs on the whole RHEL family — leaving it
     # unset would make these tests read the host and fail on exactly the distros this change
     # exists to support. A caller that wants it present passes its own KDIVE_QEMU_LIBEXEC.
-    full_env = {"KDIVE_QEMU_LIBEXEC": "/nonexistent/qemu-kvm", **env}
+    # The lifecycle worker venv defaults to its real install path for the same reason: pin it
+    # absent so a test host that ran host preparation is not read either.
+    full_env = {
+        "KDIVE_QEMU_LIBEXEC": "/nonexistent/qemu-kvm",
+        "KDIVE_LIFECYCLE_PYTHON": "/nonexistent/lifecycle/python",
+        **env,
+    }
     return subprocess.run(
         [BASH, str(SCRIPT)], env=full_env, capture_output=True, text=True, check=False
     )
@@ -37,7 +45,8 @@ def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
 def _stub_python(bindir: Path, name: str, *, imports_ok: bool) -> Path:
     """Write a python-interpreter stub that succeeds (or fails) on `-c "import ..."`.
 
-    Mirrors how the script probes the worker venv: `"$PY" -c "import guestfs, drgn"`.
+    Mirrors how the script probes KDIVE_PYTHON, the checkout/CLI interpreter:
+    `"$PY" -c "import guestfs, drgn"`.
     """
     body = "exit 0" if imports_ok else 'echo "ModuleNotFoundError" >&2\nexit 1'
     p = bindir / name
@@ -115,6 +124,7 @@ def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None
             "KDIVE_KVM_NODE": str(kvm),
             "KDIVE_INSTALL_STAGING": str(staging),
             "KDIVE_BOOT_DIR": str(boot),
+            "KDIVE_LIFECYCLE_PYTHON": str(tmp_path / "absent-lifecycle-python"),
         },
         capture_output=True,
         text=True,
@@ -154,6 +164,59 @@ def test_unwritable_install_staging_fails_with_hint(tmp_path: Path) -> None:
     assert "$HOME" in result.stderr  # the hint must name the qemu-traversability trap
 
 
+def _healthy_lifecycle_env(tmp_path: Path) -> dict[str, str]:
+    bindir, py = _healthy_bin(tmp_path)
+    return _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+
+
+@pytest.mark.parametrize("kdump_preflight", ["required", "optional"])
+def test_lifecycle_venv_without_guestfs_fails_whatever_the_kdump_setting(
+    tmp_path: Path, kdump_preflight: str
+) -> None:
+    """The installed lifecycle worker provisions, and provisioning needs guestfs (#2781).
+
+    So its probe is a FAIL that KDIVE_PREFLIGHT_KDUMP=optional does not downgrade: that knob
+    covers only the checkout interpreter's kdump tooling.
+    """
+    env = _healthy_lifecycle_env(tmp_path)
+    lifecycle = _stub_python(tmp_path / "bin", "lifecycle-python", imports_ok=False)
+    env |= {"KDIVE_LIFECYCLE_PYTHON": str(lifecycle), "KDIVE_PREFLIGHT_KDUMP": kdump_preflight}
+
+    result = _run(env)
+
+    assert result.returncode == 1, result.stderr
+    fail_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith("FAIL") and "import guestfs" in line
+    )
+    assert str(lifecycle) in fail_line
+    assert "provision" in fail_line
+    assert "prepare-local-libvirt-host" in result.stderr
+    assert "source repositories" in result.stderr
+
+
+def test_lifecycle_venv_with_guestfs_passes(tmp_path: Path) -> None:
+    env = _healthy_lifecycle_env(tmp_path)
+    lifecycle = _stub_python(tmp_path / "bin", "lifecycle-python", imports_ok=True)
+    env["KDIVE_LIFECYCLE_PYTHON"] = str(lifecycle)
+
+    result = _run(env)
+
+    assert result.returncode == 0, result.stderr
+    assert f"lifecycle worker venv ({lifecycle}) imports guestfs" in result.stderr
+
+
+def test_absent_lifecycle_venv_is_reported_not_failed(tmp_path: Path) -> None:
+    """The preflight runs before host preparation, when no lifecycle venv exists yet."""
+    result = _run(_healthy_lifecycle_env(tmp_path))
+
+    assert result.returncode == 0, result.stderr
+    assert "INFO  lifecycle worker venv (/nonexistent/lifecycle/python) is not installed" in (
+        result.stderr
+    )
+
+
 def test_missing_venv_bindings_fails_with_hint(tmp_path: Path) -> None:
     """The venv interpreter cannot import guestfs/drgn -> fail with an actionable fix."""
     bindir = tmp_path / "bin"
@@ -178,10 +241,19 @@ def test_missing_venv_bindings_fails_with_hint(tmp_path: Path) -> None:
     assert "guestfs" in err and "drgn" in err
     # The hint must point at both fixes: the live group and the libguestfs binding.
     assert "uv sync --group live" in result.stderr
-    assert "python3-libguestfs" in result.stderr
-    # The old "section 4b" pointer named a heading that no longer exists in that runbook.
-    assert "Wire the worker venv" in result.stderr, result.stderr
-    assert "section 4b" not in result.stderr, result.stderr
+    assert "just prepare-local-libvirt-host" in result.stderr
+    assert "EL10" in result.stderr
+    assert "source repositories" in result.stderr
+    # The failing check names the interpreter it actually probes (KDIVE_PYTHON, the
+    # checkout/CLI interpreter) rather than calling it the "worker venv" -- this checkout
+    # interpreter is not the running lifecycle worker (issue #2759).
+    fail_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith("FAIL") and "guestfs, drgn" in line
+    )
+    assert "KDIVE_PYTHON" in fail_line, fail_line
+    assert "worker" not in fail_line.lower(), fail_line
 
 
 def test_missing_venv_bindings_optional_warns(tmp_path: Path) -> None:
@@ -215,8 +287,17 @@ def test_missing_venv_bindings_optional_warns(tmp_path: Path) -> None:
     assert "WARN" in result.stderr
     assert "FAIL" not in result.stderr
     assert "guestfs" in result.stderr and "drgn" in result.stderr
-    assert "python3-libguestfs" in result.stderr
+    assert "source repositories" in result.stderr
     assert "host is ready" in result.stderr
+    # The WARN path's message went through the same rename as the FAIL path: it must name
+    # KDIVE_PYTHON, not the "worker venv" (issue #2759).
+    warn_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith("WARN") and "guestfs, drgn" in line
+    )
+    assert "KDIVE_PYTHON" in warn_line, warn_line
+    assert "worker" not in warn_line.lower(), warn_line
 
 
 def test_invalid_kdump_preflight_value_rejected(tmp_path: Path) -> None:
@@ -537,3 +618,68 @@ def test_unlistable_boot_dir_fails_the_kernel_probe(tmp_path: Path) -> None:
 
     assert result.returncode == 1, result.stdout
     assert "is not readable by this user" in result.stderr, result.stderr
+
+
+def _selinux_env(
+    tmp_path: Path, *, mode: str, rootfs_type: str, install_type: str
+) -> dict[str, str]:
+    """A healthy host whose getenforce reports ``mode`` and whose ``stat -c %C`` reports each
+    image directory's SELinux type (ADR-0640, #2779)."""
+    bindir, py = _healthy_bin(tmp_path)
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    env["KDIVE_ROOTFS_DIR"] = str(rootfs)
+    _stub(bindir, "getenforce", f"echo {mode}")
+    _stub(
+        bindir,
+        "stat",
+        'case "$*" in\n'
+        f'  *" {rootfs}") echo system_u:object_r:{rootfs_type}:s0 ;;\n'
+        f'  *" {env["KDIVE_INSTALL_STAGING"]}") echo system_u:object_r:{install_type}:s0 ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac",
+    )
+    return env
+
+
+def test_enforcing_host_with_svirt_image_labels_passes(tmp_path: Path) -> None:
+    env = _selinux_env(
+        tmp_path, mode="Enforcing", rootfs_type="svirt_image_t", install_type="svirt_image_t"
+    )
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("is labeled svirt_image_t") == 2, result.stderr
+
+
+@pytest.mark.parametrize("mislabeled", ["rootfs", "install"])
+def test_enforcing_host_without_svirt_image_label_fails(tmp_path: Path, mislabeled: str) -> None:
+    """A host prepared without the ADR-0640 rules fails the check, naming the directory (#2779)."""
+    types = {"rootfs": "svirt_image_t", "install": "svirt_image_t", mislabeled: "var_lib_t"}
+    env = _selinux_env(
+        tmp_path, mode="Enforcing", rootfs_type=types["rootfs"], install_type=types["install"]
+    )
+    result = _run(env)
+    directory = env["KDIVE_ROOTFS_DIR" if mislabeled == "rootfs" else "KDIVE_INSTALL_STAGING"]
+    assert result.returncode == 1, result.stderr
+    assert f"FAIL  {directory} is labeled var_lib_t, not svirt_image_t" in result.stderr
+    assert "just prepare-local-libvirt-host" in result.stderr
+    assert f"kdive_label_svirt_image {directory}" in result.stderr
+
+
+def test_unreadable_label_on_enforcing_host_fails(tmp_path: Path) -> None:
+    env = _selinux_env(
+        tmp_path, mode="Enforcing", rootfs_type="svirt_image_t", install_type="svirt_image_t"
+    )
+    env["KDIVE_ROOTFS_DIR"] = str(tmp_path / "absent-rootfs")
+    result = _run(env)
+    assert result.returncode == 1, result.stderr
+    assert "absent-rootfs is labeled unknown, not svirt_image_t" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["Permissive", "Disabled"])
+def test_non_enforcing_host_skips_the_label_check(tmp_path: Path, mode: str) -> None:
+    env = _selinux_env(tmp_path, mode=mode, rootfs_type="var_lib_t", install_type="var_lib_t")
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "svirt_image_t" not in result.stderr

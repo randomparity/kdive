@@ -21,38 +21,88 @@ The `justfile` is the **single source of truth** for build/lint/type/test comman
 (`.github/workflows/ci.yml`) and the pre-commit `ty` hook both invoke `just` recipes, so
 run the same recipes locally rather than reinventing the underlying command:
 
-| task | runs |
-|------|------|
-| `just setup` | check host deps, sync dependencies, stage the capture-bootstrap manifest, install commit/push hooks and run commit hooks |
-| `just lint` | `ruff check` + `ruff format --check` |
-| `just format` | `ruff check --fix` + `ruff format` (mutating) |
-| `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone |
-| `just test` | the suite, excluding `live_vm`, `live_stack`, and `agent_smoke` |
-| `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and passing any argument makes it serial |
-| `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image); declares the `throwaway`, `provisioned` and `debug-stepping` env families up front, and fails loud naming the tier rather than exiting 0 when no proof actually ran |
-| `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, and fails loud naming the tier rather than exiting 0 when no proof actually ran |
-| `just ci` | the full PR gate: lint, type, lock-check, shell/workflow/Ansible lint, doc-link guards, all generated-artifact checks, then the suite |
-| `just stack-backends` | the backends only: Postgres + SeaweedFS + mock OIDC healthy, bucket created, schema migrated |
-| `just compose-up` | the **containerized** tier — backends *plus* `server`/`reconciler`, then the `worker` created and started through the lifecycle witness (`--profile managed-worker`) |
-| `just compose-stop` / `compose-down` | stop that tier; `compose-stop` keeps the named volumes, `compose-down` adds `--volumes` and drops the database and object store |
-| `just test-live-stack` | the `live_stack` suite; skips cleanly when the stack/fixtures are absent |
-| `just onboard` | fund the demo project (budget/quota) and mint a token against a running stack |
+| task | runs | Approx. wall time[^test-times] |
+|------|------|------|
+| `just setup` | install developer dependencies and pinned Ansible collections, sync Python dependencies, stage the capture-bootstrap manifest, install commit/push hooks and run commit hooks | — |
+| `just lint` | `ruff check` + `ruff format --check` | — |
+| `just format` | `ruff check --fix` + `ruff format` (mutating) | — |
+| `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone | — |
+| `just test` | unit, service, database, integration, and other ordinary tests; excludes `live_vm`, `live_stack`, and `agent_smoke` | ~5 min 20 s |
+| `just test-linux` | the `just test` selection in a native-arch Linux container (Docker or Podman); the unit gate on macOS; tests a commit, not uncommitted edits | — |
+| `just test-verbose tests/domain/test_errors.py` | example Docker-free unit-test file, run serially (39 tests) | ~2 s |
+| `uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py::test_request_under_cap_grants -q` | example single database-backed test, including disposable Postgres startup | ~4 s |
+| `just test-changed` | tests mapped from branch and working-tree changes; unmappable changes fall back to the full suite | Selection-dependent |
+| `just test-lf` | cached last failures; an empty/stale cache can run the full suite | Selection-dependent |
+| `just test-shard mcp-db` / `just test-shard other` | CI partitions: `tests/mcp` + `tests/db`, or the remaining tests; same exclusions and parallelism as `just test` | — |
+| `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and passing any argument makes it serial | — |
+| `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image); declares the `throwaway`, `provisioned` and `debug-stepping` env families up front, and fails loud naming the tier rather than exiting 0 when no proof actually ran | — |
+| `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, and fails loud naming the tier rather than exiting 0 when no proof actually ran | — |
+| `just ci` | the local gate: lint, type, coverage ownership, lock/schema/container guards, decision-record shape (`just records`, needs a fetched `origin/main`), shell/workflow/Ansible lint and Ansible role tests, doc checks, then the ordinary suite | — |
+| `just stack-backends` | the backends only: Postgres + SeaweedFS + mock OIDC healthy, bucket created, schema migrated | — |
+| `just compose-up` | the **containerized** tier — backends *plus* `server`/`reconciler`, then the `worker` created and started through the lifecycle witness (`--profile managed-worker`) | — |
+| `just compose-stop` / `compose-down` | stop that tier; `compose-stop` keeps the named volumes, `compose-down` adds `--volumes` and drops the database and object store | — |
+| `just test-live-stack` | the `live_stack` suite; skips cleanly when the stack/fixtures are absent | — |
+| `just onboard` | fund the demo project (budget/quota) and mint a token against a running stack | — |
 
-Run a single test: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py::test_request_under_cap_grants -q`
+[^test-times]: Last measured **2026-09-28**, checkout `9f77c8d3b`, on Linux x86_64
+    (8 vCPUs, Intel Core Ultra 9 285HX), with the existing Python environment and
+    Docker available. Times are rounded elapsed wall time for one invocation, including
+    pytest startup and fixture setup/teardown; they are planning estimates, not timeouts.
+    The full suite used 8 xdist workers and took 322 s: 19,891 passed, 30 skipped,
+    no failures or errors, after running the capture-bootstrap setup recipe below.
+    The focused unit-file run passed all 39 tests in 2.2 s including startup;
+    the single database test passed in 3.7 s including startup.
+    Host load, caches, image downloads, selected tests,
+    and missing prerequisites affect timings. `—` means not measured; live tiers and the
+    full `just ci` gate were not timed. Selection-dependent recipes have no fixed duration.
+
+### Unit tests and the ordinary suite
+
+`just test` runs in parallel with `-n auto --maxprocesses=16 --dist worksteal` and
+`PYTHONHASHSEED=0` by default. Workers share one disposable Postgres and one SeaweedFS
+container per run. Docker-dependent tests skip if Docker is unavailable unless
+`KDIVE_REQUIRE_DOCKER=1`; `oidc_issuer` tests remain selected and skip without the issuer.
+A run with missing prerequisites is not equivalent to a run that exercised those tests.
+
+If capture-bootstrap tests report `fingerprint_ancestor_replaceable`, run
+`just build-capture-bootstrap-manifest` (also part of `just setup`), then rerun the
+affected tests. It removes group write from current-user-owned bootstrap inputs and their
+ancestors, including the checkout and staging directory, and builds/verifies the manifest.
+See [the installation permission contract](docs/operating/install.md#from-source);
+intentionally shared, group-writable trees need a private checkout/interpreter.
+
+For the timed unit-test file without Docker, use
+`just test-verbose tests/domain/test_errors.py`; direct
+`uv run python -m pytest tests/domain/test_errors.py -q` is also suitable.
+
+For a single database-backed test (requires Docker):
+`uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py::test_request_under_cap_grants -q`.
+
+CI partitions the ordinary suite into `mcp-db` and `other` with `just test-shard`;
+local `just test` and `just ci` run the whole selection. The required CI check also
+includes a separate Compose volume-persistence proof that `just ci` does not run.
+See [the contributor gate guide](CONTRIBUTING.md#pull-request-gate).
 
 Smaller-than-suite selections, all direct pytest against a path:
 
 - **One block** — any node-ID prefix: a parametrized family
-  (`tests/domain/test_errors.py::test_name` runs every parameter), a class
+  (`tests/domain/test_errors.py::test_each_category_round_trips_to_and_from_its_string`
+  runs every parameter), a class
   (`.../test_mod.py::TestClass`), one file, or one directory.
 - **Keyword expression** across files — `-k "taxonomy and not round_trips"`.
 
-Both compose with the recipes below (`just test-verbose <path>::<block>` for full error
-output on just that block).
+Use `just test-verbose <path>::<block>` for full error output on a named block.
+For a `-k` expression containing spaces, use direct pytest: `test-verbose` shell-splits
+its arguments, so quoting an expression such as `"a or b"` does not survive the recipe.
 
 **Choosing how to run the suite (agent guidance):** iterate on changed code with
 `just test-changed`, rerun failures with `just test-lf`, and use the full `just ci`
-pre-push gate described below. Default recipes run quietly (`-q` plus `-ra` from `addopts`),
+pre-push gate described below. `test-changed` maps filenames, not the import graph; it
+compares against the merge base with local `origin/main` (or `main`) and includes untracked
+files. Documentation/configuration changes, an unmapped source file, or selector failure
+can trigger a full run. A focused pass does not cover every caller of a changed module.
+`test-lf` uses pytest's local failure cache; it is not necessarily a small run.
+Default recipes run quietly (`-q` plus `-ra` from `addopts`),
 but that only drops the per-test progress line and the header — it bounds nothing on the failure path.
 What bounds it is `--tb=short`, carried by `just test`, `just test-lf`, and
 `just test-changed` alike (ADR-0577): a `file:line: in func` entry and its source line for
@@ -66,7 +116,8 @@ bottom. Name paths when you can: any argument drops xdist, so one that does not 
 run (`-x`, `--pdb`, a broad `-k`) runs the whole suite single-process. Serial is also a
 different topology from the gate's, so a failure caused by xdist itself can vanish under
 escalation — reproduce those with direct pytest carrying the gate's marker exclusion and
-parallelism flags (`_TEST_MARKERS` / `_TEST_XDIST` in the justfile, where it is described).
+parallelism flags (`_TEST_MARKERS` / `_TEST_XDIST` in the justfile, where it is described)
+and the same `PYTHONHASHSEED` (default `0`).
 For one known test, direct pytest stays fine (see above). Never pipe a gate recipe through
 `tail`/`head`: a pipeline reports the *last* command's exit code, so the gate's own status is
 lost. Redirection does not have that problem — `just ci > <file> 2>&1` reports the recipe's own
@@ -178,6 +229,8 @@ first on `PATH`; on macOS that means Homebrew ([macOS steps](docs/operating/inst
 ADR-0673). Normal development and the optional `live` group have different
 native requirements; POWER also needs Rust and the documented source-build prerequisites.
 `just check-deps` checks the host; it cannot install the runner that invokes it.
+On macOS, a host `just test` is not regression evidence: the suite needs Linux behavior.
+Run `just test-linux` instead ([cross-platform guide](docs/development/cross-platform.md#macos-run-the-suite-in-a-linux-container)).
 
 - The db/integration tests need a reachable Docker daemon (disposable Postgres via
   testcontainers). They **skip** when Docker is absent — unless `KDIVE_REQUIRE_DOCKER=1`
@@ -321,9 +374,9 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   tool in `suggested_next_actions`. Every workaround an agent improvises marks a missing
   sentence in a contract (#1336).
 - **State transitions are guarded data** — `domain/capacity/state.py` is a nested adjacency table;
-  the repository layer (`db/repositories.py`) calls `can_transition` before persisting any
-  state change. An illegal edge raises `IllegalTransition` (a programming error, distinct
-  from operational `ErrorCategory` failures).
+  the repository layer (`db/repositories.py`) calls `ensure_transition` (which checks
+  `can_transition`) before persisting guarded state changes. An illegal edge raises
+  `IllegalTransition` (a programming error, distinct from operational `ErrorCategory` failures).
 - **Stable error taxonomy** — `domain/errors.py` `ErrorCategory`. Pick the most specific
   existing value; never invent strings.
 - **Secrets by reference + mandatory redaction** — secrets resolve at the worker boundary
@@ -349,8 +402,8 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   artifacts and `docs/archive/` the retired ones. A merged plan is a point-in-time record — do
   not treat one as current guidance.
 - **Deferred work is a numbered record** (`docs/debt/`, same `NNNN-kebab-title.md` shape as an
-  ADR). `just records` is the gate; it compares against `origin/main`, so `git fetch origin main`
-  first.
+  ADR). `just records` is the gate (`just ci` runs it too); it compares against `origin/main`,
+  so `git fetch origin main` first.
 - **Releasing** — see [`docs/development/releasing.md`](docs/development/releasing.md) and
   [ADR-0041](docs/adr/0041-versioning-release-process.md) (SemVer, milestone→minor,
   tag-driven release).
@@ -371,10 +424,12 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   live body, but it runs *after* GitHub has the text — it shortens exposure, it does not
   prevent it. The `detect-secrets` hook does not cover this at all: it scans repository
   files, and a body never becomes one.
-- **`live_vm` tests** are skipped by default (marker in `pyproject.toml`); they need an
+- **`live_vm` tests** are excluded by the ordinary `just` test recipes (markers are
+  declared in `pyproject.toml`, whose `addopts` does not exclude them); they need an
   operator-provided KVM/nested-virt host with libvirt and a kdump-enabled guest image, and
-  run only as a manually-dispatched self-hosted CI job. Unit/service tests depend only on
-  disposable Postgres + SeaweedFS + mock OIDC. (SeaweedFS replaced MinIO as the S3-compatible
+  run in scheduled or manually dispatched live CI jobs. Ordinary database/store/auth
+  tests use disposable Postgres + SeaweedFS or the mock OIDC issuer; pure unit tests
+  need none of those services. (SeaweedFS replaced MinIO as the S3-compatible
   backend; some fixture and symbol names — `minio_store`, `tests/store/test_minio_store_fixture.py`
   — still carry the old name and are not evidence of a second backend.)
 - **`live_stack` tests** drive the spine over the real MCP HTTP transport against the portable
@@ -382,9 +437,9 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   the Kubernetes-only `lifecycle-witness`. Operator bring-up is in
   [`docs/operating/runbooks/live-stack.md`](docs/operating/runbooks/live-stack.md) (ADR-0042). `just
   test-live-stack` skips cleanly when the stack/fixtures (or the marked suite) are absent.
-- **Three live tiers** (ADR-0353): `live_vm` (native, direct-provider ops against a
-  pre-provisioned System); `live_vm_tcg` (the emulated foreign-arch spine — the four ppc64le
-  proofs, run over the `live_stack` vehicle, selected by `just test-live-tcg`); `live_stack`
+- **Three live tiers** (ADR-0353): `live_vm` (native direct-provider ops, including
+  throwaway guests and pre-provisioned Systems); `live_vm_tcg` (the emulated foreign-arch
+  spine — the four ppc64le proofs, run over the `live_stack` vehicle, selected by `just test-live-tcg`); `live_stack`
   (full HTTP transport). `just test-live` is native-only (`-m "live_vm and not live_vm_tcg"`);
   the TCG tier's proofs skip on a host without the foreign qemu emulator (`require_guest_arch`),
   and `just test-live-tcg` reports that as a failure rather than a pass (#2517). `just test-live`

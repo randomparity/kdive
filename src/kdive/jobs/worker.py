@@ -63,6 +63,14 @@ from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _log = logging.getLogger(__name__)
+
+# The worker never writes a marked job's row (ADR-0620): only a receipt commit, the public teardown
+# recycle, or the reconciler's unowned-job dead-letter can move it, so logs say so.
+_MARKED_JOB_LEFT_RUNNING = (
+    "the job row stays running; a lapsed lease re-claims it while attempts remain, then a public "
+    "systems.teardown recycles a teardown job and the reconciler dead-letters a boot job with no "
+    "allocating or current authority"
+)
 _CONTEXT_VALUE_MAX = 1000
 _CONTEXT_KEY = re.compile(r"[^a-zA-Z0-9_.-]+")
 _RUN_COMPENSATION_STATES = frozenset({RunState.CREATED, RunState.RUNNING})
@@ -538,12 +546,14 @@ class Worker:
                 else:
                     # exc_info because this is the *only* diagnostic for a marked job that failed
                     # before it could produce a binding-matching result: no `jobs` row is written,
-                    # both generic finalizers and `repair_abandoned_jobs` are fenced against a
-                    # marked payload, and the job then wedges `running`. A job id with no reason
-                    # leaves nothing to debug from.
+                    # and the generic finalizers are fenced against a marked payload. A job id
+                    # with no reason leaves nothing to debug from.
                     _log.warning(
-                        "marked external boot job %s failed without authority result: %s",
+                        "marked external boot job %s attempt %s/%s failed without authority "
+                        "result: %s; " + _MARKED_JOB_LEFT_RUNNING,
                         job.id,
+                        job.attempt,
+                        job.max_attempts,
                         exc,
                         exc_info=True,
                     )
@@ -591,7 +601,13 @@ class Worker:
             ):
                 return await self._commit_external_result(job, result_ref)
             else:
-                _log.warning("marked external boot job %s returned no authority result", job.id)
+                _log.warning(
+                    "marked external boot job %s attempt %s/%s returned no authority result; "
+                    + _MARKED_JOB_LEFT_RUNNING,
+                    job.id,
+                    job.attempt,
+                    job.max_attempts,
+                )
             return False
         if isinstance(result_ref, ExternalBootAuthorityResultV1):
             _log.warning("ordinary job %s returned an external authority result", job.id)
@@ -637,7 +653,7 @@ class Worker:
                 and committed.state is JobState.RUNNING
             )
         if committed is queue.ExternalBootCommitStatus.SUPERSEDED:
-            _log.warning("external boot job %s was reclaimed; result dropped", job.id)
+            await self._log_superseded_commit(job)
             return False
         failure = _classified_external_boot_failure(result, committed)
         async with self._pool.connection() as conn:
@@ -654,6 +670,28 @@ class Worker:
                 job.id,
             )
         return False
+
+    async def _log_superseded_commit(self, job: Job) -> None:
+        """Separate a real reclaim from a refused commit on the attempt that still holds the job."""
+        try:
+            async with self._pool.connection() as conn:
+                still_running = await queue.external_boot_attempt_is_running(conn, job)
+        except Exception:
+            _log.warning(
+                "external boot job %s commit superseded; attempt state unreadable; result dropped",
+                job.id,
+                exc_info=True,
+            )
+            return
+        if not still_running:
+            _log.warning("external boot job %s was reclaimed; result dropped", job.id)
+            return
+        _log.warning(
+            "external boot job %s attempt %s is still running but its commit was refused "
+            "(worker credential, allocation or state precondition); result dropped",
+            job.id,
+            job.attempt,
+        )
 
     async def _heartbeat_loop(self, job_id: UUID, attempt: int) -> None:
         """Renew the lease until cancelled, the fence misses, or a heartbeat errors.

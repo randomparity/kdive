@@ -13,7 +13,7 @@ from kdive.db import migrate
 def test_latest_migrations_are_discovered_in_order() -> None:
     migrations = migrate.discover_migrations()
 
-    assert [(item.version, item.filename) for item in migrations[-51:]] == [
+    assert [(item.version, item.filename) for item in migrations[-65:]] == [
         ("0103", "0103_worker_incarnations.sql"),
         ("0104", "0104_worker_fence_roles.sql"),
         ("0105", "0105_worker_fence_functions.sql"),
@@ -65,6 +65,20 @@ def test_latest_migrations_are_discovered_in_order() -> None:
         ("0154", "0154_worker_image_catalog_insert.sql"),
         ("0155", "0155_recoverable_worker_incarnation_read.sql"),
         ("0156", "0156_reconciler_audit_log_insert.sql"),
+        ("0157", "0157_external_boot_local_timing_journal.sql"),
+        ("0158", "0158_audit_log_insert_columns.sql"),
+        ("0159", "0159_runs_system_id_index.sql"),
+        ("0160", "0160_external_boot_teardown_failure_commit.sql"),
+        ("0161", "0161_external_boot_teardown_takeover.sql"),
+        ("0162", "0162_dead_letter_unowned_external_boot_jobs.sql"),
+        ("0163", "0163_retained_teardown_requeue_clears_category.sql"),
+        ("0164", "0164_dead_letter_exhausted_retained_teardown.sql"),
+        ("0165", "0165_bound_acknowledged_retry_grant.sql"),
+        ("0166", "0166_reprovision_incomplete_category.sql"),
+        ("0167", "0167_unrouted_preparing_teardown_route.sql"),
+        ("0168", "0168_tearing_down_authority_teardown.sql"),
+        ("0169", "0169_ended_allocation_authority_teardown.sql"),
+        ("0170", "0170_repeated_provider_conflict_terminal.sql"),
     ]
 
 

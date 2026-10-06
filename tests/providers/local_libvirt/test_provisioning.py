@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import importlib
 import itertools
 import logging
 import os
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -24,6 +26,11 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module
 from kdive.providers.local_libvirt.lifecycle import storage as storage_module
 from kdive.providers.local_libvirt.lifecycle import xml as xml_module
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    Readiness,
+    ReadinessResult,
+    _real_readiness,
+)
 from kdive.providers.local_libvirt.lifecycle.provisioning import (
     LocalLibvirtProvisioning,
     ProvisioningFiles,
@@ -691,6 +698,7 @@ class _ProvDomain:
     undefine_error: int | None = None
     undefine_flags: int | None = None  # flags passed to undefineFlags() at teardown
     xml_desc: str | None = None  # XMLDesc() result; gdbstub port reuse reads it back
+    active: bool = False  # already running before this provision (a lease-reclaimed retry)
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - mirrors the libvirt binding name
         return (
@@ -704,6 +712,9 @@ class _ProvDomain:
             raise libvirt_error(self.create_error)
         self.created = True
         return 0
+
+    def isActive(self) -> int:  # noqa: N802 - mirrors the libvirt binding name
+        return int(self.active or self.created)
 
     def destroy(self) -> int:
         if self.destroy_error is not None:
@@ -785,11 +796,15 @@ def _prov(
     overlay_exists: Callable[[str], bool] = lambda _overlay: False,
     remove_baseline: Callable[[str], None] = lambda _baseline: None,
     baseline_exists: Callable[[str], bool] = lambda _path: False,
+    install_staging_root: str | None = None,
     extract_baseline_kernel: Callable[[Path, Path, str | None], BaselineKernel] = _fake_extract,
     free_port: Callable[[], int] = lambda: next(_FREE_PORTS),
     overlay_virtual_size: Callable[[str], int] = lambda _overlay: 1 << 60,
     resize_overlay: Callable[[str, int], None] = lambda _overlay, _gb: None,
     guest_egress: bool = False,
+    prepare_console_log: Callable[[Path], None] = lambda _path: None,
+    first_boot_readiness: Readiness | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> LocalLibvirtProvisioning:
     # The overlay seams default to no-ops so the libvirt-only tests never spawn qemu-img; the
     # console-log seam is also a no-op so they never depend on host /var/lib/kdive permissions.
@@ -805,9 +820,10 @@ def _prov(
             remove_baseline=remove_baseline,
             overlay_exists=overlay_exists,
             baseline_exists=baseline_exists,
-            prepare_console_log=lambda _path: None,
+            prepare_console_log=prepare_console_log,
             overlay_virtual_size=overlay_virtual_size,
             resize_overlay=resize_overlay,
+            install_staging_root=install_staging_root,
         ),
         materialize_rootfs=lambda rootfs, _system_id, _arch, *, job_id=None: (
             rootfs.path if rootfs.kind == "local" else "/var/lib/kdive/rootfs/upload.qcow2"
@@ -815,6 +831,8 @@ def _prov(
         free_port=free_port,
         extract_baseline_kernel=extract_baseline_kernel,
         guest_egress=guest_egress,
+        first_boot_readiness=first_boot_readiness,
+        clock=clock or time.monotonic,
     )
 
 
@@ -958,6 +976,47 @@ def test_provision_foreign_ppc64le_renders_tcg_domain_with_discovered_emulator()
     assert root.get("type") == "qemu"
     emu = root.find("devices/emulator")
     assert emu is not None and emu.text == "/usr/bin/qemu-system-ppc64"
+
+
+def test_authority_expected_tcg_matches_live_foreign_arch_before_provision() -> None:
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    _prov(conn).provision(
+        _SYS,
+        _arch_profile("ppc64le"),
+        expected_guest_arch=("tcg", "/usr/bin/qemu-system-ppc64"),
+    )
+
+    root = _safe_fromstring(conn.recorded_xml[0])
+    assert root.get("type") == "qemu"
+    assert root.findtext("devices/emulator") == "/usr/bin/qemu-system-ppc64"
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        ("tcg", "/usr/bin/qemu-system-x86_64"),
+        ("tcg", None),
+        ("tcg", "/usr/bin/wrong-emulator"),
+    ],
+)
+def test_authority_expected_guest_arch_mismatch_fails_before_artifacts(
+    expected: tuple[str, str | None],
+) -> None:
+    overlay_calls: list[tuple[str, str]] = []
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    profile = (
+        _profile() if expected[1] == "/usr/bin/qemu-system-x86_64" else _arch_profile("ppc64le")
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        provisioner = _prov(
+            conn, make_overlay=lambda base, overlay: overlay_calls.append((base, overlay))
+        )
+        provisioner.provision(_SYS, profile, expected_guest_arch=expected)
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert conn.recorded_xml == []
+    assert overlay_calls == []
 
 
 def test_provision_arch_absent_from_nonempty_caps_is_configuration_error() -> None:
@@ -1107,6 +1166,101 @@ def test_teardown_removes_baseline_dir() -> None:
     assert removed == [storage_module.baseline_dir(_SYS)]
 
 
+def _stage_installed_runs(root: Path, system_id: UUID) -> Path:
+    """Lay out two installed Runs under ``root`` the way ``runs.install`` stages them."""
+    system_dir = root / str(system_id)
+    for run in ("run-a", "run-b"):
+        (system_dir / run).mkdir(parents=True)
+        (system_dir / run / "kernel").write_bytes(b"bzImage")
+    (system_dir / "run-b" / "initrd").write_bytes(b"initrd")
+    return system_dir
+
+
+_OTHER_SYS = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def test_teardown_reclaims_every_installed_run_but_not_another_systems(tmp_path: Path) -> None:
+    mine = _stage_installed_runs(tmp_path, _SYS)
+    theirs = _stage_installed_runs(tmp_path, _OTHER_SYS)
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    _prov(conn, install_staging_root=str(tmp_path)).teardown(name)
+    assert not mine.exists()
+    assert (theirs / "run-a" / "kernel").is_file()
+    assert (theirs / "run-b" / "initrd").is_file()
+
+
+def test_teardown_of_an_undefined_domain_still_reclaims_staging_and_repeats_as_noop(
+    tmp_path: Path,
+) -> None:
+    mine = _stage_installed_runs(tmp_path, _SYS)
+    prov = _prov(
+        _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN), install_staging_root=str(tmp_path)
+    )
+    prov.teardown(domain_name_for(_SYS))
+    assert not mine.exists()
+    prov.teardown(domain_name_for(_SYS))  # the achieved post-state; no raise
+    assert tmp_path.is_dir()
+
+
+def test_reprovision_reclaims_the_prior_runs_staged_kernels(tmp_path: Path) -> None:
+    mine = _stage_installed_runs(tmp_path, _SYS)
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    _prov(conn, install_staging_root=str(tmp_path)).reprovision(_SYS, _profile())
+    assert not mine.exists()
+    assert conn.defined[name].created is True
+
+
+def test_teardown_without_an_install_staging_root_reclaims_none() -> None:
+    # The authority lane and direct constructions own no install staging (no root bound).
+    removed: list[str] = []
+    name = domain_name_for(_SYS)
+    LocalLibvirtProvisioning(
+        connect=lambda: _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN),
+        files=ProvisioningFiles(
+            remove_overlay=lambda _overlay: None,
+            remove_baseline=lambda _baseline: None,
+            remove_install_staging=removed.append,
+        ),
+    ).teardown(name)
+    assert removed == []
+
+
+def test_real_remove_install_staging_oserror_is_infrastructure_failure_naming_only_the_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _rmtree_failed(_path: object, *_: object, **__: object) -> None:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(storage_module.shutil, "rmtree", _rmtree_failed)
+    staging = tmp_path / str(_SYS)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_remove_install_staging(str(staging))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to remove the per-System install staging directory"
+    assert caught.value.details == {"op": "remove_install_staging", "staging": str(_SYS)}
+
+
+def test_teardown_propagates_an_install_staging_reclaim_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stage_installed_runs(tmp_path, _SYS)
+
+    def _rmtree_failed(_path: object, *_: object, **__: object) -> None:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(storage_module.shutil, "rmtree", _rmtree_failed)
+    prov = _prov(
+        _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN), install_staging_root=str(tmp_path)
+    )
+    with pytest.raises(CategorizedError) as caught:
+        prov.teardown(domain_name_for(_SYS))
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
 def test_teardown_undefines_with_snapshot_metadata_flag() -> None:
     # Teardown must undefine with VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA so a snapshotted domain
     # undefines cleanly instead of libvirt refusing on residual snapshot metadata (ADR-0378).
@@ -1143,8 +1297,9 @@ def test_provision_real_create_failure_undefines_domain() -> None:
         _prov(conn).provision(_SYS, _profile())
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert dom.undefined is True  # the defined-but-unstarted domain was cleaned up
-    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + define/start, all closed.
-    assert conn.closed == 3
+    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + define/start + the ADR-0680
+    # domain teardown, all closed.
+    assert conn.closed == 4
 
 
 def test_provision_already_running_domain_does_not_undefine() -> None:
@@ -1155,6 +1310,58 @@ def test_provision_already_running_domain_does_not_undefine() -> None:
     conn = _ProvConn(defined={name: dom})
     _prov(conn).provision(_SYS, _profile())
     assert dom.undefined is False  # kept the running domain
+
+
+# --- retry against a running domain; failure removes the domain (ADR-0680) ------------------
+
+
+def test_provision_active_domain_skips_truncate_and_create() -> None:
+    # A lease-reclaimed retry: an earlier attempt started this boot after its own truncate, so the
+    # console must not be truncated again and the domain must not be re-created.
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, active=True)})
+    truncated: list[Path] = []
+    prov = _prov(conn, prepare_console_log=truncated.append)
+    assert prov.provision(_SYS, _profile()) == name
+    assert truncated == []
+    assert conn.defined[name].created is False
+    assert len(conn.recorded_xml) == 1  # still redefined, as before
+
+
+def test_provision_start_failure_path_tears_domain_down() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, create_error=libvirt.VIR_ERR_INTERNAL_ERROR)})
+    with pytest.raises(CategorizedError):
+        _prov(conn).provision(_SYS, _profile())
+    assert conn.defined[name].undefine_flags is not None  # the teardown's undefineFlags ran
+
+
+def test_provision_console_failure_tears_domain_down() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+
+    def fail(_path: Path) -> None:
+        raise CategorizedError("console", category=ErrorCategory.PROVISIONING_FAILURE)
+
+    with pytest.raises(CategorizedError):
+        _prov(conn, prepare_console_log=fail).provision(_SYS, _profile())
+    assert conn.defined[name].undefine_flags is not None
+
+
+def test_provision_teardown_fault_keeps_original_error() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(
+        defined={
+            name: _ProvDomain(
+                name,
+                create_error=libvirt.VIR_ERR_INTERNAL_ERROR,
+                undefine_error=libvirt.VIR_ERR_INTERNAL_ERROR,
+            )
+        }
+    )
+    with pytest.raises(CategorizedError) as caught:
+        _prov(conn).provision(_SYS, _profile())
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
 
 
 # --- gdbstub port allocation (ADR-0210 §1) -------------------------------------------------
@@ -2060,9 +2267,9 @@ def test_provision_failure_still_closes_connection() -> None:
     conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
     with pytest.raises(CategorizedError):
         _prov(conn).provision(_SYS, _profile())
-    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + the failed define, all closed
-    # even on a libvirt failure.
-    assert conn.closed == 3
+    # capabilities resolution (ADR-0340) + SSH-port reuse lookup + the failed define + the
+    # ADR-0680 domain teardown, all closed even on a libvirt failure.
+    assert conn.closed == 4
 
 
 # --- failure-path host-artifact reclaim (ADR-0435, superseded shared-base arm by ADR-0441) ---
@@ -2476,3 +2683,202 @@ def test_read_resolved_cpu_tcg_default_is_none() -> None:
 def test_read_resolved_cpu_domain_gone_is_none() -> None:
     conn = _ProvConn()  # no domain defined -> lookupByName raises NO_DOMAIN
     assert _prov(conn).read_resolved_cpu(_SYS) is None
+
+
+# --- first-boot readiness gate (ADR-0680) ------------------------------------------------------
+
+_PENDING = ReadinessResult(answered=False, ok=False)
+_READY = ReadinessResult(answered=True, ok=True)
+_CRASHED = ReadinessResult(answered=True, ok=False, crash_signature="Kernel panic")
+_EXITED = ReadinessResult(answered=True, ok=False)
+
+
+def _scripted(*results: ReadinessResult) -> tuple[Readiness, list[UUID]]:
+    """A readiness probe that answers ``results`` in order, then stays pending."""
+    queue = list(results)
+    calls: list[UUID] = []
+
+    def probe(system_id: UUID) -> ReadinessResult:
+        calls.append(system_id)
+        return queue.pop(0) if queue else _PENDING
+
+    return probe, calls
+
+
+@pytest.fixture
+def two_poll_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "10")  # ceil(10 / 5) = 2 polls on KVM
+
+
+def _gated(
+    conn: _ProvConn,
+    readiness: Readiness,
+    *,
+    removed: list[str] | None = None,
+    clock: Callable[[], float] | None = None,
+) -> LocalLibvirtProvisioning:
+    sink = removed if removed is not None else []
+    return _prov(
+        conn,
+        remove_overlay=lambda path: sink.append(f"overlay:{path}"),
+        remove_baseline=lambda path: sink.append(f"baseline:{path}"),
+        first_boot_readiness=readiness,
+        clock=clock,
+    )
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_ready_returns_name() -> None:
+    probe, calls = _scripted(_READY)
+    conn = _ProvConn()
+    assert _gated(conn, probe).provision(_SYS, _profile()) == domain_name_for(_SYS)
+    assert calls == [_SYS]
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_waits_through_pending() -> None:
+    probe, calls = _scripted(_PENDING, _READY)
+    _gated(_ProvConn(), probe).provision(_SYS, _profile())
+    assert len(calls) == 2
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_timeout_fails_and_reclaims() -> None:
+    probe, calls = _scripted()
+    conn = _ProvConn()
+    removed: list[str] = []
+    with pytest.raises(CategorizedError) as caught:
+        _gated(conn, probe, removed=removed).provision(_SYS, _profile())
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert caught.value.details["first_boot"] == "timeout"
+    assert caught.value.details["system_id"] == str(_SYS)
+    assert len(calls) == 2
+    name = domain_name_for(_SYS)
+    assert conn.defined[name].destroyed is True
+    assert conn.defined[name].undefine_flags is not None
+    assert any(item.startswith("overlay:") for item in removed)
+    assert any(item.startswith("baseline:") for item in removed)
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_crash_fails_not_ready() -> None:
+    probe, _ = _scripted(_CRASHED)
+    with pytest.raises(CategorizedError) as caught:
+        _gated(_ProvConn(), probe).provision(_SYS, _profile())
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert caught.value.details["first_boot"] == "not_ready"
+    assert caught.value.details["crash_signature"] == "Kernel panic"
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_exit_fails_not_ready() -> None:
+    probe, _ = _scripted(_EXITED)
+    conn = _ProvConn()
+    with pytest.raises(CategorizedError) as caught:
+        _gated(conn, probe).provision(_SYS, _profile())
+    assert caught.value.details["first_boot"] == "not_ready"
+    assert "crash_signature" not in caught.value.details
+    assert conn.defined[domain_name_for(_SYS)].undefine_flags is not None
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_probe_error_propagates_and_tears_down() -> None:
+    def probe(_system_id: UUID) -> ReadinessResult:
+        raise CategorizedError("console read", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    conn = _ProvConn()
+    with pytest.raises(CategorizedError) as caught:
+        _gated(conn, probe).provision(_SYS, _profile())
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert conn.defined[domain_name_for(_SYS)].undefine_flags is not None
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_deadline_bounds_wall_clock() -> None:
+    now = [0.0]
+    calls: list[UUID] = []
+
+    def slow_probe(system_id: UUID) -> ReadinessResult:
+        calls.append(system_id)
+        now[0] += 15.0  # a hung virsh domstate plus the poll sleep
+        return _PENDING
+
+    with pytest.raises(CategorizedError) as caught:
+        _gated(_ProvConn(), slow_probe, clock=lambda: now[0]).provision(_SYS, _profile())
+    assert caught.value.details["first_boot"] == "timeout"
+    assert len(calls) == 1  # the 10 s window passed after one 15 s probe, before poll two
+
+
+def test_first_boot_tcg_scales_polls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "10")
+    monkeypatch.setenv("KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER", "3")
+    probe, calls = _scripted()
+    conn = _ProvConn(caps_xml=_CAPS_X86_KVM_PPC_TCG)
+    with pytest.raises(CategorizedError):
+        _gated(conn, probe, clock=lambda: 0.0).provision(_SYS, _arch_profile("ppc64le"))
+    assert len(calls) == 6  # ceil(10 / 5) polls x the TCG multiplier
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_first_boot_waits_on_running_domain() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, active=True)})
+    probe, calls = _scripted(_READY)
+    assert _gated(conn, probe).provision(_SYS, _profile()) == name
+    assert calls == [_SYS]
+    assert conn.defined[name].created is False
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_reprovision_first_boot_ready_returns_name() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    probe, calls = _scripted(_READY)
+    assert _gated(conn, probe).reprovision(_SYS, _profile()) == name
+    assert calls == [_SYS]
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_reprovision_first_boot_timeout_fails() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    probe, _ = _scripted()
+    with pytest.raises(CategorizedError) as caught:
+        _gated(conn, probe).reprovision(_SYS, _profile())
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert caught.value.details["first_boot"] == "timeout"
+    assert conn.defined[name].undefine_flags is not None
+
+
+@pytest.mark.usefixtures("two_poll_window")
+def test_reprovision_first_boot_crash_fails_not_ready() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    probe, _ = _scripted(_CRASHED)
+    with pytest.raises(CategorizedError) as caught:
+        _gated(conn, probe).reprovision(_SYS, _profile())
+    assert caught.value.details["first_boot"] == "not_ready"
+    assert caught.value.details["crash_signature"] == "Kernel panic"
+
+
+def test_from_env_binds_the_configured_install_staging_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("KDIVE_INSTALL_STAGING", str(tmp_path))
+    mine = _stage_installed_runs(tmp_path, _SYS)
+    prov = LocalLibvirtProvisioning.from_env()
+    prov._connect = lambda: _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN)
+    prov._files = dataclasses.replace(
+        prov._files, remove_overlay=lambda _overlay: None, remove_baseline=lambda _b: None
+    )
+    prov.teardown(domain_name_for(_SYS))
+    assert not mine.exists()
+
+
+def test_from_env_wires_real_first_boot_readiness() -> None:
+    prov = LocalLibvirtProvisioning.from_env()
+    assert prov._first_boot_readiness is _real_readiness
+
+
+def test_directly_built_provisioner_does_not_wait() -> None:
+    assert _prov(_ProvConn())._first_boot_readiness is None

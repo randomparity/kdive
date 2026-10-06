@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -17,12 +18,14 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import JsonFormatter
 from kdive.mcp.responses import ToolResponse
+from tests.db.external_boot_authority_support import _RoleDsns
 from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
 from tests.live_vm import installed_local_authority_support as carrier
@@ -40,8 +43,10 @@ from tests.live_vm.installed_local_authority_support import (
     load_config,
     provision_authority_fixture,
     release_fault_barrier,
+    remove_authority_fixture,
     require_authority_artifact_confinement,
     require_deployed_revision,
+    require_evidence_read_access,
     require_fault_barrier,
     require_installed_authority_routes,
     require_journal_inventory_refusal,
@@ -107,6 +112,19 @@ def test_ledger_rejects_unowned_and_cleans_exact_reverse_order() -> None:
     removed: list[OwnedResource] = []
     ledger.cleanup(removed.append)
     assert removed == [volume, domain]
+
+
+def test_ledger_scopes_authority_fixture_entries_to_the_configured_system() -> None:
+    prefix = "kdive-2151-" + "1" * 12 + "-" + "2" * 8
+    system_id = uuid4()
+    ledger = ResourceLedger(prefix, fixture_system=system_id)
+    owned = OwnedResource(kind="authority-fixture", identity=f"kdive-{system_id}")
+    ledger.record(owned)
+    with pytest.raises(ValueError, match="outside"):
+        ledger.record(OwnedResource(kind="authority-fixture", identity=f"kdive-{uuid4()}"))
+    with pytest.raises(ValueError, match="outside"):
+        ResourceLedger(prefix).record(owned)
+    assert ledger.resources == (owned,)
 
 
 def test_missing_fault_barrier_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -425,6 +443,98 @@ def test_normal_driver_uses_public_tools_and_drains_jobs(
     ]
     assert [phase for phase, _ in drained] == ["install", "activate", "release"]
     assert [resource.kind for resource in ledger.resources] == ["investigation", "run"]
+
+
+@pytest.mark.parametrize("guest_arch", ["x86_64", "ppc64le"])
+def test_normal_driver_uploads_a_kernel_for_the_recorded_guest_arch(
+    guest_arch: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The Run's build profile and the uploaded kernel tar must name the same arch: a ppc64le
+    # Run given an x86_64 tar looks for arch/x86/boot/bzImage and cannot pass (#2767).
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    profiles: list[object] = []
+    uploads: list[dict[str, object]] = []
+
+    class Client:
+        async def call_tool(self, name: str, **args: object) -> ToolResponse:
+            if name == "runs.create":
+                profiles.append(args["build_profile"])
+            return ToolResponse.success("11111111-1111-1111-1111-111111111111", "running")
+
+    async def uploaded(_client: object, **kwargs: object) -> None:
+        uploads.append(kwargs)
+
+    async def drained_job(_client: object, _phase: str, job_id: str, **_: object) -> ToolResponse:
+        return ToolResponse.success(job_id, "succeeded")
+
+    monkeypatch.setattr(
+        "tests.live_vm.installed_local_authority_support.build_and_upload_kernel", uploaded
+    )
+    monkeypatch.setattr("tests.live_vm.installed_local_authority_support.drain_job", drained_job)
+    ledger = ResourceLedger(config.ownership_prefix)
+    asyncio.run(drive_normal_operations(cast(Any, Client()), config, ledger, guest_arch=guest_arch))
+
+    assert profiles == [{"schema_version": 1, "arch": guest_arch}]
+    assert [upload["arch"] for upload in uploads] == [guest_arch]
+
+
+def test_normal_driver_waits_out_a_system_job_before_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A console_rotate queued during the boot can still hold the System when the boot job
+    # succeeds; the release conflict names it for jobs.wait, and release is then retried.
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    releases: list[str] = []
+    drained: list[tuple[str, str]] = []
+    holder = "66666666-6666-6666-6666-666666666666"
+
+    class Client:
+        async def call_tool(self, name: str, **args: object) -> ToolResponse:
+            del args
+            if name == "runs.release_external_boot":
+                releases.append(name)
+                if len(releases) == 1:
+                    return ToolResponse.failure(
+                        "22222222-2222-2222-2222-222222222222",
+                        ErrorCategory.CONFLICT,
+                        detail="a queued or running job holds this System",
+                        suggested_next_actions=["jobs.wait"],
+                        data={"reason": "system_job_active", "job_ids": [holder]},
+                    )
+                return ToolResponse.success("55555555-5555-5555-5555-555555555555", "running")
+            return ToolResponse.success("11111111-1111-1111-1111-111111111111", "running")
+
+    async def uploaded(_client: object, **_kwargs: object) -> None:
+        return None
+
+    async def drained_job(
+        _client: object, phase_name: str, job_id: str, **_kwargs: object
+    ) -> ToolResponse:
+        drained.append((phase_name, job_id))
+        return ToolResponse.success(job_id, "succeeded")
+
+    monkeypatch.setattr(
+        "tests.live_vm.installed_local_authority_support.build_and_upload_kernel", uploaded
+    )
+    monkeypatch.setattr("tests.live_vm.installed_local_authority_support.drain_job", drained_job)
+    ledger = ResourceLedger(config.ownership_prefix)
+    result = asyncio.run(drive_normal_operations(cast(Any, Client()), config, ledger))
+
+    assert len(releases) == 2
+    assert ("release", holder) in drained
+    assert result.release_job_id == "55555555-5555-5555-5555-555555555555"
 
 
 def test_deployed_revision_uses_the_actual_active_fixed_worker_slot() -> None:
@@ -883,7 +993,7 @@ def test_native_carrier_checks_deployed_builds_before_fixture_mutation(
             return "active"
         return "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1"
 
-    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+    async def provision(*_args: object) -> None:
         nonlocal fixture_called
         fixture_called = True
 
@@ -921,7 +1031,7 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
             return "active"
         return "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1"
 
-    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+    async def provision(*_args: object) -> None:
         events.append("fixture")
 
     def probe(_config: NativeAuthorityConfig, workers: str) -> None:
@@ -944,10 +1054,53 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
     monkeypatch.setattr(carrier, "require_authority_artifact_confinement", probe)
     monkeypatch.setattr(carrier, "LiveStackClient", StopBeforeMcpClient)
     monkeypatch.setattr(carrier, "mint_role_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(
+        carrier, "remove_authority_fixture", lambda *_args: events.append("remove-fixture")
+    )
     monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://fixture")
 
     with pytest.raises(RuntimeError, match="stop before public MCP mutation"):
         carrier.run_installed_local_authority_normal_operations()
+    assert events == ["fixture", "identity-probe", "remove-fixture"]
+
+
+def test_interrupted_proof_still_removes_the_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    removed: list[object] = []
+
+    async def interrupted() -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(carrier, "remove_authority_fixture", lambda *args: removed.append(args))
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(
+            carrier._run_then_remove_fixture(cast(Any, None), cast(Any, None), interrupted())
+        )
+    assert len(removed) == 1
+
+
+def test_fixture_cleanup_failure_is_reported_with_the_proof_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+
+    async def failed_proof() -> None:
+        raise AssertionError("proof failed")
+
+    def failed_removal(*_args: object) -> None:
+        raise RuntimeError("remove failed")
+
+    monkeypatch.setattr(carrier, "remove_authority_fixture", failed_removal)
+    with pytest.raises(ExceptionGroup) as raised:
+        asyncio.run(carrier._run_then_remove_fixture(config, ledger, failed_proof()))
+
+    assert [str(error) for error in raised.value.exceptions] == ["proof failed", "remove failed"]
 
 
 def test_native_route_preflight_fails_before_fixture_mutation(
@@ -969,7 +1122,7 @@ def test_native_route_preflight_fails_before_fixture_mutation(
             return "active"
         return "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1"
 
-    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+    async def provision(*_args: object) -> None:
         nonlocal fixture_called
         fixture_called = True
 
@@ -989,9 +1142,10 @@ def test_native_route_preflight_fails_before_fixture_mutation(
     assert not fixture_called
 
 
+@pytest.mark.parametrize("proof_fails", [False, True])
 @pytest.mark.parametrize("restart_recovery", [False, True])
 def test_native_carriers_supply_the_required_cleanup_summary(
-    monkeypatch: pytest.MonkeyPatch, restart_recovery: bool
+    monkeypatch: pytest.MonkeyPatch, restart_recovery: bool, proof_fails: bool
 ) -> None:
     config = NativeAuthorityConfig(
         installed_revision="1" * 40,
@@ -1016,16 +1170,21 @@ def test_native_carriers_supply_the_required_cleanup_summary(
             cleanup_calls.append((name, kwargs))
             return ToolResponse.success(investigation_id, "closed")
 
+    def remove_fixture(_config: NativeAuthorityConfig, ledger: ResourceLedger) -> None:
+        assert ledger.fixture_system == config.system_id
+        cleanup_calls.append(("remove-fixture", {}))
+
     class ClientFactory:
         @staticmethod
         def over_http(_base_url: str, _token: str) -> Client:
             return Client()
 
-    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+    async def provision(*_args: object) -> None:
         return None
 
     async def completed(_db_url: str, _operations: NormalOperationJobs) -> None:
-        return None
+        if proof_fails:
+            raise AssertionError("root release completion is missing")
 
     async def normal(
         _client: object, _config: NativeAuthorityConfig, ledger: ResourceLedger
@@ -1082,12 +1241,19 @@ def test_native_carriers_supply_the_required_cleanup_summary(
     monkeypatch.setattr(carrier, "restart_authority_after_fault", lambda *_args: None)
     monkeypatch.setattr(carrier, "drain_job", success)
     monkeypatch.setattr(carrier, "scalar", success)
+    monkeypatch.setattr(carrier, "remove_authority_fixture", remove_fixture)
     monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://fixture")
 
-    if restart_recovery:
-        carrier.run_installed_local_authority_restart_recovery()
+    run = (
+        carrier.run_installed_local_authority_restart_recovery
+        if restart_recovery
+        else carrier.run_installed_local_authority_normal_operations
+    )
+    if proof_fails:
+        with pytest.raises(AssertionError, match="root release completion is missing"):
+            run()
     else:
-        carrier.run_installed_local_authority_normal_operations()
+        run()
 
     assert cleanup_calls == [
         (
@@ -1096,7 +1262,8 @@ def test_native_carriers_supply_the_required_cleanup_summary(
                 "investigation_id": investigation_id,
                 "summary": "Native authority proof cleanup",
             },
-        )
+        ),
+        ("remove-fixture", {}),
     ]
     assert armed == ([(config, run_id, "activate", "after-provider")] if restart_recovery else [])
 
@@ -1258,8 +1425,63 @@ def test_completed_root_release_rejects_incomplete_or_mismatched_proof(
     asyncio.run(run())
 
 
+def test_evidence_read_preflight_accepts_the_migration_owner_dsn(migrated_url: str) -> None:
+    asyncio.run(require_evidence_read_access(migrated_url))
+
+
+def test_evidence_read_preflight_names_the_private_table_and_required_role(
+    authority_role_dsns: _RoleDsns,
+) -> None:
+    server_dsn = authority_role_dsns("kdive_server")
+    with pytest.raises(PermissionError) as raised:
+        asyncio.run(require_evidence_read_access(server_dsn))
+    message = str(raised.value)
+    denied = set(message.split("cannot SELECT ", 1)[1].split(";", 1)[0].split(", "))
+    assert "external_boot_release_cleanup_receipts" in denied
+    assert denied.isdisjoint({"systems", "jobs", "external_boot_activations"})
+    assert repr(conninfo_to_dict(server_dsn)["user"]) in message
+    assert "KDIVE_DATABASE_URL" in message
+    assert "migration-owner DSN" in message
+
+
+def test_evidence_read_preflight_covers_every_table_the_carrier_sql_reads() -> None:
+    source = Path(carrier.__file__).read_text(encoding="utf-8")
+    read = set(re.findall(r"\b(?:FROM|JOIN) ([a-z_]+)\b", source)) - {"unnest"}
+    assert read == set(carrier._CARRIER_READ_TABLES)
+
+
+def test_fixture_provisioning_stops_before_the_script_when_the_dsn_cannot_read_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+
+    async def denied(_dsn: str) -> None:
+        raise PermissionError("cannot SELECT external_boot_release_cleanup_receipts")
+
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("the fixture script ran after a failed evidence preflight")
+
+    monkeypatch.setattr(carrier, "require_evidence_read_access", denied)
+    monkeypatch.setattr(subprocess, "run", run)
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+    with pytest.raises(PermissionError, match="external_boot_release_cleanup_receipts"):
+        asyncio.run(provision_authority_fixture("postgresql://fixture", config, ledger))
+    assert ledger.resources == ()
+
+
+async def _evidence_readable(_dsn: str) -> None:
+    return None
+
+
+@pytest.mark.parametrize("reported", [True, False])
 def test_fixture_provisioning_passes_only_durable_profile_to_exact_script(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reported: bool
 ) -> None:
     config = NativeAuthorityConfig(
         installed_revision="1" * 40,
@@ -1297,19 +1519,31 @@ def test_fixture_provisioning_passes_only_durable_profile_to_exact_script(
         return Connection()
 
     seen: dict[str, object] = {}
+    created = [f"/private/{config.system_id}-overlay.qcow2", f"kdive-{config.system_id}"]
+    stdout = "provider log line\n" + (json.dumps({"created": created}) if reported else "")
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         seen.update(argv=argv, kwargs=kwargs)
-        return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
 
+    monkeypatch.setattr(carrier, "require_evidence_read_access", _evidence_readable)
     monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
     monkeypatch.setattr(subprocess, "run", run)
-    asyncio.run(provision_authority_fixture("postgresql://fixture", config))
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+    if not reported:
+        with pytest.raises(RuntimeError, match="did not report its created names"):
+            asyncio.run(provision_authority_fixture("postgresql://fixture", config, ledger))
+        assert ledger.resources == ()
+        return
+    asyncio.run(provision_authority_fixture("postgresql://fixture", config, ledger))
     argv = cast(list[str], seen["argv"])
     assert argv[:3] == ["sudo", "-n", "/opt/kdive-provider-authority/.venv/bin/python"]
     assert argv[-1] == str(config.system_id)
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert json.loads(cast(str, kwargs["input"])) == {"schema_version": 1}
+    assert ledger.resources == tuple(
+        OwnedResource(kind="authority-fixture", identity=name) for name in created
+    )
 
 
 def test_fixture_verification_uses_the_explicit_read_only_script_mode(
@@ -1356,11 +1590,89 @@ def test_fixture_verification_uses_the_explicit_read_only_script_mode(
         seen.update(argv=argv, kwargs=kwargs)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
+    monkeypatch.setattr(carrier, "require_evidence_read_access", _evidence_readable)
     monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
     monkeypatch.setattr(subprocess, "run", run)
-    asyncio.run(provision_authority_fixture("postgresql://fixture", config))
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+    asyncio.run(provision_authority_fixture("postgresql://fixture", config, ledger))
 
     assert cast(list[str], seen["argv"])[-2:] == ["--verify-existing", str(config.system_id)]
+    assert ledger.resources == ()
+
+
+def _fixture_ledger(config: NativeAuthorityConfig) -> tuple[ResourceLedger, list[str]]:
+    ledger = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+    names = [f"/private/{config.system_id}-overlay.qcow2", f"kdive-{config.system_id}"]
+    ledger.record(OwnedResource(kind="investigation", identity=str(uuid4())))
+    for name in names:
+        ledger.record(OwnedResource(kind="authority-fixture", identity=name))
+    return ledger, names
+
+
+def test_remove_authority_fixture_calls_exact_remove_in_reverse_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    ledger, names = _fixture_ledger(config)
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    remove_authority_fixture(config, ledger)
+
+    script = str(
+        Path(carrier.__file__).resolve().parents[2]
+        / "scripts/live-vm/provision-authority-fixture.py"
+    )
+    assert calls == [
+        [
+            "sudo",
+            "-n",
+            "/opt/kdive-provider-authority/.venv/bin/python",
+            script,
+            "--remove",
+            str(config.system_id),
+            name,
+        ]
+        for name in reversed(names)
+    ]
+
+
+def test_remove_authority_fixture_stops_after_a_failed_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    ledger, _names = _fixture_ledger(config)
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "libvirt: operation failed")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(ExceptionGroup) as raised:
+        remove_authority_fixture(config, ledger)
+
+    assert [argv[-1] for argv in calls] == [f"kdive-{config.system_id}"]
+    causes = [str(error.__cause__) for error in raised.value.exceptions]
+    assert len(causes) == 2
+    assert "libvirt: operation failed" in causes[0]
+    assert "stopped after an earlier failure" in causes[1]
 
 
 def test_fixture_subprocess_snapshots_authority_uri_and_roots_before_provider_import() -> None:

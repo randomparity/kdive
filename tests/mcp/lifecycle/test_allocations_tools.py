@@ -20,8 +20,9 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import InvalidEnvelopeError, ToolResponse
 from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
+from kdive.mcp.tools.lifecycle.allocations import view as view_module
 from kdive.mcp.tools.lifecycle.allocations.common import (
     envelope_for_allocation,
     lease_deadline_data,
@@ -1016,9 +1017,27 @@ def test_release_response_includes_service_error_details() -> None:
         details={"field": "state"},
     )
 
-    resp = _release_response(uid, outcome)
+    resp = _release_response(uid, outcome, _ctx(), "proj")
 
     assert resp.data["field"] == "state"
+
+
+def test_release_response_names_the_holding_activation_and_next_action() -> None:
+    outcome = ReleaseOutcome(
+        released=False,
+        category=ErrorCategory.CONFLICT,
+        details={"activation_id": "act-1", "activation_state": "active"},
+        detail="allocation_release is denied while external-boot activation act-1 holds System",
+        next_actions=("runs.get", "systems.teardown"),
+    )
+
+    admin = _release_response(uuid4(), outcome, _ctx(role=Role.ADMIN), "proj")
+    contributor = _release_response(uuid4(), outcome, _ctx(role=Role.CONTRIBUTOR), "proj")
+
+    assert admin.detail == outcome.detail
+    assert admin.data["activation_state"] == "active"
+    assert admin.suggested_next_actions == ["runs.get", "systems.teardown"]
+    assert contributor.suggested_next_actions == ["runs.get"]
 
 
 def test_renew_response_includes_service_error_details() -> None:
@@ -1114,6 +1133,37 @@ def test_list_returns_project_allocations(migrated_url: str) -> None:
         assert responses.data["project"] == "proj"
         assert len(items) == 2
         assert all(r.status == "granted" for r in items)
+
+    asyncio.run(_run())
+
+
+def test_list_allocations_isolates_a_row_whose_envelope_is_invalid(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0019 per-row isolation must survive ADR-0709's non-ValueError envelope fault.
+    real = view_module.envelope_for_allocation
+    seen: list[str] = []
+
+    def _first_row_invalid(alloc: Allocation, *args: Any, **kwargs: Any) -> ToolResponse:
+        seen.append(str(alloc.id))
+        if len(seen) == 1:
+            raise InvalidEnvelopeError("forced")
+        return real(alloc, *args, **kwargs)
+
+    monkeypatch.setattr(view_module, "envelope_for_allocation", _first_row_invalid)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=3)
+            await _request(pool, _ctx())
+            await _request(pool, _ctx())
+            responses = await list_allocations(
+                pool, _ctx(), AllocationsListRequest(project="proj", limit=50)
+            )
+        bad, good = responses.items
+        assert bad.object_id == seen[0]
+        assert bad.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE.value
+        assert good.status == "granted"
 
     asyncio.run(_run())
 

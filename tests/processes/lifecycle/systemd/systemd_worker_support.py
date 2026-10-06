@@ -31,7 +31,7 @@ def start_payload(**overrides: object) -> dict[str, object]:
         "settings": settings,
     }
     for name in tuple(overrides):
-        if name in settings:
+        if name in settings or name == "systems_toml":
             settings[name] = overrides.pop(name)
     payload.update(overrides)
     return payload

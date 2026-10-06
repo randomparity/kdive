@@ -7,6 +7,7 @@ import hashlib
 import os
 import shlex
 import socket
+import stat
 from collections.abc import Awaitable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -30,6 +31,7 @@ from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     SlotPhase,
     WorkerSettings,
 )
+from kdive.processes.lifecycle.systemd.systemd_worker_inventory import UntrustedInventory
 from kdive.processes.lifecycle.systemd.systemd_worker_lifecycle import (
     EvidenceRejected,
     SystemdWorkerLifecycle,
@@ -641,6 +643,60 @@ def test_start_refuses_unmanaged_worker_without_mutating_slots() -> None:
     assert response.message == "retained lifecycle facts conflict with the observed unit"
     assert all(store.state is None for store in stores)
     assert events == []
+
+
+def _inventory_request(path: str) -> LifecycleRequest:
+    settings = _settings().model_copy(update={"systems_toml": path})
+    return LifecycleRequest(operation="start", worker_count=1, settings=settings)
+
+
+def test_start_rejects_an_untrusted_inventory_before_any_slot_action() -> None:
+    """#3086: the witness refuses the inventory before the unmanaged scan or any slot mutation."""
+    stores, runtime, authority, clock, events = _fleet()
+    runtime.unmanaged = (UnmanagedWorker(pid=77, uid=1000),)
+    checked: list[str] = []
+
+    def reject(path: str) -> None:
+        checked.append(path)
+        raise UntrustedInventory("worker inventory path must not traverse a symlink")
+
+    coordinator = SystemdWorkerLifecycle(
+        stores=tuple(stores),
+        runtime=runtime,
+        authority=authority,
+        wait=clock.advance,
+        load_redaction_values=lambda _root, _slot: (),
+        check_inventory=reject,
+    )
+    response = _run(
+        coordinator.start(_inventory_request("/etc/kdive/systems.toml"), _deadline(clock))
+    )
+
+    assert (response.code, response.retry_action) == ("invalid_request", "correct_request")
+    assert response.message == "worker inventory path must not traverse a symlink"
+    assert checked == ["/etc/kdive/systems.toml"]
+    assert all(store.state is None for store in stores)
+    assert events == []
+
+
+def test_start_checks_the_inventory_only_when_one_is_sent() -> None:
+    stores, runtime, authority, clock, _ = _fleet()
+    checked: list[str] = []
+    coordinator = SystemdWorkerLifecycle(
+        stores=tuple(stores),
+        runtime=runtime,
+        authority=authority,
+        wait=clock.advance,
+        load_redaction_values=lambda _root, _slot: (),
+        check_inventory=checked.append,
+    )
+
+    assert _run(coordinator.start(_request(), _deadline(clock))).ok
+    assert checked == []
+    assert _run(
+        coordinator.start(_inventory_request("/etc/kdive/systems.toml"), _deadline(clock))
+    ).ok
+    assert checked == ["/etc/kdive/systems.toml"]
 
 
 def test_start_refuses_populated_fixed_unit_without_retained_state() -> None:
@@ -2121,7 +2177,8 @@ def _diagnostic_source_tree(tmp_path: Path) -> Path:
         "KDIVE_DATABASE_URL="
         "postgresql://worker:password@localhost/kdive\n"  # pragma: allowlist secret
         "KDIVE_API_TOKEN=future-token\n"
-        "KDIVE_LOG_LEVEL=INFO\n",
+        "KDIVE_LOG_LEVEL=INFO\n"
+        "KDIVE_SYSTEMS_TOML=/etc/kdive/systems.toml\n",
         encoding="utf-8",
     )
     environment.chmod(0o600)
@@ -2141,6 +2198,8 @@ def test_diagnostic_source_loader_returns_only_secret_classified_values(tmp_path
         "postgresql://worker:password@localhost/kdive",  # pragma: allowlist secret
     }
     assert "INFO" not in values
+    # The inventory path is public (#3086): scrubbing it would erase every log line naming it.
+    assert "/etc/kdive/systems.toml" not in values
 
 
 def test_diagnostic_loader_reads_a_real_prepared_slot_store(
@@ -2257,6 +2316,41 @@ def test_diagnostic_source_loader_rejects_post_read_metadata_change(
         return os.stat_result(fields)
 
     monkeypatch.setattr(runtime_module.os, "fstat", changing_fstat)
+
+    with pytest.raises(PermissionError, match="source is unsafe"):
+        load_slot_redaction_values(root, 1, expected_uid=os.getuid(), expected_gid=os.getgid())
+
+
+def _fstat_directory_nlink(monkeypatch: pytest.MonkeyPatch, nlink: int) -> None:
+    real_fstat = os.fstat
+
+    def fstat(descriptor: int) -> os.stat_result:
+        metadata = real_fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            return metadata
+        fields = list(metadata)
+        fields[3] = nlink
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(runtime_module.os, "fstat", fstat)
+
+
+def test_diagnostic_source_loader_accepts_btrfs_directory_link_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _diagnostic_source_tree(tmp_path)
+    _fstat_directory_nlink(monkeypatch, 1)
+
+    values = load_slot_redaction_values(root, 1, expected_uid=os.getuid(), expected_gid=os.getgid())
+
+    assert values
+
+
+def test_diagnostic_source_loader_rejects_unlinked_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _diagnostic_source_tree(tmp_path)
+    _fstat_directory_nlink(monkeypatch, 0)
 
     with pytest.raises(PermissionError, match="source is unsafe"):
         load_slot_redaction_values(root, 1, expected_uid=os.getuid(), expected_gid=os.getgid())

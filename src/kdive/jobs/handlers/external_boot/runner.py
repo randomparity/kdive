@@ -6,9 +6,10 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Final, Literal, cast
 from uuid import NAMESPACE_URL, uuid5
 
@@ -23,10 +24,12 @@ from kdive.db.remote_module_attempt_obligations import (
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, timing_deadline
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.authority import AllocatedAuthority, allocate_authority
 from kdive.jobs.handlers.external_boot.ports import (
     ExternalBootAuthorityExecutor,
+    ExternalBootAuthorityTeardownExecutor,
     ExternalBootHandlerPorts,
 )
 from kdive.jobs.models import (
@@ -35,6 +38,7 @@ from kdive.jobs.models import (
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthorityResultV1,
 )
+from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
@@ -70,6 +74,7 @@ class _CommandLineMismatch(Exception):
 
 _ACTIVATIONS = ExternalBootActivationRepository()
 _MODULE_ATTEMPTS = RemoteModuleAttemptObligationRepository()
+_LOGGER = logging.getLogger(__name__)
 
 
 async def prepare_remote_module_on_authority_host(**values: Any) -> Any:
@@ -129,11 +134,11 @@ outside the set raises SQLSTATE ``22023`` from inside the commit, and that call 
 ``run_once failed on lane %s`` with no job id at all. The drift risk is real but gated:
 ``test_runner.py`` parses the migration and asserts this set equals the SQL's.
 
-``ErrorCategory`` has 24 members, so seven are **not** committable: ``conflict``, ``not_found``,
-``capacity_exhausted``, ``queue_timeout``, ``quota_exceeded``, ``restore_incomplete`` and
-``symbol_not_found``. That is not hypothetical for long — ``providers/remote_libvirt/lifecycle/
-external_boot.py`` already raises ``CONFLICT`` and ``NOT_FOUND``, and it is the module #2199/#2200
-compose.
+``ErrorCategory`` has 25 members, so eight are **not** committable: ``conflict``, ``not_found``,
+``capacity_exhausted``, ``queue_timeout``, ``quota_exceeded``, ``restore_incomplete``,
+``reprovision_incomplete`` and ``symbol_not_found``. That is not hypothetical for long —
+``providers/remote_libvirt/lifecycle/external_boot.py`` already raises ``CONFLICT`` and
+``NOT_FOUND``, and it is the module #2199/#2200 compose.
 """
 
 _UNCOMMITTABLE_SUBSTITUTE: Final = ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -155,6 +160,7 @@ class OperationContext:
     authority_executor: ExternalBootAuthorityExecutor | None
     connection: AsyncConnection
     incarnation_credential: SecretStr
+    local_timing: LocalExternalBootTimingV1 | None = None
     prerequisites: Mapping[str, Any] = field(default_factory=dict)
     """Whatever ``require_preconditions`` read, so ``build_result`` need not read it again.
 
@@ -163,6 +169,12 @@ class OperationContext:
     ``cleanup``/``teardown`` — are exactly the rows its precondition already had to read. Carrying
     them forward is one query rather than two, and removes the window in which the second read
     could see a different row than the check approved.
+    """
+    teardown_executor: ExternalBootAuthorityTeardownExecutor | None = None
+    """The per-call teardown executor: the factory client when one is configured.
+
+    Read from here, never from the ports ``build_operations`` captured, which production assembly
+    builds with only a client factory.
     """
 
 
@@ -206,10 +218,21 @@ def _phase_binding(context: OperationContext, operation: str) -> tuple[str, str]
     return "sha256:" + identity, "sha256:" + digest
 
 
+def _prepares(activation: ExternalBootActivation, marker: ExternalBootAuthorityMarkerV1) -> bool:
+    """A PREPARING activation is debited and prepared first, except by System teardown (#2961).
+
+    Teardown ends the activation, so preparing it would debit capacity and create provider state
+    only to destroy them. The teardown receipt ends the reservation in whatever state it holds.
+    """
+    return (
+        activation.state is ExternalBootActivationState.PREPARING and marker.purpose != "teardown"
+    )
+
+
 async def _materialize_preparing(
     conn: AsyncConnection, context: OperationContext, ports: ExternalBootHandlerPorts
 ) -> ExternalBootActivation:
-    if context.activation.state is not ExternalBootActivationState.PREPARING:
+    if not _prepares(context.activation, context.marker):
         return context.activation
     executor = ports.preparation_executor
     if executor is None:
@@ -294,7 +317,7 @@ async def _materialize_preparing(
 async def _debit_preparing(
     conn: AsyncConnection, context: OperationContext, ports: ExternalBootHandlerPorts
 ) -> ExternalBootActivation:
-    if context.activation.state is not ExternalBootActivationState.PREPARING:
+    if not _prepares(context.activation, context.marker):
         return context.activation
     geometry = (
         ports.reservation_geometry(context.binding)
@@ -481,7 +504,27 @@ def _bound_failure(
         if isinstance(exc, CategorizedError)
         else False
     )
+    try:
+        message = str(exc)
+    except Exception:  # noqa: BLE001 — diagnostic rendering must not replace the bound failure
+        message = "<message unavailable>"
+    reason = Redactor(registry=context.secret_registry).redact_text(message)[:8192]
+    _LOGGER.warning(
+        "external-boot authority failure job_id=%s activation_id=%s "
+        "phase=%s exception=%s reason=%s",
+        context.job.id,
+        marker.activation_id,
+        phase,
+        type(exc).__name__,
+        reason,
+    )
     failure_context: dict[str, object] = {"phase": phase}
+    if (
+        category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        and isinstance(exc, CategorizedError)
+        and exc.details.get("authority_reason") == "provider-conflict"
+    ):
+        failure_context["authority_reason"] = "provider-conflict"
     if mismatch is not None:
         redactor = Redactor(registry=context.secret_registry)
         failure_context["cmdline_mismatch"] = {
@@ -551,16 +594,24 @@ def _render_cmdline(value: bytes, redactor: Redactor) -> str:
     return "".join(pieces)
 
 
-def _recovery_deadline(ports: ExternalBootHandlerPorts, exc: Exception) -> datetime | None:
-    if isinstance(exc, _CommandLineMismatch):
-        return ports.clock() + ports.recovery_readiness_timeout
-    if (
-        isinstance(exc, CategorizedError)
-        and exc.category is ErrorCategory.BOOT_TIMEOUT
-        and exc.terminal
+def _recovery_deadline(
+    ports: ExternalBootHandlerPorts, exc: Exception, context: OperationContext
+) -> datetime | None:
+    if not (
+        isinstance(exc, _CommandLineMismatch)
+        or (
+            isinstance(exc, CategorizedError)
+            and exc.category is ErrorCategory.BOOT_TIMEOUT
+            and exc.terminal
+        )
     ):
-        return ports.clock() + ports.recovery_readiness_timeout
-    return None
+        return None
+    recorded = context.job.payload.get("recovery_request_v1")
+    if recorded is not None:
+        metadata = RecoveryRequestV1.model_validate(recorded)
+        if metadata.local_timing is not None:
+            return metadata.readiness_deadline
+    return timing_deadline(ports.clock(), int(ports.recovery_readiness_timeout.total_seconds()))
 
 
 async def run_operation[R: ExternalBootAuthorityResultV1](
@@ -604,14 +655,44 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     nothing type-check clean.
     """
     binding, port = await _resolve_port(conn, marker, ports)
+    activation = await _read_activation(
+        conn,
+        marker,
+        require_activation_state=require_activation_state,
+        require_activation_evidence=require_activation_evidence,
+    )
+    local_timing = None
+    if marker.provider_kind == "local-libvirt":
+        if marker.purpose == "activate" and job.payload.get("local_timing") is not None:
+            local_timing = LocalExternalBootTimingV1.model_validate(job.payload["local_timing"])
+        elif job.payload.get("recovery_request_v1") is not None:
+            local_timing = RecoveryRequestV1.model_validate(
+                job.payload["recovery_request_v1"]
+            ).local_timing
+    if local_timing is not None:
+        timeout = timedelta(seconds=local_timing.deadline_budget_s)
+        ports = replace(
+            ports,
+            activation_readiness_timeout=timeout,
+            recovery_readiness_timeout=timeout,
+        )
     if ports.authority_client_factory is not None:
         timeout = (
             ports.activation_readiness_timeout
             if marker.purpose == "activate"
             else ports.recovery_readiness_timeout
         )
+        if local_timing is not None and marker.purpose == "activate":
+            committed = activation.activation_readiness_deadline
+            if committed is not None:
+                timeout = committed - ports.clock() + timedelta(seconds=30)
+        elif local_timing is not None and job.payload.get("recovery_request_v1") is not None:
+            recorded = RecoveryRequestV1.model_validate(job.payload["recovery_request_v1"])
+            timeout = recorded.readiness_deadline - ports.clock()
         client = ports.authority_client_factory(
-            binding, marker, asyncio.get_running_loop().time() + timeout.total_seconds()
+            binding,
+            marker,
+            asyncio.get_running_loop().time() + max(0, timeout.total_seconds()),
         )
         ports = replace(
             ports,
@@ -620,20 +701,13 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             preparation_executor=client,
             teardown_executor=client,
         )
-    activation = await _read_activation(
-        conn,
-        marker,
-        require_activation_state=require_activation_state,
-        require_activation_evidence=require_activation_evidence,
-    )
     prerequisites = await require_preconditions(conn, activation, marker)
     if ports.authority_client_factory is not None:
         prerequisites = dict(prerequisites) | {"authority_executor": ports.authority_executor}
-    if (
-        activation.state is ExternalBootActivationState.PREPARING
-        and ports.preparation_executor is None
-    ):
+    if _prepares(activation, marker) and ports.preparation_executor is None:
         raise _refuse("no external-boot authority preparation executor is configured")
+    if marker.operation == "teardown" and ports.teardown_executor is None:
+        raise _refuse("no external-boot authority teardown executor is configured")
 
     authority = await allocate_authority(
         conn, job, marker, incarnation_credential=ports.incarnation_credential
@@ -661,7 +735,9 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         authority_executor=ports.authority_executor,
         connection=conn,
         incarnation_credential=ports.incarnation_credential,
+        local_timing=local_timing,
         prerequisites=prerequisites,
+        teardown_executor=ports.teardown_executor,
     )
     context = replace(context, activation=await _debit_preparing(conn, context, ports))
     context = replace(context, activation=await _materialize_preparing(conn, context, ports))
@@ -677,7 +753,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             context,
             exc,
             phase=_COMMIT,
-            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+            recovery_readiness_deadline=_recovery_deadline(ports, exc, context),
         ) from None
     try:
         # ExternalBootPorts is sync, like every other provider surface jobs/handlers/ calls.
@@ -688,7 +764,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             context,
             exc,
             phase=_PROVIDER_CALL,
-            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+            recovery_readiness_deadline=_recovery_deadline(ports, exc, context),
         ) from None
     try:
         return build_result(context, observation)
@@ -697,5 +773,5 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             context,
             exc,
             phase=_COMMIT,
-            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+            recovery_readiness_deadline=_recovery_deadline(ports, exc, context),
         ) from None

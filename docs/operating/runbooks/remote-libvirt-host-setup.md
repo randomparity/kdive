@@ -35,6 +35,19 @@ Remote-libvirt boots a complete disk image with a bootloader and qemu-guest-agen
 must carry the [in-guest helpers and their dependencies](../../../deploy/remote-libvirt-guest-helpers/README.md).
 The image playbook installs the selected helpers with root ownership and the required labels.
 
+For remote SSH parity (`ssh_addr`/`ssh_range`), the image must carry the SSH-forward return route
+from [ADR-0721](../../adr/0721-remote-ssh-forward-return-path-is-a-guest-source-route.md). The
+image playbook installs it into images that ship NetworkManager (the Fedora and Rocky entries).
+An image staged before that change does not have it: rebuild it with `force_image_rebuild=true`,
+or its SSH forward accepts connections and never answers. The Ubuntu 24.04 and bare images do
+not carry it yet (#3091).
+
+The baked `kdive-install-kernel` keeps `crashkernel=` in the `kdive` slot only when the requested
+cmdline carries one (the [ADR-0082](../../adr/0082-remote-install-in-guest-kernel.md) amendment
+for #3094). An image staged before that change copies its default entry's reservation into a
+non-kdump slot, and on Rocky 10 `runs.boot` then fails `boot_timeout` waiting for a kdump that
+never arms. Rebuild such an image with `force_image_rebuild=true`.
+
 Guest SELinux must be **permissive**, as required by
 [ADR-0484](../../adr/0484-guest-images-ship-selinux-permissive.md). A per-domain permissive rule
 for `virt_qemu_ga_t` does not cover all helper child processes. This guest policy does not imply

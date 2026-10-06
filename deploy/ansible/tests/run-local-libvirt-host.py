@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Check the localhost local-libvirt playbook contract without applying it."""
+"""Check the localhost playbook and execute its path tasks in temporary fixtures."""
 
+import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -59,6 +63,74 @@ require(
 require(
     "tasks_from: uv.yml" in (ANSIBLE / "roles/live_vm_host/tasks/main.yml").read_text(),
     "live_vm_host must reuse the same shared uv install task local_worker_host uses",
+)
+
+# ADR-0640: on an SELinux-enforcing RedHat host a confined domain can only write and map images
+# labeled svirt_image_t. This play owns the two parent fcontext rules since install-host.sh became
+# a wrapper around it (#2779); build-image.sh owns the nested rootfs/local rule, and a second
+# writer here would reorder the last-match-wins local rules the ADR measured.
+require(
+    "policycoreutils-python-utils" in uv_defaults["local_worker_host_packages_redhat"],
+    "local_worker_host must install semanage (policycoreutils-python-utils) on the RedHat family",
+)
+role_main = yaml.safe_load((LOCAL_WORKER_HOST / "tasks/main.yml").read_text())
+role_imports = [task.get("ansible.builtin.import_tasks") for task in role_main]
+LABELS = "selinux_image_labels.yml"
+require(
+    LABELS in role_imports
+    and role_imports.index("shared_directories.yml") < role_imports.index(LABELS),
+    "the svirt_image_t labels must be applied after the shared directories exist",
+)
+require(
+    role_main[role_imports.index(LABELS)].get("when") == "ansible_facts['os_family'] == 'RedHat'",
+    "the svirt_image_t labels must be scoped to the RedHat family",
+)
+require(
+    role_imports.index("packages_redhat.yml") < role_imports.index(LABELS),
+    "semanage's Python bindings must be installed before the fcontext rules are written",
+)
+label_tasks = yaml.safe_load((LOCAL_WORKER_HOST / "tasks" / LABELS).read_text())
+label_tasks_by_name = {task["name"]: task for task in label_tasks}
+mode_probe = label_tasks[0]
+require(
+    mode_probe.get("ansible.builtin.command", {}).get("argv") == ["getenforce"]
+    and mode_probe.get("changed_when") is False
+    and mode_probe.get("failed_when") is False,
+    "the SELinux mode must be read from getenforce without reporting a change, and a host "
+    "without getenforce must skip the labels rather than fail",
+)
+enforcing = "local_worker_host_selinux_mode.stdout | default('') == 'Enforcing'"
+rules = label_tasks_by_name["Install the kdive image svirt_image_t fcontext rules"]
+require(rules.get("when") == enforcing, "the fcontext rules must be guarded on enforcing SELinux")
+require(
+    rules["community.general.sefcontext"]
+    == {
+        "target": "{{ item }}(/.*)?",
+        "setype": "svirt_image_t",
+        "state": "present",
+    },
+    "the fcontext rules must set svirt_image_t on each directory and everything under it",
+)
+require(
+    uv_defaults["local_worker_host_svirt_image_directories"]
+    == ["/var/lib/kdive/rootfs", "/var/lib/kdive/install"],
+    "the play must own exactly the two ADR-0640 parent rules, never the nested rootfs/local rule",
+)
+relabel = label_tasks_by_name["Relabel the kdive image directories"]
+require(relabel.get("when") == enforcing, "the relabel must be guarded on enforcing SELinux")
+require(
+    relabel["ansible.builtin.command"]["argv"] == ["restorecon", "-R", "-v", "{{ item }}"],
+    "the relabel must be a recursive, verbose restorecon without -F (which would strip the MCS "
+    "categories of a running domain's images)",
+)
+require(
+    "Relabeled" in str(relabel.get("changed_when")),
+    "the relabel must report a change only when restorecon relabeled a file",
+)
+require(
+    [task["name"] for task in label_tasks].index(rules["name"])
+    < [task["name"] for task in label_tasks].index(relabel["name"]),
+    "restorecon must run after the fcontext rules are written",
 )
 
 pre_tasks = {task["name"]: task for task in play["pre_tasks"]}
@@ -228,6 +300,10 @@ require(
     "when" in mismatch and "msg" in mismatch["ansible.builtin.debug"],
     "guestfs mismatch must report",
 )
+require(
+    task_names.index(lifecycle_failure["name"]) < task_names.index(mismatch["name"]),
+    "the mismatch message relies on the lifecycle installer's guestfs failure having run first",
+)
 link = tasks["Link the system guestfs binding into the project venv"]
 require(link["ansible.builtin.file"]["state"] == "link", "guestfs binding must be linked")
 require("when" in link, "guestfs binding must be ABI guarded")
@@ -276,6 +352,110 @@ require(
 )
 
 print(
-    "local-libvirt-host: preflight, localhost role composition, root-resolvable uv, locked live "
-    "sync, DSN stdin, guestfs ABI handling, and the play-scoped system-interpreter pin pass"
+    "local-libvirt-host: preflight, localhost role composition, root-resolvable uv, svirt_image_t "
+    "labels, locked live sync, DSN stdin, guestfs ABI handling, and the play-scoped "
+    "system-interpreter pin pass"
 )
+
+
+# Execute the production tasks, including Ansible's absent-stat shape and conditional
+# evaluation. Only temporary paths need chmod; /tmp and / already allow traversal.
+tmp_mode = Path("/tmp").stat().st_mode
+require(tmp_mode & 0o001 != 0, "/tmp must already allow traversal")
+with tempfile.TemporaryDirectory(prefix="kdive-traversal-", dir="/tmp") as temporary:
+    fixture = Path(temporary)
+    # Contain chmod to this fixture: sticky /tmp ends in 't', so the production
+    # permission probe requests a redundant o+x there even though it is traversable.
+    shim = fixture / "bin"
+    shim.mkdir()
+    chmod = shim / "chmod"
+    chmod.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        '[[ "$1" == o+x && "$2" == -- ]]\n'
+        'if [[ "$3" == /tmp ]]; then exit 0; fi\n'
+        f'[[ "$3" == {temporary}/* || "$3" == {temporary} ]]\n'
+        f'exec {shutil.which("chmod")} "$@"\n'
+    )
+    chmod.chmod(0o700)
+    environment = {"PATH": f"{shim}:{os.environ['PATH']}"}
+    source = fixture / "checkout"
+    source.mkdir(mode=0o700)
+    kernel = fixture / "kernel"
+    kernel.mkdir(mode=0o700)
+    target = fixture / "target"
+    target.mkdir(mode=0o700)
+    link = fixture / "link"
+    link.symlink_to(target, target_is_directory=True)
+    dangling = fixture / "dangling"
+    dangling.symlink_to(fixture / "missing-target", target_is_directory=True)
+    regular = fixture / "file"
+    regular.write_text("not a directory")
+    regular.chmod(0o600)
+    cases = [fixture / "absent", kernel, link, dangling, regular]
+    traversal_play = fixture / "traversal.yml"
+    traversal_play.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "name": f"Traversal fixture {optional.name}",
+                    "hosts": "localhost",
+                    "connection": "local",
+                    "gather_facts": False,
+                    "environment": environment,
+                    "vars": {
+                        "local_libvirt_host_source": str(source),
+                        "local_libvirt_host_kernel_source_effective": str(optional),
+                    },
+                    "tasks": [tasks["Inspect the checkout and kernel roots"], traversal],
+                }
+                for optional in cases
+            ]
+        )
+    )
+    for _ in range(2):
+        result = subprocess.run(
+            ["ansible-playbook", "-i", "localhost,", str(traversal_play)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(result.returncode == 0, result.stdout + result.stderr)
+    require(Path("/tmp").stat().st_mode == tmp_mode, "/tmp permissions changed")
+    for directory in (fixture, source, kernel):
+        require(directory.stat().st_mode & 0o777 == 0o701, "ancestor traversal mode differs")
+    require(target.stat().st_mode & 0o777 == 0o700, "symlink target was modified")
+    require(regular.stat().st_mode & 0o777 == 0o600, "regular file was modified")
+    require(not cases[0].exists(), "absent optional root was created")
+    require(link.is_symlink() and dangling.is_symlink(), "symlink was replaced")
+
+    # Missing and incomplete required checkouts must still fail before host mutation.
+    for checkout_source in (fixture / "missing-checkout", source):
+        checkout_play = fixture / "checkout.yml"
+        checkout_play.write_text(
+            yaml.safe_dump(
+                [
+                    {
+                        "name": "Required checkout fixture",
+                        "hosts": "localhost",
+                        "connection": "local",
+                        "gather_facts": False,
+                        "vars": {"local_libvirt_host_source": str(checkout_source)},
+                        "tasks": play["pre_tasks"][:5],
+                    }
+                ]
+            )
+        )
+        result = subprocess.run(
+            ["ansible-playbook", "-i", "localhost,", str(checkout_play)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(result.returncode == 2, "invalid required checkout was accepted: " + result.stdout)
+        expected = (
+            "Require a complete local-libvirt source checkout before host mutation"
+            if checkout_source == source
+            else "Require a real local-libvirt source checkout"
+        )
+        require(f"TASK [{expected}]" in result.stdout, "checkout failed before its required guard")
+print("local-libvirt-host: actual traversal fixtures and required-checkout rejection pass")

@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 import subprocess
 import time
 from pathlib import Path
@@ -45,7 +46,8 @@ from kdive.mcp.dev_harness import (
     OidcIssuer,
 )
 from kdive.mcp.responses import ToolResponse
-from kdive.profiles.provisioning import reconcile_profile_sizing
+from kdive.profiles.provisioning import ProvisioningProfile, reconcile_profile_sizing
+from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from tests.integration.live_stack.conftest import (
     expected_accel,
     require_guest_arch,
@@ -61,6 +63,7 @@ from tests.integration.live_stack.spine import (
     build_and_upload_kernel,
     build_profile,
     captured_vmcore_refs,
+    check_spine_kernel_config,
     drain_job,
     mint_role_token,
     ok,
@@ -189,13 +192,13 @@ def _token(issuer: OidcIssuer, *, role: str, platform_roles: list[str] | None = 
     )
 
 
-def _provision_profile(arch: str) -> dict[str, object]:
+def _provision_profile(arch: str, *, gdbstub: bool = False) -> dict[str, object]:
     """A provisioning profile that opts force_crash in (the gate's profile factor, ADR-0045).
 
     ``arch`` is the native guest arch (``require_native_guest_arch``); the kernel tree and image
     are that arch's, and ``crashkernel`` is its trait default (#2694).
     """
-    return {
+    profile: dict[str, object] = {
         "schema_version": 1,
         "arch": arch,
         "vcpu": 2,
@@ -211,6 +214,25 @@ def _provision_profile(arch: str) -> dict[str, object]:
             }
         },
     }
+    if gdbstub:
+        provider = cast(dict[str, dict[str, object]], profile["provider"])
+        provider["local-libvirt"]["debug"] = {"gdbstub": True}
+    return profile
+
+
+_SPINE_PC_REGISTER = {"x86_64": "rip", "ppc64le": "pc"}
+
+
+@pytest.mark.parametrize("arch, register", [("x86_64", "rip"), ("ppc64le", "pc")])
+def test_spine_gdbstub_profile_and_register(
+    monkeypatch: pytest.MonkeyPatch, arch: str, register: str
+) -> None:
+    monkeypatch.setenv(_KERNEL_TREE_ENV, "/nonexistent/kernel-src")
+    monkeypatch.setenv(_GUEST_IMAGE_ENV, "/nonexistent/guest-image.qcow2")
+    profile = _provision_profile(arch, gdbstub=True)
+    parsed = ProvisioningProfile.parse(profile)
+    assert LocalLibvirtProfilePolicy().gdbstub_provisioned(parsed) is True
+    assert _SPINE_PC_REGISTER[arch] == register
 
 
 def _live_script_provision_profile(arch: str) -> dict[str, object]:
@@ -419,7 +441,7 @@ def test_spine_over_the_wire() -> None:
                             op,
                             "systems.provision",
                             allocation_id=allocation_id,
-                            profile=_provision_profile(arch),
+                            profile=_provision_profile(arch, gdbstub=True),
                         ),
                         "provision",
                     )
@@ -448,7 +470,15 @@ def test_spine_over_the_wire() -> None:
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id, arch=arch)
+                    # Every arch needs vmlinux: introspect.from_vmcore resolves debuginfo from it.
+                    await build_and_upload_kernel(
+                        op,
+                        run_id=run_id,
+                        arch=arch,
+                        with_vmlinux=True,
+                        root_fs="ext4",
+                        require_kdump=True,
+                    )
                 for step in ("install", "boot"):
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
@@ -461,10 +491,14 @@ def test_spine_over_the_wire() -> None:
                     session_id = env.object_id
                     ok(
                         await scalar(
-                            op, "debug.read_registers", session_id=session_id, registers=["rip"]
+                            op,
+                            "debug.read_registers",
+                            session_id=session_id,
+                            registers=[_SPINE_PC_REGISTER[arch]],
                         ),
                         "attach",
                     )
+                    ok(await scalar(op, "debug.end_session", session_id=session_id), "attach")
                 async with phase("crash-rbac-negative"):
                     denied = await scalar(op, "control.force_crash", system_id=system_id)
                     if denied.status != "error" or denied.error_category != "authorization_denied":
@@ -522,8 +556,8 @@ def test_spine_over_the_wire() -> None:
 def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
     """#988 acceptance: sweep two boot cmdlines, one uploaded kernel, no re-upload (ADR-0299).
 
-    allocate → provision → upload-build (once) → install(dhash_entries=1) → boot →
-    install(dhash_entries=2) → boot. Asserts each install's ``runs.get`` ``installed_cmdline``
+    allocate → provision → upload-build (once) → install(loglevel=4) → boot →
+    install(loglevel=7) → boot. Asserts each install's ``runs.get`` ``installed_cmdline``
     reflects the swept value and that the ``build`` step stays ``succeeded`` across the sweep
     (install re-stages, boot re-runs — no re-upload). Self-cleans (release).
     """
@@ -587,9 +621,13 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id, arch=arch)
+                    # The System reserves the arch's default crashkernel and the uploaded
+                    # effective_config arms install's crash-config gate, so check it here first.
+                    await build_and_upload_kernel(
+                        op, run_id=run_id, arch=arch, root_fs="ext4", require_kdump=True
+                    )
 
-                for variant in ("dhash_entries=1", "dhash_entries=2"):
+                for variant in ("loglevel=4", "loglevel=7"):
                     async with phase(f"install:{variant}"):
                         env = ok(
                             await scalar(op, "runs.install", run_id=run_id, cmdline=variant),
@@ -692,7 +730,15 @@ def test_spine_live_script_over_the_wire() -> None:
                     )
                     run_id = env.object_id
                 async with phase("upload-build"):
-                    await build_and_upload_kernel(op, run_id=run_id, arch=arch)
+                    await build_and_upload_kernel(
+                        op,
+                        run_id=run_id,
+                        arch=arch,
+                        root_fs="ext4",
+                        require_network=True,
+                        require_live_debug=True,
+                        require_kdump=True,
+                    )
                 for step in ("install", "boot"):
                     async with phase(step):
                         env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
@@ -755,6 +801,20 @@ def test_spine_live_script_over_the_wire() -> None:
 # --- per-family SSH-reachability proof (#956, ADR-0294) -------------------------------------
 
 
+def _require_x86_64_host() -> None:
+    """Skip, naming the host arch, on a host these x86_64-only spines cannot run on (#2718).
+
+    The per-family reachability profile and the SUSE v7.0 kernel preflight (an x86 ``bzImage``)
+    are x86_64-specific; a POWER host skips here rather than failing with a ``SpinePhaseError``.
+    """
+    host_arch = platform.machine()
+    if host_arch != "x86_64":
+        pytest.skip(
+            f"the per-family reachability and SUSE kdump spines provision x86_64 guests; host "
+            f"arch is {host_arch!r} (ppc64le guests: test_ppc64le_* drivers)"
+        )
+
+
 def _reachability_preflight(family: str) -> tuple[OidcIssuer, str, str, str]:
     """Resolve issuer + stack + db + the per-family ready image, or skip with the exact fix.
 
@@ -762,6 +822,7 @@ def _reachability_preflight(family: str) -> tuple[OidcIssuer, str, str, str]:
     per-family image env var, so a host that lacks this family's image (or the kernel tree) skips
     *this parameter* cleanly rather than erroring at provision-time.
     """
+    _require_x86_64_host()
     image_env = _FAMILY_IMAGE_ENV[family]
     image = os.environ.get(image_env)
     if not image or not Path(image).exists():
@@ -950,21 +1011,9 @@ def _require_v7_0_kernel_tree() -> str:
             "suse-kdump:kernel-preflight",
             f"bzImage release {artifact_release!r} does not match kernelrelease {release!r}",
         )
-    required_builtins = ("CONFIG_VIRTIO_PCI=y", "CONFIG_VIRTIO_BLK=y", "CONFIG_EXT4_FS=y")
-    try:
-        config_lines = set((Path(tree) / ".config").read_text(encoding="utf-8").splitlines())
-    except OSError as exc:
-        raise SpinePhaseError(
-            "suse-kdump:kernel-preflight",
-            f"could not read KDIVE_KERNEL_SRC/.config ({type(exc).__name__})",
-        ) from exc
-    missing = [symbol for symbol in required_builtins if symbol not in config_lines]
-    if missing:
-        required = ", ".join(required_builtins)
-        raise SpinePhaseError(
-            "suse-kdump:kernel-preflight",
-            f"the initrd-less live proof requires {required}; missing {', '.join(missing)}",
-        )
+    check_spine_kernel_config(
+        Path(tree), "x86_64", "suse-kdump:kernel-preflight", require_kdump=True, root_fs="ext4"
+    )
     return release
 
 
@@ -1042,7 +1091,38 @@ def test_await_domain_shutoff_rejects_a_running_domain_at_deadline(
         asyncio.run(_await_domain_shutoff("system-8", deadline_s=0.0, interval_s=0.0))
 
 
+def test_reachability_preflight_skips_on_a_non_x86_64_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "machine", lambda: "ppc64le")
+    with pytest.raises(pytest.skip.Exception, match="host arch is 'ppc64le'"):
+        _reachability_preflight("debian")
+
+
 def test_require_v7_0_kernel_tree_returns_the_built_release(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(_KERNEL_TREE_ENV, str(tmp_path))
+    (tmp_path / ".config").write_text(
+        "CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_EXT4_FS=y\n"
+        "CONFIG_KEXEC_FILE=y\nCONFIG_CRASH_DUMP=y\nCONFIG_PROC_VMCORE=y\n"
+        "CONFIG_FW_CFG_SYSFS=y\nCONFIG_RELOCATABLE=y\n",
+        encoding="utf-8",
+    )
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        value = "7.0.0\n" if args[-1] == "kernelversion" else "7.0.0-1-default\n"
+        return subprocess.CompletedProcess(args, 0, stdout=value, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr(
+        "tests.integration.test_live_stack._bzimage_release",
+        lambda _path: "7.0.0-1-default",
+    )
+    assert _require_v7_0_kernel_tree() == "7.0.0-1-default"
+
+
+def test_require_v7_0_kernel_tree_rejects_missing_kdump_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv(_KERNEL_TREE_ENV, str(tmp_path))
@@ -1057,10 +1137,10 @@ def test_require_v7_0_kernel_tree_returns_the_built_release(
 
     monkeypatch.setattr(subprocess, "run", _run)
     monkeypatch.setattr(
-        "tests.integration.test_live_stack._bzimage_release",
-        lambda _path: "7.0.0-1-default",
+        "tests.integration.test_live_stack._bzimage_release", lambda _path: "7.0.0-1-default"
     )
-    assert _require_v7_0_kernel_tree() == "7.0.0-1-default"
+    with pytest.raises(SpinePhaseError, match="CONFIG_KEXEC"):
+        _require_v7_0_kernel_tree()
 
 
 def test_require_v7_0_kernel_tree_rejects_another_source_version(
@@ -1113,7 +1193,7 @@ def test_require_v7_0_kernel_tree_rejects_modular_rootfs_drivers(
         lambda _path: "7.0.0-1-default",
     )
 
-    with pytest.raises(SpinePhaseError, match="CONFIG_VIRTIO_PCI=y.*CONFIG_EXT4_FS=y"):
+    with pytest.raises(SpinePhaseError, match="CONFIG_VIRTIO_BLK=y.*CONFIG_EXT4_FS=y"):
         _require_v7_0_kernel_tree()
 
 
@@ -1265,7 +1345,11 @@ def test_suse_current_kernel_reports_incomplete_kdump_core(family: str) -> None:
                     run_id = run.object_id
                 async with phase(f"{family}:upload-build"):
                     await build_and_upload_kernel(
-                        op, run_id=run_id, phase_name=f"{family}:upload-build"
+                        op,
+                        run_id=run_id,
+                        phase_name=f"{family}:upload-build",
+                        require_kdump=True,
+                        root_fs="ext4",
                     )
                 for step in ("install", "boot"):
                     phase_name = f"{family}:{step}"

@@ -145,6 +145,41 @@ def test_platform_owned_tokens_still_reject_root_on_any_provider() -> None:
     assert platform_owned_cmdline_token("dhash_entries=1") is None
 
 
+def test_platform_owned_match_is_by_parameter_name_not_substring() -> None:
+    # #2758: a substring test over the whole cmdline rejected any parameter whose *name*
+    # merely contained an owned token, refusing valid params like the ones below. Only a
+    # parameter whose name exactly equals an owned name is platform-owned.
+    assert platform_owned_cmdline_token("systemd.journald.forward_to_console=1") is None
+    assert platform_owned_cmdline_token("netconsole=@/,@10.0.0.1/") is None
+    assert platform_owned_cmdline_token("nfsroot=10.0.0.1:/export/root") is None
+
+
+def test_platform_owned_exact_name_still_rejected_alongside_lookalikes() -> None:
+    # The exact-name rejections still fire even in a cmdline that also carries a lookalike.
+    assert (
+        platform_owned_cmdline_token("console=ttyS1 systemd.journald.forward_to_console=1")
+        == "console="
+    )
+    assert platform_owned_cmdline_token("root=/dev/sdb nfsroot=10.0.0.1:/export/root") == "root="
+
+
+def test_platform_owned_rejects_quoted_forms_the_kernel_unquotes() -> None:
+    # next_arg() (lib/cmdline.c) strips one leading '"' before splitting name from value, so
+    # the kernel still parses a quoted param as the exact owned name (#2758 review finding).
+    assert platform_owned_cmdline_token('"console=ttyS1"') == "console="
+    assert platform_owned_cmdline_token('quiet "root=/dev/sdb"') == "root="
+    assert platform_owned_cmdline_token('"fadump=off"') == "fadump="
+
+
+def test_platform_owned_rejects_crashkernel_lookalikes_kernel_substring_scans() -> None:
+    # crashkernel is parsed by parse_crashkernel() (kernel/crash_reserve.c) via a raw strstr()
+    # over the whole boot_command_line, never through next_arg's exact-name tokenizer -- so a
+    # caller-controlled lookalike still supplies the kernel's crashkernel= reservation
+    # (#2758 review finding).
+    assert platform_owned_cmdline_token("xcrashkernel=2G") == "crashkernel="
+    assert platform_owned_cmdline_token("debug.crashkernel=2G quiet") == "crashkernel="
+
+
 def test_kdump_crashkernel_override_replaces_default_size() -> None:
     # A per-install crashkernel reservation (ADR-0300, #989) replaces the default 256M.
     assert (

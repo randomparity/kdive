@@ -50,7 +50,10 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
-from kdive.services.external_boot.plan import construct_external_boot_plan
+from kdive.services.external_boot.plan import (
+    construct_external_boot_plan,
+    external_boot_root_arguments,
+)
 from kdive.services.external_boot.routing import (
     authority_reservation_geometry,
     server_authority_instance,
@@ -533,10 +536,18 @@ async def _enqueue_external_boot_locked(
         return _config_error(str(run.id), data={"reason": "external_boot_provenance_missing"})
     progress = await step_progress(conn, run.id)
     method = install_method_for(system, binding.runtime.profile_policy)
+    try:
+        root_arguments = external_boot_root_arguments(
+            build, root, binding.runtime.platform_root_cmdline
+        )
+    except CategorizedError as exc:
+        return _config_error(
+            str(run.id), detail=str(exc), data={"reason": str(exc.details["reason"])}
+        )
     platform = tuple(
         system_required_cmdline(
             method,
-            " ".join(root.arguments),
+            " ".join(root_arguments),
             arch=system_arch(system),
             crashkernel=progress.installed_crashkernel,
         ).split()

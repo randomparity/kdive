@@ -33,14 +33,11 @@ export GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 export GRPC_PYTHON_BUILD_SYSTEM_ZLIB=1
 ```
 
-The workflow-lint recipe uses a PATH `actionlint` on ppc64le. Install Go and build the version
-pinned by the repository's workflow tooling:
-
-```bash
-sudo apt install golang-go
-go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-export PATH="$(go env GOPATH)/bin:$PATH"
-```
+`just setup` installs the developer libraries and tools, including Go and the pinned
+workflow linter, building natively on POWER. It also builds ShellCheck with Cabal because
+upstream does not publish a POWER binary. These source builds make a first setup slower;
+later runs reuse installed tools and compiler caches. Manual package commands above are
+useful for bootstrap or operator environments; developer setup installs those headers too.
 
 For the optional `live` dependency group, install the native `drgn` build dependencies before
 `uv sync --locked --group live`. On Debian/Ubuntu:
@@ -59,6 +56,27 @@ A successful import alone does not prove that a real capture can be read.
 
 Source builds can make the first setup slow; later runs reuse cached artifacts. The runtime
 container's native dependency setup is maintained in the [Dockerfile](../../Dockerfile).
+
+## macOS: run the suite in a Linux container
+
+On macOS, a host `just test` is not regression evidence. The suite needs Linux behavior
+(`/proc`, pidfd, seccomp, GNU tool output), so hundreds of tests fail on every branch.
+Use `just test-linux`, which runs the same selection, hash seed and `--tb=short` output in a
+Linux container at the engine's native architecture (arm64 on Apple silicon;
+[ADR-0717](../adr/0717-native-arch-linux-test-container-and-aarch64-capture-filter.md)).
+
+- `just test-linux` tests `HEAD`; `just test-linux <sha>` tests another commit. Commit first:
+  uncommitted edits are not tested, and the recipe warns when the tree is dirty.
+- `<sha>` must contain the `test-linux` change itself (#3072). An older commit fails inside the
+  container with `justfile does not contain recipe '--maxprocesses=8'`.
+- `just test-linux HEAD tests/jobs` runs only the given paths.
+- The recipe works from a worktree. It mounts the git directory read-only and changes nothing
+  in the checkout. A named volume, `kdive-test-linux-uv-cache`, keeps downloaded packages.
+- The container runs at most 8 xdist workers, the limit for the shared test PostgreSQL lock.
+- `CONTAINER_ENGINE=podman just test-linux` uses Podman. Only Docker Desktop is verified on
+  macOS.
+- The container uses the engine's socket to start the test PostgreSQL and SeaweedFS
+  containers, the same as `just test` on a Linux host with Docker.
 
 ## Container images
 
@@ -110,8 +128,15 @@ POWER-specific host checks:
   provisioning own worker staging, console and overlay directories.
 
 The [local preflight](../../scripts/operations/check-local-libvirt.sh) can diagnose host tools,
-imports and readable kernels, using `KDIVE_PYTHON` to select the worker interpreter. It checks
-the configured libvirt endpoint; only local system-daemon URIs require the `libvirt` group and
+imports and readable kernels. `KDIVE_PYTHON` selects the checkout/CLI interpreter, where it
+checks `guestfs` and `drgn` imports for build-fs and CLI kdump tooling. Separately,
+`KDIVE_LIFECYCLE_PYTHON` selects the installed lifecycle worker interpreter, where it requires a
+`guestfs` import when that interpreter is executable. If it is absent or not executable, the
+preflight reports that the lifecycle venv is not installed and skips that probe. See
+[local-libvirt host preparation](../operating/install.md#local-libvirt-host-preparation) to install
+the environments and matching bindings.
+
+It checks the configured libvirt endpoint; only local system-daemon URIs require the `libvirt` group and
 active `default` network. Its success does not prove the installed session authority or a
 working capture. The live-stack and live-testing checks own those deployment proofs.
 

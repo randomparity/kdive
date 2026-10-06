@@ -18,18 +18,17 @@ WORKTREE_PYTHONPATH := justfile_directory() + "/src" + "${PYTHONPATH:+:$PYTHONPA
 default:
     @just --list
 
-# One-command first-time setup: check host deps, sync the venv, install collections and hooks.
-# Writes outside the checkout: the collections land in ~/.ansible/collections (see below).
-setup: check-deps sync build-capture-bootstrap-manifest install-ansible-collections install-hooks
+# Complete developer setup: install native/tool dependencies, sync, collections, and hooks.
+# Installs system packages (root/sudo), user tools, and ~/.ansible/collections.
+setup: (check-deps "--install-developer") sync build-capture-bootstrap-manifest install-ansible-collections install-hooks
     @echo "Development environment is ready."
 
 # Stage and verify attestation for the explicitly selected worker interpreter. This is
 # intentionally unprivileged and never writes /usr; operators install in a separate step.
-# Normalize group-write bits on user-owned source and venv trees so build/verify succeeds
-# under relaxed umasks (0002).
+# Remove group write from current-user-owned manifest inputs and their ancestors, including
+# checkout parents and external Python installations, plus the staging directory ancestors.
 build-capture-bootstrap-manifest interpreter=".venv/bin/python" output="build/capture-bootstrap-manifest.json":
-    find src .venv -maxdepth 5 -perm -020 -exec chmod g-w {} + 2>/dev/null || true
-    {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py build --interpreter {{interpreter}} --source-root src --output {{output}}
+    {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py build --prepare-permissions --interpreter {{interpreter}} --source-root src --output {{output}}
     {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py verify --interpreter {{interpreter}} --source-root src --manifest {{output}}
 
 # Privileged operator action. The script requires euid 0, installs atomically as root:root mode
@@ -39,8 +38,10 @@ install-capture-bootstrap-manifest staged="build/capture-bootstrap-manifest.json
 
 # Report missing host packages with distro-specific install hints. Report-only in CI / when piped;
 # at an interactive terminal it offers a [y/N] install per tier (pass -y to install unattended).
-check-deps:
-    ./scripts/check-setup-deps.sh
+# --setup verifies all developer dependencies; --install-developer installs them first.
+# Provider/VM preparation remains separate.
+check-deps *ARGS:
+    ./scripts/check-setup-deps.sh {{ARGS}}
 
 # Preflight: can this host run the local-libvirt provider? (report-only)
 check-local-libvirt:
@@ -54,8 +55,19 @@ setup-local-libvirt:
 # environment so it is passed to Ansible stdin rather than a process argument. Requires an
 # interactive become password (--ask-become-pass): the play installs packages and writes system
 # units as root. The play pins its own interpreter, so uv's ephemeral env is not used for modules.
+#
+# Preflights that the collections the play's roles need (deploy/ansible/requirements.yml) can be
+# resolved at all, in the same ~/.ansible/collections tree `install-ansible-collections` installs
+# to. Ansible resolves every module in an imported task file at parse time, so a missing
+# collection breaks the play immediately with an opaque `unknown-module` error rather than only
+# on the host family whose tasks need it (#2782). This is a read-only presence check, never a
+# second `ansible-galaxy` install path (#2499): `install-ansible-collections` stays the only
+# recipe that installs collections.
 prepare-local-libvirt-host:
     test -n "${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-}" || { echo "set KDIVE_LIFECYCLE_WITNESS_DATABASE_URL" >&2; exit 2; }
+    uv run python3 scripts/guards/check_ansible_collections.py --presence-only \
+        deploy/ansible/requirements.yml ~/.ansible/collections \
+        || { echo "missing Ansible collections -- run 'just install-ansible-collections'" >&2; exit 2; }
     ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' ansible-playbook deploy/ansible/playbooks/local-libvirt-host.yml --ask-become-pass -e "local_libvirt_host_operator_user=${USER:?set USER to the operator account}"
 
 # Fund a dev-stack project + mint a token (preflight, migrate, seed, verify; KDIVE_PROJECT=demo). See #834.
@@ -103,6 +115,10 @@ lint:
 format:
     uv run ruff check --fix .
     uv run ruff format .
+
+# Validate independent live-coverage ownership without claiming live qualification.
+coverage-check:
+    uv run python -m scripts.coverage_campaign check
 
 # Type-check the whole tree (src + tests). Whole-tree, not `src`: this is the single
 # definition CI and the pre-commit ty hook both invoke, and the only place tests/ is
@@ -168,9 +184,59 @@ _TEST_XDIST := _TEST_WORKERS + ' --dist worksteal'
 # an empty `--lf` cache, an unmappable change — so both have the same mass-failure shape.
 # `just test-verbose <paths>` is the escalation when a full frame or an assertion diff is
 # actually needed.
-test:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short
+# Extra arguments go to pytest unchanged; pytest keeps the last value of a repeated option such
+# as `--maxprocesses`, which is how `test-linux` lowers the worker cap.
+test *ARGS:
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short {{ARGS}}
 
+
+# CI partitions the ordinary suite by path; local test/ci still run every selected test.
+# New test paths belong to other automatically. Both shards retain the gate's marker exclusion,
+# parallelism, hash seed and failure output. Each invocation owns its own test backends.
+test-shard shard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case '{{shard}}' in
+      mcp-db) paths=(tests/mcp tests/db) ;;
+      other) paths=(tests --ignore=tests/mcp --ignore=tests/db) ;;
+      *) echo 'expected shard: mcp-db or other' >&2; exit 2 ;;
+    esac
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short "${paths[@]}"
+
+
+# Run the `test` selection in a Linux container at the container engine's native
+# architecture (ADR-0717). This is the unit gate on macOS, where a host `just test` is not
+# regression evidence. It tests the committed `sha` (default HEAD), never uncommitted edits;
+# a dirty tree gets a warning. The git common directory is mounted read-only, so the run works
+# from a worktree and changes nothing in the checkout. `CONTAINER_ENGINE` selects `docker`
+# (default) or `podman`; only Docker is verified on macOS. Extra arguments go to `just test`,
+# with the same shell splitting as `test-verbose`.
+test-linux $sha="HEAD" *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    engine="${CONTAINER_ENGINE:-docker}"
+    case "$engine" in
+      docker) socket=/var/run/docker.sock ;;
+      podman) socket="$(podman info --format '{{{{.Host.RemoteSocket.Path}}')" ;;
+      *)
+        echo "test-linux: CONTAINER_ENGINE must be docker or podman, not '$engine'" >&2
+        exit 2
+        ;;
+    esac
+    commit="$(git rev-parse --verify --end-of-options "$sha^{commit}")"
+    if [[ -n "$(git status --porcelain)" ]]; then
+      echo "test-linux: warning: uncommitted changes are not tested; testing $commit" >&2
+    fi
+    common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+    "$engine" build --quiet --tag kdive-test-linux tests/container >/dev/null
+    exec "$engine" run --rm --init \
+      --volume "$common_dir:/repo:ro" \
+      --volume "$socket:/var/run/docker.sock" \
+      --volume kdive-test-linux-uv-cache:/home/tester/.cache/uv \
+      --env PYTHONHASHSEED \
+      --env TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
+      --add-host host.docker.internal:host-gateway \
+      kdive-test-linux "$commit" {{ARGS}}
 
 # Detect hash-order-dependent pytest collection directly and reproducibly (#2072). The
 # weekly suite's shared per-run seed makes every xdist worker collect identically, so
@@ -481,8 +547,8 @@ test-compose-volumes:
 
 # Lint and format-check the shell scripts across the repo's listed directories.
 lint-shell:
-    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts | xargs shellcheck
-    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts
+    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts tests/container | xargs shellcheck
+    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/roles deploy/ansible/tests examples deploy/systemd .github/scripts tests/container
 
 # Lint and syntax-check the Ansible automation (deploy/ansible).
 lint-ansible:
@@ -498,15 +564,15 @@ lint-ansible:
 # Run the Ansible role regression harnesses (libvirt_stack families #2392; gdbstub_acl ufw
 # prune #616; image admission + staged-volume confirmation #1629; remote module appliance #2128).
 test-ansible:
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-libvirt-stack-families.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-github-runner-preflight.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-guest-base-image-admission.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-libvirt-facts-render.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-module-appliance.sh
-    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-external-boot-recovery-root.sh
-    uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-worker-host.py
-    uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-libvirt-host.py
+    TIMEFORMAT='run-libvirt-stack-families.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-libvirt-stack-families.sh
+    TIMEFORMAT='run-gdbstub-acl-prune.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
+    TIMEFORMAT='run-github-runner-preflight.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-github-runner-preflight.sh
+    TIMEFORMAT='run-guest-base-image-admission.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-guest-base-image-admission.sh
+    TIMEFORMAT='run-remote-libvirt-facts-render.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-libvirt-facts-render.sh
+    TIMEFORMAT='run-remote-module-appliance.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-module-appliance.sh
+    TIMEFORMAT='run-external-boot-recovery-root.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-external-boot-recovery-root.sh
+    TIMEFORMAT='run-local-worker-host.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-worker-host.py
+    TIMEFORMAT='run-local-libvirt-host.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-libvirt-host.py
 
 # Lint and security-scan the GitHub Actions workflows.
 # actionlint-py bundles a prebuilt actionlint and upstream ships no ppc64le binary, so its
@@ -545,10 +611,13 @@ adr-status-check:
 # Run the same decision-record shape/anti-erasure gate the `records` workflow runs in CI
 # (ADR-0504), so an ADR number collision or malformed record is caught before pushing rather
 # than only in CI. CI passes the PR's base commit; locally the default origin/main is the
-# closest stand-in, same convention as `schema-guard`.
+# closest stand-in, same convention as `schema-guard`. Offline by design: it never fetches, and
+# an unresolvable base fails here because check-records.sh treats an empty BASE_SHA outside CI as
+# "validate shape only" and would pass, hiding an E-REWRITE.
 records base_ref="origin/main":
-    BASE_SHA="$(git merge-base {{base_ref}} HEAD)" RECORD_PROFILES="adr debt" \
-        ./.github/scripts/check-records.sh
+    base="$(git merge-base {{base_ref}} HEAD)" || { \
+        echo "records: no merge-base between '{{base_ref}}' and HEAD — run 'git fetch origin main' or pass a reachable ref" >&2; exit 1; }; \
+    BASE_SHA="$base" RECORD_PROFILES="adr debt" ./.github/scripts/check-records.sh
 
 # Audit runtime dependencies for known vulnerabilities. The script retries only a run that
 # produced no verdict (unreachable PyPI), never a run that found something — pip-audit exits 1
@@ -739,4 +808,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full local gate, including checks beyond the separate PR CI recipe list.
-ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
+ci: lint type coverage-check lock-check lint-shell lint-ansible test-ansible lint-workflows docs-links docs-paths served-doc-links adr-status-check records docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test

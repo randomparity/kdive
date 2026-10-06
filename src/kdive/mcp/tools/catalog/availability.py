@@ -48,7 +48,7 @@ from kdive.domain.pcie import (
 )
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
-from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse, validate_stored
 from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.security.authz.rbac import Role, projects_with_role
@@ -316,7 +316,7 @@ async def _fetch_resources(conn: AsyncConnection, projects: tuple[str, ...]) -> 
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT * FROM resources ORDER BY created_at, id")
         rows = await cur.fetchall()
-    resources = [Resource.model_validate(row) for row in rows]
+    resources = [validate_stored(Resource, row) for row in rows]
     return [resource for resource in resources if resource_visible_to_projects(resource, projects)]
 
 

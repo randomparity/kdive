@@ -36,6 +36,10 @@ enqueuing a fresh boot (an already-booted or in-flight Run), and `false` for a f
 force-recycled boot. Absent `force`, a fresh boot of an already-booted Run needs a
 `runs.install` re-stage (a changed cmdline/crashkernel) or `force=true`.
 
+Remote-libvirt external boot requires an initrd with the build. Without one, this call
+returns `configuration_error` before activation. Create a new Run without `build_ref`,
+upload a build with an initrd, then complete the build, install, and boot the new Run.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `force` | boolean | no | Re-boot an already-booted Run. By default runs.boot is idempotent: a repeat call on a Run whose boot already succeeded returns the prior job unchanged (data.replayed=true) and does NOT re-boot. Set force=true to recycle the boot and run a fresh boot of the same installed variant without a re-stage — use this to reboot a wedged guest. A force call that reuses a prior idempotency_key replays the stored envelope instead of re-booting; pass a distinct (or no) idempotency_key to force a boot. Rejected with configuration_error (step_in_progress) while a boot is already running. |
@@ -68,6 +72,14 @@ The `kernel` tar's boot/vmlinuz member is validated against the Run's build-prof
 (declared at runs.create): a bzImage for x86_64, an ELF vmlinux for ppc64le. A payload that
 does not match the declared arch is rejected. See
 resource://kdive/contracts/external-build for the per-arch byte contract.
+
+An uploaded effective_config is checked, never refused: `data.missing_boot_config` names
+boot symbols the guest cannot mount its root without, and `data.rhel_guest_crash_config`
+names crash_capture_rhel_guest symbols a RHEL-family guest needs before kdump can write a
+vmcore. Its `guest_family` is `rhel` when the target System boots a RHEL-family catalog
+image, or `unknown` when kdive cannot tell the guest's OS (an unbound Run, or a rootfs
+that is not a registered catalog image); ignore an `unknown` one for a non-RHEL guest.
+With no effective_config uploaded you get `data.missing_effective_config` instead.
 
 Finalize before the `manifest_deadline` that `artifacts.create_run_upload` returned —
 chunked and single-PUT alike. A later call is rejected with
@@ -276,6 +288,13 @@ Enqueue release of this Run's external boot and return a durable `job_id`.
 
 Repeating the exact request returns the same job. Poll it with `jobs.wait`; successful
 release returns the System to ordinary use through the worker-owned recovery path.
+
+`data.recovery_readiness_deadline` is an absolute server-clock timestamp for this
+request's recovery job. For local libvirt it contains the configured console readiness
+window, scaled for TCG; other providers retain their own deadline. Once the deadline
+expires, the job fails instead of renewing the window. Inspect with `runs.get`, then
+submit a fresh `runs.release_external_boot` request with a new idempotency key if the
+activation still permits release; the same key replays the original job.
 
 Requires contributor on the Run's project. Only an `active` activation owned by this
 Run is admissible, and a release is refused while a job or a debug session still holds

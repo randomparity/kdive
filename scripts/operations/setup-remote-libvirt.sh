@@ -19,7 +19,7 @@
 #   KDIVE_PROJECT (demo), KDIVE_LIMIT_KCU (1000000), KDIVE_MAX_ALLOC (4), KDIVE_MAX_SYS (4).
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 
 # fastmcp lives in the project venv, not the system python3. Prefer the repo's .venv when present

@@ -29,6 +29,7 @@ from kdive.domain.external_boot_activation import (
     ExternalBootTerminalEvidenceV1,
 )
 from kdive.providers.ports.external_boot import ExternalBootMaterialization, RecoveryPoint
+from kdive.serialization import validate_stored
 
 
 class CasStatus(StrEnum):
@@ -59,7 +60,7 @@ def _json(value: Any) -> Jsonb:
 
 
 def _activation(row: dict[str, Any] | None) -> ExternalBootActivation | None:
-    return None if row is None else ExternalBootActivation.model_validate(row)
+    return None if row is None else validate_stored(ExternalBootActivation, row)
 
 
 def _require_utc(value: datetime, name: str) -> None:
@@ -205,7 +206,7 @@ class ExternalBootActivationRepository:
                         raise RuntimeError("activation retry returned no row")
                     return current
                 raise ValueError("activation retry has neither a live debit nor release tombstone")
-            current_reservation = ExternalBootReservation.model_validate(reservation_row)
+            current_reservation = validate_stored(ExternalBootReservation, reservation_row)
             if (
                 current_reservation.store_identity,
                 current_reservation.owner_key,
@@ -293,7 +294,7 @@ class ExternalBootActivationRepository:
                 (activation_id,),
             )
             row = await cur.fetchone()
-        return None if row is None else ExternalBootReservation.model_validate(row)
+        return None if row is None else validate_stored(ExternalBootReservation, row)
 
     async def get_current_recovery_attempt(
         self, conn: AsyncConnection, activation_id: UUID
@@ -308,7 +309,7 @@ class ExternalBootActivationRepository:
                 (activation_id,),
             )
             row = await cur.fetchone()
-        return None if row is None else ExternalBootRecoveryAttempt.model_validate(row)
+        return None if row is None else validate_stored(ExternalBootRecoveryAttempt, row)
 
     async def list_recovery_attempts(
         self,
@@ -330,7 +331,7 @@ class ExternalBootActivationRepository:
                 (activation_id, before_attempt_number, before_attempt_number, limit),
             )
             rows = await cur.fetchall()
-        return [ExternalBootRecoveryAttempt.model_validate(row) for row in rows]
+        return [validate_stored(ExternalBootRecoveryAttempt, row) for row in rows]
 
     async def record_materialization(
         self,
@@ -491,8 +492,8 @@ class ExternalBootActivationRepository:
             if new_state is ExternalBootActivationState.PREPARED:
                 if current["materialization"] is None or recovery_point is None:
                     return CasResult(CasStatus.SUPERSEDED)
-                materialization = ExternalBootMaterialization.model_validate(
-                    current["materialization"]
+                materialization = validate_stored(
+                    ExternalBootMaterialization, current["materialization"]
                 )
                 if (
                     recovery_point.binding.system_id != str(system_id)
@@ -1049,7 +1050,7 @@ class ExternalBootActivationRepository:
                     release_row = await cur.fetchone()
                 if release_row is None:
                     return CasResult(CasStatus.SUPERSEDED)
-                release = ExternalBootReservationRelease.model_validate(release_row)
+                release = validate_stored(ExternalBootReservationRelease, release_row)
                 if (
                     release.release_evidence != release_evidence
                     or release.teardown_evidence != teardown_evidence
@@ -1124,7 +1125,7 @@ class ExternalBootActivationRepository:
                     ),
                 )
                 release_row = await cur.fetchone()
-        release = ExternalBootReservationRelease.model_validate(release_row)
+        release = validate_stored(ExternalBootReservationRelease, release_row)
         return CasResult(CasStatus.APPLIED, _activation(activation_row), release)
 
     @staticmethod
@@ -1215,7 +1216,7 @@ class ExternalBootActivationRepository:
             release_row = await cur.fetchone()
             if release_row is None:
                 return await self._miss(conn, activation_id)
-            release = ExternalBootReservationRelease.model_validate(release_row)
+            release = validate_stored(ExternalBootReservationRelease, release_row)
             if release.release_evidence.system_id != system_id or (
                 release.teardown_evidence is not None
                 and release.teardown_evidence.system_id != system_id

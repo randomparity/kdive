@@ -7,9 +7,8 @@
 #   source examples/local-libvirt/env.sh
 #
 # Every value is overridable from the caller's environment.
-set -euo pipefail
 
-example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+example_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${example_dir}/../.." && pwd)"
 
 # install-host.sh installs uv under ~/.local/bin, and the live-stack scripts this example wraps
@@ -23,7 +22,7 @@ fi
 # documents. It already exports KDIVE_KERNEL_SRC=~/src/linux, KDIVE_INSTALL_STAGING=
 # /var/lib/kdive/install, and the OIDC issuer on :8090 (the host-published mock issuer).
 # shellcheck source=scripts/live-stack/env.sh disable=SC1091
-source "${repo_root}/scripts/live-stack/env.sh"
+source "${repo_root}/scripts/live-stack/env.sh" || return $?
 
 # The project this example onboards and mints a token for. One name, threaded through the
 # seed step (demo-up.sh) and the token claims (mint-token.sh) so they always agree. `demo` matches
@@ -43,6 +42,20 @@ export KDIVE_MAX_SYS="${KDIVE_MAX_SYS:-4}"
 # the published session endpoint for every entry point since #2480 — this example is no longer
 # the only path that does it. demo-up.sh still reads both: it refuses to run until the
 # lifecycle contract is installed, where the live-stack default (qemu:///system) would stand.
+
+# Where demo-up.sh installs the MCP client config (.mcp.json), kept independent of
+# KDIVE_KERNEL_SRC. The live_vm/live_stack proofs use KDIVE_KERNEL_SRC as their kernel fixture
+# tree, so a demo bring-up that wrote .mcp.json there changed that tree under a proof run
+# (#2760); this variable gives the demo its own agent workspace. Defaults to KDIVE_KERNEL_SRC so
+# unset behavior is unchanged for a developer who has no separate workspace tree. Exported only
+# when it resolves to a non-empty value, same as KDIVE_KERNEL_SRC above: an always-exported empty
+# string would still satisfy demo-up.sh's `-z` check, but would report as "set" rather than
+# unset to a caller inspecting it directly.
+if [[ -n "${KDIVE_DEMO_WORKSPACE:-}" ]]; then
+  export KDIVE_DEMO_WORKSPACE
+elif [[ -n "${KDIVE_KERNEL_SRC:-}" ]]; then
+  export KDIVE_DEMO_WORKSPACE="${KDIVE_KERNEL_SRC}"
+fi
 
 # Session-mode libvirt clients want a runtime dir; an interactive login has one, a bare ssh
 # command or nohup may not (the shape .github/workflows/live.yml uses).

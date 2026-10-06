@@ -16,6 +16,7 @@ from uuid import UUID
 
 import libvirt
 
+import kdive.config as config
 from kdive.components.references import CatalogComponentRef, LocalComponentRef
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
@@ -30,12 +31,15 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     open_authority_system_teardown,
     prove_no_foreign_system_storage_references,
 )
+from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
 from kdive.providers.local_libvirt.lifecycle.provisioning import (
     LocalLibvirtProvisioning,
     _bind_probe_free_port,
 )
 from kdive.providers.local_libvirt.lifecycle.storage import ProvisioningFiles
+from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S
 from kdive.providers.local_libvirt.system_authority import (
+    _DEFAULT_PROVISION_DEADLINE,
     LocalAuthoritySystemProvider,
     LocalAuthoritySystemTopology,
 )
@@ -203,7 +207,6 @@ def validate_authority_system_installation(
 
 def _fixed_domain_exit(connect: Callable[[], Any], domain_name: str) -> _DomainExitProbe:
     connection = connect()
-    domain = None
     try:
         try:
             domain = connection.lookupByName(domain_name)
@@ -213,22 +216,21 @@ def _fixed_domain_exit(connect: Callable[[], Any], domain_name: str) -> _DomainE
             return _DomainExitProbe(False)
         return _DomainExitProbe(domain.isActive() != 1)
     finally:
-        if domain is not None:
-            domain.free()
         connection.close()
 
 
 class _LocalReadiness:
     """Retain the pre-start console inode and query exit on the fixed connection."""
 
-    def __init__(self, connect: Callable[[], Any]) -> None:
+    def __init__(self, connect: Callable[[], Any], multiplier: float = 1.0) -> None:
         self._connect = connect
+        self._multiplier = multiplier
         self._windows: dict[UUID, ConsoleReadinessWindow] = {}
         self._lock = threading.Lock()
 
     def prepare(self, path: Path) -> None:
         system_id = UUID(path.stem)
-        window = prepare_console_readiness_window(system_id)
+        window = prepare_console_readiness_window(system_id, multiplier=self._multiplier)
         with self._lock:
             previous = self._windows.pop(system_id, None)
             self._windows[system_id] = window
@@ -264,13 +266,18 @@ class _LocalReadiness:
 class _AuthorityProvisioner:
     """Narrow the concrete provisioner to the provider's deliberately small port."""
 
-    def __init__(self, delegate: LocalLibvirtProvisioning) -> None:
+    def __init__(
+        self, delegate: LocalLibvirtProvisioning, expected_guest_arch: tuple[str, str | None]
+    ) -> None:
         self._delegate = delegate
+        self._expected_guest_arch = expected_guest_arch
 
     def provision(self, system_id: UUID, profile: Any, **kwargs: Any) -> str:
         if not isinstance(profile, ProvisioningProfile):
             raise TypeError("authority System provisioning profile is invalid")
-        return self._delegate.provision(system_id, profile, **kwargs)
+        return self._delegate.provision(
+            system_id, profile, expected_guest_arch=self._expected_guest_arch, **kwargs
+        )
 
 
 def _local_base_selector(
@@ -310,11 +317,19 @@ def build_local_authority_system_provider(
     base_root = rootfs_root / "bases"
     for path in (state_root, intent_root, rootfs_root, overlay_root, baseline_root, base_root):
         _require_private_directory(path, owner_uid, owner_gid)
+    multiplier = tcg_deadline_multiplier(manifest.accel)
+    provision_deadline = _DEFAULT_PROVISION_DEADLINE * multiplier
+    if config.require(LIBVIRT_BOOT_WINDOW_S) * multiplier > provision_deadline.total_seconds():
+        raise ValueError(
+            "KDIVE_LIBVIRT_BOOT_WINDOW_S exceeds the local authority provision "
+            f"deadline ({_DEFAULT_PROVISION_DEADLINE.total_seconds():g} base seconds); "
+            "reduce the boot window to fit its base deadline"
+        )
     staged_bases = {entry.root_identity: base_root / entry.filename for entry in manifest.bases}
     verified_bases = {base.path: base for base in base_files}
     if set(verified_bases) != set(staged_bases.values()):
         raise ValueError("local authority System verified bases do not match its manifest")
-    readiness = _LocalReadiness(connect)
+    readiness = _LocalReadiness(connect, multiplier)
 
     def materialize(source: object, _system_id: UUID, architecture: str, **_kwargs: object) -> str:
         entry = _local_base_selector(source, architecture, manifest.bases)
@@ -354,7 +369,7 @@ def build_local_authority_system_provider(
         guest_egress=manifest.guest_egress,
     )
     provider = LocalAuthoritySystemProvider(
-        provisioner=_AuthorityProvisioner(provisioner),
+        provisioner=_AuthorityProvisioner(provisioner, (manifest.accel, manifest.emulator)),
         topology=topology,
         readiness_probe=readiness,
         open_teardown=lambda system_id, overlay, baseline: open_authority_system_teardown(
@@ -372,6 +387,7 @@ def build_local_authority_system_provider(
         ),
         owner_uid=owner_uid,
         owner_gid=owner_gid,
+        deadline=provision_deadline,
     )
 
     def close() -> None:

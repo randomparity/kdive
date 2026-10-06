@@ -29,7 +29,7 @@ import sys
 import tempfile
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -40,6 +40,9 @@ import httpx
 import psycopg
 
 from kdive.domain.accounting.cost import quantize_kcu
+from kdive.kernel_config.parse import parse_kernel_config
+from kdive.kernel_config.requirements import CRASH_CAPTURE, feature_requirement
+from kdive.kernel_config.support import unmet_clauses
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer, mint_token
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import JsonValue, ToolResponse
@@ -519,7 +522,7 @@ def boot_member_source(kernel_src: Path, arch: str) -> Path:
     |-----------|-----------------------------------------------------------------|
     | ``x86_64``| the bzImage, ``arch/x86/boot/bzImage`` (validator checks ``HdrS``|
     |           | magic at offset ``0x202``; a raw ``vmlinux`` ELF is rejected)    |
-    | ``ppc64le``| the stripped ELF ``vmlinux`` (powerpc has no bzImage)          |
+    | ``ppc64le``| ``vmlinux``; tar staging strips a scratch copy of this ELF     |
 
     Args:
         kernel_src: A *built* kernel tree.
@@ -546,6 +549,60 @@ def boot_member_source(kernel_src: Path, arch: str) -> Path:
     return member
 
 
+def check_spine_kernel_config(
+    kernel_src: Path,
+    arch: str,
+    phase_name: str,
+    *,
+    require_kdump: bool = False,
+    require_network: bool = False,
+    require_live_debug: bool = False,
+    root_fs: str | None = None,
+) -> bytes:
+    """Reject a built tree that lacks the selected live proof's kernel features."""
+    if arch not in {"x86_64", "ppc64le"}:
+        raise SpinePhaseError(phase_name, f"unsupported kernel arch {arch!r}")
+    if root_fs not in {None, "ext4", "xfs"}:
+        raise SpinePhaseError(phase_name, f"unsupported guest root filesystem {root_fs!r}")
+    config_path = kernel_src / ".config"
+    try:
+        config_bytes = config_path.read_bytes()
+    except OSError as exc:
+        raise SpinePhaseError(
+            phase_name, f"could not read {config_path} ({type(exc).__name__})"
+        ) from exc
+    config = parse_kernel_config(config_bytes)
+    missing: list[str] = [
+        f"CONFIG_{symbol}=y"
+        for symbol in ("VIRTIO_PCI", "VIRTIO_BLK")
+        if not config.is_builtin(symbol)
+    ]
+    if arch == "ppc64le" or root_fs == "ext4":
+        if not config.is_builtin("EXT4_FS"):
+            missing.append("CONFIG_EXT4_FS=y")
+    elif root_fs == "xfs":
+        if not config.is_builtin("XFS_FS"):
+            missing.append("CONFIG_XFS_FS=y")
+    elif not (config.is_builtin("EXT4_FS") or config.is_builtin("XFS_FS")):
+        missing.append("CONFIG_EXT4_FS=y or CONFIG_XFS_FS=y")
+    if require_network and not config.is_enabled("VIRTIO_NET"):
+        missing.append("CONFIG_VIRTIO_NET=y or =m")
+    if require_live_debug:
+        if not config.is_builtin("DEBUG_INFO_BTF"):
+            missing.append("CONFIG_DEBUG_INFO_BTF=y")
+        if not (config.is_builtin("DEBUG_INFO_DWARF4") or config.is_builtin("DEBUG_INFO_DWARF5")):
+            missing.append("CONFIG_DEBUG_INFO_DWARF4=y or CONFIG_DEBUG_INFO_DWARF5=y")
+    if require_kdump:
+        for clause in unmet_clauses(config, feature_requirement(CRASH_CAPTURE), arch=arch):
+            missing.append(" or ".join(f"CONFIG_{symbol}" for symbol in sorted(clause.symbols)))
+    if missing:
+        raise SpinePhaseError(
+            phase_name,
+            f"KDIVE_KERNEL_SRC/.config lacks required spine settings: {', '.join(missing)}",
+        )
+    return config_bytes
+
+
 def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64") -> Path:
     """Cut the ADR-0234 combined ``kernel`` artifact from a built kernel tree.
 
@@ -555,8 +612,8 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
     decompress-scan bound) plus ``lib/modules`` into one gzip tar, dropping the
     ``build``/``source`` back-symlinks.
 
-    The rename transform is derived from :func:`boot_member_source`, so that function stays the
-    single place the per-arch boot member is decided.
+    On ppc64le, strip the boot ELF into scratch space before archiving it. The build tree's
+    unstripped ``vmlinux`` remains available for the separate debug upload.
 
     Args:
         kernel_src: A *built* kernel tree for ``arch``.
@@ -567,10 +624,33 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
         The path to the combined ``kernel.tar.gz`` under ``dest_dir``.
     """
     member = boot_member_source(kernel_src, arch)
+    boot_root = kernel_src
+    if arch == "ppc64le":
+        subprocess.run(
+            ["strip", "-s", str(kernel_src / member), "-o", str(dest_dir / "vmlinuz")],
+            check=True,
+        )
+        boot_root = dest_dir
+        member = Path("vmlinuz")
     modstage = dest_dir / "modstage"
+    make_env = {
+        name: value
+        for name, value in os.environ.items()
+        if name in {"PATH", "HOME", "LANG", "LANGUAGE"} or name.startswith("LC_")
+    }
+    make_arch = {"x86_64": "x86", "ppc64le": "powerpc"}[arch]
     subprocess.run(
-        ["make", "-C", str(kernel_src), "modules_install", f"INSTALL_MOD_PATH={modstage}"],
+        [
+            "make",
+            "-C",
+            str(kernel_src),
+            "modules_install",
+            f"INSTALL_MOD_PATH={modstage}",
+            f"ARCH={make_arch}",
+            "INSTALL_MOD_STRIP=1",
+        ],
         check=True,
+        env=make_env,
     )
     tar_path = dest_dir / "kernel.tar.gz"
     subprocess.run(
@@ -582,7 +662,7 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
             "--exclude=*/source",
             f"--transform=s|^{member}$|boot/vmlinuz|",
             "-C",
-            str(kernel_src),
+            str(boot_root),
             str(member),
             "-C",
             str(modstage),
@@ -600,11 +680,18 @@ async def build_and_upload_kernel(
     phase_name: str = "upload-build",
     arch: str = "x86_64",
     with_vmlinux: bool = False,
+    require_kdump: bool = False,
+    require_network: bool = False,
+    require_live_debug: bool = False,
+    root_fs: str | None = None,
+    kernel_tree: Path | None = None,
+    evidence_dir: Path | None = None,
 ) -> None:
     """Drive the external-build upload lane for ``run_id`` and complete the Run's build step.
 
     Reads the contract resource, cuts the combined ``kernel`` tar from ``KDIVE_KERNEL_SRC``,
-    declares + PUTs it via ``artifacts.create_run_upload``, then calls ``runs.complete_build``.
+    declares + PUTs it and the tree's ``.config`` (as ``effective_config``) via
+    ``artifacts.create_run_upload``, then calls ``runs.complete_build``.
     The Run goes CREATED → SUCCEEDED with ``steps.build == succeeded``, ready for ``runs.install``.
 
     ``with_vmlinux`` additionally uploads the tree's unstripped ``vmlinux``. The gdb-MI tier
@@ -612,6 +699,9 @@ async def build_and_upload_kernel(
     without it ``debug.read_registers`` fails ``configuration_error`` / ``no_debuginfo``. It is
     opt-in because the ELF is large (hundreds of MB) and a spine that never attaches pays the
     upload for nothing.
+
+    ``kernel_tree`` overrides the environment input. ``evidence_dir`` must be new;
+    it retains the bundle, effective config and upload declarations/completion result.
     """
     contract = json.loads(await client.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
     accepted = accepted_run_upload_names(contract)
@@ -619,17 +709,45 @@ async def build_and_upload_kernel(
         raise SpinePhaseError(phase_name, f"upload contract no longer accepts 'kernel': {accepted}")
     if with_vmlinux and "vmlinux" not in accepted:
         raise SpinePhaseError(phase_name, f"upload contract accepts no 'vmlinux': {accepted}")
-    kernel_src = os.environ.get(KERNEL_TREE_ENV)
+    if "effective_config" not in accepted:
+        raise SpinePhaseError(
+            phase_name, f"upload contract no longer accepts 'effective_config': {accepted}"
+        )
+    kernel_src = kernel_tree or os.environ.get(KERNEL_TREE_ENV)
     if not kernel_src:
         raise SpinePhaseError(phase_name, f"{KERNEL_TREE_ENV} unset; point it at a built tree")
-    with tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-") as scratch:
+    config_bytes = check_spine_kernel_config(
+        Path(kernel_src),
+        arch,
+        phase_name,
+        require_kdump=require_kdump,
+        require_network=require_network,
+        require_live_debug=require_live_debug,
+        root_fs=root_fs,
+    )
+    if evidence_dir is not None:
+        evidence_dir.mkdir(parents=True, exist_ok=False)
+    with (
+        nullcontext(str(evidence_dir))
+        if evidence_dir is not None
+        else tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-")
+    ) as scratch:
         kernel_tar = combined_kernel_tar(Path(kernel_src), Path(scratch), arch=arch)
+        # The tree's own .config, so runs.complete_build's config advisories run on the live path
+        # rather than failing open on an absent config (#2762).
+        effective_config = Path(scratch) / "effective_config"
+        effective_config.write_bytes(config_bytes)
         decls = [
             {
                 "name": "kernel",
                 "sha256": sha256_b64(kernel_tar),
                 "size_bytes": kernel_tar.stat().st_size,
-            }
+            },
+            {
+                "name": "effective_config",
+                "sha256": sha256_b64(effective_config),
+                "size_bytes": len(config_bytes),
+            },
         ]
         vmlinux = Path(kernel_src) / "vmlinux"
         if with_vmlinux:
@@ -650,6 +768,9 @@ async def build_and_upload_kernel(
         if "kernel" not in by_name:
             raise SpinePhaseError(phase_name, "create_run_upload returned no 'kernel' item")
         await put_presigned(by_name["kernel"], kernel_tar)
+        if "effective_config" not in by_name:
+            raise SpinePhaseError(phase_name, "create_run_upload returned no 'effective_config'")
+        await put_presigned(by_name["effective_config"], effective_config)
         if with_vmlinux:
             if "vmlinux" not in by_name:
                 raise SpinePhaseError(phase_name, "create_run_upload returned no 'vmlinux' item")
@@ -658,7 +779,20 @@ async def build_and_upload_kernel(
     # complete_build requires build_id iff a vmlinux was uploaded; sending it otherwise (or
     # omitting it here) is a configuration_error.
     extra: dict[str, JsonValue] = {"build_id": build_id} if with_vmlinux else {}
-    ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
+    result = ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
+    if evidence_dir is not None:
+        (evidence_dir / "upload.json").write_text(
+            json.dumps(
+                {
+                    "artifacts": decls,
+                    "build_id": build_id if with_vmlinux else None,
+                    "result": result.model_dump(mode="json"),
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
 
 
 # --- per-role token factory -----------------------------------------------------------------

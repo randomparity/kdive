@@ -68,6 +68,14 @@ def test_register_publishes_control_tool_contracts() -> None:
     ]
     assert tools["control.power"].parameters["required"] == ["system_id", "action"]
     assert tools["control.power"].parameters["properties"]["idempotency_key"]["default"] is None
+    power_description = tools["control.power"].description
+    action_description = tools["control.power"].parameters["properties"]["action"]["description"]
+    assert power_description is not None
+    assert "clean shutdown" in power_description
+    assert "destroy" in power_description
+    assert "clean shutdown" in action_description
+    assert "60 s" in action_description
+    assert "blocking libvirt shutdown call" in action_description
 
     assert list(tools["control.force_crash"].parameters["properties"]) == [
         "system_id",

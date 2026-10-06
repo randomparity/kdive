@@ -25,11 +25,12 @@ from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import ToolResponse, validate_stored
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
+from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_failure
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
@@ -91,16 +92,16 @@ def _denied(object_id: str, role: PlatformRole) -> ToolResponse:
     return ToolResponse.denied(object_id, missing_roles=[role])
 
 
-def _classify_drain_release(alloc_id: str, outcome: ReleaseOutcome) -> ToolResponse:
+def _classify_drain_release(
+    alloc_id: str, outcome: ReleaseOutcome, ctx: RequestContext, project: str
+) -> ToolResponse:
     """Map one break-glass release outcome to a per-allocation drain result item."""
     if outcome.released:
         return ToolResponse.success(alloc_id, "released")
-    data = {"current_status": outcome.current_status} if outcome.current_status else {}
     if outcome.category is ErrorCategory.STALE_HANDLE:
+        data = {"current_status": outcome.current_status} if outcome.current_status else {}
         return ToolResponse.success(alloc_id, "skipped", data=data)
-    return ToolResponse.failure(
-        alloc_id, outcome.category or ErrorCategory.CONFIGURATION_ERROR, data=data
-    )
+    return release_failure(alloc_id, outcome, ctx, project, breakglass=True)
 
 
 async def set_resource_status(
@@ -146,7 +147,7 @@ async def _apply_cordon(conn: AsyncConnection, uid: UUID, *, cordoned: bool) -> 
             (cordoned, uid),
         )
         row = await cur.fetchone()
-    return Resource.model_validate(row) if row is not None else None
+    return validate_stored(Resource, row) if row is not None else None
 
 
 async def set_resource_scheduling(
@@ -202,7 +203,7 @@ async def _live_allocations(conn: AsyncConnection, resource_id: UUID) -> list[Al
             (resource_id, [s.value for s in _DRAINABLE]),
         )
         rows = await cur.fetchall()
-    return [Allocation.model_validate(row) for row in rows]
+    return [validate_stored(Allocation, row) for row in rows]
 
 
 async def _force_release_allocations(
@@ -222,7 +223,7 @@ async def _force_release_allocations(
                 actor=actor_for(ctx),
             ),
         )
-        items.append(_classify_drain_release(str(alloc.id), outcome))
+        items.append(_classify_drain_release(str(alloc.id), outcome, ctx, alloc.project))
     counts = Counter(item.status for item in items)
     tally = {
         "released": counts["released"],

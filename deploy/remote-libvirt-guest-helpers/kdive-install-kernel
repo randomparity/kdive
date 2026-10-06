@@ -8,7 +8,8 @@
 # Subcommands:
 #   install --url <presigned-get> --cmdline <cmdline> --method <method>
 #       curl the ADR-0081 gzip bundle (boot/vmlinuz + lib/modules/<ver>), install it, and
-#       add-or-replace ONE deterministic grub slot (title "kdive") with <cmdline> verbatim.
+#       add-or-replace ONE deterministic grub slot (title "kdive"): the default entry's args plus
+#       <cmdline>, minus any crashkernel= the default carried when <cmdline> has none.
 #       Does NOT change the boot selection. method=kdump also enables the kdump service.
 #       Idempotent: re-running converges to the same /boot + grub state.
 #   boot-id
@@ -128,6 +129,15 @@ do_install() {
     --title="$KDIVE_TITLE" \
     --args="$cmdline" \
     --copy-default || die "grubby add-kernel failed"
+  # --copy-default also copies the image default's crashkernel= (Rocky 10 ships one). The worker
+  # asks for a reservation only on a kdump-family install, so drop one it did not ask for: a
+  # reserved but never-armed guest fails boot's kdump-arming gate (#3094). Substring match, as
+  # the kernel's own crashkernel= parse is a strstr over the cmdline.
+  case "$cmdline" in
+  *crashkernel=*) ;;
+  *) grubby --update-kernel="TITLE=$KDIVE_TITLE" --remove-args=crashkernel ||
+    die "grubby could not remove the inherited crashkernel= from the kdive slot" ;;
+  esac
 
   if [ "$method" = "kdump" ]; then
     systemctl enable kdump.service >/dev/null 2>&1 || true

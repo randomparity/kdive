@@ -18,6 +18,8 @@ import ast
 import pathlib
 from functools import cache
 
+import pytest
+
 _TESTS_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _EXPECTED = {
     "test_ppc64le_guest_is_ssh_reachable_over_the_wire",
@@ -74,7 +76,11 @@ def _functions_with_marker(marker: str) -> dict[str, set[str]]:
     """
     found: dict[str, set[str]] = {}
     for path in _TESTS_ROOT.rglob("test_*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source = path.read_text(encoding="utf-8")
+        # The AST matcher requires a literal marker attribute; other files cannot match.
+        if marker not in source:
+            continue
+        tree = ast.parse(source, filename=str(path))
         module_marks = _module_markers(tree)
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith(
@@ -109,3 +115,27 @@ def test_no_live_vm_tcg_proof_is_also_native_live_vm() -> None:
     carriers = _functions_with_marker("live_vm_tcg")
     for name, markers in carriers.items():
         assert "live_vm" not in markers, f"{name} carries both live_vm and live_vm_tcg"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("@pytest.mark.live_vm_tcg\ndef test_sync(): pass", {"live_vm_tcg"}),
+        ("@pt.mark.live_vm_tcg()\nasync def test_async(): pass", {"live_vm_tcg"}),
+        (
+            "pytestmark: list = [pytest.mark.live_vm, pytest.mark.live_vm_tcg]\n"
+            "def test_module(): pass",
+            {"live_vm", "live_vm_tcg"},
+        ),
+        ("# live_vm_tcg\ndef test_comment(): pass", set()),
+        ("def test_unrelated(): pass", set()),
+    ],
+)
+def test_marker_scan_preserves_supported_forms(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, source: str, expected: set[str]
+) -> None:
+    (tmp_path / "test_example.py").write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "_TESTS_ROOT", tmp_path)
+    # Bypass the repository-result cache so synthetic trees cannot affect other guards.
+    found = _functions_with_marker.__wrapped__("live_vm_tcg")
+    assert list(found.values()) == ([expected] if expected else [])

@@ -280,6 +280,20 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0154",
         "0155",
         "0156",
+        "0157",
+        "0158",
+        "0159",
+        "0160",
+        "0161",
+        "0162",
+        "0163",
+        "0164",
+        "0165",
+        "0166",
+        "0167",
+        "0168",
+        "0169",
+        "0170",
     ]
     assert second == []
 
@@ -290,7 +304,7 @@ def test_investigation_build_migration_tail_is_unique_and_monotonic() -> None:
     versions = [migration.version for migration in migrations]
 
     assert len(versions) == len(set(versions))
-    assert [(migration.version, migration.filename) for migration in migrations[-55:]] == [
+    assert [(migration.version, migration.filename) for migration in migrations[-69:]] == [
         ("0099", "0099_investigation_build_use_recovery.sql"),
         ("0100", "0100_build_use_recovery_bounds.sql"),
         ("0101", "0101_investigation_build_gc_indexes.sql"),
@@ -346,6 +360,20 @@ def test_investigation_build_migration_tail_is_unique_and_monotonic() -> None:
         ("0154", "0154_worker_image_catalog_insert.sql"),
         ("0155", "0155_recoverable_worker_incarnation_read.sql"),
         ("0156", "0156_reconciler_audit_log_insert.sql"),
+        ("0157", "0157_external_boot_local_timing_journal.sql"),
+        ("0158", "0158_audit_log_insert_columns.sql"),
+        ("0159", "0159_runs_system_id_index.sql"),
+        ("0160", "0160_external_boot_teardown_failure_commit.sql"),
+        ("0161", "0161_external_boot_teardown_takeover.sql"),
+        ("0162", "0162_dead_letter_unowned_external_boot_jobs.sql"),
+        ("0163", "0163_retained_teardown_requeue_clears_category.sql"),
+        ("0164", "0164_dead_letter_exhausted_retained_teardown.sql"),
+        ("0165", "0165_bound_acknowledged_retry_grant.sql"),
+        ("0166", "0166_reprovision_incomplete_category.sql"),
+        ("0167", "0167_unrouted_preparing_teardown_route.sql"),
+        ("0168", "0168_tearing_down_authority_teardown.sql"),
+        ("0169", "0169_ended_allocation_authority_teardown.sql"),
+        ("0170", "0170_repeated_provider_conflict_terminal.sql"),
     ]
 
 
@@ -1086,6 +1114,20 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0154",
         "0155",
         "0156",
+        "0157",
+        "0158",
+        "0159",
+        "0160",
+        "0161",
+        "0162",
+        "0163",
+        "0164",
+        "0165",
+        "0166",
+        "0167",
+        "0168",
+        "0169",
+        "0170",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1516,6 +1558,20 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0154",
         "0155",
         "0156",
+        "0157",
+        "0158",
+        "0159",
+        "0160",
+        "0161",
+        "0162",
+        "0163",
+        "0164",
+        "0165",
+        "0166",
+        "0167",
+        "0168",
+        "0169",
+        "0170",
     ]
 
 

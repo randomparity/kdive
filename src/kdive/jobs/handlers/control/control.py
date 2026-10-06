@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Literal, NamedTuple
 from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.locks import (
+    LockScope,
+    advisory_xact_lock,
+    require_top_level_transaction,
+    scoped_session_advisory_lock,
+)
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -18,7 +24,7 @@ from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
-from kdive.jobs.provider_context import set_provider_kind
+from kdive.jobs.provider_context import set_provider_kind, take_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
@@ -69,6 +75,58 @@ async def _controller(conn: AsyncConnection, system_id: UUID, resolver: Provider
     return binding.runtime.controller
 
 
+async def _power_non_resume(
+    conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver, action: PowerAction
+) -> _ControlTarget:
+    target = await _power_target(conn, system_id)
+    control = await _controller(conn, system_id, resolver)
+    await asyncio.to_thread(control.power, target.domain_name, action)
+    return target
+
+
+async def _run_fenced_power[T](
+    conn: AsyncConnection, system_id: UUID, operation: Callable[[], Awaitable[T]]
+) -> T:
+    """Keep the System fence through power I/O and connection cleanup on cancellation."""
+    provider_kind: str | None = None
+
+    async def fenced() -> T:
+        nonlocal provider_kind
+        try:
+            require_top_level_transaction(conn, "operator power")
+            previous_autocommit = conn.autocommit
+            if not previous_autocommit:
+                await conn.set_autocommit(True)
+            try:
+                async with scoped_session_advisory_lock(conn, LockScope.SYSTEM, system_id):
+                    return await operation()
+            finally:
+                if not previous_autocommit:
+                    await conn.set_autocommit(False)
+        finally:
+            provider_kind = take_provider_kind()
+
+    task = asyncio.create_task(fenced())
+    try:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # to_thread survives cancellation. Keep the whole operation, including unlock and
+            # connection-mode restoration, alive before propagating cancellation.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            task.exception()  # consume a provider fault; cancellation remains primary
+            raise
+    finally:
+        if provider_kind is not None:
+            set_provider_kind(provider_kind)
+
+
 async def power_handler(
     conn: AsyncConnection,
     job: Job,
@@ -80,10 +138,12 @@ async def power_handler(
     system_id = UUID(payload.system_id)
     action = payload.action
     if action is PowerAction.RESUME:
-        return await _resume_handler(conn, job, system_id, resolver)
-    target = await _power_target(conn, system_id)
-    control = await _controller(conn, system_id, resolver)
-    await asyncio.to_thread(control.power, target.domain_name, action)
+        return await _run_fenced_power(
+            conn, system_id, lambda: _resume_handler(conn, job, system_id, resolver)
+        )
+    target = await _run_fenced_power(
+        conn, system_id, lambda: _power_non_resume(conn, system_id, resolver, action)
+    )
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:

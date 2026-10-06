@@ -205,10 +205,10 @@ def test_orphaned_system_failure_does_not_starve_sibling(
             )
         original = system_repairs.enqueue_control_teardown
 
-        async def _enqueue(conn: psycopg.AsyncConnection, system, authorizing):
+        async def _enqueue(conn: psycopg.AsyncConnection, system, authorizing, **kwargs):
             if system.id == failed_id:
                 raise RuntimeError("injected admission failure")
-            return await original(conn, system, authorizing)
+            return await original(conn, system, authorizing, **kwargs)
 
         monkeypatch.setattr(system_repairs, "enqueue_control_teardown", _enqueue)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
@@ -304,7 +304,9 @@ def test_zombie_authority_marked_job_is_left_for_the_authority_path(migrated_url
 
     The marked job is left ``running`` with an expired lease. Migration 0150 permits a worker
     claim only for an exact acknowledged no-mutation authority proof; this deliberately malformed
-    marker has no such proof and remains fenced for authority-specific repair.
+    marker has no such proof and remains fenced for authority-specific repair. The one marked
+    shape this sweep does end, a ``boot`` job no receipt can finish (migration 0162), is proven in
+    ``tests/db/test_exhausted_authority_job.py``.
     """
 
     async def _run() -> None:

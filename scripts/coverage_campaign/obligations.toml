@@ -1,0 +1,367 @@
+version = 1
+
+# These reviewed mappings own assertions, not live results. The owning issues supply
+# executable node bindings in implementations only after a scenario is implemented.
+[[groups]]
+owner = 2811
+execution = "service"
+[groups.tools]
+"fixtures.validate" = "Compare validated profiles and architectures with the configured fixture catalog."
+"projects.list" = "Compare grants and roles against the authenticated principal's real memberships."
+"session.whoami" = "Compare returned identity and grants with the authenticated test token."
+"systems.profile_examples" = "Validate each provider example against its current profile contract."
+"tools.invoke" = "Invoke a valid underlying operation through the gateway and verify its independent effect."
+"tools.search" = "Find registered tools by name and concept and compare their schemas with direct exposure."
+
+[[groups]]
+owner = 3095
+execution = "service"
+[groups.tools]
+"images.delete" = "Verify the private catalog entry is removed without deleting unrelated entries."
+"images.describe" = "Compare identity, provenance and computed capabilities with the selected image."
+"images.kernel_config" = "Download the configuration and compare its content digest with the image provenance."
+"images.list" = "Verify publication and project-scope filtering against real catalog records."
+"images.upload" = "Verify quarantine, supplied content and project-private catalog ownership."
+"resources.availability" = "Compare free capacity, shape fit and queue depth with controlled resource state."
+"resources.describe" = "Compare the resource and advertised capability details with independent inventory."
+"resources.list" = "Compare visible resources with independently seeded inventory."
+"shapes.delete" = "Verify the named shape disappears while other presets remain."
+"shapes.list" = "Compare shape names and resource dimensions with configured presets."
+"shapes.set" = "Read the created or updated preset and use its resource dimensions in admission."
+
+[[groups]]
+owner = 3096
+execution = "service"
+[groups.tools]
+"artifacts.create_investigation_upload" = "PUT bytes to the issued target and verify investigation ownership."
+"artifacts.create_run_upload" = "PUT declared build bytes and compare stored content and run ownership."
+"artifacts.fetch_raw" = "Download the selected version and compare its bytes with the known raw fixture."
+"artifacts.get" = "Compare returned byte windows, literal search and redaction against a known artifact."
+"artifacts.list" = "Compare visible artifact identities and order with the seeded system artifacts."
+"investigations.close" = "Read terminal state and the persisted closing summary."
+"investigations.complete_rootfs_upload" = "Verify finalized rootfs content digest and the published profile handle."
+"investigations.get" = "Read back the independently seeded investigation fields and relationships."
+"investigations.link" = "Read the added tracker reference and verify its investigation ownership."
+"investigations.list" = "Verify visible investigations, filtering and stable newest-first order."
+"investigations.open" = "Read the new investigation and verify its project ownership."
+"investigations.set" = "Read the changed title/description and unchanged unrelated fields."
+"investigations.unlink" = "Verify only the selected tracker reference disappears."
+
+[[groups]]
+owner = 3097
+execution = "service"
+[groups.tools]
+"jobs.cancel" = "Observe the operation-specific terminal cancellation effect and protected-state retention."
+"jobs.list" = "Compare job state/kind/ownership filters with seeded durable jobs."
+"jobs.wait" = "Observe durable job progress through its terminal state with the expected effect."
+"runs.bind" = "Read the ready system/allocation binding and unchanged uploaded build identity."
+"runs.complete_build" = "Compare validated artifact digests, build metadata and succeeded build state."
+"runs.create" = "Read the bound or unbound run and its investigation/target relationships."
+"runs.get" = "Compare run, build and separate install/boot step states with durable records."
+"runs.list" = "Verify project/system/investigation/state filters against seeded runs."
+"runs.set" = "Read the changed or cleared outcome note without changing lifecycle state."
+"systems.get" = "Compare system state, allocation, run links and capabilities with durable records."
+"systems.list" = "Verify project/allocation/state/shape filters against seeded systems."
+
+[groups.role_overrides]
+"jobs.cancel" = ["server", "worker", "reconciler", "authority"]
+"jobs.wait" = ["server", "worker"]
+
+[[groups]]
+owner = 3098
+execution = "service"
+[groups.tools]
+"accounting.estimate" = "Compare the estimate with the configured coefficients and requested time window."
+"accounting.report" = "Compare granted-project and auditor-wide rollups with seeded ledger charges."
+"accounting.set_budget" = "Read back the changed limit and unchanged spent amount; observe subsequent admission."
+"accounting.set_quota" = "Read back every cap and demonstrate admission at its boundary."
+"accounting.usage" = "Compare project and investigation totals with independently recorded charges."
+"allocations.list" = "Return the caller's seeded allocations in the requested order and state filter."
+"allocations.release" = "Observe terminal allocation state, lease release and reclaimed accounting capacity."
+"allocations.renew" = "Read the extended absolute expiry and verify renewal bounds."
+"allocations.request" = "Observe a granted or queued allocation and the matching budget/quota debit."
+"allocations.wait" = "Observe the seeded allocation's transition and bounded polling completion."
+"reports.generate" = "Download and parse the report; compare sections with seeded records and ledger totals."
+
+[groups.role_overrides]
+"allocations.release" = ["server", "worker", "reconciler", "authority"]
+"allocations.wait" = ["server", "reconciler"]
+
+[[groups]]
+owner = 2812
+execution = "service"
+[groups.tools]
+"audit.query" = "Compare project and auditor-wide audit rows with known attributed operations."
+"images.extend" = "Read the re-armed expiry without changing image contents or ownership."
+"images.prune_expired" = "Verify only expired entries are pruned and referenced/live entries are retained."
+"inventory.clear_override" = "Observe the file-owned value restored by the next reconcile."
+"inventory.list" = "Compare cross-project system/allocation totals with known durable state."
+"ops.build_uses_list" = "Compare protected build-use rows and fence identities with known active and orphaned uses."
+"ops.diagnostics" = "Compare diagnostic findings with deliberately healthy and unavailable prerequisites."
+"ops.export_cost_classes" = "Parse the exported fragment and compare coefficients with the pricing table."
+"ops.export_systems_toml" = "Parse the exported inventory and compare records and optional writeback bytes."
+"ops.jobs_list" = "Compare cross-project queue depths and bounded pages with known durable jobs."
+"ops.recover_build_use" = "Verify authorized recovery releases only the exactly fenced use after terminal evidence."
+"ops.reconcile_now" = "Observe the selected drift repair and retention of protected live resources."
+"ops.reconcile_systems" = "Compare resulting catalog records with the source configuration and prune policy."
+"ops.set_cost_class_coeff" = "Read the changed coefficient and verify the next charge uses it."
+"ops.set_host_capacity" = "Observe new placement obey the cap while existing allocations remain."
+"ops.set_queue_paused" = "Verify worker claim activity stops and resumes with the recorded pause state."
+"ops.tool_trail" = "Compare attributed invocation rows and paging with known calls."
+"resources.deregister" = "Verify the selected resource is removed under its lifecycle contract."
+"resources.drain" = "Verify cordoning and operation-specific allocation release without new placement."
+"resources.register" = "Read the registered resource and compare kind, capacity and ownership."
+"resources.renew" = "Read the changed resource expiry and unchanged inventory identity."
+"resources.set_scheduling" = "Verify placement follows scheduling state without changing health."
+"resources.set_status" = "Read changed health while scheduling/cordon state remains unchanged."
+"secrets.list" = "Compare reference presence with configured sources and verify no secret values appear."
+
+[groups.role_overrides]
+"inventory.clear_override" = ["server", "reconciler"]
+"ops.recover_build_use" = ["server", "worker", "authority"]
+"ops.reconcile_now" = ["server", "worker", "reconciler", "authority"]
+"ops.set_queue_paused" = ["server", "worker"]
+"resources.drain" = ["server", "worker", "reconciler", "authority"]
+
+[[groups]]
+owner = 2812
+execution = "provider"
+authority = true
+[groups.tools]
+"ops.force_release" = "Observe terminal release only after protected provider effects are quiescent."
+"ops.force_teardown" = "Verify forced teardown removes owned domain/storage and preserves unrelated resources."
+"ops.resolve_recovery_orphan" = "Wait for repair and verify only the exact quarantined object set is resolved."
+"systems.resolve_external_boot_conflict" = "Wait for conflict resolution and verify authoritative provider and database state agree."
+
+[[groups]]
+owner = 3062
+execution = "provider"
+kernel = true
+authority = true
+[groups.tools]
+"images.publish" = "Wait for publication and verify the built image's content, catalog provenance and cleanup."
+"runs.boot" = "Wait for boot and compare the guest's running kernel/build identity with uploaded artifacts."
+"runs.cancel" = "Verify operation-specific cancellation leaves the documented system and protected build state."
+"runs.install" = "Wait for installation and compare staged kernel, config and module contents with upload digests."
+"runs.release_external_boot" = "Wait for release and verify external-boot state and owned artifacts are reclaimed."
+"systems.authorize_ssh_key" = "Authenticate using the supplied key and confirm no unrelated key was removed."
+"systems.check_ssh_reachable" = "Compare reachability with a real guest sshd in the expected ready state."
+"systems.provision" = "Wait for first boot, authenticate, inspect guest identity and verify allocated capacity."
+"systems.reprovision" = "Wait for replacement guest readiness and verify old owned storage is reclaimed."
+"systems.ssh_info" = "Use returned coordinates to authenticate to the allocated guest and verify its identity."
+"systems.teardown" = "Wait for teardown and independently verify domain/storage and capacity reclamation."
+
+[[groups]]
+owner = 2813
+execution = "provider"
+kernel = true
+[groups.tools]
+"debug.advance" = "Verify the requested instruction/line step reaches the expected stop and program counter."
+"debug.backtrace" = "Compare frames and symbols with the stopped controlled kernel workload."
+"debug.clear_breakpoint" = "Verify the selected breakpoint disappears and no longer stops the workload."
+"debug.clear_watchpoint" = "Verify the selected watchpoint disappears and no longer stops the workload."
+"debug.continue" = "Verify execution resumes and the next expected stop reason/register state is observed."
+"debug.disassemble" = "Compare bounded instructions at a known symbol with the matching kernel binary."
+"debug.end_session" = "Verify the session detaches and the underlying transport is closed."
+"debug.get_session" = "Read the existing visible session and compare its run/system/transport state."
+"debug.interrupt" = "Verify a running guest stops and reports an interrupt stop reason."
+"debug.list_breakpoints" = "Compare breakpoint identifiers and locations with independently installed breakpoints."
+"debug.list_modules" = "Compare module addresses and symbol-load status with known loaded modules."
+"debug.list_sessions" = "Compare visible session filters and ordering with real session records."
+"debug.list_watchpoints" = "Compare watchpoint identifiers and expressions with installed watchpoints."
+"debug.load_module_symbols" = "Resolve a known module symbol at its actual relocated address after loading symbols."
+"debug.read_frame" = "Compare the selected frame's arguments and locals with the controlled workload."
+"debug.read_memory" = "Compare bounded memory bytes with a known kernel test buffer."
+"debug.read_registers" = "Compare named registers and program counter with the stopped workload."
+"debug.resolve_symbol" = "Compare a resolved address with the matching kernel/module symbol information."
+"debug.set_breakpoint" = "Reach the installed breakpoint and verify its identifier, location and stop reason."
+"debug.set_watchpoint" = "Trigger the watched write and verify its stop reason and changed value."
+"debug.start_session" = "Verify a usable single-attach transport and matching live session record."
+
+[groups.capabilities]
+"debug.advance" = "debug_transports.gdbstub"
+"debug.backtrace" = "debug_transports.gdbstub"
+"debug.clear_breakpoint" = "debug_transports.gdbstub"
+"debug.clear_watchpoint" = "debug_transports.gdbstub"
+"debug.continue" = "debug_transports.gdbstub"
+"debug.disassemble" = "debug_transports.gdbstub"
+"debug.end_session" = "debug_transports.gdbstub"
+"debug.get_session" = "debug_transports.gdbstub"
+"debug.interrupt" = "debug_transports.gdbstub"
+"debug.list_breakpoints" = "debug_transports.gdbstub"
+"debug.list_modules" = "debug_transports.gdbstub"
+"debug.list_sessions" = "debug_transports.gdbstub"
+"debug.list_watchpoints" = "debug_transports.gdbstub"
+"debug.load_module_symbols" = "debug_transports.gdbstub"
+"debug.read_frame" = "debug_transports.gdbstub"
+"debug.read_memory" = "debug_transports.gdbstub"
+"debug.read_registers" = "debug_transports.gdbstub"
+"debug.resolve_symbol" = "debug_transports.gdbstub"
+"debug.set_breakpoint" = "debug_transports.gdbstub"
+"debug.set_watchpoint" = "debug_transports.gdbstub"
+"debug.start_session" = "debug_transports"
+
+[[groups]]
+owner = 2814
+execution = "provider"
+kernel = true
+authority = true
+[groups.tools]
+"control.force_crash" = "Observe the deliberate guest panic and durable crash transition with matching evidence."
+"introspect.from_vmcore" = "Compare offline kernel facts from the real dump with matching build/workload identities."
+"introspect.run" = "Compare live kernel facts with the controlled guest workload."
+"introspect.script" = "Execute a bounded script and compare its redacted report with known live kernel facts."
+"postmortem.crash" = "Read a real matching core with crash and verify kernel identity and workload evidence."
+"vmcore.fetch" = "Wait for capture; verify readable core content, matching kernel identity and immutable artifact bytes."
+[groups.capabilities]
+"vmcore.fetch" = "capture_methods"
+"introspect.from_vmcore" = "introspection.offline-vmcore"
+"introspect.run" = "introspection.live"
+"introspect.script" = "introspection.live-script"
+
+[[groups]]
+owner = 2815
+execution = "provider"
+kernel = true
+[groups.tools]
+"control.capture_traffic" = "Read the retained pcap and verify packets from a known synthetic flow."
+"control.diagnostic_sysrq" = "Compare captured console output with the requested allowed diagnostic action."
+"control.power" = "Observe each supported power action's real domain state and guest boot/resume effect."
+"control.watch_for_crash" = "Verify detection of a deliberate console crash signature and bounded no-crash completion."
+"systems.delete_snapshot" = "Verify the checkpoint name and owned disk state are reclaimed."
+"systems.list_snapshots" = "Compare names, order and states with real checkpoints."
+"systems.restore" = "Verify guest disk/memory content returns to the selected checkpoint."
+"systems.snapshot" = "Wait for a ready checkpoint and verify it preserves the controlled guest state."
+[groups.capabilities]
+"control.capture_traffic" = "supports_traffic_capture"
+"control.diagnostic_sysrq" = "supports_diagnostic_sysrq"
+"control.watch_for_crash" = "supports_crash_watch"
+"systems.delete_snapshot" = "supports_snapshots"
+"systems.list_snapshots" = "supports_snapshots"
+"systems.restore" = "supports_snapshots"
+"systems.snapshot" = "supports_snapshots"
+
+[implementations]
+"host-install" = "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
+"image-smoke" = "tests/integration/test_image_smoke_live.py::test_image_smoke"
+"deep-lifecycle/local-libvirt/longterm" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
+"deep-lifecycle/local-libvirt/stable" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
+"tool/fixtures.validate/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/fixtures.validate/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/projects.list/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/projects.list/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/session.whoami/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/session.whoami/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/systems.profile_examples/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/systems.profile_examples/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.invoke/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.invoke/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.invoke/default/validation" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.search/default/authentication" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.search/default/functional" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/tools.search/default/validation" = "tests/integration/test_core_tool_cells_live.py::test_core_tool_cell"
+"tool/images.delete/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.delete/default/authorization" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.delete/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.delete/default/project-isolation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.delete/default/validation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.describe/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.describe/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.describe/default/validation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.kernel_config/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.kernel_config/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.kernel_config/default/validation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.list/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.list/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.list/default/validation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.upload/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.upload/default/authorization" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.upload/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.upload/default/project-isolation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/images.upload/default/validation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/resources.availability/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/resources.availability/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/resources.availability/default/validation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/resources.describe/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/resources.describe/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/resources.describe/default/validation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/resources.list/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/resources.list/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/resources.list/default/validation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/shapes.delete/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/shapes.delete/default/authorization" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/shapes.delete/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/shapes.delete/default/validation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/shapes.list/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/shapes.list/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/shapes.set/default/authentication" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/shapes.set/default/authorization" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/shapes.set/default/functional" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/shapes.set/default/validation" = "tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell"
+"tool/artifacts.create_investigation_upload/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.create_investigation_upload/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.create_investigation_upload/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.create_investigation_upload/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.create_investigation_upload/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.create_run_upload/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.create_run_upload/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.create_run_upload/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.create_run_upload/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.create_run_upload/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.fetch_raw/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.fetch_raw/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.fetch_raw/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.fetch_raw/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.fetch_raw/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.get/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.get/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.get/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.get/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.get/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.list/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.list/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.list/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.list/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/artifacts.list/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.close/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.close/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.close/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.close/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.close/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.complete_rootfs_upload/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.complete_rootfs_upload/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.complete_rootfs_upload/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.complete_rootfs_upload/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.complete_rootfs_upload/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.get/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.get/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.get/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.get/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.get/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.link/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.link/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.link/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.link/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.link/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.list/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.list/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.list/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.list/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.list/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.open/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.open/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.open/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.open/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.open/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.set/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.set/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.set/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.set/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.set/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.unlink/default/authentication" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.unlink/default/authorization" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.unlink/default/functional" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.unlink/default/project-isolation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"tool/investigations.unlink/default/validation" = "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
+"deep-lifecycle/remote-libvirt/longterm" = "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
+"deep-lifecycle/remote-libvirt/stable" = "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"

@@ -108,6 +108,9 @@ overlay via libguestfs, **clobbers** any existing `/lib/modules/<ver>`, writes t
   libguestfs mount of a live qcow2 corrupts it (the hazard ADR-0203 force-offs to avoid), so
   install `destroy`s the domain if `isActive()` before the mount — idempotent, mirroring
   `boot()`'s destroy-then-create; the later `boot()` re-creates it.
+
+  > **Amended by [ADR-0679](0679-local-libvirt-clean-power-off.md) (#2757):** the force-off
+  > requests a bounded clean shutdown first; `destroy` is the fallback.
 - **Idempotent injection.** A failed install records no `run_steps` row (ADR-0030 §2), so a
   retry re-runs injection. It must self-heal a partial prior write: clobber the version dir (or
   temp-extract + atomic rename) before extracting, and verify a completion sentinel (`depmod`

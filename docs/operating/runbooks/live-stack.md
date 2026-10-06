@@ -30,9 +30,10 @@ workers on the host so they can access KVM and libvirt.
   `KDIVE_OIDC_IMAGE`; the wrapper defaults to a pinned mirror on emulated POWER. See
   [image selection](../../../deploy/mock-oidc/README.md#using-the-image).
 - The repo set up: `just setup` (or `uv sync --locked`).
-- Local-libvirt kdump capture needs drgn and libguestfs in the **installed worker environment**,
-  `/opt/kdive-live-worker-lifecycle/.venv`, supplied by the lifecycle host provisioning below.
-  The checkout preflight probes `KDIVE_PYTHON`; passing it does not verify that worker interpreter.
+- The **installed worker environment**, `/opt/kdive-live-worker-lifecycle/.venv`, needs the
+  libguestfs binding to provision, build images, stage built kernels, boot external kernels and
+  capture kdump locally, and drgn for local kdump capture. The lifecycle host provisioning below
+  supplies it, and `check-local-libvirt.sh` probes that venv for `guestfs` once it exists.
 - The fixed systemd worker contract must be installed. Persistent self-hosted runners get it from
   `deploy/ansible/roles/live_vm_host`; apply the runner playbook with the revision to install:
 
@@ -217,7 +218,7 @@ The `KDIVE_S3_*` vars carry only the endpoint, bucket, and region.
 
 | var | value | consumed by |
 |-----|-------|-------------|
-| `KDIVE_MIGRATION_DATABASE_URL` | migration-owner member DSN | migration and role bootstrap only |
+| `KDIVE_MIGRATION_DATABASE_URL` | migration-owner member DSN | migration and role bootstrap; the [installed local authority carrier tests](live-testing.md#installed-local-authority-carrier) as `KDIVE_DATABASE_URL` |
 | `KDIVE_SERVER_DATABASE_URL` | server-member DSN, member only of `kdive_server` | server |
 | `KDIVE_WORKER_DATABASE_URL` | worker-member DSN, member only of `kdive_worker` | fixed workers |
 | `KDIVE_RECONCILER_DATABASE_URL` | reconciler-member DSN, member only of `kdive_reconciler` | reconciler |
@@ -506,6 +507,15 @@ KDIVE_STACK_SKEW_POLICY=warn just test-live-stack     # never skip, warn only
 KDIVE_STACK_SKEW_POLICY=strict just test-live-stack   # skip on anything but fresh
 KDIVE_STACK_SKEW_POLICY=off just test-live-stack      # do not probe at all
 ```
+
+Use `strict` for any proof whose result is tied to a deployed revision; an
+unknown worker build must skip that proof. Keep the variable set for the full
+proof run. Run pytest with `-v` to retain the probed-revision header and check
+that the proof passed rather than skipped. The portable stack's absent Kubernetes-only
+`lifecycle-witness` is reported as `not deployed` and is inapplicable.
+Strict admission also checks the header probe: if the app tier changes from a
+non-fresh revision after collection starts, rerun pytest to record the fresh
+revision before treating the proof as passed.
 
 A stack whose processes predate this feature reports `unknown` and only warns, so the preflight
 never blocks an older deployment. When **no** `live_stack` test is collected yet (the marked spine driver lands

@@ -8,9 +8,18 @@ payload and reference semantics. Producers remain responsible for redacting text
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import (
@@ -21,7 +30,20 @@ from kdive.domain.errors import (
 )
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.security.authz.rbac import PlatformRole, Role
-from kdive.serialization import JsonValue, safe_error_details, validate_json_value
+from kdive.serialization import (
+    JsonValue,
+    ServerFaultError,
+    safe_error_details,
+    validate_json_value,
+)
+from kdive.serialization import validate_stored as validate_stored
+
+_log = logging.getLogger(__name__)
+
+
+class InvalidEnvelopeError(ServerFaultError):
+    """A producer built an invalid :class:`ToolResponse` — a server fault (ADR-0709)."""
+
 
 # Literal next tool names by the job's state.
 # See the design doc's suggested_next_actions table.
@@ -41,9 +63,10 @@ _NEXT_ACTIONS: dict[JobState, list[str]] = {
 # Tool-specific next actions appended when a job of this kind reaches SUCCEEDED, so the hint
 # is a durable property of the completed job wherever it is rendered — every
 # jobs.wait / jobs.list read of the terminal job carries it, not just the enqueuing tool's
-# synchronous envelope (ADR-0414). A completed TEARDOWN drives the System to torn_down but
-# leaves its Allocation `active` until allocations.release; point the agent at that second
-# step so the two-step wind-down is not forgotten (#1385). A completed CAPTURE_VMCORE carries the
+# synchronous envelope (ADR-0414). A completed TEARDOWN reclaims the System's resources and
+# moves a live System to torn_down (a `failed` System stays `failed`), but either way leaves
+# its Allocation `active` until allocations.release; point the agent at that second step so
+# the two-step wind-down is not forgotten (#1385). A completed CAPTURE_VMCORE carries the
 # redacted core's artifact id in `refs.result` (ADR-0466), so it points at the two tools that
 # consume that reference — read the bytes with artifacts.get, or triage the core with
 # postmortem.crash. Keyed on SUCCEEDED only: a failed or canceled teardown did not free anything
@@ -131,27 +154,42 @@ class ToolResponse(BaseModel):
             validate_json_value(value, path=f"data.{key}")
         return data
 
-    @model_validator(mode="after")
-    def _category_iff_failed(self) -> ToolResponse:
-        """Enforce category-iff-failure and derive ``retryable`` from the category.
+    @model_validator(mode="wrap")
+    @classmethod
+    def _validated(
+        cls, data: object, handler: ModelWrapValidatorHandler[ToolResponse]
+    ) -> ToolResponse:
+        """Validate the envelope, enforce category-iff-failure, and derive ``retryable``.
 
-        A failure status without a category, or any other status carrying one, is a
-        producer bug — fail fast at construction (ADR-0019). ``retryable`` is a pure
-        function of the category (ADR-0118), derived here so it can never drift and is
-        never caller-set; ``None`` on success, a ``bool`` on a classified failure. The
-        table it reads is :data:`~kdive.domain.errors.RETRYABLE_BY_CATEGORY`, shared with
-        the job queue's dead-letter decision so both retry seams agree (ADR-0483).
+        A failure status without a category, any other status carrying one, or a category
+        outside :class:`ErrorCategory` is a producer bug — fail fast at construction
+        (ADR-0019). Every failure, field errors included, raises :class:`InvalidEnvelopeError`
+        rather than a pydantic ``ValidationError``, for the constructor, the factories and
+        ``model_validate`` alike, so a tool reports it as a server fault (ADR-0709).
+
+        ``retryable`` is a pure function of the category (ADR-0118), derived here so it can
+        never drift and is never caller-set; ``None`` on success, a ``bool`` on a classified
+        failure. The table it reads is :data:`~kdive.domain.errors.RETRYABLE_BY_CATEGORY`,
+        shared with the job queue's dead-letter decision so both retry seams agree (ADR-0483).
         """
-        is_failure = self.status in _FAILURE_STATUSES
-        if is_failure and self.error_category is None:
-            raise ValueError(f"status {self.status!r} requires an error_category")
-        if not is_failure and self.error_category is not None:
-            raise ValueError(f"error_category set on non-failure status {self.status!r}")
-        if is_failure and self.error_category is not None:
-            self.retryable = retryable_category(ErrorCategory(self.error_category))
-        else:
-            self.retryable = None
-        return self
+        try:
+            model = handler(data)
+        except ValidationError as exc:
+            raise InvalidEnvelopeError(f"invalid ToolResponse: {exc}") from exc
+        is_failure = model.status in _FAILURE_STATUSES
+        if is_failure and model.error_category is None:
+            raise InvalidEnvelopeError(f"status {model.status!r} requires an error_category")
+        if not is_failure and model.error_category is not None:
+            raise InvalidEnvelopeError(f"error_category set on non-failure status {model.status!r}")
+        if model.error_category is None:
+            model.retryable = None
+            return model
+        try:
+            category = ErrorCategory(model.error_category)
+        except ValueError as exc:
+            raise InvalidEnvelopeError(f"unknown error_category {model.error_category!r}") from exc
+        model.retryable = retryable_category(category)
+        return model
 
     @classmethod
     def success(
@@ -166,7 +204,8 @@ class ToolResponse(BaseModel):
         """Build a non-failure envelope.
 
         ``status`` must not be a failure status (``failed``/``error``); passing one is a
-        producer bug and the model validator raises, surfacing the misuse at construction.
+        producer bug and the model validator raises :class:`InvalidEnvelopeError`, surfacing
+        the misuse at construction.
         """
         return cls(
             object_id=object_id,
@@ -254,14 +293,15 @@ class ToolResponse(BaseModel):
                 policy checks (ADR-0129). It may not carry ``missing_roles`` itself.
 
         Raises:
-            ValueError: ``data`` carries the ``missing_roles`` key. The closed vocabulary holds
-                only because every token comes from a :data:`MissingRole` member, and a raw
-                ``data`` dict is unchecked — routing the key through it would put a free-form
-                string on a client-facing egress seam. Pass ``missing_roles=`` instead.
+            InvalidEnvelopeError: ``data`` carries the ``missing_roles`` key. The closed
+                vocabulary holds only because every token comes from a :data:`MissingRole`
+                member, and a raw ``data`` dict is unchecked — routing the key through it would
+                put a free-form string on a client-facing egress seam. Pass ``missing_roles=``
+                instead.
         """
         payload = dict(data or {})
         if MISSING_ROLES_KEY in payload:
-            raise ValueError(
+            raise InvalidEnvelopeError(
                 f"{MISSING_ROLES_KEY!r} must be passed as the typed `missing_roles` argument, "
                 "not through `data`, so the disclosed role vocabulary stays closed (ADR-0490)"
             )
@@ -328,6 +368,23 @@ class ToolResponse(BaseModel):
             status=job.state.value,
             suggested_next_actions=actions,
             refs=refs,
-            error_category=job.error_category.value if job.error_category else None,
+            error_category=cls._job_category(job),
             data=data,
         )
+
+    @staticmethod
+    def _job_category(job: Job) -> str | None:
+        """The category a job's envelope carries: only a failed job has one.
+
+        The schema permits a ``failed`` job with a null category, so a missing one degrades to
+        ``infrastructure_failure`` with a warning rather than tripping the category-iff-failure
+        invariant (#2931, #582).
+        """
+        if job.state is not JobState.FAILED:
+            return None
+        if job.error_category is None:
+            _log.warning(
+                "failed job %s has no error_category; degraded to infrastructure_failure", job.id
+            )
+            return ErrorCategory.INFRASTRUCTURE_FAILURE.value
+        return job.error_category.value

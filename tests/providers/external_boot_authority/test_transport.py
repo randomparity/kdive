@@ -34,7 +34,10 @@ from kdive.providers.external_boot_authority.host import (
     HostReadinessError,
     check_tls_health,
 )
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
+    AuthorityServiceError,
+)
 from kdive.providers.external_boot_authority.transport import (
     MAX_CREDENTIAL_BYTES,
     MAX_ENVELOPE_BYTES,
@@ -43,6 +46,32 @@ from kdive.providers.external_boot_authority.transport import (
     read_frame,
     serve_authority_transport,
 )
+from tests.providers.external_boot_authority.service_support import _mutation, _takeover
+
+
+def test_configuration_refusal_uses_closed_wire_category() -> None:
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class RefusingService:
+        async def execute_mutation(
+            self, peer: AuthenticatedPeer, request: protocol.AuthorityMutationRequestV1
+        ) -> protocol.AuthorityObservationV1:
+            del peer, request
+            raise AuthorityServiceError("configuration_error")
+
+    async def exercise() -> None:
+        request = _mutation(_takeover())
+        response = await transport._dispatch(
+            encode_request_envelope(
+                "execute-mutation", request.model_dump(mode="json", by_alias=True), "worker"
+            ),
+            authenticate,
+            cast(Any, RefusingService()),
+        )
+        assert response == b'{"category":"configuration-error","status":"error"}'
+
+    asyncio.run(exercise())
 
 
 def test_identity_dispatch_authenticates_before_independent_service() -> None:
@@ -1123,3 +1152,72 @@ def test_existing_operation_envelopes_keep_canonical_bytes(operation: Any) -> No
         separators=(",", ":"),
     ).encode()
     assert encode_request_envelope(operation, request, "credential") == expected
+
+
+class _RecordingWriter:
+    def __init__(self) -> None:
+        self.written = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.written.extend(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+def test_session_replies_after_dispatch_outlasts_the_tls_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Materialize and prepare run for minutes; only the peer's frame I/O is TLS-bounded.
+    monkeypatch.setattr(transport, "_TLS_TIMEOUT_SECONDS", 0.05)
+
+    async def slow_dispatch(*_args: object) -> bytes:
+        await asyncio.sleep(0.2)
+        return b"reply"
+
+    monkeypatch.setattr(transport, "_dispatch", slow_dispatch)
+
+    async def run() -> _RecordingWriter:
+        reader = asyncio.StreamReader()
+        reader.feed_data((7).to_bytes(4, "big") + b"request")
+        writer = _RecordingWriter()
+        await transport._handle_session(reader, cast(Any, writer), cast(Any, None), None)
+        return writer
+
+    writer = asyncio.run(run())
+
+    assert bytes(writer.written) == (5).to_bytes(4, "big") + b"reply"
+    assert writer.closed
+
+
+def test_session_still_bounds_a_peer_that_never_sends_a_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(transport, "_TLS_TIMEOUT_SECONDS", 0.05)
+
+    async def unexpected_dispatch(*_args: object) -> bytes:
+        raise AssertionError("dispatch must not run without a request frame")
+
+    monkeypatch.setattr(transport, "_dispatch", unexpected_dispatch)
+
+    async def run() -> _RecordingWriter:
+        writer = _RecordingWriter()
+        await asyncio.wait_for(
+            transport._handle_session(
+                asyncio.StreamReader(), cast(Any, writer), cast(Any, None), None
+            ),
+            timeout=2,
+        )
+        return writer
+
+    writer = asyncio.run(run())
+
+    assert writer.written == bytearray()
+    assert writer.closed

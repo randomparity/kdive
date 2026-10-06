@@ -23,16 +23,24 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
-from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
+from kdive.domain.capacity.state import (
+    AllocationState,
+    ExternalBootActivationState,
+    ResourceStatus,
+    SystemState,
+)
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools.ops.resources import host_ops
 from kdive.mcp.tools.ops.security import breakglass
 from kdive.security.authz.rbac import PlatformRole
+from tests.services.external_boot.conftest import SeededActivation, seed_activation
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _TARGET_PROJECT = "tenant-x"
@@ -375,6 +383,8 @@ def test_force_release_expired_stale_but_audited(migrated_url: str) -> None:
             )
         assert resp.status == "error"
         assert resp.error_category == "stale_handle"
+        # `allocations.wait` needs a project role the non-member admin does not hold.
+        assert resp.suggested_next_actions == []
         assert await _count_platform_audit(migrated_url) == 1
 
     asyncio.run(_run())
@@ -402,6 +412,110 @@ def test_force_release_missing_allocation_unaudited(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert await _count_platform_audit(migrated_url) == 0
+
+    asyncio.run(_run())
+
+
+async def _seed_denied_allocation(
+    url: str, *, cleanup_complete: bool
+) -> tuple[SeededActivation, UUID, UUID]:
+    """An abandoned activation on a granted allocation's System: (seed, allocation, resource).
+
+    Uncleaned, the activation itself refuses the release; cleaned, the System's external-boot
+    history still does until the System is torn down (ADR-0620).
+    """
+    async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
+        seeded = await seed_activation(
+            conn,
+            state=ExternalBootActivationState.ABANDONED,
+            cleanup_complete=cleanup_complete,
+            ready_reservation=True,
+        )
+        cursor = await conn.execute(
+            "SELECT a.id, a.resource_id FROM systems s JOIN allocations a "
+            "ON a.id = s.allocation_id WHERE s.id = %s",
+            (seeded.system_id,),
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    return seeded, row[0], row[1]
+
+
+def _assert_names_breakglass_exit(detail: str) -> None:
+    """#3047: the detail agrees with the break-glass next actions, not the project tools."""
+    assert "ops.force_teardown" in detail
+    assert "systems.teardown" not in detail
+    assert "allocations.release" not in detail
+
+
+def test_force_release_external_boot_denial_carries_detail_and_next_action(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        seeded, alloc_id, _ = await _seed_denied_allocation(migrated_url, cleanup_complete=False)
+        async with _pool(migrated_url) as pool:
+            resp = await breakglass.force_release(
+                pool, _admin_ctx(), allocation_id=str(alloc_id), reason="stuck"
+            )
+        assert resp.error_category == "conflict"
+        assert resp.detail is not None
+        assert str(seeded.activation.id) in resp.detail
+        assert str(seeded.system_id) in resp.detail
+        _assert_names_breakglass_exit(resp.detail)
+        assert resp.data["reason"] == "external_boot_restricted"
+        assert resp.data["activation_id"] == str(seeded.activation.id)
+        assert resp.data["activation_state"] == "abandoned"
+        assert resp.data["owning_run_id"] == str(seeded.run_id)
+        # The admin holds no project role, so `runs.get` is filtered out and the project
+        # teardown is named by its break-glass counterpart.
+        assert resp.suggested_next_actions == ["ops.force_teardown"]
+        assert await _alloc_state(migrated_url, alloc_id) == "granted"
+
+    asyncio.run(_run())
+
+
+def test_force_release_teardown_required_names_the_system(migrated_url: str) -> None:
+    async def _run() -> None:
+        seeded, alloc_id, _ = await _seed_denied_allocation(migrated_url, cleanup_complete=True)
+        async with _pool(migrated_url) as pool:
+            resp = await breakglass.force_release(
+                pool, _admin_ctx(), allocation_id=str(alloc_id), reason="stuck"
+            )
+        assert resp.error_category == "conflict"
+        assert resp.detail is not None
+        assert str(seeded.system_id) in resp.detail
+        _assert_names_breakglass_exit(resp.detail)
+        assert resp.data["reason"] == "external_boot_system_teardown_required"
+        assert resp.data["system_id"] == str(seeded.system_id)
+        assert resp.suggested_next_actions == ["ops.force_teardown"]
+
+    asyncio.run(_run())
+
+
+def test_drain_force_release_item_carries_external_boot_denial(migrated_url: str) -> None:
+    async def _run() -> None:
+        seeded, alloc_id, resource_id = await _seed_denied_allocation(
+            migrated_url, cleanup_complete=False
+        )
+        async with _pool(migrated_url) as pool:
+            resp = await host_ops.drain_resource(
+                pool,
+                _admin_ctx(),
+                resource_id=str(resource_id),
+                mode="force_release",
+                reason="maintenance",
+            )
+        assert [item.object_id for item in resp.items] == [str(alloc_id)]
+        assert (resp.data["released"], resp.data["failed"]) == ("0", "1")
+        item = resp.items[0]
+        assert item.error_category == "conflict"
+        assert item.detail is not None
+        _assert_names_breakglass_exit(item.detail)
+        assert str(seeded.system_id) in item.detail
+        assert item.data["system_id"] == str(seeded.system_id)
+        assert item.data["activation_id"] == str(seeded.activation.id)
+        assert item.data["activation_state"] == "abandoned"
+        assert item.suggested_next_actions == ["ops.force_teardown"]
 
     asyncio.run(_run())
 
@@ -516,6 +630,97 @@ def test_force_teardown_twice_dedups_to_one_job(migrated_url: str) -> None:
         assert await _job_count(migrated_url, f"{sys_id}:teardown") == 1
         # Both attempts are audited (the accountability row records each break-glass call).
         assert await _count_platform_audit(migrated_url) == 2
+
+    asyncio.run(_run())
+
+
+_JOB_ROW = "SELECT id, state, attempt, payload FROM jobs WHERE dedup_key = %s"
+
+
+async def _dead_lettered_teardown(pool: AsyncConnectionPool, sys_id: UUID, payload: str) -> None:
+    """Enqueue the ordinary teardown, then dead-letter it with ``payload`` merged in (#2978)."""
+    resp = await breakglass.force_teardown(pool, _admin_ctx(), system_id=str(sys_id), reason="x")
+    assert resp.status == "queued", resp.model_dump()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE jobs SET state = 'failed', attempt = max_attempts, error_category = 'conflict',"
+            " payload = payload || %s::jsonb WHERE dedup_key = %s",
+            (payload, f"{sys_id}:teardown"),
+        )
+
+
+async def _teardown_row(pool: AsyncConnectionPool, sys_id: UUID) -> tuple[object, ...] | None:
+    async with pool.connection() as conn:
+        return await (await conn.execute(_JOB_ROW, (f"{sys_id}:teardown",))).fetchone()
+
+
+@pytest.mark.parametrize("state", [SystemState.READY, SystemState.FAILED])
+def test_force_teardown_recycles_dead_lettered_job(migrated_url: str, state: SystemState) -> None:
+    """#2978: break-glass re-runs a dead-lettered ordinary teardown, as systems.teardown does."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _system(pool, state=SystemState.READY)
+            await _dead_lettered_teardown(pool, sys_id, "{}")
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE systems SET state = %s WHERE id = %s", (state.value, sys_id)
+                )
+            dead = await _teardown_row(pool, sys_id)
+            resp = await breakglass.force_teardown(
+                pool, _admin_ctx(), system_id=str(sys_id), reason="re-run"
+            )
+            after = await _teardown_row(pool, sys_id)
+        assert dead is not None and dead[1] == "failed"
+        assert resp.status == "queued", resp.model_dump()
+        assert resp.object_id == str(dead[0])
+        assert after is not None and after[1:3] == ("queued", 0)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("marker", ["authority_system_v1", "external_boot_authority_v1"])
+def test_force_teardown_keeps_failed_authority_marked_row(migrated_url: str, marker: str) -> None:
+    """#2978: recycling overwrites the payload, so a marked row keeps replaying (#2917)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _system(pool, state=SystemState.READY)
+            await _dead_lettered_teardown(pool, sys_id, f'{{"{marker}": {{"marked": true}}}}')
+            before = await _teardown_row(pool, sys_id)
+            await breakglass.force_teardown(
+                pool, _admin_ctx(), system_id=str(sys_id), reason="re-run"
+            )
+            after = await _teardown_row(pool, sys_id)
+        assert before is not None and before[1] == "failed"
+        assert after == before
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("prior", [None, "failed"])
+def test_force_teardown_refuses_reprovisioning(migrated_url: str, prior: str | None) -> None:
+    """#2978: no teardown is enqueued, and no failed one recycled, while a reprovision runs."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _system(pool, state=SystemState.READY)
+            if prior is not None:
+                await _dead_lettered_teardown(pool, sys_id, "{}")
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE systems SET state = 'reprovisioning' WHERE id = %s", (sys_id,)
+                )
+            before = await _teardown_row(pool, sys_id)
+            resp = await breakglass.force_teardown(
+                pool, _admin_ctx(), system_id=str(sys_id), reason="stuck"
+            )
+            after = await _teardown_row(pool, sys_id)
+        assert resp.status == "error"
+        assert resp.error_category == "conflict"
+        assert resp.data["current_status"] == "reprovisioning"
+        assert resp.suggested_next_actions == ["systems.get"]
+        assert after == before
 
     asyncio.run(_run())
 

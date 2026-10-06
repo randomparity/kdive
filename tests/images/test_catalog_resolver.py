@@ -8,14 +8,22 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import uuid4
 
 import psycopg
+import pytest
 from psycopg import sql
 
 from kdive.db.repositories import IMAGE_CATALOG
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
-from kdive.images.cataloging.catalog import resolve_public_rootfs_sync, resolve_rootfs
+from kdive.domain.lifecycle.records import System
+from kdive.images.cataloging.catalog import (
+    image_os_id,
+    resolve_public_rootfs_sync,
+    resolve_rootfs,
+    resolve_system_catalog_rootfs,
+)
 from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -258,3 +266,66 @@ def test_catalog_build_capabilities_are_per_distro() -> None:
     for capabilities in (fedora, debian, tumbleweed, leap):
         assert Capability.AGENT not in capabilities
         assert Capability.SSH in capabilities
+
+
+class _StubSystem:
+    def __init__(self, provisioning_profile: object) -> None:
+        self.provisioning_profile = provisioning_profile
+
+
+def _local_profile(rootfs: dict[str, str]) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "arch": "x86_64",
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": 10,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": "git#v7.0",
+        "provider": {"local-libvirt": {"rootfs": rootfs}},
+    }
+
+
+def _catalog_system(name: str) -> System:
+    rootfs = {"kind": "catalog", "provider": "local-libvirt", "name": name}
+    return cast(System, _StubSystem(_local_profile(rootfs)))
+
+
+def test_system_catalog_rootfs_resolves_the_public_arch_row(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await IMAGE_CATALOG.insert(conn, _entry())
+            entry = await resolve_system_catalog_rootfs(conn, _catalog_system("base"))
+            assert entry is not None and entry.name == "base"
+            assert await resolve_system_catalog_rootfs(conn, _catalog_system("other")) is None
+
+    asyncio.run(_run())
+
+
+def test_system_catalog_rootfs_is_none_for_an_unparsable_profile() -> None:
+    conn = cast(psycopg.AsyncConnection, object())
+    system = cast(System, _StubSystem("::not-a-profile::"))
+    assert asyncio.run(resolve_system_catalog_rootfs(conn, system)) is None
+
+
+def test_system_catalog_rootfs_is_none_for_a_non_catalog_rootfs() -> None:
+    conn = cast(psycopg.AsyncConnection, object())
+    rootfs = {"kind": "local", "path": "/var/lib/kdive/rootfs/x.qcow2"}
+    system = cast(System, _StubSystem(_local_profile(rootfs)))
+    assert asyncio.run(resolve_system_catalog_rootfs(conn, system)) is None
+
+
+@pytest.mark.parametrize(
+    ("provenance", "expected"),
+    [
+        ({"os_release": {"id": "fedora", "version_id": "44"}}, "fedora"),
+        ({}, None),
+        ({"os_release": "fedora"}, None),
+        ({"os_release": {"id": ""}}, None),
+        ({"os_release": {"id": 7}}, None),
+    ],
+)
+def test_image_os_id_reads_the_recorded_os_release_id(
+    provenance: dict[str, object], expected: str | None
+) -> None:
+    assert image_os_id(_entry(provenance=provenance)) == expected

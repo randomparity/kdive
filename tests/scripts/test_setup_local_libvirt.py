@@ -41,6 +41,9 @@ def _healthy_local(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     _stub(bindir, "id", "echo kvm libvirt")
     _stub(bindir, "qemu-system-x86_64", "exit 0")
     _stub(bindir, "qemu-img", "exit 0")
+    # The SELinux label probe reads the host's real getenforce off /usr/bin; pin it so an
+    # enforcing developer host does not fail the fixture's unlabeled tmp dirs (ADR-0640).
+    _stub(bindir, "getenforce", "echo Disabled")
     kvm = tmp_path / "kvm"
     kvm.write_text("")
     calllog = tmp_path / "python.log"
@@ -69,6 +72,8 @@ def _healthy_local(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
         "KDIVE_INSTALL_STAGING": str(staging),
         "KDIVE_BOOT_DIR": str(boot),
         "KDIVE_PYTHON": str(bindir / "python3"),
+        # Pinned absent so a host that ran host preparation does not decide the verdict.
+        "KDIVE_LIFECYCLE_PYTHON": str(tmp_path / "absent-lifecycle-python"),
     }
     return bindir, env, calllog
 

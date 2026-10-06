@@ -225,6 +225,209 @@ The native x86_64 and ppc64le live tiers exercise the same protocol. A provider 
 place every external-boot commit point behind the authority or to preserve unresolved execution
 across authority restart does not advertise external-boot v1.
 
+### Amendment (2026-09-25): local-libvirt observes a running domain's modules as last published (#2785)
+
+This amendment qualifies the observation rule in this section for local-libvirt. Local-libvirt
+reads the guest module tree with libguestfs, which cannot open the disk of a running domain. So
+after a successful activation, when the target runs, the tree was unreadable and the observation was
+`unreadable`, and core refused the activate commit. When a module publication completes, the
+provider now observes the published tree while the domain is still inactive and records that
+observation in its recovery metadata. While the domain is active, the observation reports the
+recorded value. While the domain is inactive, the observation still reads the tree. The recorded
+value covers only provider mutations. A change that the running guest makes to its own module tree
+is not a provider mutation, and the next inactive observation sees that change.
+
+### Amendment (2026-09-28): an unanchored final record is retracted (#2793)
+
+This amendment narrows the "longer uncommitted suffix" case in *Mutation journal and stable
+ownership*. A record the trusted head never accepted records no provider mutation that the head
+does not already show: `admitted` and `mutation-started` are anchored before provider access, so an
+unanchored record either precedes that access or follows a `mutation-started` head that already
+marks the operation unresolved. The authority therefore removes exactly one unanchored final
+record, in two cases and in no others:
+
+- at runtime, the record `_anchor` has just appended, when the head advance returns a definitive
+  `superseded` or `conflict`. An error from the advance leaves the outcome unknown, and the record
+  stays;
+- at service startup, while it holds the request-socket lock and that System's advisory lock, a
+  single record at head sequence + 1 that chains to the unchanged head, or the only record of a
+  lane that has no head.
+
+Before removal, the authority preserves the record's exact bytes in a reserved `retracted/`
+subdirectory of the journal directory: mode 0700, owned by the authority, created on first use.
+The lane inventory accepts exactly that name, and only as a real directory (not a symlink) with
+that owner and mode. It never enumerates or reads the directory's contents as a lane, and every
+other entry that is not `<uuid>.jsonl` still fails `unsafe-tree`. Every other difference still
+refuses service: a longer suffix, a head that moved, a shorter journal, or any divergence. The
+trusted head never moves, and no anchored record is removed.
+
+Rejected for this amendment:
+
+- **Advance the head before the local fsync.** judgment: a crash between the two then leaves a
+  journal shorter than its head, which is the unrecoverable case this ADR refuses.
+- **Tolerate a one-record tail at readiness.** verified: `FileAuthorityJournal._prepare_record`
+  (`journal.py`, commit 83e79f112) requires `sequence == count + 1`, while the service numbers
+  its next record from the head-length record list. The next append on the lane then fails as
+  non-contiguous.
+- **Only an operator repair command.** judgment: every refused anchor would still take the host
+  out of service until an operator acted.
+- **Evidence under `state_dir`.** verified: every authority systemd unit runs
+  `ProtectSystem=strict`, and its `ReadWritePaths` name the journal directory and fixed
+  subtrees but never `state_dir` itself
+  (`deploy/systemd/system/kdive-external-boot-authority.service`,
+  `deploy/ansible/roles/provider_authority_host/templates/authority.service.j2`,
+  `deploy/ansible/roles/live_vm_host/templates/external-boot-authority.service.j2`). A new
+  evidence path there fails with `EROFS`, and the host still restart-loops. Widening `ReadWritePaths` would require
+  reprovisioning every host. The campaign orchestrator selected the reserved subdirectory on
+  2026-09-28.
+
+### Amendment (2026-09-28): the periodic readiness check waits out an in-flight anchor (#2899)
+
+The anchor order (local fsync, then head advance) means a running authority always holds a
+window where one lane's journal is one record ahead of its head, or a new lane has no head row.
+The periodic readiness check observed that window and exited the host. When the periodic check
+raises `head-mismatch` or `inventory-mismatch`, it re-reads the heads and reloads the lanes once
+while the service holds new anchors and waits for in-flight ones to finish, including any
+retraction of a refused record. A mismatch that persists refuses service as before. The wait and
+the retry stay inside the readiness timeout. The startup and standalone checks are unchanged, and
+the periodic check never retracts.
+
+Rejected for this amendment:
+
+- **Do nothing and let startup reconcile.** judgment: every overlap aborts the requests in
+  flight, and nothing was wrong to reconcile.
+- **Retry once after a short delay, without quiescence.** judgment: nothing makes the second
+  read land outside an anchor, so it narrows the race without closing it.
+- **Hold every lane lock during the check.** verified: `_release_lane` (`service.py`, commit
+  b51e5c8c9) pops an idle lane, so a lane created during the check gets a fresh lock the check
+  does not hold.
+- **Treat a one-record tail as healthy at readiness.** judgment: the check could no longer tell
+  a crash-stranded record from an anchor in progress, and the #2793 amendment already rejects a
+  tolerated tail for the next append.
+- **Serialize every anchor behind one service lock.** judgment: it trades a rare readiness retry
+  for serialized head advances on all lanes during normal operation.
+
+### Amendment (2026-09-29): the periodic retry also covers a torn or vanished lane (#2933)
+
+The check's lane loads run beside an anchor with no reader exclusion, so an in-flight anchor has
+two more views: a final line read before its newline, or a lane truncated mid-read, fails as
+`journal: invalid-lane`; and a single-record lane that a refusal's retraction unlinks between
+the lane listing and its stat fails as `journal: unsafe-tree`. The #2899 amendment deliberately
+left both out of the retry set. The periodic check now also retries once under quiescence on
+`invalid-lane`, and on an `unsafe-tree` whose only cause is that a listed entry no longer exists.
+A wrong type, owner, mode, or name found by the lane listing is still refused at once; one found
+only when the journal opens the lane reports `invalid-lane` and is refused after the one retry.
+The reported component and reason are unchanged.
+
+Widening is safe because the retry runs with every anchor drained: no lane is mid-append,
+mid-advance, or mid-retraction, so a torn or missing lane seen then is at rest and refuses
+service as before. The retry never tolerates, repairs, or retracts a lane. Startup and the
+standalone check are unchanged, and a crash mid-append still leaves a torn lane that startup
+refuses.
+
+Rejected for this amendment:
+
+- **Do nothing.** judgment: as in the #2899 amendment, every overlap aborts the requests in
+  flight, and nothing was wrong at rest.
+- **Skip a vanished entry in the lane listing.** judgment: the listing is shared with startup and
+  the standalone check, whose reported reason for a vanished entry would then change; the
+  operator chose the retry shape on 2026-09-29.
+- **Quiesce anchors for every periodic pass.** judgment: it stalls anchors on every lane at every
+  readiness interval to prevent a rare overlap the retry already absorbs.
+- **Retry every `unsafe-tree`.** judgment: a structural cause cannot be produced by an anchor,
+  and retrying it only delays the refusal of a foreign or wrongly owned entry.
+- **Make the append atomic to readers.** judgment: it changes the journal write path the operator
+  kept out of this scope, and still leaves the retraction race.
+
+### Amendment (2026-09-29): startup removes a torn unanchored tail (#2983)
+
+An append is an `os.write` loop and an `fsync` on an `O_APPEND` descriptor. A crash, power loss,
+or write error part-way through leaves a final line with no newline; issuing a single `write` would
+not change that, because a write is not guaranteed atomic across a crash or power loss. The anchor
+order (local append, then head advance) means such a line was never anchored. This amendment
+widens the #2793 startup rule to that line, and narrows the #2933 amendment's statement that a
+lane torn mid-append is refused at startup to the cases listed below.
+
+At startup only, under the same request-socket and advisory locks, a lane whose single defect is
+a final line with no newline and no longer than one record is recovered when the complete records
+before it end exactly at the head, or when the lane has no head and no complete record; a
+zero-byte lane with no head (a first append that failed after creating it) is recovered too. The
+authority preserves the torn bytes in `retracted/` under a name carrying their SHA-256, then
+truncates the lane to the last complete record, or unlinks it; recovery needs room for that
+evidence, so a lane torn by `ENOSPC` refuses until space is freed. A startup whose first check
+fails with `journal: invalid-lane` now runs the reconcile step, and a lane it cannot recover still
+refuses service. Still refused: a torn line after an unanchored complete record (at
+most one tail per lane per startup), a head that is ahead of the complete records, an oversized
+or non-final corrupt line. The periodic and standalone checks stay read-only, the append path and
+record format are unchanged, and no anchored byte is removed.
+
+Rejected for this amendment:
+
+- **Make the append atomic** (write a temporary lane, rename it under a per-lane lock).
+  verified: every append would rewrite the whole lane, bounded only by
+  `DEFAULT_MAX_JOURNAL_BYTES` (64 MiB, `journal.py`). judgment: that cost and a lock the anchor
+  and retraction paths would both need buy nothing startup recovery does not; the operator
+  excluded it on 2026-09-29.
+- **Length-prefixed or checksummed framing.** judgment: an on-disk format change with a
+  migration for every existing lane, to detect a defect the newline already detects.
+- **Truncate whenever the complete prefix validates, head or not.** judgment: a torn line after
+  an unanchored complete record would then combine with the #2793 retraction and remove two tails
+  in one startup, and a head ahead of the journal would pass as recoverable.
+- **Do nothing; the operator repairs.** judgment: every interrupted append then takes the host out
+  of service until someone edits the lane, although nothing anchored was lost.
+
+### Amendment (2026-09-30): takeover recovery preserves the recorded mutation (#2977)
+
+When takeover recovers a suspended operation, it rebuilds that operation from its last journal
+record and anchors the remaining `provider-returned`, `observed`, and `terminal` records from the
+rebuilt request. The rebuilt request carries every mutation field of the recorded operation
+(binding, attempt, `local_timing`, identities, recovery objects), so each record recovery anchors
+carries the mutation fields the original attempt would have written; its sequence, chain, and a
+fresh observation still differ. Before
+this amendment the rebuild dropped the ADR-0684 `local_timing` snapshot. The recovered `terminal`
+then no longer matched a successor's release-phase request, and a retry that superseded a
+completion still in flight failed with `journal_conflict` (`release_phase_mismatch`) instead of
+adopting it. A refused `terminal` is still retracted and recovered as the #2793 amendment
+describes; only the rebuilt fields change. The record format, the adoption check, and takeover
+ordering are unchanged.
+
+Rejected for this amendment:
+
+- **Serialize takeover against an in-flight anchor for the same lane.** verified: the refused
+  `terminal` is already recovered and anchored under the successor's watermark, so waiting for
+  it adds nothing once the rebuilt record matches. The operator dropped this option on
+  2026-09-30.
+- **Leave `local_timing` out of the adoption match.** judgment: the match binds the timing
+  snapshot so that a replay or adoption cannot run under different deadlines than the recorded
+  attempt.
+
+### Amendment (2026-10-01): a teardown generation outlives its Allocation (#2992)
+
+Purpose `teardown` is allocated, acknowledged, and committed on an Allocation in any state. The
+three functions that required an `active` Allocation for every purpose
+(`allocate_external_boot_authority`, `acknowledge_external_boot_authority`, and
+`commit_external_boot_authority_result`) now require it only for `activate`, `recover`,
+`resolve-conflict`, and `release`. Migration 0169 makes the change. Every other part of the
+binding is unchanged: the credential, the job attempt, the generation, the acknowledgement, the
+System state, and the newest activation. Each function binds `p_purpose` to the marked or stored
+purpose in the same predicate, so a generation of another purpose cannot pass as a teardown.
+
+Lease expiry ends an Allocation without tearing down its Systems, and only the authority teardown
+may finish a System with external-boot history (ADR-0620). Before, such a System had no exit.
+Tearing it down needs no live Allocation, because it removes the System rather than using it.
+
+Rejected for this amendment:
+
+- **Do nothing.** verified: `test_0168_expired_allocation_still_supersedes` (removed by this
+  change, at ccc8b4329) showed the allocator answering `superseded` for a teardown on an
+  `expired` Allocation, which leaves the System with no supported exit.
+- **Admit only `released` and `expired`.** judgment: no other non-`active` state needs a
+  separate rule. A teardown is the operation that every Allocation end needs, so a list would
+  only add a case to maintain.
+- **Relax only the allocator.** verified: acknowledgement and commit each test
+  `v_allocation.state <> 'active'` (`0122_external_boot_authority.sql` lines 651 and 905), so a
+  teardown would allocate and then fail at acknowledgement.
+
 ## Consequences
 
 - External boot gains a fence at the provider mutation boundary and a separate database fence for

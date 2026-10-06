@@ -8,7 +8,8 @@
 # privileged daemon relabels from svirt_image_t exactly as it did from virt_image_t, so this
 # label is correct under both.
 #
-# Sourced by install-host.sh and build-image.sh; sourcing it runs nothing.
+# Sourced by build-image.sh; sourcing it runs nothing. The parent rootfs and install rules are
+# applied by `just prepare-local-libvirt-host` (local_worker_host), not by this helper.
 #
 # kdive_label_svirt_image <directory>
 #   No-ops (returns 0) off SELinux-enforcing hosts, and when semanage is missing (reporting the

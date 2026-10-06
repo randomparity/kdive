@@ -45,6 +45,41 @@ class ExternalEnvVar:
 EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
     # --- test-only (gated suites) ---------------------------------------------------------
     ExternalEnvVar(
+        "KDIVE_FIXTURE_ROOT",
+        "test",
+        None,
+        "Parent directory containing verified longterm and stable kernel fixture outputs. "
+        "Required when selecting the pinned-kernel live upload proof; unset fails the proof.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_FIXTURE_EVIDENCE",
+        "test",
+        None,
+        "Private output directory; each upload case creates a new baseline subdirectory. "
+        "Required when selecting the pinned-kernel live upload proof; unset fails the proof.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_FIXTURE_CANDIDATE",
+        "test",
+        None,
+        "Full commit SHA required to match the clean test checkout and deployed server. "
+        "Required when selecting the pinned-kernel live upload proof; unset fails the proof.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_FIXTURE_HEALTH_URL",
+        "test",
+        None,
+        "Candidate server readiness URL used to verify its revision before and after upload. "
+        "Required when selecting the pinned-kernel live upload proof; unset fails the proof.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_FIXTURE_DATABASE_URL",
+        "test",
+        None,
+        "Database DSN with read access to verify persisted build state and artifact references. "
+        "Required when selecting the pinned-kernel live upload proof; unset fails the proof.",
+    ),
+    ExternalEnvVar(
         "KDIVE_GUEST_IMAGE",
         "test",
         None,
@@ -467,9 +502,10 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_WARM_STORE_TARGET_NVR",
         "script",
         None,
-        "Supplied pinned guest-kernel NVR the warm-store refresh keys freshness on (the "
-        "operator/CI computes it from the base image; no live distro query). Unset → the script "
-        "dies. Same-NVR distro rebuilds need `KDIVE_WARM_STORE_FORCE`.",
+        "Supplied pinned guest-kernel NVR (operator/CI computes it from the base image; no live "
+        "distro query). Unset → the script dies. Warm reuse also requires the selected catalog "
+        "row, clean builder commit, provenance, and artifact digests to match; the NVR alone "
+        "does not establish freshness.",
     ),
     ExternalEnvVar(
         "KDIVE_WARM_STORE_IMAGE",
@@ -482,8 +518,8 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_WARM_STORE_FORCE",
         "script",
         "0",
-        "When `1`, `warm-store.sh` skips the warm fast-path and rebuilds — the escape hatch for a "
-        "distro that rebuilt the kernel under an unchanged NVR.",
+        "When `1`, `warm-store.sh` skips manifest-verified warm reuse and rebuilds, for example "
+        "when a distro changes package bytes without changing the pinned NVR.",
     ),
     ExternalEnvVar(
         "KDIVE_TCG_STAGE_DIR",
@@ -537,11 +573,53 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "tracks the constants in `runtime_paths.py` and `lifecycle/storage.py`.",
     ),
     ExternalEnvVar(
+        "KDIVE_LANE_WORKSPACE",
+        "script",
+        None,
+        "Existing workspace directory whose filesystem free bytes `preflight-env.sh capacity` "
+        "checks. Required for that family; unset or missing → preflight fails. Set it to an "
+        "existing workspace and retry. This is a point-in-time admission check, not a disk "
+        "reservation.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LANE_CPUS",
+        "script",
+        "8",
+        "Positive CPU count required by `preflight-env.sh capacity`; available CPUs are checked "
+        "at admission only, with no reservation. Invalid or insufficient → preflight fails; "
+        "reduce the lane size or choose another host and retry.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LANE_MEMORY_MIB",
+        "script",
+        "16384",
+        "Positive available-memory requirement in MiB for `preflight-env.sh capacity`; checked "
+        "at admission only, with no reservation. Invalid or insufficient → preflight fails; "
+        "free memory, reduce the lane size, or choose another host and retry.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LANE_DISK_BYTES",
+        "script",
+        "51539607552",
+        "Positive free-space requirement in bytes on KDIVE_LANE_WORKSPACE for "
+        "`preflight-env.sh capacity`; checked at admission only, with no reservation. Invalid "
+        "or insufficient → preflight fails; free space or choose another workspace and retry.",
+    ),
+    ExternalEnvVar(
         "KDIVE_BOOT_DIR",
         "script",
         "/boot",
         "Boot directory `check-local-libvirt.sh` scans for readable `vmlinuz-*` host kernels "
         "(libguestfs build-fs appliance, ADR-0222).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIFECYCLE_PYTHON",
+        "script",
+        "/opt/kdive-live-worker-lifecycle/.venv/bin/python",
+        "Installed lifecycle worker interpreter `check-local-libvirt.sh` probes for `import "
+        "guestfs` when it exists: that venv provisions, and baseline-kernel extraction needs the "
+        "binding (ADR-0272). Unlike the `KDIVE_PYTHON` probe, a failure here is never downgraded "
+        "by `KDIVE_PREFLIGHT_KDUMP`.",
     ),
     ExternalEnvVar(
         "KDIVE_EFFECTIVE_UID",
@@ -620,6 +698,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "<repo>/.live-stack-logs",
         "Log directory for the server/reconciler daemons `scripts/live-stack/lib.sh` starts; "
         "`examples/local-libvirt/env.sh` overrides the default to an XDG state path.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_DEMO_WORKSPACE",
+        "script",
+        "same as KDIVE_KERNEL_SRC",
+        "Directory `examples/local-libvirt/demo-up.sh` installs `.mcp.json` into; kept "
+        "independent of `KDIVE_KERNEL_SRC` so a demo bring-up cannot add files to a tree a live "
+        "proof is also using as its kernel fixture (#2760).",
     ),
     ExternalEnvVar(
         "KDIVE_ROOTFS_DIR",

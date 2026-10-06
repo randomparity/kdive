@@ -74,6 +74,9 @@ from kdive.mcp.tools.lifecycle.systems.ssh_access import (
     ssh_info as _ssh_info,
 )
 from kdive.mcp.tools.lifecycle.systems.view import (
+    RUN_INVESTIGATIONS_LIMIT as _RUN_INVESTIGATIONS_LIMIT,
+)
+from kdive.mcp.tools.lifecycle.systems.view import (
     SystemsListRequest as _SystemsListRequest,
 )
 from kdive.mcp.tools.lifecycle.systems.view import (
@@ -112,6 +115,16 @@ def _with_authorize_preflight_limit(
     func.__doc__ = func.__doc__.format(
         authorize_preflight_deadline_s=f"{_AUTHORIZE_PREFLIGHT_DEADLINE_S:g}"
     )
+    return func
+
+
+def _with_run_history_limit(
+    func: Callable[..., Awaitable[ToolResponse]],
+) -> Callable[..., Awaitable[ToolResponse]]:
+    """Interpolate the enforced history cap before FastMCP reads the docstring."""
+    if func.__doc__ is None:
+        raise AssertionError("systems.get wrapper must have a docstring")
+    func.__doc__ = func.__doc__.replace("{cap}", str(_RUN_INVESTIGATIONS_LIMIT))
     return func
 
 
@@ -237,6 +250,11 @@ def _register_systems_provision(
         request a fresh one (`allocations.release`, then `allocations.request`) for a fresh
         System. Requires contributor on the Allocation's project.
 
+        On local-libvirt the job succeeds, and the System reaches `ready`, only after the
+        guest's first boot writes its readiness marker to the console — minutes on KVM, longer
+        on an emulated arch. A guest that crashes or never writes it ends `failed` with
+        `provisioning_failure`.
+
         A profile whose `arch` the backing host cannot boot is rejected `configuration_error`
         at admission — before any capacity is committed — naming the arches the host supports;
         pick one of those or an allocation on a host that offers the arch you need. A profile
@@ -274,10 +292,18 @@ def _register_systems_get(
         annotations=_docmeta.read_only(),
         meta={"maturity": "implemented"},
     )
+    @_with_run_history_limit
     async def systems_get(
         system_id: Annotated[str, Field(description="The System to render.")],
     ) -> ToolResponse:
         """Return a System the caller can view.
+
+        ``data.investigation_id`` is the owning Investigation's id, or ``null`` when unowned.
+        ``data.run_investigation_ids`` lists distinct Investigations with Runs on this System,
+        across every Run state, ordered by their newest Run's creation time (newest first),
+        capped at {cap} ids per response. ``data.run_investigation_ids_truncated`` is ``true`` when
+        more ids were omitted. Use ``runs.list(system_id=...)`` for the complete paginated Run
+        history, including the remaining Investigation ids.
 
         ``data.accel`` is the host-derived accelerator resolved at admission — ``kvm`` (native)
         or ``tcg`` (foreign-arch emulation) — or ``null`` when the backing host advertised no
@@ -477,7 +503,9 @@ def _register_systems_teardown(
         `suggested_next_actions`). If this System has external-boot history, the returned teardown
         job is authority-marked and the authority destroys its private artifacts before the
         durable terminal record commits. The authority route must remain configured; otherwise the
-        tool returns `configuration_error` and enqueues no ordinary teardown job.
+        tool returns `configuration_error` and enqueues no ordinary teardown job. A System without
+        external-boot history that is mid-reprovision is refused with `conflict`
+        (`current_status: reprovisioning`) and nothing is enqueued; retry once it settles.
         """
         return await _teardown_system(
             pool, current_context(), system_id, idempotency_key=idempotency_key, resolver=resolver
@@ -510,6 +538,21 @@ def _register_systems_reprovision(
         The System's resource kind is fixed by its allocation, so a profile whose `provider`
         section names a different kind is rejected `configuration_error` before the System
         leaves `ready`, naming both; keep the section the System was provisioned with.
+
+        On local-libvirt the job succeeds, and the System returns to `ready`, only after the
+        rebuilt guest's first boot writes its readiness marker to the console — minutes on KVM,
+        longer on an emulated arch. A guest that crashes or never writes it ends `failed` with
+        `provisioning_failure`.
+
+        A `ready` System whose teardown job is queued or running is refused with `conflict`
+        (`reason: teardown_in_progress`) and left unchanged. The teardown normally ends the
+        System; reprovision only if `systems.get` shows it still `ready` after the teardown job
+        failed or was canceled.
+
+        Re-applying a profile the System applied before runs a fresh attempt of that
+        profile's job. While that job is queued or running, or for 15 minutes after it ended
+        canceled, lease-lapsed, or on a retried attempt, the call is refused with `conflict`
+        (`reason: reprovision_job_settling`, `job_id`) and the System stays `ready`.
         """
         ctx = current_context()
         try:
@@ -735,6 +778,13 @@ def _register_systems_resolve_external_boot_conflict(
         identity returns that same job. The worker freshly observes provider state and changes
         the activation only when the identity still matches; otherwise the job fails and leaves
         the conflict and its evidence intact. Poll with `jobs.wait`.
+
+        `data.recovery_readiness_deadline` is an absolute server-clock timestamp for this
+        request's recovery job. For local libvirt it contains the configured console readiness
+        window, scaled for TCG; other providers retain their own deadline. Expiry fails the job
+        without renewing it. Read `systems.get` for a fresh composite identity, then submit a
+        new `systems.resolve_external_boot_conflict` request with a new idempotency key, or use
+        `systems.teardown` if recovery is unavailable. The same key replays the original job.
 
         Requires admin on the System's project. Only an activation in `recovery_conflict` is
         admissible. `runs.get` reports the owning Run's current state; `systems.teardown` remains

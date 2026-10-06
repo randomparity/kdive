@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
 import pytest
 
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import InvestigationBuild
 from kdive.providers.ports.external_boot import RootSource, RootSpecV1
-from kdive.services.external_boot.plan import construct_external_boot_plan
+from kdive.services.external_boot.plan import (
+    construct_external_boot_plan,
+    external_boot_root_arguments,
+)
 
 _SHA = "sha256:" + "11" * 32
 
@@ -96,3 +99,62 @@ def test_construct_plan_fails_closed_without_v2_evidence() -> None:
             debug_cmdline=None,
         )
     assert raised.value.details["reason"] == "external_boot_evidence_missing"
+
+
+def _uuid_root(architecture: Literal["x86_64", "ppc64le"] = "x86_64") -> RootSpecV1:
+    return RootSpecV1(
+        architecture=architecture,
+        root="UUID=x",
+        arguments=("root=UUID=x", "rootfstype=ext4"),
+        authority="stage-inspection",
+        source=RootSource(kind="staged-image", identity=_SHA),
+    )
+
+
+def _without_initrd(build: InvestigationBuild) -> InvestigationBuild:
+    evidence = build.canonical_document["external_boot_evidence"]
+    assert isinstance(evidence, dict)
+    evidence["initrd"] = None
+    return build
+
+
+def test_root_arguments_keep_the_inspected_token_when_an_initrd_resolves_it() -> None:
+    assert external_boot_root_arguments(_build(), _uuid_root(), "root=/dev/vda") == (
+        "root=UUID=x",
+        "rootfstype=ext4",
+    )
+
+
+def test_root_arguments_name_the_provider_whole_disk_root_without_an_initrd() -> None:
+    build = _without_initrd(_build())
+
+    assert external_boot_root_arguments(build, _uuid_root(), "root=/dev/vda") == (
+        "root=/dev/vda",
+        "rootfstype=ext4",
+    )
+
+
+@pytest.mark.parametrize("missing_key", [False, True])
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_root_arguments_require_initrd_when_provider_owns_no_root_device(
+    missing_key: bool,
+    architecture: Literal["x86_64", "ppc64le"],
+) -> None:
+    build = _without_initrd(_build())
+    evidence = build.canonical_document["external_boot_evidence"]
+    assert isinstance(evidence, dict)
+    evidence["architecture"] = architecture
+    if missing_key:
+        del evidence["initrd"]
+
+    with pytest.raises(CategorizedError, match="create a new Run, supply an initrd") as caught:
+        external_boot_root_arguments(build, _uuid_root(architecture), None)
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details["reason"] == "remote_external_boot_initrd_required"
+
+
+def test_root_arguments_keep_inspected_token_with_initrd_and_no_provider_root() -> None:
+    assert external_boot_root_arguments(_build(), _uuid_root(), None) == (
+        "root=UUID=x",
+        "rootfstype=ext4",
+    )

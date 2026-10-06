@@ -50,6 +50,7 @@ _QUOTED = re.compile(r'"(?P<image>[^"\s]+)"')
 #: mistaken for the suite.
 _PREPULL_STEP = "just pull-test-images"
 _TEST_STEP = "just test"
+_TEST_STEPS = {_TEST_STEP, 'just test-shard "$PYTEST_SHARD"'}
 
 
 def _jobs(path: Path) -> dict[str, object]:
@@ -168,7 +169,7 @@ def test_every_suite_workflow_prepulls_before_it_runs_the_suite() -> None:
 
         for job_name, job in jobs.items():
             runs = _job_run_steps(job)
-            test_steps = [index for index, run in enumerate(runs) if run == _TEST_STEP]
+            test_steps = [index for index, run in enumerate(runs) if run in _TEST_STEPS]
             if not test_steps:
                 continue
             suite_jobs[name] += 1
@@ -193,7 +194,7 @@ def test_every_suite_workflow_prepulls_before_it_runs_the_suite() -> None:
     missing = sorted(name for name, count in suite_jobs.items() if count == 0)
     assert not missing, (
         f"no `run: just test` step found in {missing}, so this guard checks nothing there. "
-        "If the suite moved to another recipe, re-point _TEST_STEP; if a workflow stopped "
+        "If the suite moved to another recipe, re-point _TEST_STEPS; if a workflow stopped "
         "running it, drop it from _SUITE_WORKFLOWS (ADR-0553)."
     )
 

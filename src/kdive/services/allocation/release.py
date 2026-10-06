@@ -41,6 +41,8 @@ class ReleaseOutcome:
     category: ErrorCategory | None = None
     current_status: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
+    detail: str | None = None
+    next_actions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +138,14 @@ async def release_with_backstops(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 current_status=latest.state.value if latest else None,
             )
+        except ExternalBootDenied as exc:
+            return ReleaseOutcome(
+                released=False,
+                category=exc.category,
+                details=categorized_details(exc),
+                detail=str(exc),
+                next_actions=tuple(exc.next_actions),
+            )
         except CategorizedError as exc:
             return ReleaseOutcome(
                 released=False,
@@ -173,7 +183,11 @@ LockedPrecondition = Callable[[AsyncConnection], Awaitable[bool]]
 async def guard_external_boot_release(
     conn: AsyncConnection, allocation_id: UUID, *, project: str
 ) -> None:
-    """Lock every historical System and reject release while one remains restricted."""
+    """Lock every historical System and reject release while one remains restricted.
+
+    The denial names the refusing System in ``details`` as well as its message, so a renderer
+    that drops the message (the break-glass envelope, #3047) still has the System to act on.
+    """
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT id FROM systems WHERE allocation_id = %s ORDER BY id", (allocation_id,)
@@ -183,12 +197,44 @@ async def guard_external_boot_release(
         for system_id in system_ids:
             await locks.enter_async_context(advisory_xact_lock(conn, LockScope.SYSTEM, system_id))
         for system_id in system_ids:
-            await check_external_boot_admission(
-                conn,
-                system_id,
-                ExternalBootOperation.ALLOCATION_RELEASE,
-                project=project,
-            )
+            try:
+                await check_external_boot_admission(
+                    conn,
+                    system_id,
+                    ExternalBootOperation.ALLOCATION_RELEASE,
+                    project=project,
+                )
+            except ExternalBootDenied as denied:
+                denied.details.setdefault("system_id", str(system_id))
+                raise
+
+
+# Ending the allocation first would strand a domain the authority still owns, so release is
+# refused until the System is torn down (ADR-0620 amendment, #2966).
+_SYSTEM_AWAITING_AUTHORITY_TEARDOWN_SQL = (
+    "SELECT s.id FROM systems s "
+    "WHERE s.allocation_id = %s AND s.state <> 'torn_down' "
+    "  AND EXISTS (SELECT 1 FROM external_boot_activations e WHERE e.system_id = s.id) "
+    "ORDER BY s.id LIMIT 1"
+)
+SYSTEM_TEARDOWN_REQUIRED_REASON = "external_boot_system_teardown_required"
+
+
+async def _require_system_teardown(
+    conn: AsyncConnection, allocation_id: UUID, *, project: str
+) -> None:
+    """Keep the allocation until each System with external-boot history is torn down."""
+    cursor = await conn.execute(_SYSTEM_AWAITING_AUTHORITY_TEARDOWN_SQL, (allocation_id,))
+    row = await cursor.fetchone()
+    if row is None:
+        return
+    raise ExternalBootDenied(
+        f"allocations.release is denied while System {row[0]} has external-boot history and is "
+        "not torn down; run systems.teardown first (ADR-0620)",
+        details={"reason": SYSTEM_TEARDOWN_REQUIRED_REASON, "system_id": str(row[0])},
+        next_actions=["systems.teardown", "systems.get"],
+        project=project,
+    )
 
 
 async def reclaim_under_lock(
@@ -239,6 +285,7 @@ async def reclaim_under_lock(
             return ReleaseOutcome(released=False, current_status=current.state.value)
         try:
             await guard_external_boot_release(conn, uid, project=project)
+            await _require_system_teardown(conn, uid, project=project)
         except ExternalBootDenied:
             return ReleaseOutcome(
                 released=False,
@@ -306,6 +353,7 @@ async def _release_locked(
                 current_status=current.state.value,
             )
         await guard_external_boot_release(conn, uid, project=project)
+        await _require_system_teardown(conn, uid, project=project)
         if current.state in _RELEASABLE:
             await _transition_and_audit(
                 conn, audit_writer, uid, current.state, AllocationState.RELEASING, project=project

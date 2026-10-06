@@ -24,18 +24,21 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, try_advisory_xact_lock
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import AllocationState, SystemState
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.handlers.control import control as control_plane
 from kdive.jobs.payloads import PowerPayload, SystemPayload, TeardownPayload
+from kdive.jobs.provider_context import take_provider_kind
 from tests.adversarial.conftest import seed_allocation, seed_resource
 from tests.mcp.systems_support import provider_resolver
 from tests.support.object_store import INERT_OBJECT_STORE
@@ -217,13 +220,18 @@ async def _set_state(pool: AsyncConnectionPool, system_id: str, state: str) -> N
         await cur.execute("UPDATE systems SET state = %s WHERE id = %s", (state, system_id))
 
 
-async def _enqueue_power(pool: AsyncConnectionPool, system_id: str, dedup: str) -> Job:
+async def _enqueue_power(
+    pool: AsyncConnectionPool,
+    system_id: str,
+    dedup: str,
+    action: PowerAction = PowerAction.RESET,
+) -> Job:
     """Enqueue a POWER job with a valid PowerPayload (power_handler loads PowerPayload)."""
     async with pool.connection() as conn:
         return await queue.enqueue(
             conn,
             JobKind.POWER,
-            PowerPayload(system_id=system_id, action=PowerAction.RESET),
+            PowerPayload(system_id=system_id, action=action),
             {"principal": "alice", "agent_session": "s", "project": "proj"},
             dedup,
         )
@@ -432,6 +440,120 @@ def test_concurrent_double_teardown_is_idempotent(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+class _RecordingSnapshotter:
+    """Records ``delete_all`` so a test can prove teardown asked the provider for snapshots."""
+
+    def __init__(self) -> None:
+        self.deleted_all: list[str] = []
+
+    def delete_all(self, domain_name: str) -> None:
+        self.deleted_all.append(domain_name)
+
+
+async def _tearing_down_audit_count(pool: AsyncConnectionPool, system_id: str) -> int:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT count(*) AS n FROM audit_log WHERE object_id = %s AND transition LIKE %s",
+            (UUID(system_id), "%tearing_down%"),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return row["n"]
+
+
+def test_teardown_queued_behind_failed_provision_reclaims_and_stays_failed(
+    migrated_url: str,
+) -> None:
+    # #2908: a teardown queued behind a provision that then fails meets a terminal `failed` System.
+    # It must reclaim what the failed provision left on the host and succeed, without the illegal
+    # failed -> tearing_down move that burned every attempt as infrastructure_failure.
+    class _LeakingFailingProvisioner(_TrackingProvisioner):
+        def provision(
+            self,
+            system_id: UUID,
+            profile: Any,
+            *,
+            overlay_customizers: Any = (),
+            bootstrap_pubkey: str | None = None,
+            job_id: UUID | None = None,
+        ) -> str:
+            del profile, overlay_customizers, bootstrap_pubkey, job_id
+            self.live.add(f"kdive-{system_id}")
+            raise CategorizedError(
+                "readiness marker never appeared", category=ErrorCategory.PROVISIONING_FAILURE
+            )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.PROVISIONING)
+            prov = _LeakingFailingProvisioner()
+            snapshotter = _RecordingSnapshotter()
+            resolver = provider_resolver(provisioner=prov, snapshotter=snapshotter)
+            pjob = await _enqueue(pool, JobKind.PROVISION, system_id, f"{system_id}:provision")
+            tjob = await _enqueue(pool, JobKind.TEARDOWN, system_id, f"{system_id}:teardown")
+            async with pool.connection() as conn:
+                await conn.set_autocommit(True)
+                with pytest.raises(CategorizedError):
+                    await systems_handlers.provision_handler(conn, pjob, resolver=resolver)
+                assert await _system_state(pool, system_id) == SystemState.FAILED.value
+
+                result = await systems_handlers.teardown_handler(
+                    conn, tjob, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
+
+            assert result == system_id
+            assert await _system_state(pool, system_id) == SystemState.FAILED.value
+            assert prov.live == set()
+            assert snapshotter.deleted_all == [f"kdive-{system_id}"]
+            assert await _tearing_down_audit_count(pool, system_id) == 0
+
+    asyncio.run(_run())
+
+
+def test_failed_system_provider_teardown_fault_stays_retryable(migrated_url: str) -> None:
+    # A provider fault while reclaiming a `failed` System surfaces as the provider's own retryable
+    # error, and the next attempt asks the provider again and completes the reclaim.
+    class _FlakyTeardownProvisioner(_TrackingProvisioner):
+        def teardown(self, domain_name: str) -> None:
+            if not self.torn_down:
+                self.torn_down.append(domain_name)
+                raise CategorizedError(
+                    "virDomainDestroy timed out", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+                )
+            super().teardown(domain_name)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.FAILED)
+            domain = f"kdive-{system_id}"
+            prov = _FlakyTeardownProvisioner()
+            prov.live.add(domain)
+            resolver = provider_resolver(provisioner=prov)
+            job = await _enqueue(pool, JobKind.TEARDOWN, system_id, f"{system_id}:teardown")
+            async with pool.connection() as conn:
+                await conn.set_autocommit(True)
+                with pytest.raises(CategorizedError) as excinfo:
+                    await systems_handlers.teardown_handler(
+                        conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                    )
+                assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+                assert excinfo.value.terminal is False
+                assert retryable_category(excinfo.value.category)
+                assert await _system_state(pool, system_id) == SystemState.FAILED.value
+                assert prov.live == {domain}
+
+                result = await systems_handlers.teardown_handler(
+                    conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
+
+            assert result == system_id
+            assert prov.torn_down == [domain, domain]
+            assert prov.live == set()
+            assert await _system_state(pool, system_id) == SystemState.FAILED.value
+
+    asyncio.run(_run())
+
+
 def test_force_crash_drives_ready_crashing_crashed(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -492,14 +614,17 @@ def test_force_crash_nmi_raise_propagates_and_leaves_crashing(migrated_url: str)
     asyncio.run(_run())
 
 
-def test_power_refused_on_crashing_no_physical_reset(migrated_url: str) -> None:
+@pytest.mark.parametrize("action", [PowerAction.RESET, PowerAction.OFF])
+def test_power_refused_on_crashing_no_physical_reset(
+    migrated_url: str, action: PowerAction
+) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             system_id = await _seed_system(pool, SystemState.READY, domain_name="kdive-x")
             await _set_state(pool, system_id, SystemState.CRASHING.value)
             ctrl = _RecordingController()
             resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
-            pjob = await _enqueue_power(pool, system_id, f"{system_id}:power")
+            pjob = await _enqueue_power(pool, system_id, f"{system_id}:power", action)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as excinfo:
                     await control_plane.power_handler(conn, pjob, resolver=resolver)
@@ -539,5 +664,189 @@ def test_force_crash_marker_refuses_racing_power(migrated_url: str) -> None:
                     SystemState.CRASHING.value,
                 }
                 assert len(ctrl.powered) <= 1  # at most the pre-marker READY power op
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "expected_action", [PowerAction.OFF, PowerAction.ON, PowerAction.CYCLE, PowerAction.RESET]
+)
+def test_power_holds_force_crash_marker_until_provider_finishes(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, expected_action: PowerAction
+) -> None:
+    class BlockedPower(_RecordingController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.events: list[str] = []
+
+        def power(self, domain_name: str, action: PowerAction) -> None:
+            assert action is expected_action
+            self.events.append("power-start")
+            self.started.set()
+            assert self.release.wait(timeout=5)
+            self.events.append("power-done")
+
+        def force_crash(self, domain_name: str) -> None:
+            self.events.append("crash")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.READY, domain_name="kdive-x")
+            ctrl = BlockedPower()
+            resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
+            power_job = await _enqueue_power(pool, system_id, f"{system_id}:power", expected_action)
+            crash_job = await _enqueue(pool, JobKind.FORCE_CRASH, system_id, f"{system_id}:crash")
+
+            async def run_power() -> None:
+                async with pool.connection() as conn:
+                    await control_plane.power_handler(conn, power_job, resolver=resolver)
+
+            async def run_crash() -> None:
+                async with pool.connection() as conn:
+                    await control_plane.force_crash_handler(conn, crash_job, resolver=resolver)
+
+            power_task = asyncio.create_task(run_power())
+            assert await asyncio.to_thread(ctrl.started.wait, 2)
+            # Probe before crash can acquire the same lock, so a refusal proves power owns it.
+            try:
+                async with pool.connection() as probe, probe.transaction():
+                    assert not await try_advisory_xact_lock(
+                        probe, LockScope.SYSTEM, UUID(system_id)
+                    )
+            except BaseException:
+                ctrl.release.set()
+                await power_task
+                raise
+            crash_waiting = asyncio.Event()
+            real_lock = control_plane.advisory_xact_lock
+
+            @asynccontextmanager
+            async def observed_lock(
+                conn: AsyncConnection, scope: LockScope, key: UUID | str
+            ) -> AsyncIterator[None]:
+                if asyncio.current_task() is crash_task:
+                    crash_waiting.set()
+                async with real_lock(conn, scope, key):
+                    yield
+
+            monkeypatch.setattr(control_plane, "advisory_xact_lock", observed_lock)
+            crash_task = asyncio.create_task(run_crash())
+            await asyncio.wait_for(crash_waiting.wait(), 2)
+            try:
+                async with pool.connection() as probe, probe.transaction():
+                    assert not await try_advisory_xact_lock(
+                        probe, LockScope.SYSTEM, UUID(system_id)
+                    )
+                assert await _system_state(pool, system_id) == SystemState.READY.value
+            finally:
+                ctrl.release.set()
+            await asyncio.gather(power_task, crash_task)
+            assert ctrl.events == ["power-start", "power-done", "crash"]
+            assert await _system_state(pool, system_id) == SystemState.CRASHED.value
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("expected_action", [PowerAction.OFF, PowerAction.RESET])
+def test_cancelled_power_keeps_fence_until_provider_thread_finishes(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, expected_action: PowerAction
+) -> None:
+    class BlockedPower(_RecordingController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def power(self, domain_name: str, action: PowerAction) -> None:
+            assert action is expected_action
+            self.started.set()
+            assert self.release.wait(timeout=5)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.READY, domain_name="kdive-x")
+            ctrl = BlockedPower()
+            resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
+            power_job = await _enqueue_power(pool, system_id, f"{system_id}:power", expected_action)
+            crash_job = await _enqueue(pool, JobKind.FORCE_CRASH, system_id, f"{system_id}:crash")
+            connection_modes: list[tuple[bool, bool]] = []
+            provider_kinds: list[str | None] = []
+
+            async def run_power() -> None:
+                async with pool.connection() as conn:
+                    previous = conn.autocommit
+                    try:
+                        await control_plane.power_handler(conn, power_job, resolver=resolver)
+                    finally:
+                        connection_modes.append((previous, conn.autocommit))
+                        provider_kinds.append(take_provider_kind())
+
+            async def run_crash() -> None:
+                async with pool.connection() as conn:
+                    await control_plane.force_crash_handler(conn, crash_job, resolver=resolver)
+
+            power_task = asyncio.create_task(run_power())
+            assert await asyncio.to_thread(ctrl.started.wait, 2)
+            async with pool.connection() as probe, probe.transaction():
+                assert not await try_advisory_xact_lock(probe, LockScope.SYSTEM, UUID(system_id))
+            power_task.cancel()
+            crash_waiting = asyncio.Event()
+            real_lock = control_plane.advisory_xact_lock
+
+            @asynccontextmanager
+            async def observed_lock(
+                conn: AsyncConnection, scope: LockScope, key: UUID | str
+            ) -> AsyncIterator[None]:
+                if asyncio.current_task() is crash_task:
+                    crash_waiting.set()
+                async with real_lock(conn, scope, key):
+                    yield
+
+            monkeypatch.setattr(control_plane, "advisory_xact_lock", observed_lock)
+            crash_task = asyncio.create_task(run_crash())
+            await asyncio.wait_for(crash_waiting.wait(), 2)
+            power_task.cancel()  # repeated cancellation must not interrupt fenced cleanup
+            try:
+                assert not power_task.done()
+                async with pool.connection() as probe, probe.transaction():
+                    assert not await try_advisory_xact_lock(
+                        probe, LockScope.SYSTEM, UUID(system_id)
+                    )
+                assert await _system_state(pool, system_id) == SystemState.READY.value
+            finally:
+                ctrl.release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await power_task
+            await crash_task
+            assert connection_modes == [(False, False)]
+            assert provider_kinds == ["local-libvirt"]
+            assert await _system_state(pool, system_id) == SystemState.CRASHED.value
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("action", [PowerAction.OFF, PowerAction.RESET])
+def test_failed_power_releases_system_fence_and_restores_autocommit(
+    migrated_url: str, action: PowerAction
+) -> None:
+    class FailingPower(_RecordingController):
+        def power(self, domain_name: str, action: PowerAction) -> None:
+            raise CategorizedError("provider failed", category=ErrorCategory.CONTROL_FAILURE)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.READY, domain_name="kdive-x")
+            resolver = provider_resolver(controller=FailingPower())
+            power_job = await _enqueue_power(pool, system_id, f"{system_id}:power", action)
+            async with pool.connection() as conn:
+                assert conn.autocommit is False
+                with pytest.raises(CategorizedError):
+                    await control_plane.power_handler(conn, power_job, resolver=resolver)
+                assert conn.autocommit is False
+                assert take_provider_kind() == "local-libvirt"
+                async with pool.connection() as probe, probe.transaction():
+                    assert await try_advisory_xact_lock(probe, LockScope.SYSTEM, UUID(system_id))
 
     asyncio.run(_run())

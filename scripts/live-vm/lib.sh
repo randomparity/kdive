@@ -17,19 +17,22 @@ die() {
 # A function, not a source-time assignment, because this file must have no side effects when sourced.
 kdive_python() {
   local repo_root
-  repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+  repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
   printf '%s' "${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"
 }
 
-# Preflight that the resolved interpreter can actually import kdive, BEFORE the minutes-long build.
-# require_tools only proves the binary exists — an interpreter that is present but carries no kdive
-# (an un-synced checkout, a stale venv, or the system python3 on a uv-managed runner) otherwise
-# fails deep inside build-fs with a bare "No module named kdive" and an empty rootfs.
-require_kdive_module() {
-  local py
+# The identity helper validates the selected interpreter's source checkout and current inputs
+# before build-fs runs. It uses the same interpreter that will build the rootfs.
+fixture_helper() {
+  local repo_root
+  repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+  printf '%s/scripts/live_vm_fixtures.py' "$repo_root"
+}
+
+fixture_inputs() {
+  local py image="$1"
   py="$(kdive_python)"
-  "$py" -c 'import kdive' >/dev/null 2>&1 ||
-    die "interpreter ${py} cannot import kdive: run 'uv sync' in the checkout, or point KDIVE_PYTHON at a venv that has kdive installed"
+  "$py" "$(fixture_helper)" inputs . "$image"
 }
 
 # Preflight required host tools BEFORE any slow work, naming each missing binary and how to get it
@@ -79,18 +82,6 @@ require_free_space() {
   fi
 }
 
-# Content digest of FILE.
-sha256_of() {
-  sha256sum -- "$1" | cut -d' ' -f1
-}
-
-# Non-fatal digest predicate (completeness — build-id survives truncation, a digest does not).
-# Status 0 iff FILE re-hashes to EXPECTED. The warm check treats a mismatch as rebuild, so this
-# must NOT die (unlike the fail-loud helpers).
-sha256_ok() {
-  [ "$(sha256_of "$1")" = "$2" ]
-}
-
 # Post-fetch match assertion. Die if EITHER id is empty (even if both are) — no vacuous match.
 build_ids_match() {
   local a="$1" b="$2"
@@ -110,17 +101,21 @@ elf_build_id() {
 # Read the build-id from the ACTUAL staged kernel artifact (not repo metadata). A bare vmlinux ELF
 # (common for ppc64le pseries) is read directly; a compressed bzImage/vmlinuz is first decompressed.
 kernel_build_id() {
-  local image="$1" magic vmlinux
+  local image="$1" magic
   magic="$(head -c4 -- "$image" | od -An -tx1 | tr -d ' ')"
   if [ "$magic" = "7f454c46" ]; then
-    vmlinux="$image"
+    elf_build_id "$image"
   else
     command -v extract-vmlinux >/dev/null 2>&1 ||
       die "compressed kernel ${image} needs 'extract-vmlinux' (ships in linux-headers .../scripts) on PATH"
-    vmlinux="$(mktemp)"
-    extract-vmlinux "$image" >"$vmlinux" 2>/dev/null || die "cannot extract vmlinux from ${image}"
+    (
+      local vmlinux
+      vmlinux="$(mktemp)"
+      trap 'rm -f -- "$vmlinux"' EXIT
+      extract-vmlinux "$image" >"$vmlinux" 2>/dev/null || die "cannot extract vmlinux from ${image}"
+      elf_build_id "$vmlinux"
+    )
   fi
-  elf_build_id "$vmlinux"
 }
 
 # rename(2) is atomic only within one filesystem: die unless A and B share a device.
@@ -128,34 +123,6 @@ assert_same_fs() {
   local a="$1" b="$2"
   [ "$(stat -c %d -- "$a")" = "$(stat -c %d -- "$b")" ] ||
     die "temp and destination not on one filesystem: ${a} vs ${b}"
-}
-
-# Record the pinned inputs atomically (write-temp-then-rename).
-write_manifest() {
-  local manifest="$1" nvr="$2" build_id="$3" rootfs_sha="$4" kernel_sha="$5" debuginfo_sha="$6" tmp
-  tmp="$(mktemp -- "${manifest}.XXXXXX")"
-  {
-    printf 'kernel_nvr=%s\n' "$nvr"
-    printf 'build_id=%s\n' "$build_id"
-    printf 'rootfs_sha256=%s\n' "$rootfs_sha"
-    printf 'kernel_sha256=%s\n' "$kernel_sha"
-    printf 'debuginfo_sha256=%s\n' "$debuginfo_sha"
-  } >"$tmp"
-  mv -f -- "$tmp" "$manifest"
-}
-
-# Print a recorded field; rc 1 when the manifest is absent (stale, not an error).
-manifest_field() {
-  local manifest="$1" key="$2"
-  [ -f "$manifest" ] || return 1
-  sed -n "s/^${key}=//p" "$manifest"
-}
-
-# rc 0 iff the recorded NVR label equals TARGET_NVR (freshness trigger; necessary, not sufficient).
-store_manifest_matches() {
-  local manifest="$1" target_nvr="$2" have
-  have="$(manifest_field "$manifest" kernel_nvr)" || return 1
-  [ "$have" = "$target_nvr" ]
 }
 
 # Atomic commit point: flip the `current` symlink onto NEW_SET_DIR via one rename. A directory

@@ -12,10 +12,13 @@ and the worker toolchain resolves on PATH for the non-root user.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -91,3 +94,47 @@ def test_kernel_build_toolchain_on_path() -> None:
     for tool in _BUILD_TOOLS:
         res = _run("--entrypoint", tool, img, "--version")
         assert res.returncode == 0, f"{tool} missing: {res.stderr}"
+
+
+def test_runtime_source_permissions_and_bytes() -> None:
+    script = """
+import hashlib, json
+from pathlib import Path
+root = Path('/app/src')
+paths = [root, *root.rglob('*'),
+         Path('/usr/local/libexec/build-capture-bootstrap-manifest.py')]
+records = {}
+for path in paths:
+    if '__pycache__' in path.parts or path.name == '_buildinfo.py':
+        continue
+    metadata = path.stat()
+    records[str(path)] = [metadata.st_uid, metadata.st_mode & 0o777,
+                         path.is_dir(),
+                         None if path.is_dir() else hashlib.sha256(path.read_bytes()).hexdigest()]
+print(json.dumps(records))
+"""
+    result = _run("--entrypoint", "python", _image(), "-c", script)
+    assert result.returncode == 0, result.stderr
+    records = json.loads(result.stdout)
+    root = Path(__file__).resolve().parents[2]
+    expected = {"/app/src", "/usr/local/libexec/build-capture-bootstrap-manifest.py"}
+    expected.update(
+        f"/app/{path.relative_to(root)}"
+        for path in (root / "src").rglob("*")
+        if "__pycache__" not in path.parts and path.name != "_buildinfo.py"
+    )
+    assert set(records) == expected
+    for name, (uid, mode, is_dir, digest) in records.items():
+        assert uid == 0, name
+        assert mode & 0o022 == 0, name
+        required = 0o555 if is_dir else 0o444
+        assert mode & required == required, name
+        local = (
+            root / "scripts/generate/build-capture-bootstrap-manifest.py"
+            if name.startswith("/usr/local/libexec/")
+            else root / name.removeprefix("/app/")
+        )
+        if not is_dir:
+            assert digest == hashlib.sha256(local.read_bytes()).hexdigest(), name
+            executable = local.stat().st_mode & 0o111
+            assert mode & executable == executable, name

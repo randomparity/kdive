@@ -10,7 +10,7 @@ set -euo pipefail
 # Linux host this script targets has; it is unusable on macOS's bash 3.2 regardless (libguestfs).
 shopt -s inherit_errexit
 
-here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/live-vm/lib.sh
 source "${here}/lib.sh"
 
@@ -31,7 +31,7 @@ require_tools \
   "$(kdive_python):the kdive venv (set KDIVE_PYTHON), runs build-fs" \
   "virt-ls:libguestfs-tools" "virt-copy-out:libguestfs-tools" \
   "eu-readelf:elfutils" "debuginfod-find:debuginfod"
-require_kdive_module
+inputs_before="$(fixture_inputs "$IMAGE")" || die "cannot validate fixture inputs; use a clean source-overlay checkout"
 
 trap 'rm -rf -- "$STAGE"' EXIT # a failed run leaves no half-populated /mnt for the next to trust.
 rm -rf -- "$STAGE"
@@ -45,10 +45,14 @@ require_free_space "$mnt_root" "$BUDGET" "hosted TCG image set"
 
 # 3. Build the ppc64le rootfs + extract its own kernel; read the build-id from the actual artifact.
 build_id="$(produce_rootfs_and_kernel "$STAGE" "$IMAGE")"
-rm -f -- "${STAGE}/.kver" # produce records the pin marker; the TCG set has no NVR pin, so drop it.
+kernel_nvr="$(cat "${STAGE}/.kver")"
+rm -f -- "${STAGE}/.kver"
 
 # 4. Fetch the matching debuginfo by build-id (caches under the stage dir, prunes it, verifies match).
 fetch_debuginfo "$STAGE" "$build_id"
+inputs_after="$(fixture_inputs "$IMAGE")" || die "fixture inputs changed during build; retry"
+[ "$inputs_before" = "$inputs_after" ] || die "fixture inputs changed during build; retry"
+"$(kdive_python)" "$(fixture_helper)" write "$STAGE" "$IMAGE" "$kernel_nvr" "$build_id"
 
 # 5. Post-stage footprint cap on the staged set only.
 enforce_budget "$STAGE" "$BUDGET" "hosted TCG image set"

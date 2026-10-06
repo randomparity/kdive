@@ -91,6 +91,13 @@ This is demo bootstrap; use [audited project onboarding](../../docs/operating/pr
 for production tenants. The [live-stack runbook](../../docs/operating/runbooks/live-stack.md)
 owns the detailed setup and environment procedure.
 
+## Stress a running stack — `stress-allocations.py`
+
+Drives a running stack from many concurrent MCP clients (churn, races, invalid calls, abandoned
+grants, optional provisioning) and exits non-zero on an invariant violation. Usage, flags and
+invariants are in the
+[live-testing runbook](../../docs/operating/runbooks/live-testing.md#multi-client-stress-2769).
+
 ## Shared
 
 `env.sh` and `lib.sh` are sourced (not run); `apply-migrations.sh` is the host migrator.

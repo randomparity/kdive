@@ -58,6 +58,9 @@ def _healthy_env(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     # check-local-libvirt.sh probes `python3 -c "import guestfs, drgn"`; succeed on it.
     _stub(bindir, "python3", 'case "$*" in -c*) exit 0 ;; esac\nexit 0')
     _stub(bindir, "uv", _uv_stub_body(tmp_path / "uv.log"))
+    # The SELinux label probe reads the host's real getenforce off /usr/bin; pin it so an
+    # enforcing developer host does not fail the fixture's unlabeled tmp dirs (ADR-0640).
+    _stub(bindir, "getenforce", "echo Disabled")
     kvm = tmp_path / "kvm"
     kvm.write_text("")
     staging = tmp_path / "install-staging"
@@ -73,6 +76,8 @@ def _healthy_env(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "KDIVE_BOOT_DIR": str(boot),
         # The RedHat off-PATH emulator fallback, pinned absent so it cannot resolve from the host.
         "KDIVE_QEMU_LIBEXEC": str(tmp_path / "absent-qemu-kvm"),
+        # The installed lifecycle worker venv, pinned absent for the same reason.
+        "KDIVE_LIFECYCLE_PYTHON": str(tmp_path / "absent-lifecycle-python"),
         # check-local-libvirt.sh prefers the REPO .venv over the stubbed python3 when one exists,
         # and that venv has no guestfs/drgn — so without this the preflight's verdict depends on
         # whether the checkout has been synced. Downgrade the one probe with a documented soft

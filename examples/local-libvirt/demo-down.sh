@@ -12,7 +12,7 @@
 # (log directory under $XDG_STATE_HOME, the published session libvirt endpoint).
 set -euo pipefail
 
-example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+example_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${example_dir}/../.." && pwd)"
 # shellcheck source=examples/local-libvirt/env.sh disable=SC1091
 source "${example_dir}/env.sh"

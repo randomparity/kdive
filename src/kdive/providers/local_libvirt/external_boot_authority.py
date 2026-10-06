@@ -42,6 +42,10 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalObservedState,
     LocalSystemTeardownAnchorV1,
     LocalSystemTeardownIntentV1,
+    RecoveryIntentAbsentError,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    LocalExternalBootTimingConfigurationError,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalOperationLeaseScope,
@@ -537,8 +541,9 @@ class LocalExternalBootAuthorityAdapter:
         if point is not None:
             if point.binding != binding or point.plan_identity != intent.plan_identity:
                 raise AuthorityServiceError("provider_conflict")
-            self._ports.recover(point, authority)
+            # A tombstoned point already recovered and cleaned; recover() needs its intent.
             if not self._ports.cleanup_is_accounted(point, authority):
+                self._ports.recover(point, authority, restore_power=False)
                 self._ports.cleanup(point, authority)
                 self._ports.record_cleanup_quarantine(
                     point, _cleanup_proof(context, point), authority
@@ -599,7 +604,7 @@ class LocalExternalBootAuthorityAdapter:
             # the state is reported as the conflict ADR-0584 calls an unowned observation.
             raise AuthorityServiceError("provider_conflict")
         if operation in _MUTATING_OPERATIONS:
-            self._apply(operation, matched, authority, context)
+            self._apply(operation, matched, authority, context, request)
         return self._observation(request, binding, authority, matched)
 
     def _apply(
@@ -608,6 +613,7 @@ class LocalExternalBootAuthorityAdapter:
         point: RecoveryPoint,
         authority: OpaqueProviderRef,
         context: AuthorityCommitContextV1,
+        request: AuthorityMutationRequestV1,
     ) -> None:
         """Drive the named local commit points for one mutating operation.
 
@@ -618,12 +624,12 @@ class LocalExternalBootAuthorityAdapter:
         """
         try:
             if operation is AuthorityOperation.ACTIVATE:
-                self._ports.activate(point, authority)
+                self._ports.activate(point, authority, local_timing=request.local_timing)
             elif operation in {
                 AuthorityOperation.RECOVER,
                 AuthorityOperation.RECOVERY_ATTEMPT,
             }:
-                self._ports.recover(point, authority)
+                self._ports.recover(point, authority, local_timing=request.local_timing)
             elif operation in _DELETING_OPERATIONS:
                 if not self._ports.cleanup_is_accounted(point, authority):
                     self._pending_cleanup_finalization[context.operation_identity] = point
@@ -637,6 +643,11 @@ class LocalExternalBootAuthorityAdapter:
                 raise AuthorityServiceError("provider_conflict")
         except AuthorityServiceError:
             raise
+        except LocalExternalBootTimingConfigurationError:
+            logger.exception(
+                "external-boot provider configuration refused", extra={"operation": operation}
+            )
+            raise AuthorityServiceError("configuration_error") from None
         except Exception:  # noqa: BLE001 - bound provider failure to a closed category
             logger.exception("external-boot provider commit failed", extra={"operation": operation})
             raise AuthorityServiceError("provider_conflict") from None
@@ -656,7 +667,7 @@ class LocalExternalBootAuthorityAdapter:
             and point is not None
             and self._ports.cleanup_is_accounted(point, authority)
         ):
-            observed = self._read_state(binding, authority)
+            observed = self._read_state(binding, authority, cleanup_accounted=True)
             composite_state = self._composite_state(request, observed)
             return AuthorityObservationV1(
                 observation_id=self._observation_id(request, composite_state, "absent"),
@@ -715,19 +726,37 @@ class LocalExternalBootAuthorityAdapter:
         *,
         allow_cleanup_receipt: bool,
     ) -> RecoveryPoint | None:
+        absent: RecoveryIntentAbsentError | None = None
         try:
             return self._ports.recovery_point(binding, authority)
+        except RecoveryIntentAbsentError as error:
+            absent = error
         except Exception:  # noqa: BLE001 - an unresolvable point is an unreadable state
             # Logged in full inside the authority, where the diagnostic is allowed to
             # exist; only the bounded category ever crosses the boundary.
             logger.exception("external-boot recovery point is unresolvable")
         if not allow_cleanup_receipt:
+            self._log_absent_intent(absent, cleanup_accounted=False)
             return None
         try:
-            return self._ports.cleanup_receipt(binding, authority)
+            receipt = self._ports.cleanup_receipt(binding, authority)
         except Exception:  # noqa: BLE001 - malformed or unreadable receipt fails closed
             logger.exception("external-boot cleanup receipt is unresolvable")
-            return None
+            receipt = None
+        self._log_absent_intent(absent, cleanup_accounted=receipt is not None)
+        return receipt
+
+    @staticmethod
+    def _log_absent_intent(
+        absent: RecoveryIntentAbsentError | None, *, cleanup_accounted: bool
+    ) -> None:
+        """Cleanup deletes the intent by design; absent without cleanup evidence is an error."""
+        if absent is None:
+            return
+        if cleanup_accounted:
+            logger.debug("external-boot recovery intent is absent after accounted cleanup")
+        else:
+            logger.error("external-boot recovery point is unresolvable", exc_info=absent)
 
     @staticmethod
     def _require_matching_identities(
@@ -765,10 +794,18 @@ class LocalExternalBootAuthorityAdapter:
         )
 
     def _read_state(
-        self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
+        self,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+        *,
+        cleanup_accounted: bool = False,
     ) -> LocalObservedState:
         try:
             return self._ports.observe_state(binding, authority)
+        except RecoveryIntentAbsentError:
+            if not cleanup_accounted:
+                logger.exception("external-boot provider state is unreadable")
+            return LocalObservedState(definition=None, modules=None, active=None)
         except Exception:  # noqa: BLE001 - a failed read is the unreadable classification
             logger.exception("external-boot provider state is unreadable")
             return LocalObservedState(definition=None, modules=None, active=None)

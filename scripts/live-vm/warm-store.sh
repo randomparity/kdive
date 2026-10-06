@@ -10,7 +10,7 @@ set -euo pipefail
 # Linux host this script targets has; it is unusable on macOS's bash 3.2 regardless (libguestfs).
 shopt -s inherit_errexit
 
-here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/live-vm/lib.sh
 source "${here}/lib.sh"
 
@@ -23,7 +23,7 @@ require_tools \
   "$(kdive_python):the kdive venv (set KDIVE_PYTHON), runs build-fs" \
   "virt-ls:libguestfs-tools" "virt-copy-out:libguestfs-tools" \
   "eu-readelf:elfutils" "debuginfod-find:debuginfod"
-require_kdive_module
+inputs_before="$(fixture_inputs "$IMAGE")" || die "cannot validate fixture inputs; use a clean source-overlay checkout"
 
 mkdir -p -- "$STORE"
 
@@ -32,18 +32,13 @@ exec 9>"${STORE}/.lock"
 flock 9
 
 is_warm() {
-  local cur="${STORE}/current" m="${STORE}/current/MANIFEST"
+  local cur="${STORE}/current"
   [ "${KDIVE_WARM_STORE_FORCE:-0}" = "1" ] && return 1
-  [ -e "$m" ] || return 1
-  store_manifest_matches "$m" "$TARGET" || return 1
-  # Non-fatal digest re-checks: a corrupt-but-present file makes this false -> rebuild, never die.
-  sha256_ok "${cur}/rootfs.qcow2" "$(manifest_field "$m" rootfs_sha256)" &&
-    sha256_ok "${cur}/vmlinux" "$(manifest_field "$m" kernel_sha256)" &&
-    sha256_ok "${cur}/vmlinux.debug" "$(manifest_field "$m" debuginfo_sha256)"
+  "$(kdive_python)" "$(fixture_helper)" verify "$cur" "$IMAGE" "$TARGET" >/dev/null 2>&1
 }
 
 main() {
-  local new build_id kver
+  local new build_id kver inputs_after
   # Fail fast on a fetch-infra misconfig BEFORE the minutes-long, multi-GB build (else a
   # misconfigured nightly builds a rootfs only to discard it when debuginfod-find dies).
   [ -n "${DEBUGINFOD_URLS:-}" ] ||
@@ -77,10 +72,9 @@ main() {
   rm -f -- "${new}/.kver"
 
   fetch_debuginfo "$new" "$build_id"
-
-  write_manifest "${new}/MANIFEST" "$TARGET" "$build_id" \
-    "$(sha256_of "${new}/rootfs.qcow2")" "$(sha256_of "${new}/vmlinux")" \
-    "$(sha256_of "${new}/vmlinux.debug")"
+  inputs_after="$(fixture_inputs "$IMAGE")" || die "fixture inputs changed during build; retry"
+  [ "$inputs_before" = "$inputs_after" ] || die "fixture inputs changed during build; retry"
+  "$(kdive_python)" "$(fixture_helper)" write "$new" "$IMAGE" "$TARGET" "$build_id"
 
   commit_set "$STORE" "$new"
   trap - EXIT # committed: the set is now live, do not remove it.

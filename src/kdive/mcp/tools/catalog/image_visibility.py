@@ -12,6 +12,7 @@ from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
 from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 from kdive.images.planes.base import PROVENANCE_DEFAULT_KERNEL_VERSION
 from kdive.log import bind_context
+from kdive.mcp.responses import validate_stored
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
 
@@ -38,7 +39,7 @@ async def fetch_visible_image(
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(_VISIBLE_IMAGE_SQL, params)
             row = await cur.fetchone()
-    return ImageCatalogEntry.model_validate(row) if row is not None else None
+    return validate_stored(ImageCatalogEntry, row) if row is not None else None
 
 
 def default_kernel_version(provenance: dict[str, Any]) -> str:

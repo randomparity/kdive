@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Callable
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -22,6 +23,7 @@ from kdive.components.references import (
     ComponentRef,
     LocalComponentRef,
 )
+from kdive.db.locks import LockScope
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
     RemoteModuleAttemptObligationRepository,
@@ -44,9 +46,11 @@ from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools.lifecycle.systems import admin as systems_admin
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.view import get_system
+from kdive.mcp.tools.ops.security import breakglass
 from kdive.profiles.provisioning import RootfsSource
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
@@ -58,6 +62,8 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot import ExternalBootDenied
+from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.mcp import systems_support
 from tests.mcp.systems_support import (
     SYSTEM_ADMIN_HANDLERS,
@@ -1325,6 +1331,7 @@ async def _seed_retired_teardown_authority(
     *,
     purpose: str = "recover",
     current: bool = False,
+    provider_kind: str = "local-libvirt",
 ) -> None:
     """Persist the durable route that System teardown must use, not infer."""
     job_id = uuid4()
@@ -1359,7 +1366,7 @@ async def _seed_retired_teardown_authority(
         "(system_id, allocation_id, activation_id, run_id, plan_identity, job_id, job_attempt, "
         "purpose, provider_kind, authority_instance, worker_incarnation, operation, "
         "operation_identity, operation_digest, generation, state, acknowledged_at, retired_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, 'local-libvirt', 'authority-a', %s, "
+        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s, 'authority-a', %s, "
         "%s, 'prior-recovery', %s, 1, %s, now(), CASE WHEN %s THEN NULL ELSE now() END)",
         (
             seeded.system_id,
@@ -1369,6 +1376,7 @@ async def _seed_retired_teardown_authority(
             plan_identity,
             job_id,
             purpose,
+            provider_kind,
             worker,
             purpose,
             "sha256:" + "2" * 64,
@@ -1434,6 +1442,490 @@ def test_teardown_with_external_boot_history_enqueues_authority_marker(
             "operation_identity": marker["operation_identity"],
         }
         assert marker["operation_identity"].startswith("sha256:")
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("provider_kind", ["local-libvirt", "remote-libvirt"])
+def test_teardown_of_preparing_activation_enqueues_authority_marker(
+    migrated_url: str, provider_kind: str
+) -> None:
+    """#2961: a preparing activation, with its activate authority still current, is torn down.
+
+    #3016: a remote-libvirt one that never opened its module reap obligation carries no receipt.
+    """
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, system_id, RunState.RUNNING)
+            async with pool.connection() as conn:
+                seeded = await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.PREPARING,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+                await conn.execute(
+                    "INSERT INTO external_boot_reservations "
+                    "(activation_id, store_identity, owner_key, reserved_bytes, state) "
+                    "VALUES (%s, 'stores/main', %s, 4096, 'pending')",
+                    (seeded.activation.id, f"owners/{seeded.activation.id}"),
+                )
+                resolver = provider_resolver(external_boot=ExternalBootOperations())
+                if provider_kind == "remote-libvirt":
+                    await conn.execute(
+                        "UPDATE resources SET kind = 'remote-libvirt' "
+                        "WHERE id = (SELECT resource_id FROM allocations WHERE id = %s)",
+                        (alloc_id,),
+                    )
+                    await conn.execute(
+                        "UPDATE runs SET target_kind = 'remote-libvirt' WHERE id = %s", (run_id,)
+                    )
+                    local = resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
+                    resolver = ProviderResolver({ResourceKind.REMOTE_LIBVIRT: local})
+                await _seed_retired_teardown_authority(
+                    conn, seeded, purpose="activate", current=True, provider_kind=provider_kind
+                )
+            response = await _teardown(pool, ctx(Role.ADMIN), system_id, resolver=resolver)
+            assert response.status == "queued", response.model_dump()
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT kind, payload FROM jobs WHERE id = %s", (response.object_id,)
+                )
+                job = await cur.fetchone()
+                await cur.execute(
+                    "SELECT state FROM external_boot_reservations WHERE activation_id = %s",
+                    (seeded.activation.id,),
+                )
+                reservation = await cur.fetchone()
+
+        assert job is not None and job["kind"] == "teardown"
+        marker = job["payload"]["external_boot_authority_v1"]
+        assert marker["activation_id"] == str(seeded.activation.id)
+        assert (marker["purpose"], marker["operation"]) == ("teardown", "teardown")
+        assert marker["provider_kind"] == provider_kind
+        assert "external_boot_plan_v1" not in job["payload"]
+        assert job["payload"].get("remote_module_attempt_v1") is None
+        # Enqueueing credits nothing: only the authority's teardown receipt ends the reservation.
+        assert reservation == {"state": "pending"}
+
+    asyncio.run(_run())
+
+
+async def _authority_teardown_job(pool: AsyncConnectionPool) -> tuple[str, str]:
+    """Enqueue one authority teardown for a fresh external-boot System; return System and job."""
+    alloc_id = await granted_allocation(pool)
+    system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+    run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+    async with pool.connection() as conn:
+        seeded = await seed_activation(
+            conn,
+            state=ExternalBootActivationState.ACTIVE,
+            ready_reservation=True,
+            system_id=UUID(system_id),
+            run_id=UUID(run_id),
+        )
+        await _seed_retired_teardown_authority(conn, seeded)
+    first = await _teardown(
+        pool,
+        ctx(Role.ADMIN),
+        system_id,
+        resolver=provider_resolver(external_boot=ExternalBootOperations()),
+    )
+    assert first.status == "queued", first.model_dump()
+    return system_id, first.object_id
+
+
+_JOB_COLUMNS = "SELECT state, attempt, payload FROM jobs WHERE id = %s"
+
+
+def test_teardown_recycles_failed_authority_job_with_identical_marker(migrated_url: str) -> None:
+    """#2884: an exhausted authority teardown is re-run by the next public teardown."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _authority_teardown_job(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed', attempt = max_attempts, "
+                    "error_category = 'conflict' WHERE id = %s",
+                    (job_id,),
+                )
+                before = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+            response = await _teardown(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
+            )
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.status == "queued", response.model_dump()
+        assert response.object_id == job_id
+        assert before is not None and after is not None
+        assert after == ("queued", 0, before[2])
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("prior", ["queued", "succeeded", "canceled", "failed-other-marker"])
+def test_teardown_does_not_recycle_authority_job(migrated_url: str, prior: str) -> None:
+    """Only a failed job with the identical marker is re-run; every other prior replays."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _authority_teardown_job(pool)
+            async with pool.connection() as conn:
+                if prior == "failed-other-marker":
+                    await conn.execute(
+                        "UPDATE jobs SET state = 'failed', attempt = max_attempts, "
+                        "error_category = 'conflict', payload = jsonb_set(payload, "
+                        "'{external_boot_authority_v1,operation_identity}', %s) WHERE id = %s",
+                        (Jsonb("sha256:" + "0" * 64), job_id),
+                    )
+                elif prior != "queued":
+                    await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (prior, job_id))
+                before = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+            response = await _teardown(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
+            )
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.object_id == job_id
+        assert before is not None and after == before
+        assert response.status == before[0]
+
+    asyncio.run(_run())
+
+
+_RUNNING_JOB_COLUMNS = (
+    "SELECT state, attempt, max_attempts, worker_id, lease_expires_at, payload "
+    "FROM jobs WHERE id = %s"
+)
+
+
+async def _run_final_attempt(pool: AsyncConnectionPool, job_id: str, *, lease: str) -> None:
+    """Put ``job_id`` on its final charged attempt, held by a registered worker."""
+    worker_id = f"local:final-attempt-{uuid4()}"
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO worker_incarnations (incarnation, authority_kind, authority_binding, "
+            "fence_protocol, credential_hash) VALUES (%s, 'local', '{}'::jsonb, %s, "
+            "sha256(convert_to(%s, 'UTF8')))",
+            (worker_id, CURRENT_WORKER_FENCE_PROTOCOL, worker_id),
+        )
+        await conn.execute(
+            "UPDATE jobs SET state = 'running', attempt = max_attempts, worker_id = %s, "
+            "lease_expires_at = clock_timestamp() + %s::interval, heartbeat_at = now() "
+            "WHERE id = %s",
+            (worker_id, lease, job_id),
+        )
+
+
+def test_teardown_recycles_lapsed_final_authority_attempt(migrated_url: str) -> None:
+    """#2889: a final attempt whose lease lapsed no longer pins the public teardown."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _authority_teardown_job(pool)
+            await _run_final_attempt(pool, job_id, lease="-1 second")
+            async with pool.connection() as conn:
+                before = await (await conn.execute(_RUNNING_JOB_COLUMNS, (job_id,))).fetchone()
+            response = await _teardown(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
+            )
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_RUNNING_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.status == "queued", response.model_dump()
+        assert response.object_id == job_id
+        assert before is not None and after is not None
+        assert after == ("queued", before[1], before[1] + before[2], None, None, before[5])
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("resolver_external_boot", "lease"),
+    [(True, "5 minutes"), (False, "5 minutes"), (False, "-1 second")],
+    ids=["live-final-attempt", "live-final-attempt-unroutable", "lapsed-unroutable"],
+)
+def test_teardown_replays_final_authority_attempt_unchanged(
+    migrated_url: str, resolver_external_boot: bool, lease: str
+) -> None:
+    """#2889: a live final attempt, or one whose marker cannot be rebuilt, replays unchanged."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _authority_teardown_job(pool)
+            await _run_final_attempt(pool, job_id, lease=lease)
+            async with pool.connection() as conn:
+                before = await (await conn.execute(_RUNNING_JOB_COLUMNS, (job_id,))).fetchone()
+            response = await _teardown(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                resolver=provider_resolver(
+                    external_boot=ExternalBootOperations() if resolver_external_boot else None
+                ),
+            )
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_RUNNING_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.status == "running", response.model_dump()
+        assert response.object_id == job_id
+        assert before is not None and after == before
+
+    asyncio.run(_run())
+
+
+async def _ordinary_teardown_job(pool: AsyncConnectionPool, state: SystemState) -> tuple[str, str]:
+    """Enqueue the ordinary teardown for a fresh System in ``state``; return System and job."""
+    alloc_id = await granted_allocation(pool)
+    system_id = await _seed_teardown_system(pool, alloc_id, state)
+    first = await _teardown(pool, ctx(Role.ADMIN), system_id)
+    assert first.status == "queued", first.model_dump()
+    assert first.object_id is not None
+    return system_id, first.object_id
+
+
+@pytest.mark.parametrize("state", [SystemState.FAILED, SystemState.READY, SystemState.TEARING_DOWN])
+def test_teardown_recycles_dead_lettered_ordinary_job(
+    migrated_url: str, state: SystemState
+) -> None:
+    """#2929: a dead-lettered ordinary teardown, pre-#2913 category included, is re-run."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _ordinary_teardown_job(pool, state)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed', attempt = max_attempts, "
+                    "error_category = 'infrastructure_failure' WHERE id = %s",
+                    (job_id,),
+                )
+                before = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+            response = await _teardown(pool, ctx(Role.ADMIN), system_id)
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.status == "queued", response.model_dump()
+        assert response.object_id == job_id
+        assert before is not None and after == ("queued", 0, before[2])
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("prior", ["queued", "running", "running-lapsed", "succeeded", "canceled"])
+def test_teardown_replays_live_or_settled_ordinary_job(migrated_url: str, prior: str) -> None:
+    """#2929: only a failed ordinary teardown is re-run; live and settled jobs replay."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _ordinary_teardown_job(pool, SystemState.FAILED)
+            if prior.startswith("running"):
+                lease = "-1 minute" if prior == "running-lapsed" else "5 minutes"
+                await _run_final_attempt(pool, job_id, lease=lease)
+            async with pool.connection() as conn:
+                if prior in ("succeeded", "canceled"):
+                    await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (prior, job_id))
+                before = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+            response = await _teardown(pool, ctx(Role.ADMIN), system_id)
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.object_id == job_id
+        assert before is not None and after == before
+        assert response.status == before[0]
+
+    asyncio.run(_run())
+
+
+_BREAKGLASS_ADMIN = RequestContext(
+    principal="ops-admin",
+    agent_session="sess-admin",
+    projects=(),
+    roles={},
+    platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
+)
+_FORCE_TEARDOWN_AUDIT_SQL = (
+    "SELECT count(*) FROM platform_audit_log WHERE tool = 'ops.force_teardown'"
+)
+
+
+async def _force_teardown(
+    pool: AsyncConnectionPool, system_id: str, resolver: ProviderResolver | None
+) -> tuple[Any, int]:
+    """Drive break-glass `ops.force_teardown`; return its envelope and the audit row count."""
+    response = await breakglass.force_teardown(
+        pool, _BREAKGLASS_ADMIN, system_id=system_id, reason="stuck", resolver=resolver
+    )
+    async with pool.connection() as conn:
+        row = await (await conn.execute(_FORCE_TEARDOWN_AUDIT_SQL)).fetchone()
+    assert row is not None
+    return response, row[0]
+
+
+async def _ordinary_job_with_history(
+    pool: AsyncConnectionPool, prior: str, worker: str | None
+) -> tuple[str, str, Any]:
+    """A System whose ordinary teardown row is ``prior`` and that has completed history."""
+    system_id, job_id = await _ordinary_teardown_job(pool, SystemState.READY)
+    run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE jobs SET state = %s, worker_id = %s WHERE id = %s",
+            (prior, worker, job_id),
+        )
+        seeded = await seed_activation(
+            conn,
+            state=ExternalBootActivationState.RECOVERED,
+            cleanup_complete=True,
+            ready_reservation=True,
+            system_id=UUID(system_id),
+            run_id=UUID(run_id),
+        )
+        await _seed_retired_teardown_authority(conn, seeded)
+    return system_id, job_id, seeded
+
+
+@pytest.mark.parametrize("via", ["systems.teardown", "ops.force_teardown"])
+@pytest.mark.parametrize(
+    ("prior", "worker", "replaced"),
+    [("failed", None, True), ("canceled", None, True), ("canceled", "worker-live", False)],
+)
+def test_teardown_replaces_failed_ordinary_job_for_external_boot_history(
+    migrated_url: str, prior: str, worker: str | None, replaced: bool, via: str
+) -> None:
+    """#2966: the worker refuses an ordinary job for history, so the public route replaces it.
+
+    Break-glass `ops.force_teardown` takes the same route (#3007) and still writes its audit row.
+    """
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id, seeded = await _ordinary_job_with_history(pool, prior, worker)
+            resolver = provider_resolver(external_boot=ExternalBootOperations())
+            if via == "systems.teardown":
+                response = await _teardown(pool, ctx(Role.ADMIN), system_id, resolver=resolver)
+            else:
+                response, audited = await _force_teardown(pool, system_id, resolver)
+                assert audited == 1
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+
+        if not replaced:
+            # A claimed canceled attempt may still be running, so it keeps the conflict.
+            assert response.data["reason"] == "ordinary_teardown_fenced_by_external_boot"
+            assert after is not None and after[0] == prior
+            return
+        assert response.status == "queued", response.model_dump()
+        assert response.object_id == job_id
+        assert after is not None and after[0] == "queued"
+        assert after[2]["external_boot_authority_v1"]["activation_id"] == str(seeded.activation.id)
+
+    asyncio.run(_run())
+
+
+def test_force_teardown_external_boot_history_needs_resolver(migrated_url: str) -> None:
+    """#3007: with no authority resolver, break-glass refuses instead of recycling the job."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id, _ = await _ordinary_job_with_history(pool, "failed", None)
+            response, audited = await _force_teardown(pool, system_id, None)
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
+
+        assert response.error_category == ErrorCategory.CONFIGURATION_ERROR, response.model_dump()
+        assert response.data["reason"] == "external_boot_teardown_authority_unresolved"
+        assert after is not None and after[0] == "failed"
+        assert "external_boot_authority_v1" not in after[2]
+        assert audited == 1
+
+    asyncio.run(_run())
+
+
+def test_force_teardown_ordinary_path_runs_admission_matrix(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3007: break-glass keeps the matrix call `systems.teardown` makes before an ordinary job."""
+
+    async def _deny(*_: object, project: str, **__: object) -> None:
+        raise ExternalBootDenied(
+            "denied", details={"reason": "test_denial"}, next_actions=[], project=project
+        )
+
+    monkeypatch.setattr(systems_admin, "check_external_boot_admission", _deny)
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            response, audited = await _force_teardown(pool, system_id, None)
+            async with pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT count(*) FROM jobs WHERE dedup_key = %s", (f"{system_id}:teardown",)
+                    )
+                ).fetchone()
+
+        assert response.error_category == ErrorCategory.CONFLICT, response.model_dump()
+        assert response.data["reason"] == "test_denial"
+        assert row is not None and row[0] == 0
+        assert audited == 1
+
+    asyncio.run(_run())
+
+
+def test_keyed_teardown_retry_replaces_the_refused_ordinary_job(migrated_url: str) -> None:
+    """#2966: the key recorded for the ordinary job must not roll back the replacement."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            first = await teardown_system(
+                pool, ctx(Role.ADMIN), system_id, idempotency_key="teardown-refused-ordinary"
+            )
+            run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed' WHERE id = %s", (first.object_id,)
+                )
+                seeded = await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.RECOVERED,
+                    cleanup_complete=True,
+                    ready_reservation=True,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+                await _seed_retired_teardown_authority(conn, seeded)
+            retry = await teardown_system(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                idempotency_key="teardown-refused-ordinary",
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
+            )
+            async with pool.connection() as conn:
+                after = await (await conn.execute(_JOB_COLUMNS, (first.object_id,))).fetchone()
+
+        assert retry.status == "queued", retry.model_dump()
+        assert retry.object_id == first.object_id
+        assert after is not None and after[0] == "queued"
+        assert after[2]["external_boot_authority_v1"]["activation_id"] == str(seeded.activation.id)
 
     asyncio.run(_run())
 
@@ -1627,6 +2119,52 @@ def test_queued_ordinary_teardown_refuses_activation_created_before_claim(
 
         assert raised.value.category is ErrorCategory.CONFLICT
         assert raised.value.details["reason"] == "external_boot_teardown_not_supported"
+        assert system is not None and system.state is SystemState.READY
+        assert provisioner.torn_down == []
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "state", [ExternalBootActivationState.RECOVERED, ExternalBootActivationState.ABANDONED]
+)
+def test_ordinary_teardown_refuses_completed_external_boot_history(
+    migrated_url: str, state: ExternalBootActivationState
+) -> None:
+    """#2966: a clean release leaves the domain with the authority, so no ordinary teardown runs."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await seed_system(pool, alloc_id, SystemState.READY)
+            job = await _enqueue_teardown(pool, system_id)
+            run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                await seed_activation(
+                    conn,
+                    state=state,
+                    cleanup_complete=True,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+            provisioner = FakeProvisioning()
+            async with pool.connection() as conn:
+                with pytest.raises(
+                    CategorizedError, match="ordinary teardown is fenced by external-boot"
+                ) as raised:
+                    await systems_handlers.teardown_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(provisioner=provisioner),
+                        artifact_store=INERT_OBJECT_STORE,
+                    )
+            async with pool.connection() as conn:
+                system = await SYSTEMS.get(conn, UUID(system_id))
+
+        assert raised.value.category is ErrorCategory.CONFLICT
+        assert raised.value.terminal
+        assert raised.value.details["reason"] == "external_boot_teardown_not_supported"
+        assert raised.value.details["activation_state"] == state.value
         assert system is not None and system.state is SystemState.READY
         assert provisioner.torn_down == []
 
@@ -2099,6 +2637,162 @@ def test_reprovision_different_profile_is_new_job(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+async def _settle_reprovision_job(
+    pool: AsyncConnectionPool,
+    job_id: str,
+    state: str,
+    *,
+    error_category: str | None = None,
+    attempt: int = 1,
+    ago: timedelta | None = None,
+) -> None:
+    """Leave the System `ready` behind its reprovision job in ``state``, as a worker would."""
+    if state == "running":
+        await _run_final_attempt(pool, job_id, lease="5 minutes")
+    async with pool.connection() as conn:
+        if state != "running":
+            await conn.execute(
+                "UPDATE jobs SET state = %s, error_category = %s, attempt = %s WHERE id = %s",
+                (state, error_category, attempt, job_id),
+            )
+        await conn.execute(
+            "UPDATE systems SET state = 'ready' WHERE id = "
+            "(SELECT (payload->>'system_id')::uuid FROM jobs WHERE id = %s)",
+            (job_id,),
+        )
+        if ago is not None:
+            await conn.execute("ALTER TABLE jobs DISABLE TRIGGER jobs_set_updated_at")
+            try:
+                await conn.execute(
+                    "UPDATE jobs SET updated_at = now() - %s WHERE id = %s", (ago, job_id)
+                )
+            finally:
+                await conn.execute("ALTER TABLE jobs ENABLE TRIGGER jobs_set_updated_at")
+
+
+async def _job_row(pool: AsyncConnectionPool, job_id: str) -> dict[str, Any]:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    return row
+
+
+def test_reprovision_back_to_applied_profile_runs_fresh_attempt(migrated_url: str) -> None:
+    """#3008: A -> B -> A recycles A's settled job, so the third handler runs."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile_a = _active_allocation_profile()
+            profile_b = {**profile_a, "memory_mb": 8192}
+            prov = FakeProvisioning()
+            resolver = provider_resolver(provisioner=prov)
+            job_ids: list[str] = []
+            for profile in (profile_a, profile_b, profile_a):
+                resp = await _reprovision(pool, ctx(), sys_id, profile)
+                assert resp.status == "queued"
+                row = await _job_row(pool, resp.object_id)
+                assert row["state"] == "queued" and row["attempt"] == 0  # a fresh attempt
+                async with pool.connection() as conn:
+                    await systems_handlers.reprovision_handler(
+                        conn, Job.model_validate(row), resolver=resolver
+                    )
+                await _settle_reprovision_job(pool, resp.object_id, "succeeded")
+                job_ids.append(resp.object_id)
+            state = await _system_state(pool, sys_id)
+        assert prov.reprovisioned == [UUID(sys_id)] * 3  # the third handler ran
+        assert job_ids[2] == job_ids[0]  # A's dedup row, recycled
+        assert state == "ready"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("job_state", "error_category", "attempt", "ago"),
+    [
+        ("succeeded", None, 1, None),
+        ("failed", None, 1, None),  # the only handler returned before this write
+        ("canceled", None, 1, timedelta(minutes=16)),
+        ("failed", "lease_expired", 1, timedelta(minutes=16)),
+        ("failed", None, 2, timedelta(minutes=16)),
+        ("succeeded", None, 2, timedelta(minutes=16)),
+    ],
+)
+def test_reprovision_recycles_settled_same_profile_job(
+    migrated_url: str,
+    job_state: str,
+    error_category: str | None,
+    attempt: int,
+    ago: timedelta | None,
+) -> None:
+    """#3008: a same-profile row with no handler left behind it is reset to a fresh attempt."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile = _active_allocation_profile()
+            first = await _reprovision(pool, ctx(), sys_id, profile)
+            await _settle_reprovision_job(
+                pool,
+                first.object_id,
+                job_state,
+                error_category=error_category,
+                attempt=attempt,
+                ago=ago,
+            )
+            again = await _reprovision(pool, ctx(), sys_id, profile)
+            row = await _job_row(pool, first.object_id)
+            state = await _system_state(pool, sys_id)
+        assert again.status == "queued"
+        assert again.object_id == first.object_id
+        assert row["state"] == "queued" and row["attempt"] == 0 and row["error_category"] is None
+        assert state == "reprovisioning"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("job_state", "error_category", "attempt"),
+    [
+        ("queued", None, 0),
+        ("running", None, 3),
+        ("canceled", None, 1),  # `jobs.cancel` leaves the handler running
+        ("failed", "lease_expired", 1),  # written over a lapsed attempt
+        ("failed", None, 2),  # a reclaimed attempt; the lapsed one may still run
+        ("succeeded", None, 2),
+    ],
+)
+def test_reprovision_refuses_while_same_profile_handler_may_run(
+    migrated_url: str, job_state: str, error_category: str | None, attempt: int
+) -> None:
+    """#3008: a recycle resets the attempt counter, so a row that may hide a handler blocks."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile = _active_allocation_profile()
+            first = await _reprovision(pool, ctx(), sys_id, profile)
+            await _settle_reprovision_job(
+                pool, first.object_id, job_state, error_category=error_category, attempt=attempt
+            )
+            before = await _job_row(pool, first.object_id)
+            resp = await _reprovision(pool, ctx(), sys_id, profile)
+            after = await _job_row(pool, first.object_id)
+            state = await _system_state(pool, sys_id)
+        assert resp.status == "error"
+        assert resp.error_category == "conflict"
+        assert resp.data == {"reason": "reprovision_job_settling", "job_id": first.object_id}
+        assert resp.suggested_next_actions == ["systems.get"]
+        assert state == "ready"
+        assert after == before  # the job row is untouched
+
+    asyncio.run(_run())
+
+
 def test_reprovision_invalid_idempotency_key_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:
@@ -2210,6 +2904,98 @@ def test_reprovision_rejects_current_teardown_authority_before_mutation(
         assert response.data["reason"] == "external_boot_teardown_in_progress"
         assert system is not None and system["state"] == "ready"
         assert jobs is not None and jobs["count"] == 0
+
+    asyncio.run(_run())
+
+
+async def _seed_teardown_in_state(pool: AsyncConnectionPool, sys_id: str, state: str) -> None:
+    job = await _enqueue_teardown(pool, sys_id)
+    if state == "running":
+        await _run_final_attempt(pool, str(job.id), lease="5 minutes")
+    elif state != "queued":
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (state, job.id))
+
+
+@pytest.mark.parametrize("teardown_state", ["queued", "running"])
+def test_reprovision_refuses_under_live_teardown_job(
+    migrated_url: str, teardown_state: str
+) -> None:
+    """#2979: a live `{uid}:teardown` leaves the System `ready`, so admission must read it."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            await _seed_teardown_in_state(pool, sys_id, teardown_state)
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
+                jobs = await cur.fetchone()
+            state = await _system_state(pool, sys_id)
+            teardown = await _teardown_job_row(pool, sys_id)
+        assert resp.status == "error"
+        assert resp.error_category == "conflict"
+        assert resp.data["reason"] == "teardown_in_progress"
+        assert resp.retryable is False  # CONFLICT (ADR-0118): wait on the teardown, not a retry
+        assert resp.suggested_next_actions == ["systems.get"]
+        assert state == "ready"
+        assert jobs is not None and jobs["n"] == 0
+        assert teardown is not None and teardown[1] == teardown_state  # teardown untouched
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("teardown_state", ["failed", "succeeded", "canceled"])
+def test_reprovision_admitted_after_settled_teardown_job(
+    migrated_url: str, teardown_state: str
+) -> None:
+    """#2979: only a live teardown blocks; the handler re-checks state for a settled one."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            await _seed_teardown_in_state(pool, sys_id, teardown_state)
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
+            state = await _system_state(pool, sys_id)
+        assert resp.status == "queued"
+        assert state == "reprovisioning"
+
+    asyncio.run(_run())
+
+
+def test_reprovision_non_ready_system_under_teardown_keeps_config_error(
+    migrated_url: str,
+) -> None:
+    """#2979: a System the teardown already moved still reports its `current_status`."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.TEARING_DOWN)
+            await _seed_teardown_in_state(pool, sys_id, "running")
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
+        assert resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "tearing_down"
+
+    asyncio.run(_run())
+
+
+def test_reprovision_replay_survives_later_teardown_job(migrated_url: str) -> None:
+    """#2979: a repeat call on a `reprovisioning` System stays a poll, not a conflict."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile = _active_allocation_profile()
+            first = await _reprovision(pool, ctx(), sys_id, profile)
+            await _enqueue_teardown(pool, sys_id)
+            second = await _reprovision(pool, ctx(), sys_id, profile)
+        assert first.status == "queued"
+        assert second.status == "queued"
+        assert second.object_id == first.object_id
 
     asyncio.run(_run())
 
@@ -2684,6 +3470,223 @@ def test_reconciler_gc_tears_down_pre_ready_orphan(migrated_url: str) -> None:
                 )
                 job_n = await cur.fetchone()
         assert job_n is not None and job_n["n"] == 1
+
+    asyncio.run(_run())
+
+
+# --- teardown of a reprovisioning System (#2928) --------------------------------------------
+
+
+async def _teardown_job_row(pool: AsyncConnectionPool, system_id: str) -> tuple[Any, ...] | None:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, state, attempt, error_category FROM jobs WHERE dedup_key = %s",
+            (f"{system_id}:teardown",),
+        )
+        return await cur.fetchone()
+
+
+async def _system_state(pool: AsyncConnectionPool, system_id: str) -> str:
+    async with pool.connection() as conn:
+        system = await SYSTEMS.get(conn, UUID(system_id))
+    assert system is not None
+    return system.state.value
+
+
+async def _dead_letter(pool: AsyncConnectionPool, job_id: UUID, category: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE jobs SET state = 'failed', attempt = 1, error_category = %s WHERE id = %s",
+            (category, job_id),
+        )
+
+
+@pytest.mark.parametrize("prior", [None, "queued", "conflict", "infrastructure_failure"])
+def test_teardown_refuses_reprovisioning_system(migrated_url: str, prior: str | None) -> None:
+    """#2928: no teardown is enqueued, and no failed one recycled, while a reprovision runs."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.REPROVISIONING)
+            if prior is not None:
+                job = await _enqueue_teardown(pool, sys_id)
+                if prior != "queued":
+                    await _dead_letter(pool, job.id, prior)
+            before = await _teardown_job_row(pool, sys_id)
+            resp = await _teardown(pool, ctx(Role.ADMIN), sys_id)
+            after = await _teardown_job_row(pool, sys_id)
+            state = await _system_state(pool, sys_id)
+        assert resp.status == "error"
+        assert resp.error_category == "conflict"
+        assert resp.data["current_status"] == "reprovisioning"
+        assert "systems.get" in resp.suggested_next_actions
+        assert after == before
+        assert state == "reprovisioning"
+
+    asyncio.run(_run())
+
+
+def test_teardown_handler_refuses_reprovisioning_system_terminally(migrated_url: str) -> None:
+    """#2928: a teardown that races a reprovision fails once as a terminal conflict.
+
+    ``reprovisioning -> tearing_down`` is not a legal edge; the handler must not attempt it and
+    raise ``IllegalTransition``, which the worker would classify as retryable
+    ``infrastructure_failure`` and re-run until attempts ran out.
+    """
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.REPROVISIONING)
+            job = await _enqueue_teardown(pool, sys_id)
+            prov = FakeProvisioning()
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as excinfo:
+                    await systems_handlers.teardown_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(provisioner=prov),
+                        artifact_store=INERT_OBJECT_STORE,
+                    )
+            state = await _system_state(pool, sys_id)
+        assert excinfo.value.category is ErrorCategory.CONFLICT
+        assert excinfo.value.terminal is True
+        assert excinfo.value.details["current_status"] == "reprovisioning"
+        assert state == "reprovisioning"
+        assert prov.torn_down == []
+
+    asyncio.run(_run())
+
+
+def test_reconciler_orphan_lane_skips_reprovisioning_system(migrated_url: str) -> None:
+    """#2928: the orphan lane waits for a reprovision to settle instead of queueing a teardown."""
+    from kdive.reconciler.loop import _repair_orphaned_systems
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.REPROVISIONING)
+            async with pool.connection() as conn:
+                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
+                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASED)
+                skipped = await _repair_orphaned_systems(conn)
+                assert await _teardown_job_row(pool, sys_id) is None
+                await SYSTEMS.update_state(conn, UUID(sys_id), SystemState.READY)
+                enqueued = await _repair_orphaned_systems(conn)
+        assert skipped == 0
+        assert enqueued == 1
+
+    asyncio.run(_run())
+
+
+def test_reconciler_orphan_recheck_skips_system_that_began_reprovisioning(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2928: a reprovision admitted between the candidate read and the System lock is skipped."""
+    from kdive.reconciler.loop import _repair_orphaned_systems
+    from kdive.reconciler.repairs import systems as system_repairs
+
+    real_lock = system_repairs.advisory_xact_lock
+
+    @asynccontextmanager
+    async def _reprovision_then_lock(
+        conn: psycopg.AsyncConnection, scope: LockScope, key: UUID
+    ) -> AsyncIterator[None]:
+        await SYSTEMS.update_state(conn, key, SystemState.REPROVISIONING)
+        async with real_lock(conn, scope, key):
+            yield
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            async with pool.connection() as conn:
+                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
+                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASED)
+                monkeypatch.setattr(system_repairs, "advisory_xact_lock", _reprovision_then_lock)
+                enqueued = await _repair_orphaned_systems(conn)
+            assert enqueued == 0
+            assert await _teardown_job_row(pool, sys_id) is None
+            assert await _system_state(pool, sys_id) == "reprovisioning"
+
+    asyncio.run(_run())
+
+
+def test_teardown_rerun_after_reprovision_settles_recycles_refused_job(
+    migrated_url: str,
+) -> None:
+    """#2928: the operator's re-run recycles the conflict-failed row (#2929) and tears down."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.REPROVISIONING)
+            raced = await _enqueue_teardown(pool, sys_id)
+            prov = FakeProvisioning()
+            resolver = provider_resolver(provisioner=prov)
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError):
+                    await systems_handlers.teardown_handler(
+                        conn, raced, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                    )
+                await _dead_letter(pool, raced.id, "conflict")
+                await SYSTEMS.update_state(conn, UUID(sys_id), SystemState.READY)
+            resp = await _teardown(pool, ctx(Role.ADMIN), sys_id)
+            assert resp.status == "queued", resp.model_dump()
+            assert resp.object_id == str(raced.id)
+            async with pool.connection() as conn:
+                job = await queue.get_by_dedup_key(conn, f"{sys_id}:teardown")
+                assert job is not None
+                await systems_handlers.teardown_handler(
+                    conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
+            state = await _system_state(pool, sys_id)
+        assert state == "torn_down"
+        assert prov.torn_down == [f"kdive-{sys_id}"]
+
+    asyncio.run(_run())
+
+
+def test_teardown_after_stalled_reprovision_settles(migrated_url: str) -> None:
+    """#2980: the reconciler settles a stranded reprovision to `failed`; teardown then works."""
+    from kdive.reconciler.repairs.systems import repair_stalled_reprovisioning_systems
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.REPROVISIONING)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, authorizing, "
+                    "    dedup_key, error_category) "
+                    "VALUES ('reprovision', %s, 'failed', 1, 3, %s, %s, NULL)",
+                    (
+                        Jsonb({"system_id": sys_id, "profile_digest": "d"}),
+                        Jsonb({"principal": "alice", "agent_session": None, "project": "proj"}),
+                        f"{sys_id}:reprovision:d",
+                    ),
+                )
+            refused = await _teardown(pool, ctx(Role.ADMIN), sys_id)
+            assert refused.error_category == "conflict"
+            async with pool.connection() as conn:
+                assert await repair_stalled_reprovisioning_systems(conn) == 1
+            assert await _system_state(pool, sys_id) == "failed"
+            resp = await _teardown(pool, ctx(Role.ADMIN), sys_id)
+            assert resp.status == "queued", resp.model_dump()
+            prov = FakeProvisioning()
+            async with pool.connection() as conn:
+                job = await queue.get_by_dedup_key(conn, f"{sys_id}:teardown")
+                assert job is not None
+                await systems_handlers.teardown_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(provisioner=prov),
+                    artifact_store=INERT_OBJECT_STORE,
+                )
+            state = await _system_state(pool, sys_id)
+        assert state == "failed"
+        assert prov.torn_down == [f"kdive-{sys_id}"]
 
     asyncio.run(_run())
 

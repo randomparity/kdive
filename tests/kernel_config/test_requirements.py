@@ -352,6 +352,7 @@ def test_no_upload_seam_reads_the_sysrq_refusal_set():
     # over FEATURE_REQUIREMENTS would gate sysrq without ever spelling it.
     assert hasattr(gate, "CRASH_CAPTURE")
     assert hasattr(gate, "ROOTFS_MOUNT")
+    assert hasattr(gate, "CRASH_CAPTURE_RHEL_GUEST")
     assert CRASH_CAPTURE in source
     assert ROOTFS_MOUNT in source
 
@@ -392,10 +393,11 @@ def test_the_upload_enforcement_values_name_the_features_the_gate_module_really_
         if f.enforcement in (Enforcement.UPLOAD_REFUSAL, Enforcement.UPLOAD_ADVISORY)
     }
     assert checked == read
-    assert checked == {CRASH_CAPTURE, ROOTFS_MOUNT}
-    # And the two are not interchangeable: only crash_capture turns its unmet set into a refusal.
+    assert checked == {CRASH_CAPTURE, ROOTFS_MOUNT, CRASH_CAPTURE_RHEL_GUEST}
+    # And they are not interchangeable: only crash_capture turns its unmet set into a refusal.
     assert feature_requirement(CRASH_CAPTURE).enforcement is Enforcement.UPLOAD_REFUSAL
     assert feature_requirement(ROOTFS_MOUNT).enforcement is Enforcement.UPLOAD_ADVISORY
+    assert feature_requirement(CRASH_CAPTURE_RHEL_GUEST).enforcement is Enforcement.UPLOAD_ADVISORY
 
 
 def test_sysrq_summary_does_not_promise_a_config_time_gate_the_upload_path_never_performs():
@@ -1564,6 +1566,10 @@ _SEAM_SUPPLIES: Final[MappingProxyType[str, SeamFacts]] = MappingProxyType(
         # from the Run's own target_kind (ADR-0545). It holds no arch: complete_build runs against
         # a Run, and nothing on that path resolves the System profile it will install to.
         ROOTFS_MOUNT: SeamFacts(initrd=True, guest_initramfs=True, arch=False),
+        # rhel_guest_crash_warning passes none of the three (ADR-0678): its seven clauses are
+        # plain, neither UNLESS_INITRD nor arch-scoped, so no fact would change the verdict. A
+        # clause that gains either condition fails I2 here until the seam supplies it.
+        CRASH_CAPTURE_RHEL_GUEST: SeamFacts(initrd=False, guest_initramfs=False, arch=False),
     }
 )
 

@@ -21,7 +21,7 @@ import subprocess  # noqa: S404 - git commands use fixed argv, no shell  # nosec
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -83,6 +83,7 @@ class ProcessSkew:
     process: str
     verdict: SkewVerdict
     detail: str
+    applicable: bool = True
 
     def __str__(self) -> str:
         return f"{self.process}: {self.verdict.value} — {self.detail}"
@@ -94,6 +95,7 @@ class SkewProbe:
 
     results: list[ProcessSkew]
     worker_pids: frozenset[int] | None
+    revisions: dict[str, str | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,21 +410,32 @@ def probe_stack_skew(
         )
     before = inventory()
     results = []
+    revisions: dict[str, str | None] = {}
     reported_workers = 0
     for process, url in readyz_urls(base_url).items():
         version = fetch(url)
         if version is None:
+            revisions[process] = None
+            detail = (
+                "not deployed in the portable three-role stack (Kubernetes-only role)"
+                if process == "lifecycle-witness"
+                else f"no build reported at {url} (process down, or predates ADR-0482)"
+            )
             results.append(
                 ProcessSkew(
                     process,
                     SkewVerdict.UNKNOWN,
-                    f"no build reported at {url} (process down, or predates ADR-0482)",
+                    detail,
+                    applicable=process != "lifecycle-witness",
                 )
             )
             continue
         if process == "worker":
             reported_workers += 1
         commit = version.get("commit")
+        revisions[process] = (
+            commit if isinstance(commit, str) and _ABBREV_SHA.fullmatch(commit) else None
+        )
         started_at = version.get("started_at")
         results.append(
             classify(
@@ -443,9 +456,9 @@ def probe_stack_skew(
             "check scripts/live-stack/stack-status.sh and restart the app tier"
         )
     else:
-        return SkewProbe(results, after)
+        return SkewProbe(results, after, revisions)
     results.append(ProcessSkew("worker-inventory", SkewVerdict.UNKNOWN, detail))
-    return SkewProbe(results, None)
+    return SkewProbe(results, None, revisions)
 
 
 # --- policy -----------------------------------------------------------------------------
@@ -474,6 +487,10 @@ def partition(
 ) -> tuple[list[ProcessSkew], list[ProcessSkew]]:
     """Split ``results`` into ``(skip_worthy, warn_worthy)`` under ``policy``."""
     skipping = skipping_verdicts(policy)
-    skip = [r for r in results if r.verdict in skipping]
-    warn = [r for r in results if r.verdict is not SkewVerdict.FRESH and r.verdict not in skipping]
+    skip = [r for r in results if r.applicable and r.verdict in skipping]
+    warn = [
+        r
+        for r in results
+        if r.verdict is not SkewVerdict.FRESH and (not r.applicable or r.verdict not in skipping)
+    ]
     return skip, warn

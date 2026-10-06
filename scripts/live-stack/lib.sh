@@ -4,7 +4,7 @@
 # beyond that. Consumers source env.sh themselves when they need the KDIVE_* runtime config.
 
 # scripts/live-stack/ -> repo root is two levels up (matches the other scripts in this directory).
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 # KDIVE_PYTHON overrides the interpreter (the #1293 self-hosted CI job points it at /opt/kdive's
 # libguestfs venv); unset, it stays the workspace .venv so operator use is unchanged.
 py="${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"
@@ -47,10 +47,13 @@ live_stack_backends_up() {
   # Two of the three deployments are non-interactive CI actors that cannot run `docker compose
   # ps` themselves, and --wait's timeout names no service — where the postgres poll this
   # replaces named its own. Dump the table so the job log carries the same signal.
-  if ! docker compose up -d --wait --wait-timeout 120 "${KDIVE_BACKEND_LONG_RUNNING[@]}"; then
+  # The Postgres initdb bind source resolves to each checkout's absolute path. A second worktree
+  # changes Compose's hash and would recreate a healthy database; apply backend config/image
+  # changes explicitly with stack-down.sh before bringing it up again.
+  docker compose up --no-recreate --wait --wait-timeout 120 "${KDIVE_BACKEND_LONG_RUNNING[@]}" || {
     docker compose ps >&2
     return 1
-  fi
+  }
 
   # Creates the bucket, enables versioning, verifies Enabled, then exits. `run --rm` so a
   # failure here fails bring-up: the replaced `up -d` form never surfaced this exit status,

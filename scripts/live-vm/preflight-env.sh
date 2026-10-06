@@ -8,11 +8,11 @@
 # it — the env families assert paths that staging produces, so they cannot run first.
 set -euo pipefail
 
-here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/live-vm/lib.sh
 source "${here}/lib.sh"
 
-[ "$#" -ge 1 ] || die "usage: preflight-env.sh <host|throwaway|provisioned|debug-stepping|tcg> [more...]"
+[ "$#" -ge 1 ] || die "usage: preflight-env.sh <host|throwaway|provisioned|debug-stepping|tcg|native-x86|native-power|tcg-host|capacity> [more...]"
 
 # NAME: die unless the named env var is non-empty.
 require_set() {
@@ -104,6 +104,24 @@ check_tcg() {
   require_tools "qemu-system-ppc64:the ppc64le TCG guest emulator (install qemu-system-ppc)"
 }
 
+check_lane() {
+  local family="$1" py
+  require_set KDIVE_LIBVIRT_URI
+  py="$(kdive_python)"
+  "$py" "$(cd -- "${here}/.." && pwd)/live_vm_lane.py" "$family" "$KDIVE_LIBVIRT_URI" ||
+    die "$family prerequisites unavailable; fix the reported host/libvirt condition and retry"
+}
+
+check_capacity() {
+  local py
+  require_set KDIVE_LANE_WORKSPACE
+  py="$(kdive_python)"
+  "$py" "$(cd -- "${here}/.." && pwd)/live_vm_lane.py" capacity "$KDIVE_LANE_WORKSPACE" \
+    "${KDIVE_LANE_CPUS-8}" "${KDIVE_LANE_MEMORY_MIB-16384}" \
+    "${KDIVE_LANE_DISK_BYTES-51539607552}" ||
+    die "lane capacity unavailable; fix the reported resource shortage and retry"
+}
+
 for family in "$@"; do
   case "$family" in
   host) check_host ;;
@@ -111,7 +129,9 @@ for family in "$@"; do
   provisioned) check_provisioned ;;
   debug-stepping) check_debug_stepping ;;
   tcg) check_tcg ;;
-  *) die "unknown family '${family}' (expected host|throwaway|provisioned|debug-stepping|tcg)" ;;
+  native-x86 | native-power | tcg-host) check_lane "$family" ;;
+  capacity) check_capacity ;;
+  *) die "unknown family '${family}' (expected host|throwaway|provisioned|debug-stepping|tcg|native-x86|native-power|tcg-host|capacity)" ;;
   esac
 done
 echo "live_vm preflight: all declared families ($*) have their required env" >&2

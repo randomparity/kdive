@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -11,6 +12,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
+from fastmcp import Client, FastMCP
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from psycopg.rows import dict_row
@@ -30,6 +32,7 @@ from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.middleware.server_fault import SERVER_FAULT_DETAIL, ServerFaultMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.vmcore import handlers as vmcore_handler_tools
 from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
@@ -428,6 +431,45 @@ def test_fetch_vmcore_kdump_admitted_when_no_catalog_row(migrated_url: str) -> N
         assert jobs == 1
 
     asyncio.run(_run())
+
+
+def test_fetch_vmcore_over_a_corrupt_catalog_row_is_a_server_fault_envelope(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A corrupt catalog row is not a resolution gap: the gate surfaces the server fault instead of
+    # admitting the capture, and the caller is not told its arguments were wrong (#3044).
+    fastmcp_logger = logging.getLogger("fastmcp")
+    fastmcp_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG)
+
+    async def _run() -> tuple[Any, int]:
+        async with _pool(migrated_url) as pool:
+            run_id = await _catalog_rootfs_run(pool, capabilities=["kdump"], provenance={})
+            async with pool.connection() as conn:
+                await conn.execute("UPDATE image_catalog SET capabilities = '{bogus}'")
+            app: FastMCP = FastMCP("t")
+            app.add_middleware(ServerFaultMiddleware())
+
+            @app.tool(name="vmcore.fetch")
+            async def fetch() -> ToolResponse:
+                return await _real_local_handlers().fetch_vmcore(
+                    pool, _ctx(), run_id=run_id, method="kdump"
+                )
+
+            async with Client(app) as client:
+                result = await client.call_tool("vmcore.fetch", {}, raise_on_error=False)
+            return result, await _job_count(pool)
+
+    try:
+        result, jobs = asyncio.run(_run())
+    finally:
+        fastmcp_logger.removeHandler(caplog.handler)
+    assert not result.is_error
+    envelope = result.structured_content
+    assert envelope["error_category"] == ErrorCategory.INFRASTRUCTURE_FAILURE.value
+    assert envelope["detail"] == SERVER_FAULT_DETAIL
+    assert jobs == 0
+    assert not [r for r in caplog.records if "Invalid arguments for tool" in r.getMessage()]
 
 
 def test_fetch_vmcore_host_dump_ungated_when_image_incapable(migrated_url: str) -> None:

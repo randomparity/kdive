@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import IO
 
+from kdive.build_artifacts.limits import MAX_LEGACY_INSTALL_MODULE_BYTES
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
 
@@ -24,7 +25,7 @@ MAX_KERNEL_TAR_MEMBERS = 200_000
 # declared size is an attacker-controlled header field and a gzip run of zeros is tiny compressed
 # yet can declare tens of GB, so a read is refused past this bound before it allocates. A real
 # vmlinuz is well under 2 GiB and a one-version module tree far under it (#1148 review).
-MAX_KERNEL_TAR_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_KERNEL_TAR_UNCOMPRESSED_BYTES = MAX_LEGACY_INSTALL_MODULE_BYTES
 
 
 def reject_oversize_member(size: int, *, dest: str) -> None:

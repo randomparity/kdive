@@ -139,6 +139,22 @@ class RecordingTeardownExecutor:
             )
             reservation = await cursor.fetchone()
         assert reservation is not None
+        teardown_identity = ExternalBootTeardownEvidenceV1.model_validate(teardown).identity
+        if reservation["state"] == "pending":
+            return TypeAdapter(AuthorityTeardownProofV1).validate_python(
+                {
+                    "disposition": "complete_pending",
+                    "teardown_evidence": teardown,
+                    "cleanup_evidence": {
+                        "schema": "external-boot-cleanup-evidence-v1",
+                        "activation_id": str(request.activation_id),
+                        "system_id": str(request.system_id),
+                        "mode": "pending_system_teardown",
+                        "teardown_identity": teardown_identity,
+                        "completed_at": _TEARDOWN_AT,
+                    },
+                }
+            )
         assert reservation["state"] == "ready"
         release_value = {
             "schema": "external-boot-release-evidence-v1",
@@ -152,7 +168,6 @@ class RecordingTeardownExecutor:
             "verified_at": _TEARDOWN_AT,
         }
         release_identity = ExternalBootReleaseEvidenceV1.model_validate(release_value).identity
-        teardown_identity = ExternalBootTeardownEvidenceV1.model_validate(teardown).identity
         return TypeAdapter(AuthorityTeardownProofV1).validate_python(
             {
                 "disposition": "complete_ready",

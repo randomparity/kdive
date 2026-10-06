@@ -232,6 +232,14 @@ mutates the machine. Do not put credential contents in command-line extra vars. 
 variables are only for the issue-owned clean-host carrier; routine provisioning leaves
 `live_vm_host_authority_proof_enabled` false.
 
+The first converge after the authority user manager's memlock drop-in is written restarts
+`user@<uid>.service` (`provider_authority_host` role, `tasks/libvirt.yml`). The restart ends every
+unit that manager runs, including any running authority guest and the session libvirtd, which the
+play then starts again under the raised ceiling. A converge interrupted after the drop-in was
+written restarts the manager on the next run too. Drain authority guests before the first
+converge on a host that already runs them. Retirement restarts the same manager for the reverse
+reason; see [ADR-0708](../../adr/0708-authority-retirement-restarts-the-user-manager.md).
+
 After an opted-in provision or a restart, run the one-shot readiness probe as its owner. Substitute
 the provisioned authority instance for `<instance>`; the command uses the source credential profile
 and does not print credential contents.
@@ -285,8 +293,14 @@ ansible-playbook playbooks/authority_host_teardown.yml --limit <host> \
 
 Teardown fails before changing the host when the administrative DSN is absent. It stops both
 services, rejects remaining authority processes, revokes and verifies the database LOGIN, and
-removes the installed runtime. It deliberately retains the credential and journal directories for
-operator inspection; remove them only after confirming no later #2140 deployment owns them.
+removes the installed runtime and the authority user manager's memlock drop-in. A running user
+manager that still holds the unlimited memlock ceiling is then restarted, which ends anything it
+still runs; see [ADR-0708](../../adr/0708-authority-retirement-restarts-the-user-manager.md).
+The `provider_authority_host` role's disabled path does the same. Teardown also completes when the
+authority account is gone but its retained credential and journal directories remain, skipping
+the account's user-scope steps. It deliberately retains
+the credential and journal directories for operator inspection; remove them only after
+confirming no later #2140 deployment owns them.
 
 ## ppc64le runner (drop-in)
 
@@ -304,9 +318,12 @@ as two deliberately-separate stores:
 
 - **Self-hosted warm store** — `scripts/live-vm/warm-store.sh`, persistent at
   `KDIVE_WARM_STORE_DIR` (default `/var/lib/kdive/warm-store`, the dir
-  `live_vm_host` creates). Idempotent: it rebuilds only when the pinned kernel
-  changes or a staged file fails its recorded digest, and otherwise reuses the
-  warm set. It only **reports** usage — the host's own disk is not budget-gated.
+  `live_vm_host` creates). Reuse verifies the selected checksum-pinned catalog
+  source, clean builder revision, kernel NVR/build ID, retained package/config
+  provenance, and every staged file digest. A legacy or mismatched manifest
+  rebuilds the set. It only **reports** usage — the host's own disk is not
+  budget-gated. See [reproducible lab lanes](reproducible-lab-lanes.md) for the
+  prepared fixture and measured resource use.
 - **Hosted TCG set** — `scripts/live-vm/stage-tcg-images.sh`, ephemeral on the
   hosted runner's `/mnt` scratch (`KDIVE_TCG_STAGE_DIR`, default
   `/mnt/kdive-tcg`). It fetches debuginfo on demand and **enforces** a disk
