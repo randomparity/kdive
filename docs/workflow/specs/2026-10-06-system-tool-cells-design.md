@@ -124,10 +124,12 @@ needs one) or, for `systems.provision`, the target's Allocation with the lane ca
 | project-isolation | operator of a fresh project | `configuration_error` for `teardown`, `not_found` for the others (observed on the lab stack); in both cases indistinguishable from the answer for an absent id (`absent_twin`) |
 | validation | the functional grants on T, with a mistyped `system_id` or `allocation_id` | ADR-0722 §3 as amended |
 
-The `gateway` validation cells of `systems.provision` and `systems.reprovision` fail under the
-amendment's rule (their binding failures are re-enveloped without `field_errors`), four cells in
-all. They are recorded as failing, not covered, until a decision names their evidence; no issue
-owns that decision yet, so it is reported as a follow-up candidate at hand-off.
+The ADR-0722 amendment expects the `gateway` validation cells of `systems.provision` and
+`systems.reprovision` to fail because `BindingErrorMiddleware` re-envelopes their binding failures.
+It re-envelopes only failures under the `profile` parameter
+(`src/kdive/mcp/middleware/binding_errors.py`), and these cells mistype the id instead, so
+`tools.invoke` answers with its own binding failure and `field_errors`. The lab run qualified all
+four. The amendment's wider claim is reported as a follow-up candidate at hand-off.
 
 ## Failure model
 
@@ -143,7 +145,6 @@ owns that decision yet, so it is reported as a follow-up candidate at hand-off.
    - A cell killed mid-run can leave a System and its allocation; `demo-down.sh --wipe --yes`
      clears them, as for the earlier carriers.
    - Torn-down Systems, released allocations, their ledger rows and audit rows stay as history.
-   - The four `gateway` validation cells of `provision`/`reprovision` fail (above).
    - A cell that fails before its cleanup proof records only a best-effort cleanup attempt
      (`cleanup_attempt`); whatever it leaves is cleared by the post-run
      `demo-down.sh --wipe --yes`, which the live proof runs.

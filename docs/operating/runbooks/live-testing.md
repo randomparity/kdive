@@ -851,13 +851,16 @@ the staged bytes' SHA-256, so a rebuilt image needs new bindings.
   these tools runs before any state check, so a torn-down System and a released Allocation are
   valid targets. Each rejection record carries the target's guest identity and cleanup proof.
 
-The four `gateway` validation cells of `systems.provision` and `systems.reprovision` fail by
-rule: `BindingErrorMiddleware` re-envelopes their binding failures without `field_errors`, which
-the [ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md)
-amendment requires. They stay failing until a decision names their evidence. The ppc64le local
-cells share the node but are owner #2818's, and are never collected on an x86_64 host.
+A validation cell mistypes the `system_id` or `allocation_id`. For `systems.provision` and
+`systems.reprovision` that matters on `gateway`: `BindingErrorMiddleware` re-envelopes only
+failures under their `profile` parameter, so a mistyped id still reaches `tools.invoke`'s own
+binding failure with `field_errors`, the evidence the
+[ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md) amendment
+requires. The ppc64le local cells share the node but are owner #2818's, and are never collected
+on an x86_64 host.
 
-A lane takes about an hour: twelve functional cells each provision a System. What the cells leave
+A lane takes about eight minutes on a KVM host: twelve functional cells each provision a System.
+What the cells leave
 is history: torn-down Systems, released allocations, their ledger and audit rows. A cell that
 fails before its cleanup proof records a best-effort cleanup attempt instead, and a killed cell
 can leave a System and its allocation. `demo-down.sh --wipe --yes` clears all of it; run it after
