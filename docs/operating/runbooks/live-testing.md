@@ -839,12 +839,13 @@ matching DWARF debug information readable inside the guest: no released drgn rea
 `CONFIG_DEBUG_INFO_BTF` alone does not make drgn-live work (#3121); see
 [live and host-side debug information](../external-build-upload.md#choosing-your-kernel-config).
 
-The pinned debug fragment, `fixtures/kernel/debug.config`, sets all of these with `VIRTIO_NET=y`,
-so a ppc64le tree from `scripts/kernel_fixtures.py build --arch ppc64le` passes the kernel
-preflight of every spine proof listed above. BTF generation needs host `pahole`; the
-`local_worker_host` role installs the package that provides it. The guest side is separate:
-without matching DWARF debug information readable inside the guest, the live-script proof stops
-at `introspect-script` with `debuginfo_unloadable` whatever the kernel config (#3121).
+The pinned debug fragment, `fixtures/kernel/debug.config`, sets the virtio, ext4 and debug-info
+symbols with `VIRTIO_NET=y`, and `ppc64le_defconfig` supplies the kdump ones, so a ppc64le tree
+from `scripts/kernel_fixtures.py build --arch ppc64le` passes the kernel preflight of every spine
+proof listed above. BTF generation needs host `pahole`; the `local_worker_host` role installs the
+package that provides it. The guest side is separate: without matching DWARF debug information
+readable inside the guest, the live-script proof stops at `introspect-script` with
+`debuginfo_unloadable` whatever the kernel config (#3121).
 
 To validate all four crash-capture methods against such a host, see the
 [four-method live run](four-method-live-run.md). Never hand-install a host
