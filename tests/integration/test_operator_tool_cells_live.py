@@ -85,6 +85,7 @@ _LOCAL_WORKER_CHECKS = {
     DEPMOD_TOOLCHAIN_ID,
 }
 _DENIED = ErrorCategory.AUTHORIZATION_DENIED.value
+_UNAVAILABLE = WORKER_UNAVAILABLE_DETAIL
 _SIZING = {"vcpus": 1, "memory_gb": 1, "disk_gb": 1}
 _SETTLE_ATTEMPTS = 3
 _PAGED_JOBS = 5
@@ -142,7 +143,9 @@ async def _pages(
     for page in range(min(most, 200)):
         args = {**request, "limit": 1, **({"cursor": cursor} if cursor else {})}
         env = one(await caller.call(tool, {"request": args}, token, discover=page == 0))
+        assert len(env.items) <= 1, f"{tool} served {len(env.items)} items at limit=1"
         items.extend(env.items)
+        assert len(items) == page + 1 or not env.data.get("next_cursor"), f"{tool} empty page"
         cursor = env.data.get("next_cursor")
         if not cursor:
             return items
@@ -408,14 +411,16 @@ def _job_row(row: Mapping[str, object]) -> dict[str, object]:
 
 async def _jobs(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
     token = caller.token(grants)
-    await _diagnose(caller, token)
-    known = (
-        await _rows(
-            db_url,
-            "SELECT id, state FROM jobs WHERE kind = 'diagnostics_worker_check' "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
-        )
-    )[0]
+    newest: LiteralString = (
+        "SELECT id, state FROM jobs WHERE kind = 'diagnostics_worker_check' "
+        "ORDER BY created_at DESC, id DESC LIMIT 1"
+    )
+    before = await _rows(db_url, newest)
+    diagnosed = await _diagnose(caller, token)
+    unavailable = [i.data["check"] for i in diagnosed.items if i.data["detail"] == _UNAVAILABLE]
+    assert not unavailable, f"the worker did not run {unavailable}; no job of this cell to list"
+    known = (await _rows(db_url, newest))[0]
+    assert [known] != before, "the diagnostics call enqueued no new worker-check job"
 
     async def database() -> Rows:
         rows = await _rows(db_url, _JOBS, {"states": None, "limit": 200})
