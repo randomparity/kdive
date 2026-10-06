@@ -153,10 +153,12 @@ This is a starting point, not the whole menu. `resource://kdive/contracts/extern
 the per-feature `CONFIG_*` manifest — sanitizers, lock debugging, ftrace, BPF tracing, fault
 injection and coverage — each with what it finds and what it costs.
 
-**Live and host-side debug information have different consumers.** Guest drgn needs matching
-DWARF debug information already readable inside the guest; no released drgn reads kernel BTF.
-Building DWARF into the host's `vmlinux` does not place that file in the guest. For offline
-`introspect.from_vmcore` and host GDB, upload the matching unstripped `vmlinux` as described below.
+**Live and host-side debug information share one file.** The matching unstripped DWARF `vmlinux`
+you upload serves offline `introspect.from_vmcore` and host GDB, and it is also what drgn-live
+reads: no released drgn reads kernel BTF, so drgn finds symbols in the DWARF `vmlinux` staged at
+`/usr/lib/debug/lib/modules/<release>/vmlinux` in the guest. kdive stages the uploaded file there
+on the local-libvirt legacy install path; other install paths do not stage it yet, so a live
+session on them can still lack symbols. Upload the matching `vmlinux` as described below.
 
 **DWARF has a cost — omit it when you do not need post-boot introspection.**
 `CONFIG_DEBUG_INFO_DWARF5=y` embeds DWARF tables in every `.ko`, which can grow the module tree
@@ -169,10 +171,10 @@ When you do build a DWARF-heavy kernel, an operator can point `KDIVE_INSTALL_SCR
 mount to keep the large, short-lived install intermediates off the staging disk (mind the RAM
 tradeoff — see the config reference).
 
-`CONFIG_DEBUG_INFO_BTF=y` alone does not make drgn-live work.
-If live introspection reports `debuginfo_unloadable`, the guest lacks matching debug information.
-Uploading host `vmlinux` alone does not repair the guest helper's debug-info search. A missing
-warning is not proof of usable guest symbols; check the actual introspection result.
+`CONFIG_DEBUG_INFO_BTF=y` alone does not make drgn-live work; the uploaded DWARF `vmlinux` does,
+where the install path stages it. If live introspection reports `debuginfo_unloadable`, the guest
+has no matching debug information at the path above. A missing warning is not proof of usable
+guest symbols; check the actual introspection result.
 
 **kdump on a RHEL-family guest needs more than the crash-capture symbols.** `CONFIG_KEXEC` (or
 `CONFIG_KEXEC_FILE`), `CONFIG_CRASH_DUMP`, `CONFIG_PROC_VMCORE`, `CONFIG_FW_CFG_SYSFS` and
@@ -221,9 +223,9 @@ See `resource://kdive/contracts/external-build` for the per-feature `CONFIG_*` m
 entry there carries an `enforcement` value saying where omitting its symbols surfaces — refused at
 upload, warned at upload, refused later on a booted kernel, warned later on a booted kernel, or
 never checked — and `enforcement_legend` in the same payload defines each value. An entry whose
-clauses are not all enforced at the same point also carries `also_checked`, naming the ones kdive
-does read and where, with `also_checked_legend` beside it. Read them before deciding what to skip:
-several features kdive never checks are still unrecoverable without a rebuild.
+clauses are not all enforced at the same point would also carry `also_checked`, naming the ones
+kdive does read and where, with `also_checked_legend` beside it; no entry currently does. Read
+the manifest before deciding what to skip: several features kdive never checks are still unrecoverable without a rebuild.
 
 ## The `kernel` artifact: one combined gzip tar
 

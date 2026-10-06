@@ -5,7 +5,7 @@ Three consumers share :func:`load_effective_config` here:
 - the crash-capture arming seams (install crashkernel reservation, kdump vmcore fetch) **refuse**
   when the config provably lacks the crash-capture symbols;
 - the drgn-live debug seams (``debug.start_session``, live ``introspect.*``) **warn** — never
-  refuse — when the config provably lacks debuginfo and no host ``vmlinux`` was uploaded; and
+  refuse — when no host ``vmlinux`` was uploaded for a Run with an uploaded config (#3121); and
 - ``runs.complete_build`` **warns** — never refuses — when the config provably lacks the
   boot-required ``rootfs_mount`` symbols the guest needs to mount its root filesystem, and when it
   lacks the ``crash_capture_rhel_guest`` symbols and the target image is, or may be, RHEL-family
@@ -90,32 +90,22 @@ _NO_EFFECTIVE_CONFIG_REMEDIATION = (
 )
 
 MISSING_DEBUGINFO_REASON = "missing_debuginfo"
-# In-guest drgn-live resolves symbols from the running kernel's BTF (/sys/kernel/btf/vmlinux).
-# DWARF built into the kernel .config does NOT help: the DWARF-carrying vmlinux is not on the guest
-# rootfs. The only other in-guest source is a host vmlinux uploaded as the Run's debuginfo_ref, so
-# the warning keys on BTF specifically and is suppressed when a vmlinux was uploaded.
-_BTF_SYMBOL = "DEBUG_INFO_BTF"
-# BTF is settable only behind a DWARF choice member, so naming it alone is advice a DEBUG_INFO=n
-# kernel cannot follow: BTF has no Kconfig prompt outside `if DEBUG_INFO`, so olddefconfig drops
-# CONFIG_DEBUG_INFO_BTF=y out of a fragment over such a config and the rebuild produces the same
-# blind kernel (#1855). The symbol this warning *keys* on is unchanged - it asks whether in-guest
-# drgn can read /sys/kernel/btf, not whether the kernel carries DWARF - only the advice is.
+# No released drgn reads kernel BTF (#3121): in-guest drgn-live resolves symbols from the Run's
+# uploaded DWARF vmlinux, staged under /usr/lib/debug. The kernel .config therefore plays no part.
 _DEBUGINFO_REMEDIATION = (
-    "enable a DWARF choice member (CONFIG_DEBUG_INFO_DWARF5, CONFIG_DEBUG_INFO_DWARF4 or "
-    "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT) and then CONFIG_DEBUG_INFO_BTF - BTF is offered "
-    "only once one of those is set, so olddefconfig drops it from a config that sets none of them "
-    "(in-guest drgn reads BTF from /sys/kernel/btf); or upload a matching vmlinux, so drgn can "
-    f"resolve symbols (see {_EXTERNAL_BUILD_CONTRACT_URI})"
+    "upload the kernel's matching vmlinux (built with CONFIG_DEBUG_INFO_DWARF5, "
+    "CONFIG_DEBUG_INFO_DWARF4 or CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT) with the build; "
+    "drgn-live reads it from /usr/lib/debug/lib/modules/<release>/vmlinux in the guest and "
+    f"does not read kernel BTF (see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
-# The static config check above proves BTF is *advertised*, not that the running guest's drgn can
-# load it. A drgn-live runtime symbol probe can still find the session blind (guest drgn cannot load
-# the kernel's BTF); this is the distinct reason it emits, keyed on the same BTF symbol.
+# The static check above proves no vmlinux was uploaded, not that the guest could load the one that
+# was: the runtime probe emits this distinct reason when guest drgn still resolves no symbol.
 DEBUGINFO_UNLOADABLE_REASON = "debuginfo_unloadable"
 _DEBUGINFO_UNLOADABLE_REMEDIATION = (
-    "the in-guest drgn could not load the running kernel's BTF even though the config advertised "
-    "it (a known limitation of some guest drgn builds); boot a BTF-capable guest image with a "
-    f"newer drgn, or upload a matching vmlinux (see {_EXTERNAL_BUILD_CONTRACT_URI})"
+    "the in-guest drgn could not resolve kernel symbols: no matching DWARF vmlinux is "
+    "readable at /usr/lib/debug/lib/modules/<release>/vmlinux; upload the matching vmlinux "
+    f"and use an install path that stages it (see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
 
@@ -268,38 +258,33 @@ async def missing_effective_config_nudge(
 async def debuginfo_warning(
     conn: AsyncConnection, run_id: UUID, *, has_uploaded_vmlinux: bool
 ) -> dict[str, JsonValue] | None:
-    """Non-fatal ``missing_debuginfo`` warning for a drgn-live seam, or ``None`` (ADR-0322).
+    """Non-fatal ``missing_debuginfo`` warning for a drgn-live seam, or ``None`` (#3121).
 
-    Returns ``None`` (no warning) when a host ``vmlinux``/``debuginfo_ref`` was uploaded (drgn can
-    resolve via that vmlinux), when no ``effective_config`` was uploaded or it cannot be
-    read/trusted (:func:`load_effective_config` fails open), and when the config provably enables
-    BTF (the in-guest symbol source). Otherwise returns ``{reason, missing, remediation}`` — the
-    payload the drgn-live seams spread into their response ``data`` so a blind session is no longer
-    silently successful. Warns, never refuses: the uploaded-``vmlinux`` path must keep working.
+    Returns ``None`` when a host ``vmlinux``/``debuginfo_ref`` was uploaded (the guest stages it for
+    drgn) and when no ``effective_config`` was uploaded or it cannot be read/trusted
+    (:func:`load_effective_config` fails open). Otherwise returns ``{reason, missing, remediation}``
+    naming ``vmlinux``; the config's DWARF/BTF symbols are not consulted. Warns, never refuses.
     """
     if has_uploaded_vmlinux:
         return None
-    config = await load_effective_config(conn, run_id)
-    if config is None or config.is_enabled(_BTF_SYMBOL):
+    if await load_effective_config(conn, run_id) is None:
         return None
     return {
         "reason": MISSING_DEBUGINFO_REASON,
-        "missing": [_BTF_SYMBOL],
+        "missing": ["vmlinux"],
         "remediation": _DEBUGINFO_REMEDIATION,
     }
 
 
 def debuginfo_unloadable_warning() -> dict[str, JsonValue]:
-    """The runtime-probe ``debuginfo_unloadable`` warning payload (extends the static gate above).
+    """The runtime-probe ``debuginfo_unloadable`` warning payload (#3121).
 
     Emitted by the drgn-live introspect seams when a runtime symbol probe proves the in-guest drgn
-    cannot resolve a stable kernel symbol, even though the static config check was silent (BTF
-    advertised, or no config uploaded) and no host ``vmlinux`` was uploaded — the F1 case the
-    ``.config``-based check cannot see. Names ``DEBUG_INFO_BTF`` and points at the same
-    remediations, so a client keying on the ``{reason, missing, remediation}`` shape is unaffected.
+    cannot resolve a stable kernel symbol, whether or not a ``vmlinux`` was uploaded (it may not
+    have been staged in the guest). Same ``{reason, missing, remediation}`` shape as the static one.
     """
     return {
         "reason": DEBUGINFO_UNLOADABLE_REASON,
-        "missing": [_BTF_SYMBOL],
+        "missing": ["vmlinux"],
         "remediation": _DEBUGINFO_UNLOADABLE_REMEDIATION,
     }

@@ -312,9 +312,6 @@ _DWARF_CHOICE_MEMBERS: Final[frozenset[str]] = frozenset(
     {"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT"}
 )
 
-# Named once so the `bpf_tracing` entry advertises and scopes the *same* clause value rather than
-# two equal-looking copies: `also_checked` may only name a clause the entry advertises, and this is
-# what makes that structural instead of a check someone has to keep passing (ADR-0548 rule 1).
 _BTF_CLAUSE: Final = Clause(frozenset({"DEBUG_INFO_BTF"}))
 
 
@@ -471,10 +468,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "DWARF tables in every .ko - can grow the module tree 10-50x and slow upload and "
         "install. Omit for boot-time crash reproducers and console-log investigations where no "
         "post-boot introspection is needed. What is below is the DWARF half, which is what gdb "
-        "and an offline vmcore read. In-guest drgn-live reads BTF from /sys/kernel/btf instead - "
-        "the DWARF vmlinux is not on the guest rootfs - so if you are going to run drgn inside "
-        "the guest, add DEBUG_INFO_BTF from the bpf_tracing set on top of a DWARF member here, or "
-        "upload a matching vmlinux; DWARF alone leaves that session unable to resolve a symbol.",
+        "and an offline vmcore read. In-guest drgn-live reads the vmlinux you upload with the "
+        "build, staged in the guest, and does not read kernel BTF - so if you are going to run "
+        "drgn inside the guest, build with a DWARF member here and upload that vmlinux; without "
+        "it that session cannot resolve a symbol.",
         # The clause is exactly the DWARF `choice` members, and each of the two edits that made it
         # so is load-bearing (#1855).
         #
@@ -627,12 +624,7 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "debuginfo build (not reduced, not split) and lengthens the build. BPF_JIT is optional: "
         "without it programs still attach and run, under the interpreter. Runtime cost is close "
         "to nothing until a program is attached, then it is whatever that program does. "
-        "DEBUG_INFO_BTF is also the one symbol in this set kdive itself reads - see also_checked "
-        "below for where. Two conditions narrow that check and neither is machine-readable here: "
-        "debug.start_session warns only for the drgn-live transport (a gdbstub session symbolizes "
-        "from the host-side vmlinux and never warns), and the check is skipped at every seam if "
-        "you upload a matching vmlinux as the Run's debuginfo_ref, because in-guest drgn can then "
-        "resolve symbols from that instead.",
+        "kdive reads none of these symbols.",
         # The DWARF clause is BTF's prerequisite, not a second feature (#1855). DEBUG_INFO_BTF
         # (lib/Kconfig.debug:398) is a real prompt, so it stays the symbol this entry names - but
         # it sits inside `if DEBUG_INFO` (:325-455) and selects nothing, so a fragment that sets it
@@ -645,21 +637,6 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
             Clause(frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"})),
             Clause(_DWARF_CHOICE_MEMBERS),
             _BTF_CLAUSE,
-        ),
-        # The mixed entry ADR-0546's Consequences anticipated, closed by ADR-0548 (#1901). Four of
-        # the five clauses above are read by no seam, so the entry keeps `unchecked`; the fifth is
-        # what `debuginfo_warning` keys on, so the exception is stated rather than averaged into a
-        # per-entry value that would be wrong for the other four. The seam is *not* wired to this
-        # entry and must not be - it asks whether in-guest drgn can read /sys/kernel/btf, not
-        # whether the kernel carries this feature's advertised set (ADR-0544 §4). What is published
-        # here is what that seam does, pinned to its own two constants by a test.
-        also_checked=(
-            ScopedEnforcement(
-                _BTF_CLAUSE,
-                Enforcement.RUNTIME_ADVISORY,
-                "missing_debuginfo",
-                ("debug.start_session", "introspect.run", "introspect.script"),
-            ),
         ),
     ),
     FeatureRequirement(

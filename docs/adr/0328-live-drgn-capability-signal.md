@@ -5,6 +5,8 @@
 - **Issue:** #1091
 - **Builds on:** ADR-0286 (image capability metadata), ADR-0253 (kdump capability predicate), ADR-0323 (operator-attested provenance), ADR-0322 (drgn-live missing-debuginfo warning)
 
+> **Amended by [ADR-0723](0723-drgn-live-reads-a-staged-dwarf-vmlinux.md) (#3121):** the `live_drgn` signal no longer has a BTF floor; no released drgn reads kernel BTF, so `incapable` is never computed.
+
 ## Context
 
 An agent choosing a base image for live kernel introspection cannot tell, before it burns an

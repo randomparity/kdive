@@ -6,6 +6,8 @@
 - **Spec:** [drgn-live missing_debuginfo](../archive/superpowers/specs/2026-07-09-introspect-missing-debuginfo-1064-design.md)
 - **Builds on:** ADR-0318 (debug-feature config gate), ADR-0039 (drgn-live introspection)
 
+> **Amended by [ADR-0723](0723-drgn-live-reads-a-staged-dwarf-vmlinux.md) (#3121):** the warning keys on a missing `vmlinux` upload, not on `DEBUG_INFO_BTF`; ADR-0723 supersedes this record when it is accepted.
+
 ## Context
 
 `debug.start_session(drgn-live)` and the live `introspect.*` handlers report success on any

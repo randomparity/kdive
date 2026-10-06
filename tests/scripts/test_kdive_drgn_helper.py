@@ -25,21 +25,10 @@ def test_helper_has_run_script_stdin_mode() -> None:
     assert "drgn_args" in text
 
 
-def test_helper_loads_btf_explicitly_when_present() -> None:
-    """BBR F1 / #1090: bare `drgn -k` silently resolves nothing on guests whose drgn does not
-    auto-load BTF. The helper must pass -s explicitly instead of relying on drgn's auto-load.
-    """
-    text = HELPER.read_text(encoding="utf-8")
-    assert '-s "$btf_path"' in text
-    assert "/sys/kernel/btf/vmlinux" in text
-
-
-def _run_helper(tmp_path, *args, btf_present, stdin=None):
+def _run_helper(tmp_path, *args, stdin=None):
     """Run kdive-drgn against a fake `drgn` on PATH that records its argv.
 
-    KDIVE_BTF_PATH stands in for /sys/kernel/btf/vmlinux (which requires root to create), so the
-    BTF-present and BTF-absent branches are both exercisable without a live kernel — the actual
-    `drgn -k`/`-s` attach stays the live_vm-gated piece.
+    The actual `drgn -k` attach stays the live_vm-gated piece.
     """
     import os
     import subprocess
@@ -58,16 +47,14 @@ def _run_helper(tmp_path, *args, btf_present, stdin=None):
     )
     fake_drgn.chmod(0o755)
 
-    if btf_present:
-        btf_path = tmp_path / "vmlinux"
-        btf_path.write_text("fake-btf")
-    else:
-        btf_path = tmp_path / "no-such-vmlinux"
-
+    # A readable fake BTF file at the path the pre-#3121 helper reacted to, so the test bites on
+    # hosts without /sys/kernel/btf/vmlinux (macOS) too.
+    btf_file = tmp_path / "vmlinux"
+    btf_file.write_text("fake-btf")
     env = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
-        "KDIVE_BTF_PATH": str(btf_path),
+        "KDIVE_BTF_PATH": str(btf_file),
     }
 
     proc = subprocess.run(
@@ -81,41 +68,18 @@ def _run_helper(tmp_path, *args, btf_present, stdin=None):
     return proc, recorded
 
 
-def test_run_script_passes_btf_flag_when_btf_present(tmp_path) -> None:
-    proc, recorded = _run_helper(
-        tmp_path,
-        "run-script",
-        "7",
-        btf_present=True,
-        stdin=b"print(prog['init_uts_ns'])\n",
-    )
-
-    assert proc.returncode == 0, proc.stderr.decode()
-    assert proc.stdout.decode().strip() == "drgn-ran-ok"
-    recorded_text = recorded.read_text()
-    assert "-k -s" in recorded_text  # live-kernel mode, explicit BTF, quiet, staged script path
-    assert "-q" in recorded_text
-    assert "script=print(prog['init_uts_ns'])" in recorded_text  # stdin landed in the temp file
-
-
-def test_run_script_omits_btf_flag_when_btf_absent(tmp_path) -> None:
-    proc, recorded = _run_helper(
-        tmp_path,
-        "run-script",
-        "7",
-        btf_present=False,
-        stdin=b"print(prog['init_uts_ns'])\n",
-    )
-
-    assert proc.returncode == 0, proc.stderr.decode()
-    recorded_text = recorded.read_text()
-    assert "-s" not in recorded_text  # falls back to drgn's own default debug-info search
-    assert "argv=-k -q" in recorded_text
-
-
-def test_fixed_helper_passes_btf_flag_when_btf_present(tmp_path) -> None:
-    proc, recorded = _run_helper(tmp_path, "sysinfo", btf_present=True)
-
-    assert proc.returncode == 0, proc.stderr.decode()
-    recorded_text = recorded.read_text()
-    assert "-k -s" in recorded_text
+def test_helper_never_passes_symbols_flag(tmp_path) -> None:
+    """#3121: no released drgn reads kernel BTF, so every mode runs `drgn -k -q` and
+    leaves symbol lookup to drgn's default search of the staged /usr/lib/debug vmlinux. The
+    environment holds a readable fake BTF file, which the helper must ignore.
+    """
+    for index, (args, stdin) in enumerate(
+        [(("run-script", "7"), b"print(1)\n"), (("sysinfo",), None)]
+    ):
+        workdir = tmp_path / str(index)
+        workdir.mkdir()
+        proc, recorded = _run_helper(workdir, *args, stdin=stdin)
+        assert proc.returncode == 0, proc.stderr.decode()
+        argv_line = recorded.read_text().splitlines()[0]
+        assert argv_line.startswith("argv=-k -q "), argv_line
+        assert " -s" not in argv_line

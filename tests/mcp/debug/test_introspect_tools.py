@@ -623,10 +623,11 @@ def test_run_live_loads_and_materializes_the_per_system_bootstrap_key(migrated_u
     resp, port = asyncio.run(_run())
     assert resp.status != "error"
     assert port.key_path_existed_during_call is True
-    assert len(port.key_paths_seen) == 1
-    key_path = port.key_paths_seen[0]
-    assert key_path  # a real path was passed, not empty/None
-    assert not Path(key_path).exists()  # removed after the call (materialized_private_key scope)
+    # The always-on resolution probe (#3121) and the helper each materialize their own key.
+    assert len(port.key_paths_seen) == 2
+    for key_path in port.key_paths_seen:
+        assert key_path  # a real path was passed, not empty/None
+        assert not Path(key_path).exists()  # removed after the call (materialized_private_key)
 
 
 def test_run_live_no_bootstrap_key_is_configuration_error(migrated_url: str) -> None:
@@ -1056,7 +1057,7 @@ def test_script_over_size_cap_is_configuration_error(migrated_url: str) -> None:
         assert resp.data["reason"] == "script_too_large"
         assert isinstance(resp.data["script_bytes"], int)
         assert isinstance(resp.data["max_bytes"], int)
-        assert port.kwargs == {}  # rejected before the seam ran
+        assert port.kwargs == {}  # rejected before any guest round trip, probe included
 
     asyncio.run(_run())
 
@@ -1078,7 +1079,7 @@ def test_run_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: str) 
     # `succeeded` (non-fatal) but carries a symbol-naming warning so the agent knows it was blind.
     from tests.kernel_config.config_fixtures import all_builtin
 
-    cfg = all_builtin({"DEBUG_INFO", "DEBUG_KERNEL"})  # no DWARF/BTF
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_KERNEL"})
 
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
@@ -1098,7 +1099,7 @@ def test_run_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: str) 
     assert resp.status == "succeeded"
     warning = cast(dict[str, Any], resp.data["missing_debuginfo"])
     assert warning["reason"] == "missing_debuginfo"
-    assert "DEBUG_INFO_BTF" in cast(list[str], warning["missing"])
+    assert warning["missing"] == ["vmlinux"]
 
 
 def test_script_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: str) -> None:
@@ -1153,11 +1154,9 @@ def test_run_live_uploaded_vmlinux_suppresses_warning(migrated_url: str) -> None
 # --- live introspect runtime resolution probe (ADR-0329, #1092 BBR F1) ----------------------------
 
 
-def _btf_config() -> Any:
-    """A config that advertises BTF, so the static gate is silent and the runtime probe decides."""
-    from tests.kernel_config.config_fixtures import all_builtin
-
-    return all_builtin({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"})
+def _no_effective_config() -> Any:
+    """No uploaded config, so the static gate is silent and the runtime probe decides."""
+    return None
 
 
 def _attach_failure(message: str = "guest drgn could not resolve symbols") -> CategorizedError:
@@ -1222,13 +1221,13 @@ def _run_introspect(pool: AsyncConnectionPool, session_id: str, port: _FakeLiveI
 
 
 def test_run_live_probe_failure_warns_debuginfo_unloadable(migrated_url: str) -> None:
-    # ADR-0329 F1: BTF advertised in config but the guest drgn cannot resolve at runtime. The static
-    # gate is silent, the probe fails, the helper still succeeds -> a debuginfo_unloadable warning.
+    # ADR-0329 F1: no config uploaded (static gate silent) but the guest drgn cannot resolve at
+    # runtime. The probe fails, the helper still succeeds -> a debuginfo_unloadable warning.
     async def _run() -> tuple[ToolResponse, _ProbeIntrospector]:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, debuginfo_ref=None)
             port = _ProbeIntrospector(probe_raises=_attach_failure())
-            with _patch_effective_config(_btf_config()):
+            with _patch_effective_config(_no_effective_config()):
                 resp = await _run_introspect(pool, session_id, port)
             return resp, port
 
@@ -1236,17 +1235,17 @@ def test_run_live_probe_failure_warns_debuginfo_unloadable(migrated_url: str) ->
     assert resp.status == "succeeded"
     warning = cast(dict[str, Any], resp.data["missing_debuginfo"])
     assert warning["reason"] == "debuginfo_unloadable"
-    assert "DEBUG_INFO_BTF" in cast(list[str], warning["missing"])
+    assert warning["missing"] == ["vmlinux"]
     assert port.probe_calls == 1
 
 
 def test_run_live_probe_success_adds_no_warning(migrated_url: str) -> None:
-    # The probe resolves (run_script returns) -> BTF loads at runtime -> no warning.
+    # The probe resolves (run_script returns) -> symbols load at runtime -> no warning.
     async def _run() -> tuple[ToolResponse, _ProbeIntrospector]:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, debuginfo_ref=None)
             port = _ProbeIntrospector()
-            with _patch_effective_config(_btf_config()):
+            with _patch_effective_config(_no_effective_config()):
                 resp = await _run_introspect(pool, session_id, port)
             return resp, port
 
@@ -1265,7 +1264,7 @@ def test_run_live_probe_warning_rides_error_response(migrated_url: str) -> None:
             port = _ProbeIntrospector(
                 probe_raises=_attach_failure(), live_raises=_attach_failure("helper blind")
             )
-            with _patch_effective_config(_btf_config()):
+            with _patch_effective_config(_no_effective_config()):
                 return await _run_introspect(pool, session_id, port)
 
     resp = asyncio.run(_run())
@@ -1275,7 +1274,7 @@ def test_run_live_probe_warning_rides_error_response(migrated_url: str) -> None:
 
 
 def test_run_live_static_warning_skips_runtime_probe(migrated_url: str) -> None:
-    # When the static config check already warns (no BTF advertised, no vmlinux), the probe is not
+    # When the static config check already warns (no vmlinux uploaded), the probe is not
     # run: the cheap signal wins and no extra round-trip is paid.
     from tests.kernel_config.config_fixtures import all_builtin
 
@@ -1283,7 +1282,7 @@ def test_run_live_static_warning_skips_runtime_probe(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, debuginfo_ref=None)
             port = _ProbeIntrospector(probe_raises=_attach_failure())
-            with _patch_effective_config(all_builtin({"DEBUG_INFO"})):  # no BTF
+            with _patch_effective_config(all_builtin({"DEBUG_INFO"})):
                 resp = await _run_introspect(pool, session_id, port)
             return resp, port
 
@@ -1293,20 +1292,22 @@ def test_run_live_static_warning_skips_runtime_probe(migrated_url: str) -> None:
     assert port.probe_calls == 0
 
 
-def test_run_live_uploaded_vmlinux_skips_runtime_probe(migrated_url: str) -> None:
-    # An uploaded vmlinux suppresses both signals: drgn resolves from it, so the probe never runs.
+def test_run_live_uploaded_vmlinux_runs_runtime_probe(migrated_url: str) -> None:
+    # #3121: an uploaded vmlinux silences the static gate only; the guest may not have staged it,
+    # so the probe still runs and a failed probe yields debuginfo_unloadable.
     async def _run() -> tuple[ToolResponse, _ProbeIntrospector]:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)  # default debuginfo_ref set
             port = _ProbeIntrospector(probe_raises=_attach_failure())
-            with _patch_effective_config(_btf_config()):
+            with _patch_effective_config(_no_effective_config()):
                 resp = await _run_introspect(pool, session_id, port)
             return resp, port
 
     resp, port = asyncio.run(_run())
     assert resp.status == "succeeded"
-    assert "missing_debuginfo" not in resp.data
-    assert port.probe_calls == 0
+    warning = cast(dict[str, Any], resp.data["missing_debuginfo"])
+    assert warning["reason"] == "debuginfo_unloadable"
+    assert port.probe_calls == 1  # counts only RESOLUTION_PROBE_SCRIPT runs
 
 
 def test_run_live_indeterminate_probe_adds_no_warning(migrated_url: str) -> None:
@@ -1319,7 +1320,7 @@ def test_run_live_indeterminate_probe_adds_no_warning(migrated_url: str) -> None
                 "ssh dropped", category=ErrorCategory.TRANSPORT_FAILURE
             )
             port = _ProbeIntrospector(probe_raises=transport_fault)
-            with _patch_effective_config(_btf_config()):
+            with _patch_effective_config(_no_effective_config()):
                 return await _run_introspect(pool, session_id, port)
 
     resp = asyncio.run(_run())
@@ -1334,7 +1335,7 @@ def test_script_live_probe_failure_warns_debuginfo_unloadable(migrated_url: str)
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, debuginfo_ref=None)
             port = _ProbeIntrospector(probe_raises=_attach_failure())
-            with _patch_effective_config(_btf_config()):
+            with _patch_effective_config(_no_effective_config()):
                 resp = await introspect_live.introspect_script(
                     pool,
                     _live_ctx(),

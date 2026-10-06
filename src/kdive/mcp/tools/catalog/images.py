@@ -241,10 +241,11 @@ def _capability_signals(entry: ImageCatalogEntry, basis: KernelVersion) -> dict[
     Iterates the registered signals, keying each rendered block by signal name: ``kdump`` (the
     makedumpfile-vs-target-kernel capability), ``direct_kernel`` (whether the image's ``/boot``
     holds exactly one non-rescue kernel, so a direct-kernel provision can select a baseline
-    unambiguously), and ``live_drgn`` (whether the shipped drgn can introspect a booted kernel from
-    the guest's own in-guest BTF). Each signal reads a build-recorded provenance operand and
-    degrades to a non-confident status when the operand is absent, so a reader never raises on
-    image data.
+    unambiguously), and ``live_drgn`` (whether the shipped drgn can read the Run's uploaded DWARF
+    ``vmlinux`` where the install path stages it, today the local-libvirt legacy install; drgn does
+    not read kernel BTF). Each signal reads a
+    build-recorded provenance operand and degrades to a non-confident status when the operand is
+    absent, so a reader never raises on image data.
     """
     return {sig.name: sig.render(entry, basis) for sig in REGISTERED_SIGNALS}
 
@@ -399,10 +400,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         (``status`` ``provisionable`` when ``/boot`` holds exactly one non-rescue kernel, else
         ``not_provisionable``/``unverified`` — read it before a direct-kernel provision so a
         multi-kernel image does not burn an allocation on a fail-closed selection), and
-        ``live_drgn`` (``capability`` ``capable`` when the shipped drgn is new enough to introspect
-        a booted kernel from the guest's own in-guest BTF, else ``incapable``/``unverified`` — read
-        it before provisioning for live introspection so an image whose drgn cannot see the kernel
-        does not burn an allocation). A signal reads
+        ``live_drgn`` (``capability`` ``capable`` when the shipped drgn can read the Run's uploaded
+        DWARF ``vmlinux`` where the install path stages it, today the local-libvirt legacy install
+        (drgn does not read kernel BTF, so upload ``vmlinux`` with the build), ``unverified`` when
+        the drgn version is not recorded or unparseable,
+        ``not_applicable`` when the image has no drgn tooling; ``incapable`` is no longer
+        computed). A signal reads
         ``unverified`` whenever its operand was never recorded — the normal, honest state for an
         externally-baked image the operator has not attested and KDIVE has not built. When the
         operand *is* present, ``basis`` discloses its evidence: ``build_verified`` (recorded by a

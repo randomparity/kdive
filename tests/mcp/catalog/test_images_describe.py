@@ -316,7 +316,7 @@ def test_describe_exposes_live_drgn_signal(migrated_url: str) -> None:
                 capabilities=_DEBUG_CAPS,
                 provenance='{"drgn_version": "0.0.33"}',
             )
-            incapable = await _insert(
+            older = await _insert(
                 pool,
                 name="drgn-old",
                 visibility="public",
@@ -325,8 +325,8 @@ def test_describe_exposes_live_drgn_signal(migrated_url: str) -> None:
                 provenance='{"drgn_version": "0.0.22"}',
             )
             capable_resp = await catalog_images.describe_image(pool, _ctx(), capable)
-            incapable_resp = await catalog_images.describe_image(pool, _ctx(), incapable)
-        for resp, status in ((capable_resp, "capable"), (incapable_resp, "incapable")):
+            older_resp = await catalog_images.describe_image(pool, _ctx(), older)
+        for resp in (capable_resp, older_resp):
             signals = resp.data["capability_signals"]
             assert isinstance(signals, dict)
             block = signals["live_drgn"]
@@ -338,7 +338,8 @@ def test_describe_exposes_live_drgn_signal(migrated_url: str) -> None:
                 "note",
                 "basis",
             }
-            assert block["capability"] == status
+            assert block["capability"] == "capable"
+            assert block["min_drgn_required"] is None
             assert block["basis"] == "build_verified"
 
     asyncio.run(_run())

@@ -44,6 +44,9 @@ _NOT_ENV: frozenset[str] = frozenset(
         "KDIVE_ROOTFS_AUTHORIZED_KEY",  # secret-ref label, not an env var
         "KDIVE_CLOUD_CFG_PATH",  # cloud-init drop-in guest path constant (ADR-0288), not an env var
         "KDIVE_CLOUD_CFG_CONTENT",  # cloud-init drop-in body constant (ADR-0288), not an env var
+        # Removed by ADR-0723 (#3121); tests/scripts/test_kdive_drgn_helper.py sets it to prove
+        # the helper ignores it.
+        "KDIVE_BTF_PATH",
         # A config-validation error message token in tests/mcp/core/test_app.py.
         "KDIVE_S3_ENDPOINT",
         # Internal bash array constants in scripts/live-stack/lib.sh (unconditional assignment,

@@ -587,11 +587,9 @@ def check_spine_kernel_config(
         missing.append("CONFIG_EXT4_FS=y or CONFIG_XFS_FS=y")
     if require_network and not config.is_enabled("VIRTIO_NET"):
         missing.append("CONFIG_VIRTIO_NET=y or =m")
-    if require_live_debug:
-        if not config.is_builtin("DEBUG_INFO_BTF"):
-            missing.append("CONFIG_DEBUG_INFO_BTF=y")
-        if not (config.is_builtin("DEBUG_INFO_DWARF4") or config.is_builtin("DEBUG_INFO_DWARF5")):
-            missing.append("CONFIG_DEBUG_INFO_DWARF4=y or CONFIG_DEBUG_INFO_DWARF5=y")
+    has_dwarf = config.is_builtin("DEBUG_INFO_DWARF4") or config.is_builtin("DEBUG_INFO_DWARF5")
+    if require_live_debug and not has_dwarf:
+        missing.append("CONFIG_DEBUG_INFO_DWARF4=y or CONFIG_DEBUG_INFO_DWARF5=y")
     if require_kdump:
         for clause in unmet_clauses(config, feature_requirement(CRASH_CAPTURE), arch=arch):
             missing.append(" or ".join(f"CONFIG_{symbol}" for symbol in sorted(clause.symbols)))

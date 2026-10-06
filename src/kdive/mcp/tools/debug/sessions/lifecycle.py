@@ -131,7 +131,7 @@ class _RuntimeProbe:
     """Inputs for the post-open drgn-live runtime debuginfo probe (ADR-0335).
 
     Present only when a runtime probe can still change the verdict: a drgn-live attach whose static
-    config check is silent (BTF advertised, or no config) and whose Run uploaded no host vmlinux.
+    warning is silent, with or without an uploaded vmlinux (#3121).
     The probe runs after the transport opens because the transport handle does not exist where the
     static warning is computed (:meth:`DebugSessionHandlers._prepare_attach_request`).
     """
@@ -383,7 +383,7 @@ class DebugSessionHandlers:
             connector=resources.connector,
             missing_debuginfo=missing,
         )
-        probe = _runtime_probe(run, system, transport, missing, resources.live_introspector)
+        probe = _runtime_probe(system, transport, missing, resources.live_introspector)
         return _AttachPlan(request=request, probe=probe)
 
     async def _augment_after_open(
@@ -412,7 +412,6 @@ class DebugSessionHandlers:
             introspector=probe.introspector,
             transport_handle=str(handle),
             private_key=private_key,
-            has_uploaded_vmlinux=False,
         )
         return replace(plan.request, missing_debuginfo=warning)
 
@@ -502,7 +501,6 @@ class DebugSessionHandlers:
 
 
 def _runtime_probe(
-    run: Run,
     system: System,
     transport: DebugTransportKind,
     static_warning: dict[str, JsonValue] | None,
@@ -510,11 +508,11 @@ def _runtime_probe(
 ) -> _RuntimeProbe | None:
     """Build the post-open runtime probe only when it can still change the verdict (ADR-0335).
 
-    Confined to the gap the static config check cannot cover: a drgn-live attach whose static
-    warning is silent (BTF advertised, or no config) and whose Run uploaded no host vmlinux. gdbstub
-    (symbolizes host-side), a Run that already warns, or an uploaded vmlinux pay nothing new.
+    Confined to a drgn-live attach whose static warning is silent, whether or not a vmlinux was
+    uploaded (#3121: the guest may not have staged it). gdbstub (symbolizes host-side) and a Run
+    that already warns pay nothing new.
     """
-    if transport != _DRGN_LIVE or static_warning is not None or run.debuginfo_ref is not None:
+    if transport != _DRGN_LIVE or static_warning is not None:
         return None
     return _RuntimeProbe(system_id=system.id, introspector=introspector)
 
