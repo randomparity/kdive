@@ -822,6 +822,31 @@ and the SUSE v7.0 kdump spine, whose preflight reads an x86 bzImage (on POWER th
 the host arch, whatever the image env vars hold), and the gdbstub debug proofs under
 `tests/mcp/debug` (#2695).
 
+#### Native POWER spine kernel configuration
+
+The spine's kernel preflight reads the tree's `.config` and stops before boot when a proof's
+requirement is missing. The direct-boot image has an ext4 root on a virtio disk, so every proof
+needs `CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_BLK=y`, and `CONFIG_EXT4_FS=y`. The proofs that
+reach the guest over SSH (console parts, first-boot host keys, and
+`test_spine_live_script_over_the_wire`) also need `CONFIG_VIRTIO_NET`; build it in (`=y`), or
+with `=m` make sure the guest loads the module before SSH starts, or the SSH banner exchange
+times out. The proofs that capture a vmcore (`test_spine_over_the_wire`, the install cmdline
+sweep, and `test_spine_live_script_over_the_wire`) need the kdump crash-capture symbols their
+preflight names (`ppc64le_defconfig` already sets them). The preflight of
+`test_spine_live_script_over_the_wire` also requires `CONFIG_DEBUG_INFO_BTF=y` with
+`CONFIG_DEBUG_INFO_DWARF4=y` or `CONFIG_DEBUG_INFO_DWARF5=y`. Passing that proof also needs
+matching DWARF debug information readable inside the guest: no released drgn reads kernel BTF, so
+`CONFIG_DEBUG_INFO_BTF` alone does not make drgn-live work (#3121); see
+[live and host-side debug information](../external-build-upload.md#choosing-your-kernel-config).
+
+The pinned debug fragment, `fixtures/kernel/debug.config`, sets the virtio, ext4 and debug-info
+symbols with `VIRTIO_NET=y`, and `ppc64le_defconfig` supplies the kdump ones, so a ppc64le tree
+from `scripts/kernel_fixtures.py build --arch ppc64le` passes the kernel preflight of every spine
+proof listed above. BTF generation needs host `pahole`; the `local_worker_host` role installs the
+package that provides it. The guest side is separate: without matching DWARF debug information
+readable inside the guest, the live-script proof stops at `introspect-script` with
+`debuginfo_unloadable` whatever the kernel config (#3121).
+
 To validate all four crash-capture methods against such a host, see the
 [four-method live run](four-method-live-run.md). Never hand-install a host
 dependency for one of these: declare it in the owning Ansible role in the same
