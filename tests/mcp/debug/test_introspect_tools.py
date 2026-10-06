@@ -623,10 +623,11 @@ def test_run_live_loads_and_materializes_the_per_system_bootstrap_key(migrated_u
     resp, port = asyncio.run(_run())
     assert resp.status != "error"
     assert port.key_path_existed_during_call is True
-    assert len(port.key_paths_seen) == 1
-    key_path = port.key_paths_seen[0]
-    assert key_path  # a real path was passed, not empty/None
-    assert not Path(key_path).exists()  # removed after the call (materialized_private_key scope)
+    # The always-on resolution probe (ADR-0723) and the helper each materialize their own key.
+    assert len(port.key_paths_seen) == 2
+    for key_path in port.key_paths_seen:
+        assert key_path  # a real path was passed, not empty/None
+        assert not Path(key_path).exists()  # removed after the call (materialized_private_key)
 
 
 def test_run_live_no_bootstrap_key_is_configuration_error(migrated_url: str) -> None:
@@ -1056,7 +1057,8 @@ def test_script_over_size_cap_is_configuration_error(migrated_url: str) -> None:
         assert resp.data["reason"] == "script_too_large"
         assert isinstance(resp.data["script_bytes"], int)
         assert isinstance(resp.data["max_bytes"], int)
-        assert port.kwargs == {}  # rejected before the seam ran
+        # rejected before the caller's script reached the seam; only the resolution probe ran
+        assert port.kwargs.get("script") == introspect_gate.RESOLUTION_PROBE_SCRIPT
 
     asyncio.run(_run())
 
