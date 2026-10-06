@@ -27,8 +27,10 @@ The external-build guide links operators to this native spine configuration besi
 its general kernel-config advice; both copies of the guide stay byte-identical. The
 `local_worker_host` family package lists add the distribution package that
 supplies `pahole`: `pahole` on Debian/Ubuntu and `dwarves` on Red Hat/openSUSE/SLES.
-The live worker host play does not include `libvirt_stack`, which already declares
-`pahole`, so a converged live worker host otherwise lacks it. Existing OS package
+The shipped runner and local-libvirt plays also apply `libvirt_stack`, which already
+declares `pahole`, but `local_worker_host` owns the live worker's kernel-debug toolchain
+and must stand alone: a play that applies it, or `live_vm_host`, without `libvirt_stack`
+otherwise leaves the host unable to build a BTF kernel. Existing OS package
 tasks consume those lists. No new validator, guest image, build profile, or package
 abstraction is introduced.
 

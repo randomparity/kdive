@@ -831,7 +831,8 @@ reach the guest over SSH (console parts, first-boot host keys, and
 `test_spine_live_script_over_the_wire`) also need `CONFIG_VIRTIO_NET`; build it in (`=y`), or
 with `=m` make sure the guest loads the module before SSH starts, or the SSH banner exchange
 times out. `test_spine_live_script_over_the_wire` also needs `CONFIG_DEBUG_INFO_BTF=y`
-with a DWARF choice, and a guest drgn that can read the BTF; see
+with a DWARF choice, the kdump crash-capture symbols its preflight names (`ppc64le_defconfig`
+already sets them), and a guest drgn that can read the BTF; see
 [live and host-side debug information](../external-build-upload.md#choosing-your-kernel-config).
 
 The pinned debug fragment, `fixtures/kernel/debug.config`, sets all of these with `VIRTIO_NET=y`,

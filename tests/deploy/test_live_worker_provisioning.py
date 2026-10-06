@@ -3115,8 +3115,8 @@ def test_role_creates_the_server_debug_directory() -> None:
 
 
 def test_local_worker_host_packages_provision_pahole_per_family() -> None:
-    """A BTF kernel build needs `pahole`, and the live worker host play does not include
-    libvirt_stack, so this role must install its provider on every family (#2734)."""
+    """A BTF kernel build needs `pahole`. This role owns the live worker's kernel-debug
+    toolchain and must not rely on libvirt_stack also being applied (#2734)."""
     defaults = _yaml(DEFAULTS)
     providers = {
         "live_vm_host_packages": "pahole",
