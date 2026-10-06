@@ -794,6 +794,32 @@ module finalizer outside every cell, so a failed reclaim shows only as an `ERROR
 A cell killed mid-run can leave an open investigation, a created Run or the System;
 `demo-down.sh --wipe --yes` clears them, as it clears the history above.
 
+#### Read-only operator tool cells (#2812)
+
+`tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell` carries the 124
+cells of `audit.query`, `inventory.list`, `ops.diagnostics`, `ops.export_cost_classes`,
+`ops.export_systems_toml`, `ops.jobs_list`, `ops.tool_trail` and `secrets.list` on the same
+harness, lanes, bindings and assembly; add it to each lane's pytest command. The
+[design](../../workflow/specs/2026-10-06-operator-tool-cells-design.md) lists what each
+functional cell compares and with which independent source. Its environment is the catalog
+carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"` and an
+exported `KDIVE_SYSTEMS_TOML`. The lanes are local-libvirt only; an `ops.diagnostics` cell that
+sees a remote-libvirt check stops `blocked` rather than probe a remote seam.
+
+The tools only read, so each cell works in a fresh `cov-<hex>` project whose snapshot must not
+change. What the cells leave behind is history the snapshot excludes:
+
+- `audit_log`, `platform_audit_log` and `tool_invocation` rows from the cells' own calls, which
+  the `audit.query` and `ops.tool_trail` cells read back;
+- one allocation per `inventory.list` cell in `KDIVE_PROJECT`, requested and released;
+- the `diagnostics_worker_check` jobs `ops.diagnostics` enqueues.
+
+The two `secrets.list` functional cells per lane record `blocked`: the cell proves no configured
+secret value is served, but no local-lane call makes the server register a secret, so presence
+has nothing to compare with. pytest reports them as failed. `ops.export_systems_toml` is never
+called with `persist`. A cell killed mid-run can leave its allocation granted;
+`demo-down.sh --wipe --yes` clears it with the history above.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
