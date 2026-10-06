@@ -506,7 +506,9 @@ async def _secrets(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[s
     # A string scope comes only from a remote-libvirt artifact channel, absent on local lanes.
     assert set(labels) <= {"<process-global>", "<scoped>"}, f"unexpected labels {labels}"
     served = env.model_dump_json()
-    assert not [v for v in _lane_secrets() if v in served], "a configured secret was served"
+    # Count, never list: an assertion naming the matches would print the secrets themselves.
+    leaked = sum(value in served for value in _lane_secrets())
+    assert leaked == 0, f"{leaked} configured secret value(s) were served"
     raise ScenarioStop(
         Outcome.BLOCKED,
         f"secrets.list served {labels} with no secret leaked, but presence has no positive "
