@@ -156,43 +156,12 @@ async def on_catalog_system(run, base_url, issuer, db_url, *, project, image, bo
 LANE_IMAGES: dict[str, str]                      # {"x86_64": "fedora-kdive-ready-44"}
 IDENTITY_PROBE: str                              # PROBE + product_uuid line
 def lane_image() -> tuple[str, RootfsCatalogEntry]
-@dataclass(frozen=True) class Guest: op, project, system_id, image, entry, endpoint, key, probe, owned, scratch
+@dataclass(frozen=True) class Guest: op, project, system_id, image, entry, endpoint, key, probe, owned, observed, scratch
 LaneBody = Callable[[Guest], Awaitable[dict[str, object]]]
 async def on_lane_system(run, base_url, issuer, db_url, *, project: str, body: LaneBody,
                          provision: Provision = provision_catalog) -> None
 @dataclass(frozen=True) class LaneTarget: project, allocation_id, system_id, observed, artifacts
-@dataclass(frozen=True)
-class _Failed:
-    """A lane target preparation that raised, and the artifacts its cleanup attempt left."""
-
-    error: Exception
-    artifacts: tuple[str, ...]
-
-
-async def lane_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> LaneTarget:
-    """The stack's rejection target, provisioned, observed and reclaimed on first use.
-
-    Every role check of the System tools runs before any state check, so a torn-down System and
-    a released Allocation are valid targets that no background work changes. A failed or
-    blocked preparation is remembered and replayed, with its cleanup-attempt artifacts, for every
-    later cell rather than retried.
-    """
-    cached = _TARGETS.get(base_url)
-    if cached is None:
-        target = CellRun(run.cell, run.writer)
-        try:
-            cached = await _provision_target(run, target, base_url, issuer, db_url)
-        except Exception as exc:  # noqa: BLE001 - remembered and replayed for every cell
-            cached = _Failed(exc, tuple(target.artifacts))
-        _TARGETS[base_url] = cached
-    if isinstance(cached, _Failed):
-        run.artifacts.extend(cached.artifacts)
-        if isinstance(cached.error, ScenarioStop):
-            raise ScenarioStop(cached.error.outcome, str(cached.error))
-        raise AssertionError(f"the lane target could not be prepared: {cached.error!r}")
-    run.observed |= cached.observed
-    run.artifacts.extend(cached.artifacts)
-    return cached
+async def lane_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> LaneTarget
 ```
 
 Consumed from the codebase (verified present): `scenario.on_catalog_system`, `authorize_ssh`,
@@ -598,24 +567,35 @@ async def _provision_target(
     return LaneTarget(project, allocation, seen[0], dict(target.observed), (cleanup, summary))
 
 
+@dataclass(frozen=True)
+class _Failed:
+    """A lane target preparation that raised, and the artifacts its cleanup attempt left."""
+
+    error: Exception
+    artifacts: tuple[str, ...]
+
+
 async def lane_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> LaneTarget:
     """The stack's rejection target, provisioned, observed and reclaimed on first use.
 
     Every role check of the System tools runs before any state check, so a torn-down System and
     a released Allocation are valid targets that no background work changes. A failed or
-    blocked preparation is remembered and repeated for every later cell rather than retried.
+    blocked preparation is remembered and replayed, with its cleanup-attempt artifacts, for every
+    later cell rather than retried.
     """
     cached = _TARGETS.get(base_url)
     if cached is None:
+        target = CellRun(run.cell, run.writer)
         try:
-            cached = await _provision_target(run, base_url, issuer, db_url)
-        except Exception as exc:  # noqa: BLE001 - remembered and re-raised for every cell
-            cached = exc
+            cached = await _provision_target(run, target, base_url, issuer, db_url)
+        except Exception as exc:  # noqa: BLE001 - remembered and replayed for every cell
+            cached = _Failed(exc, tuple(target.artifacts))
         _TARGETS[base_url] = cached
-    if isinstance(cached, ScenarioStop):
-        raise ScenarioStop(cached.outcome, str(cached))
-    if isinstance(cached, Exception):
-        raise AssertionError(f"the lane target could not be prepared: {cached!r}") from cached
+    if isinstance(cached, _Failed):
+        run.artifacts.extend(cached.artifacts)
+        if isinstance(cached.error, ScenarioStop):
+            raise ScenarioStop(cached.error.outcome, str(cached.error))
+        raise AssertionError(f"the lane target could not be prepared: {cached.error!r}")
     run.observed |= cached.observed
     run.artifacts.extend(cached.artifacts)
     return cached
@@ -1021,7 +1001,8 @@ Steps:
    (`examples/local-libvirt/build-image.sh fedora-kdive-ready-44`), the environment (sourced
    `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`, exported
    `KDIVE_SYSTEMS_TOML`), the two-lane command block (bindings after staging; same evidence
-   root), what cells leave behind, the four expected `gateway` validation failures, and a
+   root), what cells leave behind, the four expected `gateway` validation failures, that the
+   ppc64le local parameters share the node but stay #2818's (never collected on x86_64), and a
    "Last run" record.
 2. On the lab guest: push the branch head, check it out, `just build-capture-bootstrap-manifest`,
    bindings, then per lane `examples/local-libvirt/demo-up.sh` (default) or
