@@ -866,6 +866,14 @@ fails before its cleanup proof records a best-effort cleanup attempt instead, an
 can leave a System and its allocation. `demo-down.sh --wipe --yes` clears all of it; run it after
 the proof and check that `virsh list --all` on the worker's libvirt shows no `kdive-` domain.
 
+Last run: candidate `a939e67ba` (server, worker and reconciler at that SHA in both lanes), a
+disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing and no provider authority
+installed. Each lane recorded its 60 cells in about eight minutes and skipped the other lane's 60;
+the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`. `qualify` reported all 120
+qualified: 24 `success` and 96 `rejection`, including the four `gateway` validation cells of
+`systems.provision` and `systems.reprovision`. After `demo-down.sh --wipe --yes` the worker's
+libvirt defined no domain. An earlier run at `0539e447b` gave the same result.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```

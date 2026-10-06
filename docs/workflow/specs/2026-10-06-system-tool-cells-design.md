@@ -128,8 +128,9 @@ The ADR-0722 amendment expects the `gateway` validation cells of `systems.provis
 `systems.reprovision` to fail because `BindingErrorMiddleware` re-envelopes their binding failures.
 It re-envelopes only failures under the `profile` parameter
 (`src/kdive/mcp/middleware/binding_errors.py`), and these cells mistype the id instead, so
-`tools.invoke` answers with its own binding failure and `field_errors`. The lab run qualified all
-four. The amendment's wider claim is reported as a follow-up candidate at hand-off.
+`tools.invoke` answers with its own binding failure and `field_errors`. The lab run recorded in
+the live-testing runbook (candidate `a939e67ba`) qualified all four. The amendment's wider claim
+is reported as a follow-up candidate at hand-off.
 
 ## Failure model
 
