@@ -78,12 +78,17 @@ path must do the same, and recovery must put back what was there before.
    payload with `open_projection_artifact` and passes the descriptor to libguestfs `upload`, as
    `upload_artifact` does, so the file is not copied to a host temporary file.
 
+6. **Known objects** (operator-approved surface change, 2026-10-07). `known_object_refs`
+   (`jobs/handlers/external_boot/evidence.py`) and the release coverage check
+   (`db/external_boot_activations.py`) list the `debuginfo` payload reference with the other
+   artifacts, so terminal and release evidence name it.
+
 The prior file stays in the guest under the old name while the activation is live. Recovery
 renames it back, so its content, owner, mode, xattrs and inode return unchanged. No host copy
 is made and no `RecoveryObjectBinding` kind is added: the payload `debuginfo` is removed with
 the other payloads, and the old name lives in the guest overlay that recovery owns.
 
-Not in scope: the guest free-space check (#3125), remote-libvirt delivery (#3124), catalog
+Not in scope: the x86_64 authority live arm (#3135, operator decision 2026-10-07); the guest free-space check (#3125), remote-libvirt delivery (#3124), catalog
 `drgn_version` drift (#3122), remote authority staging (#3131), remote capacity floor (#3133).
 Directories that `stage` creates stay after recovery; recovery restores the file, not the
 directory tree. The authority's source/target classification (`observe_state`) keeps reading
