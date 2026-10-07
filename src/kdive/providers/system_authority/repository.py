@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -135,8 +136,9 @@ def _head(row: dict[str, Any]) -> AuthoritySystemJournalHead:
     raw_phase = row["journal_phase"]
     raw_record = row["journal_record"]
     phase = AuthoritySystemJournalPhase(str(raw_phase)) if raw_phase is not None else None
+    # The jsonb column decodes to JSON primitives, so strict validation runs in JSON mode.
     record = (
-        AuthoritySystemJournalRecordV1.model_validate(raw_record)
+        AuthoritySystemJournalRecordV1.model_validate_json(json.dumps(raw_record))
         if raw_record is not None
         else None
     )
