@@ -53,9 +53,9 @@ identity of every stored plan.
   one, complete the build again in a new Run.
 - Build completion reads the whole `vmlinux` (up to 1.5 GiB) once to hash it, for every
   external build. Finalizations are serialized per server process, so this extends the
-  synchronous completion cost that ADR-0656 measured for the bundle alone. At the 6.9 s per
-  1.8 GB store read that ADR-0656 records, 1.5 GiB adds about 6 s plus hashing; this is not
-  measured on a deployment.
+  synchronous completion cost that ADR-0656 measured for the bundle alone. ADR-0656 records
+  6,914 ms of store time for a 1,845,478,477-byte bundle. At that rate 1.5 GiB adds about 6 s of
+  reads plus hashing to the 300 s budget. This is an estimate, not a measurement.
 - The 1.5 GiB bound keeps the largest local reservation (34,055,536,640 bytes) under the shipped
   32 GiB `KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES`. The bound also applies to builds that
   only use the legacy install path.
