@@ -796,6 +796,32 @@ def test_later_generation_execute_resumes_a_present_domain(tmp_path: Path) -> No
     assert facts.intent_identity == intent.identity
 
 
+def test_later_generation_execute_past_deadline_with_absent_domain_fails_closed(
+    tmp_path: Path,
+) -> None:
+    intent = _generation_one_intent(tmp_path)
+    base = tmp_path / "base.qcow2"
+    base.touch()
+    provider = LocalAuthoritySystemProvider(
+        provisioner=_Provisioner(),
+        topology=LocalAuthoritySystemTopology(
+            intent_root=tmp_path / "intents",
+            overlay_root=tmp_path / "overlays",
+            baseline_root=tmp_path / "baseline",
+            staged_bases={_DIGEST: base},
+        ),
+        readiness_probe=lambda _system_id: True,
+        open_teardown=lambda *_args: _AbsentTeardown(),
+        assert_no_sibling_attachment=lambda _system_id, _overlay, _baseline: None,
+        allocate_port=lambda: 2200,
+        now=lambda: intent.deadline,
+    )
+    provider._store_intent(intent)
+
+    with pytest.raises(LocalAuthoritySystemError, match="deadline expired"):
+        asyncio.run(provider.execute_system_provision(*_provision_inputs(intent, generation=2)))
+
+
 def test_provision_completion_replays_for_a_later_generation(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     intent = _generation_one_intent(tmp_path)
