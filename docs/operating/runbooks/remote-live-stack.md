@@ -333,3 +333,56 @@ accepting forwarded traffic to and from `virbr0` so guests reach the object stor
 
 `qualify` accepted the Fedora and Enterprise cells; the four blocked cells do not qualify, and
 also list context-mismatch reasons, because they stop before the provider host is observed.
+
+## 8. Remote System tool cells (#3080)
+
+`tests/integration/test_system_tool_cells_live.py::test_system_tool_cell` also carries the 120
+x86_64 remote-libvirt cells of `systems.provision`, `systems.ssh_info`,
+`systems.authorize_ssh_key`, `systems.check_ssh_reachable`, `systems.reprovision` and
+`systems.teardown`: two configurations, two exposures, one functional and four rejection cells
+each. Their parameter ids contain `remote-libvirt`, so `-k remote-libvirt` selects them and leaves
+the local cells of the [live-testing runbook](live-testing.md#system-lifecycle-tool-cells-3062)
+out. The frame, the per-tool effects and the rejection boundaries are the local cells'; the
+[design](../../workflow/specs/2026-10-06-remote-system-tool-cells-design.md) lists what differs.
+Every remote cell boots `fedora-kdive-remote-base-43` on the provider host. Its domain XML, its
+volumes and the provider's `kdive-*` domain set are read over the §7 observer, and the cell
+records the provider host's OS and architecture as its host. `systems.ssh_info` must answer the
+domain's own `hostfwd` address and port, which is `ssh_addr` here.
+
+A rejection cell aims at one target per stack and provider: a remote System provisioned, observed,
+torn down and released by the first remote rejection cell. That cell's project then must not
+change. Each rejection record carries the target's provider-host, guest and image identity and its
+cleanup proof.
+
+Prerequisites, in addition to §7's topology, observer access and SSH-forward rule:
+
+- `fedora-kdive-remote-base-43` is staged on the provider and declared as an `[[image]]`. The
+  Rocky representative is not needed.
+- The control-plane stack runs the tool-cell lanes of the live-testing runbook: the sourced
+  `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`, an exported
+  `KDIVE_SYSTEMS_TOML` that declares the `[[remote_libvirt]]` instance, and the `default` and
+  `KDIVE_WORKER_DEATH_VERIFIER=docker` (`recovery`) bring-ups.
+
+```bash
+sha=$(git rev-parse HEAD)
+export REMOTE_PROVIDER_SSH=<user>@<provider-host> KDIVE_SYSTEMS_TOML=<the stack's systems.toml>
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
+examples/local-libvirt/demo-up.sh             # default configuration
+uv run python -m pytest -m live_stack tests/integration/test_system_tool_cells_live.py -k remote-libvirt
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack tests/integration/test_system_tool_cells_live.py -k remote-libvirt
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+`bindings --remote` observes the provider host first and exits 2 naming the blocker when it
+cannot. Each pytest run records the 60 cells of its configuration and skips the other 60. A
+blocked remote prerequisite (§7's list) blocks the cell. A cell blocked before the provider host
+is observed records the control-plane host, so `qualify` adds context-mismatch reasons beside
+`missing-prerequisite`. After the run, `demo-down.sh --wipe --yes` clears the stack. Then check
+the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no `kdive-` overlay
+volume.
+
+Last run: pending.
