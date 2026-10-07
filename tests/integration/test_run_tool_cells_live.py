@@ -1,6 +1,7 @@
-"""Prove the x86_64 local run and image tool cells over HTTP (#3119).
+"""Prove the x86_64 local and remote run and image tool cells over HTTP (#3119, #3120).
 
-``live_stack``-marked (ADR-0722). One parameter per native local-libvirt contract cell of
+``live_stack``-marked (ADR-0722). One parameter per native local-libvirt contract cell, and per
+remote-libvirt cell of a guest architecture with a remote lane, of
 ``runs.install``, ``runs.boot``, ``runs.cancel``, ``runs.release_external_boot`` and
 ``images.publish``, framed by :func:`~tests.integration.live_stack.tool_cells.run_tool_cell`. A
 ``runs.*`` functional cell provisions the lane image in a fresh ``cov-<hex>`` project through
@@ -9,9 +10,12 @@ kernel fixture and calls the tool in the cell's exposure. The functional ``image
 publishes its exposure's :data:`~tests.integration.live_stack.tool_cells.PUBLISHED_IMAGES` image
 and boots it. The
 release functional cells stop ``blocked``: the demo-up lane configures no external-boot
-authority. A ``runs.*`` rejection cell aims at one unbound Run in the stack's lane-target project;
-an ``images.publish`` one at the published image's name. ``docs/operating/runbooks/
-live-testing.md`` covers the run.
+authority. A remote cell runs on the provider host's remote lane; its ``images.publish``
+functional cell also stops ``blocked``, since no remote catalog image build exists. A ``runs.*``
+rejection cell aims at one unbound Run of its provider in the stack's lane-target project; an
+``images.publish`` one at the published image's name (the remote lane image's name remotely).
+``docs/operating/runbooks/live-testing.md`` covers the local run, ``remote-live-stack.md`` the
+remote one.
 """
 
 from __future__ import annotations
@@ -49,6 +53,12 @@ from tests.integration.live_stack.deep_lifecycle import (
     load_fixture,
 )
 from tests.integration.live_stack.image_smoke import Endpoint, os_matches, ssh
+from tests.integration.live_stack.remote_lifecycle import (
+    REMOTE_REPRESENTATIVES,
+    guest_boot_kernel,
+    observe_host,
+    remote_host,
+)
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop, on_catalog_system
 from tests.integration.live_stack.spine import (
     build_and_upload_kernel,
@@ -61,6 +71,7 @@ from tests.integration.live_stack.spine import (
 from tests.integration.live_stack.tool_cells import (
     PUBLISH_TOOL,
     PUBLISHED_IMAGES,
+    REMOTE_LANE_FAMILIES,
     Boundary,
     Exposure,
     Grants,
@@ -91,12 +102,24 @@ TOOLS = (
 # The kernel fixture every runs.* cell uploads; write the bindings with
 # ``--kernel-baseline longterm``.
 BASELINE = "longterm"
-_PROVIDER = "local-libvirt"
+_LOCAL = "local-libvirt"
+_REMOTE = "remote-libvirt"
 _BUILD_DEADLINE_S = 3600.0
 _BOOT_ID = "cat /proc/sys/kernel/random/boot_id"
 _NO_AUTHORITY = (
     "runs.release_external_boot needs a configured local external-boot authority and an "
     "authority-lane System frame; the demo-up lane installs neither"
+)
+_NO_REMOTE_AUTHORITY = (
+    "runs.release_external_boot needs a remote provider authority (provider_authority_host and "
+    "the [[remote_libvirt]] authority tuple) and an authority-lane System frame; no runbook "
+    "provisions one, and an authority would route every remote install and boot through "
+    "external boot"
+)
+_NO_REMOTE_PUBLISH = (
+    "images.publish builds catalog images for local-libvirt only: the IMAGE_BUILD handler "
+    "answers remote-libvirt with configuration_error (not implemented); remote base images are "
+    "staged with deploy/ansible/playbooks/image.yml"
 )
 
 
@@ -134,13 +157,15 @@ def _fixture() -> tuple[Path, dict[str, Any]]:
         raise ScenarioStop(Outcome.BLOCKED, f"{BASELINE} fixture: {exc}") from None
 
 
-async def _create_run(op: LiveStackClient, investigation: str, system_id: str | None) -> str:
+async def _create_run(
+    op: LiveStackClient, investigation: str, system_id: str | None, provider: str = _LOCAL
+) -> str:
     args: dict[str, object] = {
         "investigation_id": investigation,
         "build_profile": build_profile(platform.machine()),
     }
     # An unbound Run names the Resource kind it builds for; a bound one derives it.
-    args |= {"system_id": system_id} if system_id else {"target_kind": _PROVIDER}
+    args |= {"system_id": system_id} if system_id else {"target_kind": provider}
     return ok(await scalar(op, "runs.create", **args), "create-run").object_id
 
 
@@ -196,7 +221,10 @@ async def _step(
         tree=tree,
         manifest=manifest,
         tmp=tmp,
-        installed_kernel=partial(_domain_kernel, guest.lane.xml),
+        # A remote install is in-guest: the kernel lands in the guest's own /boot.
+        installed_kernel=guest_boot_kernel
+        if guest.lane.provider == _REMOTE
+        else partial(_domain_kernel, guest.lane.xml),
         step=through,
     )
     run.artifacts.extend(deep.assertions.values())
@@ -303,7 +331,7 @@ async def _described(op: LiveStackClient, name: str, arch: str) -> ToolResponse:
                 item
                 for item in listing.items
                 if (item.data.get("provider"), item.data.get("name"), item.data.get("arch"))
-                == (_PROVIDER, name, arch)
+                == (_LOCAL, name, arch)
             ),
             None,
         )
@@ -321,12 +349,12 @@ def _provenance_matches(described: ToolResponse, entry: RootfsCatalogEntry) -> N
     assert os_matches(entry, built), f"provenance names {built.get('ID')} {built.get('VERSION_ID')}"
 
 
-async def _build_jobs(db_url: str, name: str) -> int:
-    """The number of ``IMAGE_BUILD`` jobs ``images.publish`` enqueued for ``name``."""
+async def _build_jobs(db_url: str, provider: str, name: str) -> int:
+    """The number of ``IMAGE_BUILD`` jobs ``images.publish`` enqueued for ``provider``/``name``."""
     async with await psycopg.AsyncConnection.connect(db_url) as conn:
         await conn.set_read_only(True)
         cursor = await conn.execute(
-            "SELECT count(*) FROM jobs WHERE dedup_key = %s", (f"image_build:{_PROVIDER}:{name}",)
+            "SELECT count(*) FROM jobs WHERE dedup_key = %s", (f"image_build:{provider}:{name}",)
         )
         row = await cursor.fetchone()
     assert row is not None
@@ -339,7 +367,7 @@ async def _pending_rows(db_url: str, name: str) -> int:
         cursor = await conn.execute(
             "SELECT count(*) FROM image_catalog WHERE provider = %s AND name = %s "
             "AND state = 'pending'",
-            (_PROVIDER, name),
+            (_LOCAL, name),
         )
         row = await cursor.fetchone()
     assert row is not None
@@ -356,12 +384,12 @@ async def _publish(
     entry = load_rootfs_catalog()[name]
     # images.publish never recycles a job of one name: a prior job would be returned again, and
     # the cell would re-observe another publication.
-    if await _build_jobs(db_url, name):
+    if await _build_jobs(db_url, _LOCAL, name):
         raise ScenarioStop(
             Outcome.BLOCKED, f"{name} was already published on this stack; wipe it first"
         )
     token = caller.token(_platform_operator())
-    env = await _call(caller, PUBLISH_TOOL, {"provider": _PROVIDER, "name": name}, token)
+    env = await _call(caller, PUBLISH_TOOL, {"provider": _LOCAL, "name": name}, token)
     # The build job's authorizing project is `platform`; a viewer there may wait on it.
     viewer = mint_role_token(issuer, project="platform", agent_session="cov-publish", role="viewer")
     async with LiveStackClient.over_http(base_url, viewer) as platform_client:
@@ -399,8 +427,18 @@ async def _functional(
     run: CellRun, caller: HttpCaller, base_url: str, issuer: OidcIssuer, db_url: str
 ) -> None:
     tool = run.cell.operation
-    if tool == "runs.release_external_boot":
-        raise ScenarioStop(Outcome.BLOCKED, _NO_AUTHORITY)
+    remote = run.cell.provider == _REMOTE
+    blocked = {"runs.release_external_boot": _NO_AUTHORITY}
+    if remote:
+        blocked = {
+            "runs.release_external_boot": _NO_REMOTE_AUTHORITY,
+            PUBLISH_TOOL: _NO_REMOTE_PUBLISH,
+        }
+    if tool in blocked:
+        if remote:
+            # A read-only probe, so the blocked record carries the provider host like the rest.
+            observe_host(run, remote_host())
+        raise ScenarioStop(Outcome.BLOCKED, blocked[tool])
     if tool == PUBLISH_TOOL:
         await _publish(run, caller, base_url, issuer, db_url)
         return
@@ -426,34 +464,37 @@ class _RunTarget:
     run_id: str
 
 
-_RUN_TARGETS: dict[str, _RunTarget | Exception] = {}
+_RUN_TARGETS: dict[tuple[str, str], _RunTarget | Exception] = {}
 
 
-async def _unbound_run(base_url: str, issuer: OidcIssuer, db_url: str, project: str) -> str:
+async def _unbound_run(
+    base_url: str, issuer: OidcIssuer, db_url: str, project: str, provider: str
+) -> str:
     token = mint_role_token(
         issuer, project=project, agent_session=f"{project}-sess", role="operator"
     )
     async with LiveStackClient.over_http(base_url, token) as op:
-        run_id = await _create_run(op, await _open(op, project, "run target"), None)
+        run_id = await _create_run(op, await _open(op, project, "run target"), None, provider)
     await settled(db_url, project)
     return run_id
 
 
 async def _run_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> _RunTarget:
-    """The stack's target Run, created on first use; a failure is replayed, not retried.
+    """The stack's target Run of the cell's provider, created on first use; a failure is replayed.
 
     Every ``runs.*`` handler resolves the Run and checks membership and the contributor role
     before any binding or state check, so an unbound Run is a valid target.
     """
     target = await lane_target(run, base_url, issuer, db_url)
-    cached = _RUN_TARGETS.get(base_url)
+    key = (base_url, run.cell.provider)
+    cached = _RUN_TARGETS.get(key)
     if cached is None:
         try:
-            run_id = await _unbound_run(base_url, issuer, db_url, target.project)
+            run_id = await _unbound_run(base_url, issuer, db_url, target.project, key[1])
             cached = _RunTarget(target.project, run_id)
         except Exception as exc:  # noqa: BLE001 - remembered and replayed for every cell
             cached = exc
-        _RUN_TARGETS[base_url] = cached
+        _RUN_TARGETS[key] = cached
     if isinstance(cached, Exception):
         raise AssertionError(f"the target Run could not be prepared: {cached!r}")
     return cached
@@ -480,14 +521,14 @@ def _run_rejection(tool: str, boundary: Boundary, target: _RunTarget) -> Rejecti
     return Rejection(args, _stranger(), _ISOLATION[tool], absent_twin=twin)
 
 
-def _publish_rejection(boundary: Boundary, name: str) -> Rejection:
-    args = {"provider": _PROVIDER, "name": name}
+def _publish_rejection(boundary: Boundary, provider: str, name: str) -> Rejection:
+    args = {"provider": provider, "name": name}
     if boundary == "validation":
         return Rejection({**args, "name": 7}, _platform_operator())
     return Rejection(args, _stranger())
 
 
-async def _publish_state(db_url: str, name: str) -> dict[str, object]:
+async def _publish_state(db_url: str, provider: str, name: str) -> dict[str, object]:
     """The ``platform`` snapshot, the image's catalog rows and its build jobs.
 
     ``jobs`` has no project column, so ``project_state`` cannot see a leaked publish's job; the
@@ -499,13 +540,20 @@ async def _publish_state(db_url: str, name: str) -> dict[str, object]:
         cursor = await conn.execute(
             "SELECT count(*), coalesce(string_agg(t::text, ',' ORDER BY t::text), '') "
             "FROM image_catalog t WHERE t.provider = %s AND t.name = %s",
-            (_PROVIDER, name),
+            (provider, name),
         )
         row = await cursor.fetchone()
     assert row is not None
     rows = [row[0], hashlib.sha256(str(row[1]).encode()).hexdigest()]
-    jobs = await _build_jobs(db_url, name)
+    jobs = await _build_jobs(db_url, provider, name)
     return {"platform": platform_state, "image_catalog": rows, "build_jobs": jobs}
+
+
+def _rejected_image(cell: Cell) -> str:
+    """The image name a publish rejection aims at: the published image, or the remote lane's."""
+    if cell.provider == _REMOTE:
+        return REMOTE_REPRESENTATIVES[REMOTE_LANE_FAMILIES[str(cell.guest_arch)]].name
+    return PUBLISHED_IMAGES[(platform.machine(), cell.exposure)]
 
 
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> None:
@@ -516,9 +564,9 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     boundary = boundary_of(run.cell)
     if run.cell.operation == PUBLISH_TOOL:
         await lane_target(run, base_url, issuer, db_url)  # the record's observed context
-        name = PUBLISHED_IMAGES[(platform.machine(), run.cell.exposure)]
-        snapshot = partial(_publish_state, db_url, name)
-        rejection = _publish_rejection(boundary, name)
+        name = _rejected_image(run.cell)
+        snapshot = partial(_publish_state, db_url, run.cell.provider, name)
+        rejection = _publish_rejection(boundary, run.cell.provider, name)
     else:
         target = await _run_target(run, base_url, issuer, db_url)
         snapshot = partial(project_state, db_url, target.project)
@@ -528,7 +576,12 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
 
 def _cells() -> list[Cell]:
     host = platform.machine()
-    return [c for c in tool_cells(TOOLS) if c.provider == _PROVIDER and c.guest_arch == host]
+    return [
+        c
+        for c in tool_cells(TOOLS)
+        if (c.provider == _LOCAL and c.guest_arch == host)
+        or (c.provider == _REMOTE and c.guest_arch in REMOTE_LANE_FAMILIES)
+    ]
 
 
 @pytest.mark.parametrize("cell", _cells(), ids=lambda cell: cell.id)
