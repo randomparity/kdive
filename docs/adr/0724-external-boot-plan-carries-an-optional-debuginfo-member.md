@@ -42,6 +42,29 @@ identity of every stored plan.
    lands, that authority ignores the member: the ADR-0723 probe reports `debuginfo_unloadable`
    on local and SSH-forward attaches, and a remote guest-agent attach stays silent.
 
+### Amendment (2026-10-07): local-libvirt keeps the prior vmlinux in the guest (#3130)
+
+Item 5 left the local recovery-object change to #3130. This amendment records that choice; it
+does not change items 1 to 4.
+
+Local-libvirt moves the prior file at `/usr/lib/debug/lib/modules/<release>/vmlinux` aside in
+the same guest directory, under a name that carries the activation id, and recovery renames it
+back. It adds no host copy and no `RecoveryObjectBinding` kind. `ProviderStateIdentity` gains an
+optional `debuginfo` component, and the materialization gains an optional `debuginfo` reference
+and verified digest. Each is left out of the canonical bytes when absent, so stored identities do
+not change.
+
+Considered & rejected:
+
+- **Capture the prior file into the host recovery directory, as the modules are.** verified: the
+  largest local reservation is 34,055,536,640 bytes against 34,359,738,368 bytes of shipped
+  capacity (Consequences below), so a second 1.5 GiB capture does not fit.
+- **Publish the whole `/usr/lib/debug/lib/modules/<release>` directory with the module
+  machinery.** judgment: it replaces files the plan does not name, and its capture bound is the
+  8 GiB module archive.
+- **Overwrite the file and leave the prior content unrecoverable.** judgment: item 5 requires
+  restoring the prior file.
+
 ## Consequences
 
 - Every plan stored before this change parses and keeps its identity. No migration is needed.
