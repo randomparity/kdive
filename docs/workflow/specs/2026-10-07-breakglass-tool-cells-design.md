@@ -48,7 +48,9 @@ stop `blocked`.
    and its `_cleanup`, `remote_lifecycle.on_remote_system` and `remote_cleanup`, and the
    `tool_cells.LaneFrame` protocol pass an optional `release` through. This mirrors their
    existing `provision` seam ("a cell whose tool under test is the provision passes its own").
-   Every existing caller keeps the default.
+   Every existing caller keeps the default. Only the cleanup proof uses a supplied `release`. The
+   failure-path `cleanup_attempt` always uses `allocations.release`, which is idempotent on a
+   released Allocation, so a broken tool under test cannot strand its own System.
 3. **Carrier** `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell`.
    It is parametrized over the native local-libvirt cells and the x86_64 remote-libvirt cells of
    the four tools, as in the System carrier, and framed by `run_tool_cell`.
@@ -129,7 +131,8 @@ System. Each refused call therefore writes nothing to T. A platform denial adds 
 1. **Actors and deployments:**
    - an operator running the live tier on the disposable lab: a control-plane guest with one
      demo-up stack per configuration (`recovery` with `KDIVE_WORKER_DEATH_VERIFIER=docker`), and
-     a separate remote provider host prepared as in #3120, with no provider authority anywhere;
+     a separate remote provider host prepared as in #3120, with no provider authority anywhere,
+     that serves only this run while it lasts (no other stack's remote cells run concurrently);
    - CI, which runs only the unit and contract tests.
 2. **Invariants and assets at stake:**
    - honest per-cell outcomes: the 16 resolve functional cells are `blocked`, never covered;
@@ -138,8 +141,10 @@ System. Each refused call therefore writes nothing to T. A platform denial adds 
    - the hosts left as found: each functional cell's System, domain, disks and capacity are
      reclaimed and proven per cell; force teardown leaves other domains and the staged base.
 3. **Accepted failure classes:**
-   - A cell killed mid-run can leave a System or Allocation behind. The post-run wipe clears it,
-     as for the earlier carriers.
+   - A cell killed mid-run can leave a System or Allocation behind. The post-run wipe clears the
+     stack and the local worker's libvirt. It does not reach the remote provider host: the
+     post-run provider check lists any leftover `kdive-` domain or overlay volume there, and the
+     runbook's manual step removes it (`virsh destroy`/`undefine`, `vol-delete`).
    - A failed lane target fails every rejection cell of its stack and provider. It is not
      retried.
    - Another `kdive-` domain created or removed on the provider during a force-teardown cell

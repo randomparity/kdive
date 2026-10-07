@@ -122,9 +122,9 @@ Steps:
    kinds are `authentication`, `authorization`, `functional` and `validation` for all four
    tools, plus `project-isolation` for `systems.resolve_external_boot_conflict`. Order: the 17
    local rows, then the 17 remote rows, each sorted by tool and then by kind.
-6. `build_contract()` validates that a bound node is an existing test function. Task 1 therefore
-   commits together with Task 3's carrier, not alone. Run the focused command and expect it to
-   pass once Task 3 exists.
+6. `build_contract()` validates that a bound node is an existing test function
+   (`_validate_node`), so Task 1 commits after Task 3's carrier, never before it. Run the focused
+   command and expect it to pass once Task 3 exists.
 
 ## Task 2: The release seam
 
@@ -192,11 +192,13 @@ Steps:
 3. In `scenario.py`, give `on_catalog_system` the keyword `release: Release = release_allocation`
    after `provision`, and give `_cleanup` the trailing keyword
    `release: Release = release_allocation`, passed as `release=release` to `release_and_verify`.
-   In `on_catalog_system`, pass `release=release` to both `_cleanup` uses (the direct call and
-   the `partial`). Import `Release` and `release_allocation` from `cleanup`.
+   In `on_catalog_system`, pass `release=release` only to the direct `_cleanup` call that proves
+   `cleanup`. The `cleanup_attempt` partial keeps the default `release_allocation`: the failure
+   path never re-runs a cell's tool under test. Import `Release` and `release_allocation` from
+   `cleanup`.
 4. In `remote_lifecycle.py`, apply the same change: `remote_cleanup(..., before, release=...)`
    passes it to `release_and_verify`, and `on_remote_system(..., provision, release=...)` passes
-   it to both `remote_cleanup` uses.
+   it only to the direct `remote_cleanup` call. The `cleanup_attempt` partial keeps the default.
 5. In `tool_cells.py`, add `release: Release = release_allocation,` to `LaneFrame.__call__`
    after `provision`, and import both names from `cleanup`.
 6. Run the focused command (green), then `just type` (green), then commit:
@@ -254,9 +256,9 @@ Steps:
    - `_cells()` applies the System carrier's filter, and `test_breakglass_tool_cell(cell)` calls
      `run_tool_cell(cell, _scenario)`.
 2. Run `just lint`, `just type` and Task 1's focused contract command (green). Run the collect
-   command (136). Commit Task 1 and Task 3 in two commits:
-   `test(coverage): split break-glass flags and bind the cells` and
-   `test(live): carry the x86_64 break-glass provider tool cells`.
+   command (136). Commit in this order, the carrier first because it collects through
+   `tool_cells(TOOLS)` and needs no binding: `test(live): carry the x86_64 break-glass provider
+   tool cells`, then Task 1 as `test(coverage): split break-glass flags and bind the cells`.
 
 ## Task 4: Runbooks and the lab run
 
@@ -268,8 +270,10 @@ Steps:
   (`KDIVE_WORKER_DEATH_VERIFIER=docker`). In each configuration, run the carrier with
   `-k local-libvirt` and with `-k remote-libvirt`. Then `evidence assemble` and `qualify`.
   Expected: 120 qualified (16 `success`, 104 `rejection`) and the 16 resolve functional cells
-  `blocked`, so `qualify` exits non-zero by design. Wipe afterwards; `virsh list --all` shows no
-  `kdive-` domain on either host.
+  `blocked`, so `qualify` exits non-zero by design. The provider host serves only this run while
+  it lasts. Wipe afterwards; `virsh list --all` shows no `kdive-` domain on either host. On the
+  provider host, any leftover `kdive-` domain is removed with `virsh destroy` and `undefine`, and
+  its overlay volume with `virsh vol-delete`, because the wipe does not reach that host.
 
 Steps:
 
@@ -277,7 +281,8 @@ Steps:
    section. It covers what each functional cell does, the blocked resolve cells, the rejection
    table summary and the bindings command (no `--kernel-baseline`), with `-k local-libvirt`.
    In `remote-live-stack.md`, add `## 10. Remote break-glass tool cells (#3112)`, which runs the
-   same carrier with `-k remote-libvirt` on §8's lane.
+   same carrier with `-k remote-libvirt` on §8's lane. It states that the provider serves only
+   this run, and gives the manual removal of provider leftovers after an interrupted run.
 2. Run the lab run, then write the "Last run" paragraphs with the candidate SHA, the counts and
    the cleanup checks. Keep host names and addresses out.
 3. Run `just docs-check`, then commit: `docs(runbook): add and record the break-glass tool
