@@ -827,6 +827,53 @@ lane's 62; the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`. `qua
 120 of the 124 qualified, 28 `success` and 92 `rejection`, and the four `secrets.list`
 functional cells `blocked` with an empty listing and no secret served.
 
+#### System lifecycle tool cells (#3062)
+
+`tests/integration/test_system_tool_cells_live.py::test_system_tool_cell` carries the 120 x86_64
+local-libvirt cells of `systems.provision`, `systems.ssh_info`, `systems.authorize_ssh_key`,
+`systems.check_ssh_reachable`, `systems.reprovision` and `systems.teardown`. It is the first
+provider-lane carrier: the tool-cell harness binds these cells with the guest's catalog identity,
+the `kvm` accelerator and the staged image digest, and frames them on a real System. The
+[design](../../workflow/specs/2026-10-06-system-tool-cells-design.md) lists what each functional
+cell compares and with which independent source. Its lanes, environment and assembly are the
+catalog carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`,
+an exported `KDIVE_SYSTEMS_TOML`, KVM on the host, and the staged `fedora-kdive-ready-44` image,
+which every cell boots. Stage the image before writing the bindings: each provider binding carries
+the staged bytes' SHA-256, so a rebuilt image needs new bindings.
+
+- A functional cell provisions the image in a fresh `cov-<hex>` project, authorizes a frame key
+  and checks the guest over SSH against the catalog entry, calls the tool through the cell's
+  exposure, proves its effect against the worker's libvirt domain and the guest, then releases the
+  allocation and proves the domain undefined, the disks gone and capacity returned. The
+  `systems.provision` cell provisions through the cell's exposure itself.
+- A rejection cell aims at one target per stack: a System provisioned, observed, torn down and
+  released by the first rejection cell, whose project then must not change. Every role check of
+  these tools runs before any state check, so a torn-down System and a released Allocation are
+  valid targets. Each rejection record carries the target's guest identity and cleanup proof.
+
+A validation cell mistypes the `system_id` or `allocation_id`. For `systems.provision` and
+`systems.reprovision` that matters on `gateway`: `BindingErrorMiddleware` re-envelopes only
+failures under their `profile` parameter, so a mistyped id still reaches `tools.invoke`'s own
+binding failure with `field_errors`, the evidence the
+[ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md) amendment
+requires. The ppc64le local cells share the node but are owner #2818's, and are never collected
+on an x86_64 host.
+
+A lane takes about eight minutes on a KVM host: twelve functional cells each provision a System.
+What the cells leave
+is history: torn-down Systems, released allocations, their ledger and audit rows. A cell that
+fails before its cleanup proof records a best-effort cleanup attempt instead, and a killed cell
+can leave a System and its allocation. `demo-down.sh --wipe --yes` clears all of it; run it after
+the proof and check that `virsh list --all` on the worker's libvirt shows no `kdive-` domain.
+
+Last run: candidate `a939e67ba` (server, worker and reconciler at that SHA in both lanes), a
+disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing and no provider authority
+installed. Each lane recorded its 60 cells in about eight minutes and skipped the other lane's 60;
+the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`. `qualify` reported all 120
+qualified: 24 `success` and 96 `rejection`, including the four `gateway` validation cells of
+`systems.provision` and `systems.reprovision`. After `demo-down.sh --wipe --yes` the worker's
+libvirt defined no domain. An earlier run at `0539e447b` gave the same result.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```

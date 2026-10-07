@@ -200,6 +200,18 @@ def catalog_profile(entry: RootfsCatalogEntry, name: str, unread_ref: str) -> di
     }
 
 
+Provision = Callable[[LiveStackClient, str, dict[str, object]], Awaitable[str]]
+
+
+async def provision_catalog(
+    op: LiveStackClient, allocation_id: str, profile: dict[str, object]
+) -> str:
+    """Provision ``profile`` on ``allocation_id`` with the frame's client and wait for ``ready``."""
+    return await provision_to_ready(
+        op, allocation_id=allocation_id, profile=profile, phase_name="provision"
+    )
+
+
 def domain_xml(system_id: str) -> str:
     conn = libvirt.open(worker_libvirt_uri())
     try:
@@ -273,11 +285,14 @@ async def on_catalog_system(
     project: str,
     image: str,
     body: CatalogBody,
+    provision: Provision = provision_catalog,
 ) -> None:
     """Acquire ``image``, provision it to ``ready``, run ``body``, then prove ``cleanup``.
 
     ``body(op, system_id, owned)`` may append host paths it made the System own; cleanup proves
     them absent with the domain's disks. On failure the cleanup attempt is recorded instead.
+    ``provision`` creates the System; a cell whose tool under test is the provision passes its
+    own.
     """
     entry = load_rootfs_catalog()[image]
     token = mint_role_token(
@@ -306,11 +321,8 @@ async def on_catalog_system(
         owned: list[str] = []
         cleaned = False
         try:
-            system_id = await provision_to_ready(
-                op,
-                allocation_id=allocation,
-                profile=catalog_profile(entry, image, f"{project}-unread"),
-                phase_name="provision",
+            system_id = await provision(
+                op, allocation, catalog_profile(entry, image, f"{project}-unread")
             )
             xml = domain_xml(system_id)
             accelerator = ET.fromstring(xml).get("type", "")  # noqa: S314  # nosec B314

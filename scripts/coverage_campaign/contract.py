@@ -209,9 +209,9 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         roles = (*roles, "authority")
                     owner = group.owner
                     # Lifecycle and break-glass ppc64le cells wait for the POWER lane (#2818).
-                    if group.owner in (3062, 3112) and arch == "ppc64le":
+                    if group.owner in (3062, 3112, 3119) and arch == "ppc64le":
                         owner = 2818
-                    elif group.owner == 3062 and provider == "remote-libvirt":
+                    elif group.owner in (3062, 3119) and provider == "remote-libvirt":
                         owner = 3080
                     cell = Cell(
                         identity + "/functional",
