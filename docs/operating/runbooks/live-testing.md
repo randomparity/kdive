@@ -991,12 +991,14 @@ uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --result
 
 Each configuration records 68 cells (4 `success`, 52 `rejection` and 12 `blocked`) and skips the
 other configuration's 68. `qualify` then qualifies 112 of the 136 and lists the 24 blocked cells,
-so it exits non-zero by design. After the run, `demo-down.sh --wipe --yes` clears the stack and
-the worker's libvirt. The wipe does not reach the provider host, so check it as well: `virsh list
---all` there must show no `kdive-` domain, and the pool must hold no `kdive-` overlay volume. A
-cell killed mid-run can leave both. Remove a leftover with `virsh destroy` and `virsh undefine`
-on the domain and `virsh vol-delete --pool <pool>` on its overlay volume, after releasing its
-allocation as §7 of the remote runbook says.
+so it exits non-zero by design. `demo-down.sh --wipe --yes` clears the stack and the worker's
+libvirt, but it does not reach the provider host. So before each wipe, including the one between
+the configurations, check the provider: `virsh list --all` there must show no `kdive-` domain,
+and the pool must hold no `kdive-` overlay volume. A cell killed mid-run can leave both. While
+the stack is still up, release the leftover's allocation as §7 of the remote runbook says, and
+let its teardown finish. Anything still on the provider after that, or after a wipe, is removed by
+hand: `virsh destroy` and `virsh undefine` on the domain, and `virsh vol-delete --pool <pool>` on
+its overlay volume.
 
 ### `live_vm` (native) — a real kernel on real silicon
 
