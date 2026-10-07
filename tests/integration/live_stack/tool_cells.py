@@ -8,15 +8,18 @@ through :func:`~tests.integration.live_stack.scenario.run_cell`. :class:`HttpCal
 in the cell's exposure; :func:`prove_functional` and :func:`prove_rejection` prove the cell's
 assertions, with :func:`project_state` as the default protected-state snapshot.
 
-A provider cell runs on the lane image (:data:`LANE_IMAGES`) of its host architecture.
-:func:`on_lane_system` is the functional frame: it provisions that image in the cell's project,
-observes the guest, proves the body's ``effect`` and the owned ``cleanup``. :func:`lane_target` is
-the rejection target, one torn-down System per stack.
+A provider cell runs on its provider's :class:`Lane`: a local-libvirt cell on the catalog lane
+image (:data:`LANE_IMAGES`) of this host's architecture, a remote-libvirt cell on the remote
+representative (:data:`REMOTE_LANE_FAMILIES`) of a separate provider host, observed through the
+operator's ``REMOTE_PROVIDER_SSH`` access. :func:`on_lane_system` is the functional frame: it
+provisions the lane image in the cell's project, observes the guest, proves the body's ``effect``
+and the owned ``cleanup``. :func:`lane_target` is the rejection target, one torn-down System per
+stack and provider.
 
 ``python -m tests.integration.live_stack.tool_cells bindings --candidate SHA --out FILE`` writes
 the expected ``Context`` of every bound service tool cell and every bound local-libvirt tool cell
-native to this host; ``--kernel-baseline NAME`` binds a verified kernel fixture to the cells that
-declare kernel inputs.
+native to this host; ``--remote`` adds the bound remote-libvirt cells of the provider host;
+``--kernel-baseline NAME`` binds a verified kernel fixture to the cells that declare kernel inputs.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ import tempfile
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast, get_args
 
@@ -58,6 +62,7 @@ from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings, Outcome
+from tests.integration.live_stack.cleanup import disk_absent
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.deep_lifecycle import (
     FIXTURE_ROOT_ENV,
@@ -66,12 +71,34 @@ from tests.integration.live_stack.deep_lifecycle import (
     load_fixture,
 )
 from tests.integration.live_stack.evidence import os_identity
-from tests.integration.live_stack.image_smoke import PROBE, Endpoint, os_matches, staged_image
+from tests.integration.live_stack.image_smoke import (
+    PROBE,
+    Endpoint,
+    GuestIdentity,
+    os_matches,
+    staged_image,
+)
+from tests.integration.live_stack.remote_lifecycle import (
+    HOST_SSH_ENV,
+    REMOTE_REPRESENTATIVES,
+    RemoteHost,
+    on_remote_system,
+    remote_host,
+    remote_profile,
+    remote_volume_absent,
+    remote_xml,
+    staged_base_volume,
+    staged_volume,
+    volume_sha256,
+)
 from tests.integration.live_stack.scenario import (
+    CatalogBody,
     CellRun,
     Provision,
     ScenarioStop,
     authorize_ssh,
+    catalog_profile,
+    domain_xml,
     on_catalog_system,
     provision_catalog,
     run_cell,
@@ -91,6 +118,8 @@ _JWT_STANDARD = frozenset({"sub", "iss", "aud", "exp", "iat", "nbf", "jti"})
 _CONFIGURATIONS: dict[str, tuple[str, list[str]]] = {}
 # The catalog image every provider cell of a host architecture boots.
 LANE_IMAGES = {"x86_64": "fedora-kdive-ready-44"}
+# The remote representative family every remote provider cell of a guest architecture boots.
+REMOTE_LANE_FAMILIES = {"x86_64": "fedora"}
 # The DMI product UUID a KVM guest reports is its libvirt domain UUID.
 IDENTITY_PROBE = PROBE + '; printf "product_uuid=%s\\n" "$(cat /sys/class/dmi/id/product_uuid)"'
 _SETTLE_S = 15.0
@@ -499,10 +528,11 @@ ToolScenario = Callable[[CellRun, str, OidcIssuer, str], Awaitable[None]]
 def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
     """Prove the configuration, skip another configuration's cell, else run and record it.
 
-    A completed rejection cell records ``rejection``, a functional one ``success``. A provider
-    cell of another host architecture is skipped before the stack is read.
+    A completed rejection cell records ``rejection``, a functional one ``success``. A local
+    provider cell of another host architecture is skipped before the stack is read; a remote
+    cell's host is the provider host, which its frame observes.
     """
-    if cell.host_arch not in (None, platform.machine()):
+    if cell.provider != "remote-libvirt" and cell.host_arch not in (None, platform.machine()):
         pytest.skip(f"{cell.id} runs on a {cell.host_arch} host")
     base_url = require_stack()
     try:
@@ -533,11 +563,17 @@ def bindings(
     cells: Iterable[Cell],
     staged: Callable[[str], Path | None] = staged_image,
     kernel: Mapping[str, str] | None = None,
+    remote: RemoteHost | None = None,
+    digest: Callable[[str, str, str], str] = volume_sha256,
+    volumes: Callable[[str], str | None] = staged_volume,
 ) -> InputBindings:
-    """The expected ``Context`` of every bound service and native local-libvirt tool cell.
+    """The expected ``Context`` of every bound service, native local and remote tool cell.
 
     A native cell boots ``LANE_IMAGES[host_arch]``: its ``image_sha256`` is the staged bytes'
-    digest, null when unstaged. ``kernel`` fills only the kernel fields a cell declares.
+    digest, null when unstaged. With ``remote``, a remote cell of the provider host's
+    architecture boots that architecture's remote representative there: its host is the provider
+    host and its ``image_sha256`` the staged base volume's digest, null when unstaged. ``kernel``
+    fills only the kernel fields a cell declares.
     """
     bound = [c for c in cells if c.scenario_id.startswith("tool/") and c.node_id]
     contexts = {
@@ -550,23 +586,47 @@ def bindings(
     native = [c for c in bound if c.provider == "local-libvirt" and c.guest_arch == host_arch]
     name = LANE_IMAGES.get(host_arch)
     if native and name is not None:
-        entry = load_rootfs_catalog()[name]
         image = staged(name)
-        digest = file_sha256(image) if image is not None else None
-        for cell in native:
-            declared = {k: v for k, v in (kernel or {}).items() if k in cell.inputs}
-            contexts[cell.id] = Context.model_validate(
-                {
-                    "host_os": host_os,
-                    "host_arch": host_arch,
-                    "guest_os": f"{entry.distro}:{entry.version}",
-                    "guest_arch": entry.arch,
-                    "accelerator": cell.accelerator,
-                    "image_sha256": digest,
-                    **declared,
-                }
-            )
+        sha = file_sha256(image) if image is not None else None
+        entry = load_rootfs_catalog()[name]
+        contexts |= _lane_contexts(native, host_os, host_arch, entry, sha, kernel=kernel)
+    family = REMOTE_LANE_FAMILIES.get(remote.host_arch) if remote is not None else None
+    if remote is not None and family is not None:
+        hosted = [
+            c for c in bound if c.provider == "remote-libvirt" and c.guest_arch == remote.host_arch
+        ]
+        base = REMOTE_REPRESENTATIVES[family]
+        volume = volumes(base.name) if hosted else None
+        sha = digest(remote.dest, remote.pool, volume) if volume else None
+        contexts |= _lane_contexts(
+            hosted, remote.host_os, remote.host_arch, base, sha, kernel=kernel
+        )
     return InputBindings(version=1, candidate_sha=candidate, matrix_sha256=matrix, cells=contexts)
+
+
+def _lane_contexts(
+    cells: Iterable[Cell],
+    host_os: str,
+    host_arch: str,
+    entry: GuestIdentity,
+    digest: str | None,
+    *,
+    kernel: Mapping[str, str] | None,
+) -> dict[str, Context]:
+    return {
+        cell.id: Context.model_validate(
+            {
+                "host_os": host_os,
+                "host_arch": host_arch,
+                "guest_os": f"{entry.distro}:{entry.version}",
+                "guest_arch": entry.arch,
+                "accelerator": cell.accelerator,
+                "image_sha256": digest,
+                **{k: v for k, v in (kernel or {}).items() if k in cell.inputs},
+            }
+        )
+        for cell in cells
+    }
 
 
 def lane_image() -> tuple[str, RootfsCatalogEntry]:
@@ -577,8 +637,81 @@ def lane_image() -> tuple[str, RootfsCatalogEntry]:
     return name, load_rootfs_catalog()[name]
 
 
+class LaneFrame(Protocol):
+    """A provider's System frame: provision, run ``body``, then prove owned cleanup."""
+
+    def __call__(
+        self,
+        run: CellRun,
+        base_url: str,
+        issuer: OidcIssuer,
+        db_url: str,
+        *,
+        project: str,
+        body: CatalogBody,
+        provision: Provision,
+    ) -> Awaitable[None]: ...
+
+
+@dataclass(frozen=True)
+class Lane:
+    """How one provider frames, profiles and observes a provider cell's System.
+
+    ``profile`` takes the profile's unread ``kernel_source_ref``. ``xml`` and ``absent`` read the
+    provider's own libvirt: the worker's for local-libvirt, the provider host's through the
+    operator's observer for remote-libvirt.
+    """
+
+    provider: str
+    entry: GuestIdentity
+    profile: Callable[[str], dict[str, object]]
+    xml: Callable[[str], str]
+    absent: Callable[[str], bool]
+    frame: LaneFrame
+
+
+def _local_lane() -> Lane:
+    name, entry = lane_image()
+    return Lane(
+        "local-libvirt",
+        entry,
+        partial(catalog_profile, entry, name),
+        domain_xml,
+        disk_absent,
+        partial(on_catalog_system, image=name),
+    )
+
+
+def _remote_lane(arch: str) -> Lane:
+    family = REMOTE_LANE_FAMILIES.get(arch)
+    if family is None:
+        raise ScenarioStop(Outcome.BLOCKED, f"no remote lane image for {arch}")
+    image = REMOTE_REPRESENTATIVES[family]
+    host = remote_host()
+    volume = staged_base_volume(image)
+
+    def profile(_unread_ref: str) -> dict[str, object]:
+        return remote_profile(image.arch, volume)
+
+    return Lane(
+        "remote-libvirt",
+        image,
+        profile,
+        partial(remote_xml, host.dest),
+        partial(remote_volume_absent, host.dest),
+        partial(on_remote_system, family=family),
+    )
+
+
+def lane_for(cell: Cell) -> Lane:
+    """The lane of provider cell ``cell``: its provider host when remote, else this host."""
+    if cell.provider == "remote-libvirt":
+        return _remote_lane(str(cell.guest_arch))
+    return _local_lane()
+
+
 async def observe_guest(
-    run: CellRun, op: LiveStackClient, system_id: str, scratch: Path, entry: RootfsCatalogEntry
+    run: CellRun, op: LiveStackClient, system_id: str, scratch: Path, entry: GuestIdentity
 ) -> tuple[Endpoint, Path, dict[str, str]]:
     """Authorize a frame key, probe the guest as root and record its identity on ``run``."""
     scratch.mkdir(parents=True, exist_ok=True)
@@ -596,16 +729,15 @@ async def observe_guest(
 class Guest:
     """A ``ready`` lane System as a provider cell's body sees it.
 
-    ``owned`` is the frame's list of host paths the cleanup proves absent; a body that makes the
-    System own more appends to it. ``observed`` is the cell's recorded context: a body that boots
-    a kernel writes the kernel fields it observed there.
+    ``owned`` is the frame's list of provider-host paths the cleanup proves absent; a body that
+    makes the System own more appends to it. ``observed`` is the cell's recorded context: a body
+    that boots a kernel writes the kernel fields it observed there.
     """
 
     op: LiveStackClient
     project: str
     system_id: str
-    image: str
-    entry: RootfsCatalogEntry
+    lane: Lane
     endpoint: Endpoint
     key: Path
     probe: dict[str, str]
@@ -631,27 +763,21 @@ async def on_lane_system(
 
     ``body`` returns the ``effect`` observation; the frame adds the exposure.
     """
-    name, entry = lane_image()
+    lane = lane_for(run.cell)
 
     async def framed(op: LiveStackClient, system_id: str, owned: list[str]) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
-            endpoint, key, probe = await observe_guest(run, op, system_id, root / "frame", entry)
+            frame = root / "frame"
+            endpoint, key, probe = await observe_guest(run, op, system_id, frame, lane.entry)
             guest = Guest(
-                op, project, system_id, name, entry, endpoint, key, probe, owned, run.observed, root
+                op, project, system_id, lane, endpoint, key, probe, owned, run.observed, root
             )
             observed = await body(guest)
         run.prove("effect", {"exposure": run.cell.exposure, **observed})
 
-    await on_catalog_system(
-        run,
-        base_url,
-        issuer,
-        db_url,
-        project=project,
-        image=name,
-        body=framed,
-        provision=provision,
+    await lane.frame(
+        run, base_url, issuer, db_url, project=project, body=framed, provision=provision
     )
 
 
@@ -659,8 +785,9 @@ async def on_lane_system(
 class LaneTarget:
     """A torn-down lane System and its released Allocation: what rejection cells aim at.
 
-    ``observed`` is the target's guest, accelerator and image identity, which each rejection
-    record carries; ``artifacts`` hold its cleanup proof.
+    ``observed`` is the target's host, guest, accelerator and image identity, which each
+    rejection record carries; ``artifacts`` hold its own evidence and cleanup proof. ``profile``
+    is the lane's provisioning profile, for the calls that name one.
     """
 
     project: str
@@ -668,6 +795,7 @@ class LaneTarget:
     system_id: str
     observed: dict[str, object]
     artifacts: tuple[str, ...]
+    profile: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -678,7 +806,7 @@ class _Failed:
     artifacts: tuple[str, ...]
 
 
-_TARGETS: dict[str, LaneTarget | _Failed] = {}
+_TARGETS: dict[tuple[str, str], LaneTarget | _Failed] = {}
 
 
 async def _allocation_of(db_url: str, system_id: str) -> str:
@@ -704,17 +832,23 @@ async def _provision_target(
     run: CellRun, target: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
 ) -> LaneTarget:
     """Provision, observe and reclaim the target; ``target`` collects its own evidence."""
-    name, entry = lane_image()
+    lane = lane_for(run.cell)
     project = f"cov-{secrets.token_hex(4)}"
     seen: list[str] = []
 
     async def observe(op: LiveStackClient, system_id: str, _owned: list[str]) -> None:
         with tempfile.TemporaryDirectory() as scratch:
-            await observe_guest(target, op, system_id, Path(scratch), entry)
+            await observe_guest(target, op, system_id, Path(scratch), lane.entry)
         seen.append(system_id)
 
-    await on_catalog_system(
-        target, base_url, issuer, db_url, project=project, image=name, body=observe
+    await lane.frame(
+        target,
+        base_url,
+        issuer,
+        db_url,
+        project=project,
+        body=observe,
+        provision=provision_catalog,
     )
     allocation = await _allocation_of(db_url, seen[0])
     await _settled(db_url, project)
@@ -722,7 +856,14 @@ async def _provision_target(
     summary = run.writer.artifact(
         {"lane_target": {"system": "torn_down", "allocation": "released"}, "cleanup": cleanup}
     )
-    return LaneTarget(project, allocation, seen[0], dict(target.observed), (cleanup, summary))
+    return LaneTarget(
+        project,
+        allocation,
+        seen[0],
+        dict(target.observed),
+        (*target.artifacts, cleanup, summary),
+        lane.profile(f"{project}-unread"),
+    )
 
 
 async def lane_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> LaneTarget:
@@ -731,9 +872,10 @@ async def lane_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: s
     Every role check of the System tools runs before any state check, so a torn-down System and
     a released Allocation are valid targets that no background work changes. A failed or
     blocked preparation is remembered and replayed, with its cleanup-attempt artifacts, for every
-    later cell rather than retried.
+    later cell rather than retried. Each provider of a stack has its own target.
     """
-    cached = _TARGETS.get(base_url)
+    key = (base_url, run.cell.provider)
+    cached = _TARGETS.get(key)
     if cached is None:
         target = CellRun(run.cell, run.writer)
         try:
@@ -741,7 +883,7 @@ async def lane_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: s
         except Exception as exc:  # noqa: BLE001 - remembered and replayed for every cell
             # A cleanup the target already proved is evidence too, beside any cleanup attempt.
             cached = _Failed(exc, (*target.artifacts, *target.assertions.values()))
-        _TARGETS[base_url] = cached
+        _TARGETS[key] = cached
     if isinstance(cached, _Failed):
         run.artifacts.extend(cached.artifacts)
         if isinstance(cached.error, ScenarioStop):
@@ -762,7 +904,22 @@ def main(argv: list[str] | None = None) -> int:
         "--kernel-baseline",
         help=f"bind the verified ${FIXTURE_ROOT_ENV}/NAME kernel to cells declaring kernel inputs",
     )
+    write.add_argument(
+        "--remote",
+        action="store_true",
+        help=f"also bind the remote-libvirt cells of the provider host ${HOST_SSH_ENV} reaches",
+    )
     args = parser.parse_args(argv)
+    remote: RemoteHost | None = None
+    if args.remote:
+        try:
+            remote = remote_host()
+        except ScenarioStop as stop:
+            print(f"cannot bind the remote cells: {stop}")
+            return 2
+        if remote.host_arch not in REMOTE_LANE_FAMILIES:
+            print(f"cannot bind the remote cells: no remote lane image for {remote.host_arch}")
+            return 2
     host_arch = platform.machine()
     kernel: dict[str, str] = {}
     if args.kernel_baseline:
@@ -780,6 +937,7 @@ def main(argv: list[str] | None = None) -> int:
         matrix=contract.matrix_sha256,
         cells=contract.cells,
         kernel=kernel,
+        remote=remote,
     )
     args.out.write_text(inputs.model_dump_json(indent=1) + "\n", encoding="utf-8")
     print(f"wrote {len(inputs.cells)} tool-cell binding(s)")
@@ -788,8 +946,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     if unstaged:
         print(
-            f"{unstaged} provider binding(s) have no image digest: stage "
-            f"{LANE_IMAGES.get(host_arch)} and declare it in KDIVE_SYSTEMS_TOML first"
+            f"{unstaged} provider binding(s) have no image digest: stage the lane image "
+            f"({LANE_IMAGES.get(host_arch)} locally, the remote representative remotely) and "
+            "declare it in KDIVE_SYSTEMS_TOML first"
         )
     return 0
 

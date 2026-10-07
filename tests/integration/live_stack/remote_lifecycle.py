@@ -50,14 +50,15 @@ from tests.integration.live_stack.scenario import (
     ACCELERATORS,
     CatalogBody,
     CellRun,
+    Provision,
     ScenarioStop,
     cleanup_attempt,
+    provision_catalog,
 )
 from tests.integration.live_stack.spine import (
     REMOTE_ALLOCATION_DISK_GB,
     mint_role_token,
     ok,
-    provision_to_ready,
     scalar,
     seed_metering,
 )
@@ -163,6 +164,15 @@ def volume_absent(conn: libvirt.virConnect, path: str) -> bool:
     return False
 
 
+def remote_volume_absent(dest: str, path: str) -> bool:
+    """:func:`volume_absent` over the test's own observer connection to the provider host."""
+    conn = observer(dest)
+    try:
+        return volume_absent(conn, path)
+    finally:
+        conn.close()
+
+
 def remote_kdive_domains(conn: libvirt.virConnect) -> set[str]:
     """The names of every ``kdive-`` domain the provider host defines."""
     return {d.name() for d in conn.listAllDomains(0) if d.name().startswith("kdive-")}
@@ -196,6 +206,18 @@ def staged_volume(name: str) -> str | None:
         ):
             return image.source.volume
     return None
+
+
+def staged_base_volume(image: RemoteImage) -> str:
+    """The staged base volume of ``image``; an unstaged image is a blocked cell."""
+    volume = staged_volume(image.name)
+    if volume is None:
+        raise ScenarioStop(
+            Outcome.BLOCKED,
+            f"{image.name} is not a staged remote-libvirt [[image]]; build it with "
+            "deploy/ansible/playbooks/image.yml",
+        )
+    return volume
 
 
 def remote_host() -> RemoteHost:
@@ -288,7 +310,8 @@ async def remote_cleanup(
     return {**result, "remote_domains": "unchanged"}
 
 
-def _remote_xml(dest: str, system_id: str) -> str:
+def remote_xml(dest: str, system_id: str) -> str:
+    """System ``system_id``'s domain XML, read on the provider host through the observer."""
     conn = observer(dest)
     try:
         return conn.lookupByName(domain_name_for(UUID(system_id))).XMLDesc(0)
@@ -313,20 +336,19 @@ async def on_remote_system(
     project: str,
     family: str,
     body: CatalogBody,
+    provision: Provision = provision_catalog,
 ) -> None:
-    """Provision ``family``'s remote representative to ``ready``, run ``body``, prove cleanup."""
+    """Provision ``family``'s remote representative to ``ready``, run ``body``, prove cleanup.
+
+    ``provision`` creates the System; a cell whose tool under test is the provision passes its
+    own.
+    """
     if family in REMOTE_BLOCKED:
         raise ScenarioStop(Outcome.BLOCKED, REMOTE_BLOCKED[family])
     image = REMOTE_REPRESENTATIVES[family]
     host = remote_host()
     observe_host(run, host)
-    volume = staged_volume(image.name)
-    if volume is None:
-        raise ScenarioStop(
-            Outcome.BLOCKED,
-            f"{image.name} is not a staged remote-libvirt [[image]]; build it with "
-            "deploy/ansible/playbooks/image.yml",
-        )
+    volume = staged_base_volume(image)
     run.observed["image_sha256"] = await asyncio.to_thread(
         volume_sha256, host.dest, host.pool, volume
     )
@@ -353,13 +375,8 @@ async def on_remote_system(
         owned: list[str] = []
         cleaned = False
         try:
-            system_id = await provision_to_ready(
-                op,
-                allocation_id=allocation,
-                profile=remote_profile(image.arch, volume),
-                phase_name="provision",
-            )
-            xml = await asyncio.to_thread(_remote_xml, host.dest, system_id)
+            system_id = await provision(op, allocation, remote_profile(image.arch, volume))
+            xml = await asyncio.to_thread(remote_xml, host.dest, system_id)
             accelerator = ET.fromstring(xml).get("type", "")  # noqa: S314  # nosec B314
             run.observed["accelerator"] = ACCELERATORS.get(accelerator, "none")
             owned = domain_disks(xml)

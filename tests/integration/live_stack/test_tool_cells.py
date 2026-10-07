@@ -22,6 +22,7 @@ from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import scenario, tool_cells
 from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
+from tests.integration.live_stack.remote_lifecycle import RemoteHost
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.integration.live_stack.tool_cells import (
     RECOVERY_TOOLS,
@@ -461,6 +462,92 @@ def test_bindings_cover_bound_tool_cells(tmp_path: Path) -> None:
     lane = inputs.cells[native.id]
     assert (lane.guest_os, lane.guest_arch, lane.accelerator) == ("fedora:44", "x86_64", "kvm")
     assert lane.image_sha256 == hashlib.sha256(b"lane").hexdigest()
+
+
+def test_remote_bindings_carry_the_provider_host() -> None:
+    remote = _bound(_cell("systems.ssh_info", "remote-libvirt", "x86_64"))
+    foreign = _bound(_cell("systems.ssh_info", "remote-libvirt", "ppc64le"))
+    host = RemoteHost("operator@provider.example", "default", "rocky:10.2", "x86_64", "kvm")
+    inputs = bindings(
+        "a" * 40,
+        host_os="ubuntu:26.04",
+        host_arch="x86_64",
+        matrix="b" * 64,
+        cells=[remote, foreign],
+        staged=lambda _name: None,
+        remote=host,
+        digest=lambda *_: "f" * 64,
+        volumes=lambda name: f"{name}.qcow2",
+    )
+    assert set(inputs.cells) == {remote.id}
+    bound = inputs.cells[remote.id]
+    assert (bound.host_os, bound.host_arch, bound.guest_os, bound.guest_arch) == (
+        "rocky:10.2",
+        "x86_64",
+        "fedora:43",
+        "x86_64",
+    )
+    assert (bound.accelerator, bound.image_sha256) == ("kvm", "f" * 64)
+
+
+def test_remote_bindings_refuse_a_provider_without_a_lane_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = RemoteHost("operator@provider.example", "default", "rocky:10.2", "aarch64", "kvm")
+    monkeypatch.setattr(tool_cells, "remote_host", lambda: host)
+    out = tmp_path / "inputs.json"
+    argv = ["bindings", "--remote", "--candidate", "a" * 40, "--out", str(out)]
+    assert tool_cells.main(argv) == 2
+    assert not out.exists()
+
+
+def test_lane_for_selects_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
+    local = tool_cells.lane_for(_cell("systems.ssh_info", "local-libvirt", "x86_64"))
+    assert (local.provider, local.entry.distro) == ("local-libvirt", "fedora")
+    monkeypatch.delenv("REMOTE_PROVIDER_SSH", raising=False)
+    with pytest.raises(ScenarioStop) as stop:
+        tool_cells.lane_for(_cell("systems.ssh_info", "remote-libvirt", "x86_64"))
+    assert stop.value.outcome is Outcome.BLOCKED
+
+
+def test_remote_cell_is_not_skipped_by_control_plane_arch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def stack() -> str:
+        raise RuntimeError("stack read")
+
+    monkeypatch.setattr(tool_cells, "require_stack", stack)
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: "aarch64")
+
+    async def never(*_: object) -> None:
+        raise AssertionError("the scenario must not run")
+
+    cell = _cell("systems.ssh_info", "remote-libvirt", "x86_64")
+    try:
+        with pytest.raises(RuntimeError, match="stack read"):
+            tool_cells.run_tool_cell(cell, never)
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"the remote cell was skipped by the control plane's arch: {exc}")
+
+
+def test_lane_target_prepares_once_per_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared: list[str] = []
+    issuer = cast(OidcIssuer, object())
+
+    async def prepare(run: CellRun, *_: object) -> object:
+        prepared.append(run.cell.provider)
+        return tool_cells.LaneTarget("cov-t", "alloc", "sys", {}, ())
+
+    monkeypatch.setattr(tool_cells, "_TARGETS", {})
+    monkeypatch.setattr(tool_cells, "_provision_target", prepare)
+    local = _cell("systems.ssh_info", "local-libvirt", "x86_64")
+    for cell in (_run(tmp_path, "authentication").cell, local, local):
+        run = CellRun(cell, EvidenceWriter(tmp_path))
+        asyncio.run(tool_cells.lane_target(run, "u", issuer, "db"))
+    assert prepared == ["service", "local-libvirt"]
 
 
 def test_kernel_inputs_bind_only_declaring_cells() -> None:
