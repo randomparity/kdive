@@ -5,16 +5,15 @@
 See the [spec](../specs/2026-10-07-breakglass-tool-cells-design.md).
 
 **Architecture.** `obligations.toml` splits group 3112 on the `authority` flag (operator
-option A) and binds the 34 scenarios to a new carrier. The frame gains an optional `release`
-seam, next to its `provision` seam, so a cell can make the frame's release its tool under test.
-The carrier proves the two force tools on real Systems. It stops the two resolve functional
-cells `blocked`, and runs every rejection cell against the stack's lane target.
+option A) and binds the 34 scenarios to a new carrier. The carrier reuses the shared frame
+unchanged. It proves `ops.force_teardown` on real Systems. It stops the functional cells of
+`ops.force_release` (operator checkpoint 2, option (b)) and of the two resolve tools `blocked`,
+and it runs every rejection cell against the stack's lane target.
 
 **Tech stack.** Python 3.14, pytest, the repository's `live_stack` harness, and `uv`.
 
-Expected implementation size: 330–420 changed lines (L). Derived from the file map below:
-carrier ~230, frame seam ~25, seam test ~20, `obligations.toml` ~45, contract test ~20, and
-runbooks ~60.
+Expected implementation size: 250–330 changed lines (L). Derived from the file map below:
+carrier ~190, `obligations.toml` ~45, contract test ~20, and runbook ~50.
 
 ## Global Constraints
 
@@ -23,8 +22,9 @@ runbooks ~60.
 - Ruff line length 100, lint `E,F,I,UP,B,SIM`; `ty` is strict over the whole tree (`just type`).
 - Prose rule: no "critical", "robust", "comprehensive" or "elegant"; write "Milestone", never
   "Sprint".
-- Observations and the `contract.py` routing stay unchanged. Edits to `obligations.toml`,
-  `tool_cells.py` and the frame stay additive, because campaign 6460ad12693e edits them too.
+- Observations and the `contract.py` routing stay unchanged. Edits to `obligations.toml` stay
+  additive, because campaign 6460ad12693e edits it too. The shared frame files (`cleanup.py`,
+  `scenario.py`, `remote_lifecycle.py`, `tool_cells.py`) are not edited (operator checkpoint 2).
 - Guardrails: `just lint`, `just type` and `just test-changed`; `just docs-check` for the
   runbooks; `just records` needs `git fetch origin main` first.
 - Commits follow Conventional Commits, with an imperative subject of 72 characters or fewer.
@@ -38,14 +38,8 @@ runbooks ~60.
 |---|---|---|
 | `scripts/coverage_campaign/obligations.toml` | one 3112 group with `authority = true`; no 3112 rows | two 3112 groups (the force tools without authority, the resolve tools with it); 34 implementation rows |
 | `tests/scripts/test_coverage_contract.py` | 3112 cells unbound | flags and bindings asserted |
-| `tests/integration/live_stack/cleanup.py` | `release_and_verify` calls `allocations.release` itself | adds `Release`, `release_allocation`, and a `release` parameter |
-| `tests/integration/live_stack/scenario.py` | `on_catalog_system`, `_cleanup` | add a `release` keyword passed through to the cleanup |
-| `tests/integration/live_stack/remote_lifecycle.py` | `on_remote_system`, `remote_cleanup` | add a `release` keyword passed through to the cleanup |
-| `tests/integration/live_stack/tool_cells.py` | `LaneFrame` protocol | adds a `release` keyword |
-| `tests/integration/live_stack/test_cleanup.py` | — | a supplied release replaces `allocations.release` |
 | `tests/integration/test_breakglass_tool_cells_live.py` | — | new carrier |
-| `docs/operating/runbooks/live-testing.md` | — | new section after the run cells section |
-| `docs/operating/runbooks/remote-live-stack.md` | — | new §10 |
+| `docs/operating/runbooks/live-testing.md` | — | one new section after the run cells section, covering both lanes |
 
 ## Task 1: Split the flags and bind the scenarios
 
@@ -123,95 +117,16 @@ Steps:
    tools, plus `project-isolation` for `systems.resolve_external_boot_conflict`. Order: the 17
    local rows, then the 17 remote rows, each sorted by tool and then by kind.
 6. `build_contract()` validates that a bound node is an existing test function
-   (`_validate_node`), so Task 1 commits after Task 3's carrier, never before it. Run the focused
-   command and expect it to pass once Task 3 exists.
+   (`_validate_node`), so Task 1 commits after Task 2's carrier, never before it. Run the focused
+   command and expect it to pass once Task 2 exists.
 
-## Task 2: The release seam
+## Task 2: The carrier
 
-**Interfaces.** Later tasks rely on:
-`cleanup.Release = Callable[[LiveStackClient, str], Awaitable[None]]`,
-`cleanup.release_allocation(client, allocation_id) -> None`, and a keyword `release: Release`
-on `release_and_verify`, `scenario.on_catalog_system`, `remote_lifecycle.on_remote_system`,
-`remote_lifecycle.remote_cleanup` and `tool_cells.LaneFrame.__call__`.
-
-**Verification.**
-- Contract: a supplied `release` replaces `allocations.release`, and the proof still verifies
-  teardown, domain, disks and capacity. Mode: focused-test,
-  `tests/integration/live_stack/test_cleanup.py::test_supplied_release_replaces_allocations_release`.
-  - Red: `TypeError: unexpected keyword argument 'release'`.
-  - Green: `uv run python -m pytest tests/integration/live_stack/test_cleanup.py -q`.
-- Contract: the existing frames keep today's release. Mode: focused-test, the existing
-  `test_cleanup.py` cases, which assert `allocations.release` is called. The green command is
-  the same.
-
-Steps:
-
-1. Add the test:
-
-   ```python
-   def test_supplied_release_replaces_allocations_release() -> None:
-       client = _Client(1, 0)
-       released: list[str] = []
-
-       async def release(_client: LiveStackClient, allocation_id: str) -> None:
-           released.append(allocation_id)
-
-       result = asyncio.run(
-           release_and_verify(
-               cast(LiveStackClient, client),
-               allocation_id="a",
-               system_id="s",
-               domain="kdive-s",
-               disks=[],
-               in_use_before=0,
-               connect=lambda: _Conn(False),
-               release=release,
-               deadline_s=1.0,
-               poll_s=0.0,
-           )
-       )
-       assert released == ["a"] and "allocations.release" not in client.calls
-       assert result["allocation"] == "released" and result["in_use"] == [0, 1, 0]
-   ```
-
-2. In `cleanup.py`, import `Awaitable` beside `Callable` and add, before `release_and_verify`:
-
-   ```python
-   Release = Callable[[LiveStackClient, str], Awaitable[None]]
-
-
-   async def release_allocation(client: LiveStackClient, allocation_id: str) -> None:
-       """``allocations.release`` as the frame's project operator: the frames' default release."""
-       ok(await scalar(client, "allocations.release", allocation_id=allocation_id), "release")
-   ```
-
-   Then add `release: Release = release_allocation,` after `absent` in `release_and_verify`'s
-   parameters, and replace its `ok(await scalar(client, "allocations.release", ...), "release")`
-   line with `await release(client, allocation_id)`. Extend the docstring: "``release`` performs
-   the release; a cell whose tool under test is the release passes its own."
-3. In `scenario.py`, give `on_catalog_system` the keyword `release: Release = release_allocation`
-   after `provision`, and give `_cleanup` the trailing keyword
-   `release: Release = release_allocation`, passed as `release=release` to `release_and_verify`.
-   In `on_catalog_system`, pass `release=release` only to the direct `_cleanup` call that proves
-   `cleanup`. The `cleanup_attempt` partial keeps the default `release_allocation`: the failure
-   path never re-runs a cell's tool under test. Import `Release` and `release_allocation` from
-   `cleanup`.
-4. In `remote_lifecycle.py`, apply the same change: `remote_cleanup(..., before, release=...)`
-   passes it to `release_and_verify`, and `on_remote_system(..., provision, release=...)` passes
-   it only to the direct `remote_cleanup` call. The `cleanup_attempt` partial keeps the default.
-5. In `tool_cells.py`, add `release: Release = release_allocation,` to `LaneFrame.__call__`
-   after `provision`, and import both names from `cleanup`.
-6. Run the focused command (green), then `just type` (green), then commit:
-   `test(live-stack): let a cell supply the frame's release`.
-
-## Task 3: The carrier
-
-**Interfaces.** It consumes `lane_for`, `Lane.frame` (with `release`), `on_lane_system`,
-`lane_target`, `observe_guest`, `prove_rejection`, `run_tool_cell`, `tool_cells`, `HttpCaller`,
+**Interfaces.** It consumes `on_lane_system`, `lane_target`, `prove_rejection`, `run_tool_cell`, `tool_cells`, `HttpCaller`,
 `Grants`, `Rejection`, `project_state`, `boundary_of` and `one` from `tool_cells`;
 `observe_host`, `observer`, `remote_host`, `remote_kdive_domains`, `staged_base_volume` and
 `REMOTE_REPRESENTATIVES` from `remote_lifecycle`; `staged_image` from `image_smoke`; and
-`drain_job`, `await_system_state`, `scalar`, `mint_role_token` and `worker_libvirt_uri` from
+`drain_job`, `await_system_state` and `worker_libvirt_uri` from
 `spine`. All of them exist on `main` with the signatures used.
 
 **Verification.**
@@ -220,7 +135,7 @@ Steps:
   `uv run python -m pytest tests/integration/test_breakglass_tool_cells_live.py --collect-only -q`
   must list 136 parameters on an x86_64 host. With no stack, they skip (`live_stack`).
 - Carrier bodies: task-test-not-applicable. They need a live stack and a provider host, and
-  Task 4's lab run is their evidence.
+  Task 3's lab run is their evidence.
 
 Steps:
 
@@ -239,16 +154,17 @@ Steps:
      - Remotely, `storageVolLookupByName(staged_base_volume(image))` in the refreshed
        `remote_host().pool`, where `VIR_ERR_NO_STORAGE_VOL` means absent.
    - `_defined(xml, system_id)`, as in the System carrier.
-   - `_force_teardown(run, caller, db_url, guest)` and `_force_release(run, caller, base_url,
-     issuer, db_url)`, as the spec's functional section states: the call through the exposure
-     with the admin token and `reason = "coverage #3112"`, the proofs listed there, and one
-     audit row with scope `<project>:<object id>`. `_force_release` calls `lane.frame` with
-     `provision=provision_catalog` and a `release` that makes the call and requires `released`.
-     After the frame returns, it re-reads `allocations.wait` (`timeout_s=0`) with a fresh
-     project-operator token, requires `released`, and proves `effect`.
-   - `_blocked(run)`: remotely, `observe_host(run, remote_host())` and then
-     `ScenarioStop(BLOCKED, remote reason)`; locally, `ScenarioStop(BLOCKED, local reason)`. The
-     spec gives the reasons.
+   - `_force_teardown(run, caller, db_url, guest)`, the `on_lane_system` body, as the spec's
+     functional section states: the call through the exposure with the admin token and
+     `reason = "coverage #3112"`, the proofs listed there, and one audit row with scope
+     `<project>:<system_id>`.
+   - `_blocked(run)`: remotely, `observe_host(run, remote_host())` first; then
+     `ScenarioStop(BLOCKED, reason)`. The reason names the tool: for `ops.force_release`, its
+     ordering needs an authority-owned System with external-boot history, which no lane frames;
+     for the resolve tools, the missing installed authority (remotely, the
+     `provider_authority_host` role and `[[remote_libvirt]]` authority tuple, which would route
+     every remote install and boot through external boot), the missing authority-lane System
+     frame, and the missing orphan or conflict construction.
    - `_args(tool, system_id, allocation_id)` and `_rejection(tool, boundary, target)`, per the
      spec's rejection table.
    - `_scenario` dispatches the functional kinds and otherwise runs `prove_rejection` with
@@ -260,17 +176,17 @@ Steps:
    `tool_cells(TOOLS)` and needs no binding: `test(live): carry the x86_64 break-glass provider
    tool cells`, then Task 1 as `test(coverage): split break-glass flags and bind the cells`.
 
-## Task 4: Runbooks and the lab run
+## Task 3: The runbook and the lab run
 
 **Verification.**
-- Runbook sections: task-test-not-applicable, because they are human procedure. `just docs-check`
+- Runbook section: task-test-not-applicable, because they are human procedure. `just docs-check`
   is the guardrail.
 - Lab run: deploy the committed head on the control-plane guest. Run `demo-up.sh` in the default
   configuration and then, after `demo-down.sh --wipe --yes`, in the recovery configuration
   (`KDIVE_WORKER_DEATH_VERIFIER=docker`). In each configuration, run the carrier with
   `-k local-libvirt` and with `-k remote-libvirt`. Then `evidence assemble` and `qualify`.
-  Expected: 120 qualified (16 `success`, 104 `rejection`) and the 16 resolve functional cells
-  `blocked`, so `qualify` exits non-zero by design. The provider host serves only this run while
+  Expected: 112 qualified (8 `success`, 104 `rejection`) and 24 functional cells `blocked`
+  (8 `ops.force_release` and 16 resolve), so `qualify` exits non-zero by design. The provider host serves only this run while
   it lasts. Wipe afterwards; `virsh list --all` shows no `kdive-` domain on either host. On the
   provider host, any leftover `kdive-` domain is removed with `virsh destroy` and `undefine`, and
   its overlay volume with `virsh vol-delete`, because the wipe does not reach that host.
@@ -278,11 +194,14 @@ Steps:
 Steps:
 
 1. In `live-testing.md`, add `#### Break-glass provider tool cells (#3112)` after the run cells
-   section. It covers what each functional cell does, the blocked resolve cells, the rejection
-   table summary and the bindings command (no `--kernel-baseline`), with `-k local-libvirt`.
-   In `remote-live-stack.md`, add `## 10. Remote break-glass tool cells (#3112)`, which runs the
-   same carrier with `-k remote-libvirt` on §8's lane. It states that the provider serves only
-   this run, and gives the manual removal of provider leftovers after an interrupted run.
+   section. It covers:
+   - what the force-teardown cells do, and why the other functional cells are blocked;
+   - a summary of the rejection table;
+   - the bindings command (`--remote`, no `--kernel-baseline`) and both lanes' commands
+     (`-k local-libvirt` and `-k remote-libvirt`), with the remote set-up linked to
+     `remote-live-stack.md` §8;
+   - that the provider serves only this run;
+   - the manual removal of provider leftovers after an interrupted run.
 2. Run the lab run, then write the "Last run" paragraphs with the candidate SHA, the counts and
    the cleanup checks. Keep host names and addresses out.
 3. Run `just docs-check`, then commit: `docs(runbook): add and record the break-glass tool

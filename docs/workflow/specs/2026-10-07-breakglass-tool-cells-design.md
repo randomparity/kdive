@@ -28,9 +28,13 @@ The four tools do not all need the authority:
   either tool.
 
 On 2026-10-07 the operator chose option A (recorded in the issue's `WORK:SCOPE`): split the
-flags per tool. `ops.force_release` and `ops.force_teardown` drop the authority, and their
-functional cells are proven live. The two resolve tools keep it, and their functional cells
-stop `blocked`.
+flags per tool. `ops.force_release` and `ops.force_teardown` drop the authority. The two resolve
+tools keep it, and their functional cells stop `blocked`. The scope audit then found that the
+`ops.force_release` observation ("terminal release only after protected provider effects are
+quiescent") describes an ordering that only an authority-owned System with external-boot history
+has: an ordinary release is terminal when the call returns, and the teardown follows. At the
+second checkpoint, the operator chose option (b): its 8 functional cells stop `blocked` as well.
+Both decisions are recorded in the issue's re-frozen `WORK:SCOPE`.
 
 ## Scope
 
@@ -43,45 +47,26 @@ stop `blocked`.
    `contract.py` is unchanged. Its ppc64le route still sends these tools' ppc64le cells to
    #2818, which take the same flags. The 136 x86_64 cells stay with owner 3112. `[implementations]`
    binds the 34 scenarios (17 local, 17 remote) to the new carrier node.
-2. **Release seam** in the frame. `cleanup.release_and_verify` releases the Allocation through
-   a `release` callable, which defaults to `allocations.release`. `scenario.on_catalog_system`
-   and its `_cleanup`, `remote_lifecycle.on_remote_system` and `remote_cleanup`, and the
-   `tool_cells.LaneFrame` protocol pass an optional `release` through. This mirrors their
-   existing `provision` seam ("a cell whose tool under test is the provision passes its own").
-   Every existing caller keeps the default. Only the cleanup proof uses a supplied `release`. The
-   failure-path `cleanup_attempt` always uses `allocations.release`, which is idempotent on a
-   released Allocation, so a broken tool under test cannot strand its own System.
-3. **Carrier** `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell`.
+2. **Carrier** `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell`.
    It is parametrized over the native local-libvirt cells and the x86_64 remote-libvirt cells of
-   the four tools, as in the System carrier, and framed by `run_tool_cell`.
-4. **Runbooks:** one section in `docs/operating/runbooks/live-testing.md` (local) and one in
-   `remote-live-stack.md` (remote), each recording the live run.
+   the four tools, as in the System carrier, and framed by `run_tool_cell`. The shared frame
+   (`cleanup.py`, `scenario.py`, `remote_lifecycle.py`, `tool_cells.py`) is reused unchanged.
+3. **Runbook:** one section in `docs/operating/runbooks/live-testing.md` covering both lanes,
+   linking the remote lane's set-up in `remote-live-stack.md` §8, and recording the live run.
 
 No product source, ADR or migration change is needed.
 
+Each record's identity comes from the inherited frame. `run_cell` records the candidate and the
+deployed roles. The bindings and `observe_guest` record the guest and image. `observe_host`
+records the provider host of a remote cell. The four tools declare no kernel inputs, so no
+kernel identity is bound.
+
 ### Functional cells
 
-Every functional call is made by a platform admin who holds no role in the System's project: a
-token with `platform_roles = ("platform_admin",)` and one fresh `cov-<hex>` project of its own.
+A platform admin who holds no role in the System's project makes the `ops.force_teardown` call:
+a token with `platform_roles = ("platform_admin",)` and one fresh `cov-<hex>` project of its own.
 The call goes through the cell's exposure, with `reason = "coverage #3112"`.
 
-- **`ops.force_release`.** The lane frame provisions the lane image in a fresh project and
-  observes the guest over SSH. The cell then passes a `release` that calls `ops.force_release` on
-  the frame's Allocation and requires the status `released`. The frame's
-  `release_and_verify` then proves the rest with that release. Capacity in use was above its
-  pre-allocation value while the Allocation was held. After the release, `allocations.wait`
-  reports `released`, the System reaches `torn_down`, the provider libvirt no longer defines the
-  domain, every owned disk is absent on the provider host, and the summed `in_use` is back to
-  its pre-allocation value. After that cleanup returns, the cell proves `effect`: the call's
-  answer, a second `allocations.wait` still reporting `released`, and exactly one
-  `platform_audit_log` row for the admin subject with `tool = ops.force_release` and
-  `scope = <project>:<allocation_id>`.
-  *Reading of the observation.* For an ordinary System, the release is terminal when the call
-  returns, and the provider teardown follows. The cell therefore proves that the release stays
-  terminal while the provider effects quiesce: domain, disks and capacity are reclaimed, and the
-  Allocation is still `released` afterwards. The authority-path ordering, where a System with
-  external-boot history is torn down before the release, is not observed here. It belongs to the
-  follow-up candidate below.
 - **`ops.force_teardown`.** Inside `on_lane_system`, the cell first reads the provider's set of
   `kdive-` domains and the lane's staged base: the local staged qcow2 file, or the remote base
   volume in the instance's pool. It then calls `ops.force_teardown` on the frame's System. Unless
@@ -99,8 +84,12 @@ The call goes through the cell's exposure, with `reason = "coverage #3112"`.
 - **`ops.resolve_recovery_orphan` and `systems.resolve_external_boot_conflict`.** These stop
   `blocked` (`missing-prerequisite`) before any stack mutation. The reason names the missing
   installed authority, the missing authority-lane System frame, and the missing construction of
-  a quarantined orphan or a recovery conflict. A remote cell first probes the provider host, so
-  its record carries that host. These cells are never `success`.
+  a quarantined orphan or a recovery conflict.
+- **`ops.force_release`.** This stops `blocked` before any stack mutation as well. The reason
+  states that its ordering exists only for an authority-owned System with external-boot history,
+  and that no lane frames one.
+- A blocked remote cell first probes the provider host, so its record carries that host. Blocked
+  cells are never `success`.
 
 ### Rejection cells
 
@@ -135,11 +124,12 @@ System. Each refused call therefore writes nothing to T. A platform denial adds 
      that serves only this run while it lasts (no other stack's remote cells run concurrently);
    - CI, which runs only the unit and contract tests.
 2. **Invariants and assets at stake:**
-   - honest per-cell outcomes: the 16 resolve functional cells are `blocked`, never covered;
+   - honest per-cell outcomes: the 24 functional cells of the resolve tools and of
+     `ops.force_release` are `blocked`, never covered;
    - a contract whose flags match option A, with routing unchanged;
-   - existing carriers unchanged: the `release` seam defaults to today's `allocations.release`;
-   - the hosts left as found: each functional cell's System, domain, disks and capacity are
-     reclaimed and proven per cell; force teardown leaves other domains and the staged base.
+   - existing carriers unchanged: the shared frame files are not edited;
+   - the hosts left as found: each force-teardown cell's System, domain, disks and capacity are
+     reclaimed and proven per cell, and its other domains and the staged base remain.
 3. **Accepted failure classes:**
    - A cell killed mid-run can leave a System or Allocation behind. The post-run wipe clears the
      stack and the local worker's libvirt. It does not reach the remote provider host: the
@@ -152,7 +142,8 @@ System. Each refused call therefore writes nothing to T. A platform denial adds 
    - The admin's `platform_audit_log` rows and the targets' history rows stay. They are audit
      history, and the wipe clears them.
 4. **Covered elsewhere:**
-   - the authority lane frame plus an orphan/conflict construction harness (follow-up candidate);
+   - the authority lane frame plus an orphan/conflict construction harness, which also owns the
+     `ops.force_release` ordering (follow-up candidate);
    - ppc64le cells (#2818);
    - mutating operator tools (#3110) and build-use recovery (#3111);
    - the capability boundary (#2814).
@@ -163,6 +154,6 @@ System. Each refused call therefore writes nothing to T. A platform denial adds 
 |---|---|---|
 | per-tool flags and owners | focused-test | `tests/scripts/test_coverage_contract.py`: x86_64 cells of the four tools stay 3112 (136), ppc64le stay 2818; functional roles carry `authority` only for the two resolve tools |
 | carrier bindings | focused-test | same file: the four tools' cells bind the carrier node |
-| release seam | focused-test | `tests/integration/live_stack/test_cleanup.py`: a supplied `release` replaces `allocations.release`, and the proof still runs |
+| record identity | task-test-not-applicable | inherited unchanged from `run_cell`, the bindings, `observe_guest` and `observe_host`, which their own tests cover; this change adds no identity field |
 | carrier bodies | task-test-not-applicable | they need a live stack and provider host; their evidence is the lab run below |
-| live run | lab run | both configurations on both lanes; `qualify` reports 120 of 136 qualified and the 16 resolve functional cells blocked |
+| live run | lab run | both configurations on both lanes; `qualify` reports 112 of 136 qualified (8 `success`, 104 `rejection`) and the 24 blocked functional cells |
