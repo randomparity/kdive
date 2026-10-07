@@ -64,6 +64,7 @@ _INVESTIGATION_NODE = (
 _OPERATOR_NODE = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 _SYSTEM_NODE = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
 _RUN_NODE = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+_BREAKGLASS_NODE = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _REMOTE_DEEP_NODE = (
     "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
@@ -166,6 +167,8 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert len(local_runs) == 192 and {c.node_id for c in local_runs} == {_RUN_NODE}
     remote_runs = [c for c in runs if c.provider == "remote-libvirt"]
     assert len(remote_runs) == 192 and {c.node_id for c in remote_runs} == {_RUN_NODE}
+    glass = [c for c in contract.cells if c.operation in _OPERATOR_SPLIT[3112]]
+    assert len(glass) == 272 and {c.node_id for c in glass} == {_BREAKGLASS_NODE}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -176,6 +179,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_OPERATOR_TOOLS,
         *_SYSTEM_TOOLS,
         *_RUN_TOOLS,
+        *_OPERATOR_SPLIT[3112],
     }
     unbound = [c for c in contract.cells if c.operation not in bound]
     assert all(c.node_id is None for c in unbound)
@@ -385,6 +389,16 @@ def test_operator_tools_follow_the_approved_split(inventory: Inventory) -> None:
         "resources.drain",
     }
     assert overrides[3111] == {"ops.recover_build_use"}
+    assert len([c for c in cells if c.owner == 3112]) == 136
+    # Operator option A (#3112, 2026-10-07): only the resolve tools need the authority.
+    base = ("server", "worker", "reconciler")
+    roles = {(c.operation, c.roles) for c in glass if c.kind == "functional"}
+    assert roles == {
+        ("ops.force_release", base),
+        ("ops.force_teardown", base),
+        ("ops.resolve_recovery_orphan", (*base, "authority")),
+        ("systems.resolve_external_boot_conflict", (*base, "authority")),
+    }
 
 
 def _tool_prefix(provider: str) -> str:

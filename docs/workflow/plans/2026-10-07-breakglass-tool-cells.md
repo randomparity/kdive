@@ -59,9 +59,7 @@ Steps:
 1. In `tests/scripts/test_coverage_contract.py`, add the node constant after `_RUN_NODE`:
 
    ```python
-   _BREAKGLASS_NODE = (
-       "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
-   )
+   _BREAKGLASS_NODE = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
    ```
 
 2. At the end of `test_operator_tools_follow_the_approved_split`, add:

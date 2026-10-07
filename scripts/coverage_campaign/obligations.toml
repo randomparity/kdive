@@ -138,10 +138,15 @@ execution = "service"
 [[groups]]
 owner = 3112
 execution = "provider"
-authority = true
 [groups.tools]
 "ops.force_release" = "Observe terminal release only after protected provider effects are quiescent."
 "ops.force_teardown" = "Verify forced teardown removes owned domain/storage and preserves unrelated resources."
+
+[[groups]]
+owner = 3112
+execution = "provider"
+authority = true
+[groups.tools]
 "ops.resolve_recovery_orphan" = "Wait for repair and verify only the exact quarantined object set is resolved."
 "systems.resolve_external_boot_conflict" = "Wait for conflict resolution and verify authoritative provider and database state agree."
 
@@ -532,3 +537,37 @@ kernel = true
 "tool/runs.release_external_boot/default/functional" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
 "tool/runs.release_external_boot/default/project-isolation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
 "tool/runs.release_external_boot/default/validation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/ops.force_release/default/authentication" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.force_release/default/authorization" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.force_release/default/functional" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.force_release/default/validation" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.force_teardown/default/authentication" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.force_teardown/default/authorization" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.force_teardown/default/functional" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.force_teardown/default/validation" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.resolve_recovery_orphan/default/authentication" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.resolve_recovery_orphan/default/authorization" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.resolve_recovery_orphan/default/functional" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/ops.resolve_recovery_orphan/default/validation" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/systems.resolve_external_boot_conflict/default/authentication" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/systems.resolve_external_boot_conflict/default/authorization" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/systems.resolve_external_boot_conflict/default/functional" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/systems.resolve_external_boot_conflict/default/project-isolation" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/systems.resolve_external_boot_conflict/default/validation" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.force_release/default/authentication" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.force_release/default/authorization" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.force_release/default/functional" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.force_release/default/validation" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.force_teardown/default/authentication" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.force_teardown/default/authorization" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.force_teardown/default/functional" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.force_teardown/default/validation" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.resolve_recovery_orphan/default/authentication" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.resolve_recovery_orphan/default/authorization" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.resolve_recovery_orphan/default/functional" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/ops.resolve_recovery_orphan/default/validation" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/systems.resolve_external_boot_conflict/default/authentication" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/systems.resolve_external_boot_conflict/default/authorization" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/systems.resolve_external_boot_conflict/default/functional" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/systems.resolve_external_boot_conflict/default/project-isolation" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+"tool/remote-libvirt/systems.resolve_external_boot_conflict/default/validation" = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
