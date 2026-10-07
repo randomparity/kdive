@@ -6,6 +6,7 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import socket
 import ssl
@@ -73,6 +74,7 @@ SOCKET_MODE = 0o660
 SOCKET_DIRECTORY_MODE = 0o2750
 _TLS_TIMEOUT_SECONDS = 5.0
 _MAX_JSON_NESTING = 64
+_log = logging.getLogger(__name__)
 _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 
 type Operation = Literal[
@@ -437,6 +439,7 @@ async def _dispatch(
     try:
         peer = await authenticate_peer(credential)
     except Exception:  # noqa: BLE001 -- authentication details never cross the boundary
+        _log.exception("authority transport %s peer authentication failed", operation)
         return _error("unauthenticated")
     if operation == "health":
         return _success(AuthorityHealthAcknowledgementV1())
@@ -448,6 +451,7 @@ async def _dispatch(
         try:
             return _success(await identity_service.resolve(request))
         except Exception:  # noqa: BLE001 -- filesystem details never cross the boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-failure")
     if operation in {"acknowledge-system-takeover", "execute-system-operation"}:
         if system_service is None:
@@ -468,6 +472,7 @@ async def _dispatch(
         except AuthoritySystemServiceError as exc:
             return _error(_service_category(exc.category))
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
     if operation == "execute-remote-module-lifecycle":
         if remote_module_service is None:
@@ -486,6 +491,7 @@ async def _dispatch(
                 return _error("remote-module-refused")
             return _error("provider-conflict")
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
     if operation == "execute-remote-module-preparation":
         if remote_module_service is None:
@@ -502,6 +508,7 @@ async def _dispatch(
                 return _error("remote-module-failed")
             return _error("provider-conflict")
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
     if operation == "begin-remote-module-preparation":
         if remote_module_service is None:
@@ -513,6 +520,7 @@ async def _dispatch(
         except AuthorityServiceError as exc:
             return _error(_service_category(exc.category))
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
     if service is None:
         return _error("provider-not-configured")
@@ -559,6 +567,7 @@ async def _dispatch(
     except AuthorityServiceError as exc:
         return _error(_service_category(exc.category))
     except Exception:  # noqa: BLE001 -- provider/service details never cross the boundary
+        _log.exception("authority transport %s failed unexpectedly", operation)
         return _error("provider-conflict")
 
 
