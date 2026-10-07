@@ -1237,6 +1237,45 @@
       - live_vm_host_worker_libvirtd_executable.stat.executable
     fail_msg: selected Debian-family libvirtd executable is missing at /usr/sbin/libvirtd
 
+- name: Read the legacy selected session unit state
+  ansible.builtin.command:
+    argv: [systemctl, --user, show, kdive-libvirtd-live.service, --property=ActiveState, --value]
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_worker_operator_uid }}"
+  become: true
+  become_user: "{{ live_vm_host_operator_user }}"
+  register: live_vm_host_legacy_libvirt_state
+  changed_when: false
+
+- name: Read the legacy selected session unit source
+  ansible.builtin.command:
+    argv: [systemctl, --user, show, kdive-libvirtd-live.service, --property=FragmentPath, --value]
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_worker_operator_uid }}"
+  become: true
+  become_user: "{{ live_vm_host_operator_user }}"
+  register: live_vm_host_legacy_libvirt_source
+  changed_when: false
+
+- name: Refuse automatic takeover from the legacy user unit
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_legacy_libvirt_state.stdout | trim in ['inactive', 'failed']
+      - >-
+        live_vm_host_legacy_libvirt_source.stdout | trim in ['',
+        ansible_facts.getent_passwd[live_vm_host_operator_user][4]
+        + '/.config/systemd/user/kdive-libvirtd-live.service']
+    fail_msg: >-
+      Drain Systems on the selected operator endpoint, then stop only
+      kdive-libvirtd-live.service with systemctl --user as the configured operator and rerun.
+      Do not restart the user manager or change device permissions.
+
+- name: Read the installed selected system unit PID
+  ansible.builtin.command:
+    argv: [systemctl, show, kdive-libvirtd-live.service, --property=MainPID, --value]
+  register: live_vm_host_system_libvirt_pid
+  changed_when: false
+
 - name: Initialize the selected libvirt startup decision
   ansible.builtin.set_fact:
     live_vm_host_worker_libvirtd_should_start: false
@@ -1562,15 +1601,58 @@
           safe: true
       when: item.safe | bool
 
-# systemd does not pre-create ~/.config/systemd/user, and a clean host has no user
-# units for the runner yet, so the copy below is fatal without it (#2044).
-- name: Ensure the runner's systemd user unit directory exists
+- name: Refuse takeover of an unmanaged selected session daemon
+  ansible.builtin.assert:
+    that:
+      - >-
+        not live_vm_host_worker_libvirtd_live
+        or live_vm_host_worker_libvirtd_pid == live_vm_host_system_libvirt_pid.stdout | trim
+    fail_msg: >-
+      The selected daemon is not owned by the installed system unit. Drain its Systems,
+      stop that exact operator daemon, then rerun provisioning; do not restart the user manager.
+
+- name: Inspect the legacy selected user unit
+  ansible.builtin.stat:
+    path: "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][4] }}/.config/systemd/user/kdive-libvirtd-live.service"
+    follow: false
+  register: live_vm_host_legacy_libvirt_unit
+
+- name: Require a regular operator-owned legacy unit before retirement
+  ansible.builtin.assert:
+    that:
+      - not (live_vm_host_legacy_libvirt_unit.stat.islnk | default(false))
+      - >-
+        not live_vm_host_legacy_libvirt_unit.stat.exists
+        or (live_vm_host_legacy_libvirt_unit.stat.isreg
+        and not live_vm_host_legacy_libvirt_unit.stat.islnk
+        and live_vm_host_legacy_libvirt_unit.stat.pw_name == live_vm_host_operator_user)
+
+- name: Disable the inactive legacy selected user unit
+  ansible.builtin.systemd_service:
+    name: kdive-libvirtd-live.service
+    scope: user
+    enabled: false
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_worker_operator_uid }}"
+  become: true
+  become_user: "{{ live_vm_host_operator_user }}"
+  when: live_vm_host_legacy_libvirt_unit.stat.exists
+
+- name: Remove only the inactive legacy selected user unit
   ansible.builtin.file:
-    path: "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][4] }}/.config/systemd/user"
-    state: directory
-    owner: "{{ live_vm_host_operator_user }}"
-    group: "{{ live_vm_host_operator_user }}"
-    mode: "0700"
+    path: "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][4] }}/.config/systemd/user/kdive-libvirtd-live.service"
+    state: absent
+  when: live_vm_host_legacy_libvirt_unit.stat.exists
+
+- name: Reload the operator manager after retiring its selected unit
+  ansible.builtin.systemd_service:
+    scope: user
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_worker_operator_uid }}"
+  become: true
+  become_user: "{{ live_vm_host_operator_user }}"
+  when: live_vm_host_legacy_libvirt_unit.stat.exists
 
 - name: Consume the shared private authority libvirt endpoint tasks
   ansible.builtin.include_tasks: ../../provider_authority_host/tasks/libvirt.yml
@@ -1743,56 +1825,39 @@
       become_user: "{{ live_vm_host_authority_proof_account }}"
       changed_when: false
 
-- name: Install the boot-persistent session libvirtd user unit
+- name: Install the boot-persistent session libvirtd system unit
   ansible.builtin.copy:
-    dest: "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][4] }}/.config/systemd/user/kdive-libvirtd-live.service"
+    dest: /etc/systemd/system/kdive-libvirtd-live.service
     content: |
       [Unit]
       Description=kdive dedicated session libvirt daemon (operator-owned)
-
+      After=systemd-tmpfiles-setup.service
       [Service]
       Type=forking
-      # The daemon's sockets and pid live under the dedicated runtime root, not /run/user.
+      User={{ live_vm_host_operator_user }}
+      Group={{ live_vm_host_operator_user }}
+      SupplementaryGroups=kvm {{ live_vm_host_worker_libvirt_group }}
       Environment=XDG_RUNTIME_DIR=/run/kdive/live-libvirt
-      # A lingering user manager can predate Ansible's group update. sg resolves the declared
-      # fixed-worker group on every start so libvirtd can apply unix_sock_group without a reboot.
-      ExecStart=/usr/bin/sg {{ live_vm_host_worker_libvirt_group }} -c \
-        '/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf --pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid'
+      ExecStart=/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf --pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid
       PIDFile=/run/kdive/live-libvirt/libvirt/libvirtd.pid
       Restart=on-failure
       RestartSec=5s
-
       [Install]
-      WantedBy=default.target
-    owner: "{{ live_vm_host_operator_user }}"
-    group: "{{ live_vm_host_operator_user }}"
+      WantedBy=multi-user.target
+    owner: root
+    group: root
     mode: "0644"
 
-# Linger is enabled at the top of this role, so the runner's user manager runs from boot with no
-# login session and this unit keeps the dedicated session endpoint up across reboots (#2032)
-# instead of relying on workflow-side starts. The module reaches the user manager through
-# XDG_RUNTIME_DIR; no dbus login session is involved. daemon_reload picks up unit edits; enable is
-# idempotent.
-- name: Enable the boot-persistent session libvirtd user unit
+- name: Enable the boot-persistent session libvirtd system unit
   ansible.builtin.systemd_service:
     name: kdive-libvirtd-live.service
-    scope: user
     enabled: true
     daemon_reload: true
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_worker_operator_uid }}"
-  become: true
-  become_user: "{{ live_vm_host_operator_user }}"
 
 - name: Start the operator-owned dedicated session libvirtd
   ansible.builtin.systemd_service:
     name: kdive-libvirtd-live.service
-    scope: user
     state: started
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_worker_operator_uid }}"
-  become: true
-  become_user: "{{ live_vm_host_operator_user }}"
   when: live_vm_host_worker_libvirtd_should_start
 
 - name: Enable the live-worker lifecycle control socket

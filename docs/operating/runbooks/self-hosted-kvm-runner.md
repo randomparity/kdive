@@ -144,15 +144,25 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    the same daemon.
 
    The dedicated session daemon is **boot-persistent** (#2032): provisioning installs a
-   `systemd --user` unit (`kdive-libvirtd-live.service`) for the runner account and enables it
-   (linger is already on), so the endpoint comes back by itself after a reboot instead of
-   depending on workflow-side starts. If the endpoint is nonetheless unreachable at job time,
+   system unit (`kdive-libvirtd-live.service`) running as the operator, with explicit KVM and
+   socket groups. The system manager supplies fresh credentials even when the operator user
+   manager predates provisioning. The endpoint returns after a reboot through this unit.
+   Maintenance uses privileged `systemctl`; no new operator sudo grant is installed.
+
+   To migrate an existing user unit, drain Systems on the selected endpoint, then stop only
+   `kdive-libvirtd-live.service` with `systemctl --user` as the configured operator and rerun
+   provisioning. Active legacy units and live unmanaged daemons are refused before takeover;
+   an unmanaged daemon requires its exact targeted stop after draining. Do not restart the
+   user manager or change device permissions. Provisioning removes only the inactive legacy
+   unit, preserving unrelated user services. See [ADR-0730](../../adr/0730-system-manager-starts-operator-session-libvirt.md). If the endpoint is nonetheless unreachable at job time,
    `scripts/live-stack/stack-services.sh` recovers by starting that same operator-owned daemon directly as
    the invoking user (`libvirtd --config /etc/kdive/libvirtd-live.conf --pid-file
    /run/kdive/live-libvirt/libvirt/libvirtd.pid`, idempotent on a live pid) — never `sudo`: the
    runner service account has no sudoers grant and Debian-family hosts ship no `virtqemud`. If
    the daemon cannot be started non-interactively, `stack-services.sh` dies loud naming the exact paths
-   rather than degrading to `qemu:///system`.
+   rather than degrading to `qemu:///system`. This compatibility fallback can create an unmanaged
+   daemon even after a system unit is installed; the next provisioning run requires the same
+   drain and targeted stop before adopting the endpoint.
 
    The fixed workers also use the distro's `kvm` group to read the host kernels that
    libguestfs uses for its appliance and to read and write `/dev/kvm`. Provisioning keeps

@@ -177,7 +177,7 @@ if [[ "$skip_libvirt" != "1" ]]; then
       # Provisioned-runner recovery (#2032): the dedicated session endpoint is down (fresh boot,
       # reprovision lag). Start the OPERATOR-OWNED session daemon as the invoking user — the same
       # daemon shape the live_vm_host role provisions and keeps boot-persistent via its systemd
-      # --user unit. No sudo to start it: the runner service account has none, virtqemud does not
+      # system unit (ADR-0730). This fallback stays unmanaged. No sudo to start it: the runner service account has none, virtqemud does not
       # exist on the Debian-family runner, and degrading to qemu:///system would hit the
       # root-readback wall (ADR-0223) anyway. If the daemon cannot be started non-interactively,
       # die loud naming the missing paths instead of failing later with a confusing URI error.

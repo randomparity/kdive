@@ -1047,10 +1047,10 @@ def test_authority_runtime_is_recreated_at_boot_with_exact_acl() -> None:
     assert "ConditionPathIsDirectory=/run/kdive/provider-authority/libvirt" in tasks
 
 
-def test_fixed_worker_user_unit_renders_the_configured_libvirt_group() -> None:
+def test_fixed_worker_system_unit_renders_the_configured_libvirt_group() -> None:
     tasks = _text(MAIN_TASKS)
-    assert "ExecStart=/usr/bin/sg {{ live_vm_host_worker_libvirt_group }} -c" in tasks
-    assert "ExecStart=/usr/bin/sg kdive-live-libvirt -c" not in tasks
+    assert "SupplementaryGroups=kvm {{ live_vm_host_worker_libvirt_group }}" in tasks
+    assert "SupplementaryGroups=kvm kdive-live-libvirt" not in tasks
 
 
 def test_ansible_uses_declarative_account_and_file_modules() -> None:
@@ -2062,39 +2062,161 @@ def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
         assert path in provisioning
 
 
-def test_session_libvirtd_is_boot_persistent_via_user_unit() -> None:
-    """The dedicated session daemon survives reboots (#2032): linger + an enabled user unit."""
-    tasks = _text(MAIN_TASKS)
-    defaults = _yaml(DEFAULTS)
-    packages = defaults["live_vm_host_packages"]
-    assert isinstance(packages, list)
-    assert "login" in packages
-    assert "kdive-libvirtd-live.service" in tasks
-    assert (
-        "ExecStart=/usr/bin/sg {{ live_vm_host_worker_libvirt_group }} -c \\\n"
-        "        '/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf "
-        "--pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid'" in tasks
+def test_session_libvirtd_has_system_manager_credentials() -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    install = next(
+        t for t in tasks if t["name"] == "Install the boot-persistent session libvirtd system unit"
     )
-    # The user manager is reached through the runner's XDG_RUNTIME_DIR (no login session needed).
-    enable = tasks.index("- name: Enable the boot-persistent session libvirtd user unit")
-    start = tasks.index("- name: Start the operator-owned dedicated session libvirtd")
-    assert "scope: user" in tasks[enable:start]
-    # The unit's destination directory must exist before the copy: systemd does not
-    # pre-create ~/.config/systemd/user and a clean host has no user units yet (#2044).
-    ensure_dir = tasks.index("- name: Ensure the runner's systemd user unit directory exists")
-    install = tasks.index("- name: Install the boot-persistent session libvirtd user unit")
-    assert ensure_dir < install
-    ensure_block = tasks[ensure_dir:install]
-    assert "state: directory" in ensure_block
-    assert 'mode: "0700"' in ensure_block
-    assert (
-        "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][4] }}/.config/systemd/user"
-        in (ensure_block)
+    unit = install["ansible.builtin.copy"]
+    assert unit["dest"] == "/etc/systemd/system/kdive-libvirtd-live.service"
+    assert unit["owner"] == unit["group"] == "root"
+    content = unit["content"]
+    assert "User={{ live_vm_host_operator_user }}" in content
+    assert "Group={{ live_vm_host_operator_user }}" in content
+    assert "SupplementaryGroups=kvm {{ live_vm_host_worker_libvirt_group }}" in content
+    assert "ExecStart=/usr/sbin/libvirtd --daemon" in content
+    assert "WantedBy=multi-user.target" in content
+    assert "After=systemd-tmpfiles-setup.service" in content
+    for name in (
+        "Enable the boot-persistent session libvirtd system unit",
+        "Start the operator-owned dedicated session libvirtd",
+    ):
+        task = next(t for t in tasks if t["name"] == name)
+        assert task["ansible.builtin.systemd_service"].get("scope", "system") == "system"
+        assert "become_user" not in task
+    assert not any(
+        t["name"] == "Ensure the runner's systemd user unit directory exists" for t in tasks
     )
-    # Linger must be provisioned before the unit: it is what keeps the runner's user manager
-    # alive from boot with no login session.
-    assert tasks.index("loginctl enable-linger") < install
-    assert enable < start, "the unit enables unconditionally; only the start is stale-gated"
+
+
+@pytest.mark.parametrize(
+    "state,allowed",
+    [("active", False), ("activating", False), ("inactive", True), ("failed", True)],
+)
+def test_legacy_session_migration_refuses_active_unit(state: str, allowed: bool) -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    guard = next(
+        t for t in tasks if t["name"] == "Refuse automatic takeover from the legacy user unit"
+    )
+    evaluate = Environment(undefined=StrictUndefined).compile_expression(
+        guard["ansible.builtin.assert"]["that"][0]
+    )
+    assert bool(evaluate(live_vm_host_legacy_libvirt_state={"stdout": state})) is allowed
+    assert tasks.index(guard) < next(
+        i
+        for i, t in enumerate(tasks)
+        if t["name"] == "Reconcile the selected libvirt tuple under a protected hierarchy"
+    )
+
+
+@pytest.mark.parametrize(
+    "live,pid,owner,allowed",
+    [
+        (False, "", "0", True),
+        (True, "31", "31", True),
+        (True, "31", "0", False),
+        (True, "31", "32", False),
+    ],
+)
+def test_session_migration_refuses_unmanaged_daemon(
+    live: bool, pid: str, owner: str, allowed: bool
+) -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    guard = next(
+        t for t in tasks if t["name"] == "Refuse takeover of an unmanaged selected session daemon"
+    )
+    expression = guard["ansible.builtin.assert"]["that"][0]
+    evaluate = Environment(undefined=StrictUndefined).compile_expression(expression)
+    assert (
+        bool(
+            evaluate(
+                live_vm_host_worker_libvirtd_live=live,
+                live_vm_host_worker_libvirtd_pid=pid,
+                live_vm_host_system_libvirt_pid={"stdout": owner},
+            )
+        )
+        is allowed
+    )
+    assert tasks.index(guard) < next(
+        i
+        for i, t in enumerate(tasks)
+        if t["name"] == "Remove only the inactive legacy selected user unit"
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata,allowed",
+    [
+        ({"exists": False}, True),
+        ({"exists": True, "isreg": True, "islnk": False, "pw_name": "operator"}, True),
+        ({"exists": True, "isreg": True, "islnk": False, "pw_name": "other"}, False),
+        ({"exists": True, "isreg": False, "islnk": True, "pw_name": "operator"}, False),
+    ],
+)
+def test_session_migration_retirement_checks_file_owner(
+    metadata: dict[str, object], allowed: bool
+) -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    task = next(
+        t
+        for t in tasks
+        if t["name"] == "Require a regular operator-owned legacy unit before retirement"
+    )
+    env = Environment(undefined=StrictUndefined)
+    assert (
+        all(
+            env.compile_expression(clause)(
+                live_vm_host_legacy_libvirt_unit={"stat": metadata},
+                live_vm_host_operator_user="operator",
+            )
+            for clause in task["ansible.builtin.assert"]["that"]
+        )
+        is allowed
+    )
+
+
+@pytest.mark.parametrize("mode", ["kvm", "tcg", "empty", "malformed", "missing", "error"])
+def test_selected_endpoint_native_kvm_probe(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    tasks = yaml.safe_load(_text(VERIFY_TASKS))
+    task = next(
+        t for t in tasks if t["name"] == "Verify native KVM on the selected libvirt endpoints"
+    )
+    assert task["become_user"] == "{{ item.user }}"
+    assert task["loop"][0]["uri"] == "{{ live_vm_host_worker_libvirt_uri }}"
+    assert task["loop"][1]["uri"] == "{{ live_vm_host_authority_libvirt_uri }}"
+    assert task["loop"][1]["user"] == "{{ live_vm_host_authority_account }}"
+    script = task["ansible.builtin.command"]["argv"][2]
+    closed = []
+    xml = (
+        "<capabilities><host><cpu><arch>x86_64</arch></cpu></host>"
+        "<guest><os_type>hvm</os_type><arch name='x86_64'><emulator>/qemu</emulator>"
+        f"<domain type='{mode}'/></arch></guest><guest><os_type>hvm</os_type>"
+        "<arch name='ppc64le'><emulator>/qemu-ppc</emulator><domain type='qemu'/>"
+        "</arch></guest></capabilities>"
+    )
+
+    def capabilities() -> str:
+        if mode == "error":
+            raise RuntimeError("capability request failed")
+        return "" if mode == "empty" else "<broken" if mode == "malformed" else xml
+
+    connection = SimpleNamespace(getCapabilities=capabilities, close=lambda: closed.append(True))
+
+    def open_endpoint(uri: str) -> object:
+        assert uri == "test:///selected"
+        return None if mode == "missing" else connection
+
+    monkeypatch.setitem(sys.modules, "libvirt", SimpleNamespace(open=open_endpoint))
+    monkeypatch.setattr(sys, "argv", ["probe", "test:///selected", "operator"])
+    if mode == "kvm":
+        exec(script, {})
+    else:
+        with pytest.raises(RuntimeError if mode == "error" else SystemExit):
+            exec(script, {})
+    assert closed == ([] if mode == "missing" else [True])
 
 
 def test_live_vm_host_packages_declare_kmod_for_host_depmod() -> None:
@@ -3235,12 +3357,12 @@ def test_installer_makes_the_session_libvirt_runtime_root_boot_durable() -> None
 def test_session_libvirtd_unit_depends_on_a_runtime_root_it_cannot_create() -> None:
     """Pin the reason the tmpfiles rule exists, so removing it fails here rather than at boot.
 
-    The user unit names the pid file under `/run/kdive/live-libvirt/libvirt` and sets
-    XDG_RUNTIME_DIR to the root, but declares no RuntimeDirectory and no ExecStartPre — a user
-    unit cannot create either path under root-owned `/run/kdive`.
+    The operator-owned unit names the pid file under `/run/kdive/live-libvirt/libvirt` and sets
+    XDG_RUNTIME_DIR to the root, but declares no RuntimeDirectory and no ExecStartPre — its operator
+    cannot create either path under root-owned `/run/kdive`.
     """
     tasks = _text(MAIN_TASKS)
-    unit_start = tasks.index("Install the boot-persistent session libvirtd user unit")
+    unit_start = tasks.index("Install the boot-persistent session libvirtd system unit")
     unit = tasks[unit_start : unit_start + 1400]
     # The pragma marks a runtime path, not a credential: detect-secrets reads the long
     # slash-separated literal below as a base64 high-entropy string.
