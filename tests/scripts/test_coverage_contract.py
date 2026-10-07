@@ -149,7 +149,8 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     systems = [c for c in contract.cells if c.operation in _SYSTEM_TOOLS]
     local = [c for c in systems if c.provider == "local-libvirt"]
     assert len(local) == 240 and {c.node_id for c in local} == {_SYSTEM_NODE}
-    assert {c.node_id for c in systems if c.provider == "remote-libvirt"} == {None}
+    remote = [c for c in systems if c.provider == "remote-libvirt"]
+    assert len(remote) == 240 and {c.node_id for c in remote} == {_SYSTEM_NODE}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -384,5 +385,5 @@ def test_remote_tool_scenarios_never_share_a_local_node(inventory: Inventory) ->
     mapping.implementations[local.scenario_id] = _DEEP_NODE
     mapped = build_contract(mapping=mapping, inventory=inventory).cells
     same = [c for c in mapped if c.operation == local.operation]
-    assert {c.node_id for c in same if c.provider == "remote-libvirt"} == {None}
+    assert _DEEP_NODE not in {c.node_id for c in same if c.provider == "remote-libvirt"}
     assert _DEEP_NODE in {c.node_id for c in same if c.provider == "local-libvirt"}
