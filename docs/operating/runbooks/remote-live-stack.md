@@ -456,3 +456,29 @@ so it exits non-zero by design. After an interrupted run, release the leftover a
 says before the wipe. After the run, `demo-down.sh --wipe --yes` clears the stack. Then check the
 provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no `kdive-` overlay
 volume.
+
+Last run: candidate `da633d359` (server, worker and reconciler at that SHA in both
+configurations; later commits change only this record). The control plane was a disposable
+Fedora 44 x86_64 lab guest with SELinux enforcing, with the `longterm` fixture `v6.18.54` built
+there. The provider was a separate disposable Rocky Linux 10.2 x86_64 host with SELinux
+enforcing, itself a KVM guest whose domains ran with the `kvm` accelerator (nested), prepared
+with `site.yml` (a fresh PKI from `playbooks/pki.yml`) and `image.yml` for
+`fedora-kdive-remote-base-43` alone. One provider-host step existed only because of an open
+defect and is not product coverage: firewalld was installed and enabled before `site.yml`
+(#3083). The provider runs no Docker, so §7's `DOCKER-USER` rule (#3093) was not needed; the
+guests reached the object store at the control plane's LAN address. Each configuration recorded
+its 48 cells on a freshly wiped stack in about ten minutes and skipped the other 48. The
+`KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`.
+
+`qualify` qualified 88 of the 96 cells: 12 `success` (`runs.install`, `runs.boot` and
+`runs.cancel`, both exposures, both configurations) and all 76 `rejection` cells, each record
+carrying the provider host as `rocky:10.2` and the guest as `fedora:43`. The eight blocked
+functional cells recorded the provider host but no guest or kernel, so `qualify` lists
+`input-digest-mismatch` and `input-context-mismatch` beside `missing-prerequisite` for them, and
+`deployed-role-missing` for the four release cells, which require the `authority` role. One
+`images.publish` call for `remote-libvirt` with a name no image carries, made on the default
+stack after its cells, enqueued an `IMAGE_BUILD` job that failed on its first attempt with
+`configuration_error`, "provider-specific image build request is not implemented", provider
+`remote-libvirt`. No record or artifact carried a host name or address. After each configuration
+and after the final `demo-down.sh --wipe --yes`, the provider defined no `kdive-` domain and its
+pool held only the base volume.
