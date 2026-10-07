@@ -385,4 +385,16 @@ is observed records the control-plane host, so `qualify` adds context-mismatch r
 the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no `kdive-` overlay
 volume.
 
-Last run: pending.
+Last run: candidate `ee349c788` (server, worker and reconciler at that SHA in both lanes; later
+commits change only this record). The control plane was a disposable Fedora 44 x86_64 lab guest
+with SELinux enforcing. The provider was a separate disposable Rocky Linux 10.2 x86_64 host, itself
+a KVM guest whose domains ran with the `kvm` accelerator (nested), prepared with `site.yml` and
+`image.yml` for `fedora-kdive-remote-base-43` alone. One provider-host step existed only because
+of an open defect and is not product coverage: firewalld was installed and enabled before
+`site.yml` (#3083). The §7 `DOCKER-USER` rule (#3093) was not needed, because these cells never
+send guest traffic to the object store. Each lane recorded its 60 cells in about eight minutes and
+skipped the other lane's 60. The `KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`.
+`qualify` reported all 120 qualified: 24 `success` and 96 `rejection`, every record carrying the
+provider host as `rocky:10.2` and the guest as `fedora:43`. No record or artifact carried a host
+name or address. After the run the provider defined no `kdive-` domain and held only its base
+volume, and `demo-down.sh --wipe --yes` cleared the stack.
