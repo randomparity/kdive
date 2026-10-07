@@ -82,8 +82,10 @@ These are the points where the two families genuinely diverge, not just in packa
   AlmaLinux use `sudo dnf config-manager --set-enabled crb` after installing
   `dnf-plugins-core`. On subscribed RHEL, enable its CodeReady Builder repository through
   `subscription-manager`. The EL10 binding builder also needs the distribution's AppStream
-  source repository definition; it enables source repositories only for its exact-source
-  download. Fedora uses its packaged binding.
+  source repository definition: `appstream-source` on Rocky/AlmaLinux, or
+  `rhel-10-for-<rpm-arch>-appstream-source-rpms` on RHEL. The builder selects only that
+  repository for its exact-source download, excluding third-party repositories even
+  when they are enabled. It does not persist repository changes. Fedora uses its packaged binding.
 - **Container engine.** The engine and the compose v2 plugin are separate packages on every
   family: Debian/Ubuntu pair `docker.io` with `docker-compose-v2`, Fedora pairs `moby-engine`
   with `docker-compose`, and openSUSE Tumbleweed pairs `docker` with `docker-compose`. In each

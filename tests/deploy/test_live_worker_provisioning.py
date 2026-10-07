@@ -2045,6 +2045,79 @@ def test_el10_guestfs_builder_runs_after_its_host_dependencies() -> None:
     assert (LOCAL_WORKER / "files/build-el10-guestfs-binding.sh").is_file()
 
 
+def _el10_source_download(
+    tmp_path: Path, distro: str, arch: str = "x86_64", dnf_exit: int = 0
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    release = tmp_path / "os-release"
+    release.write_text(f"ID={distro}\n", encoding="utf-8")
+    arguments = tmp_path / "dnf-args"
+    script = _text(LOCAL_WORKER / "files/build-el10-guestfs-binding.sh")
+    block = script[script.index("  source_nevr=") : script.index("  [[ -f $stage/$source_rpm")]
+    block = block.replace("/etc/os-release", '"$1"')
+    command = (
+        r"""
+set -euo pipefail
+source_rpm=libguestfs-1.58.1-9.el10_2.src.rpm
+stage="$2/source directory"
+rpm() { printf '%s\n' "$TEST_ARCH"; }
+dnf() { printf '%s\n' "$@" > "$DNF_ARGS"; return "$DNF_EXIT"; }
+"""
+        + block
+    )
+    result = subprocess.run(
+        ["bash", "-c", command, "bash", str(release), str(tmp_path)],
+        env={
+            **os.environ,
+            "TEST_ARCH": arch,
+            "DNF_ARGS": str(arguments),
+            "DNF_EXIT": str(dnf_exit),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, arguments.read_text().splitlines() if arguments.exists() else []
+
+
+@pytest.mark.parametrize(
+    ("distro", "arch", "repository"),
+    [
+        ("rocky", "x86_64", "appstream-source"),
+        ("almalinux", "x86_64", "appstream-source"),
+        ("rhel", "x86_64", "rhel-10-for-x86_64-appstream-source-rpms"),
+        ("rhel", "ppc64le", "rhel-10-for-ppc64le-appstream-source-rpms"),
+    ],
+)
+def test_el10_guestfs_download_uses_only_distribution_source(
+    tmp_path: Path, distro: str, arch: str, repository: str
+) -> None:
+    result, arguments = _el10_source_download(tmp_path, distro, arch)
+    assert result.returncode == 0, result.stderr
+    # --repo disables other enabled repos as well as avoiding disabled third-party sources.
+    assert arguments == [
+        "-q",
+        "download",
+        "--source",
+        f"--repo={repository}",
+        "--destdir",
+        str(tmp_path / "source directory"),
+        "libguestfs-1.58.1-9.el10_2",
+    ]
+
+
+def test_el10_guestfs_source_download_rejects_unsupported_distro(tmp_path: Path) -> None:
+    result, arguments = _el10_source_download(tmp_path, "fedora")
+    assert result.returncode != 0
+    assert "does not support distribution: fedora" in result.stderr
+    assert not arguments
+
+
+def test_el10_guestfs_source_download_propagates_failure(tmp_path: Path) -> None:
+    result, arguments = _el10_source_download(tmp_path, "rocky", dnf_exit=17)
+    assert result.returncode == 17
+    assert arguments
+
+
 def test_el10_rootfs_tools_are_provisioned_without_changing_other_redhat_hosts() -> None:
     tasks = yaml.safe_load(_text(ROLE.parent / "libvirt_stack/tasks/main.yml"))
     tools = next(task for task in tasks if task["name"] == "Install EL10 rootfs build tools")
