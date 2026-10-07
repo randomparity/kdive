@@ -921,6 +921,19 @@ assemble and qualify as in the System section.
 The ppc64le local cells share the node but are owner #2818's and are never collected on an
 x86_64 host.
 
+Last run: candidate `0024b4145` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing and no
+provider authority installed, the `longterm` fixture `v6.18.54` built on that host. Each
+configuration ran on a freshly wiped stack: 48 cells, about 15 minutes. `qualify` reported 88 of
+the 96 cells qualified: 12 `success` (`runs.install`, `runs.boot` and `runs.cancel`) and all 76
+`rejection` cells. The four `runs.release_external_boot` functional cells were `blocked` as
+designed. The four `images.publish` functional cells were `failure`. The worker's build job
+dead-lettered with `infrastructure_failure`, because the session libvirt that runs the
+customization boot could not read the worker's build workspace ("Cannot access storage file
+'/var/lib/kdive/build/images/rootfs-build-<random>/<image>.qcow2' ... Permission denied"). The
+build workspace held no leftovers afterwards. After `demo-down.sh --wipe --yes` the worker's
+libvirt defined no `kdive-` domain and `KDIVE_INSTALL_STAGING` was empty.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
