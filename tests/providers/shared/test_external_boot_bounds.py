@@ -1,11 +1,23 @@
 """Tests for provider-neutral external-boot artifact bounds."""
 
 from typing import cast
+from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
-from kdive.providers.ports.external_boot import ArtifactSource, BundleSource, InitrdSource
-from kdive.providers.shared.external_boot_bounds import source_byte_limit
+from kdive.build_artifacts import validation
+from kdive.providers.ports.external_boot import (
+    ArtifactSource,
+    BundleSource,
+    DebuginfoSource,
+    InitrdSource,
+)
+from kdive.providers.shared.external_boot_bounds import (
+    materialization_reservation_bytes,
+    source_byte_limit,
+)
+from tests.support.external_boot_plan import external_boot_plan
 
 _DIGEST = "sha256:" + "11" * 32
 
@@ -36,3 +48,29 @@ def test_source_byte_limit_bounds_a_kernel_bundle_independently_of_claimed_size(
     )
 
     assert source_byte_limit(source) > source.uncompressed_bytes
+
+
+def _debuginfo(size_bytes: int) -> DebuginfoSource:
+    return DebuginfoSource(key="vmlinux", version="v1", sha256=_DIGEST, size_bytes=size_bytes)
+
+
+def test_source_byte_limit_uses_the_closed_debuginfo_size() -> None:
+    assert source_byte_limit(_debuginfo(4096)) == 4096
+
+
+def test_reservation_counts_the_debuginfo_size() -> None:
+    plan = external_boot_plan(UUID(int=1), UUID(int=2))
+    with_debuginfo = plan.model_copy(update={"debuginfo": _debuginfo(4096)})
+
+    assert (
+        materialization_reservation_bytes(with_debuginfo) - materialization_reservation_bytes(plan)
+        == 4096
+    )
+
+
+def test_debuginfo_bound_matches_completion_bound() -> None:
+    bound = validation._EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES  # noqa: SLF001
+
+    assert _debuginfo(bound).size_bytes == bound
+    with pytest.raises(ValidationError):
+        _debuginfo(bound + 1)

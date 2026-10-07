@@ -86,6 +86,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
+    DebuginfoSource,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
@@ -101,6 +102,7 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes
 from kdive.providers.shared.runtime_paths import overlay_path
 from tests.providers.local_libvirt.external_boot_support import (
     _BINDING,
@@ -1494,14 +1496,12 @@ def _materialization() -> ExternalBootMaterialization:
 
 
 def test_real_materializer_capacity_accepts_equality_and_refuses_one_over() -> None:
-    plan = _plan()
+    debuginfo = DebuginfoSource(
+        key="vmlinux", version="v1", sha256="sha256:" + "0" * 64, size_bytes=4096
+    )
+    plan = _plan().model_copy(update={"debuginfo": debuginfo})
     reservation = (
-        plan.bundle.decoded_kernel_size_bytes
-        + (0 if plan.initrd is None else plan.initrd.size_bytes)
-        + plan.module_obligation.uncompressed_bytes
-        + plan.module_obligation.member_count * 1024
-        + external_boot_module.MAX_ARCHIVE_BYTES * 2
-        + external_boot_module._source_byte_limit(plan.bundle)  # noqa: SLF001
+        materialization_reservation_bytes(plan)
         + external_boot_module._MAX_PROJECTION_BYTES
         + external_boot_module._MAX_RECOVERY_METADATA_BYTES
     )

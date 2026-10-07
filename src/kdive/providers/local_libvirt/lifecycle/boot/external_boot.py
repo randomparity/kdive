@@ -87,6 +87,7 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes
 from kdive.providers.shared.external_boot_bounds import source_byte_limit as _source_byte_limit
 from kdive.providers.shared.libvirt_external_boot import (
     boot_projection_element_identity,
@@ -1943,14 +1944,8 @@ class _RealLocalExternalBootOperation:
         self._capacity_bytes = capacity_bytes
 
     def materialize(self, plan: ExternalBootPlan) -> ExternalBootMaterialization:
-        initrd_bytes = 0 if plan.initrd is None else plan.initrd.size_bytes
         reservation = (
-            plan.bundle.decoded_kernel_size_bytes
-            + initrd_bytes
-            + plan.module_obligation.uncompressed_bytes
-            + plan.module_obligation.member_count * 1024
-            + MAX_ARCHIVE_BYTES * 2
-            + _source_byte_limit(plan.bundle)
+            materialization_reservation_bytes(plan)
             + _MAX_PROJECTION_BYTES
             + _MAX_RECOVERY_METADATA_BYTES
         )
