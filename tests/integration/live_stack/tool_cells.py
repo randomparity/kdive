@@ -589,7 +589,7 @@ def bindings(
         image = staged(name)
         sha = file_sha256(image) if image is not None else None
         entry = load_rootfs_catalog()[name]
-        contexts |= _lane_contexts(native, host_os, host_arch, entry, sha, kernel)
+        contexts |= _lane_contexts(native, host_os, host_arch, entry, sha, kernel=kernel)
     family = REMOTE_LANE_FAMILIES.get(remote.host_arch) if remote is not None else None
     if remote is not None and family is not None:
         hosted = [
@@ -598,7 +598,9 @@ def bindings(
         base = REMOTE_REPRESENTATIVES[family]
         volume = volumes(base.name) if hosted else None
         sha = digest(remote.dest, remote.pool, volume) if volume else None
-        contexts |= _lane_contexts(hosted, remote.host_os, remote.host_arch, base, sha, kernel)
+        contexts |= _lane_contexts(
+            hosted, remote.host_os, remote.host_arch, base, sha, kernel=kernel
+        )
     return InputBindings(version=1, candidate_sha=candidate, matrix_sha256=matrix, cells=contexts)
 
 
@@ -608,6 +610,7 @@ def _lane_contexts(
     host_arch: str,
     entry: GuestIdentity,
     digest: str | None,
+    *,
     kernel: Mapping[str, str] | None,
 ) -> dict[str, Context]:
     return {
