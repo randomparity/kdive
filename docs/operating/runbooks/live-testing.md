@@ -936,6 +936,87 @@ customization boot could not read the worker's build workspace ("Cannot access s
 build workspace held no leftovers afterwards. After `demo-down.sh --wipe --yes` the worker's
 libvirt defined no `kdive-` domain and `KDIVE_INSTALL_STAGING` was empty.
 
+#### Break-glass provider tool cells (#3112)
+
+`tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell` carries the 136
+x86_64 cells of `ops.force_release`, `ops.force_teardown`, `ops.resolve_recovery_orphan` and
+`systems.resolve_external_boot_conflict` on both lanes: 68 local-libvirt cells, and 68
+remote-libvirt cells on the provider lane of the
+[remote runbook](remote-live-stack.md#8-remote-system-tool-cells-3080). The
+[design](../../workflow/specs/2026-10-07-breakglass-tool-cells-design.md) lists what each cell
+compares. Only the two resolve tools require the provider `authority` role (operator decision,
+2026-10-07).
+
+- An `ops.force_teardown` functional cell provisions the lane image in a fresh `cov-<hex>`
+  project. A platform admin who holds no role in that project then tears it down through the
+  cell's exposure. The cell proves the System `torn_down`, the domain undefined and its disks
+  gone on the provider. It also proves the provider's other `kdive-` domains and the lane's
+  staged base untouched, and one `platform_audit_log` row for the call. The frame then releases
+  the allocation and proves capacity returned.
+- The `ops.force_release` functional cells stop `blocked` (`missing-prerequisite`). The
+  observed ordering, a release that becomes terminal only after the protected provider effects
+  are quiescent, exists only for an authority-owned System with external-boot history. No lane
+  frames one (operator decision, 2026-10-07).
+- The `ops.resolve_recovery_orphan` and `systems.resolve_external_boot_conflict` functional
+  cells stop `blocked`. They need an installed provider authority, an authority-owned System, and
+  a quarantined orphan or a recovery conflict, and no lane or harness provides any of them. A
+  blocked remote cell first probes the provider host, so its record carries that host.
+- A rejection cell aims at the stack's System target for its provider: a torn-down System and its
+  released allocation.
+  - The three `ops.*` tools refuse a `platform_operator` with `authorization_denied` before they
+    resolve the object.
+  - `systems.resolve_external_boot_conflict` refuses a contributor of the target's project. It
+    answers another project's System with `not_found`, identical to its answer for an absent
+    System.
+  - A validation cell mistypes the id.
+
+Run the cells on a stack prepared as for the System cells above, with the remote prerequisites
+of the remote runbook's §8. The provider host serves only this run while it lasts: another
+stack's remote cells would change its domain set during a teardown cell.
+
+```bash
+sha=$(git rev-parse HEAD)
+export REMOTE_PROVIDER_SSH=<user>@<provider-host> KDIVE_SYSTEMS_TOML=<the stack's systems.toml>
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both configurations
+examples/local-libvirt/demo-up.sh             # default configuration
+uv run python -m pytest -m live_stack tests/integration/test_breakglass_tool_cells_live.py
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack tests/integration/test_breakglass_tool_cells_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Each configuration records 68 cells (4 `success`, 52 `rejection` and 12 `blocked`) and skips the
+other configuration's 68. `qualify` then qualifies 112 of the 136 and lists the 24 blocked cells,
+so it exits non-zero by design. `demo-down.sh --wipe --yes` clears the stack and the worker's
+libvirt, but it does not reach the provider host. So before each wipe, including the one between
+the configurations, check the provider: `virsh list --all` there must show no `kdive-` domain,
+and the pool must hold no `kdive-` overlay volume. A cell killed mid-run can leave both. While
+the stack is still up, release the leftover's allocation as §7 of the remote runbook says, and
+let its teardown finish. Anything still on the provider after that, or after a wipe, is removed by
+hand: `virsh destroy` and `virsh undefine` on the domain, and `virsh vol-delete --pool <pool>` on
+its overlay volume.
+
+Last run: candidate `967755fa0` (server, worker and reconciler at that SHA in both configurations;
+later commits change only this runbook). The control plane was a disposable Fedora 44 x86_64 lab
+guest with SELinux enforcing. The provider was a separate disposable Rocky Linux 10.2 x86_64 KVM
+guest, prepared with `site.yml` (a fresh PKI from `playbooks/pki.yml`) and staging only
+`fedora-kdive-remote-base-43`, with no provider authority on either host. One provider-host step
+existed only because of an open defect and is not product coverage: firewalld was installed and
+enabled before `site.yml` (#3083). Each configuration ran on a freshly wiped stack and recorded
+its 68 cells in about three and a half minutes: 4 `success`, 52 `rejection` and 12 `blocked`.
+`qualify` reported 112 of the 136 qualified: the 8 `ops.force_teardown` functional cells and all
+104 rejection cells. The 24 blocked functional cells were blocked as designed. Their `qualify`
+rows also list input-context and digest mismatches, because they stop before any guest is
+observed, and the resolve rows list the missing `authority` role. On these hosts the provider's
+other-domain set was empty, so the teardown cells' proof that unrelated resources stay rests on
+the staged base surviving. Remote records carry the provider host as `rocky:10.2`. No record or
+artifact carried a host name or address. After the run, neither the worker's libvirt nor the
+provider defined a `kdive-` domain, and the provider pool held only its base volume.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
