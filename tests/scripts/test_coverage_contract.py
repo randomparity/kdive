@@ -99,7 +99,8 @@ def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> Non
     for operations, provider, owner in (
         (_SYSTEM_TOOLS, "local-libvirt", 3062),
         (_RUN_TOOLS, "local-libvirt", 3119),
-        (_LIFECYCLE_TOOLS, "remote-libvirt", 3080),
+        (_SYSTEM_TOOLS, "remote-libvirt", 3080),
+        (_RUN_TOOLS, "remote-libvirt", 3120),
         (deep, "local-libvirt", 2809),
         (deep, "remote-libvirt", 2810),
     ):
@@ -110,7 +111,8 @@ def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> Non
     assert len([c for c in cells if c.owner == 3119]) == 96
     assert len([c for c in cells if c.owner == 2809]) == 8
     assert len([c for c in cells if c.owner == 2810]) == 8
-    assert len([c for c in cells if c.owner == 3080]) == 216
+    assert len([c for c in cells if c.owner == 3080]) == 120
+    assert len([c for c in cells if c.owner == 3120]) == 96
     functional = [c for c in cells if c.kind == "functional" and c.operation in _LIFECYCLE_TOOLS]
     systems = {(c.roles, c.inputs) for c in functional if c.operation in _SYSTEM_TOOLS}
     assert systems == {(("server", "worker", "reconciler"), ())}
