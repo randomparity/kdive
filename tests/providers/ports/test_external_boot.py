@@ -85,6 +85,37 @@ def test_plan_matches_adr_golden_vector_and_identity() -> None:
     assert ExternalBootPlan.from_canonical_json(plan.to_canonical_json()) == plan
 
 
+def test_plan_with_debuginfo_round_trips_canonically() -> None:
+    golden = ExternalBootPlan.model_validate(_plan_data())
+    plan = ExternalBootPlan.model_validate(
+        _plan_data()
+        | {
+            "debuginfo": {
+                "key": "builds/vmlinux",
+                "version": "v1",
+                "sha256": ZERO_DIGEST,
+                "size_bytes": 4096,
+            }
+        }
+    )
+    serialized = plan.to_canonical_json()
+
+    assert b'"debuginfo":{' in serialized
+    assert ExternalBootPlan.from_canonical_json(serialized) == plan
+    assert plan.identity != golden.identity
+
+
+def test_plan_rejects_an_explicit_null_debuginfo_as_non_canonical() -> None:
+    serialized = ExternalBootPlan.model_validate(_plan_data()).to_canonical_json()
+    with_null = serialized.replace(
+        b'"debug_cmdline":null,', b'"debug_cmdline":null,"debuginfo":null,'
+    )
+    assert with_null != serialized
+
+    with pytest.raises(ValueError, match="not canonical"):
+        ExternalBootPlan.from_canonical_json(with_null)
+
+
 def test_plan_preserves_a_decomposed_debug_command_line_in_canonical_json() -> None:
     debug_cmdline = "debug=cafe\u0301"
     data = _plan_data()
