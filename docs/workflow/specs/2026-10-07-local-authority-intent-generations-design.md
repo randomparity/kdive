@@ -73,7 +73,9 @@ quest stops and reports.
 3. Accepted failure classes:
    - a later generation whose intent deadline has passed and whose domain is absent answers
      `provider-conflict` ("deadline expired"). Recovery is preactivation teardown. No domain or
-     guest exists to resume, and the deadline bounds the host work of one System.
+     guest exists to resume. The deadline bounds only new provisioner work (define, start, boot
+     wait). Resuming a present domain is one bounded observation, so it does not check the
+     deadline.
    - a retained domain that never reaches readiness stays `retained-quarantine`. Teardown owns
      it.
 4. Covered elsewhere: attempt and generation authenticity — `AuthoritySystemService`
