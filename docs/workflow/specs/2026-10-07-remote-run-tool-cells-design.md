@@ -57,7 +57,12 @@ Two of the five tools have no remote path to prove today:
      provider authority, the absent provisioning runbook and the install/boot rerouting above.
    - `images.publish`: `blocked` before any stack mutation, naming the handler's local-only
      catalog build. The lab run calls `images.publish` for `remote-libvirt` once outside the
-     carrier and records the job's terminal state and category in the runbook.
+     carrier, with a name no image carries, and records the job's terminal state, error
+     category, message and `details.provider` in the runbook.
+
+   Both blocked cells first observe the provider host (`observe_host(run, remote_host())`, a
+   read-only probe), so their records carry the remote host identity like every other remote
+   cell.
 
    Each runs functional cell proves #3080's remote cleanup: the domain undefined, its volumes
    absent and no new `kdive-*` domain on the provider host, capacity returned.
@@ -73,7 +78,13 @@ Two of the five tools have no remote path to prove today:
    gives each remote cell the provider host, the remote base volume's digest and the declared
    kernel fields.
 6. A runbook section in `docs/operating/runbooks/remote-live-stack.md` and one live run of both
-   configurations against a separate x86_64 provider host.
+   configurations against a separate x86_64 provider host. The expected result per
+   configuration is 48 records: 6 `success` (`runs.install`, `runs.boot`, `runs.cancel` in both
+   exposures), 38 `rejection` and 4 `blocked`; `qualify` qualifies 12 + 76 of the 96 and lists the
+   8 blocked cells. Any other tally is a finding the runbook records.
+7. The #3119 command in `docs/operating/runbooks/live-testing.md` selects the run carrier's local
+   cells with `-k local-libvirt`, since the carrier now also collects remote cells (the same
+   consequence #3080 met for the System carrier).
 
 No product source, ADR or migration change.
 
@@ -91,14 +102,18 @@ No product source, ADR or migration change.
      returned, proven per runs functional cell and for the remote lane target;
    - the provider destination never enters evidence (ADR-0715).
 3. **Accepted failure classes:**
-   - a killed cell can leave a System, allocation, Run, domain or overlay on the provider;
-     `demo-down.sh --wipe --yes` plus the runbook's provider check clear them;
+   - a killed cell can leave a System, allocation, Run, domain or overlay on the provider; the
+     operator releases a leftover allocation with `allocations.release` before
+     `demo-down.sh --wipe --yes`, as §7 of the remote runbook says, then the runbook's provider
+     check finds anything left, which the operator removes by hand (`virsh undefine`,
+     `virsh vol-delete`);
    - the target Runs, their Investigations and the lab's one remote `images.publish` job remain
      as history until the wipe;
    - a failed or blocked remote lane target or target Run fails or blocks every remote rejection
      cell of that stack that needs it; it is not retried;
-   - a cell blocked before the provider host is observed records the control-plane host, so
-     `qualify` adds context-mismatch reasons, as for #2810 and #3080;
+   - a cell blocked because the provider host is unconfigured, unreachable or of another
+     architecture records the control-plane host, so `qualify` adds context-mismatch reasons, as
+     for #2810 and #3080;
    - the remote `images.publish` and `runs.release_external_boot` functional cells stay blocked
      until the follow-ups below land; a change to the handler or an installed authority does not
      turn them into evidence by itself;

@@ -38,6 +38,7 @@ Expected implementation size: 150–200 changed lines (L) — the file map below
 | `tests/scripts/test_coverage_contract.py` | remote run/image cells unbound | remote run/image cells (192) bound to the run carrier node |
 | `tests/integration/test_run_tool_cells_live.py` | local cells only; `local-libvirt` hard-coded | remote cells collected; provider from the cell; remote installed-kernel observer; remote release and publish functional cells blocked |
 | `docs/operating/runbooks/remote-live-stack.md` | §8 remote System cells | §9 remote run and image cells with the lab result |
+| `docs/operating/runbooks/live-testing.md` | #3119 command runs the whole carrier | `-k local-libvirt` on that command |
 
 ## Task 1 — Bind the remote scenarios
 
@@ -103,7 +104,8 @@ Steps:
 Edits in `tests/integration/test_run_tool_cells_live.py`:
 
 1. Imports: add `REMOTE_LANE_FAMILIES` to the `tool_cells` import list; add
-   `from tests.integration.live_stack.remote_lifecycle import REMOTE_REPRESENTATIVES, guest_boot_kernel`.
+   `REMOTE_REPRESENTATIVES`, `guest_boot_kernel`, `observe_host` and `remote_host` from
+   `tests.integration.live_stack.remote_lifecycle`.
 2. Constants: rename `_PROVIDER` to `_LOCAL` everywhere; add `_REMOTE = "remote-libvirt"` and
 
    ```python
@@ -129,11 +131,15 @@ Edits in `tests/integration/test_run_tool_cells_live.py`:
 
    ```python
        remote = run.cell.provider == _REMOTE
-       if tool == "runs.release_external_boot":
-           raise ScenarioStop(Outcome.BLOCKED, _NO_REMOTE_AUTHORITY if remote else _NO_AUTHORITY)
-       if tool == PUBLISH_TOOL:
+       blocked = {"runs.release_external_boot": _NO_AUTHORITY}
+       if remote:
+           blocked = {"runs.release_external_boot": _NO_REMOTE_AUTHORITY, PUBLISH_TOOL: _NO_REMOTE_PUBLISH}
+       if tool in blocked:
            if remote:
-               raise ScenarioStop(Outcome.BLOCKED, _NO_REMOTE_PUBLISH)
+               # A read-only probe, so the blocked record carries the provider host like the rest.
+               observe_host(run, remote_host())
+           raise ScenarioStop(Outcome.BLOCKED, blocked[tool])
+       if tool == PUBLISH_TOOL:
            await _publish(run, caller, base_url, issuer, db_url)
            return
    ```
@@ -182,11 +188,16 @@ Steps:
    install observer, blocked release and publish with reasons), prerequisites (§8's plus the §7
    `DOCKER-USER` rule if guests cannot reach the object store, the `longterm` fixture), the
    command block (`bindings --remote --kernel-baseline longterm`, `-k remote-libvirt` per
-   configuration on a wiped stack, assemble, qualify), and the provider check.
+   configuration on a wiped stack, assemble, qualify), the expected tally (per configuration 6
+   `success`, 38 `rejection`, 4 `blocked`), and the provider check, with the §7 leftover-allocation
+   release before the wipe.
+1. In `docs/operating/runbooks/live-testing.md` §"Run and image tool cells (#3119)", append
+   `-k local-libvirt` to `uv run python -m pytest -m live_stack tests/integration/test_run_tool_cells_live.py`
+   and say the carrier also holds the remote cells of `remote-live-stack.md` §9.
 2. Lab run on the disposable kdive-servers lab (control plane and separate provider host), the
    stack at the committed candidate in both configurations. After the default stack's carrier
    run, one manual `images.publish` call for `remote-libvirt` with a throwaway name (no image of
    that name exists, so a build that did run could overwrite nothing), recording the job's
-   terminal state and category.
+   terminal state, error category, message and `details.provider`.
 3. Record the run (candidate, hosts by OS only, outcomes, lab-only workarounds) in §9; `just
    docs-check`; commit `docs(runbook): record the remote run and image tool-cell lab run`.
