@@ -191,6 +191,7 @@ class _Guest(Protocol):
     def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
     def download(self, remotefilename: str, filename: str) -> None: ...
     def pread(self, path: str, count: int, offset: int) -> bytes: ...
+    def checksum(self, csumtype: str, path: str) -> str: ...
     def mkdir(self, path: str) -> None: ...
     def upload(self, filename: str, remotefilename: str) -> None: ...
     def ln_s(self, target: str, linkname: str) -> None: ...
@@ -281,8 +282,12 @@ class InactiveGuest(Protocol):
     def open_regular(self, path: str, *, size: int) -> AbstractContextManager[BinaryIO]: ...
     def create_regular(self, content: BinaryIO, path: str, *, size: int) -> None: ...
     def download_artifact(self, guest_source: str, artifact_name: str) -> None: ...
+    def checksum(self, csumtype: str, path: str) -> str: ...
     def mkdir(self, path: str) -> None: ...
     def upload_artifact(self, artifact_name: str, guest_destination: str) -> None: ...
+    def upload_projection_artifact(
+        self, artifact: OpaqueProviderRef, guest_destination: str
+    ) -> None: ...
     def ln_s(self, target: str, linkname: str) -> None: ...
     def chmod(self, mode: int, path: str) -> None: ...
     def chown(self, owner: int, group: int, path: str) -> None: ...
@@ -396,12 +401,22 @@ class _GuardedGuest:
             self._owner, self._guest, guest_source, artifact_name
         )
 
+    def checksum(self, csumtype: str, path: str) -> str:
+        return self._handle().checksum(csumtype, path)
+
     def mkdir(self, path: str) -> None:
         self._handle().mkdir(path)
 
     def upload_artifact(self, artifact_name: str, guest_destination: str) -> None:
         self._owner._session._upload_artifact(
             self._owner, self._guest, artifact_name, guest_destination
+        )
+
+    def upload_projection_artifact(
+        self, artifact: OpaqueProviderRef, guest_destination: str
+    ) -> None:
+        self._owner._session._upload_projection_artifact(
+            self._owner, self._guest, artifact, guest_destination
         )
 
     def ln_s(self, target: str, linkname: str) -> None:
@@ -1191,6 +1206,22 @@ class _ConcreteSession:
     ) -> None:
         self._guard_guest_operation(wrapper)
         descriptor = self.open_artifact(_relative_name(artifact_name), os.O_RDONLY)
+        self._transfer_with_close(
+            descriptor,
+            lambda path: guest.upload(path, guest_destination),
+        )
+
+    def _upload_projection_artifact(
+        self,
+        wrapper: _GuestContext,
+        guest: _Guest,
+        artifact: OpaqueProviderRef,
+        guest_destination: str,
+    ) -> None:
+        # The descriptor goes straight to libguestfs, so a payload of up to 1.5 GiB is never
+        # copied to a host temporary file (#3130).
+        self._guard_guest_operation(wrapper)
+        descriptor = self.open_projection_artifact(artifact, os.O_RDONLY)
         self._transfer_with_close(
             descriptor,
             lambda path: guest.upload(path, guest_destination),

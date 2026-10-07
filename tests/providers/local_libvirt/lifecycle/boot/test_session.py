@@ -536,6 +536,61 @@ def test_projection_artifact_opens_the_payload_inside_its_digest_directory(
     session.close()
 
 
+class _ReadingGuest(Guest):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events)
+        self.uploaded: list[tuple[bytes, str]] = []
+
+    def upload(self, filename: str, remotefilename: str) -> None:
+        with open(filename, "rb") as source:
+            self.uploaded.append((source.read(), remotefilename))
+
+
+def test_guest_uploads_a_projection_payload_by_descriptor_and_checksums(tmp_path: Path) -> None:
+    # #3130: the vmlinux payload is uploaded from its projection descriptor, never copied.
+    activation = tmp_path / "activation"
+    activation.mkdir(mode=0o700)
+    overlay = tmp_path / "overlay"
+    overlay.write_bytes(b"qcow")
+    events: list[str] = []
+    guest_handle = _ReadingGuest(events)
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: os.open(activation, os.O_RDONLY | os.O_DIRECTORY),
+        open_guest=lambda: guest_handle,
+        open_overlay=lambda _path: os.open(overlay, os.O_RDONLY),
+    )
+    session = factory.open(_lease(), _expected())
+    projection = TargetProjectionV1(
+        ownership={"system_id": BINDING.system_id, "run_id": BINDING.run_id},
+        activation_id=BINDING.activation_id,
+        plan_identity="sha256:" + "a" * 64,
+        architecture="x86_64",
+        cmdline="root=UUID=x",
+        initrd_filename=None,
+    )
+    with session.projection_directory(projection) as descriptor:
+        payload = os.open(
+            "debuginfo", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=descriptor
+        )
+        os.write(payload, b"dwarf vmlinux")
+        os.close(payload)
+    digest = projection.digest.removeprefix("sha256:")
+    reference = OpaqueProviderRef(
+        ref=f"local-artifact-v2/{BINDING.system_id}/{BINDING.run_id}/"
+        f"{BINDING.activation_id}/{digest}/debuginfo"
+    )
+
+    with session.guest() as guest:
+        guest.upload_projection_artifact(reference, "/usr/lib/debug/staging")
+        assert guest.checksum("sha256", "/usr/lib/debug/staging") == "0" * 64
+
+    assert guest_handle.uploaded == [(b"dwarf vmlinux", "/usr/lib/debug/staging")]
+    assert "checksum:sha256:/usr/lib/debug/staging" in events
+    session.close()
+
+
 @pytest.mark.parametrize(
     "expected",
     [

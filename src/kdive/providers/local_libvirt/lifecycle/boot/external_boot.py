@@ -2609,6 +2609,136 @@ class _SessionModulePublicationIO:
         return self._writer.observe(tree, self.metadata.release)
 
 
+_DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
+_DEBUGINFO_ANCESTORS = ("/usr/lib/debug", "/usr/lib/debug/lib", _DEBUGINFO_ROOT)
+type _DebuginfoLayout = tuple[
+    PresentComponentState | None, PresentComponentState | None, PresentComponentState | None
+]
+
+
+def debuginfo_file_state(
+    *, size: int, sha256: str, mode: int, uid: int, gid: int
+) -> PresentComponentState:
+    """Identity of one regular guest file: its content plus the metadata publish sets (#3130)."""
+    facts = {"gid": gid, "mode": f"{mode:04o}", "sha256": sha256, "size": size, "uid": uid}
+    data = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(b"kdive-debuginfo-file-v1\0" + data).hexdigest()
+    return PresentComponentState(manifest=f"sha256:{digest}")
+
+
+class GuestDebuginfoFile:
+    """Activation-owned live, staging and old names for one release's DWARF vmlinux (#3130).
+
+    Every step is chosen from the observed (live, staging, old) layout and the known prior and
+    target states, so a restart repeats or skips a step without a recorded phase. The prior
+    file stays beside the live name under the old name until recovery renames it back.
+    """
+
+    def __init__(
+        self, guest: InactiveGuest, *, binding: ExternalBootActivationBinding, release: str
+    ) -> None:
+        if not release or "/" in release or release in {".", ".."}:
+            raise ValueError("debuginfo release is invalid")
+        self._guest = guest
+        self._directory = f"{_DEBUGINFO_ROOT}/{release}"
+        prefix = f"{self._directory}/.kdive-{binding.activation_id}-vmlinux"
+        self.live = f"{self._directory}/vmlinux"
+        self.staging = f"{prefix}-staging"
+        self.old = f"{prefix}-old"
+
+    def observe_live(self) -> ComponentState:
+        state = self._layout()[0]
+        return AbsentComponentState() if state is None else state
+
+    def stage(
+        self,
+        source: ComponentState,
+        target: PresentComponentState,
+        upload: Callable[[str], None],
+    ) -> None:
+        prior = _layout_component(source)
+        live, staging, old = self._layout()
+        if live != prior or old is not None:
+            raise ValueError("external-boot debuginfo staging conflict")
+        if staging == target:
+            return
+        if staging is not None:
+            self._guest.rm_rf(self.staging)
+        self._directories(create=True)
+        upload(self.staging)
+        self._guest.chmod(0o644, self.staging)
+        self._guest.chown(0, 0, self.staging)
+        if self._observe(self.staging) != target:
+            raise ValueError("staged debuginfo does not match the materialized vmlinux")
+        self._guest.sync()
+
+    def publish(self, source: ComponentState, target: PresentComponentState) -> None:
+        prior = _layout_component(source)
+        layout = self._layout()
+        if prior is not None and layout == (prior, target, None):
+            self._guest.mv(self.live, self.old)
+            layout = (None, target, prior)
+        if layout == (None, target, prior):
+            self._guest.mv(self.staging, self.live)
+            self._guest.sync()
+        elif layout != (target, None, prior):
+            raise ValueError("external-boot debuginfo publication conflict")
+        if self._layout() != (target, None, prior):
+            raise ValueError("external-boot debuginfo publication did not complete")
+
+    def restore(self, source: ComponentState, target: PresentComponentState) -> None:
+        prior = _layout_component(source)
+        layout = self._layout()
+        if layout == (prior, None, None):
+            return
+        if layout in ((target, None, prior), (None, target, prior)):
+            if prior is not None:
+                self._guest.mv(self.old, self.live)
+            elif layout[0] is not None:
+                self._guest.rm_rf(self.live)
+            layout = (prior, layout[1], None)
+        if layout[0] != prior or layout[2] is not None:
+            raise ValueError("external-boot debuginfo recovery conflict")
+        if layout[1] is not None:
+            self._guest.rm_rf(self.staging)
+        self._guest.sync()
+        if self._layout() != (prior, None, None):
+            raise ValueError("external-boot debuginfo recovery did not complete")
+
+    def _layout(self) -> _DebuginfoLayout:
+        if not self._directories(create=False):
+            return None, None, None
+        return self._observe(self.live), self._observe(self.staging), self._observe(self.old)
+
+    def _directories(self, *, create: bool) -> bool:
+        # Distro symlinks above the release directory are followed (Fedora's `filesystem`
+        # package ships /usr/lib/debug/lib -> usr/lib); libguestfs keeps every path inside the
+        # guest root. The release directory itself must be a real directory.
+        walk = [(path, True) for path in _DEBUGINFO_ANCESTORS] + [(self._directory, False)]
+        for path, follow in walk:
+            if not self._guest.exists(path):
+                if not create:
+                    return False
+                self._guest.mkdir(path)
+            elif not self._guest.is_dir(path, followsymlinks=follow):
+                raise ValueError("external-boot debuginfo directory is not a directory")
+        return True
+
+    def _observe(self, path: str) -> PresentComponentState | None:
+        if not self._guest.exists(path):
+            return None
+        status = self._guest.lstatns(path)
+        if not stat.S_ISREG(status["st_mode"]):
+            raise ValueError("external-boot debuginfo name is not a regular file")
+        return debuginfo_file_state(
+            size=status["st_size"],
+            sha256="sha256:" + self._guest.checksum("sha256", path),
+            mode=stat.S_IMODE(status["st_mode"]),
+            uid=status["st_uid"],
+            gid=status["st_gid"],
+        )
+
+
 def _layout_component(state: ComponentState) -> PresentComponentState | None:
     return state if isinstance(state, PresentComponentState) else None
 

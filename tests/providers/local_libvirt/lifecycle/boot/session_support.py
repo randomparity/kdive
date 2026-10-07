@@ -177,6 +177,10 @@ class Guest:
         self.events.append(f"pread:{path}:{count}:{offset}")
         return b""
 
+    def checksum(self, csumtype: str, path: str) -> str:
+        self.events.append(f"checksum:{csumtype}:{path}")
+        return "0" * 64
+
     def mkdir(self, path: str) -> None:
         self.events.append(f"mkdir:{path}")
 
