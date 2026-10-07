@@ -213,13 +213,14 @@ def toolchain_identity() -> dict[str, str]:
         tool: command([tool, "--version"]).splitlines()[0]
         for tool in ("gcc", "make", "readelf", "pahole", "bison", "flex")
     }
-    if shutil.which("dpkg-query"):
-        result["packages"] = command(["dpkg-query", "-W", "-f=${Package}=${Version}\n"])
-    elif shutil.which("rpm"):
-        result["packages"] = command(["rpm", "-qa", "--qf", "%{NAME}=%{VERSION}-%{RELEASE}\n"])
-    else:
-        raise ValueError("fixture provenance requires dpkg-query or rpm package inventory")
-    return result
+    for query in (
+        ["dpkg-query", "-W", "-f=${Package}=${Version}\n"],
+        ["rpm", "-qa", "--qf", "%{NAME}=%{VERSION}-%{RELEASE}\n"],
+    ):
+        if shutil.which(query[0]) and (packages := command(query)):
+            result["packages"] = packages
+            return result
+    raise ValueError("fixture provenance requires a nonempty dpkg-query or rpm package inventory")
 
 
 def build(

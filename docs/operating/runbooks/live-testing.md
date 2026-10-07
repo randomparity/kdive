@@ -637,12 +637,10 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Build the fixtures on the native architecture, on a Debian-family host until #3063 is fixed: on a
-host with both `rpm` and `dpkg-query` the fixture records an empty package inventory and `verify`
-rejects it. A missing `KDIVE_FIXTURE_ROOT`, a fixture that `verify` rejects, or an unregistered
-representative is `blocked` (`missing-prerequisite`); the other outcomes are those of the image
-smoke. A binding's kernel fields are null when its fixture is absent, which `qualify` reports as a
-missing required input.
+Build the fixtures on the native architecture. A missing `KDIVE_FIXTURE_ROOT`, a fixture that
+`verify` rejects, or an unregistered representative is `blocked` (`missing-prerequisite`); the other
+outcomes are those of the image smoke. A binding's kernel fields are null when its fixture is absent,
+which `qualify` reports as a missing required input.
 
 After an interrupted run, release the leftover allocation with `allocations.release` (or let the
 lease expire) and check `KDIVE_INSTALL_STAGING` (`/var/lib/kdive/install` on the demo lane) for
