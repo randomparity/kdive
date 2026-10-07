@@ -54,7 +54,16 @@ optional `debuginfo` component, and the materialization gains an optional `debug
 and verified digest. Each is left out of the canonical bytes when absent, so stored identities do
 not change.
 
+Consequences of this choice: the guest holds both files while the activation is live (free
+space is #3125), and directories created for the file stay after recovery. A server or worker
+from before #3130 rejects a materialization or recovery point that carries the new members, so
+for this change upgrade the server and workers before, or together with, the local authority
+host.
+
 Considered & rejected:
+
+- **Do nothing: the local authority keeps ignoring the member.** judgment: ADR-0723 item 5 and
+  item 5 above require every install path to stage the file; drgn-live keeps failing.
 
 - **Capture the prior file into the host recovery directory, as the modules are.** verified: the
   largest local reservation is 34,055,536,640 bytes against 34,359,738,368 bytes of shipped

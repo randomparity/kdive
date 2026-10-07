@@ -38,24 +38,34 @@ path must do the same, and recovery must put back what was there before.
    observes each name as absent or as a `PresentComponentState` whose manifest is
    `sha256("kdive-debuginfo-file-v1\0" + canonical JSON of mode, uid, gid, size, sha256)`. The
    content digest comes from libguestfs `checksum("sha256", …)`, so no bytes leave the
-   appliance. A name that is not a regular file, or a path directory that is a symlink or not a
-   directory, is a conflict. Every step is chosen from the observed layout of the three names
-   and the known prior (P) and target (T) states, so a restart repeats or skips a step with no
-   new recorded phase:
-   - `publish(prior, target)`: from `(P, any, —)`, remove a staging file that is not T, create
-     missing directories, upload the projection's `debuginfo` to staging, set mode 0644 and
-     owner 0:0, and require it to read back as T; then move live to old when P is present;
-     then move staging to live. The end state is `(T, —, P)`.
+   appliance. A name that is not a regular file, or a release directory that is not a real
+   directory, is a conflict. Directories above the release directory may be symlinks: Fedora,
+   RHEL and Rocky ship `/usr/lib/debug/lib -> usr/lib` in the `filesystem` package, and the
+   legacy path follows it. libguestfs resolves every path inside the guest root, so following
+   them cannot leave the guest. Every step is chosen from the observed layout of the three
+   names and the known prior (P) and target (T) states, so a restart repeats or skips a step
+   with no new recorded phase:
+   - `stage(prior, target, upload)`: from `(P, any, —)`, remove a staging file that is not T,
+     create missing directories, upload the projection's `debuginfo` to staging, set mode
+     0644 and owner 0:0, require it to read back as T, and sync. The end state is `(P, T, —)`.
+   - `publish(prior, target)`: from `(P, T, —)`, move live to old when P is present; from
+     `(—, T, P)`, move staging to live. The end state `(T, —, P)` is a no-op.
    - `restore(prior, target)`: from `(T, —, P)` or `(—, T, P)`, move old to live, or remove
      live when P is absent; from `(P, any, —)`, remove staging. The end state is `(P, —, —)`.
    - Any other layout raises `ValueError` and changes nothing, like the module publication's
      conflict rows.
+   The new file gets no SELinux label, as on the legacy path; drgn-live reads it as root
+   through the guest agent, and ADR-0723 observed that on the Fedora 44 ppc64le guest.
 4. **Wiring** (`_RealLocalExternalBootOperation`).
    - `prepare` computes `target_state.debuginfo` from the materialized file and
      `source_state.debuginfo` from the guest's live name, read-only, in the guest context that
      captures the modules. Without a member both stay `None`.
-   - `activate_modules` runs `publish` after the module publication completes and before it
-     records `module-restored`.
+   - `activate_modules` runs `stage` in its `pre-stop-intent` block, after the module staging
+     and before it records `move-ready` or `old-aside`. A failed upload (for example a full
+     guest disk) therefore leaves the record in `pre-stop-intent`, where recovery runs
+     `_settle_unpublished_modules` and `restore` removes the staging file. `publish` (two
+     renames that need no space) runs after the module publication completes and before
+     `module-restored` is recorded.
    - `recover_modules` runs `restore` first, in the same guest context, before the module rows,
      including the path where the modules are already terminal. `_settle_unpublished_modules`
      runs it too.
@@ -73,7 +83,7 @@ the other payloads, and the old name lives in the guest overlay that recovery ow
 
 Not in scope: the guest free-space check (#3125), remote-libvirt delivery (#3124), catalog
 `drgn_version` drift (#3122), remote authority staging (#3131), remote capacity floor (#3133).
-Directories that `publish` creates stay after recovery; recovery restores the file, not the
+Directories that `stage` creates stay after recovery; recovery restores the file, not the
 directory tree. The authority's source/target classification (`observe_state`) keeps reading
 modules and the definition only.
 
@@ -87,9 +97,16 @@ modules and the definition only.
    - Identities of stored plans, materializations, recovery points and recovery records.
    - The authority writes only inside the guest's own filesystem, at the three names.
 3. **Accepted failure classes:**
-   - The guest changes a name while the activation is live: recovery refuses on the conflict
-     and needs an operator. Same as the module tree; bounded because only root in the guest
-     can do it.
+   - The guest changes one of the three names while the activation is live: recovery, and so
+     System teardown, refuses on the conflict until an operator repairs the names. Unlike a
+     module-tree change, `observe_state` does not report it as a conflict. Bounded because only
+     root in the guest can do it.
+   - Mixed versions: a server or worker from before this change rejects a materialization or
+     recovery point that carries the new members (closed models). Upgrade the server and
+     workers before, or together with, the local authority host.
+   - An activation whose materialize step ran on an authority from before this change and is
+     retried after the upgrade fails on the missing `debuginfo` payload; it is aborted and a new
+     activation materializes it.
    - Disk space: a prior file doubles guest usage during the activation. Covered by #3125.
    - A prior that is a symlink or other non-regular file: prepare refuses the install.
    - Created directories remain after recovery (empty, under `/usr/lib/debug`).
@@ -103,8 +120,9 @@ modules and the definition only.
    exact-version stream, its digest check and its size bound.
 2. **Actors:** the guest's root user (controls the overlay content); the worker (supplies the
    plan, already authenticated by the authority journal).
-3. **Controls:** fixed names from validated release and activation id; no-follow directory
-   checks; regular-file checks before checksum, move or remove; read-back identity before
+3. **Controls:** fixed names from validated release and activation id; no-follow checks on
+   the release directory and the three names (ancestors may be distro symlinks, still inside
+   the guest root); regular-file checks before checksum, move or remove; read-back identity before
    publication; libguestfs confines every path to the guest filesystem.
 4. **Out of scope:** a guest that edits its own files during the activation (accepted above).
 
@@ -115,9 +133,13 @@ modules and the definition only.
 - Without a member, the call sequence on the guest is the same as before this change.
 - A recovery record, recovery point and materialization written before this change parse,
   keep their identity, and recover as before.
-- Live: `test_spine_live_script_over_the_wire` passes through the authority on native ppc64le
-  with no `missing_debuginfo`/`debuginfo_unloadable`; the guest file's digest equals the upload;
-  a second install restores the prior state. The x86_64 arm needs an authority host.
+- Live, per architecture: `test_spine_live_script_over_the_wire` passes through the authority
+  with no `missing_debuginfo`/`debuginfo_unloadable`; the guest file's sha256 equals
+  `plan.debuginfo.sha256` with mode 0644 and owner 0:0; after recovery the prior digest or
+  absence returns; the `vmlinux` size and the publish/restore wall time are recorded for
+  #3125. The ppc64le arm runs on a native POWER9 KVM-HV host. No x86_64 host runs the authority
+  today; that arm is reported to the operator through the campaign orchestrator as not run,
+  for an explicit decision, and is not claimed.
 
 ## Validation
 

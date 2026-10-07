@@ -13,8 +13,8 @@ operation calls it after module publication and before module recovery.
 **Tech stack:** Python 3.14, pydantic v2 (`Field(exclude_if=...)`), libguestfs Python binding,
 pytest.
 
-Expected implementation size: 700–950 changed lines (L) — four source files (~300 lines) and
-four test files (~550 lines), from the file map below.
+Expected implementation size: 750–1000 changed lines (L) — four source files (~320 lines) and
+six test files (~600 lines), from the file map below.
 
 ## Global Constraints
 
@@ -38,6 +38,7 @@ four test files (~550 lines), from the file map below.
 | `tests/providers/ports/test_external_boot.py` | identity and co-presence tests |
 | `tests/providers/local_libvirt/lifecycle/boot/test_materializer.py` | debuginfo materialize tests |
 | `tests/providers/local_libvirt/lifecycle/boot/test_session.py` | upload/checksum seam test |
+| `tests/providers/local_libvirt/lifecycle/boot/test_session_mechanisms.py` | payload cleanup removes `debuginfo` |
 | `tests/providers/local_libvirt/lifecycle/boot/test_debuginfo_file.py` (new) | layout table tests |
 | `tests/providers/local_libvirt/test_external_boot.py` | wiring tests |
 
@@ -103,7 +104,9 @@ Steps:
    `plan.debuginfo.sha256/size_bytes` raises `"materialized debuginfo bytes do not match
    external-boot plan"`. No second stream (spec item 2).
 6. `materialize` sets `verified_debuginfo_sha256` and `artifacts.debuginfo`;
-   `inspect_prepare` adds the matching `artifacts.debuginfo` projection-ref check.
+   `inspect_prepare` additionally requires `materialization.artifacts.debuginfo` to be `None`
+   exactly when `verified_debuginfo_sha256` is `None`, and otherwise to equal
+   `_projection_ref(projection, "debuginfo")` (same digest directory as the kernel).
 7. Run the tests; expect pass. Commit `feat(local-libvirt): materialize the debuginfo payload`.
 
 ## Task 3 — session seam
@@ -129,29 +132,39 @@ Steps:
 
 ## Task 4 — `GuestDebuginfoFile`
 
-**Interfaces:** `GuestDebuginfoFile(guest, *, binding, release)`;
-`.observe_live() -> ComponentState` (absent/present); `.publish(source, target, upload:
-Callable[[str], None])`; `.restore(source, target)`; module function
-`debuginfo_file_state(*, size, sha256, mode, uid, gid) -> PresentComponentState`.
+**Interfaces:** `GuestDebuginfoFile(guest: InactiveGuest, *, binding:
+ExternalBootActivationBinding, release: str)`; `.observe_live() -> ComponentState`;
+`.stage(source: ComponentState, target: PresentComponentState, upload: Callable[[str], None])`;
+`.publish(source, target)`; `.restore(source, target)`; module function
+`debuginfo_file_state(*, size: int, sha256: str, mode: int, uid: int, gid: int) ->
+PresentComponentState`. `InactiveGuest` gains `checksum` and `upload_projection_artifact` in
+Task 3, so Task 3 lands first.
 
 **Verification:** Mode: focused-test — new `test_debuginfo_file.py` with an in-memory fake guest
-(dict of path → (bytes, mode, uid, gid), directory set, symlink set) covering:
-publish from `(P,—,—)`, `(—,—,—)`, `(P,partial,—)`, `(P,T,—)`, `(—,T,P)`, `(T,—,P)` (no-op);
-restore from `(T,—,P)`, `(T,—,—)`, `(—,T,P)`, `(P,T,—)`, `(P,—,—)` (no-op); P == T;
-conflicts (live changed by the guest, live a symlink, a directory component a symlink) raising
-`ValueError` with no mutation; a read-back mismatch after upload raising before any move.
-Green: `uv run python -m pytest tests/providers/local_libvirt/lifecycle/boot/test_debuginfo_file.py -q`.
+(dict of path → (bytes, mode, uid, gid), a directory set, and a symlink map resolved by
+`exists`/`is_dir(followsymlinks=True)`) covering: stage from `(P,—,—)`, `(—,—,—)` with missing
+directories, `(P,partial,—)`, `(P,T,—)` (no upload); publish from `(P,T,—)`, `(—,T,P)`, `(T,—,P)`
+(no-op), and with P absent; restore from `(T,—,P)`, `(T,—,—)`, `(—,T,P)`, `(P,T,—)`, `(P,—,—)`
+(no-op); P == T for all three; `/usr/lib/debug/lib -> usr/lib` symlinked ancestor publishes and
+restores; conflicts (live changed, live a symlink, release directory a symlink, staging missing
+at publish) raise `ValueError` with no mutation; a read-back mismatch after upload raises
+before any move. Red: import error. Green: `uv run python -m pytest
+tests/providers/local_libvirt/lifecycle/boot/test_debuginfo_file.py -q`.
 
-Code (in `external_boot.py`, beside `_SessionModulePublicationIO`):
+Code (in `external_boot.py`, after `_SessionModulePublicationIO`):
 
 ```python
 _DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
-type _DebuginfoLayout = tuple[PresentComponentState | None, ...]
+_DEBUGINFO_ANCESTORS = ("/usr/lib/debug", "/usr/lib/debug/lib", _DEBUGINFO_ROOT)
+type _DebuginfoLayout = tuple[
+    PresentComponentState | None, PresentComponentState | None, PresentComponentState | None
+]
 
 
 def debuginfo_file_state(
     *, size: int, sha256: str, mode: int, uid: int, gid: int
 ) -> PresentComponentState:
+    """Identity of one regular guest file: content plus the metadata publish sets (#3130)."""
     facts = {"gid": gid, "mode": f"{mode:04o}", "sha256": sha256, "size": size, "uid": uid}
     data = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
     digest = hashlib.sha256(b"kdive-debuginfo-file-v1\0" + data).hexdigest()
@@ -161,79 +174,120 @@ def debuginfo_file_state(
 class GuestDebuginfoFile:
     """Activation-owned live/staging/old names for one release's DWARF vmlinux (#3130)."""
 
-    def __init__(self, guest, *, binding, release) -> None:
+    def __init__(
+        self, guest: InactiveGuest, *, binding: ExternalBootActivationBinding, release: str
+    ) -> None:
         if not release or "/" in release or release in {".", ".."}:
             raise ValueError("debuginfo release is invalid")
         self._guest = guest
         self._directory = f"{_DEBUGINFO_ROOT}/{release}"
         prefix = f"{self._directory}/.kdive-{binding.activation_id}-vmlinux"
-        self.live, self.staging, self.old = (
-            f"{self._directory}/vmlinux", f"{prefix}-staging", f"{prefix}-old"
-        )
+        self.live = f"{self._directory}/vmlinux"
+        self.staging = f"{prefix}-staging"
+        self.old = f"{prefix}-old"
 
     def observe_live(self) -> ComponentState:
-        state = self._observe(self.live) if self._directories(create=False) else None
+        state = self._layout()[0]
         return AbsentComponentState() if state is None else state
 
-    def publish(self, source, target, upload) -> None:
+    def stage(
+        self, source: ComponentState, target: PresentComponentState, upload: Callable[[str], None]
+    ) -> None:
         prior = _layout_component(source)
-        done = (target, None, prior)
+        live, staging, old = self._layout()
+        if live != prior or old is not None:
+            raise ValueError("external-boot debuginfo staging conflict")
+        if staging == target:
+            return
+        if staging is not None:
+            self._guest.rm_rf(self.staging)
+        self._directories(create=True)
+        upload(self.staging)
+        self._guest.chmod(0o644, self.staging)
+        self._guest.chown(0, 0, self.staging)
+        if self._observe(self.staging) != target:
+            raise ValueError("staged debuginfo does not match the materialized vmlinux")
+        self._guest.sync()
+
+    def publish(self, source: ComponentState, target: PresentComponentState) -> None:
+        prior = _layout_component(source)
         layout = self._layout()
-        if layout[0] == prior and layout[2] is None:
-            if layout[1] != target:
-                if layout[1] is not None:
-                    self._guest.rm_rf(self.staging)
-                self._directories(create=True)
-                upload(self.staging)
-                self._guest.chmod(0o644, self.staging)
-                self._guest.chown(0, 0, self.staging)
-                if self._observe(self.staging) != target:
-                    raise ValueError("staged debuginfo does not match the materialized vmlinux")
-                self._guest.sync()
-            if prior is not None:
-                self._guest.mv(self.live, self.old)
+        if layout == (prior, target, None) and prior is not None:
+            self._guest.mv(self.live, self.old)
             layout = (None, target, prior)
         if layout == (None, target, prior):
             self._guest.mv(self.staging, self.live)
             self._guest.sync()
-        elif layout != done:
+        elif layout != (target, None, prior):
             raise ValueError("external-boot debuginfo publication conflict")
-        if self._layout() != done:
+        if self._layout() != (target, None, prior):
             raise ValueError("external-boot debuginfo publication did not complete")
 
-    def restore(self, source, target) -> None:
+    def restore(self, source: ComponentState, target: PresentComponentState) -> None:
         prior = _layout_component(source)
         layout = self._layout()
         if layout == (prior, None, None):
             return
-        if layout in {(target, None, prior), (None, target, prior)}:
+        if layout in ((target, None, prior), (None, target, prior)):
             if prior is not None:
                 self._guest.mv(self.old, self.live)
             elif layout[0] is not None:
                 self._guest.rm_rf(self.live)
             layout = (prior, layout[1], None)
-        if layout[0] == prior and layout[2] is None:
-            if layout[1] is not None:
-                self._guest.rm_rf(self.staging)
-            self._guest.sync()
-        else:
+        if layout[0] != prior or layout[2] is not None:
             raise ValueError("external-boot debuginfo recovery conflict")
+        if layout[1] is not None:
+            self._guest.rm_rf(self.staging)
+        self._guest.sync()
         if self._layout() != (prior, None, None):
             raise ValueError("external-boot debuginfo recovery did not complete")
+
+    def _layout(self) -> _DebuginfoLayout:
+        if not self._directories(create=False):
+            return None, None, None
+        return self._observe(self.live), self._observe(self.staging), self._observe(self.old)
+
+    def _directories(self, *, create: bool) -> bool:
+        # Distro symlinks above the release directory are followed (Fedora ships
+        # /usr/lib/debug/lib -> usr/lib); libguestfs keeps every path inside the guest root.
+        walk = [(path, True) for path in _DEBUGINFO_ANCESTORS] + [(self._directory, False)]
+        for path, follow in walk:
+            if not self._guest.exists(path):
+                if not create:
+                    return False
+                self._guest.mkdir(path)
+            elif not self._guest.is_dir(path, followsymlinks=follow):
+                raise ValueError("external-boot debuginfo directory is not a directory")
+        return True
+
+    def _observe(self, path: str) -> PresentComponentState | None:
+        if not self._guest.exists(path):
+            return None
+        status = self._guest.lstatns(path)
+        if not stat.S_ISREG(status["st_mode"]):
+            raise ValueError("external-boot debuginfo name is not a regular file")
+        return debuginfo_file_state(
+            size=status["st_size"],
+            sha256="sha256:" + self._guest.checksum("sha256", path),
+            mode=stat.S_IMODE(status["st_mode"]),
+            uid=status["st_uid"],
+            gid=status["st_gid"],
+        )
 ```
 
-`_layout()` returns `(self._observe(live), self._observe(staging), self._observe(old))` when
-the directory exists, else `(None, None, None)`. `_observe(path)`: `exists` false → `None`;
-`lstatns` not `S_ISREG` → `ValueError("external-boot debuginfo name is not a regular file")`;
-otherwise `debuginfo_file_state(size=st_size, sha256="sha256:" + checksum("sha256", path),
-mode=S_IMODE(st_mode), uid, gid)`. `_directories(create)` walks `/usr/lib/debug`,
-`/usr/lib/debug/lib`, `/usr/lib/debug/lib/modules`, `self._directory`: an existing component
-that is not `is_dir(followsymlinks=False)` raises `ValueError("external-boot debuginfo
-directory is not a real directory")`; a missing one returns `False` when `create` is false and
-is created with `mkdir` otherwise; returns `True` when all exist.
+`_directories` walks `(path, follow)` pairs `(/usr/lib/debug, True)`, `(/usr/lib/debug/lib,
+True)`, `(_DEBUGINFO_ROOT, True)`, `(self._directory, False)`: when `exists(path)` is true it
+requires `is_dir(path, followsymlinks=follow)` else raises `ValueError("external-boot
+debuginfo directory is not a directory")`; when false it returns `False` if `create` is false
+and calls `mkdir(path)` otherwise; it returns `True` when every directory exists. The no-follow
+check on the release directory uses `is_dir(path, followsymlinks=False)`, which lstat-s the last
+component only. `_observe(path)`: `exists` false → `None`; `lstatns` mode not `S_ISREG` →
+`ValueError("external-boot debuginfo name is not a regular file")`; otherwise
+`debuginfo_file_state(size=st_size, sha256="sha256:" + checksum("sha256", path),
+mode=S_IMODE(st_mode), uid=st_uid, gid=st_gid)`.
 
-Steps: write the tests (red: import error), add the code, run green, commit
-`feat(local-libvirt): publish and restore one guest debuginfo file`.
+Steps: write the tests (red: import error), add the code, run green, commit with Task 3 as
+`feat(local-libvirt): stage, publish and restore one guest debuginfo file`.
 
 ## Task 5 — wire into prepare, activate and recover
 
@@ -266,11 +320,15 @@ Steps:
    `verified_debuginfo_sha256`) and the source via `GuestDebuginfoFile(guest, binding=...,
    release=intent.release).observe_live()`; pass both to `_complete_preparation_metadata`,
    which sets `debuginfo=` on both `ProviderStateIdentity` values.
-3. `activate_modules`: after `_finish_present_publication`, when
-   `metadata.target_state.debuginfo is not None`, call
-   `GuestDebuginfoFile(...).publish(metadata.source_state.debuginfo, target, upload)` where
-   `upload = lambda path: guest.upload_projection_artifact(_debuginfo_ref(metadata), path)` and
-   `_debuginfo_ref` swaps the last segment of `metadata.materialized_modules` for `debuginfo`.
+3. `activate_modules`: in the `pre-stop-intent` block, after the module staging check and
+   before `publication.guest_sync()`, when `metadata.target_state.debuginfo is not None`, call
+   `GuestDebuginfoFile(...).stage(source, target, upload)` where
+   `upload = lambda path: opened_guest.upload_projection_artifact(_debuginfo_ref(metadata), path)`
+   and `_debuginfo_ref` returns `metadata.materialized_modules` with its last segment replaced
+   by `debuginfo` (validated by `_artifact_ref_parts`). After `_finish_present_publication`,
+   call `.publish(source, target)`. Test `test_failed_debuginfo_upload_recovers_from_pre_stop`
+   injects an upload error and expects the record to stay `pre-stop-intent` and a following
+   recover to reach `module-restored` with the staging name removed.
 4. `recover_modules` (right after the guest opens) and `_settle_unpublished_modules` (before
    `discard_staging`): call `_restore_debuginfo(guest, metadata)` which runs `restore` when the
    target is present.
@@ -278,5 +336,16 @@ Steps:
 
 ## Task 6 — live proof (no code)
 
-Mode: task-test-not-applicable for code; the proof is the live run in the spec's Success list on
-the native POWER9 KVM-HV host (deployed build equal to HEAD), recording the `vmlinux` size.
+Mode: task-test-not-applicable for code: the contract is the deployed authority on real
+hardware, which no unit test observes. Per arm, on a host whose deployed build equals HEAD:
+1. Record the guest's prior `/usr/lib/debug/lib/modules/<release>/vmlinux` sha256 or absence
+   (guestfish/virt-cat on the inactive overlay, or `sha256sum` in the guest).
+2. Run `test_spine_live_script_over_the_wire` through the authority; expect pass with no
+   `missing_debuginfo`/`debuginfo_unloadable`.
+3. In the guest, `sha256sum` and `stat -c '%a %u %g %s'` of the live file: expect
+   `plan.debuginfo.sha256`, `644 0 0 <size_bytes>`. Record the size and the authority's
+   publish/restore wall time for #3125.
+4. Recover (rollback, or a second install that recovers the first); expect the step 1 digest or
+   absence and no `.kdive-*-vmlinux-*` names.
+The ppc64le arm runs on the native POWER9 KVM-HV host. No x86_64 host runs the authority; the
+x86_64 arm is reported to the operator through the campaign orchestrator as not run.
