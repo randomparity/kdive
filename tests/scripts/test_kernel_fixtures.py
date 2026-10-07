@@ -13,6 +13,11 @@ from scripts import kernel_fixtures as fixture
 from tests.scripts.kernel_fixture_support import repository as repository
 
 
+@pytest.mark.parametrize("symbol", ["KEXEC", "KEXEC_FILE", "CRASH_DUMP"])
+def test_default_fragment_requests_kdump_syscalls(symbol: str) -> None:
+    assert fixture.config_values(fixture.CONFIG.read_text()).get(f"CONFIG_{symbol}") == "y"
+
+
 @pytest.mark.parametrize(
     "family,headers,btf",
     [
