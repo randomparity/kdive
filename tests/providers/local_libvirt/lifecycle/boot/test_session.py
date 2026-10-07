@@ -585,6 +585,7 @@ def test_guest_uploads_a_projection_payload_by_descriptor_and_checksums(tmp_path
     with session.guest() as guest:
         guest.upload_projection_artifact(reference, "/usr/lib/debug/staging")
         assert guest.checksum("sha256", "/usr/lib/debug/staging") == "0" * 64
+        assert guest.is_symlink("/usr/lib/debug/staging") == 0
 
     assert guest_handle.uploaded == [(b"dwarf vmlinux", "/usr/lib/debug/staging")]
     assert "checksum:sha256:/usr/lib/debug/staging" in events

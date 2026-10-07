@@ -2978,6 +2978,10 @@ class _RestartGuest(_GuestTreeHandle):
         assert csumtype == "sha256"
         return hashlib.sha256(self.files[path]).hexdigest()
 
+    def is_symlink(self, path: str) -> int:
+        del path
+        return 0
+
     def upload_projection_artifact(self, artifact: OpaqueProviderRef, path: str) -> None:
         assert artifact.ref.endswith("/debuginfo")
         self.faults.run("upload-debuginfo", lambda: self.files.__setitem__(path, _DEBUGINFO))

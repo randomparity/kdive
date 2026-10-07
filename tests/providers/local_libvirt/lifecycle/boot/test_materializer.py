@@ -283,6 +283,27 @@ def test_a_projection_without_debuginfo_keeps_its_pre_3130_bytes() -> None:
     assert b"debuginfo" not in projection.canonical_bytes()
 
 
+def test_the_shared_artifact_stager_does_not_fetch_debuginfo(tmp_path: Path) -> None:
+    # Remote authorities reuse `materialize_artifacts` and do not stage the vmlinux (#3131).
+    bundle = _bundle()
+    plan = _with_debuginfo(_plan(bundle))
+    client = _Client(
+        {("build/kernel", "kernel-v1"): bundle, ("build/vmlinux", "vmlinux-v1"): _VMLINUX}
+    )
+    directory = tmp_path / "stage"
+    directory.mkdir(mode=0o700)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        RealLocalExternalBootMaterializer(ObjectStore(client, "bucket")).materialize_artifacts(
+            plan, descriptor
+        )
+    finally:
+        os.close(descriptor)
+
+    assert ("build/vmlinux", "vmlinux-v1") not in client.requests
+    assert not (directory / "debuginfo").exists()
+
+
 def test_materialize_rejects_debuginfo_size_mismatch(tmp_path: Path) -> None:
     bundle = _bundle()
     plan = _with_debuginfo(_plan(bundle), size=len(_VMLINUX) + 1)

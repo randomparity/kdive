@@ -1197,6 +1197,8 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             except FileNotFoundError:
                 try:
                     evidence, installed_manifest = self.materialize_artifacts(plan, directory_fd)
+                    self._fetch_debuginfo(plan, directory_fd)
+                    self._validate_local_debuginfo(plan, directory_fd)
                 except BaseException as primary:
                     _cleanup_uncommitted_payloads(directory_fd, primary)
                     raise
@@ -1206,6 +1208,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
                 evidence, installed_manifest = self.validate_materialized_artifacts(
                     plan, directory_fd
                 )
+                self._validate_local_debuginfo(plan, directory_fd)
             if reopened != projection:
                 raise ValueError("materialized target projection changed on exact reopen")
         return ExternalBootMaterialization(
@@ -1247,7 +1250,6 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
         """Reopen and validate previously materialized exact artifacts without writing them."""
         evidence, installed_manifest = self._validate_local_bundle(plan, directory_fd)
         self._validate_local_initrd(plan, directory_fd)
-        self._validate_local_debuginfo(plan, directory_fd)
         return evidence, installed_manifest
 
     def inspect_prepare(
@@ -1366,12 +1368,17 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             )
             os.close(initrd_fd)
             _commit_private_artifact(directory_fd, ".initrd.next", "initrd")
-        if plan.debuginfo is not None:
-            debuginfo_fd = _stream_exact_version(
-                self._object_store, plan.debuginfo, directory_fd, ".debuginfo.next"
-            )
-            os.close(debuginfo_fd)
-            _commit_private_artifact(directory_fd, ".debuginfo.next", "debuginfo")
+
+    def _fetch_debuginfo(self, plan: ExternalBootPlan, directory_fd: int) -> None:
+        # Local projections only: the remote authorities share `materialize_artifacts` through
+        # `ExternalBootArtifactStager` and do not stage the vmlinux (#3131).
+        if plan.debuginfo is None:
+            return
+        debuginfo_fd = _stream_exact_version(
+            self._object_store, plan.debuginfo, directory_fd, ".debuginfo.next"
+        )
+        os.close(debuginfo_fd)
+        _commit_private_artifact(directory_fd, ".debuginfo.next", "debuginfo")
 
     @staticmethod
     def _validate_bundle_evidence(plan: ExternalBootPlan, descriptor: int) -> dict[str, object]:
@@ -2770,6 +2777,9 @@ class GuestDebuginfoFile:
         return True
 
     def _observe(self, path: str) -> PresentComponentState | None:
+        # `exists` follows links, so a dangling link would otherwise read as absent.
+        if self._guest.is_symlink(path):
+            raise ValueError("external-boot debuginfo name is not a regular file")
         if not self._guest.exists(path):
             return None
         status = self._guest.lstatns(path)

@@ -177,6 +177,10 @@ class Guest:
         self.events.append(f"pread:{path}:{count}:{offset}")
         return b""
 
+    def is_symlink(self, path: str) -> int:
+        self.events.append(f"is_symlink:{path}")
+        return 0
+
     def checksum(self, csumtype: str, path: str) -> str:
         self.events.append(f"checksum:{csumtype}:{path}")
         return "0" * 64

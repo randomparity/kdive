@@ -83,6 +83,9 @@ class _Guest:
             "st_gid": file.gid,
         }
 
+    def is_symlink(self, path: str) -> int:
+        return int(self._resolve(path, follow_last=False) in self.symlinks)
+
     def checksum(self, csumtype: str, path: str) -> str:
         assert csumtype == "sha256"
         return hashlib.sha256(self.files[self._resolve(path)].data).hexdigest()
@@ -353,6 +356,13 @@ def test_a_symlink_at_the_live_name_is_refused() -> None:
     guest = _Guest().with_release_directory()
     guest.files["/etc/passwd"] = _File(b"root")
     guest.symlinks[_LIVE] = "/etc/passwd"
+
+    _no_mutation(guest, lambda: _file(guest).observe_live())
+
+
+def test_a_dangling_symlink_at_the_live_name_is_refused() -> None:
+    guest = _Guest().with_release_directory()
+    guest.symlinks[_LIVE] = "/nonexistent-target"
 
     _no_mutation(guest, lambda: _file(guest).observe_live())
 
