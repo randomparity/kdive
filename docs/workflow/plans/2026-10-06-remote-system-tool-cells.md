@@ -177,7 +177,7 @@ Verification (all focused-test; green:
   `REMOTE_PROVIDER_SSH` unset raises `ScenarioStop` `BLOCKED`. Red: `AttributeError`.
 - remote skip — `test_remote_cell_is_not_skipped_by_control_plane_arch`: with
   `platform.machine` patched to `aarch64`, a remote x86_64 cell reaches `require_stack` (patched
-  to raise a sentinel). Red: `pytest.skip` raised instead.
+  to raise a sentinel). Red: `pytest.fail` (the cell was skipped).
 - memo per provider — `test_lane_target_prepares_once_per_provider`: one URL, a service cell and
   a local cell, two preparations; a second call per provider reuses. Red: one preparation.
 
@@ -232,8 +232,12 @@ Steps:
        async def never(*_: object) -> None:
            raise AssertionError("the scenario must not run")
 
-       with pytest.raises(RuntimeError, match="stack read"):
-           tool_cells.run_tool_cell(_cell("systems.ssh_info", "remote-libvirt", "x86_64"), never)
+       cell = _cell("systems.ssh_info", "remote-libvirt", "x86_64")
+       try:
+           with pytest.raises(RuntimeError, match="stack read"):
+               tool_cells.run_tool_cell(cell, never)
+       except pytest.skip.Exception as exc:
+           pytest.fail(f"the remote cell was skipped by the control plane's arch: {exc}")
 
 
    def test_lane_target_prepares_once_per_provider(
@@ -358,6 +362,11 @@ Steps:
      `remote_host()`, printing `cannot bind the remote cells: <reason>` and returning 2 on
      `ScenarioStop`. The unstaged hint names both lane images.
    - Module docstring: the provider lanes and `--remote`.
+   - In `tests/integration/test_system_tool_cells_live.py`, move every read of the removed
+     `Guest` fields and of the local-only observers to the lane in this same task, so the
+     whole-tree `ty` gate stays green: the `_HOSTFWD`, `_ssh_info`, `_defined`, `_provision`,
+     `_reprovision`, `_teardown` and `_target_args` edits listed in Task 4 step 3 (everything
+     there except `_cells` and the docstring, which Task 4 makes).
 3. Green command, `just lint`, `just type`; commit
    `test(live-stack): run provider-lane tool cells on remote-libvirt`.
 
@@ -386,7 +395,8 @@ Steps:
    `authentication`, `authorization`, `functional`, `project-isolation`, `validation`:
    `"tool/remote-libvirt/<tool>/default/<kind>" =
    "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"`.
-3. In the carrier:
+3. In the carrier (the bullets other than `_cells` and the docstring already landed with Task 3;
+   re-check them):
    - `_HOSTFWD = re.compile(r"hostfwd=tcp:([^:,\s]+):(\d+)-:22")`; `_ssh_info` reads
      `xml = guest.lane.xml(guest.system_id)` and asserts
      `(coords.get("host"), coords.get("port")) == (forwarded.group(1), int(forwarded.group(2)))`.
