@@ -205,6 +205,8 @@
           - "{{ local_libvirt_host_operator_user }}"
           - --source
           - "{{ local_libvirt_host_source }}"
+          - --uv
+          - "{{ live_vm_host_uv_bin }}"
         stdin: "{{ local_libvirt_host_witness_dsn }}"
         stdin_add_newline: true
       # The DSN reaches the installer on stdin, so the module arguments carry a live credential

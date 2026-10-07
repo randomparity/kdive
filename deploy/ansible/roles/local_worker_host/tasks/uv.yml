@@ -1,12 +1,6 @@
 ---
-# Shared with live_vm_host, in its own file because two callers need a root-resolvable `uv`:
-# this role's own play (local-libvirt-host.yml, `become: true`) runs
-# install-live-worker-lifecycle.sh, whose `_resolve_uv_bin` does a bare `command -v uv`; and
-# live_vm_host's own venv build below runs `uv` by the absolute live_vm_host_uv_bin path. Both
-# reach a host provisioned per docs/operating/install.md's user-local `~/.local/bin` install,
-# which root's sudo secure_path does not list (#2506, #2665). pip installs the console script to
-# /usr/local/bin, which secure_path does list, so this converges both callers to a `uv` root can
-# resolve without duplicating the install task.
+# Both lifecycle installation and the live_vm_host venv build consume live_vm_host_uv_bin.
+# Use the installed absolute path even when sudo secure_path omits /usr/local/bin (#3069).
 - name: Probe whether the target interpreter's pip needs and accepts --break-system-packages
   # PEP 668 (an EXTERNALLY-MANAGED marker in the interpreter's own stdlib directory) is what
   # makes a plain system `pip install` refuse without the flag, and the flag itself is only a
