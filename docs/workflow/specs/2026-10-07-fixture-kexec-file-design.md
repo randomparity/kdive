@@ -53,3 +53,31 @@ kernel identity, crash-kernel arming and actual capture result. Keep unavailable
 Use owned bounded scratch, at most eight build jobs and one build at a time; preserve prior fixtures.
 Run focused tests, lint, whole-tree types, relevant docs checks, then mandatory pre-push CI and
 remote CI before any merge-ready handoff. Unit/config/build success alone cannot close the issue.
+
+## Observed capture prerequisite amendment
+
+The first candidate-matched Rocky capture attempt failed at the existing upload-build
+preflight: both pinned x86 configurations lack `CONFIG_FW_CFG_SYSFS`. Provisioning
+completed, but install, kdump arming and capture were not reached. This is an existing
+x86 `CRASH_CAPTURE` requirement, not a KEXEC_FILE Kconfig dependency. Issue #3101 retains
+ownership of making its fixture usable by that required proof; upload policy is unchanged.
+
+In `scripts/kernel_fixtures.py::build`, extend the default fragment with
+`CONFIG_FW_CFG_SYSFS=y` only when the selected architecture is x86_64 and the selected
+config is the repository default. Reuse the existing architecture argument and fragment
+application/check sequence. Explicit custom config files retain their exact contents.
+Do not add this option to the shared fragment: it is unavailable on supported little-endian
+POWER. The existing manifest records the fully assembled `input.config` and its digest;
+its schema and verification rules do not change. No new option, public interface or
+architecture configuration framework is needed.
+
+Test default x86 and ppc64le selection through the real builder logic with only external
+commands stubbed, asserting the resulting input and effective config against the existing
+architecture-aware CRASH_CAPTURE clauses. Verify custom config remains unchanged and a
+Kconfig-dropped requested option is still rejected. Resolve actual pinned x86 configs and
+check those same clauses before compilation; preserve the observed red and fresh green.
+Rebuild both native baselines into fresh output directories and verify new identities,
+then rerun the same strict-revision Rocky capture carrier. Reuse clean source trees;
+the existing builder requires fresh outputs, so do not invent an incremental bypass.
+Retain old outputs and their actual builder identity. Native POWER remains unproven.
+The earlier static RHEL filesystem concern remains unverified and is not added here.
