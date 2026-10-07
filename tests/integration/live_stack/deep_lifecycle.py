@@ -21,12 +21,13 @@ import platform
 import struct
 import subprocess  # noqa: S404 - fixed argv, no shell  # nosec B404
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 from kdive.images.rootfs.catalog import load_rootfs_catalog
 from kdive.mcp.dev_harness import LiveStackClient
+from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings
 from scripts.kernel_fixtures import identity, verify
@@ -83,6 +84,8 @@ Fixture = Callable[[Path, str, str], tuple[Path, dict[str, Any]]]
 # (system_id, endpoint, key, release) -> (SHA-256 of the installed boot kernel, the host path the
 # System owns for it, or None when the kernel lives inside the guest's own disk).
 InstalledKernel = Callable[[str, Endpoint, Path, str], tuple[str, str | None]]
+# (step, run_id) -> the step tool's envelope; lets a caller route install or boot elsewhere.
+StepCall = Callable[[str, str], Awaitable[ToolResponse]]
 
 
 def native_cells(arch: str | None = None) -> list[Cell]:
@@ -238,12 +241,13 @@ async def deep_body(
     manifest: dict[str, Any],
     tmp: Path,
     installed_kernel: InstalledKernel,
+    step: StepCall | None = None,
 ) -> None:
     """Upload → install and boot → installed kernel → reconnect → build identity → module load.
 
     Provider-neutral: ``installed_kernel`` observes the kernel the install put in place, after the
     reboot into it; a host path it returns joins ``owned``, which the caller's cleanup proves
-    absent.
+    absent. ``step`` issues ``runs.install`` and ``runs.boot``; the default is ``op``.
     """
     endpoint, key = await asyncio.wait_for(
         authorize_ssh(op, system_id, tmp, "deep-lifecycle"), timeout=900
@@ -268,7 +272,7 @@ async def deep_body(
             "create-run",
         ).object_id
         await _upload(run, op, run_id, tree, manifest, upload)
-        steps = await _install_and_boot(op, run_id)
+        steps = await _install_and_boot(op, run_id, step)
         endpoint = await ssh_endpoint(op, system_id)
         # Before the reconnect, so a host path the install created joins `owned` even when a
         # later assertion fails and only the cleanup attempt runs.
@@ -327,11 +331,14 @@ async def _upload(
     )
 
 
-async def _install_and_boot(op: LiveStackClient, run_id: str) -> Mapping[str, object]:
+async def _install_and_boot(
+    op: LiveStackClient, run_id: str, step: StepCall | None = None
+) -> Mapping[str, object]:
     """Drain ``runs.install`` and ``runs.boot``; return the Run's read-back ``steps``."""
-    for step in ("install", "boot"):
-        env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
-        await drain_job(op, step, env.object_id)
+    for name in ("install", "boot"):
+        call = step(name, run_id) if step else scalar(op, f"runs.{name}", run_id=run_id)
+        env = ok(await call, name)
+        await drain_job(op, name, env.object_id)
     steps = data_mapping(ok(await scalar(op, "runs.get", run_id=run_id), "read-back"), "steps")
     assert (steps.get("install"), steps.get("boot")) == ("succeeded", "succeeded"), steps
     return steps

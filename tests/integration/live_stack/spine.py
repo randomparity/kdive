@@ -684,6 +684,7 @@ async def build_and_upload_kernel(
     root_fs: str | None = None,
     kernel_tree: Path | None = None,
     evidence_dir: Path | None = None,
+    complete: bool = True,
 ) -> None:
     """Drive the external-build upload lane for ``run_id`` and complete the Run's build step.
 
@@ -700,6 +701,8 @@ async def build_and_upload_kernel(
 
     ``kernel_tree`` overrides the environment input. ``evidence_dir`` must be new;
     it retains the bundle, effective config and upload declarations/completion result.
+    ``complete=False`` uploads the artifacts and skips ``runs.complete_build``, so the Run stays
+    ``created``.
     """
     contract = json.loads(await client.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
     accepted = accepted_run_upload_names(contract)
@@ -777,14 +780,18 @@ async def build_and_upload_kernel(
     # complete_build requires build_id iff a vmlinux was uploaded; sending it otherwise (or
     # omitting it here) is a configuration_error.
     extra: dict[str, JsonValue] = {"build_id": build_id} if with_vmlinux else {}
-    result = ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
+    result = (
+        ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
+        if complete
+        else None
+    )
     if evidence_dir is not None:
         (evidence_dir / "upload.json").write_text(
             json.dumps(
                 {
                     "artifacts": decls,
                     "build_id": build_id if with_vmlinux else None,
-                    "result": result.model_dump(mode="json"),
+                    "result": result.model_dump(mode="json") if result is not None else None,
                 },
                 sort_keys=True,
                 indent=2,
