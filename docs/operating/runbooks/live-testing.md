@@ -1000,6 +1000,23 @@ let its teardown finish. Anything still on the provider after that, or after a w
 hand: `virsh destroy` and `virsh undefine` on the domain, and `virsh vol-delete --pool <pool>` on
 its overlay volume.
 
+Last run: candidate `967755fa0` (server, worker and reconciler at that SHA in both configurations;
+later commits change only this runbook). The control plane was a disposable Fedora 44 x86_64 lab
+guest with SELinux enforcing. The provider was a separate disposable Rocky Linux 10.2 x86_64 KVM
+guest, prepared with `site.yml` (a fresh PKI from `playbooks/pki.yml`) and staging only
+`fedora-kdive-remote-base-43`, with no provider authority on either host. One provider-host step
+existed only because of an open defect and is not product coverage: firewalld was installed and
+enabled before `site.yml` (#3083). Each configuration ran on a freshly wiped stack and recorded
+its 68 cells in about three and a half minutes: 4 `success`, 52 `rejection` and 12 `blocked`.
+`qualify` reported 112 of the 136 qualified: the 8 `ops.force_teardown` functional cells and all
+104 rejection cells. The 24 blocked functional cells were blocked as designed. Their `qualify`
+rows also list input-context and digest mismatches, because they stop before any guest is
+observed, and the resolve rows list the missing `authority` role. On these hosts the provider's
+other-domain set was empty, so the teardown cells' proof that unrelated resources stay rests on
+the staged base surviving. Remote records carry the provider host as `rocky:10.2`. No record or
+artifact carried a host name or address. After the run, neither the worker's libvirt nor the
+provider defined a `kdive-` domain, and the provider pool held only its base volume.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
