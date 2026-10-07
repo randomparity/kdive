@@ -23,10 +23,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes impor
     BootArtifactVolumeConn,
     materialize_boot_artifacts,
 )
-from kdive.providers.shared.external_boot_bounds import (
-    MAX_MODULE_ARCHIVE_BYTES,
-    source_byte_limit,
-)
+from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes
 from kdive.store.objectstore import ObjectStore
 
 _TEMPORARY_METADATA_BYTES = 2 * 1_048_576
@@ -67,15 +64,7 @@ class ConcreteRemoteExternalBootMaterializer:
         ):
             raise ValueError("external-boot binding does not match plan ownership")
         initrd_bytes = 0 if plan.initrd is None else plan.initrd.size_bytes
-        reservation = (
-            plan.bundle.decoded_kernel_size_bytes
-            + initrd_bytes
-            + plan.module_obligation.uncompressed_bytes
-            + plan.module_obligation.member_count * 1024
-            + MAX_MODULE_ARCHIVE_BYTES * 2
-            + source_byte_limit(plan.bundle)
-            + _TEMPORARY_METADATA_BYTES
-        )
+        reservation = materialization_reservation_bytes(plan) + _TEMPORARY_METADATA_BYTES
         if reservation > self._capacity_bytes:
             raise ValueError("remote external-boot materialization exceeds configured capacity")
         self._require_deadline(deadline)

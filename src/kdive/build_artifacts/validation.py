@@ -66,6 +66,8 @@ _RANGE_CHUNK_BYTES = 8 * 1024 * 1024
 # change aggregate-budget rejection. Keep it independent of store read-ahead.
 _DECODE_CHUNK_BYTES = 4 * 1024 * 1024
 _EXTERNAL_BOOT_INITRD_MAX_BYTES = 512 * 1024 * 1024
+# Keeps the largest local reservation under the shipped 32 GiB capacity (#3129).
+_EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES = 1_610_612_736
 _EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS = 200_000
 _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024 * 1024
@@ -258,6 +260,7 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
         format=FormatContract(
             container="ELF (uncompressed)",
             magic=(MagicPin(offset=0, hex=_ELF_MAGIC.hex()),),
+            max_bytes=_EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES,
         ),
         notes=(
             "If uploaded you MUST pass a matching build_id to runs.complete_build; it must equal "
@@ -457,8 +460,9 @@ def _external_boot_evidence(
             "sha256": _digest_object(store, keys["initrd"], initrd_head.size_bytes),
             "size_bytes": initrd_head.size_bytes,
         }
+    debuginfo = _debuginfo_evidence(store, keys=keys, heads=heads)
     bundle_digest.drain()
-    return {
+    evidence: dict[str, JsonValue] = {
         "schema": "external-boot-evidence-v1",
         "bundle_sha256": bundle_digest.value(),
         "initrd": initrd,
@@ -475,6 +479,29 @@ def _external_boot_evidence(
         "module_source_manifest": archive["module_source_manifest"],
         "module_member_count": archive["module_member_count"],
         "module_uncompressed_bytes": archive["module_uncompressed_bytes"],
+    }
+    if debuginfo is not None:
+        evidence["debuginfo"] = debuginfo
+    return evidence
+
+
+def _debuginfo_evidence(
+    store: ValidatorStore, *, keys: Mapping[str, str], heads: Mapping[str, HeadResult]
+) -> dict[str, JsonValue] | None:
+    """Pin the uploaded vmlinux for an external-boot authority to stage (#3129)."""
+    head = heads.get("vmlinux")
+    if head is None:
+        return None
+    if head.size_bytes > _EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES:
+        raise _build_failure(
+            "vmlinux exceeds the external-boot byte limit; compress its debug sections "
+            "(objcopy --compress-debug-sections) and upload again",
+            name="vmlinux",
+            max_bytes=_EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES,
+        )
+    return {
+        "sha256": _digest_object(store, keys["vmlinux"], head.size_bytes),
+        "size_bytes": head.size_bytes,
     }
 
 

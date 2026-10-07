@@ -429,6 +429,42 @@ def test_external_boot_evidence_matches_pre_stream_guard_baseline() -> None:
     }
 
 
+def _evidence_with_vmlinux(vmlinux: bytes) -> dict[str, JsonValue]:
+    blobs = {"k": _KERNEL_TAR, "v": vmlinux}
+    heads = {
+        "kernel": HeadResult(len(_KERNEL_TAR), "csum", "e", STORE_MTIME, "k-version"),
+        "vmlinux": HeadResult(len(vmlinux), "csum", "e", STORE_MTIME, "v-version"),
+    }
+    return validation._external_boot_evidence(  # noqa: SLF001
+        _FakeStore(blobs, heads),
+        keys={"kernel": "k", "vmlinux": "v"},
+        heads=heads,
+        arch="x86_64",
+        build_id=_BUILD_ID.hex(),
+    )
+
+
+def test_external_boot_evidence_records_the_uploaded_vmlinux() -> None:
+    vmlinux = _elf_with_build_id(_BUILD_ID)
+
+    evidence = _evidence_with_vmlinux(vmlinux)
+
+    assert evidence["debuginfo"] == {
+        "sha256": "sha256:" + hashlib.sha256(vmlinux).hexdigest(),
+        "size_bytes": len(vmlinux),
+    }
+
+
+def test_external_boot_evidence_rejects_an_oversize_vmlinux(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vmlinux = _elf_with_build_id(_BUILD_ID)
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES", len(vmlinux) - 1)
+
+    with pytest.raises(CategorizedError, match="vmlinux exceeds the external-boot byte limit"):
+        _evidence_with_vmlinux(vmlinux)
+
+
 def test_external_boot_evidence_reuses_the_scan_digest_for_trailing_padding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

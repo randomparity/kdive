@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -16,6 +16,7 @@ from kdive.providers.external_boot_authority.protocol import (
     record_digest,
 )
 from kdive.providers.ports.external_boot import (
+    DebuginfoSource,
     ExternalBootActivationBinding,
     ExternalBootPreparationObservation,
     OpaqueProviderRef,
@@ -381,3 +382,31 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
             "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
             open_arguments,
         ).fetchone() == (None,)
+
+
+def test_sql_plan_identity_matches_python_with_and_without_debuginfo(migrated_url: str) -> None:
+    plan = external_boot_plan(UUID(int=1), UUID(int=2))
+    with_debuginfo = plan.model_copy(
+        update={
+            "debuginfo": DebuginfoSource(
+                key="builds/vmlinux", version="v1", sha256="sha256:" + "0" * 64, size_bytes=4096
+            )
+        }
+    )
+    with psycopg.connect(migrated_url) as conn:
+        identities = [
+            conn.execute(
+                "SELECT 'sha256:' || encode(sha256("
+                "convert_to('kdive-external-boot-plan-v1', 'UTF8') || decode('00', 'hex') || "
+                "convert_to(public.canonical_external_boot_authority_json(%s::jsonb), 'UTF8')"
+                "), 'hex')",
+                (Jsonb(value.model_dump(mode="json", by_alias=True)),),
+            ).fetchone()
+            for value in (plan, with_debuginfo)
+        ]
+
+    assert identities == [(plan.identity,), (with_debuginfo.identity,)]
+    # The pre-#3129 identity of this plan: an absent member must not change it.
+    assert plan.identity == (
+        "sha256:501702530d3d6f4bf522d5374e82caf7d21c78f840092d8cf787f22f753dbb63"
+    )

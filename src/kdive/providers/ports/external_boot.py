@@ -22,6 +22,7 @@ type CanonicalUuid = Annotated[
 ]
 
 _INITRD_MAX_BYTES = 536_870_912
+_DEBUGINFO_MAX_BYTES = 1_610_612_736
 _PLATFORM_ARGUMENT_MAX_BYTES = 256
 _CMDLINE_MAX_BYTES = 2_047
 _CANONICAL_VALUE_MAX_BYTES = 65_536
@@ -81,6 +82,10 @@ class BundleSource(ArtifactSource):
 
 class InitrdSource(ArtifactSource):
     size_bytes: Annotated[int, Field(ge=0, le=_INITRD_MAX_BYTES)]
+
+
+class DebuginfoSource(ArtifactSource):
+    size_bytes: Annotated[int, Field(ge=1, le=_DEBUGINFO_MAX_BYTES)]
 
 
 class PlanOwnership(_ClosedValue):
@@ -183,6 +188,8 @@ class ExternalBootPlan(_ClosedValue):
     platform_arguments: Annotated[tuple[str, ...], Field(min_length=1, max_length=32)]
     module_obligation: ModuleObligation
     root: RootSpecV1
+    # Omitted when absent so plans persisted before #3129 keep their canonical identity.
+    debuginfo: DebuginfoSource | None = Field(None, exclude_if=lambda value: value is None)
 
     @field_validator("platform_arguments")
     @classmethod
