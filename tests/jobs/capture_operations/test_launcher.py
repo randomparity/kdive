@@ -534,19 +534,16 @@ def test_post_spawn_attestation_faults_abort_before_release(
             return {pid: identity, impossible.pid: impossible}
 
         monkeypatch.setattr(launcher_module, "_process_group_members", _extra_handoff_member)
-        original_cleanup = launcher_module._cleanup_failed_launch
+    original_cleanup = launcher_module._cleanup_failed_launch
 
-        async def _cleanup_after_gate_eof(
-            process: asyncio.subprocess.Process, **kwargs: Any
-        ) -> None:
-            # Pin the EOF-exit schedule: the invented member forces a recovery scan,
-            # which otherwise races the real leader's exit and can replace our injected
-            # handoff error with a membership-change error. Keep the real cleanup and
-            # absence proof; this test targets the handoff fault, not cleanup races.
-            await asyncio.wait_for(process.wait(), timeout=5)
-            await original_cleanup(process, **kwargs)
+    async def _cleanup_after_gate_eof(process: asyncio.subprocess.Process, **kwargs: Any) -> None:
+        # Each fault forces recovery without a complete attested process identity.
+        # Pin the EOF-exit schedule so /proc churn from the leader cannot replace
+        # the injected fault. Keep the real cleanup and complete absence proof.
+        await asyncio.wait_for(process.wait(), timeout=5)
+        await original_cleanup(process, **kwargs)
 
-        monkeypatch.setattr(launcher_module, "_cleanup_failed_launch", _cleanup_after_gate_eof)
+    monkeypatch.setattr(launcher_module, "_cleanup_failed_launch", _cleanup_after_gate_eof)
 
     aborts: list[LaunchAbortEvidence] = []
     expected_error = (
