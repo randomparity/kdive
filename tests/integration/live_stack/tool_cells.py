@@ -914,6 +914,9 @@ def main(argv: list[str] | None = None) -> int:
         except ScenarioStop as stop:
             print(f"cannot bind the remote cells: {stop}")
             return 2
+        if remote.host_arch not in REMOTE_LANE_FAMILIES:
+            print(f"cannot bind the remote cells: no remote lane image for {remote.host_arch}")
+            return 2
     host_arch = platform.machine()
     kernel: dict[str, str] = {}
     if args.kernel_baseline:

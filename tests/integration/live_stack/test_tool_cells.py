@@ -490,6 +490,17 @@ def test_remote_bindings_carry_the_provider_host() -> None:
     assert (bound.accelerator, bound.image_sha256) == ("kvm", "f" * 64)
 
 
+def test_remote_bindings_refuse_a_provider_without_a_lane_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = RemoteHost("operator@provider.example", "default", "rocky:10.2", "aarch64", "kvm")
+    monkeypatch.setattr(tool_cells, "remote_host", lambda: host)
+    out = tmp_path / "inputs.json"
+    argv = ["bindings", "--remote", "--candidate", "a" * 40, "--out", str(out)]
+    assert tool_cells.main(argv) == 2
+    assert not out.exists()
+
+
 def test_lane_for_selects_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
     local = tool_cells.lane_for(_cell("systems.ssh_info", "local-libvirt", "x86_64"))
