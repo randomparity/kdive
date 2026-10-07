@@ -893,7 +893,7 @@ export KDIVE_FIXTURE_ROOT=$HOME/kfix
 uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
   --out inputs.json --kernel-baseline longterm
 export KDIVE_ARTIFACT_DIR=$(mktemp -d)
-uv run python -m pytest -m live_stack tests/integration/test_run_tool_cells_live.py
+uv run python -m pytest -m live_stack tests/integration/test_run_tool_cells_live.py -k local-libvirt
 ```
 
 Run each configuration on a freshly wiped stack (`demo-down.sh --wipe --yes`, then `demo-up.sh`,
@@ -919,7 +919,9 @@ assemble and qualify as in the System section.
   absent Run.
 
 The ppc64le local cells share the node but are owner #2818's and are never collected on an
-x86_64 host.
+x86_64 host. The carrier also holds the remote-libvirt cells of the
+[remote run and image section](remote-live-stack.md#9-remote-run-and-image-tool-cells-3120);
+`-k local-libvirt` leaves them out.
 
 Last run: candidate `0024b4145` (server, worker and reconciler at that SHA in both
 configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing and no
