@@ -2950,25 +2950,60 @@ class _RestartGuest(_GuestTreeHandle):
         super().__init__([])
         self.faults = faults
         self.states = states
+        # Regular files and directories under /usr/lib/debug (#3130), apart from module trees.
+        self.files: dict[str, bytes] = {}
+        self.directories: set[str] = {"/usr/lib/debug", "/usr/lib/debug/lib"}
+        self.paths: list[str] = []
 
     def exists(self, path: str) -> int:
-        return int(path in self.states)
+        self.paths.append(path)
+        return int(path in self.states or path in self.files or path in self.directories)
 
     def is_dir(self, path: str, *, followsymlinks: bool) -> int:
         del followsymlinks
-        return int(path in self.states)
+        return int(path in self.states or path in self.directories)
+
+    def lstatns(self, path: str) -> dict[str, int]:
+        if path not in self.files:
+            return super().lstatns(path)
+        return {
+            "st_mode": stat.S_IFREG | 0o644,
+            "st_uid": 0,
+            "st_gid": 0,
+            "st_size": len(self.files[path]),
+            "st_nlink": 1,
+        }
+
+    def checksum(self, csumtype: str, path: str) -> str:
+        assert csumtype == "sha256"
+        return hashlib.sha256(self.files[path]).hexdigest()
+
+    def upload_projection_artifact(self, artifact: OpaqueProviderRef, path: str) -> None:
+        assert artifact.ref.endswith("/debuginfo")
+        self.faults.run("upload-debuginfo", lambda: self.files.__setitem__(path, _DEBUGINFO))
 
     def mkdir(self, path: str) -> None:
-        self.faults.run("mkdir")
+        def effect() -> None:
+            if path.startswith("/usr/lib/debug"):
+                self.directories.add(path)
+
+        self.faults.run("mkdir", effect)
 
     def mv(self, source: str, destination: str) -> None:
         def effect() -> None:
-            self.states[destination] = self.states.pop(source)
+            if source in self.files:
+                self.files[destination] = self.files.pop(source)
+            else:
+                self.states[destination] = self.states.pop(source)
 
         self.faults.run(f"move:{Path(source).name}->{Path(destination).name}", effect)
 
     def rm_rf(self, path: str) -> None:
-        self.faults.run(f"remove:{Path(path).name}", lambda: self.states.pop(path, None))
+        def effect() -> None:
+            self.states.pop(path, None)
+            self.files.pop(path, None)
+
+        self.faults.run(f"remove:{Path(path).name}", effect)
 
     def sync(self) -> None:
         self.faults.run("sync")
@@ -3121,6 +3156,7 @@ def _restart_fixture(
     prior_power: str = "running",
     xml: str = _SOURCE_XML,
     active: bool = False,
+    debuginfo: tuple[ComponentState, PresentComponentState] | None = None,
 ) -> tuple[
     LocalLibvirtExternalBoot,
     LocalRecoveryMetadataV1,
@@ -3167,10 +3203,12 @@ def _restart_fixture(
             "source_state": ProviderStateIdentity(
                 definition=_metadata().source_state.definition,
                 modules=source_modules,
+                debuginfo=None if debuginfo is None else debuginfo[0],
             ),
             "target_state": ProviderStateIdentity(
                 definition=_metadata().target_state.definition,
                 modules=target,
+                debuginfo=None if debuginfo is None else debuginfo[1],
             ),
         }
     )
@@ -3235,6 +3273,7 @@ class _FreshRestartHarness:
         prior_power: str = "running",
         xml: str = _SOURCE_XML,
         active: bool = False,
+        debuginfo: tuple[ComponentState, PresentComponentState] | None = None,
     ) -> _FreshRestartHarness:
         return cls(
             *_restart_fixture(
@@ -3244,6 +3283,7 @@ class _FreshRestartHarness:
                 prior_power=prior_power,
                 xml=xml,
                 active=active,
+                debuginfo=debuginfo,
             )
         )
 
@@ -6573,3 +6613,169 @@ def test_restore_preflights_final_xattr_before_first_mutation(name: str, value: 
     with pytest.raises(ValueError):
         tree.prepare_restore(iter([first, last]))
     assert guest.calls == []
+
+
+_DEBUGINFO = b"dwarf vmlinux for #3130"
+_DEBUGINFO_TARGET = external_boot_module.debuginfo_file_state(
+    size=len(_DEBUGINFO),
+    sha256="sha256:" + hashlib.sha256(_DEBUGINFO).hexdigest(),
+    mode=0o644,
+    uid=0,
+    gid=0,
+)
+
+
+def _debuginfo_names(metadata: LocalRecoveryMetadataV1) -> tuple[str, str]:
+    directory = f"/usr/lib/debug/lib/modules/{metadata.release}"
+    return f"{directory}/vmlinux", f"{directory}/.kdive-{_BINDING.activation_id}-vmlinux-staging"
+
+
+def test_activation_stages_and_publishes_debuginfo_and_recovery_restores_absence(
+    tmp_path: Path,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+        debuginfo=(AbsentComponentState(), _DEBUGINFO_TARGET),
+    )
+    live, _staging = _debuginfo_names(harness.metadata)
+
+    harness.activate()
+    assert harness.guest.files == {live: _DEBUGINFO}
+    actions = [action.split("#")[0] for action in harness.faults.actions]
+    assert actions.index("upload-debuginfo") < actions.index(
+        "move:6.12.0->.kdive-" + (f"{_BINDING.activation_id}-old")
+    )
+    assert _recovery_phase(harness.root, harness.metadata) == "target-defined"
+
+    harness.recover()
+
+    assert harness.guest.files == {}
+    assert _recovery_phase(harness.root, harness.metadata) == "recovered"
+
+
+def test_a_failed_debuginfo_upload_stays_in_pre_stop_intent_and_recovery_settles(
+    tmp_path: Path,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+        debuginfo=(AbsentComponentState(), _DEBUGINFO_TARGET),
+    )
+    _live, staging = _debuginfo_names(harness.metadata)
+    harness.faults.failures["upload-debuginfo#1"] = "os-after"
+
+    with pytest.raises(OSError, match="upload-debuginfo#1 failed after effect"):
+        harness.activate()
+    assert _recovery_phase(harness.root, harness.metadata) == "pre-stop-intent"
+    assert harness.guest.files == {staging: _DEBUGINFO}
+    harness.recover()
+
+    assert harness.guest.files == {}
+    assert _recovery_phase(harness.root, harness.metadata) == "recovered"
+
+
+def test_recovery_restores_debuginfo_even_when_the_modules_are_already_terminal(
+    tmp_path: Path,
+) -> None:
+    # The module rows return early when the source tree is already live; the debuginfo restore
+    # runs before them, so a matching module tree cannot skip it (#3130).
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="module-restored",
+        source_present=True,
+        debuginfo=(AbsentComponentState(), _DEBUGINFO_TARGET),
+        prior_power="inactive",
+    )
+    live, _staging = _debuginfo_names(harness.metadata)
+    harness.guest.states[f"/lib/modules/{harness.metadata.release}"] = cast(
+        PresentComponentState, harness.metadata.source_state.modules
+    )
+    harness.guest.directories.update(
+        {"/usr/lib/debug/lib/modules", f"/usr/lib/debug/lib/modules/{harness.metadata.release}"}
+    )
+    harness.guest.files[live] = _DEBUGINFO
+
+    harness.recover()
+
+    assert harness.guest.files == {}
+
+
+def test_a_record_without_debuginfo_never_touches_the_debug_tree(tmp_path: Path) -> None:
+    harness = _FreshRestartHarness.create(tmp_path, phase="pre-stop-intent", source_present=True)
+
+    harness.activate()
+    harness.recover()
+
+    assert _recovery_phase(harness.root, harness.metadata) == "recovered"
+    assert not [path for path in harness.guest.paths if path.startswith("/usr/lib/debug")]
+
+
+def test_recovery_metadata_from_before_debuginfo_parses_unchanged(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata()
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+    stored = root / recovery_directory_name(reference, metadata.binding) / "intent.json"
+
+    assert b"debuginfo" not in stored.read_bytes()
+    with RecoveryMetadataStore(root) as store:
+        reopened = store.reopen(reference, metadata.binding)
+    assert reopened == metadata
+    assert reopened.target_state.debuginfo is None
+
+
+class _DebuginfoPrepareSession(_RealSession):
+    def __init__(self, preparation: _RealPreparation, payload: Path) -> None:
+        super().__init__(preparation)
+        self.payload = payload
+
+    def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
+        assert artifact.ref.endswith("/debuginfo")
+        return os.open(self.payload, flags)
+
+
+@pytest.mark.parametrize("with_member", [True, False])
+def test_prepare_records_the_debuginfo_source_and_target(tmp_path: Path, with_member: bool) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    payload = tmp_path / "debuginfo"
+    payload.write_bytes(_DEBUGINFO)
+    materialization = _materialization()
+    if with_member:
+        materialization = materialization.model_copy(
+            update={
+                "verified_debuginfo_sha256": "sha256:" + hashlib.sha256(_DEBUGINFO).hexdigest(),
+                "artifacts": materialization.artifacts.model_copy(
+                    update={
+                        "debuginfo": OpaqueProviderRef(
+                            ref=materialization.artifacts.kernel.ref.rsplit("/", 1)[0]
+                            + "/debuginfo"
+                        )
+                    }
+                ),
+            }
+        )
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    preparation = _RealPreparation(metadata, root)
+    session = _DebuginfoPrepareSession(preparation, payload)
+    io = RealLocalExternalBootIO(
+        root,
+        preparation,
+        _RecordingRecoveryWriter(preparation),
+        lambda _authority: cast(LocalExternalBootOperationLease, object()),
+        cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+        32 * 1024**3,
+    )
+
+    prepared = _real_prepare(io, materialization)
+
+    if with_member:
+        assert prepared.source_state.debuginfo == AbsentComponentState()
+        assert prepared.target_state.debuginfo == _DEBUGINFO_TARGET
+    else:
+        assert prepared == metadata
+        assert prepared.target_state.debuginfo is None

@@ -2026,6 +2026,14 @@ class _RealLocalExternalBootOperation:
                 )
                 capture_sink, owned_sink = owned_sink, None
                 capture = self._recovery_writer.capture(tree, intent.release, capture_sink)
+                debuginfo = None
+                if materialization.artifacts.debuginfo is not None:
+                    debuginfo = (
+                        GuestDebuginfoFile(
+                            guest, binding=binding, release=intent.release
+                        ).observe_live(),
+                        self._materialized_debuginfo_state(materialization),
+                    )
                 with guest_policy(guest) as policy:
                     target_manifest = materialization.installed_module_tree
                     if policy is not None:
@@ -2052,9 +2060,28 @@ class _RealLocalExternalBootOperation:
                     if primary is None:
                         raise
                     primary.add_note(f"recovery archive sink cleanup failed: {cleanup!r}")
-        metadata = _complete_preparation_metadata(intent, materialization, capture, target_manifest)
+        metadata = _complete_preparation_metadata(
+            intent, materialization, capture, target_manifest, debuginfo
+        )
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.complete_preparation(reference, intent, metadata)
+
+    def _materialized_debuginfo_state(
+        self, materialization: ExternalBootMaterialization
+    ) -> PresentComponentState:
+        """The identity the staged vmlinux must read back as in the guest (#3130)."""
+        if materialization.artifacts.debuginfo is None:
+            raise ValueError("external-boot materialization has no debuginfo payload")
+        descriptor = self._session.open_projection_artifact(
+            materialization.artifacts.debuginfo, os.O_RDONLY
+        )
+        try:
+            digest, size = _open_descriptor_digest(descriptor)
+        finally:
+            os.close(descriptor)
+        if digest != materialization.verified_debuginfo_sha256:
+            raise ValueError("materialized debuginfo bytes do not match materialization")
+        return debuginfo_file_state(size=size, sha256=digest, mode=0o644, uid=0, gid=0)
 
     @staticmethod
     def recovery_ref(binding: ExternalBootActivationBinding) -> OpaqueProviderRef:
@@ -2150,6 +2177,15 @@ class _RealLocalExternalBootOperation:
                         raise ValueError(
                             "external-boot target staging layout conflicts with metadata"
                         )
+                    # Staged before any module move is recorded, so a failed upload leaves
+                    # the record in pre-stop-intent, which recovery settles (#3130).
+                    if (states := _debuginfo_states(metadata)) is not None:
+                        _debuginfo_file(opened_guest, metadata).stage(
+                            *states,
+                            lambda path: opened_guest.upload_projection_artifact(
+                                _debuginfo_ref(metadata), path
+                            ),
+                        )
                     publication.guest_sync()
                     publication.record_phase(
                         PublicationPhase.MOVE_READY
@@ -2157,6 +2193,8 @@ class _RealLocalExternalBootOperation:
                         else PublicationPhase.OLD_ASIDE
                     )
                 self._finish_present_publication(publication, prior=prior, desired=desired)
+                if (states := _debuginfo_states(metadata)) is not None:
+                    _debuginfo_file(opened_guest, metadata).publish(*states)
                 completed = publication.metadata
                 observed = self._observe_modules(opened_guest, completed)
         self.record_phase(completed, "module-restored", inactive_modules=observed)
@@ -2199,6 +2237,7 @@ class _RealLocalExternalBootOperation:
         target = _present_component(metadata.target_state.modules, "target module state")
         desired = _layout_component(metadata.source_state.modules)
         with self._session.guest() as opened_guest:
+            _restore_debuginfo(opened_guest, metadata)
             guest = cast(_GuestfsTreeHandle, opened_guest)
             publication = _SessionModulePublicationIO(
                 guest,
@@ -2266,6 +2305,7 @@ class _RealLocalExternalBootOperation:
             )
         prior = _layout_component(metadata.source_state.modules)
         with self._session.guest() as opened_guest:
+            _restore_debuginfo(opened_guest, metadata)
             publication = _SessionModulePublicationIO(
                 cast(_GuestfsTreeHandle, opened_guest),
                 metadata,
@@ -2739,6 +2779,34 @@ class GuestDebuginfoFile:
         )
 
 
+def _debuginfo_states(
+    metadata: LocalRecoveryMetadataV1,
+) -> tuple[ComponentState, PresentComponentState] | None:
+    """The prior and target debuginfo states, or ``None`` for a plan without the member."""
+    target = metadata.target_state.debuginfo
+    if target is None:
+        return None
+    source = metadata.source_state.debuginfo
+    if source is None or not isinstance(target, PresentComponentState):
+        raise ValueError("external-boot debuginfo recovery state is incomplete")
+    return source, target
+
+
+def _debuginfo_file(guest: InactiveGuest, metadata: LocalRecoveryMetadataV1) -> GuestDebuginfoFile:
+    return GuestDebuginfoFile(guest, binding=metadata.binding, release=metadata.release)
+
+
+def _debuginfo_ref(metadata: LocalRecoveryMetadataV1) -> OpaqueProviderRef:
+    """The `debuginfo` payload beside the materialized modules in the same projection."""
+    directory = metadata.materialized_modules.ref.rsplit("/", 1)[0]
+    return OpaqueProviderRef(ref=f"{directory}/debuginfo")
+
+
+def _restore_debuginfo(guest: InactiveGuest, metadata: LocalRecoveryMetadataV1) -> None:
+    if (states := _debuginfo_states(metadata)) is not None:
+        _debuginfo_file(guest, metadata).restore(*states)
+
+
 def _layout_component(state: ComponentState) -> PresentComponentState | None:
     return state if isinstance(state, PresentComponentState) else None
 
@@ -2768,6 +2836,7 @@ def _complete_preparation_metadata(
     materialization: ExternalBootMaterialization,
     capture: ModuleCapture,
     target_manifest: str,
+    debuginfo: tuple[ComponentState, PresentComponentState] | None = None,
 ) -> LocalRecoveryMetadataV1:
     source_modules: ComponentState
     if isinstance(capture, AbsentModuleCapture):
@@ -2780,10 +2849,12 @@ def _complete_preparation_metadata(
             "source_state": ProviderStateIdentity(
                 definition=intent.source_boot,
                 modules=source_modules,
+                debuginfo=None if debuginfo is None else debuginfo[0],
             ),
             "target_state": ProviderStateIdentity(
                 definition=intent.target_boot,
                 modules=PresentComponentState(manifest=target_manifest),
+                debuginfo=None if debuginfo is None else debuginfo[1],
             ),
             "capture": capture,
             "phase": "pre-stop-intent",
