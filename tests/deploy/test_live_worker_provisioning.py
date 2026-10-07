@@ -1495,6 +1495,39 @@ _resolve_uv_bin "$2"
         assert marker.exists() == (fault in {"version", "version_exit"})
 
 
+@pytest.mark.parametrize("valid_version", [True, False])
+def test_installer_uv_version_probe_preserves_caller_input(
+    tmp_path: Path, valid_version: bool
+) -> None:
+    stub = tmp_path / "uv"
+    eof = tmp_path / "eof"
+    version = "uv 0.12.22" if valid_version else "unsuitable"
+    stub.write_text(
+        f"#!/bin/bash\nif IFS= read -r input; then exit 99; fi\n"
+        f"printf eof > '{eof}'\nprintf '%s\\n' '{version}'\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    command = r"""
+source "$1"
+export PATH="$2"
+status=0
+_resolve_uv_bin >/dev/null || status=$?
+IFS= read -r remaining
+printf '%s\n%s\n' "$status" "$remaining"
+"""
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(tmp_path)],
+        input="synthetic-witness-input\n",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert eof.read_text() == "eof"
+    assert result.stdout.splitlines() == ["0" if valid_version else "1", "synthetic-witness-input"]
+
+
 def test_installer_never_emits_the_witness_dsn() -> None:
     """The play reports this installer's stderr from an uncensored task, so stderr is public.
 

@@ -601,7 +601,7 @@ _resolve_uv_bin() {
       return 1
     fi
   fi
-  if ! version="$("$resolved" --version 2>/dev/null)" || [[ ! $version =~ ^uv\ [0-9]+\.[0-9]+\.[0-9]+($|[[:space:]]) ]]; then
+  if ! version="$("$resolved" --version </dev/null 2>/dev/null)" || [[ ! $version =~ ^uv\ [0-9]+\.[0-9]+\.[0-9]+($|[[:space:]]) ]]; then
     echo "uv selection at $resolved did not identify a working uv; supply --uv PATH to a working installation." >&2
     return 1
   fi
