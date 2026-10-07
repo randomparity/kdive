@@ -62,16 +62,12 @@ _INVESTIGATION_NODE = (
     "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
 )
 _OPERATOR_NODE = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+_SYSTEM_NODE = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _REMOTE_DEEP_NODE = (
     "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
 )
-_LIFECYCLE_TOOLS = {
-    "images.publish",
-    "runs.boot",
-    "runs.cancel",
-    "runs.install",
-    "runs.release_external_boot",
+_SYSTEM_TOOLS = {
     "systems.authorize_ssh_key",
     "systems.check_ssh_reachable",
     "systems.provision",
@@ -79,6 +75,14 @@ _LIFECYCLE_TOOLS = {
     "systems.ssh_info",
     "systems.teardown",
 }
+_RUN_TOOLS = {
+    "images.publish",
+    "runs.boot",
+    "runs.cancel",
+    "runs.install",
+    "runs.release_external_boot",
+}
+_LIFECYCLE_TOOLS = _SYSTEM_TOOLS | _RUN_TOOLS
 
 
 def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> None:
@@ -93,7 +97,8 @@ def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> Non
 
     deep = {"deep-lifecycle"}
     for operations, provider, owner in (
-        (_LIFECYCLE_TOOLS, "local-libvirt", 3062),
+        (_SYSTEM_TOOLS, "local-libvirt", 3062),
+        (_RUN_TOOLS, "local-libvirt", 3119),
         (_LIFECYCLE_TOOLS, "remote-libvirt", 3080),
         (deep, "local-libvirt", 2809),
         (deep, "remote-libvirt", 2810),
@@ -101,9 +106,16 @@ def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> Non
         assert owners(operations, provider, "x86_64") == {owner}
     for provider in ("local-libvirt", "remote-libvirt"):
         assert owners(_LIFECYCLE_TOOLS | deep, provider, "ppc64le") == {2818}
+    assert len([c for c in cells if c.owner == 3062]) == 120
+    assert len([c for c in cells if c.owner == 3119]) == 96
     assert len([c for c in cells if c.owner == 2809]) == 8
     assert len([c for c in cells if c.owner == 2810]) == 8
     assert len([c for c in cells if c.owner == 3080]) == 216
+    functional = [c for c in cells if c.kind == "functional" and c.operation in _LIFECYCLE_TOOLS]
+    systems = {(c.roles, c.inputs) for c in functional if c.operation in _SYSTEM_TOOLS}
+    assert systems == {(("server", "worker", "reconciler"), ())}
+    runs = {(c.roles, len(c.inputs)) for c in functional if c.operation in _RUN_TOOLS}
+    assert runs == {(("server", "worker", "reconciler", "authority"), 6)}
     local = {c.scenario_id for c in cells if c.operation in deep and c.provider == "local-libvirt"}
     assert local == {"deep-lifecycle/local-libvirt/longterm", "deep-lifecycle/local-libvirt/stable"}
 
@@ -132,6 +144,10 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert {c.node_id for c in investigation} == {_INVESTIGATION_NODE}
     operator = [c for c in contract.cells if c.operation in _OPERATOR_TOOLS]
     assert len(operator) == 124 and {c.node_id for c in operator} == {_OPERATOR_NODE}
+    systems = [c for c in contract.cells if c.operation in _SYSTEM_TOOLS]
+    local = [c for c in systems if c.provider == "local-libvirt"]
+    assert len(local) == 240 and {c.node_id for c in local} == {_SYSTEM_NODE}
+    assert {c.node_id for c in systems if c.provider == "remote-libvirt"} == {None}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -140,6 +156,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_SPLIT[3095],
         *_SPLIT[3096],
         *_OPERATOR_TOOLS,
+        *_SYSTEM_TOOLS,
     }
     assert all(c.node_id is None for c in contract.cells if c.operation not in bound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)

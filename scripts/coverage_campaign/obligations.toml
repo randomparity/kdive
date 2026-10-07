@@ -148,6 +148,17 @@ authority = true
 [[groups]]
 owner = 3062
 execution = "provider"
+[groups.tools]
+"systems.authorize_ssh_key" = "Authenticate using the supplied key and confirm no unrelated key was removed."
+"systems.check_ssh_reachable" = "Compare reachability with a real guest sshd in the expected ready state."
+"systems.provision" = "Wait for first boot, authenticate, inspect guest identity and verify allocated capacity."
+"systems.reprovision" = "Wait for replacement guest readiness and verify old owned storage is reclaimed."
+"systems.ssh_info" = "Use returned coordinates to authenticate to the allocated guest and verify its identity."
+"systems.teardown" = "Wait for teardown and independently verify domain/storage and capacity reclamation."
+
+[[groups]]
+owner = 3119
+execution = "provider"
 kernel = true
 authority = true
 [groups.tools]
@@ -156,12 +167,6 @@ authority = true
 "runs.cancel" = "Verify operation-specific cancellation leaves the documented system and protected build state."
 "runs.install" = "Wait for installation and compare staged kernel, config and module contents with upload digests."
 "runs.release_external_boot" = "Wait for release and verify external-boot state and owned artifacts are reclaimed."
-"systems.authorize_ssh_key" = "Authenticate using the supplied key and confirm no unrelated key was removed."
-"systems.check_ssh_reachable" = "Compare reachability with a real guest sshd in the expected ready state."
-"systems.provision" = "Wait for first boot, authenticate, inspect guest identity and verify allocated capacity."
-"systems.reprovision" = "Wait for replacement guest readiness and verify old owned storage is reclaimed."
-"systems.ssh_info" = "Use returned coordinates to authenticate to the allocated guest and verify its identity."
-"systems.teardown" = "Wait for teardown and independently verify domain/storage and capacity reclamation."
 
 [[groups]]
 owner = 2813
@@ -408,3 +413,33 @@ kernel = true
 "tool/secrets.list/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/secrets.list/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/secrets.list/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/systems.authorize_ssh_key/default/authentication" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.authorize_ssh_key/default/authorization" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.authorize_ssh_key/default/functional" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.authorize_ssh_key/default/project-isolation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.authorize_ssh_key/default/validation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.check_ssh_reachable/default/authentication" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.check_ssh_reachable/default/authorization" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.check_ssh_reachable/default/functional" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.check_ssh_reachable/default/project-isolation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.check_ssh_reachable/default/validation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.provision/default/authentication" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.provision/default/authorization" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.provision/default/functional" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.provision/default/project-isolation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.provision/default/validation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.reprovision/default/authentication" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.reprovision/default/authorization" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.reprovision/default/functional" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.reprovision/default/project-isolation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.reprovision/default/validation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.ssh_info/default/authentication" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.ssh_info/default/authorization" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.ssh_info/default/functional" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.ssh_info/default/project-isolation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.ssh_info/default/validation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.teardown/default/authentication" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.teardown/default/authorization" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.teardown/default/functional" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.teardown/default/project-isolation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/systems.teardown/default/validation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
