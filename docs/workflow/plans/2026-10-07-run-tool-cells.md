@@ -9,8 +9,8 @@ change per tool (operator option B).
 Two additive seams support the carrier:
 - `tool_cells.bindings()` binds the functional `images.publish` cells to the image they publish,
   and `_settled` becomes public `settled`;
-- `deep_lifecycle.deep_body` takes an optional `step` call, and `_upload` becomes public
-  `upload_fixture`.
+- `deep_lifecycle.deep_body` takes an optional `step` call;
+- `spine.build_and_upload_kernel` takes `complete: bool = True`.
 
 A new carrier `tests/integration/test_run_tool_cells_live.py` reuses `run_tool_cell`,
 `on_lane_system`, `lane_target`, `prove_rejection` and `deep_body`.
@@ -18,7 +18,7 @@ A new carrier `tests/integration/test_run_tool_cells_live.py` reuses `run_tool_c
 **Tech stack.** Python 3.14, pytest, the repository's `live_stack` harness, `uv`.
 
 Expected implementation size: 520–640 changed lines (L) — the file map below: carrier ~380,
-frame seams ~40, contract and unit tests ~80, `obligations.toml` ~40, runbook ~60.
+frame seams ~50, contract and unit tests ~110, `obligations.toml` ~40, runbook ~60.
 
 ## Global Constraints
 
@@ -41,7 +41,9 @@ frame seams ~40, contract and unit tests ~80, `obligations.toml` ~40, runbook ~6
 | `tests/scripts/test_coverage_contract.py` | pins one role/input set for the five tools | pins the per-tool set; pins the run carrier's bound scenarios |
 | `tests/integration/live_stack/tool_cells.py` | lane bindings for every native cell; private `_settled` | `PUBLISHED_IMAGES`, `PUBLISH_TOOL`; published-image bindings; public `settled` |
 | `tests/integration/live_stack/test_tool_cells.py` | authority test uses `runs.install` | uses `runs.release_external_boot`; one published-image binding test |
-| `tests/integration/live_stack/deep_lifecycle.py` | install/boot through the operator client; private `_upload` | optional `step`; public `upload_fixture` |
+| `tests/integration/live_stack/deep_lifecycle.py` | install/boot through the operator client | optional `step` |
+| `tests/integration/live_stack/spine.py` | `build_and_upload_kernel` always completes the build | `complete: bool = True`; `False` skips `runs.complete_build` |
+| `tests/integration/live_stack/test_spine.py` | upload tests | one test of `complete=False` |
 | `tests/integration/live_stack/test_deep_lifecycle.py` | no step test | one test of the `step` seam |
 | `tests/integration/test_run_tool_cells_live.py` | absent | the carrier |
 | `docs/operating/runbooks/live-testing.md` | System cells section | adds a run/image cells section with the lab result |
@@ -122,12 +124,15 @@ tools' functional cells carry the role and input sets of step 1.
 
 **Interfaces.** Later tasks consume:
 - `tool_cells.PUBLISH_TOOL: str = "images.publish"`;
-- `tool_cells.PUBLISHED_IMAGES: dict[str, str] = {"x86_64": "fedora-kdive-ready-43"}`;
+- `tool_cells.PUBLISHED_IMAGES: dict[tuple[str, str], str]`, keyed by (architecture, exposure):
+  `("x86_64", "direct")` → `"fedora-kdive-ready-43-cloud"`, `("x86_64", "gateway")` →
+  `"rocky-kdive-ready-9"`;
 - `async def tool_cells.settled(db_url: str, project: str) -> None`;
 - `deep_lifecycle.StepCall = Callable[[str, str], Awaitable[ToolResponse]]`;
 - `deep_body(..., installed_kernel: InstalledKernel, step: StepCall | None = None) -> None`;
-- `async def deep_lifecycle.upload_fixture(run, op, run_id, tree, manifest, upload) -> None`,
-  the former `_upload`, unchanged in body.
+- `spine.build_and_upload_kernel(client, *, run_id, ..., evidence_dir=None, complete=True)`;
+  with `complete=False` it uploads, writes `upload.json` with `"result": null`, and leaves the
+  Run `created`.
 
 **Verification.**
 - Contract: a functional `images.publish` cell binds the published entry with a null digest; its
@@ -139,8 +144,12 @@ tools' functional cells carry the role and input sets of step 1.
   `tests/integration/live_stack/test_deep_lifecycle.py::test_install_and_boot_use_the_step`.
   Red: `TypeError` (unexpected argument). Green:
   `uv run python -m pytest tests/integration/live_stack/test_deep_lifecycle.py -q`.
-- Contract: the renames `_settled` → `settled` and `_upload` → `upload_fixture`.
-  Mode: task-test-not-applicable. They are names only; `just type` resolves every caller.
+- Contract: `build_and_upload_kernel(complete=False)` uploads without completing. Mode:
+  focused-test. `tests/integration/live_stack/test_spine.py::test_spine_upload_can_leave_the_build_open`.
+  Red: `TypeError` (unexpected argument). Green:
+  `uv run python -m pytest tests/integration/live_stack/test_spine.py -q`.
+- Contract: the rename `_settled` → `settled`. Mode: task-test-not-applicable. It is a name
+  only; `just type` resolves every caller.
 
 Steps:
 
@@ -149,7 +158,12 @@ Steps:
    def test_published_image_binds_the_product(tmp_path: Path) -> None:
        image = tmp_path / "image.qcow2"
        image.write_bytes(b"lane")
-       publish = _bound(_cell("images.publish", "local-libvirt", "x86_64"))
+       cells = [c for c in build_contract().cells if c.operation == "images.publish"]
+       publish = {
+           c.exposure: _bound(c)
+           for c in cells
+           if c.kind == "functional" and c.provider == "local-libvirt" and c.guest_arch == "x86_64"
+       }
        reject = _bound(_cell("images.publish", "local-libvirt", "x86_64", "rejection"))
        install = _bound(_cell("runs.install", "local-libvirt", "x86_64"))
        inputs = bindings(
@@ -157,16 +171,18 @@ Steps:
            host_os="fedora:44",
            host_arch="x86_64",
            matrix="b" * 64,
-           cells=[publish, reject, install],
+           cells=[*publish.values(), reject, install],
            staged=lambda _name: image,
        )
-       product = inputs.cells[publish.id]
-       assert (product.guest_os, product.guest_arch, product.accelerator) == (
-           "fedora:43",
-           "x86_64",
-           "kvm",
-       )
-       assert product.image_sha256 is None
+       guests = {e: inputs.cells[c.id].guest_os for e, c in publish.items()}
+       assert guests == {"direct": "fedora:43", "gateway": "rocky:9"}
+       for cell in publish.values():
+           product = inputs.cells[cell.id]
+           assert (product.guest_arch, product.accelerator, product.image_sha256) == (
+               "x86_64",
+               "kvm",
+               None,
+           )
        lane = hashlib.sha256(b"lane").hexdigest()
        assert inputs.cells[reject.id].guest_os == "fedora:44"
        assert inputs.cells[reject.id].image_sha256 == lane
@@ -176,9 +192,13 @@ Steps:
 2. In `tests/integration/live_stack/tool_cells.py`, below `REMOTE_LANE_FAMILIES`, add:
    ```python
    PUBLISH_TOOL = "images.publish"
-   # The catalog image a functional images.publish cell publishes and boots; no other carrier
-   # boots it, so its re-publication changes no other cell's inputs.
-   PUBLISHED_IMAGES = {"x86_64": "fedora-kdive-ready-43"}
+   # The single-kernel catalog image a functional images.publish cell publishes and boots, per
+   # (architecture, exposure). One image per exposure: images.publish never recycles a finished
+   # job of the same name, so two cells of one stack cannot both publish one image.
+   PUBLISHED_IMAGES = {
+       ("x86_64", "direct"): "fedora-kdive-ready-43-cloud",
+       ("x86_64", "gateway"): "rocky-kdive-ready-9",
+   }
    ```
    In `bindings()`, replace
    ```python
@@ -189,14 +209,26 @@ Steps:
        native = [c for c in bound if c.provider == "local-libvirt" and c.guest_arch == host_arch]
        published = [c for c in native if c.operation == PUBLISH_TOOL and c.kind == "functional"]
        native = [c for c in native if c not in published]
-       product = PUBLISHED_IMAGES.get(host_arch)
-       if published and product is not None:
-           # The published image is the cell's output, so no input digest binds it.
-           entry = load_rootfs_catalog()[product]
-           contexts |= _lane_contexts(published, host_os, host_arch, entry, None, kernel=kernel)
+       for cell in published:
+           product = PUBLISHED_IMAGES.get((host_arch, cell.exposure))
+           if product is not None:
+               # The published image is the cell's output, so no input digest binds it.
+               entry = load_rootfs_catalog()[product]
+               contexts |= _lane_contexts([cell], host_os, host_arch, entry, None, kernel=kernel)
    ```
    Add one sentence to the `bindings` docstring: "A functional ``images.publish`` cell boots
-   ``PUBLISHED_IMAGES[host_arch]``, the image it publishes, with a null ``image_sha256``."
+   ``PUBLISHED_IMAGES[(host_arch, exposure)]``, the image it publishes, with a null
+   ``image_sha256``."
+   In `main()`, the unstaged count must not count a functional `images.publish` binding, whose
+   null digest is deliberate. Replace its `unstaged = sum(...)` with
+   ```python
+   published = {c.id for c in contract.cells if c.operation == PUBLISH_TOOL and c.kind == "functional"}
+   unstaged = sum(
+       c.guest_arch is not None and c.image_sha256 is None
+       for cell_id, c in inputs.cells.items()
+       if cell_id not in published
+   )
+   ```
    Rename `async def _settled` to `async def settled` and its one call in `_provision_target`.
    Rerun step 1's test: green.
 3. Append to `tests/integration/live_stack/test_deep_lifecycle.py`:
@@ -250,11 +282,66 @@ Steps:
          assert (steps.get("install"), steps.get("boot")) == ("succeeded", "succeeded"), steps
          return steps
      ```
-   - rename `_upload` to `upload_fixture` (definition and the one call in `deep_body`).
 
-   Rerun: green. `just lint`, `just type`. Commit `test(live): add run-cell seams to the frame`.
+   Rerun: green.
+5. Append to `tests/integration/live_stack/test_spine.py`:
+   ```python
+   def test_spine_upload_can_leave_the_build_open(
+       monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+   ) -> None:
+       (tmp_path / ".config").write_bytes(_BOOT_CONFIG + b"CONFIG_VIRTIO_NET=y\n")
+       kernel_tar = tmp_path / "kernel.tar"
+       kernel_tar.write_bytes(b"tar")
+       monkeypatch.setattr(
+           spine, "accepted_run_upload_names", lambda _c: ["kernel", "effective_config"]
+       )
+       monkeypatch.setattr(spine, "combined_kernel_tar", lambda *_a, **_k: kernel_tar)
+       calls: list[str] = []
 
-Acceptance: both focused tests green. `test_bindings_cover_bound_tool_cells` and the deep
+       async def _scalar(client: object, name: str, **args: object) -> ToolResponse:
+           calls.append(name)
+           items = [_upload_item(n) for n in ("kernel", "effective_config")]
+           return ToolResponse.collection("run-1", "pending", items)
+
+       async def _put(item: ToolResponse, path: Path) -> None:
+           return None
+
+       monkeypatch.setattr(spine, "scalar", _scalar)
+       monkeypatch.setattr(spine, "put_presigned", _put)
+       client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+       asyncio.run(
+           spine.build_and_upload_kernel(
+               cast(Any, client),
+               run_id="run-1",
+               kernel_tree=tmp_path,
+               evidence_dir=tmp_path / "evidence",
+               complete=False,
+           )
+       )
+       assert calls == ["artifacts.create_run_upload"]
+       assert json.loads((tmp_path / "evidence/upload.json").read_text())["result"] is None
+   ```
+   Run it: red (`TypeError`).
+6. In `tests/integration/live_stack/spine.py` `build_and_upload_kernel`, add the keyword
+   parameter `complete: bool = True` after `evidence_dir`. Document it in the docstring:
+   "``complete=False`` uploads the artifacts and skips ``runs.complete_build``, so the Run
+   stays ``created``." Replace
+   ```python
+       result = ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
+   ```
+   with
+   ```python
+       result = (
+           ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
+           if complete
+           else None
+       )
+   ```
+   and the record's `"result": result.model_dump(mode="json"),` with
+   `"result": result.model_dump(mode="json") if result is not None else None,`. Rerun: green.
+   `just lint`, `just type`. Commit `test(live): add run-cell seams to the frame`.
+
+Acceptance: the three focused tests green. `test_bindings_cover_bound_tool_cells` and the deep
 lifecycle tests are unchanged and green.
 
 ## Task 3 — The run/image carrier
@@ -272,7 +359,8 @@ at `12b76d2e5`:
   `mint_role_token(issuer, *, project, agent_session, role)`, `ok`, `scalar`;
 - `deep_lifecycle`: `FIXTURE_ROOT_ENV`, `boot_kernel_sha256(tree, arch)`, `file_sha256`,
   `load_fixture(root, name, arch)`;
-- `image_smoke`: `Endpoint`, `ssh(endpoint, key, command)`;
+- `spine.build_and_upload_kernel` (Task 2's `complete` flag);
+- `image_smoke`: `Endpoint`, `ssh(endpoint, key, command)`, `os_matches(entry, probe)`;
 - `scripts.kernel_fixtures.identity(toolchain)`.
 
 **Verification.**
@@ -318,7 +406,8 @@ Steps:
 ``runs.*`` functional cell provisions the lane image in a fresh ``cov-<hex>`` project through
 :func:`~tests.integration.live_stack.tool_cells.on_lane_system`, uploads the verified ``longterm``
 kernel fixture and calls the tool in the cell's exposure. The functional ``images.publish`` cell
-publishes :data:`~tests.integration.live_stack.tool_cells.PUBLISHED_IMAGES` and boots it. The
+publishes its exposure's :data:`~tests.integration.live_stack.tool_cells.PUBLISHED_IMAGES` image
+and boots it. The
 release functional cells stop ``blocked``: the demo-up lane configures no external-boot
 authority. A ``runs.*`` rejection cell aims at one unbound Run in the stack's lane-target project;
 an ``images.publish`` one at the published image's name. ``docs/operating/runbooks/
@@ -358,11 +447,11 @@ from tests.integration.live_stack.deep_lifecycle import (
     deep_body,
     file_sha256,
     load_fixture,
-    upload_fixture,
 )
-from tests.integration.live_stack.image_smoke import Endpoint, ssh
+from tests.integration.live_stack.image_smoke import Endpoint, os_matches, ssh
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop, on_catalog_system
 from tests.integration.live_stack.spine import (
+    build_and_upload_kernel,
     build_profile,
     drain_job,
     mint_role_token,
@@ -450,8 +539,8 @@ async def _create_run(op: LiveStackClient, investigation: str, system_id: str | 
         "investigation_id": investigation,
         "build_profile": build_profile(platform.machine()),
     }
-    if system_id is not None:
-        args["system_id"] = system_id
+    # An unbound Run names the Resource kind it builds for; a bound one derives it.
+    args |= {"system_id": system_id} if system_id else {"target_kind": _PROVIDER}
     return ok(await scalar(op, "runs.create", **args), "create-run").object_id
 
 
@@ -534,25 +623,48 @@ async def _cancel(
     manifest: dict[str, Any],
     guest: Guest,
 ) -> dict[str, object]:
-    """Cancel an uploaded, uninstalled Run; its System and build survive, the System is freed."""
+    """Cancel an uploaded, uncompleted Run: its System is untouched and freed, its build closed.
+
+    Only a ``created`` or ``running`` Run is cancelable; ``runs.complete_build`` would make it
+    ``succeeded``, which ``runs.cancel`` answers with ``conflict``.
+    """
     op = guest.op
     upload = guest.scratch / "upload"
     investigation = await _open(op, guest.project, "run cancel")
     try:
         run_id = await _create_run(op, investigation, guest.system_id)
-        await upload_fixture(CellRun(run.cell, run.writer), op, run_id, tree, manifest, upload)
-        before = ok(await scalar(op, "runs.get", run_id=run_id), "read-before")
+        await build_and_upload_kernel(
+            op,
+            run_id=run_id,
+            arch=manifest["arch"],
+            kernel_tree=tree,
+            evidence_dir=upload,
+            with_vmlinux=True,
+            require_network=True,
+            root_fs="ext4",
+            complete=False,
+        )
         boot = _os_boot(guest.lane.xml(guest.system_id))
         boot_id = await _boot_id(guest)
+        held = await scalar(
+            op,
+            "runs.create",
+            investigation_id=investigation,
+            system_id=guest.system_id,
+            build_profile=build_profile(manifest["arch"]),
+        )
+        assert held.data.get("reason") == "system_has_live_run", f"second create: {held.data}"
         env = await _call(caller, "runs.cancel", {"run_id": run_id}, token)
         assert env.status == "canceled", f"runs.cancel answered {env.status}"
         after = ok(await scalar(op, "runs.get", run_id=run_id), "read-after")
-        assert after.status == "canceled", f"the Run is {after.status}"
-        build_ref = before.data.get("build_ref")
-        assert build_ref and after.data.get("build_ref") == build_ref, "the build changed"
         steps = cast(Mapping[str, object], after.data.get("steps") or {})
         ran = [s for s in ("install", "boot") if steps.get(s) == "succeeded"]
-        assert not ran, f"steps ran: {ran}"
+        assert after.status == "canceled" and not ran, f"Run {after.status}, steps ran {ran}"
+        assert after.data.get("build_ref") is None, "the canceled Run carries a build"
+        closed = await scalar(op, "runs.complete_build", run_id=run_id, build_id="0" * 40)
+        assert closed.error_category is not None, "complete_build accepted a canceled Run"
+        again = ok(await scalar(op, "runs.get", run_id=run_id), "read-again")
+        assert again.status == "canceled", f"the Run became {again.status}"
         system = ok(await scalar(op, "systems.get", system_id=guest.system_id), "system")
         assert system.status == "ready", f"the System is {system.status}"
         assert _os_boot(guest.lane.xml(guest.system_id)) == boot, "the domain's boot changed"
@@ -571,8 +683,9 @@ async def _cancel(
     }
     return {
         "run": "canceled",
-        "build_ref_kept": True,
-        "steps_run": [],
+        "held_before_cancel": "system_has_live_run",
+        "build": "never-completed",
+        "complete_build_after": closed.error_category,
         "system": "ready",
         "guest_rebooted": False,
         "system_freed": True,
@@ -601,24 +714,52 @@ async def _described(op: LiveStackClient, name: str, arch: str) -> ToolResponse:
 
 
 def _provenance_matches(described: ToolResponse, entry: RootfsCatalogEntry) -> None:
+    """The build-recorded ``os_release`` and ``arch`` name the catalog row's platform."""
     provenance = cast(Mapping[str, Any], described.data.get("provenance") or {})
-    release = cast(Mapping[str, Any], provenance.get("os_release") or {})
-    assert (provenance.get("arch"), provenance.get("releasever")) == (entry.arch, entry.version), (
-        f"provenance {provenance.get('arch')}/{provenance.get('releasever')}"
-    )
-    assert (release.get("ID"), release.get("VERSION_ID")) == (entry.distro, entry.version), (
-        f"os_release {release.get('ID')}/{release.get('VERSION_ID')}"
-    )
+    release = {str(k): str(v) for k, v in (provenance.get("os_release") or {}).items()}
+    built = {**release, "machine": str(provenance.get("arch"))}
+    assert os_matches(entry, built), f"provenance names {built.get('ID')} {built.get('VERSION_ID')}"
+
+
+async def _build_jobs(db_url: str, name: str) -> int:
+    """The number of ``IMAGE_BUILD`` jobs ``images.publish`` enqueued for ``name``."""
+    async with await psycopg.AsyncConnection.connect(db_url) as conn:
+        await conn.set_read_only(True)
+        cursor = await conn.execute(
+            "SELECT count(*) FROM jobs WHERE dedup_key = %s", (f"image_build:{_PROVIDER}:{name}",)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _pending_rows(db_url: str, name: str) -> int:
+    async with await psycopg.AsyncConnection.connect(db_url) as conn:
+        await conn.set_read_only(True)
+        cursor = await conn.execute(
+            "SELECT count(*) FROM image_catalog WHERE provider = %s AND name = %s "
+            "AND state = 'pending'",
+            (_PROVIDER, name),
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 async def _publish(
     run: CellRun, caller: HttpCaller, base_url: str, issuer: OidcIssuer, db_url: str
 ) -> None:
     """Publish the cell's image through its exposure, then boot it and prove the frame cleanup."""
-    name = PUBLISHED_IMAGES.get(platform.machine())
+    name = PUBLISHED_IMAGES.get((platform.machine(), run.cell.exposure))
     if name is None:
         raise ScenarioStop(Outcome.BLOCKED, f"no published image for {platform.machine()}")
     entry = load_rootfs_catalog()[name]
+    # images.publish never recycles a job of one name: a prior job would be returned again, and
+    # the cell would re-observe another publication.
+    if await _build_jobs(db_url, name):
+        raise ScenarioStop(
+            Outcome.BLOCKED, f"{name} was already published on this stack; wipe it first"
+        )
     token = caller.token(_platform_operator())
     env = await _call(caller, PUBLISH_TOOL, {"provider": _PROVIDER, "name": name}, token)
     # The build job's authorizing project is `platform`; a viewer there may wait on it.
@@ -632,6 +773,7 @@ async def _publish(
         digest = str(described.data.get("digest", ""))
         assert described.data.get("state") == "registered", "the published row is not registered"
         assert digest.startswith("sha256:") and len(digest) == 71, f"digest {digest!r}"
+        assert await _pending_rows(db_url, name) == 0, f"a pending {name} row remains"
         _provenance_matches(described, entry)
         with tempfile.TemporaryDirectory() as scratch:
             await observe_guest(run, op, system_id, Path(scratch), entry)
@@ -639,7 +781,7 @@ async def _publish(
             "effect",
             {
                 "exposure": run.cell.exposure,
-                "job": "succeeded",
+                "job": {"enqueued": env.status, "drained": "succeeded"},
                 "image": name,
                 "state": "registered",
                 "digest": digest,
@@ -717,7 +859,17 @@ async def _run_target(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: s
     return cached
 
 
-def _run_rejection(boundary: Boundary, target: _RunTarget) -> Rejection:
+# install and boot answer a Run outside the caller's projects as configuration_error, cancel and
+# release as not_found; each is identical to the answer for an absent run_id.
+_ISOLATION = {
+    "runs.boot": frozenset({ErrorCategory.CONFIGURATION_ERROR.value}),
+    "runs.install": frozenset({ErrorCategory.CONFIGURATION_ERROR.value}),
+    "runs.cancel": frozenset({ErrorCategory.NOT_FOUND.value}),
+    "runs.release_external_boot": frozenset({ErrorCategory.NOT_FOUND.value}),
+}
+
+
+def _run_rejection(tool: str, boundary: Boundary, target: _RunTarget) -> Rejection:
     args = {"run_id": target.run_id}
     if boundary == "validation":
         return Rejection({"run_id": 7}, _grants(target.project, "contributor"))
@@ -725,8 +877,7 @@ def _run_rejection(boundary: Boundary, target: _RunTarget) -> Rejection:
         # Viewer is one rank below the contributor gate; its issued-token call writes nothing.
         return Rejection(args, _grants(target.project, "viewer"))
     twin = {"run_id": str(uuid4())}
-    category = frozenset({ErrorCategory.NOT_FOUND.value})
-    return Rejection(args, _stranger(), category, absent_twin=twin)
+    return Rejection(args, _stranger(), _ISOLATION[tool], absent_twin=twin)
 
 
 def _publish_rejection(boundary: Boundary, name: str) -> Rejection:
@@ -737,7 +888,11 @@ def _publish_rejection(boundary: Boundary, name: str) -> Rejection:
 
 
 async def _publish_state(db_url: str, name: str) -> dict[str, object]:
-    """The ``platform`` project's snapshot plus the published image's catalog rows."""
+    """The ``platform`` snapshot, the image's catalog rows and its build jobs.
+
+    ``jobs`` has no project column, so ``project_state`` cannot see a leaked publish's job; the
+    dedup-key count can.
+    """
     platform_state = await project_state(db_url, "platform")
     async with await psycopg.AsyncConnection.connect(db_url) as conn:
         await conn.set_read_only(True)
@@ -749,7 +904,8 @@ async def _publish_state(db_url: str, name: str) -> dict[str, object]:
         row = await cursor.fetchone()
     assert row is not None
     rows = [row[0], hashlib.sha256(str(row[1]).encode()).hexdigest()]
-    return {"platform": platform_state, "image_catalog": rows}
+    jobs = await _build_jobs(db_url, name)
+    return {"platform": platform_state, "image_catalog": rows, "build_jobs": jobs}
 
 
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> None:
@@ -760,13 +916,13 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     boundary = boundary_of(run.cell)
     if run.cell.operation == PUBLISH_TOOL:
         await lane_target(run, base_url, issuer, db_url)  # the record's observed context
-        name = PUBLISHED_IMAGES[platform.machine()]
+        name = PUBLISHED_IMAGES[(platform.machine(), run.cell.exposure)]
         snapshot = partial(_publish_state, db_url, name)
         rejection = _publish_rejection(boundary, name)
     else:
         target = await _run_target(run, base_url, issuer, db_url)
         snapshot = partial(project_state, db_url, target.project)
-        rejection = _run_rejection(boundary, target)
+        rejection = _run_rejection(run.cell.operation, boundary, target)
     await prove_rejection(run, caller, boundary, rejection, snapshot)
 
 
@@ -812,15 +968,19 @@ Steps:
      per lane, then assembly and `qualify` as in the System section;
    - the four `runs.release_external_boot` functional cells record `blocked`
      (`missing-prerequisite`) because the demo-up lane installs no external-boot authority;
-   - `images.publish` builds and leaves `fedora-kdive-ready-43` registered (cleared by
-     `demo-down.sh --wipe --yes`);
+   - each stack's two functional `images.publish` cells build `fedora-kdive-ready-43-cloud`
+     (`direct`) and `rocky-kdive-ready-9` (`gateway`) on the worker, which needs network access
+     to the pinned cloud-image URLs and the libguestfs build tools. Both rows stay registered,
+     and the lane must be wiped (`demo-down.sh --wipe --yes`) before the other configuration,
+     because a second publish of one name returns the first job;
    - the recorded lab result.
 2. Lab run, on the disposable kdive-servers Fedora 44 guest (control plane, idle). Use a probe
    branch committed on the guest at the candidate, and bring each stack up with
    `examples/local-libvirt/demo-up.sh` (`KDIVE_WORKER_DEATH_VERIFIER=docker` for recovery).
    Rebuild the capture-bootstrap manifest, check worker `/readyz` `ready`, stage
-   `fedora-kdive-ready-44`, build the `longterm` fixture, write the bindings, run both lanes,
-   assemble and `qualify`. Expected: 92 qualified (16 `success`, 76 `rejection`) and the 4
+   `fedora-kdive-ready-44`, build the `longterm` fixture, write the bindings, run one lane, wipe
+   and bring up the other lane (restaging the lane image), run it, then assemble and `qualify`.
+   Record whether the worker's image-build workspace holds leftovers after each publish. Expected: 92 qualified (16 `success`, 76 `rejection`) and the 4
    release functional cells `blocked`. Afterwards run `demo-down.sh --wipe --yes`, check that
    `virsh list --all` shows no `kdive-` domain, and remove the probe refs, scripts and bundles.
 3. Write the result into the runbook section, run `just docs-check`, and commit
