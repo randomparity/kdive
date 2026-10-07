@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted (2026-10-07), following explicit operator approval of this interface and validation rule.
+Accepted (2026-10-07)
+
+The operator explicitly approved this interface and validation rule.
 
 ## Context
 
