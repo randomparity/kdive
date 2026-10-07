@@ -132,8 +132,18 @@ selected row in `fixtures/local-libvirt/rootfs_catalog.toml`:
    during verification. Preserve the vendor URL, checksum record and downloaded byte digest.
 3. Update the selected row's exact URL and SHA-256, and its snapshot version where applicable.
    Keep unrelated rows unchanged, including other architectures: an x86_64 download does not
-   verify a ppc64le source. Use the existing `build-fs` command above with the row's image name;
-   its acquisition path independently verifies the catalog checksum again.
+   verify a ppc64le source. Build with the catalog's default package set; do not copy the
+   Fedora example's `--package` overrides into another distribution. For example:
+
+   ```bash
+   python -m kdive build-fs \
+     --image centos-stream-kdive-ready-9 \
+     --workspace ~/.local/share/kdive/build/images \
+     --dest ~/.local/share/kdive/build/images/centos-stream-kdive-ready-9.qcow2
+   ```
+
+   For another row, change both the image name and destination basename. The acquisition path
+   independently verifies the catalog checksum again.
 4. After a successful build, inspect the emitted provenance sidecar and the guest's installed
    package inventory. Check the recorded `makedumpfile_version` and `drgn_version` against the
    executable version markers produced by customization. Update the row's package annotations
