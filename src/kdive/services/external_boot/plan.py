@@ -85,6 +85,23 @@ def construct_external_boot_plan(
             "sha256": initrd_evidence.get("sha256"),
             "size_bytes": initrd_evidence.get("size_bytes"),
         }
+    # Evidence without a debuginfo key (no vmlinux, or completed before #3129) yields no member.
+    debuginfo_evidence = evidence.get("debuginfo")
+    if debuginfo_evidence is not None:
+        vmlinux = artifacts.get("vmlinux")
+        debuginfo_ref = result.get("debuginfo_ref")
+        if (
+            not isinstance(debuginfo_evidence, dict)
+            or vmlinux is None
+            or not isinstance(debuginfo_ref, str)
+        ):
+            raise _invalid("external_boot_debuginfo_incomplete")
+        data["debuginfo"] = {
+            "key": debuginfo_ref,
+            "version": vmlinux.get("version_id"),
+            "sha256": debuginfo_evidence.get("sha256"),
+            "size_bytes": debuginfo_evidence.get("size_bytes"),
+        }
     try:
         return ExternalBootPlan.model_validate(cast("object", data))
     except ValidationError as exc:

@@ -7,7 +7,12 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import InvestigationBuild
-from kdive.providers.ports.external_boot import RootSource, RootSpecV1
+from kdive.providers.ports.external_boot import (
+    DebuginfoSource,
+    ExternalBootPlan,
+    RootSource,
+    RootSpecV1,
+)
 from kdive.services.external_boot.plan import (
     construct_external_boot_plan,
     external_boot_root_arguments,
@@ -99,6 +104,52 @@ def test_construct_plan_fails_closed_without_v2_evidence() -> None:
             debug_cmdline=None,
         )
     assert raised.value.details["reason"] == "external_boot_evidence_missing"
+
+
+def _construct(build: InvestigationBuild) -> ExternalBootPlan:
+    return construct_external_boot_plan(
+        build=build,
+        system_id=uuid4(),
+        run_id=uuid4(),
+        root=_root(),
+        platform_arguments=("root=/dev/vda1",),
+        debug_cmdline=None,
+    )
+
+
+def _with_debuginfo(build: InvestigationBuild) -> InvestigationBuild:
+    evidence = build.canonical_document["external_boot_evidence"]
+    assert isinstance(evidence, dict)
+    evidence["debuginfo"] = {"sha256": _SHA, "size_bytes": 4096}
+    build.artifacts["vmlinux"] = {"version_id": "vmlinux-v1"}
+    build.build_result["debuginfo_ref"] = "builds/vmlinux"
+    return build
+
+
+def test_construct_plan_carries_the_uploaded_vmlinux() -> None:
+    plan = _construct(_with_debuginfo(_build()))
+
+    assert plan.debuginfo == DebuginfoSource(
+        key="builds/vmlinux", version="vmlinux-v1", sha256=_SHA, size_bytes=4096
+    )
+
+
+def test_construct_plan_omits_debuginfo_for_evidence_without_it() -> None:
+    build = _build()
+    build.artifacts["vmlinux"] = {"version_id": "vmlinux-v1"}
+    build.build_result["debuginfo_ref"] = "builds/vmlinux"
+
+    assert _construct(build).debuginfo is None
+
+
+def test_construct_plan_rejects_debuginfo_evidence_without_its_object() -> None:
+    build = _with_debuginfo(_build())
+    del build.build_result["debuginfo_ref"]
+
+    with pytest.raises(CategorizedError) as raised:
+        _construct(build)
+
+    assert raised.value.details["reason"] == "external_boot_debuginfo_incomplete"
 
 
 def _uuid_root(architecture: Literal["x86_64", "ppc64le"] = "x86_64") -> RootSpecV1:
