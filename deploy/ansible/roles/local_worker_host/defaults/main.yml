@@ -33,11 +33,9 @@ live_vm_host_packages:  # noqa: var-naming[no-role-prefix]
   - libssl-dev         # grpcio source build on ppc64le (no wheel, no BoringSSL target, #2666)
   - zlib1g-dev         # grpcio source build on ppc64le (paired with libssl-dev above, #2666)
 
-# pip installs the uv console script to /usr/local/bin, which root's sudo secure_path lists
-# (#2506, #2665) unlike a user-local ~/.local/bin install. Reference uv by absolute path in a
-# venv-build command so it is found under become regardless of sudo's PATH handling; override if
-# pip is configured to install console scripts elsewhere. Shared with live_vm_host, which installs
-# and consumes this identically (tasks/uv.yml).
+# pip normally installs uv to /usr/local/bin; sudo secure_path may omit it. Both venv
+# callers use this absolute selection. Override when pip installs elsewhere; lifecycle
+# installation requires a root-owned canonical path without group/other write access.
 live_vm_host_uv_bin: /usr/local/bin/uv  # noqa: var-naming[no-role-prefix]
 
 # Fixed host-worker authority contract (ADR-0574). Keep the slot count literal: unit names,

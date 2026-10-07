@@ -571,19 +571,38 @@ _cleanup_source_link() {
   _created_source_link=""
 }
 
-# The venv build below needs `uv`, and this script runs as root under `sudo`, whose `secure_path`
-# hides a user-local ~/.local/bin: a bare `uv` there exits 127 with no context, after the host has
-# already been mutated (#2506). Resolve it to an absolute path up front instead, and refuse with
-# the remedy. `command -v` also reports functions and builtins, so the result must be a path.
+# Resolve before host mutation or reading secrets. Explicit provisioning selection uses
+# the root-controlled canonical path; default direct callers retain their PATH contract.
 _resolve_uv_bin() {
-  local resolved
-  resolved="$(command -v uv 2>/dev/null)" || resolved=""
-  if [[ $resolved != /* ]]; then
-    echo "uv is not resolvable from PATH=$PATH; this installer runs as root, and sudo's" \
-      "secure_path hides a user-local uv. Invoke it through 'sudo env \"PATH=\$PATH\"', as" \
-      ".github/workflows/live.yml and docs/operating/runbooks/live-stack.md do; where root is" \
-      "reached through Ansible's become instead, install uv where root resolves it (pip installs" \
-      "the console script to /usr/local/bin)." >&2
+  local resolved candidate metadata owner mode version
+  if (($#)); then
+    resolved="$1"
+    if [[ $resolved != /* || ! -f $resolved || ! -x $resolved ]]; then
+      echo "uv selection must be an absolute executable regular file; supply --uv PATH to the installed uv." >&2
+      return 1
+    fi
+    resolved="$(readlink -e -- "$resolved")" || return 1
+    candidate="$resolved"
+    while :; do
+      metadata="$(stat -c '%u %a' -- "$candidate")" || return 1
+      read -r owner mode <<<"$metadata"
+      if [[ $owner != 0 ]] || (((8#$mode & 0022) != 0)); then
+        echo "uv selection has unsafe ownership or permissions at $candidate; use a root-owned path without group/other write access." >&2
+        return 1
+      fi
+      [[ $candidate != / ]] || break
+      candidate="${candidate%/*}"
+      [[ -n $candidate ]] || candidate=/
+    done
+  else
+    resolved="$(command -v uv 2>/dev/null)" || resolved=""
+    if [[ $resolved != /* || ! -f $resolved || ! -x $resolved ]]; then
+      echo "uv is not resolvable as an executable from PATH=$PATH; sudo secure_path may hide it. Supply --uv PATH to the installed root-owned uv." >&2
+      return 1
+    fi
+  fi
+  if ! version="$("$resolved" --version </dev/null 2>/dev/null)" || [[ ! $version =~ ^uv\ [0-9]+\.[0-9]+\.[0-9]+($|[[:space:]]) ]]; then
+    echo "uv selection at $resolved did not identify a working uv; supply --uv PATH to a working installation." >&2
     return 1
   fi
   printf '%s\n' "$resolved"
@@ -621,12 +640,13 @@ if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
 fi
 
 usage() {
-  echo "usage: $0 --operator USER --source PATH" >&2
+  echo "usage: $0 --operator USER --source PATH [--uv PATH]" >&2
   exit 2
 }
 
 operator=""
 source_root=""
+uv_selection=()
 while (($#)); do
   case "$1" in
   --operator)
@@ -637,6 +657,11 @@ while (($#)); do
   --source)
     [[ $# -ge 2 ]] || usage
     source_root="$2"
+    shift 2
+    ;;
+  --uv)
+    [[ $# -ge 2 ]] || usage
+    uv_selection=("$2")
     shift 2
     ;;
   *) usage ;;
@@ -652,7 +677,7 @@ done
   echo "fixed local-libvirt fixture catalog is missing from the installation source" >&2
   exit 1
 }
-uv_bin="$(_resolve_uv_bin)" || exit 1
+uv_bin="$(_resolve_uv_bin "${uv_selection[@]}")" || exit 1
 operator_uid="$(id -u "$operator")"
 _select_libvirt_tuple /etc/os-release
 IFS= read -r witness_dsn || [[ -n $witness_dsn ]]
