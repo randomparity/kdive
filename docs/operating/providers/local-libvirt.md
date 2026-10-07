@@ -27,8 +27,10 @@ guest, repeated setup, and booted again.
 - **Fedora 44:** every install, boot, confinement and cleanup check held.
 - **Ubuntu 26.04:** installed and booted, but its session-mode guests run unconfined under
   AppArmor (#3067).
-- **Rocky Linux 10:** host preparation stops when Docker comes from Docker's repository (#3068).
-  The lab's stale clean image cannot start Docker at all until its packages are upgraded.
+- **Rocky Linux 10:** the original proof stopped at source repository selection (#3068).
+  The corrected binding builder has passed build/import checks with Docker's repository
+  definition and with podman-docker. This focused proof does not establish a passing
+  clean-host installation cell; the full installation still needs qualification.
 
 See the [proof record](../../design/2026-10-01-host-install-proof-record-2807.md).
 
