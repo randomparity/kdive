@@ -1,14 +1,15 @@
-"""Prove the x86_64 local-libvirt System lifecycle tool cells over HTTP (#3062, ADR-0722).
+"""Prove the x86_64 System lifecycle tool cells over HTTP on both providers (#3062, #3080).
 
-``live_stack``-marked. One parameter per native local-libvirt contract cell of the six
-``systems.*`` lifecycle tools, framed by
-:func:`~tests.integration.live_stack.tool_cells.run_tool_cell`. A functional cell provisions the
-lane image in a fresh ``cov-<hex>`` project through
+``live_stack``-marked (ADR-0722). One parameter per native local-libvirt contract cell and per
+x86_64 remote-libvirt contract cell of the six ``systems.*`` lifecycle tools, framed by
+:func:`~tests.integration.live_stack.tool_cells.run_tool_cell`. A functional cell provisions its
+provider's lane image in a fresh ``cov-<hex>`` project through
 :func:`~tests.integration.live_stack.tool_cells.on_lane_system`, calls the tool in the cell's
-exposure, proves its effect against the worker's libvirt domain, the guest over SSH and its
+exposure, proves its effect against the provider's libvirt domain, the guest over SSH and its
 disks, and proves owned cleanup. A rejection cell aims at the stack's
-:func:`~tests.integration.live_stack.tool_cells.lane_target`, a torn-down System and its
-released Allocation. ``docs/operating/runbooks/live-testing.md`` covers the run.
+:func:`~tests.integration.live_stack.tool_cells.lane_target` for its provider, a torn-down System
+and its released Allocation. ``docs/operating/runbooks/live-testing.md`` covers the local run,
+``docs/operating/runbooks/remote-live-stack.md`` the remote one.
 """
 
 from __future__ import annotations
@@ -35,20 +36,19 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell
-from tests.integration.live_stack.cleanup import disk_absent, domain_disks
+from tests.integration.live_stack.cleanup import domain_disks
 from tests.integration.live_stack.image_smoke import Endpoint, os_matches, ssh
 from tests.integration.live_stack.scenario import (
     CellRun,
     Provision,
     authorize_ssh,
-    catalog_profile,
-    domain_xml,
     provision_catalog,
     ssh_probe,
 )
 from tests.integration.live_stack.spine import await_system_state, drain_job
 from tests.integration.live_stack.tool_cells import (
     IDENTITY_PROBE,
+    REMOTE_LANE_FAMILIES,
     Boundary,
     Exposure,
     Grants,
@@ -57,7 +57,6 @@ from tests.integration.live_stack.tool_cells import (
     LaneTarget,
     Rejection,
     boundary_of,
-    lane_image,
     lane_target,
     on_lane_system,
     one,
@@ -91,7 +90,8 @@ _BELOW: dict[str, str | None] = {"viewer": None, "contributor": "viewer", "admin
 # Teardown answers an id outside the caller's projects with configuration_error, the others with
 # not_found; each answer is byte-identical to the one for an absent id.
 _CONFIG_ERROR_TOOLS = frozenset({"systems.teardown"})
-_HOSTFWD = re.compile(r"hostfwd=tcp:127\.0\.0\.1:(\d+)-:22")
+# The SSH forward's listen address: loopback for local-libvirt, ``ssh_addr`` for remote-libvirt.
+_HOSTFWD = re.compile(r"hostfwd=tcp:([^:,\s]+):(\d+)-:22")
 _MARKER = "/root/kdive-cov-marker"
 _LANE_VCPUS, _LANE_MEMORY_KIB = 2, 2 * 1024 * 1024
 _KEYS = "cat /root/.ssh/authorized_keys"
@@ -140,9 +140,9 @@ def _keys(result: subprocess.CompletedProcess[str]) -> set[str]:
     return {_key_id(line) for line in lines if not line.startswith("#")}
 
 
-def _defined(system_id: str) -> bool:
+def _defined(xml: Callable[[str], str], system_id: str) -> bool:
     try:
-        domain_xml(system_id)
+        xml(system_id)
     except libvirt.libvirtError as exc:
         if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
             return False
@@ -174,7 +174,7 @@ def _provisioner(caller: HttpCaller, token: str) -> Provision:
 
 
 async def _provision(_caller: HttpCaller, _token: str, guest: Guest) -> dict[str, object]:
-    domain = ET.fromstring(domain_xml(guest.system_id))  # noqa: S314  # nosec B314
+    domain = ET.fromstring(guest.lane.xml(guest.system_id))  # noqa: S314  # nosec B314
     vcpus = int(domain.findtext("vcpu") or 0)
     memory = domain.find("memory")
     assert memory is not None and memory.get("unit", "KiB") == "KiB", "domain memory unit"
@@ -186,10 +186,11 @@ async def _provision(_caller: HttpCaller, _token: str, guest: Guest) -> dict[str
 async def _ssh_info(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
     env = await _call(caller, "systems.ssh_info", {"system_id": guest.system_id}, token)
     coords = data_mapping(env, "ssh")
-    xml = domain_xml(guest.system_id)
+    xml = guest.lane.xml(guest.system_id)
     forwarded = _HOSTFWD.search(xml)
-    assert forwarded, "the domain XML carries no loopback SSH forward"
-    assert coords.get("port") == int(forwarded.group(1)), f"ssh_info port {coords.get('port')}"
+    assert forwarded, "the domain XML carries no SSH forward"
+    recorded = (forwarded.group(1), int(forwarded.group(2)))
+    assert (coords.get("host"), coords.get("port")) == recorded, f"ssh_info {coords}"
     endpoint = Endpoint(str(coords["host"]), int(cast(int, coords["port"])))
     probe = await asyncio.to_thread(ssh_probe, endpoint, guest.key, IDENTITY_PROBE)
     uuid = ET.fromstring(xml).findtext("uuid") or ""  # noqa: S314  # nosec B314
@@ -225,18 +226,18 @@ async def _reprovision(caller: HttpCaller, token: str, guest: Guest) -> dict[str
     marked = await asyncio.to_thread(ssh, guest.endpoint, guest.key, f"touch {_MARKER}")
     assert marked.returncode == 0, f"marker write exited {marked.returncode}"
     old = list(guest.owned)
-    profile = catalog_profile(guest.entry, guest.image, f"{guest.project}-unread")
+    profile = guest.lane.profile(f"{guest.project}-unread")
     args = {"system_id": guest.system_id, "profile": profile}
     env = await _call(caller, "systems.reprovision", args, token)
     await drain_job(guest.op, "reprovision", env.object_id)
     await await_system_state(guest.op, "reprovision", guest.system_id, "ready")
-    guest.owned.extend(p for p in domain_disks(domain_xml(guest.system_id)) if p not in old)
+    guest.owned.extend(p for p in domain_disks(guest.lane.xml(guest.system_id)) if p not in old)
     after = guest.scratch / "after"
     after.mkdir()
     endpoint, key = await authorize_ssh(guest.op, guest.system_id, after, "cov")
     probe = await asyncio.to_thread(ssh_probe, endpoint, key)
     assert probe.get("boot_id") != guest.probe.get("boot_id"), "the guest did not reboot"
-    assert os_matches(guest.entry, probe), "the replacement guest is not the catalog image"
+    assert os_matches(guest.lane.entry, probe), "the replacement guest is not the catalog image"
     marker = await asyncio.to_thread(ssh, endpoint, key, f"test -e {_MARKER}")
     assert marker.returncode == 1, "the old install's marker survived the reprovision"
     return {"ready": True, "boot_id_changed": True, "marker": "absent", "disks": len(guest.owned)}
@@ -247,8 +248,9 @@ async def _teardown(caller: HttpCaller, token: str, guest: Guest) -> dict[str, o
     if env.status != "torn_down":
         await drain_job(guest.op, "teardown", env.object_id)
     await await_system_state(guest.op, "teardown", guest.system_id, "torn_down")
-    assert not await asyncio.to_thread(_defined, guest.system_id), "the domain is still defined"
-    surviving = [path for path in guest.owned if not disk_absent(path)]
+    defined = await asyncio.to_thread(_defined, guest.lane.xml, guest.system_id)
+    assert not defined, "the domain is still defined"
+    surviving = [path for path in guest.owned if not guest.lane.absent(path)]
     assert not surviving, f"owned disk(s) survived teardown: {surviving}"
     return {"system": "torn_down", "domain": "absent", "disks_absent": len(guest.owned)}
 
@@ -284,8 +286,7 @@ async def _functional(
 def _target_args(
     tool: str, target: LaneTarget, system_id: str, allocation_id: str
 ) -> dict[str, object]:
-    name, entry = lane_image()
-    profile = catalog_profile(entry, name, f"{target.project}-unread")
+    profile = dict(target.profile)
     if tool == "systems.provision":
         return {"allocation_id": allocation_id, "profile": profile}
     args: dict[str, object] = {"system_id": system_id}
@@ -331,7 +332,12 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
 
 def _cells() -> list[Cell]:
     host = platform.machine()
-    return [c for c in tool_cells(TOOLS) if c.provider == "local-libvirt" and c.guest_arch == host]
+    return [
+        c
+        for c in tool_cells(TOOLS)
+        if (c.provider == "local-libvirt" and c.guest_arch == host)
+        or (c.provider == "remote-libvirt" and c.guest_arch in REMOTE_LANE_FAMILIES)
+    ]
 
 
 @pytest.mark.parametrize("cell", _cells(), ids=lambda cell: cell.id)

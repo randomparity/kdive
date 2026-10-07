@@ -839,7 +839,10 @@ cell compares and with which independent source. Its lanes, environment and asse
 catalog carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`,
 an exported `KDIVE_SYSTEMS_TOML`, KVM on the host, and the staged `fedora-kdive-ready-44` image,
 which every cell boots. Stage the image before writing the bindings: each provider binding carries
-the staged bytes' SHA-256, so a rebuilt image needs new bindings.
+the staged bytes' SHA-256, so a rebuilt image needs new bindings. The same file also carries the
+remote-libvirt cells (#3080), which block without a provider host, so select the local cells with
+`-k local-libvirt` on this lane; the
+[remote runbook](remote-live-stack.md#8-remote-system-tool-cells-3080) runs the others.
 
 - A functional cell provisions the image in a fresh `cov-<hex>` project, authorizes a frame key
   and checks the guest over SSH against the catalog entry, calls the tool through the cell's

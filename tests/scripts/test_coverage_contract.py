@@ -99,7 +99,8 @@ def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> Non
     for operations, provider, owner in (
         (_SYSTEM_TOOLS, "local-libvirt", 3062),
         (_RUN_TOOLS, "local-libvirt", 3119),
-        (_LIFECYCLE_TOOLS, "remote-libvirt", 3080),
+        (_SYSTEM_TOOLS, "remote-libvirt", 3080),
+        (_RUN_TOOLS, "remote-libvirt", 3120),
         (deep, "local-libvirt", 2809),
         (deep, "remote-libvirt", 2810),
     ):
@@ -110,7 +111,8 @@ def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> Non
     assert len([c for c in cells if c.owner == 3119]) == 96
     assert len([c for c in cells if c.owner == 2809]) == 8
     assert len([c for c in cells if c.owner == 2810]) == 8
-    assert len([c for c in cells if c.owner == 3080]) == 216
+    assert len([c for c in cells if c.owner == 3080]) == 120
+    assert len([c for c in cells if c.owner == 3120]) == 96
     functional = [c for c in cells if c.kind == "functional" and c.operation in _LIFECYCLE_TOOLS]
     systems = {(c.roles, c.inputs) for c in functional if c.operation in _SYSTEM_TOOLS}
     assert systems == {(("server", "worker", "reconciler"), ())}
@@ -147,7 +149,8 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     systems = [c for c in contract.cells if c.operation in _SYSTEM_TOOLS]
     local = [c for c in systems if c.provider == "local-libvirt"]
     assert len(local) == 240 and {c.node_id for c in local} == {_SYSTEM_NODE}
-    assert {c.node_id for c in systems if c.provider == "remote-libvirt"} == {None}
+    remote = [c for c in systems if c.provider == "remote-libvirt"]
+    assert len(remote) == 240 and {c.node_id for c in remote} == {_SYSTEM_NODE}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -382,5 +385,5 @@ def test_remote_tool_scenarios_never_share_a_local_node(inventory: Inventory) ->
     mapping.implementations[local.scenario_id] = _DEEP_NODE
     mapped = build_contract(mapping=mapping, inventory=inventory).cells
     same = [c for c in mapped if c.operation == local.operation]
-    assert {c.node_id for c in same if c.provider == "remote-libvirt"} == {None}
+    assert _DEEP_NODE not in {c.node_id for c in same if c.provider == "remote-libvirt"}
     assert _DEEP_NODE in {c.node_id for c in same if c.provider == "local-libvirt"}
