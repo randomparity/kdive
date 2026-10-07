@@ -199,5 +199,11 @@ Steps:
    run, one manual `images.publish` call for `remote-libvirt` with a throwaway name (no image of
    that name exists, so a build that did run could overwrite nothing), recording the job's
    terminal state, error category, message and `details.provider`.
-3. Record the run (candidate, hosts by OS only, outcomes, lab-only workarounds) in §9; `just
-   docs-check`; commit `docs(runbook): record the remote run and image tool-cell lab run`.
+3. Tear down: release any leftover allocation (`allocations.release`, as §7 says), run
+   `demo-down.sh --wipe --yes` after each configuration, check the provider (no `kdive-` domain,
+   only the base volume in the pool), and remove the lab's inventory, TLS client refs, known-host
+   entry, scripts, bundles and probe branches. A leftover the check finds is removed by hand and
+   recorded.
+4. Record the run (candidate, hosts by OS only, outcomes, lab-only workarounds, teardown result)
+   in §9; `just docs-check`; commit `docs(runbook): record the remote run and image tool-cell lab
+   run`.
