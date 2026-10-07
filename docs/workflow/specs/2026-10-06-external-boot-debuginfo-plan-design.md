@@ -15,10 +15,10 @@ canonical bytes unchanged.
 1. `src/kdive/build_artifacts/validation.py`: `_external_boot_evidence` adds
    `"debuginfo": {"sha256", "size_bytes"}` when `heads` has `vmlinux`, and no key otherwise.
    The digest reuses `_digest_object`. A `vmlinux` over `_EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES`
-   (8 GiB) fails completion with `_build_failure`, and the `vmlinux` `ArtifactContract` states
+   (1.5 GiB, ADR-0724) fails completion with `_build_failure`, and the `vmlinux` `ArtifactContract` states
    that `max_bytes`.
 2. `src/kdive/providers/ports/external_boot.py`: new `DebuginfoSource(ArtifactSource)` with
-   `size_bytes` from 1 to 8 GiB. `ExternalBootPlan.debuginfo: DebuginfoSource | None`, default
+   `size_bytes` from 1 to 1.5 GiB. `ExternalBootPlan.debuginfo: DebuginfoSource | None`, default
    `None`, excluded from `model_dump` when `None` (`Field(exclude_if=...)`). This one rule covers
    canonical bytes, job payloads and the SQL identity, which all read `model_dump`.
 3. `src/kdive/services/external_boot/plan.py`: when the evidence has a `debuginfo` key, the plan
@@ -45,11 +45,12 @@ stage implementation (#3131).
 2. **Invariants and assets:** the identity of every plan stored before this change; the SQL
    identity check in migration 0135; the published upload contract.
 3. **Accepted failure classes:**
-   - A Run completed before this change gets no member even with a `vmlinux`. Bounded: the
-     ADR-0723 probe reports `debuginfo_unloadable`; a new Run fixes it.
+   - A Run completed before this change gets no member even with a `vmlinux`. Bounded: as
+     the next entry, and a new Run fixes it.
    - A pre-change process rejects a plan with the member during a mixed-version rollout.
-     Bounded: the boot fails closed with a validation error.
-   - Until #3130 and #3131 land, authorities ignore the member. The probe reports it.
+     Bounded: the boot fails closed; ADR-0724 states the upgrade order.
+   - Until #3130 and #3131 land, authorities ignore the member. The probe reports it on local
+     and SSH-forward attaches; a remote guest-agent attach stays silent (ADR-0723 residual).
 4. **Covered elsewhere:** guest disk space for the file (#3125); recovery of the staged file
    (#3130, #3131).
 

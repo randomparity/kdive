@@ -19,7 +19,7 @@ migrations, five test files, from the task list below.
   `just records`, `just docs-check`, `just env-docs-check`, `just config-docs-check`,
   `just adr-status-check` (after `git fetch origin main`).
 - Code cites #3129, not ADR-0724, while ADR-0724 is Proposed (`adr-status-check`).
-- The 8 GiB bound is `8_589_934_592` bytes in both `validation.py` and `ports/external_boot.py`.
+- The 1.5 GiB bound is `1_610_612_736` bytes in both `validation.py` and `ports/external_boot.py`.
 - Doc style: plain prose; no "critical", "robust", "comprehensive", "elegant".
 
 ## Task 1 — Plan member with canonical omission
@@ -44,7 +44,7 @@ Steps:
    identity differs from the golden one. The null test asserts `from_canonical_json` of the golden
    bytes with `"debuginfo":null` inserted in sorted position raises `ValueError` matching
    `not canonical`. Run: red.
-2. Add `_DEBUGINFO_MAX_BYTES = 8_589_934_592` and
+2. Add `_DEBUGINFO_MAX_BYTES = 1_610_612_736` and
    ```python
    class DebuginfoSource(ArtifactSource):
        size_bytes: Annotated[int, Field(ge=1, le=_DEBUGINFO_MAX_BYTES)]
@@ -65,8 +65,11 @@ computes, over `Jsonb(plan.model_dump(mode="json", by_alias=True))`,
 `'sha256:' || encode(sha256(convert_to('kdive-external-boot-plan-v1','UTF8') || decode('00','hex')
 || convert_to(public.canonical_external_boot_authority_json(%s::jsonb),'UTF8')),'hex')` on
 `psycopg.connect(migrated_url)` and asserts it equals `plan.identity` for
-`external_boot_plan(uuid4(), uuid4())` and for that plan with `model_copy(update={"debuginfo":
-DebuginfoSource(...)})`. Red check: temporarily drop `exclude_if` → the no-member case fails.
+`external_boot_plan(UUID(int=1), UUID(int=2))` and for that plan with
+`model_copy(update={"debuginfo": DebuginfoSource(...)})`. It also asserts the no-member SQL
+identity equals the pre-change value
+`sha256:501702530d3d6f4bf522d5374e82caf7d21c78f840092d8cf787f22f753dbb63` (computed at
+`708a2084d`). Red check: temporarily drop `exclude_if` → that fixed-value assertion fails.
 Command: `uv run python -m pytest tests/db/test_external_boot_authority_preparation_migration.py -q -k sql_plan_identity` → pass (needs Docker).
 
 Steps: write the test, run red by the controlled fault, revert it, run green, commit
@@ -93,7 +96,7 @@ Verification:
 
 Steps:
 1. Write the tests; run red.
-2. Add `_EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES = 8 * 1024 * 1024 * 1024`; add
+2. Add `_EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES = 1_610_612_736`; add
    `max_bytes=_EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES` to the `vmlinux` `FormatContract`. In
    `_external_boot_evidence`, before `bundle_digest.drain()`:
    ```python
@@ -101,7 +104,7 @@ Steps:
    if debuginfo_head is not None:
        if debuginfo_head.size_bytes > _EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES:
            raise _build_failure(
-               "vmlinux exceeds the external-boot byte limit; strip unused debug sections",
+               "vmlinux exceeds the external-boot byte limit; compress its debug sections",
                name="vmlinux",
                max_bytes=_EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES,
            )
@@ -175,7 +178,7 @@ Verification:
   in `tests/providers/local_libvirt/test_external_boot.py` computes `reservation =
   materialization_reservation_bytes(plan) + _MAX_PROJECTION_BYTES + _MAX_RECOVERY_METADATA_BYTES`
   for `_plan()` with a 4096-byte `debuginfo` member (`model_copy(update=...)`); its inline sum
-  goes away. Red: the old local formula refuses at equality (it omits 4096 bytes).
+  goes away. Red: `ImportError` first; with the old formula, the one-over arm is accepted.
 - Contract: the remote caller still refuses an over-capacity plan. Mode: focused-test —
   `test_concrete_remote_materializer_rejects_capacity_and_foreign_binding` stays green.
 - Command: `uv run python -m pytest tests/providers/shared/test_external_boot_bounds.py tests/providers/local_libvirt tests/providers/remote_libvirt -q`.
@@ -201,7 +204,8 @@ Steps:
    and `if isinstance(source, (InitrdSource, DebuginfoSource)): return source.size_bytes`.
 3. Local: `reservation = materialization_reservation_bytes(plan) + _MAX_PROJECTION_BYTES +
    _MAX_RECOVERY_METADATA_BYTES`. Remote: `reservation = materialization_reservation_bytes(plan) +
-   _TEMPORARY_METADATA_BYTES`. Remove the now-unused `initrd_bytes` locals and imports.
+   _TEMPORARY_METADATA_BYTES`. Remove the local-libvirt `initrd_bytes` local and imports that
+   become unused; keep the remote `initrd_bytes`, which `max_bytes` still reads.
 4. Run green; commit `refactor(external-boot): share the materialization reservation`.
 
 ## Final
