@@ -118,6 +118,7 @@ def cloud_init_first_boot_steps(
     steps: list[Step] = []
     if not ctx.is_cloud_image:
         steps.append(InstallPackages(("cloud-init",)))
+    steps.append(Mkdir(str(Path(KDIVE_CLOUD_CFG_PATH).parent)))
     steps.append(Mkdir(NOCLOUD_SEED_DIR))
     steps.append(StageFile(KDIVE_CLOUD_CFG_PATH, cloud_cfg_content))
     steps.append(StageFile(f"{NOCLOUD_SEED_DIR}/meta-data", _NOCLOUD_META_DATA))

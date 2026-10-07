@@ -23,7 +23,7 @@ from kdive.images.families._fedora_customize import (
     readiness_unit,
 )
 from kdive.images.families.base import CustomizeContext
-from kdive.images.families.steps import Mkdir, RunCommand, Step, WriteFile
+from kdive.images.families.steps import Mkdir, RunCommand, StageFile, Step, WriteFile
 from kdive.images.planes._build_common import (
     DRGN_MARKER_GUEST_PATH,
     MAKEDUMPFILE_MARKER_GUEST_PATH,
@@ -139,6 +139,26 @@ def _ci_ctx(tmp_path: Path, *, is_cloud_image: bool) -> CustomizeContext:
 
 def _ci_steps(tmp_path: Path, *, is_cloud_image: bool) -> list[Step]:
     return cloud_init_first_boot_steps(_ci_ctx(tmp_path, is_cloud_image=is_cloud_image))
+
+
+@pytest.mark.parametrize("is_cloud_image", [False, True])
+@pytest.mark.parametrize("existing_config_dir", [False, True])
+def test_cloud_init_files_stage_before_package_install(
+    tmp_path: Path, is_cloud_image: bool, existing_config_dir: bool
+) -> None:
+    guest = tmp_path / "guest"
+    (guest / "etc").mkdir(parents=True)
+    if existing_config_dir:
+        (guest / "etc/cloud/cloud.cfg.d").mkdir(parents=True)
+    for step in _ci_steps(tmp_path, is_cloud_image=is_cloud_image):
+        match step:
+            case Mkdir(path):
+                (guest / path.lstrip("/")).mkdir(parents=True, exist_ok=True)
+            case StageFile(path, content) | WriteFile(path, content):
+                (guest / path.lstrip("/")).write_text(content)
+    assert (guest / KDIVE_CLOUD_CFG_PATH.lstrip("/")).read_text() == (
+        _fedora_customize.KDIVE_CLOUD_CFG_CONTENT
+    )
 
 
 def test_cloud_init_helper_writes_authoritative_cfg(tmp_path: Path) -> None:
