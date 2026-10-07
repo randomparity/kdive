@@ -34,6 +34,8 @@ from tests.integration.live_stack.remote_lifecycle import (
     remote_cleanup,
     remote_kdive_domains,
     remote_profile,
+    remote_volume_absent,
+    staged_base_volume,
     volume_absent,
 )
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
@@ -164,6 +166,20 @@ def test_volume_absent_refreshes_every_pool_before_lookup() -> None:
     assert volume_absent(_conn(_Conn()), "/pool/overlay.qcow2") is False
     with pytest.raises(libvirt.libvirtError):
         volume_absent(_conn(_Conn(_Denied("denied"))), "/pool/overlay.qcow2")
+
+
+def test_remote_volume_absent_closes_its_observer(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _Conn(_NoVolume("gone"))
+    monkeypatch.setattr(remote_lifecycle, "observer", lambda _dest: _conn(conn))
+    assert remote_volume_absent("operator@provider.example", "/pool/overlay.qcow2")
+    assert conn.closed
+
+
+def test_unstaged_base_volume_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(remote_lifecycle, "staged_volume", lambda _name: None)
+    with pytest.raises(ScenarioStop) as stop:
+        staged_base_volume(REMOTE_REPRESENTATIVES["fedora"])
+    assert stop.value.outcome is Outcome.BLOCKED
 
 
 def test_remote_kdive_domains_lists_only_kdive_domains() -> None:
