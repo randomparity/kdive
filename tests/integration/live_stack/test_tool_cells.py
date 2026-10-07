@@ -579,7 +579,7 @@ def test_declared_authority_fails_without_it(
     monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
     monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
     monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
-    cell = _bound(_cell("runs.install", "local-libvirt", "x86_64"))
+    cell = _bound(_cell("runs.release_external_boot", "local-libvirt", "x86_64"))
     assert "authority" in cell.roles
 
     async def body(run: CellRun, *_: object) -> None:
@@ -687,3 +687,37 @@ def test_missing_issuer_fails_instead_of_skipping(
 
     with pytest.raises(pytest.fail.Exception, match="KDIVE_OIDC_ISSUER"):
         tool_cells.run_tool_cell(_run(tmp_path, "authentication").cell, never)
+
+
+def test_published_image_binds_the_product(tmp_path: Path) -> None:
+    image = tmp_path / "image.qcow2"
+    image.write_bytes(b"lane")
+    cells = [c for c in build_contract().cells if c.operation == "images.publish"]
+    publish = {
+        c.exposure: _bound(c)
+        for c in cells
+        if c.kind == "functional" and c.provider == "local-libvirt" and c.guest_arch == "x86_64"
+    }
+    reject = _bound(_cell("images.publish", "local-libvirt", "x86_64", "rejection"))
+    install = _bound(_cell("runs.install", "local-libvirt", "x86_64"))
+    inputs = bindings(
+        "a" * 40,
+        host_os="fedora:44",
+        host_arch="x86_64",
+        matrix="b" * 64,
+        cells=[*publish.values(), reject, install],
+        staged=lambda _name: image,
+    )
+    guests = {e: inputs.cells[c.id].guest_os for e, c in publish.items()}
+    assert guests == {"direct": "fedora:43", "gateway": "rocky:9"}
+    for cell in publish.values():
+        product = inputs.cells[cell.id]
+        assert (product.guest_arch, product.accelerator, product.image_sha256) == (
+            "x86_64",
+            "kvm",
+            None,
+        )
+    lane = hashlib.sha256(b"lane").hexdigest()
+    assert inputs.cells[reject.id].guest_os == "fedora:44"
+    assert inputs.cells[reject.id].image_sha256 == lane
+    assert inputs.cells[install.id].image_sha256 == lane

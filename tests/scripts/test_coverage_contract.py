@@ -63,6 +63,7 @@ _INVESTIGATION_NODE = (
 )
 _OPERATOR_NODE = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 _SYSTEM_NODE = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+_RUN_NODE = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _REMOTE_DEEP_NODE = (
     "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
@@ -116,8 +117,17 @@ def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> Non
     functional = [c for c in cells if c.kind == "functional" and c.operation in _LIFECYCLE_TOOLS]
     systems = {(c.roles, c.inputs) for c in functional if c.operation in _SYSTEM_TOOLS}
     assert systems == {(("server", "worker", "reconciler"), ())}
-    runs = {(c.roles, len(c.inputs)) for c in functional if c.operation in _RUN_TOOLS}
-    assert runs == {(("server", "worker", "reconciler", "authority"), 6)}
+    base = ("server", "worker", "reconciler")
+    runs = {(c.operation, c.roles, len(c.inputs)) for c in functional if c.operation in _RUN_TOOLS}
+    # Operator option B (#3119, 2026-10-07): only the release needs the provider authority,
+    # and images.publish uploads no kernel.
+    assert runs == {
+        ("images.publish", base, 0),
+        ("runs.boot", base, 6),
+        ("runs.cancel", base, 6),
+        ("runs.install", base, 6),
+        ("runs.release_external_boot", (*base, "authority"), 6),
+    }
     local = {c.scenario_id for c in cells if c.operation in deep and c.provider == "local-libvirt"}
     assert local == {"deep-lifecycle/local-libvirt/longterm", "deep-lifecycle/local-libvirt/stable"}
 
@@ -151,6 +161,10 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert len(local) == 240 and {c.node_id for c in local} == {_SYSTEM_NODE}
     remote = [c for c in systems if c.provider == "remote-libvirt"]
     assert len(remote) == 240 and {c.node_id for c in remote} == {_SYSTEM_NODE}
+    runs = [c for c in contract.cells if c.operation in _RUN_TOOLS]
+    local_runs = [c for c in runs if c.provider == "local-libvirt"]
+    assert len(local_runs) == 192 and {c.node_id for c in local_runs} == {_RUN_NODE}
+    assert {c.node_id for c in runs if c.provider == "remote-libvirt"} == {None}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -160,8 +174,11 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_SPLIT[3096],
         *_OPERATOR_TOOLS,
         *_SYSTEM_TOOLS,
+        *_RUN_TOOLS,
     }
-    assert all(c.node_id is None for c in contract.cells if c.operation not in bound)
+    remote_runs = {c.id for c in runs if c.provider == "remote-libvirt"}
+    unbound = [c for c in contract.cells if c.operation not in bound or c.id in remote_runs]
+    assert all(c.node_id is None for c in unbound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
     assert recovery and {c.configuration for c in recovery} == {"recovery"}

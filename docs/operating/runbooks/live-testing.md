@@ -877,6 +877,63 @@ qualified: 24 `success` and 96 `rejection`, including the four `gateway` validat
 `systems.provision` and `systems.reprovision`. After `demo-down.sh --wipe --yes` the worker's
 libvirt defined no domain. An earlier run at `0539e447b` gave the same result.
 
+#### Run and image tool cells (#3119)
+
+`tests/integration/test_run_tool_cells_live.py::test_run_tool_cell` carries the 96 x86_64
+local-libvirt cells of `runs.install`, `runs.boot`, `runs.cancel`, `runs.release_external_boot`
+and `images.publish`. Only the release requires the provider `authority` role, and
+`images.publish` declares no kernel inputs (operator decision, 2026-10-07). The
+[design](../../workflow/specs/2026-10-07-run-tool-cells-design.md) lists what each cell compares.
+The prerequisites are the System cells' above, plus a verified `longterm` kernel fixture under
+`KDIVE_FIXTURE_ROOT`, built as in the deep-lifecycle section with `--baseline longterm`:
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+uv run python -m pytest -m live_stack tests/integration/test_run_tool_cells_live.py
+```
+
+Run each configuration on a freshly wiped stack (`demo-down.sh --wipe --yes`, then `demo-up.sh`,
+with `KDIVE_WORKER_DEATH_VERIFIER=docker` for `recovery`). The staged lane image is registered
+again from `KDIVE_SYSTEMS_TOML` at bring-up, so its digest and the bindings stay valid. Then
+assemble and qualify as in the System section.
+
+- `runs.install` and `runs.boot` cells provision the lane image, upload the fixture and run the
+  deep-lifecycle checks, with the tool under test called through the cell's exposure.
+- A `runs.cancel` cell cancels an uploaded Run whose build it never completed. The System stays
+  ready and untouched and is freed for a new Run.
+- An `images.publish` cell builds and publishes `fedora-kdive-ready-43-cloud` (`direct`) or
+  `rocky-kdive-ready-9` (`gateway`) on the worker, then boots it. The worker needs network
+  access to the pinned cloud-image URLs. `images.publish` returns a stack's existing job for the
+  same image, so a cell stops `blocked` when its image was already published on that stack; this
+  is why each configuration starts from a wiped stack. The published rows stay registered until
+  the wipe.
+- The four `runs.release_external_boot` functional cells stop `blocked` (`missing-prerequisite`):
+  the demo-up lane installs no local external-boot authority. Their rejection cells run.
+- `runs.*` rejection cells aim at one unbound Run created in the stack's System target project.
+  `runs.install` and `runs.boot` answer another project's Run with `configuration_error`,
+  `runs.cancel` and `runs.release_external_boot` with `not_found`; each matches its answer for an
+  absent Run.
+
+The ppc64le local cells share the node but are owner #2818's and are never collected on an
+x86_64 host.
+
+Last run: candidate `0024b4145` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing and no
+provider authority installed, the `longterm` fixture `v6.18.54` built on that host. Each
+configuration ran on a freshly wiped stack: 48 cells, about 15 minutes. `qualify` reported 88 of
+the 96 cells qualified: 12 `success` (`runs.install`, `runs.boot` and `runs.cancel`) and all 76
+`rejection` cells. The four `runs.release_external_boot` functional cells were `blocked` as
+designed. The four `images.publish` functional cells were `failure`. The worker's build job
+dead-lettered with `infrastructure_failure`, because the session libvirt that runs the
+customization boot could not read the worker's build workspace ("Cannot access storage file
+'/var/lib/kdive/build/images/rootfs-build-<random>/<image>.qcow2' ... Permission denied"). The
+build workspace held no leftovers afterwards. After `demo-down.sh --wipe --yes` the worker's
+libvirt defined no `kdive-` domain and `KDIVE_INSTALL_STAGING` was empty.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```

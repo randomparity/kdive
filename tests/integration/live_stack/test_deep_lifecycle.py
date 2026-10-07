@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import shutil
 import struct
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from kdive.images.rootfs.catalog import load_rootfs_catalog
+from kdive.mcp.dev_harness import LiveStackClient
+from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell, build_contract, image_family
 from scripts.kernel_fixtures import identity
+from tests.integration.live_stack import deep_lifecycle
 from tests.integration.live_stack.deep_lifecycle import (
     baseline,
     bindings,
@@ -166,3 +170,24 @@ def test_prove_install_owns_the_path_and_checks_the_digest(tmp_path: Path) -> No
     assert owned == ["/kernels/vmlinuz"]
     with pytest.raises(AssertionError, match="not the uploaded boot member"):
         prove_install(run, steps, ("e" * 64, None), owned, "d" * 64)
+
+
+def test_install_and_boot_use_the_step() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class _Op:
+        async def call_tool(self, name: str, **args: object) -> ToolResponse:
+            if name == "jobs.wait":
+                return ToolResponse.success(str(args["job_id"]), "succeeded")
+            assert name == "runs.get", f"unexpected operator call {name}"
+            steps = {"install": "succeeded", "boot": "succeeded"}
+            return ToolResponse.success("r", "succeeded", data={"steps": steps})
+
+    async def step(name: str, run_id: str) -> ToolResponse:
+        calls.append((name, run_id))
+        return ToolResponse.success(f"job-{name}", "queued")
+
+    op = cast(LiveStackClient, _Op())
+    steps = asyncio.run(deep_lifecycle._install_and_boot(op, "r", step))
+    assert calls == [("install", "r"), ("boot", "r")]
+    assert steps["boot"] == "succeeded"

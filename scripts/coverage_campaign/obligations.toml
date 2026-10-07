@@ -160,12 +160,23 @@ execution = "provider"
 owner = 3119
 execution = "provider"
 kernel = true
-authority = true
 [groups.tools]
-"images.publish" = "Wait for publication and verify the built image's content, catalog provenance and cleanup."
 "runs.boot" = "Wait for boot and compare the guest's running kernel/build identity with uploaded artifacts."
 "runs.cancel" = "Verify operation-specific cancellation leaves the documented system and protected build state."
 "runs.install" = "Wait for installation and compare staged kernel, config and module contents with upload digests."
+
+[[groups]]
+owner = 3119
+execution = "provider"
+[groups.tools]
+"images.publish" = "Wait for publication and verify the built image's content, catalog provenance and cleanup."
+
+[[groups]]
+owner = 3119
+execution = "provider"
+kernel = true
+authority = true
+[groups.tools]
 "runs.release_external_boot" = "Wait for release and verify external-boot state and owned artifacts are reclaimed."
 
 [[groups]]
@@ -473,3 +484,27 @@ kernel = true
 "tool/systems.teardown/default/functional" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
 "tool/systems.teardown/default/project-isolation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
 "tool/systems.teardown/default/validation" = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
+"tool/images.publish/default/authentication" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/images.publish/default/authorization" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/images.publish/default/functional" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/images.publish/default/validation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.boot/default/authentication" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.boot/default/authorization" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.boot/default/functional" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.boot/default/project-isolation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.boot/default/validation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.cancel/default/authentication" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.cancel/default/authorization" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.cancel/default/functional" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.cancel/default/project-isolation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.cancel/default/validation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.install/default/authentication" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.install/default/authorization" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.install/default/functional" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.install/default/project-isolation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.install/default/validation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.release_external_boot/default/authentication" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.release_external_boot/default/authorization" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.release_external_boot/default/functional" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.release_external_boot/default/project-isolation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
+"tool/runs.release_external_boot/default/validation" = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"

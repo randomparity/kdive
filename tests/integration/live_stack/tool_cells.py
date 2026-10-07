@@ -120,6 +120,14 @@ _CONFIGURATIONS: dict[str, tuple[str, list[str]]] = {}
 LANE_IMAGES = {"x86_64": "fedora-kdive-ready-44"}
 # The remote representative family every remote provider cell of a guest architecture boots.
 REMOTE_LANE_FAMILIES = {"x86_64": "fedora"}
+PUBLISH_TOOL = "images.publish"
+# The single-kernel catalog image a functional images.publish cell publishes and boots, per
+# (architecture, exposure). One image per exposure: images.publish never recycles a finished
+# job of the same name, so two cells of one stack cannot both publish one image.
+PUBLISHED_IMAGES = {
+    ("x86_64", "direct"): "fedora-kdive-ready-43-cloud",
+    ("x86_64", "gateway"): "rocky-kdive-ready-9",
+}
 # The DMI product UUID a KVM guest reports is its libvirt domain UUID.
 IDENTITY_PROBE = PROBE + '; printf "product_uuid=%s\\n" "$(cat /sys/class/dmi/id/product_uuid)"'
 _SETTLE_S = 15.0
@@ -573,7 +581,9 @@ def bindings(
     digest, null when unstaged. With ``remote``, a remote cell of the provider host's
     architecture boots that architecture's remote representative there: its host is the provider
     host and its ``image_sha256`` the staged base volume's digest, null when unstaged. ``kernel``
-    fills only the kernel fields a cell declares.
+    fills only the kernel fields a cell declares. A functional ``images.publish`` cell boots
+    ``PUBLISHED_IMAGES[(host_arch, exposure)]``, the image it publishes, with a null
+    ``image_sha256``.
     """
     bound = [c for c in cells if c.scenario_id.startswith("tool/") and c.node_id]
     contexts = {
@@ -584,6 +594,14 @@ def bindings(
         if c.provider == "service"
     }
     native = [c for c in bound if c.provider == "local-libvirt" and c.guest_arch == host_arch]
+    published = [c for c in native if c.operation == PUBLISH_TOOL and c.kind == "functional"]
+    native = [c for c in native if c not in published]
+    for cell in published:
+        product = PUBLISHED_IMAGES.get((host_arch, cell.exposure))
+        if product is not None:
+            # The published image is the cell's output, so no input digest binds it.
+            entry = load_rootfs_catalog()[product]
+            contexts |= _lane_contexts([cell], host_os, host_arch, entry, None, kernel=kernel)
     name = LANE_IMAGES.get(host_arch)
     if native and name is not None:
         image = staged(name)
@@ -818,7 +836,7 @@ async def _allocation_of(db_url: str, system_id: str) -> str:
     return str(row[0])
 
 
-async def _settled(db_url: str, project: str) -> None:
+async def settled(db_url: str, project: str) -> None:
     """Wait until ``project``'s snapshot stops changing (release bookkeeping runs after it)."""
     for _ in range(_SETTLE_ATTEMPTS):
         before = await project_state(db_url, project)
@@ -851,7 +869,7 @@ async def _provision_target(
         provision=provision_catalog,
     )
     allocation = await _allocation_of(db_url, seen[0])
-    await _settled(db_url, project)
+    await settled(db_url, project)
     cleanup = target.assertions["cleanup"]
     summary = run.writer.artifact(
         {"lane_target": {"system": "torn_down", "allocation": "released"}, "cleanup": cleanup}
@@ -941,8 +959,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args.out.write_text(inputs.model_dump_json(indent=1) + "\n", encoding="utf-8")
     print(f"wrote {len(inputs.cells)} tool-cell binding(s)")
+    published = {
+        c.id for c in contract.cells if c.operation == PUBLISH_TOOL and c.kind == "functional"
+    }
     unstaged = sum(
-        c.guest_arch is not None and c.image_sha256 is None for c in inputs.cells.values()
+        c.guest_arch is not None and c.image_sha256 is None
+        for cell_id, c in inputs.cells.items()
+        if cell_id not in published
     )
     if unstaged:
         print(

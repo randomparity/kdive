@@ -1019,3 +1019,39 @@ def test_a_missing_published_endpoint_takes_the_default(monkeypatch: pytest.Monk
     monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
     _no_published_endpoint(monkeypatch)
     assert spine.worker_libvirt_uri() == "qemu:///system"
+
+
+def test_spine_upload_can_leave_the_build_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / ".config").write_bytes(_BOOT_CONFIG + b"CONFIG_VIRTIO_NET=y\n")
+    kernel_tar = tmp_path / "kernel.tar"
+    kernel_tar.write_bytes(b"tar")
+    monkeypatch.setattr(
+        spine, "accepted_run_upload_names", lambda _c: ["kernel", "effective_config"]
+    )
+    monkeypatch.setattr(spine, "combined_kernel_tar", lambda *_a, **_k: kernel_tar)
+    calls: list[str] = []
+
+    async def _scalar(client: object, name: str, **args: object) -> ToolResponse:
+        calls.append(name)
+        items = [_upload_item(n) for n in ("kernel", "effective_config")]
+        return ToolResponse.collection("run-1", "pending", items)
+
+    async def _put(item: ToolResponse, path: Path) -> None:
+        return None
+
+    monkeypatch.setattr(spine, "scalar", _scalar)
+    monkeypatch.setattr(spine, "put_presigned", _put)
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+    asyncio.run(
+        spine.build_and_upload_kernel(
+            cast(Any, client),
+            run_id="run-1",
+            kernel_tree=tmp_path,
+            evidence_dir=tmp_path / "evidence",
+            complete=False,
+        )
+    )
+    assert calls == ["artifacts.create_run_upload"]
+    assert json.loads((tmp_path / "evidence/upload.json").read_text())["result"] is None
