@@ -85,27 +85,39 @@ def construct_external_boot_plan(
             "sha256": initrd_evidence.get("sha256"),
             "size_bytes": initrd_evidence.get("size_bytes"),
         }
-    # Evidence without a debuginfo key (no vmlinux, or completed before #3129) yields no member.
-    debuginfo_evidence = evidence.get("debuginfo")
-    if debuginfo_evidence is not None:
-        vmlinux = artifacts.get("vmlinux")
-        debuginfo_ref = result.get("debuginfo_ref")
-        if (
-            not isinstance(debuginfo_evidence, dict)
-            or vmlinux is None
-            or not isinstance(debuginfo_ref, str)
-        ):
-            raise _invalid("external_boot_debuginfo_incomplete")
-        data["debuginfo"] = {
-            "key": debuginfo_ref,
-            "version": vmlinux.get("version_id"),
-            "sha256": debuginfo_evidence.get("sha256"),
-            "size_bytes": debuginfo_evidence.get("size_bytes"),
-        }
+    debuginfo = _debuginfo_source(build, evidence)
+    if debuginfo is not None:
+        data["debuginfo"] = debuginfo
     try:
         return ExternalBootPlan.model_validate(cast("object", data))
     except ValidationError as exc:
         raise _invalid("external_boot_plan_invalid") from exc
+
+
+def _debuginfo_source(
+    build: InvestigationBuild, evidence: dict[str, JsonValue]
+) -> dict[str, JsonValue] | None:
+    """Return the plan's debuginfo member from pinned build evidence (#3129).
+
+    Evidence without a debuginfo key (no vmlinux, or completed before #3129) yields no member.
+    """
+    debuginfo_evidence = evidence.get("debuginfo")
+    if debuginfo_evidence is None:
+        return None
+    vmlinux = build.artifacts.get("vmlinux")
+    debuginfo_ref = build.build_result.get("debuginfo_ref")
+    if (
+        not isinstance(debuginfo_evidence, dict)
+        or vmlinux is None
+        or not isinstance(debuginfo_ref, str)
+    ):
+        raise _invalid("external_boot_debuginfo_incomplete")
+    return {
+        "key": debuginfo_ref,
+        "version": vmlinux.get("version_id"),
+        "sha256": debuginfo_evidence.get("sha256"),
+        "size_bytes": debuginfo_evidence.get("size_bytes"),
+    }
 
 
 def external_boot_root_arguments(
