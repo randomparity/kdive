@@ -202,7 +202,10 @@ Steps:
        assert set(inputs.cells) == {remote.id}
        bound = inputs.cells[remote.id]
        assert (bound.host_os, bound.host_arch, bound.guest_os, bound.guest_arch) == (
-           "rocky:10.2", "x86_64", "fedora:43", "x86_64"
+           "rocky:10.2",
+           "x86_64",
+           "fedora:43",
+           "x86_64",
        )
        assert (bound.accelerator, bound.image_sha256) == ("kvm", "f" * 64)
 
@@ -247,7 +250,9 @@ Steps:
        monkeypatch.setattr(tool_cells, "_provision_target", prepare)
        local = _cell("systems.ssh_info", "local-libvirt", "x86_64")
        for cell in (_run(tmp_path, "authentication").cell, local, local):
-           asyncio.run(tool_cells.lane_target(CellRun(cell, EvidenceWriter(tmp_path)), "u", issuer, "db"))
+           asyncio.run(
+               tool_cells.lane_target(CellRun(cell, EvidenceWriter(tmp_path)), "u", issuer, "db")
+           )
        assert prepared == ["service", "local-libvirt"]
    ```
    (`_cell(tool, provider, arch)` is the file's existing helper; import `RemoteHost` from
