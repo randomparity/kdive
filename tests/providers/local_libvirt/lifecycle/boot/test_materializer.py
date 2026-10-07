@@ -235,6 +235,79 @@ def test_materialize_streams_exact_version_publishes_last_and_retries(tmp_path: 
     assert set(client.requests) == {("build/kernel", "kernel-v1")}
 
 
+_VMLINUX = b"\x7fELF debuginfo for #3130"
+
+
+def _with_debuginfo(plan: ExternalBootPlan, *, size: int = len(_VMLINUX)) -> ExternalBootPlan:
+    return ExternalBootPlan.model_validate(
+        {
+            **plan.model_dump(by_alias=True),
+            "debuginfo": {
+                "key": "build/vmlinux",
+                "version": "vmlinux-v1",
+                "sha256": "sha256:" + hashlib.sha256(_VMLINUX).hexdigest(),
+                "size_bytes": size,
+            },
+        }
+    )
+
+
+def test_materialize_fetches_exact_debuginfo_version(tmp_path: Path) -> None:
+    bundle = _bundle()
+    plan = _with_debuginfo(_plan(bundle))
+    client = _Client(
+        {("build/kernel", "kernel-v1"): bundle, ("build/vmlinux", "vmlinux-v1"): _VMLINUX}
+    )
+    materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
+    session = _Session(tmp_path / "activation")
+
+    first = materializer.materialize(plan, cast(LocalExternalBootSession, session))
+    second = materializer.materialize(plan, cast(LocalExternalBootSession, _Session(session.root)))
+
+    assert second == first
+    assert plan.debuginfo is not None
+    assert first.verified_debuginfo_sha256 == plan.debuginfo.sha256
+    assert first.artifacts.debuginfo is not None
+    assert first.artifacts.debuginfo.ref.endswith("/debuginfo")
+    digest_dir = session.root / first.artifacts.kernel.ref.split("/")[4]
+    assert (digest_dir / "debuginfo").read_bytes() == _VMLINUX
+    assert ((digest_dir / "debuginfo").stat().st_mode & 0o777) == 0o600
+    assert client.requests.count(("build/vmlinux", "vmlinux-v1")) == 1
+
+
+def test_materialize_rejects_debuginfo_size_mismatch(tmp_path: Path) -> None:
+    bundle = _bundle()
+    plan = _with_debuginfo(_plan(bundle), size=len(_VMLINUX) + 1)
+    client = _Client(
+        {("build/kernel", "kernel-v1"): bundle, ("build/vmlinux", "vmlinux-v1"): _VMLINUX}
+    )
+    session = _Session(tmp_path / "activation")
+
+    with pytest.raises(ValueError, match="exact object version size"):
+        RealLocalExternalBootMaterializer(ObjectStore(client, "bucket")).materialize(
+            plan, cast(LocalExternalBootSession, session)
+        )
+
+    assert not list(session.root.glob("*/debuginfo"))
+
+
+def test_revalidation_rejects_changed_debuginfo_bytes(tmp_path: Path) -> None:
+    bundle = _bundle()
+    plan = _with_debuginfo(_plan(bundle))
+    client = _Client(
+        {("build/kernel", "kernel-v1"): bundle, ("build/vmlinux", "vmlinux-v1"): _VMLINUX}
+    )
+    materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
+    session = _Session(tmp_path / "activation")
+    first = materializer.materialize(plan, cast(LocalExternalBootSession, session))
+    payload = session.root / first.artifacts.kernel.ref.split("/")[4] / "debuginfo"
+    payload.write_bytes(_VMLINUX[:-1] + b"!")
+
+    with pytest.raises(ValueError, match="materialized debuginfo bytes"):
+        materializer.materialize(plan, cast(LocalExternalBootSession, _Session(session.root)))
+    assert client.requests.count(("build/vmlinux", "vmlinux-v1")) == 1
+
+
 def test_materialize_confines_and_closes_conversion_temporaries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

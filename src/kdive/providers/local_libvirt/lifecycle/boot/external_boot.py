@@ -69,6 +69,7 @@ from kdive.providers.ports.external_boot import (
     ActivationOwnership,
     ArtifactSource,
     ComponentState,
+    DebuginfoSource,
     ExternalBootActivationBinding,
     ExternalBootArtifactStager,
     ExternalBootMaterialization,
@@ -438,6 +439,7 @@ _OWNED_TEMPORARY_NAMES = frozenset(
         ".modules.next",
         ".initrd.next",
         ".initrd.verify",
+        ".debuginfo.next",
         _PROJECTION_TEMPORARY_NAME,
     }
 )
@@ -580,7 +582,7 @@ def _artifact_ref_parts(
         or parts[3] != activation_id
         or len(parts[4]) != 64
         or any(character not in "0123456789abcdef" for character in parts[4])
-        or parts[5] not in {"kernel", "modules", "initrd"}
+        or parts[5] not in {"kernel", "modules", "initrd", "debuginfo"}
     ):
         raise ValueError("local artifact reference is malformed or cross-owner")
     return parts
@@ -1211,6 +1213,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             installed_module_tree=installed_manifest,
             verified_bundle_sha256=plan.bundle.sha256,
             verified_initrd_sha256=None if plan.initrd is None else plan.initrd.sha256,
+            verified_debuginfo_sha256=None if plan.debuginfo is None else plan.debuginfo.sha256,
             kernel_observation=KernelIdentity(
                 architecture=plan.architecture,
                 release=str(evidence["release"]),
@@ -1220,6 +1223,9 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
                 kernel=_projection_ref(projection, "kernel"),
                 modules=_projection_ref(projection, "modules"),
                 initrd=(None if plan.initrd is None else _projection_ref(projection, "initrd")),
+                debuginfo=(
+                    None if plan.debuginfo is None else _projection_ref(projection, "debuginfo")
+                ),
             ),
         )
 
@@ -1236,6 +1242,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
         """Reopen and validate previously materialized exact artifacts without writing them."""
         evidence, installed_manifest = self._validate_local_bundle(plan, directory_fd)
         self._validate_local_initrd(plan, directory_fd)
+        self._validate_local_debuginfo(plan, directory_fd)
         return evidence, installed_manifest
 
     def inspect_prepare(
@@ -1260,6 +1267,12 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
                 None
                 if projection.initrd_filename is None
                 else _projection_ref(projection, "initrd")
+            )
+            or materialization.artifacts.debuginfo
+            != (
+                None
+                if materialization.verified_debuginfo_sha256 is None
+                else _projection_ref(projection, "debuginfo")
             )
         ):
             raise ValueError("external-boot materialization does not match target projection")
@@ -1348,6 +1361,12 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             )
             os.close(initrd_fd)
             _commit_private_artifact(directory_fd, ".initrd.next", "initrd")
+        if plan.debuginfo is not None:
+            debuginfo_fd = _stream_exact_version(
+                self._object_store, plan.debuginfo, directory_fd, ".debuginfo.next"
+            )
+            os.close(debuginfo_fd)
+            _commit_private_artifact(directory_fd, ".debuginfo.next", "debuginfo")
 
     @staticmethod
     def _validate_bundle_evidence(plan: ExternalBootPlan, descriptor: int) -> dict[str, object]:
@@ -1426,6 +1445,16 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
         if digest != plan.initrd.sha256 or size != plan.initrd.size_bytes:
             raise ValueError("materialized initrd bytes do not match external-boot plan")
 
+    @staticmethod
+    def _validate_local_debuginfo(plan: ExternalBootPlan, directory_fd: int) -> None:
+        # Unlike the initrd, the object is not streamed a second time: a second copy of up to
+        # 1.5 GiB is outside the materialization reservation (#3130).
+        if plan.debuginfo is None:
+            return
+        digest, size = _descriptor_digest(directory_fd, "debuginfo")
+        if digest != plan.debuginfo.sha256 or size != plan.debuginfo.size_bytes:
+            raise ValueError("materialized debuginfo bytes do not match external-boot plan")
+
 
 def _stream_exact_version(
     store: ObjectStore, source: ArtifactSource, directory_fd: int, name: str
@@ -1467,8 +1496,8 @@ def _stream_exact_version(
                     view = view[written:]
         if "sha256:" + digest.hexdigest() != source.sha256:
             raise ValueError("exact object version digest does not match external-boot plan")
-        if isinstance(source, InitrdSource) and size != source.size_bytes:
-            raise ValueError("exact initrd version size does not match external-boot plan")
+        if isinstance(source, InitrdSource | DebuginfoSource) and size != source.size_bytes:
+            raise ValueError("exact object version size does not match external-boot plan")
         os.fsync(descriptor)
         os.lseek(descriptor, 0, os.SEEK_SET)
         return descriptor
@@ -1622,7 +1651,7 @@ def _cleanup_uncommitted_payloads(directory_fd: int, primary: BaseException) -> 
         primary.add_note("uncommitted payload cleanup refused: projection is committed")
         return
     entries = set(os.listdir(directory_fd))
-    allowed = {"kernel", "modules", "initrd", *_OWNED_TEMPORARY_NAMES}
+    allowed = {"kernel", "modules", "initrd", "debuginfo", *_OWNED_TEMPORARY_NAMES}
     if not entries <= allowed:
         primary.add_note("uncommitted payload cleanup refused: projection has unknown entries")
         return
@@ -4132,6 +4161,8 @@ class RecoveryMetadataStore:
         refs = [materialization.artifacts.kernel, materialization.artifacts.modules]
         if materialization.artifacts.initrd is not None:
             refs.append(materialization.artifacts.initrd)
+        if materialization.artifacts.debuginfo is not None:
+            refs.append(materialization.artifacts.debuginfo)
         parts = [_artifact_ref_parts(ref, ownership, binding.activation_id) for ref in refs]
         if any(item[1:5] != parts[0][1:5] for item in parts[1:]):
             raise ValueError("materialization artifacts do not share one projection")
