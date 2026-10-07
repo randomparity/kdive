@@ -579,7 +579,7 @@ def test_declared_authority_fails_without_it(
     monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
     monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
     monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
-    cell = _bound(_cell("runs.install", "local-libvirt", "x86_64"))
+    cell = _bound(_cell("runs.release_external_boot", "local-libvirt", "x86_64"))
     assert "authority" in cell.roles
 
     async def body(run: CellRun, *_: object) -> None:

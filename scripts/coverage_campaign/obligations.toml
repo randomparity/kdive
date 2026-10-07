@@ -160,12 +160,23 @@ execution = "provider"
 owner = 3119
 execution = "provider"
 kernel = true
-authority = true
 [groups.tools]
-"images.publish" = "Wait for publication and verify the built image's content, catalog provenance and cleanup."
 "runs.boot" = "Wait for boot and compare the guest's running kernel/build identity with uploaded artifacts."
 "runs.cancel" = "Verify operation-specific cancellation leaves the documented system and protected build state."
 "runs.install" = "Wait for installation and compare staged kernel, config and module contents with upload digests."
+
+[[groups]]
+owner = 3119
+execution = "provider"
+[groups.tools]
+"images.publish" = "Wait for publication and verify the built image's content, catalog provenance and cleanup."
+
+[[groups]]
+owner = 3119
+execution = "provider"
+kernel = true
+authority = true
+[groups.tools]
 "runs.release_external_boot" = "Wait for release and verify external-boot state and owned artifacts are reclaimed."
 
 [[groups]]

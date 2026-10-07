@@ -116,8 +116,17 @@ def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> Non
     functional = [c for c in cells if c.kind == "functional" and c.operation in _LIFECYCLE_TOOLS]
     systems = {(c.roles, c.inputs) for c in functional if c.operation in _SYSTEM_TOOLS}
     assert systems == {(("server", "worker", "reconciler"), ())}
-    runs = {(c.roles, len(c.inputs)) for c in functional if c.operation in _RUN_TOOLS}
-    assert runs == {(("server", "worker", "reconciler", "authority"), 6)}
+    base = ("server", "worker", "reconciler")
+    runs = {(c.operation, c.roles, len(c.inputs)) for c in functional if c.operation in _RUN_TOOLS}
+    # Operator option B (#3119, 2026-10-07): only the release needs the provider authority,
+    # and images.publish uploads no kernel.
+    assert runs == {
+        ("images.publish", base, 0),
+        ("runs.boot", base, 6),
+        ("runs.cancel", base, 6),
+        ("runs.install", base, 6),
+        ("runs.release_external_boot", (*base, "authority"), 6),
+    }
     local = {c.scenario_id for c in cells if c.operation in deep and c.provider == "local-libvirt"}
     assert local == {"deep-lifecycle/local-libvirt/longterm", "deep-lifecycle/local-libvirt/stable"}
 
