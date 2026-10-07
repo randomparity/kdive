@@ -411,6 +411,10 @@ class TargetProjectionV1(_ClosedValue):
     modules_filename: Literal["modules"] = "modules"
     initrd_filename: Literal["initrd"] | None
     whole_disk_root_uuid: Annotated[str, Field(min_length=1, max_length=255)] | None = None
+    # Omitted when absent so projections written before #3130 keep their digest.
+    debuginfo_filename: Literal["debuginfo"] | None = Field(
+        None, exclude_if=lambda value: value is None
+    )
 
     def canonical_bytes(self) -> bytes:
         return json.dumps(
@@ -1185,6 +1189,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             cmdline=plan.cmdline,
             initrd_filename=None if plan.initrd is None else "initrd",
             whole_disk_root_uuid=_whole_disk_root_uuid(plan),
+            debuginfo_filename=None if plan.debuginfo is None else "debuginfo",
         )
         with session.projection_directory(projection) as directory_fd:
             try:
@@ -1271,7 +1276,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             or materialization.artifacts.debuginfo
             != (
                 None
-                if materialization.verified_debuginfo_sha256 is None
+                if projection.debuginfo_filename is None
                 else _projection_ref(projection, "debuginfo")
             )
         ):

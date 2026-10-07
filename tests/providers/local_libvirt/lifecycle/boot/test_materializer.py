@@ -273,6 +273,14 @@ def test_materialize_fetches_exact_debuginfo_version(tmp_path: Path) -> None:
     assert (digest_dir / "debuginfo").read_bytes() == _VMLINUX
     assert ((digest_dir / "debuginfo").stat().st_mode & 0o777) == 0o600
     assert client.requests.count(("build/vmlinux", "vmlinux-v1")) == 1
+    assert session.reopen_projection(first.artifacts.kernel).debuginfo_filename == "debuginfo"
+
+
+def test_a_projection_without_debuginfo_keeps_its_pre_3130_bytes() -> None:
+    projection = _projection_for(_plan(_bundle()))
+
+    assert projection.debuginfo_filename is None
+    assert b"debuginfo" not in projection.canonical_bytes()
 
 
 def test_materialize_rejects_debuginfo_size_mismatch(tmp_path: Path) -> None:

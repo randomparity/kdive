@@ -31,7 +31,9 @@ path must do the same, and recovery must put back what was there before.
    1.5 GiB copy is not in the ADR-0724 reservation. The new names join the owned payload and
    temporary sets (`PAYLOAD_NAMES`, `_OWNED_TEMPORARY_NAMES`, `_artifact_ref_parts`, the
    uncommitted-payload cleanup and the partial-abort references), so the existing cleanup and
-   abort paths remove them.
+   abort paths remove them. `TargetProjectionV1` gains `debuginfo_filename`, omitted when
+   absent so stored projection digests do not change, and the payload-name test keeps
+   `PAYLOAD_NAMES` equal to the projection's file names.
 3. **Guest file unit** (new `GuestDebuginfoFile` in `lifecycle/boot/external_boot.py`). It owns
    three names in `/usr/lib/debug/lib/modules/<release>/`: live `vmlinux`, staging
    `.kdive-<activation>-vmlinux-staging`, and old `.kdive-<activation>-vmlinux-old`. It
@@ -104,9 +106,10 @@ modules and the definition only.
    - Mixed versions: a server or worker from before this change rejects a materialization or
      recovery point that carries the new members (closed models). With #3129 already on every
      host, upgrade the server and workers before, or together with, the local authority host.
-   - An activation whose materialize step ran on an authority from before this change and is
-     retried after the upgrade fails on the missing `debuginfo` payload; it is aborted and a new
-     activation materializes it.
+   - An activation whose materialize step ran on an authority from before this change, with no
+     committed receipt, and is retried after the upgrade materializes again under a new
+     projection digest (the projection names the `debuginfo` payload); the earlier partial
+     projection directory is not removed by that activation.
    - Disk space: a prior file doubles guest usage during the activation. Covered by #3125.
    - A prior that is a symlink or other non-regular file: prepare refuses the install.
    - Created directories remain after recovery (empty, under `/usr/lib/debug`).
