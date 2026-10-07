@@ -35,8 +35,8 @@ identity of every stored plan.
 4. The materialization reservation that both authorities check counts the member's size. One
    provider-neutral function computes it.
 5. Both authorities stage the member and restore the prior file on recovery. Local-libvirt does
-   it in #3130 with the modules' staged-then-rename pattern; its recovery-object kinds
-   (migration 0138) gain a member. Remote-libvirt does it in #3131, which chooses the write and
+   it in #3130 with the modules' staged-then-rename pattern; #3130 decides the recovery-object
+   change. Remote-libvirt does it in #3131, which chooses the write and
    recovery mechanism. ADR-0585 allows the remote module appliance one mutable destination,
    `lib/modules/<release>/`, so #3131 amends ADR-0585 or stages inside that tree. Until each
    lands, that authority ignores the member: the ADR-0723 probe reports `debuginfo_unloadable`
@@ -53,7 +53,9 @@ identity of every stored plan.
   one, complete the build again in a new Run.
 - Build completion reads the whole `vmlinux` (up to 1.5 GiB) once to hash it, for every
   external build. Finalizations are serialized per server process, so this extends the
-  synchronous completion cost that ADR-0656 measured for the bundle alone.
+  synchronous completion cost that ADR-0656 measured for the bundle alone. At the 6.9 s per
+  1.8 GB store read that ADR-0656 records, 1.5 GiB adds about 6 s plus hashing; this is not
+  measured on a deployment.
 - The 1.5 GiB bound keeps the largest local reservation (34,055,536,640 bytes) under the shipped
   32 GiB `KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES`. The bound also applies to builds that
   only use the legacy install path.
