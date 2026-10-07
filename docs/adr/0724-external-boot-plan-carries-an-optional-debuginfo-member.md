@@ -56,9 +56,9 @@ not change.
 
 Consequences of this choice: the guest holds both files while the activation is live (free
 space is #3125), and directories created for the file stay after recovery. A server or worker
-from before #3130 rejects a materialization or recovery point that carries the new members, so
-for this change upgrade the server and workers before, or together with, the local authority
-host.
+from before #3130 rejects a materialization or recovery point that carries the new members.
+This reverses the upgrade order under Consequences for this change only: with #3129 already on
+every host, upgrade the server and workers before, or together with, the local authority host.
 
 Considered & rejected:
 

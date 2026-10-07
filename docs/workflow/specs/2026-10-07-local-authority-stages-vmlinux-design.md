@@ -102,8 +102,8 @@ modules and the definition only.
      module-tree change, `observe_state` does not report it as a conflict. Bounded because only
      root in the guest can do it.
    - Mixed versions: a server or worker from before this change rejects a materialization or
-     recovery point that carries the new members (closed models). Upgrade the server and
-     workers before, or together with, the local authority host.
+     recovery point that carries the new members (closed models). With #3129 already on every
+     host, upgrade the server and workers before, or together with, the local authority host.
    - An activation whose materialize step ran on an authority from before this change and is
      retried after the upgrade fails on the missing `debuginfo` payload; it is aborted and a new
      activation materializes it.
