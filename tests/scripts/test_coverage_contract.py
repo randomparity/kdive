@@ -164,7 +164,8 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     runs = [c for c in contract.cells if c.operation in _RUN_TOOLS]
     local_runs = [c for c in runs if c.provider == "local-libvirt"]
     assert len(local_runs) == 192 and {c.node_id for c in local_runs} == {_RUN_NODE}
-    assert {c.node_id for c in runs if c.provider == "remote-libvirt"} == {None}
+    remote_runs = [c for c in runs if c.provider == "remote-libvirt"]
+    assert len(remote_runs) == 192 and {c.node_id for c in remote_runs} == {_RUN_NODE}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -176,8 +177,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_SYSTEM_TOOLS,
         *_RUN_TOOLS,
     }
-    remote_runs = {c.id for c in runs if c.provider == "remote-libvirt"}
-    unbound = [c for c in contract.cells if c.operation not in bound or c.id in remote_runs]
+    unbound = [c for c in contract.cells if c.operation not in bound]
     assert all(c.node_id is None for c in unbound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]

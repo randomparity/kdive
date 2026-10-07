@@ -398,3 +398,87 @@ skipped the other lane's 60. The `KDIVE_WORKER_DEATH_VERIFIER=docker` lane prove
 provider host as `rocky:10.2` and the guest as `fedora:43`. No record or artifact carried a host
 name or address. After the run the provider defined no `kdive-` domain and held only its base
 volume, and `demo-down.sh --wipe --yes` cleared the stack.
+
+## 9. Remote run and image tool cells (#3120)
+
+`tests/integration/test_run_tool_cells_live.py::test_run_tool_cell` also carries the 96 x86_64
+remote-libvirt cells of `runs.install`, `runs.boot`, `runs.cancel`, `runs.release_external_boot`
+and `images.publish`. Their parameter ids contain `remote-libvirt`, so `-k remote-libvirt` selects
+them. The bodies and rejection boundaries are the local cells' of the
+[live-testing runbook](live-testing.md#run-and-image-tool-cells-3119), on §8's remote lane; the
+[design](../../workflow/specs/2026-10-07-remote-run-tool-cells-design.md) lists what differs.
+
+- `runs.install` and `runs.boot` cells provision `fedora-kdive-remote-base-43`, upload the
+  `longterm` fixture and run §7's checks, with the tool under test called through the cell's
+  exposure. The install is in-guest, so the installed kernel is the digest of the guest's
+  `/boot/vmlinuz-<release>`.
+- A `runs.cancel` cell cancels an uploaded Run whose build it never completed. The System stays
+  ready, the guest keeps its `boot_id`, and the System is freed for a new Run.
+- The four `runs.release_external_boot` functional cells stop `blocked`: no runbook provisions a
+  remote provider authority, and an authority on the instance would route every remote install
+  and boot through external boot.
+- The four `images.publish` functional cells stop `blocked`: the `IMAGE_BUILD` handler builds
+  catalog images for local-libvirt only. Remote base images are staged with
+  `deploy/ansible/playbooks/image.yml`.
+- Both blocked kinds first probe the provider host, so their records carry it as their host.
+- `runs.*` rejection cells aim at one unbound `remote-libvirt` Run in the stack's remote System
+  target project. `images.publish` rejection cells aim at `fedora-kdive-remote-base-43` with
+  provider `remote-libvirt`; their snapshot holds that name's catalog rows and build jobs.
+
+Prerequisites, in addition to §8's:
+
+- A verified `longterm` kernel fixture under `KDIVE_FIXTURE_ROOT`, built as in the
+  [live-testing runbook](live-testing.md#deep-lifecycle-across-representative-guests-2809).
+- `KDIVE_S3_ENDPOINT_URL` set, before the bring-up, to an object-store address the remote guests
+  reach (§3): the install downloads the kernel in the guest. If the provider host runs Docker,
+  its `FORWARD` drop policy also needs §7's `DOCKER-USER` rule (#3093).
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix REMOTE_PROVIDER_SSH=<user>@<provider-host>
+export KDIVE_SYSTEMS_TOML=<the stack's systems.toml> KDIVE_S3_ENDPOINT_URL=<guest-reachable URL>
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
+examples/local-libvirt/demo-up.sh             # default configuration, on a wiped stack
+uv run python -m pytest -m live_stack tests/integration/test_run_tool_cells_live.py -k remote-libvirt
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack tests/integration/test_run_tool_cells_live.py -k remote-libvirt
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Each configuration records 48 cells: 6 `success`, 38 `rejection` and 4 `blocked`, and skips the
+other configuration's 48. `qualify` then qualifies 88 of the 96 and lists the 8 blocked cells,
+so it exits non-zero by design. After an interrupted run, release the leftover allocation as §7
+says before the wipe. After the run, `demo-down.sh --wipe --yes` clears the stack. Then check the
+provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no `kdive-` overlay
+volume.
+
+Last run: candidate `da633d359` (server, worker and reconciler at that SHA in both
+configurations; later commits change only this record). The control plane was a disposable
+Fedora 44 x86_64 lab guest with SELinux enforcing, with the `longterm` fixture `v6.18.54` built
+there. The provider was a separate disposable Rocky Linux 10.2 x86_64 host with SELinux
+enforcing, itself a KVM guest whose domains ran with the `kvm` accelerator (nested), prepared
+with `site.yml` (a fresh PKI from `playbooks/pki.yml`) and `image.yml` for
+`fedora-kdive-remote-base-43` alone. One provider-host step existed only because of an open
+defect and is not product coverage: firewalld was installed and enabled before `site.yml`
+(#3083). The provider runs no Docker, so §7's `DOCKER-USER` rule (#3093) was not needed; the
+guests reached the object store at the control plane's LAN address. Each configuration recorded
+its 48 cells on a freshly wiped stack in about ten minutes and skipped the other 48. The
+`KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`.
+
+`qualify` qualified 88 of the 96 cells: 12 `success` (`runs.install`, `runs.boot` and
+`runs.cancel`, both exposures, both configurations) and all 76 `rejection` cells, each record
+carrying the provider host as `rocky:10.2` and the guest as `fedora:43`. The eight blocked
+functional cells recorded the provider host but no guest or kernel, so `qualify` lists
+`input-digest-mismatch` and `input-context-mismatch` beside `missing-prerequisite` for them, and
+`deployed-role-missing` for the four release cells, which require the `authority` role. One
+`images.publish` call for `remote-libvirt` with a name no image carries, made on the default
+stack after its cells, enqueued an `IMAGE_BUILD` job that failed on its first attempt with
+`configuration_error`, "provider-specific image build request is not implemented", provider
+`remote-libvirt`. No record or artifact carried a host name or address. After each configuration
+and after the final `demo-down.sh --wipe --yes`, the provider defined no `kdive-` domain and its
+pool held only the base volume.
