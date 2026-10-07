@@ -8,7 +8,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -25,6 +25,7 @@ from kdive.providers.local_libvirt.system_authority import (
     LocalAuthoritySystemError,
     LocalAuthoritySystemProvider,
     LocalAuthoritySystemTopology,
+    _Completion,
     _Intent,
 )
 from kdive.providers.ports.external_boot import RootSpecV1
@@ -638,3 +639,275 @@ def test_completion_receipt_replays_a_stable_terminal_timestamp(tmp_path: Path) 
     assert completed.complete
     assert replayed == completed
     assert receipt.read_bytes() == before
+
+
+_BOOTSTRAP_KEY = "ssh-ed25519 YWFhYQ== kdive-system"
+_BOOTSTRAP_IDENTITY = "sha256:" + hashlib.sha256(_BOOTSTRAP_KEY.encode()).hexdigest()
+
+
+def _generation_digest(generation: int) -> str:
+    return "sha256:" + f"{generation:064x}"
+
+
+def _provision_inputs(
+    intent: _Intent, *, generation: int, allocation_id: UUID | None = None
+) -> tuple[
+    AuthoritySystemMutationRequestV1,
+    AuthoritySystemCommitContextV1,
+    AuthoritySystemProvisionSnapshot,
+]:
+    """One attempt generation's request, as migration 0149 binds it: a new digest per generation."""
+    profile = ProvisioningProfile.parse(
+        {
+            "schema_version": 1,
+            "arch": "ppc64le",
+            "vcpu": 2,
+            "memory_mb": 2048,
+            "disk_gb": 20,
+            "boot_method": "direct-kernel",
+            "kernel_source_ref": "linux-test",
+            "provider": {
+                "local-libvirt": {
+                    "rootfs": {"kind": "local", "path": "/var/lib/kdive/rootfs/base.qcow2"}
+                }
+            },
+        }
+    )
+    allocation = intent.allocation_id if allocation_id is None else allocation_id
+    request = AuthoritySystemMutationRequestV1(
+        system_id=intent.system_id,
+        allocation_id=allocation,
+        resource_id=intent.resource_id,
+        provider_kind="local-libvirt",
+        resource_name="local-a",
+        authority_instance=intent.authority_instance,
+        profile_identity="sha256:" + profile_digest(profile),
+        root_identity=intent.root_identity,
+        operation=AuthoritySystemOperation.PROVISION,
+        operation_identity="provision-a",
+        authority_id=uuid4(),
+        generation=generation,
+        attempt_id=uuid4(),
+        operation_digest=_generation_digest(generation),
+        bootstrap_identity=_BOOTSTRAP_IDENTITY,
+    )
+    context = AuthoritySystemCommitContextV1(
+        attempt_id=request.attempt_id,
+        operation=AuthoritySystemOperation.PROVISION,
+        journal_sequence=1,
+        journal_digest=_DIGEST,
+    )
+    snapshot = AuthoritySystemProvisionSnapshot(
+        system_id=intent.system_id,
+        allocation_id=allocation,
+        resource_id=intent.resource_id,
+        project="project-a",
+        provider_kind="local-libvirt",
+        resource_name="local-a",
+        authority_instance=intent.authority_instance,
+        profile=profile,
+        profile_identity=request.profile_identity,
+        source_image_id=uuid4(),
+        root_identity=intent.root_identity,
+        root_spec=RootSpecV1(
+            architecture="ppc64le",
+            root="/dev/vda1",
+            arguments=("root=/dev/vda1",),
+            authority="stage-inspection",
+            source={"kind": "staged-image", "identity": intent.root_identity},
+        ),
+        bootstrap_public_key=_BOOTSTRAP_KEY,
+        bootstrap_identity=_BOOTSTRAP_IDENTITY,
+    )
+    return request, context, snapshot
+
+
+def _generation_one_intent(tmp_path: Path) -> _Intent:
+    return replace(
+        _intent(tmp_path),
+        bootstrap_identity=_BOOTSTRAP_IDENTITY,
+        operation_digest=_generation_digest(1),
+    )
+
+
+def test_later_generation_observes_the_retained_intent(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    intent = _generation_one_intent(tmp_path)
+    provider._store_intent(intent)
+
+    facts = asyncio.run(provider.observe_system_provision(*_provision_inputs(intent, generation=2)))
+
+    assert facts.intent_identity == intent.identity
+    assert not facts.complete
+
+
+def test_retained_intent_rejects_another_allocation(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    intent = _generation_one_intent(tmp_path)
+    provider._store_intent(intent)
+    inputs = _provision_inputs(intent, generation=2, allocation_id=uuid4())
+
+    with pytest.raises(LocalAuthoritySystemError, match="does not match the request"):
+        asyncio.run(provider.observe_system_provision(*inputs))
+
+
+def test_later_generation_execute_resumes_a_present_domain(tmp_path: Path) -> None:
+    intent = _generation_one_intent(tmp_path)
+    Path(intent.overlay).parent.mkdir()
+    Path(intent.overlay).write_bytes(b"qcow2")
+    Path(intent.baseline).mkdir(parents=True)
+    xml = _xml(overlay=intent.overlay, system_id=intent.system_id)
+    intent = replace(
+        intent, xml_digest=owned_system_semantic_identity(xml, intent.system_id, intent.overlay)
+    )
+
+    class Inspection(_AbsentInspection):
+        domain_absent = False
+        domain_validated = True
+
+    class Teardown(_AbsentTeardown):
+        def inspect(self) -> Inspection:
+            return Inspection()
+
+        def owned_xml(self) -> tuple[str, str]:
+            return xml, xml
+
+    base = tmp_path / "base.qcow2"
+    base.touch()
+    provider = LocalAuthoritySystemProvider(
+        provisioner=_Provisioner(),
+        topology=LocalAuthoritySystemTopology(
+            intent_root=tmp_path / "intents",
+            overlay_root=tmp_path / "overlays",
+            baseline_root=tmp_path / "baseline",
+            staged_bases={_DIGEST: base},
+        ),
+        readiness_probe=lambda _system_id: True,
+        open_teardown=lambda *_args: Teardown(),
+        assert_no_sibling_attachment=lambda _system_id, _overlay, _baseline: None,
+        allocate_port=lambda: 2200,
+        now=lambda: intent.deadline + timedelta(minutes=1),
+    )
+    provider._store_intent(intent)
+
+    facts = asyncio.run(provider.execute_system_provision(*_provision_inputs(intent, generation=2)))
+
+    assert facts.complete
+    assert facts.intent_identity == intent.identity
+
+
+def test_provision_completion_replays_for_a_later_generation(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    intent = _generation_one_intent(tmp_path)
+    first, _context, _snapshot = _provision_inputs(intent, generation=1)
+    later, _context, _snapshot = _provision_inputs(intent, generation=2)
+    candidate = AuthoritySystemProvisionFacts(
+        intent_identity=intent.identity,
+        domain_owned=True,
+        root_storage_owned=True,
+        boot_ready=True,
+        bootstrap_ready=False,
+        quarantine_retained=True,
+        completed_at=None,
+    )
+
+    completed = provider._complete_provision_facts(intent, first, candidate, create=True)
+    replayed = provider._complete_provision_facts(intent, later, candidate, create=False)
+
+    assert replayed == completed
+
+
+def _teardown_inputs(
+    system_id: UUID, generation: int
+) -> tuple[AuthoritySystemMutationRequestV1, AuthoritySystemCommitContextV1]:
+    request = AuthoritySystemMutationRequestV1(
+        system_id=system_id,
+        allocation_id=uuid4(),
+        resource_id=uuid4(),
+        provider_kind="local-libvirt",
+        resource_name="local-a",
+        authority_instance="authority-a",
+        profile_identity=_DIGEST,
+        root_identity=_DIGEST,
+        operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+        operation_identity="teardown-a",
+        authority_id=uuid4(),
+        generation=generation,
+        attempt_id=uuid4(),
+        operation_digest=_generation_digest(generation),
+        bootstrap_identity=_DIGEST,
+    )
+    context = AuthoritySystemCommitContextV1(
+        attempt_id=request.attempt_id,
+        operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+        journal_sequence=1,
+        journal_digest=_DIGEST,
+    )
+    return request, context
+
+
+def test_teardown_completion_replays_for_a_later_generation(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    system_id = uuid4()
+
+    first = asyncio.run(provider.execute_preactivation_teardown(*_teardown_inputs(system_id, 1)))
+    later = asyncio.run(provider.observe_preactivation_teardown(*_teardown_inputs(system_id, 2)))
+
+    assert first.complete
+    assert later.complete
+    assert later.completed_at == first.completed_at
+
+
+def test_retained_intent_teardown_accepts_an_earlier_generation_receipt(tmp_path: Path) -> None:
+    class Teardown(_AbsentTeardown):
+        def destroy(self) -> None:
+            return None
+
+        def undefine(self) -> None:
+            return None
+
+        def remove_overlay(self) -> None:
+            return None
+
+        def remove_baseline(self) -> None:
+            return None
+
+    base = tmp_path / "base.qcow2"
+    base.touch()
+    provider = LocalAuthoritySystemProvider(
+        provisioner=_Provisioner(),
+        topology=LocalAuthoritySystemTopology(
+            intent_root=tmp_path / "intents",
+            overlay_root=tmp_path / "overlays",
+            baseline_root=tmp_path / "baseline",
+            staged_bases={_DIGEST: base},
+        ),
+        readiness_probe=lambda _system_id: False,
+        open_teardown=lambda *_args: Teardown(),
+        assert_no_sibling_attachment=lambda _system_id, _overlay, _baseline: None,
+        allocate_port=lambda: 2200,
+        now=lambda: datetime(2026, 9, 6, tzinfo=UTC),
+    )
+    intent = _intent(tmp_path)
+    provider._store_intent(intent)
+    request, context = _teardown_inputs(intent.system_id, 2)
+    request = request.model_copy(
+        update={
+            "allocation_id": intent.allocation_id,
+            "resource_id": intent.resource_id,
+        }
+    )
+    stored = provider._store_completion(
+        _Completion(
+            system_id=intent.system_id,
+            operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+            operation_digest=_generation_digest(1),
+            completed_at=datetime(2026, 9, 5, tzinfo=UTC),
+        )
+    )
+
+    facts = asyncio.run(provider.execute_preactivation_teardown(request, context))
+
+    assert facts.complete
+    assert facts.completed_at == stored.completed_at
+    assert provider._load_intent(intent.system_id) is None
