@@ -58,10 +58,9 @@ kdive_external_boot_userland_programs:
 
 # The catalog. Each entry: logical name, distro/version, source kind, optional
 # per-entry overrides (packages/helpers/arches/host_distros/root_device/cloud_image_url/force).
-# The in-guest helpers are Fedora/RHEL-family (grubby/dracut): the full kdive
-# build->install->boot->debug arc ships for fedora + rocky; the ubuntu image stages,
-# boots, and connects its guest agent (provision/host_dump) but runs.install needs a
-# Debian helper variant (tracked separately).
+# The install helper follows each image family: Fedora/RHEL uses grubby/dracut;
+# Ubuntu uses its native initramfs/GRUB tools through the same installed entrypoint.
+# Other capabilities still require their documented guest packages and fixtures.
 kdive_image_catalog:
   - name: fedora-kdive-remote-base-43
     distro: fedora
@@ -80,6 +79,9 @@ kdive_image_catalog:
       - kexec-tools
       - makedumpfile
       - kdump-tools
+      - initramfs-tools
+      - grub2-common
+      - kmod
       - curl
       - tar
       - openssl
