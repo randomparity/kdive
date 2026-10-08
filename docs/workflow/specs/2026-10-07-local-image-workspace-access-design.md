@@ -1,6 +1,6 @@
 # Local image build workspace access
 
-Status: Workspace rule approved; published-cache extension proposed, awaiting explicit approval.
+Status: Workspace and published-cache permission rules approved.
 
 ## Authority and outcome
 
