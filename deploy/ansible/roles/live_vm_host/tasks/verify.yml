@@ -383,6 +383,47 @@
       - live_vm_host_worker_libvirt_socket.stat.gr_name == live_vm_host_worker_libvirt_group
       - live_vm_host_worker_libvirt_socket.stat.mode == "0770"
 
+- name: Verify native KVM on the selected libvirt endpoints
+  ansible.builtin.command:
+    argv:
+      - "{{ live_vm_venv }}/.venv/bin/python"
+      - -c
+      - |
+        import sys
+        import libvirt
+        from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
+        from kdive.providers.shared.libvirt_xml import parse_capabilities_arch, parse_guest_arches
+
+        connection = libvirt.open(sys.argv[1])
+        if connection is None:
+            raise SystemExit(f"Cannot open {sys.argv[2]} endpoint; inspect its installed daemon")
+        try:
+            xml = connection.getCapabilities()
+        finally:
+            connection.close()
+        native = parse_capabilities_arch(xml)
+        guests = parse_guest_arches(xml, SUPPORTED_ARCHES)
+        if guests.get(native, {}).get("accel") != "kvm":
+            raise SystemExit(
+                f"{sys.argv[2]} endpoint does not advertise native KVM for {native}; "
+                "inspect its installed daemon groups and KVM access before minting a System"
+            )
+      - "{{ item.uri }}"
+      - "{{ item.label }}"
+  become: true
+  become_user: "{{ item.user }}"
+  loop:
+    - uri: "{{ live_vm_host_worker_libvirt_uri }}"
+      user: "{{ live_vm_host_operator_user }}"
+      label: operator
+      enabled: true
+    - uri: "{{ live_vm_host_authority_libvirt_uri }}"
+      user: "{{ live_vm_host_authority_account }}"
+      label: authority
+      enabled: "{{ live_vm_host_authority_enabled | bool and live_vm_host_authority_local_mutation_enabled | bool }}"
+  when: item.enabled | bool
+  changed_when: false
+
 - name: Inspect authority protected paths
   ansible.builtin.stat:
     path: "{{ item }}"

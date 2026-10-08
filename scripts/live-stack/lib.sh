@@ -403,10 +403,12 @@ nodedev_ok() {
 
 # Operator-owned dedicated session libvirt daemon (#2032). The live_vm_host role provisions a
 # dedicated session daemon for the runner account (config /etc/kdive/libvirtd-live.conf, runtime
-# root /run/kdive/live-libvirt) and keeps it boot-persistent with a systemd --user unit. stack-services.sh's
+# root /run/kdive/live-libvirt) and keeps it boot-persistent with a system unit running as that
+# operator with fresh provider groups. stack-services.sh's
 # recovery path starts this same daemon directly as the invoking user — the runner service account
 # has no sudo and the Debian-family runner ships no virtqemud, so a system-daemon fallback can
-# never work there.
+# never work there. A direct start remains unmanaged even if the system unit is installed;
+# provisioning requires a drain and targeted stop before taking ownership (ADR-0737).
 #
 # Idempotently ensure the dedicated session daemon is running. A pid file pointing at a live
 # process short-circuits; otherwise start it exactly as the provisioning role does (same binary,
