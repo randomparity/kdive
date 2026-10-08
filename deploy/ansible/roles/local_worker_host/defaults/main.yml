@@ -59,6 +59,8 @@ live_vm_host_worker_shared_directories:  # noqa: var-naming[no-role-prefix]
   - /var/lib/kdive/console
   - /var/lib/kdive/pcap
   - /var/lib/kdive/build
+  - /var/lib/kdive/build/images
+  - /var/lib/kdive/rootfs-cache
   - /var/lib/kdive/install
 # Local external-boot recovery roots (ADR-0586, #2210) use one owner-only child per worker.
 # The traverse-only root remains root-owned so a worker cannot replace sibling roots.
@@ -110,13 +112,15 @@ local_worker_host_guestfs_packages_el10:
   - rpm-build
   - cpio
 
-# The two parent image directories this role labels svirt_image_t on an SELinux-enforcing RedHat
+# Image roots and the build/images subtree labeled svirt_image_t on an SELinux-enforcing RedHat
 # host (ADR-0640, #2779). The nested /var/lib/kdive/rootfs/local rule belongs to build-image.sh
 # and must not be added here: local fcontext rules match last-wins in file_contexts.local, so a
 # second writer would change which rule wins.
 local_worker_host_svirt_image_directories:
   - /var/lib/kdive/rootfs
   - /var/lib/kdive/install
+  - /var/lib/kdive/build/images
+  - /var/lib/kdive/rootfs-cache
 
 # Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
 # testcontainers gate, split into engine and compose halves because they carry different gates.
