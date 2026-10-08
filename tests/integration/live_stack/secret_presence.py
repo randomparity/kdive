@@ -105,7 +105,7 @@ async def _booted_run(op: LiveStackClient, investigation: str, system_id: str, r
             run_id=run_id,
             arch=manifest["arch"],
             kernel_tree=tree,
-            evidence_dir=Path(scratch),
+            evidence_dir=Path(scratch) / "upload",
             with_vmlinux=True,
             require_network=True,
             root_fs="ext4",

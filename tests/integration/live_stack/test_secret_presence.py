@@ -180,3 +180,45 @@ def test_json_escaped_value_is_detected_without_disclosure(value: str) -> None:
     with pytest.raises(AssertionError, match="1 known secret value") as error:
         verify_presence(answer, {value})
     assert value not in str(error.value)
+
+
+def test_upload_owns_a_fresh_child_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+    from typing import Any, cast
+    from unittest.mock import AsyncMock
+
+    from kdive.mcp.dev_harness import LiveStackClient
+    from scripts.coverage_campaign.contract import build_contract
+    from tests.integration.live_stack import secret_presence as proof
+    from tests.integration.live_stack.evidence import EvidenceWriter
+    from tests.integration.live_stack.scenario import CellRun
+
+    image = tmp_path / "arch/x86/boot/bzImage"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"unit-kernel")
+    manifest = {
+        "arch": "x86_64",
+        "source": {"commit": "a" * 40},
+        "artifacts": {".config": "b" * 64},
+        "toolchain": {},
+        "build_id": "c" * 40,
+    }
+    monkeypatch.setenv(proof.FIXTURE_ROOT_ENV, str(tmp_path))
+    monkeypatch.setattr(proof, "load_fixture", lambda *_: (tmp_path, manifest))
+    monkeypatch.setattr(proof, "scalar", AsyncMock(return_value=ToolResponse.success("run", "ok")))
+    monkeypatch.setattr(proof, "drain_job", AsyncMock())
+    paths: list[Path] = []
+
+    async def upload(_op: object, **kwargs: Any) -> None:
+        path = kwargs["evidence_dir"]
+        assert path.parent.is_dir()
+        path.mkdir()  # the real uploader owns creation, including rejection of existing directories
+        paths.append(path)
+
+    monkeypatch.setattr(proof, "build_and_upload_kernel", upload)
+    run = CellRun(build_contract().cells[0], EvidenceWriter(tmp_path / "evidence"))
+    result = asyncio.run(proof._booted_run(cast(LiveStackClient, object()), "i", "s", run))
+    assert result == "run"
+    assert len(paths) == 1 and not paths[0].exists()
