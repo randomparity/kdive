@@ -14,7 +14,7 @@ import hashlib
 import stat
 import subprocess
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
@@ -48,7 +48,10 @@ from kdive.images.rootfs.catalog import (
     resolve_rootfs_entry,
 )
 from kdive.providers.local_libvirt import rootfs_build
-from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
+    BaselineKernel,
+    select_kernel_and_initrd,
+)
 from kdive.providers.local_libvirt.rootfs_build import (
     _EXT4_INCOMPATIBLE_FEATURE,
     LocalLibvirtRootfsBuildPlane,
@@ -1122,3 +1125,52 @@ def test_cloud_init_self_check_uses_the_scaled_budget(
 ) -> None:
     rootfs_build._run_cloud_init_guestfish(tmp_path / "img.qcow2", "is-file /etc/hosts\n")
     assert _timeouts(scaled_budget) == [_SCALED_SENTINEL]
+
+
+@pytest.mark.parametrize(
+    ("versions", "hint", "expected"),
+    [
+        ("a b", "b", "b"),
+        ("a b", "vmlinuz-b", "b"),
+        ("a", None, "a"),
+        ("a b", None, None),
+        ("a", "stale", None),
+        ("0-rescue-a", "0-rescue-a", None),
+    ],
+)
+def test_customization_kernel_reaches_exact_selector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    versions: str,
+    hint: str | None,
+    expected: str | None,
+) -> None:
+    calls = _RecordingBootTools()
+    entry = replace(resolve_rootfs_entry("fedora-kdive-ready-44"), customization_kernel=hint)
+    monkeypatch.setattr(rootfs_build, "_resolve_entry", lambda spec: entry)
+    acquisition, customization, provenance = calls.as_dependencies()
+    selected: list[tuple[str, str | None]] = []
+
+    def extract(base: Path, dest: Path, forwarded: str | None) -> BaselineKernel:
+        entries = [
+            name for v in versions.split() for name in (f"vmlinuz-{v}", f"initramfs-{v}.img")
+        ]
+        kernel, initrd = select_kernel_and_initrd(entries, forwarded)
+        selected.append((kernel, initrd))
+        return BaselineKernel(dest / kernel, dest / initrd if initrd else None)
+
+    plane = LocalLibvirtRootfsBuildPlane(
+        workspace=tmp_path / "work",
+        acquisition=acquisition,
+        customization=replace(customization, extract_baseline_kernel=extract),
+        provenance=provenance,
+    )
+    if expected is None:
+        with pytest.raises(CategorizedError):
+            plane.build(_spec(name=entry.name))
+        assert not calls.customization_boot_ran
+        assert not (tmp_path / "work" / f"{entry.name}.qcow2").exists()
+    else:
+        plane.build(_spec(name=entry.name))
+        assert selected == [(f"vmlinuz-{expected}", f"initramfs-{expected}.img")]
+        assert calls.customization_boot_ran

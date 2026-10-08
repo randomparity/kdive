@@ -648,14 +648,18 @@ class LocalLibvirtRootfsBuildPlane:
             )
             unit = render_firstboot_unit(script_path=CUSTOMIZE_SCRIPT_PATH)
             self._customization.inject_offline(staged, file_ops, script, unit)
-            self._run_boot(staged, work_dir, spec.arch)
+            self._run_boot(staged, work_dir, spec.arch, entry.customization_kernel)
         finally:
             for path in cleanup:
                 path.unlink(missing_ok=True)
 
-    def _run_boot(self, staged: Path, work_dir: Path, arch: str) -> None:
+    def _run_boot(
+        self, staged: Path, work_dir: Path, arch: str, customization_kernel: str | None
+    ) -> None:
         """Extract the baseline kernel, render the build domain XML, and drive the boot to ok."""
-        baseline = self._customization.extract_baseline_kernel(staged, work_dir / "baseline", None)
+        baseline = self._customization.extract_baseline_kernel(
+            staged, work_dir / "baseline", customization_kernel
+        )
         _grant_hypervisor_traversal(work_dir)
         accel, emulator = self._customization.resolve_accel(arch)
         build_id = uuid4()

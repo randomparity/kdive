@@ -12,6 +12,7 @@ from kdive.images.drgn_support import live_drgn_capability
 from kdive.images.families import family_for
 from kdive.images.kdump_support import DEFAULT_KERNEL_BASIS, kdump_capability
 from kdive.images.rootfs.catalog import (
+    DEFAULT_CATALOG_PATH,
     CloudImageSource,
     VirtBuilderSource,
     load_rootfs_catalog,
@@ -554,3 +555,24 @@ source = { kind = "iso", template = "fedora-44" }
         load_rootfs_catalog(path=path)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["field"] == "source.kind"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, '"6.18.5-200.fc43.x86_64"', '"vmlinuz-6.18.5-200.fc43.x86_64"', '""', "42", "false"],
+)
+def test_customization_kernel_catalog_contract(tmp_path: Path, value: str | None) -> None:
+    text = DEFAULT_CATALOG_PATH.read_text().split("[[image]]")[1]
+    text = "[[image]]" + "\n".join(
+        line for line in text.splitlines() if not line.startswith("customization_kernel =")
+    )
+    if value is not None:
+        text += f"\ncustomization_kernel = {value}\n"
+    path = _write_catalog(tmp_path, text)
+    if value in ('""', "42", "false"):
+        with pytest.raises(CategorizedError) as error:
+            load_rootfs_catalog(path)
+        assert error.value.details["field"] == "customization_kernel"
+    else:
+        entry = next(iter(load_rootfs_catalog(path).values()))
+        assert entry.customization_kernel == (None if value is None else value.strip('"'))

@@ -70,6 +70,7 @@ class RootfsCatalogEntry:
     source: RootfsSource
     makedumpfile_version: str
     drgn_version: str | None
+    customization_kernel: str | None = None
 
 
 def _catalog_error(message: str, field: str) -> CategorizedError:
@@ -125,6 +126,9 @@ def _parse_entry(row: dict[str, Any]) -> RootfsCatalogEntry:
         source=_parse_source(row.get("source")),
         makedumpfile_version=_require_str(row, "makedumpfile_version"),
         drgn_version=_parse_drgn_version(row),
+        customization_kernel=(
+            _require_str(row, "customization_kernel") if "customization_kernel" in row else None
+        ),
     )
 
 

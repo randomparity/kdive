@@ -158,6 +158,12 @@ rejected, never published), and publishes row-first.
 owns local build inputs, pinned base sources, and curated guest-tool versions. Family customizers
 own package installation; avoid copying their package/version tables into another guide.
 
+Optional `customization_kernel` is a nonempty catalog string naming the exact bare version or
+`vmlinuz-<version>` filename for the transient customization boot (ADR-0731). Missing or stale
+explicit matches fail; omission preserves the existing single-kernel requirement. If a template
+changes, inspect its kernels and explicitly refresh the value with new build evidence. This field
+neither prunes kernels nor supplies a final provisioning hint; rerun the required image-smoke cell.
+
 Runtime capture capability depends on the target kernel and available evidence. Use
 `images.describe` and the [images guide](../../guide/toolsets/images.md) to distinguish supported,
 unsupported, and unverified results. Catalog metadata does not prove that a particular guest's
