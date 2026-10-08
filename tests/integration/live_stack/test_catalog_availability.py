@@ -12,7 +12,7 @@ import pytest
 from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
-from tests.integration import test_catalog_tool_cells_live as carrier
+from tests.integration.live_stack import catalog as carrier
 from tests.integration.live_stack.scenario import ScenarioStop
 from tests.integration.live_stack.tool_cells import Grants
 

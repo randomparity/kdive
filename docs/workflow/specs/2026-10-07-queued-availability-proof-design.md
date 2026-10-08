@@ -60,3 +60,13 @@ Run all twelve existing availability cells, covering direct/gateway and default/
 configurations, against an attested candidate. No guest or provider operation is required.
 Retain configuration-specific outcomes and cleanup records. Ordinary tests are not HTTP
 proof, and architecture-independent evidence does not qualify native POWER.
+
+## Test-support ownership
+
+The repository forbids importing any collected test module from another test. The ordinary
+regressions and collected HTTP carrier therefore share the availability behavior through
+`tests/integration/live_stack/catalog.py`. Move its existing SQL, quota-fixture cleanup and
+catalog visibility dependency closure there without changing their contracts. Existing image,
+shape and resource carrier consumers import the same helpers from that owner; `_granted`
+remains in the carrier. The carrier retains its pytest entry point, marks and all cell IDs.
+No dynamic import, guard exception, new callback framework or unrelated catalog move.
