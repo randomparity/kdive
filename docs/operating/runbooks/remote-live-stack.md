@@ -295,12 +295,14 @@ Operator notes:
 parameter for each `deep-lifecycle/remote-libvirt/x86_64` contract cell: four families times the
 two pinned baselines in `fixtures/kernel/baselines.toml`. Fedora runs on
 `fedora-kdive-remote-base-43` and Enterprise Linux on `rocky-10-kdive-remote-base`
-(`REMOTE_REPRESENTATIVES` in `tests/integration/live_stack/remote_lifecycle.py`). Debian and SUSE
-record `blocked`: the in-guest install helper is Fedora/RHEL-only (#3081) and there is no SUSE
-remote base image (#3082). A parameter provisions the representative, uploads its baseline's
+(`REMOTE_REPRESENTATIVES` in `tests/integration/live_stack/remote_lifecycle.py`). Debian uses
+`ubuntu-2404-kdive-remote-base`, rebuilt with its native install helper (ADR-0766).
+SUSE records `blocked` because there is no SUSE remote base image (#3082). Debian's
+separate SSH return-route prerequisite remains #3091; a helper fix does not prove that leg. A parameter provisions the representative, uploads its baseline's
 fixture kernel, completes the build, installs and boots it in the guest, reconnects over the SSH
 forward with the same key, checks the running release and GNU build ID against the fixture, reads
-the digest of the guest's `/boot/vmlinuz-<release>`, loads the `loop` module and compares its
+the digest of the guest's `/boot/kdive/vmlinuz-<release>` for Debian or
+`/boot/vmlinuz-<release>` for other families, loads the `loop` module and compares its
 bytes with the uploaded copy, then releases and proves on the provider host that the domain is
 undefined, its volumes are gone and no new `kdive-*` domain remains, with kdive's capacity back to
 its starting value. The ppc64le remote cells share the node and stay `missing-result` for #2818.

@@ -1,0 +1,164 @@
+#!/bin/bash
+# Debian-family implementation of the fixed ADR-0082/0489 helper (ADR-0766).
+# Only a running curl's fetch failure returns 75; other failures are permanent.
+set -euo pipefail
+
+BOOT_DIR=/boot/kdive
+MODULES_DIR=/lib/modules
+GRUB_SCRIPT=/etc/grub.d/42_kdive
+GRUB_LIB=/usr/share/grub/grub-mkconfig_lib
+DEVICE_LINKS=/dev/disk
+KDUMP_DEFAULTS=/etc/default/kdump-tools
+
+die() {
+  echo "kdive-install-kernel: $*" >&2
+  exit 1
+}
+
+# This is a native grub-mkconfig generator. Its data assignments are shell-quoted;
+# requested arguments are separately parsed/quoted as GRUB words, never shell code.
+write_generator() {
+  local dest="$1" ver="$2" cmdline="$3"
+  {
+    printf '#!/bin/bash\nset -eo pipefail\n'
+    printf 'kernel=%q\ninitrd=%q\nrequested=%q\n' \
+      "$BOOT_DIR/vmlinuz-$ver" "$BOOT_DIR/initrd.img-$ver" "$cmdline"
+    printf 'grub_lib=%q\ndevice_links=%q\n' "$GRUB_LIB" "$DEVICE_LINKS"
+    cat <<'GRUB'
+# The native library owns filesystem access, modules and relative boot paths.
+# shellcheck disable=SC1090
+source "$grub_lib"
+: "${GRUB_DEVICE:?GRUB_DEVICE is missing}"
+: "${GRUB_DEVICE_BOOT:?GRUB_DEVICE_BOOT is missing}"
+uuid="${GRUB_DEVICE_UUID:-}"
+partuuid="${GRUB_DEVICE_PARTUUID:-}"
+disable_uuid="${GRUB_DISABLE_LINUX_UUID:-false}"
+disable_partuuid="${GRUB_DISABLE_LINUX_PARTUUID:-true}"
+root="$GRUB_DEVICE"
+if { [ -n "$uuid$partuuid" ] &&
+  { [ "$disable_uuid" != true ] || [ "$disable_partuuid" != true ]; } &&
+  { [ -e "$device_links/by-uuid/$uuid" ] || [ -e "$device_links/by-partuuid/$partuuid" ]; }; } &&
+  ! { [ -e "$GRUB_DEVICE" ] && uses_abstraction "$GRUB_DEVICE" lvm; }; then
+  if [ -n "$uuid" ] && [ "$disable_uuid" != true ]; then
+    root="UUID=$uuid"
+  else
+    root="PARTUUID=$partuuid"
+  fi
+fi
+subvol=""
+if [ "${GRUB_FS:-}" = btrfs ]; then
+  subvol="$(make_system_path_relative_to_its_root /)"
+  subvol="${subvol#/}"
+fi
+kernel_path="$(make_system_path_relative_to_its_root "$kernel")"
+initrd_path="$(make_system_path_relative_to_its_root "$initrd")"
+printf "menuentry 'kdive' --id 'kdive' {\n"
+prepare_grub_to_access_device "$GRUB_DEVICE_BOOT"
+python3 - "$kernel_path" "$initrd_path" "$root" "$subvol" "$requested" <<'WORDS'
+import os
+import shlex
+import sys
+
+kernel, initrd, root, subvol, requested = sys.argv[1:]
+extra = shlex.split(requested)
+base = shlex.split(os.environ.get("GRUB_CMDLINE_LINUX", "")) + shlex.split(
+    os.environ.get("GRUB_CMDLINE_LINUX_DEFAULT", "")
+)
+if not any(word == "crashkernel" or word.startswith("crashkernel=") for word in extra):
+    base = [word for word in base if word != "crashkernel" and not word.startswith("crashkernel=")]
+args = ["root=" + root, "ro"]
+if subvol:
+    args.append("rootflags=subvol=" + subvol)
+
+def quote(word):
+    return "'" + word.replace("'", "'\\''") + "'"
+
+print("linux " + " ".join(quote(word) for word in [kernel, *args, *base, *extra]))
+print("initrd " + quote(initrd))
+WORDS
+printf '}\n'
+GRUB
+  } >"$dest"
+}
+
+configure_kdump() {
+  local tmp="$1" ver="$2"
+  [ -f "$KDUMP_DEFAULTS" ] || die "kdump-tools configuration is missing"
+  # Retain operator settings except the three values this install must select.
+  sed '/^[[:space:]]*\(USE_KDUMP\|KDUMP_KERNEL\|KDUMP_INITRD\)=/d' \
+    "$KDUMP_DEFAULTS" >"$tmp/kdump-tools"
+  printf '\nUSE_KDUMP=1\nKDUMP_KERNEL=%q\nKDUMP_INITRD=%q\n' \
+    "$BOOT_DIR/vmlinuz-$ver" "$BOOT_DIR/initrd.img-$ver" >>"$tmp/kdump-tools"
+  install -m 0644 "$tmp/kdump-tools" "$KDUMP_DEFAULTS"
+  systemctl enable kdump-tools.service || die "cannot enable kdump-tools.service"
+}
+
+do_install() {
+  local url="" cmdline="" method=""
+  while [ $# -gt 0 ]; do
+    [ $# -ge 2 ] || die "missing value for $1"
+    case "$1" in
+    --url) url="$2" ;;
+    --cmdline) cmdline="$2" ;;
+    --method) method="$2" ;;
+    *) die "unknown install arg: $1" ;;
+    esac
+    shift 2
+  done
+  [ -n "$url" ] || die "install requires --url"
+  [ -n "$cmdline" ] || die "install requires --cmdline"
+  [[ "$cmdline" != *$'\n'* && "$cmdline" != *$'\r'* ]] || die "cmdline must be one line"
+  command -v curl >/dev/null 2>&1 || die "curl is not installed in this guest image"
+  local tmp rc=0 ver mode=-c
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  curl -fsSL --retry 3 -o "$tmp/kernel.tar.gz" "$url" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -ne 126 ] && [ "$rc" -ne 127 ] || die "curl could not execute"
+    echo "kdive-install-kernel: bundle download failed" >&2
+    exit 75
+  fi
+  tar -xzf "$tmp/kernel.tar.gz" -C "$tmp" || die "bundle extract failed"
+  [ -s "$tmp/boot/vmlinuz" ] || die "bundle has no boot/vmlinuz"
+  shopt -s nullglob
+  local releases=("$tmp"/lib/modules/*)
+  [ "${#releases[@]}" -eq 1 ] && [ -d "${releases[0]}" ] &&
+    [ ! -L "${releases[0]}" ] || die "bundle must contain one module release directory"
+  ver="${releases[0]##*/}"
+  [[ "$ver" =~ ^[[:alnum:]][[:alnum:]._+-]*$ ]] || die "invalid module release"
+  install -d -m 0755 "$BOOT_DIR" "$MODULES_DIR"
+  install -m 0644 "$tmp/boot/vmlinuz" "$BOOT_DIR/vmlinuz-$ver"
+  rm -rf "${MODULES_DIR:?}/$ver"
+  cp -a "${releases[0]}" "$MODULES_DIR/$ver"
+  depmod "$ver" || die "depmod failed"
+  [ ! -e "$BOOT_DIR/initrd.img-$ver" ] || mode=-u
+  update-initramfs "$mode" -k "$ver" -b "$BOOT_DIR" || die "update-initramfs failed"
+  [ -s "$BOOT_DIR/initrd.img-$ver" ] || die "update-initramfs produced no initramfs"
+  write_generator "$tmp/42_kdive" "$ver" "$cmdline"
+  install -m 0755 "$tmp/42_kdive" "$GRUB_SCRIPT"
+  update-grub || die "update-grub failed"
+  if [ "$method" = kdump ]; then
+    configure_kdump "$tmp" "$ver"
+  fi
+  echo "installed kernel $ver into the kdive slot"
+}
+
+do_boot() {
+  grub-reboot kdive || die "grub-reboot could not select the kdive slot"
+  systemd-run --on-active=2 systemctl reboot >/dev/null 2>&1 ||
+    (setsid bash -c 'sleep 2; systemctl reboot' >/dev/null 2>&1 </dev/null &)
+  echo "kdive slot selected for next boot; reboot scheduled"
+}
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+install) do_install "$@" ;;
+boot-id) cat /proc/sys/kernel/random/boot_id ;;
+boot) do_boot ;;
+kdump-status)
+  printf 'crash_size=%s\n' "$(cat /sys/kernel/kexec_crash_size 2>/dev/null || echo 0)"
+  printf 'crash_loaded=%s\n' "$(cat /sys/kernel/kexec_crash_loaded 2>/dev/null || echo 0)"
+  ;;
+*) die "unknown subcommand: ${cmd:-<none>} (expected install|boot-id|boot|kdump-status)" ;;
+esac

@@ -222,7 +222,9 @@ async def _step(
         manifest=manifest,
         tmp=tmp,
         # A remote install is in-guest: the kernel lands in the guest's own /boot.
-        installed_kernel=guest_boot_kernel
+        installed_kernel=partial(
+            guest_boot_kernel, family=REMOTE_LANE_FAMILIES[guest.lane.entry.arch]
+        )
         if guest.lane.provider == _REMOTE
         else partial(_domain_kernel, guest.lane.xml),
         step=through,

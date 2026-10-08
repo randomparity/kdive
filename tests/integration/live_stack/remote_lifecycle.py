@@ -95,12 +95,12 @@ class RemoteHost:
 
 # One remote base image per family; Fedora and Enterprise Linux stay distinct (#2803 req 7).
 REMOTE_REPRESENTATIVES = {
+    "debian": RemoteImage("ubuntu-2404-kdive-remote-base", "ubuntu", "24.04", "x86_64"),
     "fedora": RemoteImage("fedora-kdive-remote-base-43", "fedora", "43", "x86_64"),
     "enterprise": RemoteImage("rocky-10-kdive-remote-base", "rocky", "10", "x86_64"),
 }
 # Families with no remote full cycle yet, and the issue that owns the gap.
 REMOTE_BLOCKED = {
-    "debian": "#3081: no Debian-family in-guest install helper for remote-libvirt guests",
     "suse": "#3082: no SUSE remote-libvirt base image",
 }
 
@@ -272,10 +272,13 @@ def remote_profile(arch: str, volume: str) -> dict[str, object]:
 
 
 def guest_boot_kernel(
-    _system_id: str, endpoint: Endpoint, key: Path, release: str
+    _system_id: str, endpoint: Endpoint, key: Path, release: str, *, family: str
 ) -> tuple[str, None]:
-    """The digest of the guest's ``/boot/vmlinuz-<release>``; it lives on the guest's own disk."""
-    command = f"sha256sum -- {shlex.quote(f'/boot/vmlinuz-{release}')}"
+    """Hash the exact family-owned installed artifact; never fall back to another kernel."""
+    if family not in REMOTE_REPRESENTATIVES:
+        raise ValueError(f"no remote kernel observation path for family {family}")
+    directory = "/boot/kdive" if family == "debian" else "/boot"
+    command = f"sha256sum -- {shlex.quote(f'{directory}/vmlinuz-{release}')}"
     result = ssh(endpoint, key, command)
     assert result.returncode == 0, f"cannot read the installed kernel: exit {result.returncode}"
     return result.stdout.split()[0], None

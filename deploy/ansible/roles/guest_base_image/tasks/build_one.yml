@@ -339,7 +339,9 @@
   ansible.builtin.set_fact:
     guest_base_image_helper_args: >-
       {{ guest_base_image_helper_args
-         + ['--copy-in', guest_base_image_helper_dir ~ '/' ~ item ~ ':/usr/local/sbin/',
+         + ['--copy-in', guest_base_image_helper_dir ~ '/'
+            ~ ('debian/' if image.distro in ['debian', 'ubuntu']
+               and item == 'kdive-install-kernel' else '') ~ item ~ ':/usr/local/sbin/',
             '--run-command', 'chown root:root /usr/local/sbin/' ~ item,
             '--run-command', 'chmod 0755 /usr/local/sbin/' ~ item,
             '--run-command',

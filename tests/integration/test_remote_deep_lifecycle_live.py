@@ -5,8 +5,9 @@ the family's remote base image is provisioned on the ``remote-libvirt`` host, th
 fixture kernel is uploaded, completed, installed in-guest and booted over HTTP, and the test
 reconnects with the same key, checks the running release and GNU build ID, reads the installed
 kernel's digest in the guest, loads a module from the upload, then releases and proves on the
-provider host that the domain, its volumes and the ``kdive-*`` domain set are reclaimed. Debian
-and SUSE record ``blocked`` (#3081, #3082). Each parameter writes one version-1 ``Evidence``
+provider host that the domain, its volumes and the ``kdive-*`` domain set are reclaimed. SUSE
+records ``blocked`` (#3082); Debian requires its rebuilt family helper and guest return route.
+Each parameter writes one version-1 ``Evidence``
 record under ``KDIVE_ARTIFACT_DIR``; ``docs/operating/runbooks/remote-live-stack.md`` §7 covers
 the topology, observer access, bindings, assembly and qualification.
 """
@@ -68,7 +69,7 @@ async def _deep(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, *,
             tree=tree,
             manifest=manifest,
             tmp=tmp,
-            installed_kernel=guest_boot_kernel,
+            installed_kernel=partial(guest_boot_kernel, family=family),
         )
 
     await on_remote_system(

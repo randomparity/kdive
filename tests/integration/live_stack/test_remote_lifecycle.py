@@ -57,7 +57,7 @@ def test_every_remote_cell_family_is_represented_or_blocked() -> None:
     assert len(cells) == 8 and {c.guest_arch for c in cells} == {"x86_64"}
     for cell in cells:
         assert (cell.family in REMOTE_REPRESENTATIVES) != (cell.family in REMOTE_BLOCKED)
-    assert {"#3081", "#3082"} == {reason.split(":")[0] for reason in REMOTE_BLOCKED.values()}
+    assert {"#3082"} == {reason.split(":")[0] for reason in REMOTE_BLOCKED.values()}
 
 
 def test_representatives_are_ansible_catalog_rows_of_their_family() -> None:
@@ -187,7 +187,12 @@ def test_remote_kdive_domains_lists_only_kdive_domains() -> None:
     assert remote_kdive_domains(_conn(conn)) == {"kdive-1", "kdive-build-2"}
 
 
-def test_guest_boot_kernel_reads_the_release_kernel(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "family,directory", [("fedora", "/boot"), ("enterprise", "/boot"), ("debian", "/boot/kdive")]
+)
+def test_guest_boot_kernel_reads_the_release_kernel(
+    monkeypatch: pytest.MonkeyPatch, family: str, directory: str
+) -> None:
     sent: list[str] = []
 
     def ssh(endpoint: Endpoint, key: Path, command: str) -> subprocess.CompletedProcess[str]:
@@ -197,10 +202,10 @@ def test_guest_boot_kernel_reads_the_release_kernel(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(remote_lifecycle, "ssh", ssh)
     endpoint = Endpoint("192.0.2.10", 47201)
-    assert guest_boot_kernel("s", endpoint, Path("k"), "6.18.54") == ("d" * 64, None)
-    assert sent[-1] == "sha256sum -- /boot/vmlinuz-6.18.54"
-    guest_boot_kernel("s", endpoint, Path("k"), "6.1'x")
-    assert sent[-1] == "sha256sum -- " + shlex.quote("/boot/vmlinuz-6.1'x")
+    assert guest_boot_kernel("s", endpoint, Path("k"), "6.18.54", family=family) == ("d" * 64, None)
+    assert sent[-1] == f"sha256sum -- {directory}/vmlinuz-6.18.54"
+    guest_boot_kernel("s", endpoint, Path("k"), "6.1'x", family=family)
+    assert sent[-1] == "sha256sum -- " + shlex.quote(f"{directory}/vmlinuz-6.1'x")
 
 
 def test_remote_profile_validates() -> None:
@@ -316,3 +321,19 @@ def test_volume_sha256_hashes_on_the_provider_host(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(subprocess, "run", _completed(1, ""))
     with pytest.raises(AssertionError, match="volume digest exited 1"):
         remote_lifecycle.volume_sha256("operator@provider.example", "default", "x.qcow2")
+
+
+@pytest.mark.parametrize("family", ["debian", "fedora"])
+def test_missing_installed_kernel_never_probes_another_path(
+    monkeypatch: pytest.MonkeyPatch, family: str
+) -> None:
+    commands: list[str] = []
+
+    def missing(endpoint: Endpoint, key: Path, command: str) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess([], 1, "", "missing")
+
+    monkeypatch.setattr(remote_lifecycle, "ssh", missing)
+    with pytest.raises(AssertionError, match="cannot read the installed kernel"):
+        guest_boot_kernel("s", Endpoint("192.0.2.10", 47201), Path("k"), "6.18", family=family)
+    assert len(commands) == 1
