@@ -1710,6 +1710,7 @@ def _build_mutation_service(
         RemoteModuleVolumePreparationStore,
     )
     from kdive.providers.remote_libvirt.external_boot_materialization import (
+        REMOTE_MATERIALIZATION_CAPACITY_BYTES,
         ConcreteRemoteExternalBootMaterializer,
     )
     from kdive.providers.remote_libvirt.external_boot_operations import (
@@ -1762,7 +1763,7 @@ def _build_mutation_service(
         object_store=object_store,
         connection=provider_connection,
         pool_name=config.remote_libvirt_storage_pool,
-        capacity_bytes=10 * 1024**3,
+        capacity_bytes=REMOTE_MATERIALIZATION_CAPACITY_BYTES,
         monotonic=monotonic,
         artifact_stager=artifact_stager,
     )

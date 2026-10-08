@@ -206,6 +206,50 @@ def test_concrete_remote_materializer_binds_and_publishes_private_volume_names(
     assert calls == [(UUID(binding.system_id), UUID(binding.run_id), "boot-pool")]
 
 
+@pytest.mark.parametrize("shortfall", [0, 1])
+@pytest.mark.parametrize("optional_sources", [False, True])
+def test_concrete_remote_materializer_capacity_boundary(
+    shortfall: int,
+    optional_sources: bool,
+) -> None:
+    from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes
+
+    data = _plan(with_initrd=False).model_dump(by_alias=True)
+    if optional_sources:
+        for field in ("initrd", "debuginfo"):
+            data[field] = {
+                "key": field,
+                "version": "v1",
+                "sha256": "sha256:" + "0" * 64,
+                "size_bytes": 123,
+            }
+    plan = ExternalBootPlan.model_validate(data)
+
+    class Stager:
+        def materialize_artifacts(self, actual: ExternalBootPlan, descriptor: int) -> None:
+            assert actual == plan
+            raise RuntimeError("staging reached")
+
+    materializer = ConcreteRemoteExternalBootMaterializer(
+        object_store=cast(Any, object()),
+        connection=cast(Any, object()),
+        pool_name="boot-pool",
+        capacity_bytes=materialization_reservation_bytes(plan) + 2 * 1_048_576 - shortfall,
+        monotonic=lambda: 1.0,
+        artifact_stager=cast(Any, Stager()),
+    )
+    binding = ExternalBootActivationBinding(
+        system_id=plan.ownership.system_id,
+        run_id=plan.ownership.run_id,
+        activation_id=str(uuid4()),
+    )
+    error, message = (
+        (ValueError, "configured capacity") if shortfall else (RuntimeError, "staging reached")
+    )
+    with pytest.raises(error, match=message):
+        materializer.materialize(plan, binding, OpaqueProviderRef(ref="authority/current"), 2.0)
+
+
 def test_concrete_remote_materializer_rejects_capacity_and_foreign_binding() -> None:
     plan = _plan()
     materializer = ConcreteRemoteExternalBootMaterializer(
