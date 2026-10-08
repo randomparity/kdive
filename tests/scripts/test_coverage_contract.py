@@ -35,7 +35,7 @@ def test_failure_ownership_and_remote_quiescence_binding(inventory: Inventory) -
         assert cell.owner == (
             2818 if cell.guest_arch == "ppc64le" else 3117 if failure in orchestration else 3118
         )
-        assert cell.scenario_id == f"failure-resource/{failure}"
+        assert cell.scenario_id == cell.id
         assert cell.assertions == (failure, "no-duplicates", "protected-state", "cleanup")
         assert cell.node_id is None
     proofs = [cell for cell in cells if cell.operation == "remote-quiescence"]
@@ -51,6 +51,25 @@ def test_failure_ownership_and_remote_quiescence_binding(inventory: Inventory) -
         )
         assert cell.owner == (2816 if cell.guest_arch == "x86_64" else 2818)
         assert (cell.node_id is not None) == (cell.guest_arch == "x86_64")
+
+
+@pytest.mark.parametrize("provider", ["local-libvirt", "remote-libvirt"])
+def test_failure_binding_is_provider_and_arch_specific(inventory: Inventory, provider: str) -> None:
+    cells = build_contract(inventory=inventory).cells
+    selected = next(
+        cell
+        for cell in cells
+        if cell.operation == "failure-resource"
+        and cell.provider == provider
+        and cell.guest_arch == "x86_64"
+        and cell.id.endswith("/worker-interruption")
+    )
+    mapping = load_mapping().model_copy(deep=True)
+    mapping.implementations[selected.scenario_id] = _DEEP_NODE
+    mapped = build_contract(mapping=mapping, inventory=inventory).cells
+    failures = [cell for cell in mapped if cell.operation == "failure-resource"]
+    assert {cell.id for cell in failures if cell.node_id == _DEEP_NODE} == {selected.id}
+    assert all(cell.node_id is None for cell in failures if cell.id != selected.id)
 
 
 def test_registered_addition_requires_mapping(inventory: Inventory) -> None:

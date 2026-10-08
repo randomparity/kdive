@@ -425,7 +425,7 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
                     replace(
                         cell,
                         id=f"{cell.id}/{failure}",
-                        scenario_id=f"failure-resource/{failure}",
+                        scenario_id=f"failure-resource/{provider}/{guest}/{failure}",
                         assertions=(failure, "no-duplicates", "protected-state", "cleanup"),
                     )
                 )

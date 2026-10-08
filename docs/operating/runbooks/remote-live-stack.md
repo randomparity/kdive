@@ -498,7 +498,7 @@ must match the candidate commit.
 Before running the carrier, record the expected provider host and staged image:
 
 ```sh
-python -m tests.integration.live_stack.remote_quiescence \
+uv run python -m tests.integration.live_stack.remote_quiescence \
   --candidate "$(git rev-parse HEAD)" --out /tmp/quiescence-bindings.json
 uv run python -m pytest \
   tests/integration/test_remote_capture_operation_quiescence_live.py -q

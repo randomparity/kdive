@@ -117,8 +117,11 @@ probe or tearing down its domain, avoiding a libvirt job deadlock.
 
 Preserve all24 original failure-resource cells: x86 six orchestration cells
 (three failures × two providers) become #3117, x86 six resource cells become
-#3118, POWER12 become #2818. Their IDs/scenario IDs/assertions and unbound status
-remain unchanged. The new native remote-quiescence cell has assertions
+#3118, POWER12 become #2818. Their public IDs, assertions and unbound status
+remain unchanged. Internal implementation lookup keys equal each public ID:
+`failure-resource/<provider>/<arch>/<failure>`. A later x86 binding must not
+implicitly bind another provider or any POWER obligation. The new native
+remote-quiescence cell has assertions
 accepted-mutation, client-terminated, fresh-monitor-ordering and cleanup;
 inputs image_sha256; deployed roles server/worker/reconciler because normal
 System provisioning and release are exercised. Bind the existing node for x86;
