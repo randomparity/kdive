@@ -76,6 +76,9 @@ kdive_image_catalog:
       image_arch_alias }}.img
     kdump_service: kdump-tools.service  # Debian unit name (the kdump-tools package)
     packages:  # Debian names; drgn is not in the default Ubuntu repos
+      - netplan.io
+      - networkd-dispatcher
+      - iproute2
       - qemu-guest-agent
       - kexec-tools
       - makedumpfile
@@ -91,6 +94,7 @@ kdive_image_catalog:
     cloud_image_url: >-
       https://dl.rockylinux.org/pub/rocky/10/images/{{ ansible_architecture
       }}/Rocky-10-GenericCloud-Base.latest.{{ ansible_architecture }}.qcow2
+  # No remote SSH parity: no sshd or network policy. Bootability remains unvalidated.
   - name: bare-kdive-remote-base
     distro: bare
     version: "1"

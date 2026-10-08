@@ -207,7 +207,7 @@
 # from a routable worker keeps the worker's source address, so without a source route the guest
 # replies through its default route on the libvirt NIC and the forward never answers. The
 # NetworkManager dispatcher script adds that route on every activation. An image without
-# NetworkManager has no dispatcher directory and is skipped; its return path is #3091.
+# NetworkManager has no dispatcher directory and is skipped; Ubuntu uses the native policy below.
 # Like the fadump unit, the source is the staged copy. It is uploaded to /tmp because --upload
 # cannot target a directory the image may not have.
 - name: Install the SSH-forward return-route dispatcher for {{ image.name }}
@@ -228,6 +228,84 @@
         if command -v restorecon >/dev/null 2>&1; then restorecon -v "$dst"; fi; fi;
         rm -f "$src"
   when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
+
+# Ubuntu uses native lease events; the shared NetworkManager helper remains unchanged.
+- name: Install the Ubuntu native network policy for {{ image.name }}
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-ssh-return-route:/tmp/kdive-ssh-return-route"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-networkd-ssh-return-route:/tmp/kdive-networkd-ssh-return-route"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-ubuntu-network.yaml:/tmp/kdive-ubuntu-network.yaml"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-networkd-startup.conf:/tmp/kdive-networkd-startup.conf"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-ubuntu-ssh-host-keys.conf:/tmp/kdive-ubuntu-ssh-host-keys.conf"
+      - --run-command
+      - |
+        set -eu
+        command -v netplan
+        command -v ip
+        test -x /usr/bin/networkd-dispatcher
+        for policy in /etc/netplan/*.yaml /etc/netplan/*.yml; do
+          if [ -e "$policy" ] || [ -L "$policy" ]; then
+            if [ "$policy" != /etc/netplan/60-kdive.yaml ] || [ -L "$policy" ] ||
+                ! cmp -s "$policy" /tmp/kdive-ubuntu-network.yaml; then
+              echo 'kdive: foreign netplan policy; rebuild from a clean supported Ubuntu image' >&2
+              exit 1
+            fi
+          fi
+        done
+        command -v ssh-keygen
+        if [ -e /etc/systemd/system/ssh.service ] || [ -L /etc/systemd/system/ssh.service ] ||
+            ! awk '
+              /^[[:space:]]*ExecStartPre[[:space:]]*=/ {
+                count++
+                if ($0 != "ExecStartPre=/usr/sbin/sshd -t") bad = 1
+              }
+              END { exit bad || count != 1 }
+            ' /usr/lib/systemd/system/ssh.service; then
+          echo 'kdive: unfamiliar Ubuntu SSH prechecks; rebuild from a clean supported image' >&2
+          exit 1
+        fi
+        for unit_root in /etc/systemd/system /run/systemd/system /usr/lib/systemd/system; do
+          for dropin in "$unit_root"/ssh.service.d/*.conf "$unit_root"/sshd.service.d/*.conf "$unit_root"/service.d/*.conf; do
+            if [ -e "$dropin" ] || [ -L "$dropin" ]; then
+              if [ "$dropin" != /etc/systemd/system/ssh.service.d/50-kdive-host-keys.conf ] || [ -L "$dropin" ] ||
+                  ! cmp -s "$dropin" /tmp/kdive-ubuntu-ssh-host-keys.conf; then
+                echo 'kdive: foreign Ubuntu SSH drop-in; rebuild from a clean supported image' >&2
+                exit 1
+              fi
+            fi
+          done
+        done
+        install -d -o root -g root -m 0755 /etc/systemd/system/ssh.service.d
+        install -o root -g root -m 0644 /tmp/kdive-ubuntu-ssh-host-keys.conf /etc/systemd/system/ssh.service.d/50-kdive-host-keys.conf
+        install -d -o root -g root -m 0755 /etc/netplan /usr/local/libexec
+        install -o root -g root -m 0600 /tmp/kdive-ubuntu-network.yaml /etc/netplan/60-kdive.yaml
+        install -o root -g root -m 0755 /tmp/kdive-ssh-return-route /usr/local/libexec/kdive-ssh-return-route
+        install -o root -g root -m 0755 /tmp/kdive-networkd-ssh-return-route /usr/local/libexec/kdive-networkd-ssh-return-route
+        for state in configured routable off no-carrier failed linger; do
+          install -d -o root -g root -m 0755 "/etc/networkd-dispatcher/$state.d"
+          ln -sf /usr/local/libexec/kdive-networkd-ssh-return-route "/etc/networkd-dispatcher/$state.d/50-kdive-ssh-return-route"
+        done
+        install -d -o root -g root -m 0755 /etc/cloud/cloud.cfg.d /etc/systemd/system/networkd-dispatcher.service.d
+        printf 'network: {config: disabled}\n' > /etc/cloud/cloud.cfg.d/99-kdive-network-policy.cfg
+        chmod 0644 /etc/cloud/cloud.cfg.d/99-kdive-network-policy.cfg
+        install -o root -g root -m 0644 /tmp/kdive-networkd-startup.conf /etc/systemd/system/networkd-dispatcher.service.d/50-kdive-startup.conf
+        netplan generate
+        systemctl enable systemd-networkd.service networkd-dispatcher.service
+        rm -f /tmp/kdive-ssh-return-route /tmp/kdive-networkd-ssh-return-route /tmp/kdive-ubuntu-network.yaml \
+          /tmp/kdive-networkd-startup.conf /tmp/kdive-ubuntu-ssh-host-keys.conf
+  when:
+    - image.distro == 'ubuntu'
+    - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: true
 
 # --- Set the crashkernel reservation when a debuginfo/kdump image is requested. ---

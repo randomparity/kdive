@@ -198,3 +198,8 @@ local_worker_host_engine_unit_path: /usr/lib/systemd/system/docker.service
 # The socket unit's SocketGroup on all three: its socket is root:docker 0660, so a non-root
 # operator outside this group cannot reach the daemon and stack-services.sh fails (#2557).
 local_worker_host_engine_socket_group: docker
+
+# Optional operator-supplied controller files (ADR-0762); all three are required together.
+local_worker_host_remote_libvirt_client_certificate_source: ""
+local_worker_host_remote_libvirt_client_key_source: ""
+local_worker_host_remote_libvirt_ca_certificate_source: ""

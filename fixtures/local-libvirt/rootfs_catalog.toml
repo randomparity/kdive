@@ -35,6 +35,7 @@ arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.8"  # < 1.7.9; the #817 regression reference
 drgn_version = "0.1.0"  # Fedora 43 stable (0.1.0-1.fc43)
+retained_kernel = "6.18.5-200.fc43.x86_64"  # Customization only; final discovery stays unhinted.
 source = { kind = "virt-builder", template = "fedora-43" }
 
 # The cloud-image sibling of the virt-builder entry above. Same Fedora 43 release, but built from

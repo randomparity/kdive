@@ -108,10 +108,43 @@ different directory. Keep the remote client material in its own subdirectory:
 /var/lib/kdive/secrets/remote-libvirt/*   root:kdive-live-libvirt 0440
 ```
 
-The Ansible `local_worker_host` role creates the secrets root. On an installer-only host, create it
-yourself with `sudo install -d -o root -g root -m 0711 /var/lib/kdive/secrets`. The installer adds both the slot accounts and the operator to `kdive-live-libvirt`. The refs then
-read `client_cert_ref = "remote-libvirt/clientcert.pem"`, and likewise for the key and CA. The
-launcher also checks that every slot account can traverse the secrets root.
+Supply the existing `local_worker_host` role (also reused by the runner role) with
+these three controller-local source paths:
+
+- `local_worker_host_remote_libvirt_client_certificate_source`
+- `local_worker_host_remote_libvirt_client_key_source`
+- `local_worker_host_remote_libvirt_ca_certificate_source`
+
+Each defaults to an empty string. Supplying any requires all three. Sources must be
+nonempty regular files, not symlinks, with mode 0400 or 0600 on the controller.
+The role installs `clientcert.pem`, `clientkey.pem` and `cacert.pem` in the fixed
+layout above, suppresses sensitive copy output/diffs, and refuses substituted
+parent or child directories. Repeating identical inputs changes nothing; leaving
+all inputs empty preserves existing credentials. Copies are individually atomic,
+not transactional as a set: retry a failed installation with the validated inputs.
+Certificate issuance and coordinated rotation remain operator responsibilities.
+
+For a host prepared by the standalone lifecycle installer, run the same TLS tasks
+after that installer has created the provider group. From the repository root,
+use an Ansible play with the three source variables supplied privately:
+
+```yaml
+- hosts: worker_hosts
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install operator-supplied remote TLS refs
+      ansible.builtin.import_role:
+        name: local_worker_host
+        tasks_from: remote_libvirt_tls.yml
+```
+
+Use `ANSIBLE_ROLES_PATH=deploy/ansible/roles` with this play and the worker-host
+inventory. This entrypoint creates the missing secrets parent without installing
+packages or changing the lifecycle contract. The installer adds both the slot
+accounts and operator to `kdive-live-libvirt`. Inventory refs then read
+`client_cert_ref = "remote-libvirt/clientcert.pem"`, and likewise for the key and CA.
+The launcher checks that every slot account can traverse the secrets root.
 
 Confirm the worker host can actually reach libvirtd over TLS before running the spine:
 
