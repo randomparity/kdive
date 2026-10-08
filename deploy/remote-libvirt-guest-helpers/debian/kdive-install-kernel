@@ -1,5 +1,5 @@
 #!/bin/bash
-# Debian-family implementation of the fixed ADR-0082/0489 helper (ADR-0753).
+# Debian-family implementation of the fixed ADR-0082/0489 helper (ADR-0766).
 # Only a running curl's fetch failure returns 75; other failures are permanent.
 set -euo pipefail
 

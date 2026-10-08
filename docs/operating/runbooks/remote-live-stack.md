@@ -263,7 +263,7 @@ parameter for each `deep-lifecycle/remote-libvirt/x86_64` contract cell: four fa
 two pinned baselines in `fixtures/kernel/baselines.toml`. Fedora runs on
 `fedora-kdive-remote-base-43` and Enterprise Linux on `rocky-10-kdive-remote-base`
 (`REMOTE_REPRESENTATIVES` in `tests/integration/live_stack/remote_lifecycle.py`). Debian uses
-`ubuntu-2404-kdive-remote-base`, rebuilt with its native install helper (ADR-0753).
+`ubuntu-2404-kdive-remote-base`, rebuilt with its native install helper (ADR-0766).
 SUSE records `blocked` because there is no SUSE remote base image (#3082). Debian's
 separate SSH return-route prerequisite remains #3091; a helper fix does not prove that leg. A parameter provisions the representative, uploads its baseline's
 fixture kernel, completes the build, installs and boots it in the guest, reconnects over the SSH

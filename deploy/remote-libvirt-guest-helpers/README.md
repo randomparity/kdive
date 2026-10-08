@@ -97,4 +97,4 @@ The native tool may report ordinary-layout discovery diagnostics before using th
 explicit paths. Positive crash-loaded status after reboot is required arming evidence.
 A missing uploaded kernel configuration can also produce an initramfs compression
 warning: installation alone does not prove the resulting image boots. These are not
-crash-capture results. See [ADR-0753](../../docs/adr/0753-debian-remote-kernel-install-helper.md).
+crash-capture results. See [ADR-0766](../../docs/adr/0766-debian-remote-kernel-install-helper.md).

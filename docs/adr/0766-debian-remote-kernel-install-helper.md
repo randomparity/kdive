@@ -1,4 +1,4 @@
-# 0753 — Debian-family remote kernel installation uses native initramfs and GRUB tools
+# 0766 — Debian-family remote kernel installation uses native initramfs and GRUB tools
 
 ## Status
 

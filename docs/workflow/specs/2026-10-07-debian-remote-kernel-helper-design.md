@@ -7,7 +7,7 @@ reproduction extracts a valid bundle and fails on absent dracut. The remote work
 already invokes one allowlisted helper with fixed argv; family policy belongs in
 image construction and the helper, not the worker.
 
-Implement #3081 under [ADR-0753](../../adr/0753-debian-remote-kernel-install-helper.md).
+Implement #3081 under [ADR-0766](../../adr/0766-debian-remote-kernel-install-helper.md).
 Keep Fedora behavior, provider ports, argv, stdout and exit categorization unchanged.
 The existing `distro` field chooses a source variant but the installed basename,
 owner and executable mode stay the same. No new inventory or public interface.
