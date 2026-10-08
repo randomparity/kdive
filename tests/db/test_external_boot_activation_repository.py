@@ -1219,3 +1219,23 @@ def test_teardown_cleanup_releases_capacity_and_fences_terminal_state(
             await conn.commit()
 
     asyncio.run(_run())
+
+
+def test_release_coverage_counts_the_debuginfo_payload_as_a_known_object() -> None:
+    # #3130: release evidence must cover the staged vmlinux payload like the other artifacts.
+    row = {
+        "materialization": {
+            "artifacts": {
+                "kernel": {"ref": "kernel/ref"},
+                "modules": {"ref": "modules/ref"},
+                "initrd": None,
+                "debuginfo": {"ref": "debuginfo/ref"},
+            }
+        },
+        "recovery_point": None,
+        "pre_recovery_evidence": None,
+    }
+
+    known = ExternalBootActivationRepository._known_objects(row)  # noqa: SLF001
+
+    assert known == {"kernel/ref", "modules/ref", "debuginfo/ref"}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import cast
 
@@ -10,6 +11,7 @@ from pydantic import ValidationError
 
 from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 from kdive.providers.ports.external_boot import (
+    AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
@@ -17,6 +19,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPreparationRequest,
     KernelIdentity,
     OpaqueProviderRef,
+    PresentComponentState,
     RecoveryPoint,
     RootSpecV1,
     RunningKernelObservation,
@@ -388,6 +391,73 @@ def test_recovery_point_binding_canonical_round_trip_and_closed_schema() -> None
             data.pop("binding")
         with pytest.raises(ValidationError):
             RecoveryPoint.model_validate(data)
+
+
+def test_recovery_point_without_debuginfo_keeps_its_pre_3130_identity() -> None:
+    provider = FaultInjectExternalBoot()
+    authority = OpaqueProviderRef(ref="authority/current")
+    materialization = provider.materialize(ExternalBootPlan.model_validate(_plan_data()), authority)
+    binding = ExternalBootActivationBinding(
+        system_id=SYSTEM_ID, run_id=RUN_ID, activation_id=ACTIVATION_ID
+    )
+    point = provider.prepare(materialization, binding, authority)
+    serialized = point.to_canonical_json()
+
+    # Golden digests computed from the same values on the code before #3130.
+    assert "sha256:" + hashlib.sha256(serialized).hexdigest() == (
+        "sha256:a6232353c010127f50fcf54ebc09a388a5bf1fdb8a9cb3a28504a952323805e9"
+    )
+    assert materialization.identity == (
+        "sha256:cc26419249be6dafe2cf43283cbeaf03b1cda83cbae2e94fa9599bedbc9fd490"
+    )
+    assert b"debuginfo" not in serialized
+    with pytest.raises(ValueError, match="not canonical"):
+        RecoveryPoint.from_canonical_json(
+            serialized.replace(b'"definition":', b'"debuginfo":null,"definition":', 1)
+        )
+
+
+def test_recovery_point_with_debuginfo_round_trips_canonically() -> None:
+    provider = FaultInjectExternalBoot()
+    authority = OpaqueProviderRef(ref="authority/current")
+    materialization = provider.materialize(ExternalBootPlan.model_validate(_plan_data()), authority)
+    binding = ExternalBootActivationBinding(
+        system_id=SYSTEM_ID, run_id=RUN_ID, activation_id=ACTIVATION_ID
+    )
+    point = provider.prepare(materialization, binding, authority)
+    staged = point.model_copy(
+        update={
+            "source_state": point.source_state.model_copy(
+                update={"debuginfo": AbsentComponentState()}
+            ),
+            "target_state": point.target_state.model_copy(
+                update={"debuginfo": PresentComponentState(manifest=ZERO_DIGEST)}
+            ),
+        }
+    )
+
+    assert RecoveryPoint.from_canonical_json(staged.to_canonical_json()) == staged
+    assert staged.to_canonical_json() != point.to_canonical_json()
+
+
+def test_materialization_debuginfo_ref_and_digest_are_paired() -> None:
+    provider = FaultInjectExternalBoot()
+    authority = OpaqueProviderRef(ref="authority/current")
+    data = provider.materialize(
+        ExternalBootPlan.model_validate(_plan_data()), authority
+    ).model_dump(by_alias=True)
+    reference = {"ref": "debuginfo/ref"}
+
+    paired = {**data, "verified_debuginfo_sha256": ZERO_DIGEST}
+    paired["artifacts"] = {**data["artifacts"], "debuginfo": reference}
+    assert ExternalBootMaterialization.model_validate(paired).artifacts.debuginfo is not None
+    reference_only = {**data, "artifacts": {**data["artifacts"], "debuginfo": reference}}
+    with pytest.raises(ValidationError, match="debuginfo reference and verified digest"):
+        ExternalBootMaterialization.model_validate(reference_only)
+    with pytest.raises(ValidationError, match="debuginfo reference and verified digest"):
+        ExternalBootMaterialization.model_validate(
+            {**data, "verified_debuginfo_sha256": ZERO_DIGEST}
+        )
 
 
 @pytest.mark.parametrize("field", ["system_id", "run_id"])

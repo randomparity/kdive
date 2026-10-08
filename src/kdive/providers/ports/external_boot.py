@@ -267,6 +267,8 @@ class MaterializedArtifacts(_ClosedValue):
     kernel: OpaqueProviderRef
     modules: OpaqueProviderRef
     initrd: OpaqueProviderRef | None
+    # Omitted when absent so materializations stored before #3130 keep their identity.
+    debuginfo: OpaqueProviderRef | None = Field(None, exclude_if=lambda value: value is None)
 
 
 class KernelIdentity(_ClosedValue):
@@ -296,6 +298,7 @@ class ExternalBootMaterialization(_ClosedValue):
     verified_initrd_sha256: Digest | None
     kernel_observation: KernelIdentity
     artifacts: MaterializedArtifacts
+    verified_debuginfo_sha256: Digest | None = Field(None, exclude_if=lambda value: value is None)
 
     _canonical_provider = field_validator("provider_kind")(_nfc)
 
@@ -305,6 +308,8 @@ class ExternalBootMaterialization(_ClosedValue):
             raise ValueError("kernel observation architecture must match materialization")
         if (self.artifacts.initrd is None) != (self.verified_initrd_sha256 is None):
             raise ValueError("initrd reference and verified digest must have the same presence")
+        if (self.artifacts.debuginfo is None) != (self.verified_debuginfo_sha256 is None):
+            raise ValueError("debuginfo reference and verified digest must have the same presence")
         return self
 
     @property
@@ -335,6 +340,8 @@ type ComponentState = AbsentComponentState | PresentComponentState
 class ProviderStateIdentity(_ClosedValue):
     definition: Digest
     modules: ComponentState
+    # The staged DWARF vmlinux (#3130); omitted when absent so stored points keep their identity.
+    debuginfo: ComponentState | None = Field(None, exclude_if=lambda value: value is None)
 
 
 class RecoveryPoint(_ClosedValue):
