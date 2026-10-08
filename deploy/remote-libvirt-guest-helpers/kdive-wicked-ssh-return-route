@@ -87,10 +87,12 @@ def event_interfaces(args):
         if len(args) != 3 or args[2] != "info":
             raise ValueError("invalid native batch arguments")
         events = {}
-        for line in read_native(args[1]).splitlines():
-            words = shlex.split(line)
-            if not words:
-                continue
+        records = [shlex.split(line) for line in read_native(args[1]).splitlines() if line.strip()]
+        if records:
+            if records[-1] != ["update"]:
+                raise ValueError("native batch requires terminal update")
+            records.pop()
+        for words in records:
             if len(words) not in {5, 7} or words[1] != "-i" or words[3] != "-s":
                 raise ValueError("invalid native batch record")
             iface = interface(words[2])

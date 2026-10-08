@@ -125,7 +125,7 @@ def test_empty_native_batch_probe_does_not_query_or_mutate_routes(guest):
 def test_native_batch_modify_reconciles_current_lease(guest):
     p = lease(guest)
     batch = guest[1] / "batch.native"
-    batch.write_text(f"modify -i ethA -s wicked-dhcp-ipv4 -I {p}\n")
+    batch.write_text(f"modify -i ethA -s wicked-dhcp-ipv4 -I {p}\nupdate\n")
     result, calls = run(guest, "batch", str(batch), "info")
     assert result.returncode == 0, result.stderr
     assert calls[0] == ["delegate", "batch", str(batch), "info"]
@@ -213,7 +213,8 @@ def test_batch_remove_after_modify_uses_final_native_state(guest):
     path = guest[1] / "leaseinfo.ethA.dhcp.ipv4"
     batch = guest[1] / "batch.remove"
     batch.write_text(
-        f"modify -i ethA -s wicked-dhcp-ipv4 -I {path}\nremove -i ethA -s wicked-dhcp-ipv4\n"
+        f"modify -i ethA -s wicked-dhcp-ipv4 -I {path}\n"
+        "remove -i ethA -s wicked-dhcp-ipv4\nupdate\n"
     )
     result, calls = run(
         guest,
@@ -386,7 +387,7 @@ def test_coalesced_batch_transfers_only_obsolete_source_ownership(guest):
     new = lease(guest, "10.0.2.16/24", "ethB")
     batch = guest[1] / "batch.transfer"
     batch.write_text(
-        f"remove -i ethA -s wicked-dhcp-ipv4\nmodify -i ethB -s wicked-dhcp-ipv4 -I {new}\n"
+        f"remove -i ethA -s wicked-dhcp-ipv4\nmodify -i ethB -s wicked-dhcp-ipv4 -I {new}\nupdate\n"
     )
     env = {
         "ADDRESSES": json.dumps(
@@ -405,3 +406,28 @@ def test_coalesced_batch_transfers_only_obsolete_source_ownership(guest):
     result, calls = run(guest, "batch", str(batch), "info", **env)
     assert result.returncode != 0
     assert not any(c[0] == "helper" for c in calls)
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        "update extra\n",
+        "update\nupdate\n",
+        "update\nremove -i ethA -s wicked-dhcp-ipv4\n",
+        "remove -i ethA -s wicked-dhcp-ipv4\n",
+    ],
+)
+def test_invalid_batch_update_directives_refuse_route_changes(guest, records):
+    batch = guest[1] / "batch.invalid-control"
+    batch.write_text(records)
+    result, calls = run(guest, "batch", str(batch), "info")
+    assert result.returncode != 0
+    assert calls == [["delegate", "batch", str(batch), "info"]]
+
+
+def test_native_batch_remove_terminal_update(guest):
+    batch = guest[1] / "batch.remove-only"
+    batch.write_text("remove -i ethA -s wicked-dhcp-ipv4\nupdate\n")
+    result, calls = run(guest, "batch", str(batch), "info")
+    assert result.returncode == 0, result.stderr
+    assert calls[0] == ["delegate", "batch", str(batch), "info"]

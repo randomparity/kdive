@@ -96,7 +96,10 @@ incompatibility is source/package evidence, not a claimed failed live install.
     first; nonzero delegate status is logged/returned without routing mutations.
     The adapter then interprets only DHCP/IPv4 records. A Python stdlib parser
     handles native `-i/-t/-f` arguments, `modify -i IF -s wicked-dhcp-ipv4 -I FILE`
-    and `remove -i IF -s wicked-dhcp-ipv4` batch records. No eval/source/shell expansion.
+    and `remove -i IF -s wicked-dhcp-ipv4` batch records. A nonempty native batch
+    ends with exactly one standalone `update` control record, not a lease event.
+    Reject missing, duplicate, malformed or nonterminal update directives; preserve
+    the truly empty startup probe. No eval/source/shell expansion.
     Native non-DHCP/IPv6 records retain delegation and cause no KDIVE route change.
     Validate bounded regular non-symlink native input paths, interface identity,
     lease INTERFACE/TYPE/FAMILY and IPADDR fields; ignore unrelated lease metadata.
