@@ -762,12 +762,18 @@ whole shapes catalog to the per-project one:
   `uploads/q/<project>/` with the metadata the upload reassembly writes, register it, delete the
   image and purge every version of the quarantine key and the published object;
 - `shapes.set` and `shapes.delete` create and remove a `cov-<hex>` shape;
-- `shapes.set` and `resources.availability` take one allocation in `KDIVE_PROJECT` through
-  `allocations.request` and release it. The released row and its ledger entries stay in that
-  project as history.
+- `shapes.set` takes one allocation in `KDIVE_PROJECT` and releases it.
+- `resources.availability` requires an idle fleet with one available local host of capacity
+  one and room for 1 vCPU/1 GiB RAM/1 GB disk. It temporarily raises the funded project's
+  pending cap, preserving both concurrency caps, holds one grant and queues one by-kind and
+  one by-ID request. It compares the full queue split with the database, withdraws both queued
+  rows before releasing the grant, then verifies zero queue depth and restored quota caps.
+  Unsuitable topology is `blocked`. Failed or indeterminate withdrawal retains known blockers;
+  reconcile the reported subject and IDs, withdraw queued rows before releasing blockers,
+  and restore the recorded caps. A restored pending cap alone does not clear residual rows.
+  Released allocations and ledger entries remain as history.
 
 A cell killed mid-run can leave any of these behind; `demo-down.sh --wipe --yes` clears them.
-Queue depth is compared but not driven (#3106).
 
 #### Investigation and artifact tool cells (#3096)
 
