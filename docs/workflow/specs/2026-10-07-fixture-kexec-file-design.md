@@ -80,4 +80,13 @@ Rebuild both native baselines into fresh output directories and verify new ident
 then rerun the same strict-revision Rocky capture carrier. Reuse clean source trees;
 the existing builder requires fresh outputs, so do not invent an incremental bypass.
 Retain old outputs and their actual builder identity. Native POWER remains unproven.
-The earlier static RHEL filesystem concern remains unverified and is not added here.
+The subsequent native RHEL capture reached installation but kdump arming failed.
+The guest service journal identified missing `erofs` and `overlay` modules while
+building its dracut `squash-erofs` initramfs. This is now observed prerequisite
+failure, not an inferred KEXEC_FILE dependency. The operator approved the bounded
+correction and one additional final review (three total, two already used).
+Append `CONFIG_EROFS_FS=y` and `CONFIG_OVERLAY_FS=y` alongside fw_cfg only in the
+same default-x86 branch. Preserve custom fragments and POWER defaults. Extend the
+existing selection test and dropped-option cases; rebuild both fresh outputs and
+rerun actual capture. Do not add unobserved SQUASHFS/XFS requirements or alter
+upload policy. Preserve all earlier build identities and failed capture evidence.

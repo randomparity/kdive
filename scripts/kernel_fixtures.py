@@ -235,9 +235,9 @@ def build(
     if output.exists() or source == output or source in output.parents or output in source.parents:
         raise ValueError("choose a fresh output directory separate from source")
     fragment = config.read_text()
-    # The existing x86 capture contract requires fw_cfg; little-endian POWER cannot enable it.
+    # x86 capture needs fw_cfg; RHEL dracut also needs erofs and overlay to arm kdump.
     if arch == "x86_64" and config == CONFIG.resolve():
-        fragment += "CONFIG_FW_CFG_SYSFS=y\n"
+        fragment += "CONFIG_FW_CFG_SYSFS=y\nCONFIG_EROFS_FS=y\nCONFIG_OVERLAY_FS=y\n"
     toolchain = toolchain_identity()
     env = {
         k: v

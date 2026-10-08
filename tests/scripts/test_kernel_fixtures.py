@@ -417,14 +417,16 @@ def test_failed_compilation_never_writes_manifest(tmp_path: Path, monkeypatch) -
 @pytest.mark.parametrize(
     "arch,custom,dropped",
     [
-        ("x86_64", False, False),
-        ("ppc64le", False, False),
-        ("x86_64", True, False),
-        ("x86_64", False, True),
+        ("x86_64", False, ""),
+        ("ppc64le", False, ""),
+        ("x86_64", True, ""),
+        ("x86_64", False, "FW_CFG_SYSFS"),
+        ("x86_64", False, "EROFS_FS"),
+        ("x86_64", False, "OVERLAY_FS"),
     ],
 )
 def test_default_capture_input_preserves_arch_and_custom_policy(
-    tmp_path: Path, monkeypatch, arch: str, custom: bool, dropped: bool
+    tmp_path: Path, monkeypatch, arch: str, custom: bool, dropped: str
 ) -> None:
     monkeypatch.setattr(fixture.platform, "machine", lambda: arch)
     monkeypatch.setattr(fixture, "toolchain_identity", lambda: {"gcc": "test"})
@@ -432,7 +434,10 @@ def test_default_capture_input_preserves_arch_and_custom_policy(
     config = fixture.CONFIG
     if custom:
         config = tmp_path / "custom.config"
-        config.write_text(fixture.CONFIG.read_text() + "CONFIG_FW_CFG_SYSFS=n\n")
+        config.write_text(
+            fixture.CONFIG.read_text()
+            + "CONFIG_FW_CFG_SYSFS=n\nCONFIG_EROFS_FS=n\nCONFIG_OVERLAY_FS=n\n"
+        )
 
     def command(argv, **kwargs):
         if argv[0] == "git":
@@ -444,9 +449,7 @@ def test_default_capture_input_preserves_arch_and_custom_policy(
                 if dropped:
                     effective = output / ".config"
                     effective.write_text(
-                        effective.read_text().replace(
-                            "CONFIG_FW_CFG_SYSFS=y", "CONFIG_FW_CFG_SYSFS=n"
-                        )
+                        effective.read_text().replace(f"CONFIG_{dropped}=y", f"CONFIG_{dropped}=n")
                     )
             else:
                 raise RuntimeError("compilation boundary reached")
@@ -454,14 +457,14 @@ def test_default_capture_input_preserves_arch_and_custom_policy(
 
     monkeypatch.setattr(fixture, "command", command)
     error = ValueError if dropped else RuntimeError
-    message = "CONFIG_FW_CFG_SYSFS" if dropped else "compilation boundary reached"
+    message = f"CONFIG_{dropped}" if dropped else "compilation boundary reached"
     with pytest.raises(error, match=message):
         fixture.build(
             tmp_path / "source", output, baseline="longterm", arch=arch, config=config, jobs=1
         )
     expected = config.read_text()
     if arch == "x86_64" and not custom:
-        expected += "CONFIG_FW_CFG_SYSFS=y\n"
+        expected += "CONFIG_FW_CFG_SYSFS=y\nCONFIG_EROFS_FS=y\nCONFIG_OVERLAY_FS=y\n"
     assert (output / "input.config").read_text() == expected
     if not dropped:
         missing = unmet_clauses(
