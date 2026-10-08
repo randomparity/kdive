@@ -100,3 +100,15 @@ denial, with SELinux enforcing. Preserve staged-path separation and existing
 cache behavior tests. Then rerun all four unchanged publication cells on fresh
 candidate-matched stacks; retain failed earlier records separately. Final
 review must cover the complete expanded branch, not only the list entries.
+
+## Publication provenance oracle
+
+The required native publication cell exposed a carrier mismatch after a successful
+build and provisioning: the producer records `os_release.id` and
+`os_release.version_id`, while the guest identity comparator consumes `ID` and
+`VERSION_ID`. Map these two canonical fields explicitly before comparing the
+published provenance, preserving the existing architecture and version checks.
+Keep this assertion in the existing image-smoke support module so its owning
+ordinary tests do not import a collected live-test module. Missing or mismatched
+OS/version/architecture must still fail. This changes no product schema or cell
+identity; rerun all four required publication cells after correcting the oracle.

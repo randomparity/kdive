@@ -39,7 +39,7 @@ import psycopg
 import pytest
 
 from kdive.domain.errors import ErrorCategory
-from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
+from kdive.images.rootfs.catalog import load_rootfs_catalog
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell
@@ -52,7 +52,7 @@ from tests.integration.live_stack.deep_lifecycle import (
     file_sha256,
     load_fixture,
 )
-from tests.integration.live_stack.image_smoke import Endpoint, os_matches, ssh
+from tests.integration.live_stack.image_smoke import Endpoint, provenance_matches, ssh
 from tests.integration.live_stack.remote_lifecycle import (
     REMOTE_REPRESENTATIVES,
     guest_boot_kernel,
@@ -341,14 +341,6 @@ async def _described(op: LiveStackClient, name: str, arch: str) -> ToolResponse:
         assert cursor, f"{name} is not in the catalog after its publication"
 
 
-def _provenance_matches(described: ToolResponse, entry: RootfsCatalogEntry) -> None:
-    """The build-recorded ``os_release`` and ``arch`` name the catalog row's platform."""
-    provenance = cast(Mapping[str, Any], described.data.get("provenance") or {})
-    release = {str(k): str(v) for k, v in (provenance.get("os_release") or {}).items()}
-    built = {**release, "machine": str(provenance.get("arch"))}
-    assert os_matches(entry, built), f"provenance names {built.get('ID')} {built.get('VERSION_ID')}"
-
-
 async def _build_jobs(db_url: str, provider: str, name: str) -> int:
     """The number of ``IMAGE_BUILD`` jobs ``images.publish`` enqueued for ``provider``/``name``."""
     async with await psycopg.AsyncConnection.connect(db_url) as conn:
@@ -402,7 +394,7 @@ async def _publish(
         assert described.data.get("state") == "registered", "the published row is not registered"
         assert digest.startswith("sha256:") and len(digest) == 71, f"digest {digest!r}"
         assert await _pending_rows(db_url, name) == 0, f"a pending {name} row remains"
-        _provenance_matches(described, entry)
+        provenance_matches(described, entry)
         with tempfile.TemporaryDirectory() as scratch:
             await observe_guest(run, op, system_id, Path(scratch), entry)
         run.prove(
