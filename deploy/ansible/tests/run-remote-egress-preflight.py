@@ -3,6 +3,7 @@
 
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,7 +18,9 @@ FORWARD = "-P FORWARD DROP\n-A FORWARD -j DOCKER-USER\n-A FORWARD -j DOCKER-FORW
 EMPTY = "-N DOCKER-USER"
 
 
-def run_case(name, forward=FORWARD, user=EMPTY, *, rc=0, user_rc=0, missing=False, failure=None):
+def run_case(
+    name, forward=FORWARD, user=EMPTY, *, rc=0, user_rc=0, missing=False, failure=None, shell=None
+):
     with tempfile.TemporaryDirectory(prefix="kdive-egress-test-") as directory:
         work = Path(directory)
         calls = work / "calls"
@@ -40,6 +43,9 @@ def run_case(name, forward=FORWARD, user=EMPTY, *, rc=0, user_rc=0, missing=Fals
                         "hosts": "localhost",
                         "connection": "local",
                         "gather_facts": False,
+                        "module_defaults": (
+                            {"ansible.builtin.shell": {"executable": shell}} if shell else {}
+                        ),
                         "environment": {"PATH": str(work)},
                         "vars": {
                             "libvirt_network": "selected-network",
@@ -88,6 +94,25 @@ run_case("non-docker", forward="-P FORWARD DROP")
 run_case("inspection-error", rc=4, failure="Read IPv4 forwarding rules")
 run_case("user-inspection-error", user_rc=1, failure="Read Docker user forwarding rules")
 run_case("tool-absent", missing=True)
+
+for shell_name in ("bash", "dash"):
+    executable = shutil.which(shell_name)
+    if executable is None:
+        print(f"not run {shell_name}: shell unavailable on this host")
+        continue
+    run_case(f"{shell_name}-tool-absent", missing=True, shell=executable)
+    run_case(
+        f"{shell_name}-inspection-error",
+        rc=4,
+        failure="Read IPv4 forwarding rules",
+        shell=executable,
+    )
+    run_case(
+        f"{shell_name}-user-inspection-error",
+        user_rc=1,
+        failure="Read Docker user forwarding rules",
+        shell=executable,
+    )
 
 plays = yaml.safe_load((ANSIBLE / "site.yml").read_text())
 preflight = next(

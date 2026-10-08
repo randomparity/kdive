@@ -2,7 +2,7 @@
 # ADR-0751: recognize one known conflict; do not interpret arbitrary firewall policy.
 - name: Discover the optional iptables inspection tool  # noqa: command-instead-of-shell
   # command -v is a shell builtin; do not require a separate discovery package.
-  ansible.builtin.shell: command -v iptables
+  ansible.builtin.shell: if command -v iptables; then exit 0; else exit 1; fi
   register: libvirt_pool_net_iptables
   changed_when: false
   failed_when: libvirt_pool_net_iptables.rc not in [0, 1]
