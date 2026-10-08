@@ -646,6 +646,16 @@ Build the fixtures on the native architecture. A missing `KDIVE_FIXTURE_ROOT`, a
 outcomes are those of the image smoke. A binding's kernel fields are null when its fixture is absent,
 which `qualify` reports as a missing required input.
 
+The default fragment requests `CONFIG_KEXEC_FILE=y` for RHEL-family kdump loading, alongside
+`CONFIG_KEXEC=y` and `CONFIG_CRASH_DUMP=y`. For the default x86_64 configuration, the builder
+also appends `CONFIG_FW_CFG_SYSFS=y`, required by the existing crash-capture contract. The
+assembled fragment is retained as `input.config` and hashed in the manifest. Native ppc64le
+and explicit custom config files retain their selected input unchanged. After changing these
+inputs, rebuild both baselines
+into fresh output directories and regenerate their evidence bindings. An older manifest can
+still pass integrity verification; that does not establish these options or current capture
+evidence. Check the rebuilt effective `.config` and rerun the affected live cells.
+
 After an interrupted run, release the leftover allocation with `allocations.release` (or let the
 lease expire) and check `KDIVE_INSTALL_STAGING` (`/var/lib/kdive/install` on the demo lane) for
 the run's installed kernel.
