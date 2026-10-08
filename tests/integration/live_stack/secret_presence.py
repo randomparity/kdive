@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import platform
 import secrets
@@ -56,7 +57,8 @@ def lane_secrets() -> set[str]:
 
 def verify_presence(answer: ToolResponse, known: set[str]) -> dict[str, object]:
     """Fail without disclosing compared values, including when a label contains one."""
-    leaked = sum(value in answer.model_dump_json() for value in known)
+    served = answer.model_dump_json()
+    leaked = sum(json.dumps(value, ensure_ascii=False)[1:-1] in served for value in known)
     assert leaked == 0, f"{leaked} known secret value(s) were served"
     expected = answer.data.get("secrets") == ["<process-global>"]
     assert expected, "expected exact process-global presence"
@@ -128,6 +130,7 @@ async def prove_secret_presence(
         raise ScenarioStop(
             Outcome.BLOCKED, "secrets.list requires an idle fresh server; restart before this cell"
         )
+    fixture = CellRun(run.cell, run.writer)
     known = lane_secrets()
     owned_system: str | None = None
 
@@ -140,7 +143,7 @@ async def prove_secret_presence(
         ).object_id
         session: str | None = None
         try:
-            run_id = await _booted_run(op, investigation, system_id, run)
+            run_id = await _booted_run(op, investigation, system_id, fixture)
             clean = (await listed()).data.get("secrets") == []
             assert clean, "server registered an unexpected source before debug attach"
             attached = ok(
@@ -179,22 +182,28 @@ async def prove_secret_presence(
                 )
                 assert closed.status == "closed", "owned investigation did not close"
 
-    await on_catalog_system(
-        run,
-        base_url,
-        issuer,
-        db_url,
-        project=project,
-        image=lane_image()[0],
-        body=body,
-    )
+    try:
+        await on_catalog_system(
+            fixture,
+            base_url,
+            issuer,
+            db_url,
+            project=project,
+            image=lane_image()[0],
+            body=body,
+        )
+    finally:
+        run.artifacts.extend(fixture.artifacts)
+        run.artifacts.extend(fixture.assertions.values())
     assert owned_system is not None, "source System was not created"
     absent = await _source_key(db_url, owned_system) is None
     assert absent, "owned bootstrap key remained after System cleanup"
     retained = verify_presence(await listed(), known)
     run.prove(
-        "source-cleanup",
+        "cleanup",
         {
+            "fixture_cleanup": fixture.assertions["cleanup"],
+            "fixture_context": fixture.observed,
             "bootstrap_key_absent": absent,
             "session_detached": True,
             "registry_lifetime": "process; stop server after this cell",
