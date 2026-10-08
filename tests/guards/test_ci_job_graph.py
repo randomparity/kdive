@@ -139,7 +139,7 @@ def test_split_jobs_carry_their_own_runtime_and_base_ref_prerequisites() -> None
     assert '"${BASE_SHA:-origin/main}"' in schema["run"]
 
 
-@pytest.mark.parametrize("fail_at", [None, 0, 4, 8])
+@pytest.mark.parametrize("fail_at", [None, 0, 4, 8, 9])
 def test_ansible_timings_preserve_failure_and_stop_later_harnesses(
     tmp_path: Path, fail_at: int | None
 ) -> None:
@@ -156,6 +156,7 @@ def test_ansible_timings_preserve_failure_and_stop_later_harnesses(
         "run-external-boot-recovery-root.sh",
         "run-local-worker-host.py",
         "run-local-libvirt-host.py",
+        "run-remote-egress-preflight.py",
     ]
     stub = tmp_path / "uv"
     stub.write_text(
