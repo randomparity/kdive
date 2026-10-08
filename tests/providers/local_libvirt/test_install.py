@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import stat
 import subprocess
 import sys
 import tarfile
@@ -2464,3 +2465,21 @@ def test_default_boot_accel_is_none_scaled(tmp_path: Path, _tcg_multiplier_5: No
         inst.boot(_SYS)
     assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
     assert seam.calls == 15
+
+
+@pytest.mark.parametrize("mask", [0o022, 0o077])
+def test_persistent_staging_shares_system_and_run_but_not_separate_scratch(
+    tmp_path: Path, mask: int
+) -> None:
+    staging = tmp_path / "staging"
+    scratch = tmp_path / "scratch"
+    inst = _install(conn=_conn_with_existing(), staging_root=staging, scratch_root=scratch)
+    previous = os.umask(mask)
+    try:
+        inst.install(_request())
+        inst.install(_request())
+    finally:
+        os.umask(previous)
+    for path in (staging / str(_SYS), staging / str(_SYS) / str(_RUN)):
+        assert stat.S_IMODE(path.stat().st_mode) == (0o777 & ~mask) | 0o070
+    assert stat.S_IMODE((scratch / str(_SYS)).stat().st_mode) == 0o777 & ~mask

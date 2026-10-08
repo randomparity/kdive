@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -247,3 +249,20 @@ def test_baseline_kernel_names_count_not_one_iff_selection_fails(entries: list[s
     assert len(baseline_kernel_names(entries)) != 1
     with pytest.raises(CategorizedError):
         select_kernel_and_initrd(entries)
+
+
+@pytest.mark.parametrize("mask", [0o022, 0o077])
+def test_extracted_baseline_retains_shared_cleanup_access(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mask: int
+) -> None:
+    _install_guest(monkeypatch, _Guest([f"/boot/vmlinuz-{_V}"]))
+    destination = tmp_path / "baseline"
+    previous = os.umask(mask)
+    try:
+        result = _real_extract_baseline_kernel(tmp_path / "base.qcow2", destination)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(destination.stat().st_mode) == (0o777 & ~mask) | 0o070
+    assert result.kernel.read_bytes() == b"kernel"
+    assert stat.S_IMODE(result.kernel.stat().st_mode) == 0o666 & ~mask
+    assert not (tmp_path / "baseline.part").exists()
