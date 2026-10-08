@@ -275,6 +275,7 @@ kernel = true
 "systems.snapshot" = "supports_snapshots"
 
 [implementations]
+"remote-quiescence/x86_64" = "tests/integration/test_remote_capture_operation_quiescence_live.py::test_remote_capture_operation_waits_for_fresh_monitor_ordering"
 "host-install" = "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
 "image-smoke" = "tests/integration/test_image_smoke_live.py::test_image_smoke"
 "deep-lifecycle/local-libvirt/longterm" = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
