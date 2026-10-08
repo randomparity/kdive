@@ -29,6 +29,63 @@ def test_host_provisioning_covers_kernel_build_tools(family, headers, btf) -> No
     assert required <= set(defaults[f"libvirt_stack_packages_{family}"])
 
 
+@pytest.mark.parametrize(
+    "inventories,expected",
+    [
+        ({"dpkg-query": "", "rpm": "gcc=16.1-1"}, "gcc=16.1-1"),
+        ({"dpkg-query": "gcc=16.1", "rpm": ""}, "gcc=16.1"),
+        ({"rpm": "gcc=16.1-1"}, "gcc=16.1-1"),
+        ({"dpkg-query": "gcc=16.1"}, "gcc=16.1"),
+    ],
+)
+def test_toolchain_records_nonempty_package_inventory(monkeypatch, inventories, expected) -> None:
+    monkeypatch.setattr(fixture.shutil, "which", lambda tool: tool if tool in inventories else None)
+
+    def command(argv):
+        return "test version" if argv[-1] == "--version" else inventories[argv[0]]
+
+    monkeypatch.setattr(fixture, "command", command)
+    assert fixture.toolchain_identity()["packages"] == expected
+
+
+@pytest.mark.parametrize("inventories", [{}, {"dpkg-query": ""}, {"dpkg-query": "", "rpm": ""}])
+def test_empty_package_inventory_stops_before_fetch_or_build(tmp_path, monkeypatch, inventories):
+    monkeypatch.setattr(fixture.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(fixture.shutil, "which", lambda tool: tool if tool in inventories else None)
+
+    def command(argv, **kwargs):
+        if argv[-1] == "--version":
+            return "test version"
+        assert argv[0] in inventories, "build started without package provenance"
+        return inventories[argv[0]]
+
+    monkeypatch.setattr(fixture, "command", command)
+    output = tmp_path / "out"
+    with pytest.raises(ValueError, match="package inventory"):
+        fixture.build(
+            tmp_path / "source",
+            output,
+            baseline="longterm",
+            arch="x86_64",
+            config=fixture.CONFIG,
+            jobs=1,
+        )
+    assert not output.exists()
+
+
+def test_package_query_failure_is_not_hidden(monkeypatch):
+    monkeypatch.setattr(fixture.shutil, "which", lambda tool: tool)
+
+    def command(argv):
+        if argv[-1] == "--version":
+            return "test version"
+        raise subprocess.CalledProcessError(2, argv)
+
+    monkeypatch.setattr(fixture, "command", command)
+    with pytest.raises(subprocess.CalledProcessError):
+        fixture.toolchain_identity()
+
+
 def _outputs(root: Path) -> None:
     for name in (
         *fixture.REQUIRED["x86_64"],

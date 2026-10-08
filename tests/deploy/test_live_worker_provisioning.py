@@ -1359,6 +1359,17 @@ def test_installer_pins_grpc_system_openssl_and_zlib_for_the_sync() -> None:
     assert prefix in source
 
 
+def test_installer_uv_provisioning_uses_existing_selection() -> None:
+    play = yaml.safe_load(_text(LOCAL_PLAY))[0]
+    install = next(
+        task
+        for task in play["tasks"]
+        if task["name"] == "Install the fixed live-worker lifecycle contract"
+    )
+    assert install["ansible.builtin.command"]["argv"][-2:] == ["--uv", "{{ live_vm_host_uv_bin }}"]
+    assert install["no_log"] is True
+
+
 def test_installer_resolves_uv_before_it_mutates_the_host() -> None:
     """A bare ``uv`` exits 127 under ``sudo``, whose ``secure_path`` hides a user-local one.
 
@@ -1367,13 +1378,14 @@ def test_installer_resolves_uv_before_it_mutates_the_host() -> None:
     (#2506).
     """
     source = _text(INSTALLER)
-    resolve = 'uv_bin="$(_resolve_uv_bin)"'
+    resolve = 'uv_bin="$(_resolve_uv_bin "${uv_selection[@]}")"'
     first_mutation = 'getent group "$control_group" >/dev/null || groupadd'
     sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live'
     assert resolve in source
     assert sync in source
     assert source.index(resolve) < source.index(first_mutation)
     assert source.index(resolve) < source.index(sync)
+    assert source.index(resolve) < source.index("IFS= read -r witness_dsn")
 
 
 def test_installer_uv_resolution_names_the_remedy_and_refuses(tmp_path: Path) -> None:
@@ -1397,7 +1409,123 @@ _resolve_uv_bin
     assert "uv is not resolvable" in result.stderr
     assert str(tmp_path) in result.stderr
     assert "secure_path" in result.stderr
-    assert "/usr/local/bin" in result.stderr
+    assert "--uv" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "symlink",
+        "missing",
+        "relative",
+        "empty",
+        "directory",
+        "nonexec",
+        "owner",
+        "writable",
+        "ancestor_owner",
+        "ancestor_writable",
+        "version",
+        "version_exit",
+    ],
+)
+def test_installer_uv_explicit_selection(tmp_path: Path, fault: str | None) -> None:
+    stub = tmp_path / "selected-uv"
+    marker = tmp_path / "executed"
+    version = "not-uv" if fault == "version" else "uv 0.12.22"
+    stub.write_text(
+        f"#!/bin/bash\nprintf executed > '{marker}'\nprintf '%s\\n' '{version}'\n"
+        + ("exit 1\n" if fault == "version_exit" else ""),
+        encoding="utf-8",
+    )
+    stub.chmod(0o644 if fault == "nonexec" else 0o755)
+    link = tmp_path / "uv-link"
+    link.symlink_to(stub)
+    selected = {
+        "symlink": str(link),
+        "missing": str(tmp_path / "absent"),
+        "relative": "selected-uv",
+        "empty": "",
+        "directory": str(tmp_path),
+    }.get(fault or "", str(stub))
+    # Ownership is the privilege boundary; emulate metadata only, keeping real file,
+    # canonicalization, execution and version checks on an unprivileged test runner.
+    command = r"""
+source "$1"
+fixture="$3"; fault="$4"; ancestor="$5"
+stat() {
+  local owner=0 mode=755 target="${@: -1}"
+  if [[ $target == "$fixture" ]]; then
+    [[ $fault != owner ]] || owner=1000
+    [[ $fault != writable ]] || mode=775
+  elif [[ $target == "$ancestor" ]]; then
+    [[ $fault != ancestor_owner ]] || owner=1000
+    [[ $fault != ancestor_writable ]] || mode=777
+  fi
+  printf '%s %s\n' "$owner" "$mode"
+}
+export PATH=/usr/bin:/bin
+_resolve_uv_bin "$2"
+"""
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            command,
+            "bash",
+            str(INSTALLER),
+            selected,
+            str(stub),
+            fault or "",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if fault in {None, "symlink"}:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(stub.resolve())
+        assert marker.exists()
+    else:
+        assert result.returncode != 0
+        assert result.stdout == ""
+        assert "uv" in result.stderr
+        assert marker.exists() == (fault in {"version", "version_exit"})
+
+
+@pytest.mark.parametrize("valid_version", [True, False])
+def test_installer_uv_version_probe_preserves_caller_input(
+    tmp_path: Path, valid_version: bool
+) -> None:
+    stub = tmp_path / "uv"
+    eof = tmp_path / "eof"
+    version = "uv 0.12.22" if valid_version else "unsuitable"
+    stub.write_text(
+        f"#!/bin/bash\nif IFS= read -r input; then exit 99; fi\n"
+        f"printf eof > '{eof}'\nprintf '%s\\n' '{version}'\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    command = r"""
+source "$1"
+export PATH="$2"
+status=0
+_resolve_uv_bin >/dev/null || status=$?
+IFS= read -r remaining
+printf '%s\n%s\n' "$status" "$remaining"
+"""
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(tmp_path)],
+        input="synthetic-witness-input\n",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert eof.read_text() == "eof"
+    assert result.stdout.splitlines() == ["0" if valid_version else "1", "synthetic-witness-input"]
 
 
 def test_installer_never_emits_the_witness_dsn() -> None:
@@ -1424,7 +1552,7 @@ def test_installer_never_emits_the_witness_dsn() -> None:
 
 def test_installer_uv_resolution_returns_an_absolute_path(tmp_path: Path) -> None:
     stub = tmp_path / "uv"
-    stub.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    stub.write_text("#!/bin/bash\nprintf 'uv 0.12.22\\n'\n", encoding="utf-8")
     stub.chmod(0o755)
     command = r"""
 source "$1"
@@ -2043,6 +2171,79 @@ def test_el10_guestfs_builder_runs_after_its_host_dependencies() -> None:
     )
     assert build["ansible.builtin.script"] == "build-el10-guestfs-binding.sh"
     assert (LOCAL_WORKER / "files/build-el10-guestfs-binding.sh").is_file()
+
+
+def _el10_source_download(
+    tmp_path: Path, distro: str, arch: str = "x86_64", dnf_exit: int = 0
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    release = tmp_path / "os-release"
+    release.write_text(f"ID={distro}\n", encoding="utf-8")
+    arguments = tmp_path / "dnf-args"
+    script = _text(LOCAL_WORKER / "files/build-el10-guestfs-binding.sh")
+    block = script[script.index("  source_nevr=") : script.index("  [[ -f $stage/$source_rpm")]
+    block = block.replace("/etc/os-release", '"$1"')
+    command = (
+        r"""
+set -euo pipefail
+source_rpm=libguestfs-1.58.1-9.el10_2.src.rpm
+stage="$2/source directory"
+rpm() { printf '%s\n' "$TEST_ARCH"; }
+dnf() { printf '%s\n' "$@" > "$DNF_ARGS"; return "$DNF_EXIT"; }
+"""
+        + block
+    )
+    result = subprocess.run(
+        ["bash", "-c", command, "bash", str(release), str(tmp_path)],
+        env={
+            **os.environ,
+            "TEST_ARCH": arch,
+            "DNF_ARGS": str(arguments),
+            "DNF_EXIT": str(dnf_exit),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, arguments.read_text().splitlines() if arguments.exists() else []
+
+
+@pytest.mark.parametrize(
+    ("distro", "arch", "repository"),
+    [
+        ("rocky", "x86_64", "appstream-source"),
+        ("almalinux", "x86_64", "appstream-source"),
+        ("rhel", "x86_64", "rhel-10-for-x86_64-appstream-source-rpms"),
+        ("rhel", "ppc64le", "rhel-10-for-ppc64le-appstream-source-rpms"),
+    ],
+)
+def test_el10_guestfs_download_uses_only_distribution_source(
+    tmp_path: Path, distro: str, arch: str, repository: str
+) -> None:
+    result, arguments = _el10_source_download(tmp_path, distro, arch)
+    assert result.returncode == 0, result.stderr
+    # --repo disables other enabled repos as well as avoiding disabled third-party sources.
+    assert arguments == [
+        "-q",
+        "download",
+        "--source",
+        f"--repo={repository}",
+        "--destdir",
+        str(tmp_path / "source directory"),
+        "libguestfs-1.58.1-9.el10_2",
+    ]
+
+
+def test_el10_guestfs_source_download_rejects_unsupported_distro(tmp_path: Path) -> None:
+    result, arguments = _el10_source_download(tmp_path, "fedora")
+    assert result.returncode != 0
+    assert "does not support distribution: fedora" in result.stderr
+    assert not arguments
+
+
+def test_el10_guestfs_source_download_propagates_failure(tmp_path: Path) -> None:
+    result, arguments = _el10_source_download(tmp_path, "rocky", dnf_exit=17)
+    assert result.returncode == 17
+    assert arguments
 
 
 def test_el10_rootfs_tools_are_provisioned_without_changing_other_redhat_hosts() -> None:
