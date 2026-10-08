@@ -1,13 +1,13 @@
 # Local image build workspace access
 
-Status: Approved permission rule.
+Status: Workspace rule approved; published-cache extension proposed, awaiting explicit approval.
 
 ## Authority and outcome
 
 Issue #3150 under #2803 requires local images.publish to build, customize,
 validate, publish, boot, and clean up on the supported operator-session host.
 Frozen scope: issue comment 6049719556, token q3150-c0f0f510. The user approved
-original scope/exclusions on 2026-10-07; the operator explicitly approved this reviewed permission rule. ADR-0744 records
+original scope/exclusions on 2026-10-07; the operator explicitly approved this reviewed permission rule. ADR-0764 records
 the exact bounded rule. Baseline/staging directories
 (#3084), authority publishing (#3152), and native POWER (#2818) are excluded.
 
@@ -25,7 +25,7 @@ destroyed after traversal, disk group write and svirt_image_t labeling.
 
 ## Behavior
 
-Implement ADR-0744 in the existing local handoff helper and its sole `_run_boot`
+Implement ADR-0764 in the existing local handoff helper and its sole `_run_boot`
 caller. Pass the staged disk explicitly so no other file gains group write.
 Preserve the existing system-daemon path and remote build behavior. Validate the
 entire temporary handoff tree before permission changes; no symlink target or
@@ -70,3 +70,33 @@ before boot, retain an actionable error and never widen an outside target.
 Provider group members are already cooperating principals; this change does not
 promise adversarial race isolation from an actor that can replace the workspace
 through its shared parent. No blanket existing-tree migration is permitted.
+
+## Approved published-cache prerequisite extension
+
+The first unchanged native Fedora cell at `3e4c546d` successfully built and
+published its image, then failed to provision it because the fixed worker could
+not create `/var/lib/kdive/rootfs-cache`. The complete cell remains failed.
+Root retained this prerequisite under #3150. The original workspace grant does
+not authorize this additional permission surface.
+
+Accepted [ADR-0765](../../adr/0765-local-published-rootfs-cache-access.md) retains
+the fixed persistent backing path outside allowed staging roots and adds only
+that exact root/subtree to the existing shared-directory and SELinux lists.
+No runtime cache code, file mode, umask, digest/cache-hit/concurrency behavior,
+daemon identity or cleanup lifetime changes. Explicitly accept that trusted
+provider peers with directory write can replace cached entries. There is no
+claim of hostile-peer isolation or immutable cache content.
+
+Before applying to a populated legacy cache, quiesce dependent Systems. Repair
+only inspected, named legacy paths through their owner/administrator; no
+recursive chmod/chown, automatic deletion, relocation or live-base redownload.
+The installed worker's existing `0022` umask provides readable cache files;
+a restrictive override must retain equivalent read access through host policy.
+
+After design review and explicit approval, extend the two role lists, their
+owning tests and operator documentation. Verify exact-root modes/labels,
+independent creation by two actual worker UIDs, operator read and outsider
+denial, with SELinux enforcing. Preserve staged-path separation and existing
+cache behavior tests. Then rerun all four unchanged publication cells on fresh
+candidate-matched stacks; retain failed earlier records separately. Final
+review must cover the complete expanded branch, not only the list entries.

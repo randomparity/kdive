@@ -233,7 +233,7 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
 
 
 def _grant_hypervisor_traversal(work_dir: Path, staged: Path) -> None:
-    """Prepare owned build contents for system and shared-session QEMU (ADR-0744).
+    """Prepare owned build contents for system and shared-session QEMU (ADR-0764).
 
     Validate the complete tree before adding group traversal/read and staged-disk write.
     Retain existing system-daemon other traversal/read; never grant directory or other write.
