@@ -1,0 +1,257 @@
+#!/usr/bin/python3
+"""Leap Wicked generic updater, installed as private netconfig (ADR-0768).
+
+Python 3.6 is the pinned image interpreter. Native errors are visible but do not
+constitute a Wicked readiness barrier; traffic is the readiness proof.
+"""
+
+import fcntl
+import ipaddress
+import json
+import os
+import re
+import shlex
+import stat
+import subprocess
+import sys
+import syslog
+from pathlib import Path
+
+STATE_ROOT = "/run/wicked"
+LOCK = "/run/kdive-wicked.lock"
+DELEGATE = "/etc/wicked/extensions/netconfig"
+HELPER = "/usr/local/libexec/kdive-ssh-return-route"
+POLICY = "/etc/wicked/kdive-ethernet-policy.xml"
+TABLE = 2291
+GATEWAY = "10.0.2.2"
+SUBNET = ipaddress.ip_network("10.0.2.0/24")
+
+
+def execute(args, **kwargs):
+    return subprocess.check_call(args, **kwargs)
+
+
+def query(*args):
+    return json.loads(
+        subprocess.check_output(["ip", "-N", "-j", "-4", *args], universal_newlines=True)
+    )
+
+
+def interface(value):
+    if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.:-]{0,14}", value):
+        raise ValueError("invalid native interface")
+    return value
+
+
+def read_native(filename):
+    path = Path(filename)
+    root = Path(STATE_ROOT).resolve()
+    if root not in path.resolve().parents:
+        raise ValueError("input is outside native Wicked state")
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "r") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise ValueError("native input must be an owned, non-writable regular file")
+        text = source.read(1024 * 1024 + 1)
+        if len(text) > 1024 * 1024:
+            raise ValueError("native input exceeds 1 MiB; inspect native configuration")
+        return text
+
+
+def lease(filename, iface):
+    if Path(filename).name != f"leaseinfo.{iface}.dhcp.ipv4":
+        raise ValueError("native lease path does not match interface")
+    fields = {}
+    for line in read_native(filename).splitlines():
+        key = line.split("=", 1)[0]
+        if key in {"INTERFACE", "TYPE", "FAMILY"} or re.fullmatch(r"IPADDR(?:_[0-9]+)?", key):
+            match = re.fullmatch(r"([A-Z0-9_]+)='([^'\r\n]*)'", line)
+            if not match or key in fields:
+                raise ValueError("malformed or duplicate native lease field")
+            fields[key] = match.group(2)
+    if any(
+        fields.get(k) != v for k, v in [("INTERFACE", iface), ("TYPE", "dhcp"), ("FAMILY", "ipv4")]
+    ):
+        raise ValueError("native lease identity mismatch")
+    addresses = [ipaddress.ip_interface(v).ip for k, v in fields.items() if k.startswith("IPADDR")]
+    if not addresses or any(a.version != 4 for a in addresses):
+        raise ValueError("native DHCPv4 lease has no valid address")
+    return addresses
+
+
+def event_interfaces(args):
+    """Validate native syntax after netconfig; only DHCPv4 triggers our policy."""
+    action = args[0]
+    if action == "batch":
+        if len(args) != 3 or args[2] != "info":
+            raise ValueError("invalid native batch arguments")
+        events = {}
+        for line in read_native(args[1]).splitlines():
+            words = shlex.split(line)
+            if not words:
+                continue
+            if len(words) not in {5, 7} or words[1] != "-i" or words[3] != "-s":
+                raise ValueError("invalid native batch record")
+            iface = interface(words[2])
+            if (
+                (words[0] == "modify" and (len(words) != 7 or words[5] != "-I"))
+                or (words[0] == "remove" and len(words) != 5)
+                or words[0] not in {"modify", "remove"}
+            ):
+                raise ValueError("invalid native batch operation")
+            if words[4] == "wicked-dhcp-ipv4":
+                events[iface] = words[6] if words[0] == "modify" else None
+        for iface, filename in events.items():
+            if filename is not None:
+                lease(filename, iface)
+        return set(events)
+    if len(args) not in {7, 9} or args[1] != "-i" or args[3] != "-t" or args[5] != "-f":
+        raise ValueError("invalid native updater arguments")
+    iface = interface(args[2])
+    if args[4:7:2] != ["dhcp", "ipv4"]:
+        return set()
+    if action == "install":
+        if len(args) != 9 or args[8] != "info":
+            raise ValueError("invalid native install arguments")
+        lease(args[7], iface)
+    elif len(args) != 7:
+        raise ValueError("invalid native removal arguments")
+    return {iface}
+
+
+def active_leases(addresses):
+    active = []
+    for path in Path(STATE_ROOT).glob("leaseinfo.*.dhcp.ipv4"):
+        iface = interface(path.name[len("leaseinfo.") : -len(".dhcp.ipv4")])
+        for address in lease(str(path), iface):
+            if address in SUBNET:
+                if address in {SUBNET.network_address, SUBNET.broadcast_address}:
+                    raise ValueError("invalid slirp host address")
+                if str(address) not in addresses.get(iface, set()):
+                    raise ValueError("stale slirp lease has no current interface address")
+                active.append((iface, str(address)))
+    if len(active) > 1:
+        raise ValueError("ambiguous active slirp leases")
+    return active
+
+
+def owned_routes():
+    # A direct dump of a not-yet-created FIB table fails with exit2 on first boot.
+    routes = [
+        r for r in query("route", "show", "table", "all") if r.get("table") in {TABLE, str(TABLE)}
+    ]
+    rules = [r for r in query("rule", "show") if r.get("table") in {TABLE, str(TABLE)}]
+    if len(routes) > 1 or len(rules) > 1:
+        raise ValueError("foreign or ambiguous return-route ownership")
+    for route in routes:
+        if (
+            route.get("dst") != "default"
+            or route.get("gateway") != GATEWAY
+            or not route.get("dev")
+            or route.get("multipath")
+            or set(route) - {"dst", "gateway", "dev", "protocol", "flags", "table"}
+        ):
+            raise ValueError("foreign return-table route")
+        interface(route["dev"])
+    for rule in rules:
+        address = ipaddress.ip_interface(rule.get("src", "0.0.0.0/0"))
+        if (
+            address.network.prefixlen != 32
+            or address.ip not in SUBNET
+            or rule.get("priority") != TABLE
+            or set(rule) - {"priority", "src", "table", "protocol"}
+        ):
+            raise ValueError("foreign return-table rule")
+    return routes, rules
+
+
+def reconcile(events=None):
+    addresses = {
+        r["ifname"]: {a["local"] for a in r.get("addr_info", []) if a.get("family") == "inet"}
+        for r in query("address", "show")
+    }
+    active = active_leases(addresses)
+    routes, rules = owned_routes()
+    if active:
+        iface, address = active[0]
+        if routes and routes[0]["dev"] != iface and routes[0]["dev"] in addresses:
+            old = str(ipaddress.ip_interface(rules[0]["src"]).ip) if rules else None
+            if old is None or any(old in values for values in addresses.values()):
+                raise ValueError("return table still has another current source owner")
+        execute([HELPER, iface, "up"], env=dict(os.environ, DHCP4_IP_ADDRESS=address))
+        defaults = query(
+            "route",
+            "show",
+            "table",
+            "main",
+            "default",
+            "proto",
+            "dhcp",
+            "via",
+            GATEWAY,
+            "dev",
+            iface,
+        )
+        for _ in defaults:
+            execute(
+                [
+                    "ip",
+                    "-4",
+                    "route",
+                    "del",
+                    "default",
+                    "proto",
+                    "dhcp",
+                    "via",
+                    GATEWAY,
+                    "dev",
+                    iface,
+                    "table",
+                    "main",
+                ]
+            )
+    elif routes:
+        iface = routes[0]["dev"]
+        if events is None or iface in events:
+            execute([HELPER, iface, "down"])
+    elif rules:
+        old = str(ipaddress.ip_interface(rules[0]["src"]).ip)
+        if any(old in values for values in addresses.values()):
+            raise ValueError("source rule still has a current address without native lease")
+        execute(["ip", "-4", "rule", "del", "pref", str(TABLE), "from", old, "table", str(TABLE)])
+
+
+def main(args):
+    if args == ["startup"]:
+        if Path("/sys/firmware/ibft").exists():
+            raise ValueError("foreign firmware network policy; use the supported guest topology")
+        execute(["wicked", "nanny", "addpolicy", POLICY])
+        for link in query("link", "show"):
+            if link.get("link_type") == "ether":
+                execute(["wicked", "nanny", "enable", interface(link["ifname"])])
+        events = None
+    elif args and args[0] in {"install", "remove", "batch"}:
+        execute([DELEGATE, *args])
+        events = event_interfaces(args)
+        if not events:
+            return
+    else:
+        raise ValueError("expected native install/remove/batch or startup")
+    fd = os.open(LOCK, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError("unsafe return-route runtime lock")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        reconcile(events)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        message = f"kdive Wicked return route: {error}"
+        syslog.syslog(syslog.LOG_ERR, message)
+        print(message, file=sys.stderr)
+        sys.exit(error.returncode if isinstance(error, subprocess.CalledProcessError) else 1)

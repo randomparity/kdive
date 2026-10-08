@@ -100,13 +100,31 @@ def test_helper_install_propagates_restorecon_failure(tmp_path: Path) -> None:
     assert completed.returncode == 23
 
 
-@pytest.mark.parametrize("distro", ["ubuntu", "debian", "fedora", "rocky"])
+@pytest.mark.parametrize("distro", ["ubuntu", "debian", "fedora", "rocky", "opensuse-leap"])
 @pytest.mark.parametrize("helper", ["kdive-install-kernel", "kdive-drgn"])
 def test_family_selection_preserves_installed_helper_path(distro: str, helper: str) -> None:
     args = _helper_args(distro, helper)
     family = (
         "debian/" if distro in {"debian", "ubuntu"} and helper == "kdive-install-kernel" else ""
     )
+    if distro == "opensuse-leap" and helper == "kdive-install-kernel":
+        family = "suse/"
     assert args[:2] == ["--copy-in", f"/tmp/helpers/{family}{helper}:/usr/local/sbin/"]
     assert f"chown root:root /usr/local/sbin/{helper}" in args
     assert f"chmod 0755 /usr/local/sbin/{helper}" in args
+
+
+def test_leap_source_pin_reaches_existing_downloader() -> None:
+    catalog_path = BUILD_ONE.parents[3] / "inventory/group_vars/all.yml"
+    catalog = yaml.safe_load(catalog_path.read_text())["kdive_image_catalog"]
+    leap = next(row for row in catalog if row["distro"] == "opensuse-leap")
+    assert leap["arches"] == ["x86_64"]
+    checksum = "sha256:0a5720416d423f98aacaa793a57d56ec045e3dd25cd88713952660ad00da53bd"
+    assert leap["cloud_image_checksum"] == checksum
+    tasks = yaml.safe_load(BUILD_ONE.read_text())
+    download = next(
+        t["ansible.builtin.get_url"] for t in tasks if "Download the cloud" in t["name"]
+    )
+    expression = Environment(autoescape=False).from_string(download["checksum"])
+    assert expression.render(image=leap, omit="omitted") == checksum
+    assert expression.render(image={}, omit="omitted") == "omitted"

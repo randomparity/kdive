@@ -98,3 +98,27 @@ explicit paths. Positive crash-loaded status after reboot is required arming evi
 A missing uploaded kernel configuration can also produce an initramfs compression
 warning: installation alone does not prove the resulting image boots. These are not
 crash-capture results. See [ADR-0766](../../docs/adr/0766-debian-remote-kernel-install-helper.md).
+
+## SUSE Leap installation and networking
+
+The Leap15.6 catalog row selects `suse/kdive-install-kernel`, using native dracut,
+`grub2-mkconfig` and `grub2-reboot` with the same helper protocol. Uploaded artifacts
+remain in `/boot/kdive`; persistent distribution boot selection is unchanged.
+The kdump method selects that kernel through native `KDUMP_KERNELVER`. Service
+installation or enablement alone is not evidence of a boot or armed crash kernel.
+
+The clean pinned image gains a native Wicked Ethernet DHCPv4 policy. Its generic
+updater invokes the private `kdive-wicked/netconfig` adapter, which delegates to
+native netconfig before reconciling the existing source return route. It preserves
+DNS and unrelated IPv6/non-DHCP processing. Only the slirp interface's DHCP default
+is removed from the main table; static and primary-interface routes remain.
+Native nanny startup registers policy, enables current Ethernet devices and replays
+current leases. Native batch startup probing remains enabled by the executable name.
+
+Foreign network policy or native reader changes stop image construction: rebuild
+from the supported clean source instead of overwriting operator configuration.
+Adapter errors reach stderr and syslog; Wicked readiness is not a routing barrier.
+Verify native lease/rule/route state, authenticated forwarded SSH and primary egress
+again after lease changes, daemon restart and reboot. See
+[ADR-0767](../../docs/adr/0767-suse-remote-kernel-install-helper.md) and
+[ADR-0768](../../docs/adr/0768-suse-wicked-remote-guest-network-policy.md).

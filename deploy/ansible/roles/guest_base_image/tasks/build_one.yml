@@ -61,6 +61,7 @@
 - name: Download the cloud image for {{ image.name }}
   ansible.builtin.get_url:
     url: "{{ image.cloud_image_url }}"
+    checksum: "{{ image.cloud_image_checksum | default(omit) }}"
     dest: "{{ guest_base_image_qcow2 }}"
     mode: "0644"
   when:
@@ -308,6 +309,94 @@
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: true
 
+# Leap retains native Wicked/netconfig; no NetworkManager or Ubuntu policy migration.
+- name: Install the Leap native network policy for {{ image.name }}
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-ssh-return-route:/tmp/kdive-ssh-return-route"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-wicked-ssh-return-route:/tmp/kdive-wicked-ssh-return-route"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-wicked-policy.xml:/tmp/kdive-wicked-policy.xml"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-wicked-server-local.xml:/tmp/kdive-wicked-server-local.xml"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-wicked-startup.conf:/tmp/kdive-wicked-startup.conf"
+      - --run-command
+      - |
+        set -eu
+        command -v wicked
+        command -v ip
+        command -v python3
+        test -x /etc/wicked/extensions/netconfig
+        # These pinned native readers define source precedence and generic updater semantics.
+        sha256sum -c - <<'NATIVE'
+        29787e471d8f011e1e4148b897fe4a4dbaa7d98d40949e533b6d29968cd919a4  /etc/wicked/client.xml
+        8bbb7040755dabbf185bea2b19587bc84cc5e6a4c3d9e3919664bd29d3010800  /etc/wicked/common.xml
+        6cabde2f9efeb4a4a1a2ad6a427654c143bcb0e5afe5b64dfec30b80d54816cc  /etc/wicked/nanny.xml
+        f21672f780bef41db5521962ff73486b88c69785e629ce9972abf58f0777a479  /etc/wicked/server.xml
+        NATIVE
+        for policy in /etc/sysconfig/network/ifcfg-* /etc/sysconfig/network/ifroute-* \
+            /etc/wicked/ifconfig/* /run/wicked/nanny/policy*.xml /var/lib/wicked/nanny/policy*.xml \
+            /etc/wicked/*-local.xml /etc/wicked/local.xml /etc/wicked/client-firmware.xml \
+            /etc/wicked/client-nbft.xml; do
+          [ -e "$policy" ] || [ -L "$policy" ] || continue
+          case "$policy" in
+            /etc/sysconfig/network/ifcfg-lo|/etc/sysconfig/network/ifcfg.template) continue ;;
+            /etc/wicked/server-local.xml)
+              if [ ! -L "$policy" ] && cmp -s "$policy" /tmp/kdive-wicked-server-local.xml; then continue; fi ;;
+          esac
+          echo 'kdive: foreign Wicked policy; rebuild from a clean supported Leap image' >&2
+          exit 1
+        done
+        for unit_root in /etc/systemd/system /run/systemd/system /usr/lib/systemd/system; do
+          for dropin in "$unit_root"/wickedd*.service.d/*.conf "$unit_root"/wicked.service.d/*.conf \
+              "$unit_root"/service.d/*.conf; do
+            [ -e "$dropin" ] || [ -L "$dropin" ] || continue
+            if [ "$dropin" != /etc/systemd/system/wickedd-nanny.service.d/50-kdive-startup.conf ] || \
+                [ -L "$dropin" ] || ! cmp -s "$dropin" /tmp/kdive-wicked-startup.conf; then
+              echo 'kdive: foreign Wicked service drop-in; rebuild from a clean supported Leap image' >&2
+              exit 1
+            fi
+          done
+        done
+        for unit in /etc/systemd/system/wickedd*.service /etc/systemd/system/wicked.service; do
+          if [ -e "$unit" ] || [ -L "$unit" ]; then
+            echo 'kdive: foreign Wicked service override; rebuild from a clean supported Leap image' >&2
+            exit 1
+          fi
+        done
+        for pair in kdive-wicked-policy.xml:/etc/wicked/kdive-ethernet-policy.xml \
+            kdive-wicked-ssh-return-route:/usr/local/libexec/kdive-wicked/netconfig \
+            kdive-wicked-startup.conf:/etc/systemd/system/wickedd-nanny.service.d/50-kdive-startup.conf; do
+          src=/tmp/${pair%%:*}; dst=${pair#*:}
+          if { [ -e "$dst" ] || [ -L "$dst" ]; } && \
+              { [ -L "$dst" ] || ! cmp -s "$src" "$dst"; }; then
+            echo 'kdive: foreign owned-path contents; rebuild from a clean supported Leap image' >&2
+            exit 1
+          fi
+        done
+        install -d -o root -g root -m 0755 /usr/local/libexec/kdive-wicked \
+          /etc/systemd/system/wickedd-nanny.service.d /etc/cloud/cloud.cfg.d
+        install -o root -g root -m 0755 /tmp/kdive-ssh-return-route /usr/local/libexec/kdive-ssh-return-route
+        install -o root -g root -m 0755 /tmp/kdive-wicked-ssh-return-route /usr/local/libexec/kdive-wicked/netconfig
+        install -o root -g root -m 0644 /tmp/kdive-wicked-policy.xml /etc/wicked/kdive-ethernet-policy.xml
+        install -o root -g root -m 0644 /tmp/kdive-wicked-server-local.xml /etc/wicked/server-local.xml
+        install -o root -g root -m 0644 /tmp/kdive-wicked-startup.conf /etc/systemd/system/wickedd-nanny.service.d/50-kdive-startup.conf
+        printf 'network: {config: disabled}\n' > /etc/cloud/cloud.cfg.d/99-kdive-network-policy.cfg
+        chmod 0644 /etc/cloud/cloud.cfg.d/99-kdive-network-policy.cfg
+        systemctl enable wicked.service
+        rm -f /tmp/kdive-ssh-return-route /tmp/kdive-wicked-ssh-return-route \
+          /tmp/kdive-wicked-policy.xml /tmp/kdive-wicked-server-local.xml /tmp/kdive-wicked-startup.conf
+  when:
+    - image.distro == 'opensuse-leap'
+    - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
+
 # --- Set the crashkernel reservation when a debuginfo/kdump image is requested. ---
 - name: Set the crashkernel reservation for {{ image.name }}
   ansible.builtin.command:  # noqa: command-instead-of-module
@@ -341,7 +430,9 @@
       {{ guest_base_image_helper_args
          + ['--copy-in', guest_base_image_helper_dir ~ '/'
             ~ ('debian/' if image.distro in ['debian', 'ubuntu']
-               and item == 'kdive-install-kernel' else '') ~ item ~ ':/usr/local/sbin/',
+               and item == 'kdive-install-kernel' else 'suse/'
+               if image.distro == 'opensuse-leap' and item == 'kdive-install-kernel'
+               else '') ~ item ~ ':/usr/local/sbin/',
             '--run-command', 'chown root:root /usr/local/sbin/' ~ item,
             '--run-command', 'chmod 0755 /usr/local/sbin/' ~ item,
             '--run-command',

@@ -212,3 +212,13 @@ with a clear message if it is not set in `host_vars/`.
 - `root_device` on a catalog entry is metadata only for remote-libvirt — the in-guest GRUB
   owns the real root (ADR-0183); the platform injects no `root=` for remote.
 - Molecule-in-Docker is intentionally not used: it cannot exercise KVM or `virt-builder`.
+
+### Pinned SUSE remote image
+
+`opensuse-leap-15.6-kdive-remote-base` is the x86_64 Leap representative. Its
+`cloud_image_checksum` is passed to the existing downloader; omitted checksums
+preserve other rows' behavior. A source pin does not freeze installed package versions.
+Use `playbooks/image.yml` to rebuild and stage its native helpers and Wicked policy;
+existing guests are not migrated. Competing network configuration is refused.
+The native helper/network contract and failure diagnostics are in the
+[guest-helper guide](../remote-libvirt-guest-helpers/README.md#suse-leap-installation-and-networking).

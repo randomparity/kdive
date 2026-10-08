@@ -1,0 +1,10 @@
+<policy name="kdive_ethernet" weight="0">
+  <match>
+    <link-type>ethernet</link-type>
+  </match>
+  <merge>
+    <ipv4:dhcp>
+      <enabled>true</enabled>
+    </ipv4:dhcp>
+  </merge>
+</policy>
