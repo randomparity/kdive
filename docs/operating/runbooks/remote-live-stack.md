@@ -108,10 +108,43 @@ different directory. Keep the remote client material in its own subdirectory:
 /var/lib/kdive/secrets/remote-libvirt/*   root:kdive-live-libvirt 0440
 ```
 
-The Ansible `local_worker_host` role creates the secrets root. On an installer-only host, create it
-yourself with `sudo install -d -o root -g root -m 0711 /var/lib/kdive/secrets`. The installer adds both the slot accounts and the operator to `kdive-live-libvirt`. The refs then
-read `client_cert_ref = "remote-libvirt/clientcert.pem"`, and likewise for the key and CA. The
-launcher also checks that every slot account can traverse the secrets root.
+Supply the existing `local_worker_host` role (also reused by the runner role) with
+these three controller-local source paths:
+
+- `local_worker_host_remote_libvirt_client_certificate_source`
+- `local_worker_host_remote_libvirt_client_key_source`
+- `local_worker_host_remote_libvirt_ca_certificate_source`
+
+Each defaults to an empty string. Supplying any requires all three. Sources must be
+nonempty regular files, not symlinks, with mode 0400 or 0600 on the controller.
+The role installs `clientcert.pem`, `clientkey.pem` and `cacert.pem` in the fixed
+layout above, suppresses sensitive copy output/diffs, and refuses substituted
+parent or child directories. Repeating identical inputs changes nothing; leaving
+all inputs empty preserves existing credentials. Copies are individually atomic,
+not transactional as a set: retry a failed installation with the validated inputs.
+Certificate issuance and coordinated rotation remain operator responsibilities.
+
+For a host prepared by the standalone lifecycle installer, run the same TLS tasks
+after that installer has created the provider group. From the repository root,
+use an Ansible play with the three source variables supplied privately:
+
+```yaml
+- hosts: worker_hosts
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install operator-supplied remote TLS refs
+      ansible.builtin.import_role:
+        name: local_worker_host
+        tasks_from: remote_libvirt_tls.yml
+```
+
+Use `ANSIBLE_ROLES_PATH=deploy/ansible/roles` with this play and the worker-host
+inventory. This entrypoint creates the missing secrets parent without installing
+packages or changing the lifecycle contract. The installer adds both the slot
+accounts and operator to `kdive-live-libvirt`. Inventory refs then read
+`client_cert_ref = "remote-libvirt/clientcert.pem"`, and likewise for the key and CA.
+The launcher checks that every slot account can traverse the secrets root.
 
 Confirm the worker host can actually reach libvirtd over TLS before running the spine:
 
@@ -484,3 +517,37 @@ stack after its cells, enqueued an `IMAGE_BUILD` job that failed on its first at
 `remote-libvirt`. No record or artifact carried a host name or address. After each configuration
 and after the final `demo-down.sh --wipe --yes`, the provider defined no `kdive-` domain and its
 pool held only the base volume.
+
+### Accepted-operation quiescence proof
+
+The `live_vm_remote` carrier
+`tests/integration/test_remote_capture_operation_quiescence_live.py::test_remote_capture_operation_waits_for_fresh_monitor_ordering`
+provisions an Enterprise Linux System over HTTP, then uses that System's actual
+Resource configuration for native libvirt TLS monitor clients. Export the normal
+live-stack environment, server database DSN, and `REMOTE_PROVIDER_SSH` operator
+observer destination. The staged Enterprise base image, its guest agent and provider-side Python 3
+are required. Guest identity is read through the existing constrained agent seam;
+no forwarded guest SSH port is needed. The normal three roles and clean test checkout
+must match the candidate commit.
+
+Before running the carrier, record the expected provider host and staged image:
+
+```sh
+uv run python -m tests.integration.live_stack.remote_quiescence \
+  --candidate "$(git rev-parse HEAD)" --out /tmp/quiescence-bindings.json
+uv run python -m pytest \
+  tests/integration/test_remote_capture_operation_quiescence_live.py -q
+```
+
+The task-owned provider listener binds only loopback, accepts an actual native NBD
+request and withholds its handshake. A fresh production absence probe must remain
+pending both before and after the submitting client is terminated. Releasing the
+peer must allow matching absence evidence; the listener, processes, block node,
+System, overlay and allocation are checked for cleanup. The listener has a
+60-second total lifetime and closes on controller EOF. No firewall change or
+installed external authority is part of this proof.
+
+The x86 cell is `remote-quiescence/remote-libvirt/x86_64`. The original fault and
+resource-limit cells remain required under #3117 and #3118; POWER evidence remains
+under #2818. This finite ordering observation does not establish those separate
+obligations or durable capture finalization.

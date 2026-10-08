@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -108,6 +109,170 @@ def live_vm_operator_identity() -> None:
     print("ok live_vm_host: independent default, operator lookup and explicit runner binding")
 
 
+def remote_tls_installation() -> None:
+    role = ANSIBLE / "roles/local_worker_host"
+    source = role / "tasks/remote_libvirt_tls.yml"
+    require(source.is_file(), "remote TLS installation task is missing")
+    production = yaml.safe_load(source.read_text())
+    imports = yaml.safe_load((role / "tasks/worker_install_dirs.yml").read_text())
+    selected = next(t for t in imports if t.get("ansible.builtin.import_tasks") == source.name)
+    names = [
+        f"local_worker_host_remote_libvirt_{part}_source"
+        for part in ("client_certificate", "client_key", "ca_certificate")
+    ]
+    defaults = yaml.safe_load((role / "defaults/main.yml").read_text())
+    require(all(defaults[n] == "" for n in names), "remote TLS must default off")
+    install = production[-1]
+    require(
+        install.get("no_log") is True and install.get("diff") is False,
+        "remote TLS copy must suppress content and diffs",
+    )
+    require(install["ansible.builtin.copy"]["owner"] == "root", "TLS owner must be root")
+    require(install["ansible.builtin.copy"]["mode"] == "0440", "TLS files must be 0440")
+    require(install["ansible.builtin.copy"]["follow"] is False, "TLS copy must not follow links")
+    user = subprocess.check_output(["id", "-un"], text=True).strip()
+    group = subprocess.check_output(["id", "-gn"], text=True).strip()
+    cases = (
+        "good",
+        "off",
+        "off-existing",
+        "source-readonly",
+        "partial",
+        "missing",
+        "empty",
+        "source-link",
+        "source-public",
+        "parent-link",
+        "child-link",
+        "parent-file",
+        "child-file",
+        "leaf-link",
+        "leaf-directory",
+        "leaf-directory-link",
+    )
+    with tempfile.TemporaryDirectory(prefix="kdive-remote-tls-") as directory:
+        for case in cases:
+            base = Path(directory) / case
+            base.mkdir()
+            sources = [base / name for name in ("certificate", "key", "ca")]
+            for index, path in enumerate(sources):
+                path.write_text(f"PRIVATE_FIXTURE_{index}")
+                path.chmod(0o400 if case == "source-readonly" else 0o600)
+            parent = base / "secrets"
+            child = parent / "remote-libvirt"
+            sentinel = base / "sentinel"
+            sentinel.mkdir()
+            marker = sentinel / "marker"
+            marker.write_text("unchanged")
+            if case.startswith("child-"):
+                parent.mkdir()
+            if case == "off-existing":
+                child.mkdir(parents=True)
+                (child / "clientkey.pem").write_text("retained credential")
+            if case == "leaf-directory":
+                (child / "clientkey.pem").mkdir(parents=True)
+            if case == "leaf-directory-link":
+                child.mkdir(parents=True)
+                (child / "clientkey.pem").symlink_to(sentinel)
+            if case == "leaf-link":
+                child.mkdir(parents=True)
+                (child / "clientkey.pem").symlink_to(marker)
+            if case in {"parent-link", "child-link"}:
+                (parent if case == "parent-link" else child).symlink_to(sentinel)
+            if case.endswith("-file"):
+                (parent if case == "parent-file" else child).write_text("untouched")
+            if case == "missing":
+                sources[1].unlink()
+            elif case == "empty":
+                sources[1].write_text("")
+            elif case == "source-link":
+                sources[1].unlink()
+                sources[1].symlink_to(sources[0])
+            elif case == "source-public":
+                sources[1].chmod(0o644)
+            values = dict(zip(names, map(str, sources), strict=True))
+            if case in {"off", "off-existing"}:
+                values = dict.fromkeys(names, "")
+            elif case == "partial":
+                values[names[1]] = ""
+            copied = json.loads(
+                json.dumps(production).replace("/var/lib/kdive/secrets", str(parent))
+            )
+            for task in copied:
+                for module in ("ansible.builtin.file", "ansible.builtin.copy"):
+                    if module in task:
+                        task[module]["owner"] = user
+                if task.get("ansible.builtin.file", {}).get("state") == "directory":
+                    task["loop"][0]["group"] = group
+            task_file = base / "tls.yml"
+            task_file.write_text(yaml.safe_dump(copied))
+            call = selected | {"ansible.builtin.import_tasks": str(task_file)}
+            play = base / "play.yml"
+            play.write_text(
+                yaml.safe_dump(
+                    [
+                        {
+                            "hosts": "localhost",
+                            "connection": "local",
+                            "gather_facts": False,
+                            "vars": values
+                            | {
+                                "live_vm_host_worker_libvirt_group": group,
+                                "ansible_python_interpreter": sys.executable,
+                            },
+                            "tasks": [call],
+                        }
+                    ]
+                )
+            )
+            result = playbook(play, "--diff")
+            require(
+                (result.returncode == 0)
+                == (
+                    case
+                    in {
+                        "good",
+                        "off",
+                        "off-existing",
+                        "source-readonly",
+                        "leaf-link",
+                        "leaf-directory-link",
+                    }
+                ),
+                f"remote TLS {case}: {result.stdout} {result.stderr}",
+            )
+            require("PRIVATE_FIXTURE_" not in result.stdout + result.stderr, "TLS output leak")
+            require(marker.read_text() == "unchanged", "substitution changed outside sentinel")
+            require(list(sentinel.iterdir()) == [marker], "copied into outside directory")
+            if case == "leaf-directory":
+                require(not list((child / "clientkey.pem").iterdir()), "copied into leaf directory")
+                require(not (child / "clientcert.pem").exists(), "copied before leaf validation")
+                require(not (child / "cacert.pem").exists(), "copied before leaf validation")
+            if case == "off-existing":
+                require(
+                    (child / "clientkey.pem").read_text() == "retained credential",
+                    "disabled TLS changed existing credential",
+                )
+            if case in {"good", "source-readonly", "leaf-link", "leaf-directory-link"}:
+                require(parent.stat().st_mode & 0o777 == 0o711, "secrets parent mode")
+                require(child.stat().st_mode & 0o777 == 0o750, "remote TLS directory mode")
+                for name, src in zip(
+                    ("clientcert.pem", "clientkey.pem", "cacert.pem"), sources, strict=True
+                ):
+                    target = child / name
+                    require(target.read_bytes() == src.read_bytes(), "TLS bytes differ")
+                    require(target.stat().st_mode & 0o777 == 0o440, "TLS file mode")
+                repeated = playbook(play)
+                require(
+                    repeated.returncode == 0 and "changed=0" in repeated.stdout,
+                    "remote TLS repeat must be unchanged",
+                )
+            elif case in {"off", "partial", "missing", "empty", "source-link", "source-public"}:
+                require(not parent.exists(), "rejected/disabled TLS mutated destination")
+    print("ok remote TLS: real install, repeat, no-log, disabled and rejected inputs")
+
+
+remote_tls_installation()
 live_vm_operator_identity()
 
 
@@ -126,10 +291,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 343, f"runner listed {len(actual_tasks)} baseline tasks, expected 343")
+require(len(actual_tasks) == 353, f"runner listed {len(actual_tasks)} baseline tasks, expected 353")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 343 ordered task names and tags match the updated baseline")
+print("ok runner: 353 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()

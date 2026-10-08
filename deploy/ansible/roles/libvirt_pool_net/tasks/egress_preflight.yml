@@ -1,0 +1,50 @@
+---
+# ADR-0751: recognize one known conflict; do not interpret arbitrary firewall policy.
+- name: Discover the optional iptables inspection tool  # noqa: command-instead-of-shell
+  # command -v is a shell builtin; do not require a separate discovery package.
+  ansible.builtin.shell: if command -v iptables; then exit 0; else exit 1; fi
+  register: libvirt_pool_net_iptables
+  changed_when: false
+  failed_when: libvirt_pool_net_iptables.rc not in [0, 1]
+
+- name: Inspect the Docker forwarding conflict signature
+  when: libvirt_pool_net_iptables.rc == 0
+  block:
+    - name: Read IPv4 forwarding rules
+      ansible.builtin.command:
+        argv: ["{{ libvirt_pool_net_iptables.stdout }}", -S, FORWARD]
+      register: libvirt_pool_net_forward
+      changed_when: false
+
+    - name: Inspect the user chain for the observed Docker forwarding layout
+      when: >-
+        libvirt_pool_net_forward.stdout_lines ==
+        ['-P FORWARD DROP', '-A FORWARD -j DOCKER-USER', '-A FORWARD -j DOCKER-FORWARD']
+      block:
+        - name: Read Docker user forwarding rules
+          ansible.builtin.command:
+            argv: ["{{ libvirt_pool_net_iptables.stdout }}", -S, DOCKER-USER]
+          register: libvirt_pool_net_docker_user
+          changed_when: false
+
+        - name: Refuse the known Docker guest forwarding conflict
+          ansible.builtin.assert:
+            that:
+              - >-
+                libvirt_pool_net_docker_user.stdout_lines not in
+                [['-N DOCKER-USER'], ['-N DOCKER-USER', '-A DOCKER-USER -j RETURN']]
+            fail_msg: >-
+              Remote network {{ libvirt_network }}: Docker FORWARD DROP with an empty
+              DOCKER-USER chain can block guest-to-object-store traffic. Configure an
+              administrator-owned exception scoped to this guest network, the intended
+              object-store destination and established return traffic; retain unrelated
+              forwarding and protected-port ACLs. See the Docker forwarding section in
+              docs/operating/runbooks/remote-libvirt-host-setup.md, then rerun site.yml
+              and verify the actual guest transfer and remote install.
+
+- name: Report the bounded scope of the forwarding check
+  ansible.builtin.debug:
+    msg: >-
+      Known Docker forwarding conflict not detected{{ ' (iptables absent)'
+      if libvirt_pool_net_iptables.rc == 1 else '' }}. Other policies are unverified;
+      actual guest-to-object-store access and remote install still require live proof.
