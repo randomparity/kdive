@@ -25,16 +25,39 @@ from kdive.reconciler.cleanup.provider_resources.module_volume_reaping import (
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend
 from kdive.store.assembly import ObjectStoreAssembly
-from tests.providers.test_composition import _REMOTE_INVENTORY
 from tests.support.object_store import INERT_OBJECT_STORE
 from tests.support.worker_fence import register_worker
+
+_REMOTE_INVENTORY = """
+schema_version = 2
+[[image]]
+provider = "remote-libvirt"
+name = "base"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+[image.source]
+kind = "staged"
+volume = "base.qcow2"
+[[remote_libvirt]]
+name = "plain"
+uri = "qemu+tls://plain.example/system"
+gdb_addr = "192.0.2.20"
+gdbstub_range = "47000:47099"
+client_cert_ref = "clientcert.pem"
+client_key_ref = "clientkey.pem"  # pragma: allowlist secret
+ca_cert_ref = "cacert.pem"
+base_image = "base"
+cost_class = "remote"
+vcpus = 8
+memory_mb = 16384
+"""
 
 
 @pytest.mark.parametrize("mixed", [False, True])
 def test_registered_module_reap_job(migrated_url, tmp_path, monkeypatch, mixed):
-    inventory = _REMOTE_INVENTORY.replace('name = "host"', 'name = "plain"').replace(
-        "host.example", "plain.example"
-    )
+    inventory = _REMOTE_INVENTORY
     if mixed:
         host = inventory.split("[[remote_libvirt]]", 1)[1].replace("plain", "eligible")
         inventory += (
