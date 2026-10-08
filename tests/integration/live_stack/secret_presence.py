@@ -8,6 +8,7 @@ import os
 import platform
 import secrets
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import cast
 
@@ -24,7 +25,12 @@ from tests.integration.live_stack.deep_lifecycle import (
     kernel_inputs,
     load_fixture,
 )
-from tests.integration.live_stack.scenario import CellRun, ScenarioStop, on_catalog_system
+from tests.integration.live_stack.scenario import (
+    CellRun,
+    ScenarioStop,
+    domain_xml,
+    on_catalog_system,
+)
 from tests.integration.live_stack.spine import (
     build_and_upload_kernel,
     build_profile,
@@ -144,6 +150,12 @@ async def prove_secret_presence(
         session: str | None = None
         try:
             run_id = await _booted_run(op, investigation, system_id, fixture)
+            xml = ET.fromstring(domain_xml(system_id))  # noqa: S314  # nosec B314
+            owned.extend(
+                path
+                for name in ("kernel", "initrd")
+                if (path := xml.findtext(f"./os/{name}")) is not None
+            )
             clean = (await listed()).data.get("secrets") == []
             assert clean, "server registered an unexpected source before debug attach"
             attached = ok(

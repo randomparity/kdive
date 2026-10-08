@@ -100,7 +100,9 @@ def test_source_sequence_and_owned_cleanup(
         events.append("frame")
         fixture.observed.update(accelerator="kvm", image_sha256="a" * 64)
         try:
-            await kwargs["body"](object(), "system-id", [])
+            owned: list[str] = []
+            await kwargs["body"](object(), "system-id", owned)
+            assert owned == ["owned-kernel", "owned-initrd"]
             fixture.prove("cleanup", {"domain_absent": True})
         finally:
             events.append("frame-cleanup")
@@ -114,6 +116,13 @@ def test_source_sequence_and_owned_cleanup(
     monkeypatch.setattr(proof, "HttpCaller", Caller)
     monkeypatch.setattr(proof, "lane_secrets", lambda: set())
     monkeypatch.setattr(proof, "lane_image", lambda: ("catalog-image", None))
+    monkeypatch.setattr(
+        proof,
+        "domain_xml",
+        lambda _system: (
+            "<domain><os><kernel>owned-kernel</kernel><initrd>owned-initrd</initrd></os></domain>"
+        ),
+    )
     monkeypatch.setattr(proof, "scalar", scalar)
     monkeypatch.setattr(proof, "_booted_run", boot)
     monkeypatch.setattr(proof, "_source_key", key)
