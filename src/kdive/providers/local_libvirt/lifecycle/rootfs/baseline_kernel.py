@@ -18,6 +18,7 @@ from pathlib import Path
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.rootfs.baseline import VMLINUZ_PREFIX as _VMLINUZ_PREFIX
 from kdive.images.rootfs.baseline import baseline_kernel_names
+from kdive.providers.local_libvirt.lifecycle.storage import ensure_shared_artifact_directory
 
 __all__ = ["baseline_kernel_names"]
 
@@ -179,6 +180,7 @@ def _real_extract_baseline_kernel(  # pragma: no cover - live_vm (libguestfs)
 def _reset_dir(path: Path) -> None:  # pragma: no cover - live_vm
     shutil.rmtree(path, ignore_errors=True)
     path.mkdir(parents=True)
+    ensure_shared_artifact_directory(path)
 
 
 def _shutdown(guest: object) -> None:  # pragma: no cover - live_vm
