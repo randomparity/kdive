@@ -13,12 +13,41 @@ source return path through the separately leased slirp NIC, independent of NIC n
 
 ## Decision
 
-The operator explicitly approved a Leap-only native policy amendment. Install one
-KDIVE-owned Ethernet-link-type DHCPv4 policy and register it with native nanny at
-startup, then explicitly enable already-present Ethernet devices through native
-nanny before replay. Disable only cloud-init networking. Refuse competing foreign network
-configuration; require rebuilding from the clean supported image rather than
-removing it. Preserve native SSH key generation, IPv6 and non-DHCP processing.
+The operator approved Leap-only native Ethernet DHCPv4 ownership. At existing
+nanny startup enumerate actual Ethernet links with symbolic `ip -j -4 link` output.
+Render one owned native hardware-class policy for each validated actual name:
+`<match><class>netif-ethernet</class></match>` and DHCPv4-enabled merge. Encode only
+the native policy name using pinned Wicked's `policy__` prefix, underscore doubling,
+`_d` for period and `_m` for hyphen; pass ASCII alphanumerics unchanged and refuse
+unsupported names before mutation. Names address discovered devices; no NIC name,
+MAC or PCI topology is assumed. This is a fixed native API encoding, not a framework.
+
+Before registration scan native policy XML in the supported nanny state directories
+for selected encoded names with safe bounded reads: native loads XML names even
+under different filenames. Reject duplicate/alternate-filename selected collisions. Require absent
+state or identical owned origin/content with root owner0 and only validated native
+UUID metadata; different or uncertain state fails visibly without alteration.
+Identical persisted policy loaded at this fresh nanny startup skips registration;
+no live-content export is asserted. Absent state uses installed native `busctl`
+nanny `createPolicy` with the explicit XML. Any live collision fails without update.
+Never use `nanny addpolicy` for replay: it transparently updates POLICY_EXISTS.
+No new client library, persistence system or concurrent guest-root guarantee is added.
+After create verify owned native persistence before enable, since save failure can
+warn while returning success. Explicitly enable devices, then replay. Actual create/persistence/
+owned replay/collision refusal and first acquisition remain required proof.
+
+Pinned Wicked first compares encoded policy names, so generic `kdive_ethernet`
+cannot apply. Its `link-type` matcher reads configured worker type, initially UNKNOWN,
+rather than actual Ethernet hardware class. Native name-only diagnosis acquired no
+lease; changing only its match to hardware class acquired DHCP. The native
+interface-config converter is embedded in mutating addpolicy; show-policy reads
+native XML unchanged and is not a read-only export of that conversion.
+
+Startup-enumerated devices becoming ready later retain their per-device policy;
+prove DEVICE_READY scheduling without startup lease waiting. New test Ethernet
+fixtures receive the same owned registration before activation. This does not
+promise arbitrary later production hotplug. Disable only cloud-init networking;
+refuse competing configuration, preserving native SSH keys, IPv6 and netconfig.
 
 Configure the generic updater through owned `/etc/wicked/server-local.xml` to use
 the fixed private adapter `/usr/local/libexec/kdive-wicked/netconfig`: Wicked0.6.77 requires the batch command
@@ -58,4 +87,10 @@ can require recovery/rebuild and retain failed evidence. Native POWER is unchang
   `src/update.c` records updater failure; no such barrier is provided.
 - Suppress defaults globally or select NIC names/MAC/PCI paths — judgment: discards
   primary egress or introduces topology assumptions beyond the lease-based contract.
+- Native interface configuration through addpolicy — verified: conversion encodes
+  names, but the client transparently updates existing policies; show-policy's
+  native XML reader does not export that conversion. Judgment: obtaining a safe
+  explicit payload through another machinery is larger than the native encoder.
+- Retain generic policy — verified: native name gate rejects it; name-only native
+  diagnosis remained DOWN without DHCP, so it does not satisfy first acquisition.
 - Inject routes through QGA after boot — judgment: no persistent native lifecycle.

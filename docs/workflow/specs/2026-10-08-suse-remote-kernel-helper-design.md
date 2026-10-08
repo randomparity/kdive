@@ -2,7 +2,7 @@
 
 ## Scope and source
 
-Status: approved geometry amendment prepared for independent design review and scope audit; no growth implementation authorized yet.
+Status: approved geometry implemented and built; corrected native registration design awaits confirming review and scope audit. Native qualification remains incomplete.
 
 Implement #3082 under ADR-0767 and ADR-0768. Frozen amended charter6067241872,
 retained token q3082-1f7d293a. Original scope/exclusions, the optional checksum input, native Wicked amendment
@@ -116,25 +116,59 @@ Separate deployed network policy is unresolved and is not authorized by image gr
 
 7. Add Leap-only native files beside the current guest helpers: `kdive-wicked-policy.xml`,
    `kdive-wicked-server-local.xml`, `kdive-wicked-startup.conf` and fixed-purpose
-   `kdive-wicked-ssh-return-route`. Install policy under `/etc/wicked/`, the adapter
+   `kdive-wicked-ssh-return-route`. Install the native hardware-class policy template under `/etc/wicked/`, the adapter
    as `/usr/local/libexec/kdive-wicked/netconfig`, generic configuration as `/etc/wicked/server-local.xml`
    and the startup drop-in on existing `wickedd-nanny.service`. Root owns these files;
    configuration is0644, executables0755. Existing return-route helper is reused.
-8. The policy uses native Ethernet link-type matching and IPv4 DHCP only; it does
-   not disable IPv6 or match interface names/MAC/PCI paths. ExecStartPost registers
-   the generic policy with `wicked nanny addpolicy`, enumerates actual Ethernet
-   links via `ip -j link` and invokes `wicked nanny enable <actual-interface>` for
-   each, then replays current lease/address state. No wildcard or nanny recheck:
-   recheck CLI is unimplemented and its internal policy-name mapping is unsuitable.
-   Native enable schedules the actual ready worker, rearms it and lets the main
-   loop select applicable generic policies. Later DEVICE_READY/UP registration
-   schedules newly ready devices against the already installed generic policy.
-   This is activation, not waiting for a lease inside ExecStartPost; no new service
-   or timer. The CLI ignores individual D-Bus false results: preserve stderr/logs
-   and require actual lease/traffic proof, not an exit0 activation claim. Enable
-   existing Wicked services. Clean first boot has no saved policies/leases and both
-   Ethernet devices present before registration; prove it separately from restart
-   and hotplug, which must not mask a missing activation step.
+8. Startup selects actual Ethernet links from symbolic `ip -j -4 link show` output;
+   numeric `-N` is retained only for route/rule/address queries. Validate each name
+   against pinned native encoding: ASCII alphanumeric, underscore, period, hyphen,
+   maximum kernel name15; unsupported names fail visibly before mutation. Prefix
+   `policy__`; encode `_` as `__`, `.` as `_d`, `-` as `_m`, alphanumerics unchanged.
+   This mirrors pinned native API data encoding in one fixed-purpose function.
+   Validate the exact owned root/non-writable regular template and native shape;
+   render payload in memory, with no new runtime configuration directory/files.
+   Render per-interface explicit `<policy name="ENCODED" origin="wicked:xml:/etc/wicked/kdive-ethernet-policy.xml">`
+   with exactly `<match><class>netif-ethernet</class></match>` and
+   `<merge><ipv4:dhcp><enabled>true</enabled></ipv4:dhcp></merge>`. No interface-config
+   converter/export, configured link-type matcher or custom persistence is used.
+   The name gate identifies the selected device; class matches actual hardware.
+   Native class acquisition is diagnostic evidence, not canonical firstboot proof.
+   Before registration scan native `policy*.xml` files in supported
+   `/run/wicked/nanny` and `/var/lib/wicked/nanny` state directories for the selected
+   encoded names: native loader uses XML names, not filenames. Safe root-owned
+   non-writable directories/files, no symlinks, existing1MiB read bound and an
+   unambiguous supported native XML shape are required to identify collisions.
+   Preserve unrelated policies; reject duplicate selected-name occurrences, alternate
+   collision filenames, unreadable/unsafe/ambiguous state or differing selected
+   origin/content before mutation. Only a single exact nominal owned file may skip.
+   Compare selected policy shape with stdlib expat namespace processing disabled:
+   native `ipv4:dhcp` is an unbound XML name. Require fixed owned origin/rootowner0,
+   allow only valid native UUID root metadata and no other attributes/actions;
+   no UUID checksum implementation or generalized canonicalization framework.
+   Exact owned persisted policy loaded at fresh nanny startup skips registration;
+   no readable live XML assertion is made. Different/uncertain persisted state
+   refuses before enable/update/deletion. Absent state calls separate argv
+   `busctl call org.opensuse.Network.Nanny /org/opensuse/Network/Nanny
+   org.opensuse.Network.Nanny createPolicy s XML`. Native create atomically refuses
+   an existing live policy; do not use addpolicy's transparent update or fallback.
+   After successful create require the same owned persisted-policy postcondition
+   before enable: native save failure can warn yet return0, so missing/unsafe state
+   stops with evidence and no overwrite/delete recovery. Prior failures remain visible. This bounded startup
+   check relies on native load before ExecStartPost and excludes concurrent trusted
+   guest-root changes under the existing nontransactional model. Require installed
+   busctl at image admission, never install host tools. Actual call syntax, native
+   persistence, owned replay and collision refusal remain proof obligations.
+   Register before enable then replay current leases without waiting. CLI enable0
+   can hide D-Bus failure: preserve stderr and require actual lease/traffic proof.
+   A has both Ethernet devices already discovered, no saved policies/leases and no
+   prior restart/hotplug. Separately prove delayed DEVICE_READY for an already
+   registered device. C's new owned Ethernet fixture gets this same native policy
+   registration before activation; arbitrary later production hotplug is not promised.
+   Reuse owned policy and replay on restart/reboot; no daemon, timer, udev rule,
+   lease poller, provider policy or generic routing framework is added. Preserve
+   IPv6 defaults, unrelated/foreign policies and reject competing state at admission
+   and runtime. Missing native proof never counts as completion.
 9. Before installation refuse competing ifcfg Ethernet definitions, Wicked interface
    or persisted nanny policies, foreign server-local configuration and relevant
    systemd drop-ins; allow stock loopback/templates and byte-identical owned files
