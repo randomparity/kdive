@@ -47,7 +47,11 @@ if name == "ip":
     if "route" in args and "show" in args and "2291" in args:
         sys.exit(2)  # Linux has no FIB table before the first return route.
     if "address" in args: print(os.environ["ADDRESSES"])
-    elif "link" in args: print('[{"ifname":"ethA","link_type":"ether"}]')
+    elif "link" in args:
+        print(json.dumps([
+            {"ifname":"lo", "link_type":"[772]" if "-N" in args else "loopback"},
+            {"ifname":"ethA", "link_type":"[1]" if "-N" in args else "ether"},
+        ]))
     elif "rule" in args: print(os.environ.get("RULES", "[]"))
     elif "all" in args:
         print(json.dumps([dict(r, table=2291) for r in json.loads(os.environ.get("ROUTES", "[]"))]))
@@ -177,6 +181,7 @@ def test_startup_registers_then_enables_actual_ethernet_before_replay(guest):
     assert result.returncode == 0, result.stderr
     assert calls[0] == ["wicked", "nanny", "addpolicy", str(guest[0].parent / "policy.xml")]
     assert ["wicked", "nanny", "enable", "ethA"] in calls
+    assert ["wicked", "nanny", "enable", "lo"] not in calls
     assert not any("recheck" in c for c in calls)
 
 

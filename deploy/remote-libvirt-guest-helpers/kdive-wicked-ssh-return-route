@@ -32,8 +32,10 @@ def execute(args, **kwargs):
 
 
 def query(*args):
+    # Numeric output renders Ethernet as "[1]" instead of the startup selector's "ether".
+    flags = [] if args[0] == "link" else ["-N"]
     return json.loads(
-        subprocess.check_output(["ip", "-N", "-j", "-4", *args], universal_newlines=True)
+        subprocess.check_output(["ip", *flags, "-j", "-4", *args], universal_newlines=True)
     )
 
 
