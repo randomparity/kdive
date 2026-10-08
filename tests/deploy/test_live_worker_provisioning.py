@@ -238,7 +238,17 @@ def test_provider_authority_failed_convergence_stops_the_service() -> None:
         task for task in tasks if task["name"] == "Converge the production authority"
     )
     rescue = convergence["rescue"]
-    assert convergence["block"][0]["ansible.builtin.include_role"]["name"] == "gdbstub_acl"
+    block = convergence["block"]
+    firewall = next(i for i, task in enumerate(block) if "ansible.builtin.include_role" in task)
+    assert block[firewall]["ansible.builtin.include_role"]["name"] == "gdbstub_acl"
+    assert (
+        block[firewall - 1]["ansible.builtin.set_fact"]["provider_authority_host_failure_phase"]
+        == "Protected-port firewall convergence"
+    )
+    assert (
+        "Disabled provider authority cleanup"
+        in block[firewall + 1]["ansible.builtin.set_fact"]["provider_authority_host_failure_phase"]
+    )
     assert any(
         task.get("ansible.builtin.systemd_service", {}).get("state") == "stopped" for task in rescue
     )

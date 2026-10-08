@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Protocol
-from uuid import UUID, uuid4
+from typing import Protocol, cast
+from uuid import UUID
 
 import libvirt
+import libvirt_qemu
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.traffic import (
@@ -16,19 +17,20 @@ from kdive.providers.ports.traffic import (
 )
 
 
-class _ProbeDomain(Protocol):
-    def qemuMonitorCommand(self, raw: str, flags: int) -> str: ...  # noqa: N802
-
-
 class _ProbeConnection(Protocol):
-    def lookupByName(self, name: str) -> _ProbeDomain: ...  # noqa: N802
+    def lookupByName(self, name: str) -> object: ...  # noqa: N802
     def close(self) -> object: ...
 
 
 type ConnectionFactory = Callable[[], AbstractContextManager[_ProbeConnection]]
+type Monitor = Callable[[object, str, int], str]
 
 
-def _ordered_reply(raw: str, expected_id: str) -> object:
+def _native_monitor(domain: object, raw: str, flags: int) -> str:
+    return libvirt_qemu.qemuMonitorCommand(cast(libvirt.virDomain, domain), raw, flags)
+
+
+def _ordered_reply(raw: str, *, absent_object: str | None = None) -> object:
     try:
         response = json.loads(raw)
     except json.JSONDecodeError as error:
@@ -36,12 +38,25 @@ def _ordered_reply(raw: str, expected_id: str) -> object:
             "remote QMP quiescence response was malformed",
             category=ErrorCategory.CONTROL_FAILURE,
         ) from error
-    if not isinstance(response, dict) or response.get("id") != expected_id:
+    # Native libvirt correlates this synchronous call and supplies its own id;
+    # submitting a caller id is rejected by virDomainQemuMonitorCommand.
+    if (
+        not isinstance(response, dict)
+        or not isinstance(response.get("id"), str)
+        or not response["id"]
+    ):
         raise CategorizedError(
             "remote QMP transport did not correlate the ordered response",
             category=ErrorCategory.CONTROL_FAILURE,
         )
-    if "return" not in response:
+    error = response.get("error")
+    if (
+        absent_object is not None
+        and "return" not in response
+        and error == {"class": "GenericError", "desc": f"object '{absent_object}' not found"}
+    ):
+        return None
+    if "error" in response or "return" not in response:
         raise CategorizedError(
             "remote QMP quiescence response was inconclusive",
             category=ErrorCategory.CONTROL_FAILURE,
@@ -52,9 +67,16 @@ def _ordered_reply(raw: str, expected_id: str) -> object:
 class RemoteLibvirtCaptureQuiescence:
     """Cross a fresh Resource-bound TLS connection and prove the exact QOM object absent."""
 
-    def __init__(self, *, resource_id: UUID, connection: ConnectionFactory) -> None:
+    def __init__(
+        self,
+        *,
+        resource_id: UUID,
+        connection: ConnectionFactory,
+        monitor: Monitor = _native_monitor,
+    ) -> None:
         self._resource_id = resource_id
         self._connection = connection
+        self._monitor = monitor
 
     def prove_absent(self, resource_id: UUID, domain_name: str, qom_id: str) -> QuiescenceEvidence:
         """Detach idempotently, then issue a correlated QOM query on one new TLS connection."""
@@ -91,38 +113,30 @@ class RemoteLibvirtCaptureQuiescence:
             ordering="fresh-qmp-connection",
         )
 
-    @staticmethod
-    def _detach(domain: _ProbeDomain, qom_id: str) -> None:
-        command_id = f"kdive-detach-{uuid4()}"
-        command = {"execute": "object-del", "arguments": {"id": qom_id}, "id": command_id}
+    def _detach(self, domain: object, qom_id: str) -> None:
+        command = {"execute": "object-del", "arguments": {"id": qom_id}}
         try:
-            raw = domain.qemuMonitorCommand(json.dumps(command), 0)
+            raw = self._monitor(domain, json.dumps(command), 0)
         except libvirt.libvirtError as error:
-            message = str(error).lower()
-            if "not found" in message or "devicenotfound" in message:
-                return
             raise CategorizedError(
                 "remote capture detach failed during quiescence",
                 category=ErrorCategory.CONTROL_FAILURE,
             ) from error
-        _ordered_reply(raw, command_id)
+        _ordered_reply(raw, absent_object=qom_id)
 
-    @staticmethod
-    def _query_absence(domain: _ProbeDomain, qom_id: str) -> None:
-        command_id = f"kdive-query-{uuid4()}"
+    def _query_absence(self, domain: object, qom_id: str) -> None:
         command = {
             "execute": "qom-list",
             "arguments": {"path": "/objects"},
-            "id": command_id,
         }
         try:
-            raw = domain.qemuMonitorCommand(json.dumps(command), 0)
+            raw = self._monitor(domain, json.dumps(command), 0)
         except libvirt.libvirtError as error:
             raise CategorizedError(
                 "remote capture QOM query failed during quiescence",
                 category=ErrorCategory.CONTROL_FAILURE,
             ) from error
-        members = _ordered_reply(raw, command_id)
+        members = _ordered_reply(raw)
         if not isinstance(members, list):
             raise CategorizedError(
                 "remote capture QOM query returned an inconclusive shape",

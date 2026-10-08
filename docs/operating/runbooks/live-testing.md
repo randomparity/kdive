@@ -123,15 +123,19 @@ into `boot_throwaway_domain(mode=…)`.
 - **Daemon layout follows the host distro.** The supported Debian/Ubuntu lifecycle host
   uses monolithic `libvirtd`; Red Hat-family hosts use modular `virtqemud`. Use the
   endpoint published by host provisioning rather than assuming either layout.
-- **Guest confinement is named per environment.** Under **system mode** on the
-  RHEL-family self-hosted runner, staged images must be relabeled SELinux
-  `virt_image_t`; under system mode on an Ubuntu host, AppArmor's `libvirt-qemu`
-  profile applies. **Session mode still confines the domain** — qemu runs as
-  `svirt_t` with its own MCS categories — but the unprivileged daemon performs no
-  image *relabel*, so the static label on the image tree has to be one `svirt_t`
-  can use: `svirt_image_t`
+- **Guest confinement is named per environment.** On SELinux hosts, staged images
+  use `virt_image_t` in system mode and `svirt_image_t` in session mode. SELinux
+  session guests run as `svirt_t` with per-domain MCS categories, but the
+  unprivileged daemon performs no image relabel
   ([ADR-0640](../../adr/0640-static-svirt-image-label-for-session-mode-domains.md)).
-  A session-mode tier sidesteps the relabel, not sVirt.
+  On the supported Ubuntu AppArmor session deployment, the daemon's enforcing
+  profile does **not** confine its QEMU guests: capabilities report `none` and
+  guests run `unconfined`. The system endpoint advertises AppArmor capability;
+  that observation is not a system-mode guest proof or permission to switch
+  endpoints. [ADR-0741](../../adr/0741-apparmor-session-confinement-posture.md)
+  accepts this documented session limitation without changing daemon ownership.
+  The required host-install confinement assertion still fails for unconfined
+  guests; this posture does not qualify the Debian cell or release 0.5.0.
 - **Guest image and matching debuginfo** are staged at a known location and kept
   warm between runs on the self-hosted host.
 
@@ -642,6 +646,16 @@ Build the fixtures on the native architecture. A missing `KDIVE_FIXTURE_ROOT`, a
 outcomes are those of the image smoke. A binding's kernel fields are null when its fixture is absent,
 which `qualify` reports as a missing required input.
 
+The default fragment requests `CONFIG_KEXEC_FILE=y` for RHEL-family kdump loading, alongside
+`CONFIG_KEXEC=y` and `CONFIG_CRASH_DUMP=y`. For the default x86_64 configuration, the builder
+also appends `CONFIG_FW_CFG_SYSFS=y`, required by the existing crash-capture contract. The
+assembled fragment is retained as `input.config` and hashed in the manifest. Native ppc64le
+and explicit custom config files retain their selected input unchanged. After changing these
+inputs, rebuild both baselines
+into fresh output directories and regenerate their evidence bindings. An older manifest can
+still pass integrity verification; that does not establish these options or current capture
+evidence. Check the rebuilt effective `.config` and rerun the affected live cells.
+
 After an interrupted run, release the leftover allocation with `allocations.release` (or let the
 lease expire) and check `KDIVE_INSTALL_STAGING` (`/var/lib/kdive/install` on the demo lane) for
 the run's installed kernel.
@@ -748,12 +762,18 @@ whole shapes catalog to the per-project one:
   `uploads/q/<project>/` with the metadata the upload reassembly writes, register it, delete the
   image and purge every version of the quarantine key and the published object;
 - `shapes.set` and `shapes.delete` create and remove a `cov-<hex>` shape;
-- `shapes.set` and `resources.availability` take one allocation in `KDIVE_PROJECT` through
-  `allocations.request` and release it. The released row and its ledger entries stay in that
-  project as history.
+- `shapes.set` takes one allocation in `KDIVE_PROJECT` and releases it.
+- `resources.availability` requires an idle fleet with one available local host of capacity
+  one and room for 1 vCPU/1 GiB RAM/1 GB disk. It temporarily raises the funded project's
+  pending cap, preserving both concurrency caps, holds one grant and queues one by-kind and
+  one by-ID request. It compares the full queue split with the database, withdraws both queued
+  rows before releasing the grant, then verifies zero queue depth and restored quota caps.
+  Unsuitable topology is `blocked`. Failed or indeterminate withdrawal retains known blockers;
+  reconcile the reported subject and IDs, withdraw queued rows before releasing blockers,
+  and restore the recorded caps. A restored pending cap alone does not clear residual rows.
+  Released allocations and ledger entries remain as history.
 
 A cell killed mid-run can leave any of these behind; `demo-down.sh --wipe --yes` clears them.
-Queue depth is compared but not driven (#3106).
 
 #### Investigation and artifact tool cells (#3096)
 
@@ -804,21 +824,51 @@ carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_
 exported `KDIVE_SYSTEMS_TOML`. The lanes are local-libvirt only; an `ops.diagnostics` cell that
 sees a remote-libvirt check stops `blocked` rather than probe a remote seam.
 
-The tools only read, so each cell works in a fresh `cov-<hex>` project whose snapshot must not
-change. What the cells leave behind is history the snapshot excludes:
+The tools only read. Except for the secret-presence fixture below, each cell works in a
+fresh `cov-<hex>` project whose snapshot must not change. What the cells leave behind is history the snapshot excludes:
 
 - `audit_log`, `platform_audit_log` and `tool_invocation` rows from the cells' own calls, which
   the `audit.query` and `ops.tool_trail` cells read back;
 - one allocation per `inventory.list` cell in `KDIVE_PROJECT`, requested and released;
 - the `diagnostics_worker_check` jobs `ops.diagnostics` enqueues.
 
-The two `secrets.list` functional cells per lane record `blocked`: the cell proves no configured
-secret value is served, but no local-lane call makes the server register a secret, so presence
-has nothing to compare with. pytest reports them as failed. `ops.export_systems_toml` is never
-called with `persist`. A cell killed mid-run can leave its allocation granted;
-`demo-down.sh --wipe --yes` clears it with the history above.
+The four `secrets.list` functional cells use an owned Fedora 44 local System, the
+verified longterm fixture under `KDIVE_FIXTURE_ROOT/longterm`, and a successful
+`debug.start_session` with `drgn-live`. The existing server path registers the
+System's bootstrap key. They require an empty server listing before setup and
+attach, then exactly `<process-global>` through the selected direct/gateway
+exposure, with no configured or owned-key value in the answer. A server already
+holding a secret blocks before creating the fixture: restart it first.
 
-Last run: candidate `86ed1b021` (server, worker and reconciler at that SHA in both lanes), a
+Run these four functional cells separately from other live cells, on an idle
+operator-owned stack. For each configuration, use the canonical stack bring-up
+with `KDIVE_WORKER_DEATH_VERIFIER=disabled` (default) or `docker` (recovery), verify
+all three role SHAs, and select one exposure's functional cell:
+
+```sh
+uv run python -m pytest tests/integration/test_operator_tool_cells_live.py \
+  -k 'secrets.list and functional and direct' -vv --tb=short
+```
+
+Repeat with `gateway`; the opposite configuration's parameter is skipped, not
+counted as proof. Each successful cell records source presence and actual owned
+session, System, disk, allocation-capacity and bootstrap-key cleanup. Terminal
+history remains. The server's global registration deliberately remains after
+resource cleanup: it lasts until that process exits. Between cells and after the
+last cell, stop the owned server through the canonical stack lifecycle, verify
+its old PID exited, start the same candidate again, and retain an authenticated
+empty `secrets.list` answer alongside the cell records. Record the old/new PID,
+configuration and candidate identity without tokens or key material. Do not use
+registry clearing, DB deletion or a synthetic response as cleanup evidence.
+
+An unavailable image/kernel or failing attach prerequisite cannot qualify the
+cell. Preserve that failure and its owned cleanup evidence. These cells prove
+secret presence, not image-builder provenance, introspection or native POWER.
+`ops.export_systems_toml` is never called with `persist`. A killed run can leave
+owned resources; use their recorded IDs for supported cleanup, preserving shared
+images and prior histories.
+
+Historical pre-positive-control run: candidate `86ed1b021` (server, worker and reconciler at that SHA in both lanes), a
 disposable Fedora 44 x86_64 lab guest; earlier runs at `44503b3bf` and `f1150fc13` gave the same
 result. Each lane recorded its 62 cells and skipped the other
 lane's 62; the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`. `qualify` reported
@@ -1535,9 +1585,9 @@ experiment's workers and logs, not the current slot identity contract.
   [platform support](../platform-support.md) for why the project's `uv` dependency set does not
   supply the binding.
 - **Staged images need the right label on an SELinux host** — `virt_image_t` under
-  system mode, `svirt_image_t` under session mode (ADR-0640), or the
-  `libvirt-qemu` AppArmor profile on Ubuntu — and the rootfs's parent dir must be
-  writable, because the boot stages an overlay beside it.
+  system mode, `svirt_image_t` under session mode (ADR-0640). Ubuntu session guests
+  have no per-domain AppArmor confinement (ADR-0741). The rootfs's parent dir must
+  be writable, because the boot stages an overlay beside it.
 - **`pytest -m live_vm` selects all four families.** If you run a nightly for
   only one, declare which families you intend to run and let the fail-loud gate
   catch a missing declared family, rather than skipping to green.

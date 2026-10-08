@@ -1,0 +1,47 @@
+---
+- name: Install the firewalld backend and Python binding (RedHat)
+  ansible.builtin.package:
+    name: [firewalld, python3-firewall]
+    state: present
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Inspect the installed firewall service before activation (RedHat)
+  ansible.builtin.service_facts:
+  register: gdbstub_acl_services
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Preserve management before activating an inactive firewall (RedHat)
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - gdbstub_acl_services.ansible_facts.services.get('firewalld.service', {}).get('state') != 'running'
+  block:
+    - name: Reject management ports that would widen protected-port access
+      ansible.builtin.assert:
+        that:
+          - (ansible_port | default(22) | int) >= 1
+          - (ansible_port | default(22) | int) <= 65535
+          - (ansible_port | default(22) | int) != (gdbstub_acl_tls_port | int)
+          - >-
+            (ansible_port | default(22) | int) < (gdbstub_range.split(':')[0] | int)
+            or (ansible_port | default(22) | int) > (gdbstub_range.split(':')[1] | int)
+        fail_msg: Configure a distinct valid management SSH port before activating firewalld.
+    - name: Preserve the configured SSH port in permanent configuration before startup
+      ansible.posix.firewalld:
+        port: "{{ ansible_port | default(22) }}/tcp"
+        permanent: true
+        immediate: false
+        offline: true
+        state: enabled
+
+- name: Enable and start firewalld before applying protected-port rules (RedHat)
+  ansible.builtin.systemd_service:
+    name: firewalld
+    enabled: true
+    state: started
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Install the ufw backend before applying any rules (Debian)
+  ansible.builtin.package:
+    name: ufw
+    state: present
+  when: ansible_facts['os_family'] == 'Debian'

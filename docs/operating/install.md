@@ -301,6 +301,14 @@ re-applies those modes to a kernel a later upgrade installs, so no re-run is nee
 membership takes effect, then run `just check-local-libvirt`. Do not use `examples/local-libvirt/install-host.sh` as a
 second installer; it only calls this recipe for compatibility with the example walkthrough.
 
+On the supported Ubuntu AppArmor session deployment, the daemon's enforcing profile
+is not per-domain guest confinement: libvirt reports security model `none` and QEMU
+runs `unconfined`. [ADR-0741](../adr/0741-apparmor-session-confinement-posture.md)
+accepts that documented posture without granting privileged libvirt access or
+changing daemon ownership. Do not treat it as a confined multi-user deployment.
+The host-install confinement assertion remains failing for unconfined guests;
+this decision does not qualify the Debian host-install cell or release 0.5.0.
+
 The play's external-boot recovery capacity gate reserves
 `live_vm_host_external_boot_concurrent_activations` (3 by default here, 96 GiB at 32 GiB each)
 free bytes per worker slot, sized for a typical developer or lab host rather than the

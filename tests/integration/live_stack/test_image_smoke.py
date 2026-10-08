@@ -149,3 +149,30 @@ def test_ssh_connects_to_the_endpoint_host(tmp_path: Path, monkeypatch: pytest.M
     argv = seen[0]
     assert argv[argv.index("-p") + 1] == "47201"
     assert argv[-3:] == ["root@192.0.2.10", "--", "true"]
+
+
+def test_ssh_timeout_does_not_replay_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    def run(argv: list[str], *, timeout: float, **_kwargs: object):
+        calls.append(argv)
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(subprocess.TimeoutExpired):
+        ssh(Endpoint("127.0.0.1", 22), tmp_path / "key", "make install")
+    assert len(calls) == 1
+
+
+def test_ssh_forwards_per_attempt_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    timeouts = []
+
+    def run(argv: list[str], *, timeout: float, **_kwargs: object):
+        timeouts.append(timeout)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    ssh(Endpoint("127.0.0.1", 22), tmp_path / "key", "true", timeout_s=2.0)
+    assert timeouts == [2.0]
