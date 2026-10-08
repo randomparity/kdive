@@ -4,8 +4,8 @@
 
 - **Subsystem**: `io_uring`, poll cancellation
 - **Public reference**: [ChangeLog-7.0.4](https://www.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.0.4)
-- **Fix reference**: Upstream `45cd95763e198d74d369ede43aef0b1955b8dea4`, stable backport in 7.0.4
-- **Fixed release**: Linux 7.0.4
+- **Fix reference**: Upstream [`326941b22806`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=326941b22806cbf2df1fbfe902b7908b368cce42) ("io_uring/poll: fix signed comparison in io_poll_get_ownership()"), stable backport in 7.0.4
+- **Fixed release**: Linux 7.1-rc1 upstream; Linux 7.0.4 stable
 - **Primary symptom**: Incorrect poll-cancellation ownership under high concurrency
 - **VM suitability**: Medium. Pure userspace repro, but often needs stress and KCSAN/tracing.
 
