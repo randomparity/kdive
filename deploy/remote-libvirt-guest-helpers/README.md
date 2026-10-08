@@ -107,13 +107,17 @@ remain in `/boot/kdive`; persistent distribution boot selection is unchanged.
 The kdump method selects that kernel through native `KDUMP_KERNELVER`. Service
 installation or enablement alone is not evidence of a boot or armed crash kernel.
 
-The clean pinned image gains a native Wicked Ethernet DHCPv4 policy. Its generic
+The clean pinned image gains per-device native Wicked hardware-class DHCPv4 policies. Its generic
 updater invokes the private `kdive-wicked/netconfig` adapter, which delegates to
 native netconfig before reconciling the existing source return route. It preserves
 DNS and unrelated IPv6/non-DHCP processing. Only the slirp interface's DHCP default
 is removed from the main table; static and primary-interface routes remain.
-Native nanny startup registers policy, enables current Ethernet devices and replays
-current leases. Native batch startup probing remains enabled by the executable name.
+Native nanny startup encodes actual Ethernet names, checks selected native persisted
+policy ownership and uses existing busctl createPolicy without transparent updates.
+Exact owned policy loaded at startup is reused; foreign/duplicate/unsafe state or
+a live collision fails visibly. Native persistence is checked before enabling devices
+and replaying current leases; unsupported native names require a clean supported
+topology. No temporary interface configuration or new daemon is installed. Native batch startup probing remains enabled by the executable name.
 
 Foreign network policy or native reader changes stop image construction: rebuild
 from the supported clean source instead of overwriting operator configuration.

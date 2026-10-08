@@ -438,6 +438,7 @@
       - |
         set -eu
         command -v wicked
+        command -v busctl
         command -v ip
         command -v python3
         test -x /etc/wicked/extensions/netconfig

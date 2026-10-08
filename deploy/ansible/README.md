@@ -219,6 +219,8 @@ with a clear message if it is not set in `host_vars/`.
 `cloud_image_checksum` is passed to the existing downloader; omitted checksums
 preserve other rows' behavior. A source pin does not freeze installed package versions.
 Use `playbooks/image.yml` to rebuild and stage its native helpers and Wicked policy;
+the admitted image must already provide busctl for atomic native policy creation.
+Startup refuses selected foreign policy state rather than transparently updating it;
 existing guests are not migrated. Competing network configuration is refused.
 The native helper/network contract and failure diagnostics are in the
 [guest-helper guide](../remote-libvirt-guest-helpers/README.md#suse-leap-installation-and-networking).

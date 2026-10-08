@@ -1,6 +1,6 @@
-<policy name="kdive_ethernet" weight="0">
+<policy name="policy__" origin="wicked:xml:/etc/wicked/kdive-ethernet-policy.xml">
   <match>
-    <link-type>ethernet</link-type>
+    <class>netif-ethernet</class>
   </match>
   <merge>
     <ipv4:dhcp>

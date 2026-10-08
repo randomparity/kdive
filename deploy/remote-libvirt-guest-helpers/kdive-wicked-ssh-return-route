@@ -15,13 +15,17 @@ import stat
 import subprocess
 import sys
 import syslog
+import uuid
 from pathlib import Path
+from xml.parsers import expat
 
 STATE_ROOT = "/run/wicked"
 LOCK = "/run/kdive-wicked.lock"
 DELEGATE = "/etc/wicked/extensions/netconfig"
 HELPER = "/usr/local/libexec/kdive-ssh-return-route"
 POLICY = "/etc/wicked/kdive-ethernet-policy.xml"
+POLICY_ROOTS = ("/run/wicked/nanny", "/var/lib/wicked/nanny")
+POLICY_ORIGIN = "wicked:xml:/etc/wicked/kdive-ethernet-policy.xml"
 TABLE = 2291
 GATEWAY = "10.0.2.2"
 SUBNET = ipaddress.ip_network("10.0.2.0/24")
@@ -50,7 +54,11 @@ def read_native(filename):
     root = Path(STATE_ROOT).resolve()
     if root not in path.resolve().parents:
         raise ValueError("input is outside native Wicked state")
-    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    return read_owned(path)
+
+
+def read_owned(path):
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "r") as source:
         info = os.fstat(source.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
@@ -59,6 +67,119 @@ def read_native(filename):
         if len(text) > 1024 * 1024:
             raise ValueError("native input exceeds 1 MiB; inspect native configuration")
         return text
+
+
+def native_policy_name(iface):
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,15}", iface):
+        raise ValueError("interface name cannot be encoded by pinned Wicked")
+    return "policy__" + "".join({"_": "__", ".": "_d", "-": "_m"}.get(c, c) for c in iface)
+
+
+def policy_tree(text):
+    """Read the small native policy grammar, including unbound ipv4:dhcp names."""
+    parser = expat.ParserCreate()
+    stack, roots = [], []
+
+    def start(tag, attrs):
+        if len(stack) >= 8:
+            raise ValueError("native policy nesting exceeds supported shape")
+        node = [tag, attrs, [], []]
+        if stack:
+            stack[-1][3].append(node)
+        else:
+            roots.append(node)
+        stack.append(node)
+
+    def finish(tag):
+        node = stack.pop()
+        node[2] = "".join(node[2]).strip()
+
+    def reject_doctype(*args):
+        raise ValueError("native policy must not contain a DTD")
+
+    parser.StartElementHandler = start
+    parser.EndElementHandler = finish
+    parser.CharacterDataHandler = lambda data: stack[-1][2].append(data)
+    parser.StartDoctypeDeclHandler = reject_doctype
+    try:
+        parser.Parse(text, True)
+    except expat.ExpatError as error:
+        raise ValueError("invalid native policy XML: " + str(error)) from error
+    if len(roots) != 1 or roots[0][0] != "policy":
+        raise ValueError("expected exactly one native policy")
+    return roots[0]
+
+
+def policy_template():
+    text = read_owned(Path(POLICY))
+    expected = '<policy name="policy__" origin="' + POLICY_ORIGIN + '"><match>'
+    expected += "<class>netif-ethernet</class></match><merge><ipv4:dhcp>"
+    expected += "<enabled>true</enabled></ipv4:dhcp></merge></policy>"
+    if policy_tree(text) != policy_tree(expected) or text.count('name="policy__"') != 1:
+        raise ValueError("foreign native policy template; rebuild the supported image")
+    return text
+
+
+def persisted_policies(expected):
+    found = set()
+    for directory in POLICY_ROOTS:
+        root = Path(directory)
+        if root.is_symlink():
+            raise ValueError("native policy directory must not be a symlink")
+        if not root.exists():
+            continue
+        info = root.stat()
+        if not root.is_dir() or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise ValueError("unsafe native policy directory")
+        for path in root.glob("policy*.xml"):
+            node = policy_tree(read_owned(path))
+            name = node[1].get("name")
+            if name not in expected:
+                continue
+            if name in found or path.name != name + ".xml":
+                raise ValueError("duplicate or alternate-file selected native policy")
+            attrs = node[1]
+            if attrs.pop("owner", None) != "0":
+                raise ValueError("selected native policy owner must be root")
+            try:
+                native_uuid = uuid.UUID(attrs.pop("uuid"))
+                if not native_uuid.int:
+                    raise ValueError("empty native UUID")
+            except (KeyError, ValueError) as error:
+                raise ValueError("invalid selected native policy UUID") from error
+            if node != expected[name]:
+                raise ValueError("foreign selected native policy; rebuild the supported image")
+            found.add(name)
+    return found
+
+
+def register_ethernet():
+    template = policy_template()
+    links = [link for link in query("link", "show") if link.get("link_type") == "ether"]
+    names = [native_policy_name(link["ifname"]) for link in links]
+    if len(set(names)) != len(names):
+        raise ValueError("duplicate selected Ethernet interface")
+    payloads = {name: template.replace('name="policy__"', 'name="' + name + '"') for name in names}
+    expected = {name: policy_tree(payload) for name, payload in payloads.items()}
+    owned = persisted_policies(expected)
+    for name, payload in payloads.items():
+        if name not in owned:
+            execute(
+                [
+                    "busctl",
+                    "call",
+                    "org.opensuse.Network.Nanny",
+                    "/org/opensuse/Network/Nanny",
+                    "org.opensuse.Network.Nanny",
+                    "createPolicy",
+                    "s",
+                    payload,
+                ]
+            )
+            if name not in persisted_policies(expected):
+                raise ValueError("native policy was not safely persisted; inspect nanny errors")
+    for link in links:
+        execute(["wicked", "nanny", "enable", link["ifname"]])
 
 
 def lease(filename, iface):
@@ -230,10 +351,7 @@ def main(args):
     if args == ["startup"]:
         if Path("/sys/firmware/ibft").exists():
             raise ValueError("foreign firmware network policy; use the supported guest topology")
-        execute(["wicked", "nanny", "addpolicy", POLICY])
-        for link in query("link", "show"):
-            if link.get("link_type") == "ether":
-                execute(["wicked", "nanny", "enable", interface(link["ifname"])])
+        register_ethernet()
         events = None
     elif args and args[0] in {"install", "remove", "batch"}:
         execute([DELEGATE, *args])

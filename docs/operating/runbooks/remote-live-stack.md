@@ -561,7 +561,11 @@ Deploy matching server/worker/reconciler source before running the SUSE paramete
 of `tests/integration/test_remote_deep_lifecycle_live.py`. Both longterm and stable
 cells require actual installed-kernel, module, boot and cleanup evidence.
 
-The Leap image retains Wicked. Before qualification, observe clean first-boot
+The Leap image retains Wicked. Its adapter creates encoded per-device hardware-class
+policies with native busctl createPolicy and verifies persistence before enable.
+Prove owned replay and same-name foreign-policy refusal without changing that policy;
+CLI success never proves acquisition. For a newly created test Ethernet fixture,
+register its owned native policy before activation. Before qualification, observe clean first-boot
 DHCP on both NICs, native generic batch processing, lease renewal/replacement and
 removal/reactivation, then native daemon restart and guest reboot. Confirm table2291
 source routing, preservation of primary/static routes, authenticated forwarded SSH

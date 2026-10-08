@@ -29,11 +29,14 @@ def guest(tmp_path: Path):
         "DELEGATE": str(bins / "delegate"),
         "HELPER": str(bins / "helper"),
         "POLICY": str(tmp_path / "policy.xml"),
+        "POLICY_ROOTS": (str(tmp_path / "nanny"), str(tmp_path / "old-nanny")),
     }.items():
-        line = next(line for line in source.splitlines() if line.startswith(name + " ="))
-        source = source.replace(line, name + " = " + repr(value), 1)
+        line = next((line for line in source.splitlines() if line.startswith(name + " =")), None)
+        if line is not None:
+            source = source.replace(line, name + " = " + repr(value), 1)
     script = tmp_path / "netconfig"
     script.write_text(source)
+    (tmp_path / "policy.xml").write_text((ASSETS / "kdive-wicked-policy.xml").read_text())
     tool = """#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -48,7 +51,7 @@ if name == "ip":
         sys.exit(2)  # Linux has no FIB table before the first return route.
     if "address" in args: print(os.environ["ADDRESSES"])
     elif "link" in args:
-        print(json.dumps([
+        print(os.environ.get("LINKS") or json.dumps([
             {"ifname":"lo", "link_type":"[772]" if "-N" in args else "loopback"},
             {"ifname":"ethA", "link_type":"[1]" if "-N" in args else "ether"},
         ]))
@@ -56,15 +59,61 @@ if name == "ip":
     elif "all" in args:
         print(json.dumps([dict(r, table=2291) for r in json.loads(os.environ.get("ROUTES", "[]"))]))
     elif "show" in args: print(os.environ.get("DEFAULTS", "[]"))
+elif name in {"wicked", "busctl", "device-ready"}:
+    from xml.parsers import expat
+    root = Path(os.environ["NATIVE_ROOT"])
+    root.mkdir(exist_ok=True)
+    def fields(text):
+        parser = expat.ParserCreate()
+        values = {}
+        current = []
+        def start(tag, attrs):
+            current.append(tag)
+            if tag == "policy": values.update(attrs)
+        parser.StartElementHandler = start
+        parser.EndElementHandler = lambda tag: current.pop()
+        def text_data(text):
+            if text.strip(): values[current[-1]] = text.strip()
+        parser.CharacterDataHandler = text_data
+        parser.Parse(text, True)
+        return values
+    if name == "busctl":
+        assert args[:6] == [
+            "call", "org.opensuse.Network.Nanny", "/org/opensuse/Network/Nanny",
+            "org.opensuse.Network.Nanny", "createPolicy", "s",
+        ]
+        values = fields(args[6]); target = root / (values["name"] + ".xml")
+        if target.exists() or os.environ.get("LIVE_COLLISION"): sys.exit(19)
+        if not os.environ.get("SAVE_FAIL"):
+            import uuid
+            identity = str(uuid.uuid5(uuid.NAMESPACE_URL, args[6]))
+            text = args[6].replace('<policy ', '<policy owner="0" uuid="'+identity+'" ', 1)
+            target.write_text(text);target.chmod(0o600)
+        print('o "/org/opensuse/Network/Nanny/Policy/'+values["name"]+'"')
+    elif args[:2] == ["nanny", "addpolicy"]:
+        values = fields(Path(args[2]).read_text()); target = root / (values["name"] + ".xml")
+        target.write_text(Path(args[2]).read_text())  # Native client transparently updates.
+    elif args[:2] == ["nanny", "enable"] or name == "device-ready":
+        if os.environ.get("ENABLE_FALSE"):
+            print("Device not known", file=sys.stderr);sys.exit(0)
+        iface = args[0] if name == "device-ready" else args[2]
+        encoded = "policy__" + "".join({"_":"__", ".":"_d", "-":"_m"}.get(c,c) for c in iface)
+        target = root / (encoded + ".xml")
+        if target.exists():
+            values = fields(target.read_text())
+            # Pinned consumer name gate and configured UNKNOWN link-type precede merge.
+            if (values.get("class") == "netif-ethernet" and values.get("enabled") == "true"
+                    and not (os.environ.get("DELAYED_READY") and name != "device-ready")):
+                (root / ("acquired-"+iface)).write_text("native-consumer scheduled DHCP")
 """
-    for name in ["ip", "delegate", "helper", "wicked"]:
+    for name in ["ip", "delegate", "helper", "wicked", "busctl", "device-ready"]:
         p = bins / name
         p.write_text(tool)
         p.chmod(0o755)
     env = {
-        **os.environ,
         "PATH": f"{bins}:{Path(sys.executable).parent}:/usr/bin:/bin",
         "CALLS": str(calls),
+        "NATIVE_ROOT": str(tmp_path / "nanny"),
         "ADDRESSES": json.dumps(
             [{"ifname": "ethA", "addr_info": [{"family": "inet", "local": "10.0.2.15"}]}]
         ),
@@ -87,6 +136,7 @@ def run(guest, *args, **env):
         capture_output=True,
         text=True,
         check=False,
+        timeout=5,
     )
     return result, [json.loads(line) for line in calls.read_text().splitlines()]
 
@@ -179,10 +229,12 @@ def test_unrelated_remove_preserves_existing_owner(guest):
 def test_startup_registers_then_enables_actual_ethernet_before_replay(guest):
     result, calls = run(guest, "startup")
     assert result.returncode == 0, result.stderr
-    assert calls[0] == ["wicked", "nanny", "addpolicy", str(guest[0].parent / "policy.xml")]
-    assert ["wicked", "nanny", "enable", "ethA"] in calls
+    assert (guest[0].parent / "nanny/acquired-ethA").exists()
+    create = next(i for i, c in enumerate(calls) if c[0] == "busctl")
+    enable = calls.index(["wicked", "nanny", "enable", "ethA"])
+    assert create < enable
     assert ["wicked", "nanny", "enable", "lo"] not in calls
-    assert not any("recheck" in c for c in calls)
+    assert not any(c[:3] == ["wicked", "nanny", "addpolicy"] for c in calls)
 
 
 def test_batch_injection_is_data(guest):
@@ -205,9 +257,9 @@ def test_rendered_native_batch_command_survives_pinned_selector():
     assert commands["install"].endswith("/netconfig install")
 
 
-def test_policy_uses_link_type_and_existing_native_service():
+def test_policy_uses_hardware_class_and_existing_native_service():
     policy = (ASSETS / "kdive-wicked-policy.xml").read_text()
-    assert "<link-type>ethernet</link-type>" in policy
+    assert "<class>netif-ethernet</class>" in policy
     assert "<ipv4:dhcp>" in policy
     assert "<ipv6>" not in policy and "<device>" not in policy
     startup = (ASSETS / "kdive-wicked-startup.conf").read_text()
@@ -326,7 +378,7 @@ def prepare_image(tmp_path, *, foreign="", fail=""):
         r"/(?:etc|usr/local|usr/lib|run|var/lib|tmp)/", lambda match: str(root) + match[0], script
     )
     bins = root / "bin"
-    for name in ["wicked", "ip", "systemctl", "sha256sum"]:
+    for name in ["wicked", "busctl", "ip", "systemctl", "sha256sum"]:
         p = bins / name
         p.write_text(f"#!/bin/sh\n[ '{name}' != '{fail}' ] || exit 23\n")
         p.chmod(0o755)
@@ -345,7 +397,7 @@ os.execv('/usr/bin/install', ['install', *args])
         ["/bin/sh", "-c", script],
         text=True,
         capture_output=True,
-        env={**os.environ, "PATH": f"{bins}:{Path(sys.executable).parent}:/usr/bin:/bin"},
+        env={"PATH": f"{bins}:{Path(sys.executable).parent}:/usr/bin:/bin"},
         check=False,
     )
     return result, root
@@ -436,3 +488,221 @@ def test_native_batch_remove_terminal_update(guest):
     result, calls = run(guest, "batch", str(batch), "info")
     assert result.returncode == 0, result.stderr
     assert calls[0] == ["delegate", "batch", str(batch), "info"]
+
+
+@pytest.mark.parametrize(
+    "iface, encoded",
+    [("en-p.0_1", "policy__en_mp_d0__1"), ("ETH2", "policy__ETH2"), ("-eth", "policy___meth")],
+)
+def test_native_name_encoding_and_owned_replay(guest, iface, encoded):
+    links = json.dumps([{"ifname": iface, "link_type": "ether"}])
+    result, calls = run(guest, "startup", LINKS=links)
+    assert result.returncode == 0, result.stderr
+    policy = guest[0].parent / "nanny" / (encoded + ".xml")
+    before = policy.read_bytes()
+    assert (policy.parent / ("acquired-" + iface)).exists()
+    result, calls = run(guest, "startup", LINKS=links)
+    assert result.returncode == 0, result.stderr
+    assert not any(c[0] == "busctl" for c in calls)
+    assert policy.read_bytes() == before
+
+
+@pytest.mark.parametrize("iface", ["eth:0", "a" * 16, "eth;touch", "éth"])
+def test_unsupported_native_name_refuses_before_create(guest, iface):
+    result, calls = run(
+        guest, "startup", LINKS=json.dumps([{"ifname": iface, "link_type": "ether"}])
+    )
+    assert result.returncode != 0
+    assert not any(c[0] in {"busctl", "wicked"} for c in calls)
+
+
+def test_multiple_present_ethernet_devices_register_before_enable(guest):
+    links = json.dumps([{"ifname": n, "link_type": "ether"} for n in ["ethA", "ethB"]])
+    result, calls = run(guest, "startup", LINKS=links)
+    assert result.returncode == 0, result.stderr
+    creates = [i for i, c in enumerate(calls) if c[0] == "busctl"]
+    enables = [i for i, c in enumerate(calls) if c[:3] == ["wicked", "nanny", "enable"]]
+    assert len(creates) == len(enables) == 2
+    assert max(creates) < min(enables)
+    assert all((guest[0].parent / "nanny" / ("acquired-" + n)).exists() for n in ["ethA", "ethB"])
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "origin",
+        "action",
+        "owner",
+        "uuid",
+        "attribute",
+        "duplicate",
+        "alternate",
+        "symlink",
+        "mode",
+        "oversize",
+        "dtd",
+    ],
+)
+def test_runtime_selected_collision_is_preserved_before_enable(guest, change):
+    result, _ = run(guest, "startup")
+    assert result.returncode == 0, result.stderr
+    root = guest[0].parent / "nanny"
+    policy = root / "policy__ethA.xml"
+    text = policy.read_text()
+    if change == "origin":
+        text = text.replace("wicked:xml:", "foreign:xml:")
+    elif change == "action":
+        text = text.replace("<enabled>true", "<enabled>false")
+    elif change == "owner":
+        text = text.replace('owner="0"', 'owner="1"')
+    elif change == "uuid":
+        text = text.replace('uuid="', 'uuid="invalid-')
+    elif change == "attribute":
+        text = text.replace("<policy ", '<policy foreign="true" ')
+    elif change == "oversize":
+        text += " " * (1024 * 1024)
+    elif change == "dtd":
+        text = '<!DOCTYPE policy [<!ENTITY foreign "true">]>' + text
+    policy.write_text(text)
+    if change in {"duplicate", "alternate"}:
+        other = root / "policy-alternate.xml"
+        other.write_bytes(policy.read_bytes())
+        if change == "alternate":
+            policy.unlink()
+            policy = other
+    elif change == "symlink":
+        other = root / "saved.xml"
+        policy.rename(other)
+        policy.symlink_to(other)
+    elif change == "mode":
+        policy.chmod(0o666)
+    before = policy.read_bytes()
+    result, calls = run(guest, "startup")
+    assert result.returncode != 0
+    assert not any(c[0] in {"busctl", "wicked"} for c in calls)
+    assert policy.read_bytes() == before
+
+
+@pytest.mark.parametrize("failure, code", [("busctl", 23), ("wicked", 23)])
+def test_registration_native_command_failure_is_visible(guest, failure, code):
+    result, _ = run(guest, "startup", FAIL=failure)
+    assert result.returncode == code
+    assert "kdive Wicked return route" in result.stderr
+
+
+@pytest.mark.parametrize("failure", ["LIVE_COLLISION", "SAVE_FAIL"])
+def test_unexported_live_collision_or_failed_native_save_never_enables(guest, failure):
+    result, calls = run(guest, "startup", **{failure: "1"})
+    assert result.returncode != 0
+    assert not any(c[:3] == ["wicked", "nanny", "enable"] for c in calls)
+
+
+def test_native_false_enable_remains_visible_and_is_not_acquisition(guest):
+    result, _ = run(guest, "startup", ENABLE_FALSE="1")
+    assert result.returncode == 0  # Pinned CLI hides the false D-Bus result.
+    assert "Device not known" in result.stderr
+    assert not (guest[0].parent / "nanny/acquired-ethA").exists()
+
+
+@pytest.mark.parametrize("change", ["class", "origin", "symlink", "mode"])
+def test_foreign_template_refuses_before_native_registration(guest, change):
+    policy = guest[0].parent / "policy.xml"
+    if change == "class":
+        policy.write_text(policy.read_text().replace("netif-ethernet", "netif-loopback"))
+    elif change == "origin":
+        policy.write_text(policy.read_text().replace("wicked:xml:", "foreign:xml:"))
+    elif change == "mode":
+        policy.chmod(0o666)
+    else:
+        target = policy.with_name("saved-template.xml")
+        policy.rename(target)
+        policy.symlink_to(target)
+    result, calls = run(guest, "startup")
+    assert result.returncode != 0
+    assert not calls
+
+
+@pytest.mark.parametrize("change", ["symlink", "mode"])
+def test_unsafe_native_directory_refuses_without_touching_policy(guest, change):
+    root = guest[0].parent / "nanny"
+    root.mkdir()
+    if change == "mode":
+        root.chmod(0o777)
+    else:
+        target = root.with_name("saved-nanny")
+        root.rename(target)
+        root.symlink_to(target, target_is_directory=True)
+    result, calls = run(guest, "startup")
+    assert result.returncode != 0
+    assert not any(c[0] in {"busctl", "wicked"} for c in calls)
+
+
+def test_unrelated_native_policy_is_preserved(guest):
+    root = guest[0].parent / "nanny"
+    root.mkdir()
+    other = root / "policy__other.xml"
+    other.write_text(
+        '<policy name="policy__other"><match><class>netif-loopback</class></match></policy>'
+    )
+    before = other.read_bytes()
+    result, _ = run(guest, "startup")
+    assert result.returncode == 0, result.stderr
+    assert other.read_bytes() == before
+
+
+def test_image_requires_existing_native_busctl():
+    import yaml
+
+    tasks = yaml.safe_load(
+        (ASSETS.parent / "ansible/roles/guest_base_image/tasks/build_one.yml").read_text()
+    )
+    task = next(t for t in tasks if t["name"].startswith("Install the Leap native network"))
+    assert "command -v busctl" in task["ansible.builtin.command"]["argv"][-1]
+
+
+def test_registered_policy_survives_until_native_ready_event(guest):
+    result, _ = run(guest, "startup", DELAYED_READY="1")
+    assert result.returncode == 0, result.stderr
+    marker = guest[0].parent / "nanny/acquired-ethA"
+    assert not marker.exists()
+    # Boundary fake injects the native DEVICE_READY callback, not a second startup.
+    event = guest[0].parent / "bin/device-ready"
+    completed = subprocess.run([str(event), "ethA"], env=guest[3], capture_output=True, check=False)
+    assert completed.returncode == 0
+    assert marker.exists()
+
+
+def test_owned_reader_refuses_wrong_os_owner(tmp_path, monkeypatch):
+    import runpy
+    from types import SimpleNamespace
+
+    reader = runpy.run_path(str(ADAPTER))["read_owned"]
+    path = tmp_path / "policy.xml"
+    path.write_text("native input")
+    fake_os = SimpleNamespace(
+        open=os.open,
+        fdopen=os.fdopen,
+        O_RDONLY=os.O_RDONLY,
+        O_NOFOLLOW=os.O_NOFOLLOW,
+        O_NONBLOCK=os.O_NONBLOCK,
+        geteuid=os.geteuid,
+        fstat=lambda fd: SimpleNamespace(st_mode=path.stat().st_mode, st_uid=os.geteuid() + 1),
+    )
+    monkeypatch.setitem(reader.__globals__, "os", fake_os)
+    with pytest.raises(ValueError, match="owned"):
+        reader(path)
+
+
+def test_fifo_policy_refuses_without_blocking(guest):
+    root = guest[0].parent / "nanny"
+    root.mkdir()
+    os.mkfifo(root / "policy__ethA.xml", 0o600)
+    result, calls = run(guest, "startup")
+    assert result.returncode != 0
+    assert not any(c[0] in {"busctl", "wicked"} for c in calls)
+
+
+def test_adapter_preserves_pinned_python36_syntax():
+    import ast
+
+    ast.parse(ADAPTER.read_text(), feature_version=(3, 6))
