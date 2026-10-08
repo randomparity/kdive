@@ -13,7 +13,10 @@ x86_64 or ppc64le). Design: `docs/archive/superpowers/specs/2026-06-18-ansible-r
 - A `dir` storage pool + the `default` network.
 - A firewalld/ufw ACL restricting `:16514` and the gdbstub range to `worker_cidr`,
   **enforced** on both distros (the gdbstub tier is raw TCP — the ACL is its only auth).
-  Fedora/RHEL use firewalld; on Ubuntu the role allows SSH, sets
+  Fedora/RHEL install firewalld and its Python binding, preserve the configured management
+  port before starting an inactive firewall, then enable/start it before protected rules.
+  Already-running firewalls keep their existing management policy. Debian/Ubuntu install
+  ufw; on Ubuntu the role allows SSH, sets
   `DEFAULT_FORWARD_POLICY=ACCEPT` (so enabling ufw doesn't break libvirt guest NAT
   egress), enables ufw (`gdbstub_acl_ufw_enable`, default true), and asserts it is
   active — failing closed rather than leaving the debug ports open. Set the var false
