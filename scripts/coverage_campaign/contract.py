@@ -409,7 +409,13 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
             ):
                 cell = _native_cell(
                     "failure-resource",
-                    2816,
+                    2818
+                    if guest == "ppc64le"
+                    else (
+                        3117
+                        if failure in {"worker-interruption", "lost-response", "backing-service"}
+                        else 3118
+                    ),
                     guest,
                     provider,
                     "Prove operation-specific recovery, no duplicate resources, "
@@ -423,6 +429,26 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
                         assertions=(failure, "no-duplicates", "protected-state", "cleanup"),
                     )
                 )
+        quiescence = _native_cell(
+            "remote-quiescence",
+            2816 if guest == "x86_64" else 2818,
+            guest,
+            "remote-libvirt",
+            "Prove an accepted remote monitor mutation orders a fresh TLS absence probe.",
+        )
+        cells.append(
+            replace(
+                quiescence,
+                scenario_id=f"remote-quiescence/{guest}",
+                inputs=("image_sha256",),
+                assertions=(
+                    "accepted-mutation",
+                    "client-terminated",
+                    "fresh-monitor-ordering",
+                    "cleanup",
+                ),
+            )
+        )
         for case in ("case-1", "case-2"):
             for revision in ("broken", "fixed"):
                 cell = _native_cell(

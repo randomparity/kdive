@@ -18,6 +18,41 @@ def inventory() -> Inventory:
     return read_inventory()
 
 
+def test_failure_ownership_and_remote_quiescence_binding(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+    failures = [cell for cell in cells if cell.operation == "failure-resource"]
+    orchestration = {"worker-interruption", "lost-response", "backing-service"}
+    limits = {"minimum-cpu-ram", "insufficient-disk", "slow-boot"}
+    expected = {
+        f"failure-resource/{provider}/{arch}/{failure}"
+        for provider in inventory.capabilities
+        for arch in inventory.arches
+        for failure in orchestration | limits
+    }
+    assert {cell.id for cell in failures} == expected
+    for cell in failures:
+        failure = cell.id.rsplit("/", 1)[1]
+        assert cell.owner == (
+            2818 if cell.guest_arch == "ppc64le" else 3117 if failure in orchestration else 3118
+        )
+        assert cell.scenario_id == f"failure-resource/{failure}"
+        assert cell.assertions == (failure, "no-duplicates", "protected-state", "cleanup")
+        assert cell.node_id is None
+    proofs = [cell for cell in cells if cell.operation == "remote-quiescence"]
+    assert {cell.guest_arch for cell in proofs} == set(inventory.arches)
+    for cell in proofs:
+        assert cell.provider == "remote-libvirt"
+        assert cell.inputs == ("image_sha256",)
+        assert cell.assertions == (
+            "accepted-mutation",
+            "client-terminated",
+            "fresh-monitor-ordering",
+            "cleanup",
+        )
+        assert cell.owner == (2816 if cell.guest_arch == "x86_64" else 2818)
+        assert (cell.node_id is not None) == (cell.guest_arch == "x86_64")
+
+
 def test_registered_addition_requires_mapping(inventory: Inventory) -> None:
     added = replace(inventory.tools[0], tool="new.operation")
     with pytest.raises(ValueError, match="unmapped"):
@@ -173,6 +208,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         "image-smoke",
         "deep-lifecycle",
         "host-install",
+        "remote-quiescence",
         *_CORE_TOOLS,
         *_SPLIT[3095],
         *_SPLIT[3096],

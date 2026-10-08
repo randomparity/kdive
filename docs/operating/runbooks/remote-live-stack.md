@@ -482,3 +482,36 @@ stack after its cells, enqueued an `IMAGE_BUILD` job that failed on its first at
 `remote-libvirt`. No record or artifact carried a host name or address. After each configuration
 and after the final `demo-down.sh --wipe --yes`, the provider defined no `kdive-` domain and its
 pool held only the base volume.
+
+### Accepted-operation quiescence proof
+
+The `live_vm_remote` carrier
+`tests/integration/test_remote_capture_operation_quiescence_live.py::test_remote_capture_operation_waits_for_fresh_monitor_ordering`
+provisions an Enterprise Linux System over HTTP, then uses that System's actual
+Resource configuration for native libvirt TLS monitor clients. Export the normal
+live-stack environment, server database DSN, and `REMOTE_PROVIDER_SSH` operator
+observer destination. The staged Enterprise base image, guest SSH access and
+provider-side Python 3 are required. The normal three roles and clean test checkout
+must match the candidate commit.
+
+Before running the carrier, record the expected provider host and staged image:
+
+```sh
+python -m tests.integration.live_stack.remote_quiescence \
+  --candidate "$(git rev-parse HEAD)" --out /tmp/quiescence-bindings.json
+uv run python -m pytest \
+  tests/integration/test_remote_capture_operation_quiescence_live.py -q
+```
+
+The task-owned provider listener binds only loopback, accepts an actual native NBD
+request and withholds its handshake. A fresh production absence probe must remain
+pending both before and after the submitting client is terminated. Releasing the
+peer must allow matching absence evidence; the listener, processes, block node,
+System, overlay and allocation are checked for cleanup. The listener has a
+60-second total lifetime and closes on controller EOF. No firewall change or
+installed external authority is part of this proof.
+
+The x86 cell is `remote-quiescence/remote-libvirt/x86_64`. The original fault and
+resource-limit cells remain required under #3117 and #3118; POWER evidence remains
+under #2818. This finite ordering observation does not establish those separate
+obligations or durable capture finalization.
