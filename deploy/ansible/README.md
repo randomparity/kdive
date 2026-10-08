@@ -197,6 +197,9 @@ with a clear message if it is not set in `host_vars/`.
   lease-identified SSH return route. Rebuild existing staged images with
   `force_image_rebuild=true`; unrelated netplan YAML is refused rather than overwritten.
   The policy removes only the identified slirp DHCP default, preserving other routes and DNS.
+  Ubuntu SSH generates missing host keys at service startup, separately for each clone,
+  and preserves them on reboot. Unknown SSH prechecks or foreign service drop-ins
+  also require a clean supported image; shared-image host keys are not generated.
 - The **scratch/bare** image has no remote SSH parity: it installs neither sshd nor a
   guest network policy. Its build path is implemented but **unvalidated** (no scratch-capable test
   host): it builds the rootfs from the host OS family but the bootloader install + boot

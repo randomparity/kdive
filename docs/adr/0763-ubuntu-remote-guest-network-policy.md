@@ -62,6 +62,22 @@ For the canonical Ubuntu cloud image only:
    existing executable; no replacement daemon or poller. Startup replay handles
    service ordering and restart after the lease already exists.
 
+7. Provide missing Ubuntu SSH host keys on each guest's first SSH service start,
+   using the distribution's `ssh-keygen -A`; never generate keys in the base image.
+   An owned `ssh.service` drop-in runs this before the preserved vendor `sshd -t`.
+   Before installing the override, require the inspected vendor unit's single
+   `/usr/sbin/sshd -t` precheck and refuse unfamiliar precheck or drop-in inputs.
+   Existing keys survive restart and reboot. Authentication settings and general
+   cloud-init ownership stay unchanged. Two actual clones must have different
+   host-key fingerprints.
+
+Actual first-run proof established this additional prerequisite: the vendor image
+has no host keys, remote provisioning supplies no cloud datasource, and cloud-init
+is disabled in that guest. Socket activation reaches `sshd -t`, which refuses to
+start without keys. The routing policy was already present and correct. This
+image repair uses native key generation at service activation, preserving private
+key uniqueness rather than baking credentials into a shared template.
+
 DHCP renewals which reintroduce the default or replace an address cause native
 configuration events; the adapter reapplies the same bounded policy. Losing a link
 removes its private route/rule without touching another NIC's policy. No claim of

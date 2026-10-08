@@ -96,3 +96,31 @@ before rebuilding the assigned task image. No broad guest or lab reset.
 The complete design was reviewed and the scope audit identified one checkpoint. The
 operator explicitly approved the native policy and exact restricted-default exception
 before implementation; the resumed scope records that decision. Final review budget remains two passes.
+
+## Observed SSH host-key prerequisite amendment
+
+The first actual candidate provision reached ready with both DHCP leases and the
+correct main/source routes, but forwarded SSH failed: vendor `sshd -t` reported
+`no hostkeys available`. Cloud-init was disabled because this remote guest has no
+cloud datasource. No image role or native SSH unit generates the missing keys.
+
+For Ubuntu only, install an owned root:root 0644 `ssh.service` drop-in that resets
+ExecStartPre, executes `/usr/bin/ssh-keygen -A`, then retains `/usr/sbin/sshd -t`.
+The image build must require the vendor unit's single exact precheck, reject
+additional/continued/unknown prechecks and foreign service drop-ins, and accept
+only its byte-identical owned drop-in on repeat. Verify the native executable
+exists. Do not generate keys while customizing the shared image, remove existing
+keys, change authentication, or change general cloud-init policy.
+
+Tests execute the actual rendered role command: wrong unit shape/foreign drop-in
+fail before replacement; owned repeat succeeds; native generation precedes
+validation; generation failure prevents validation. Verify key generation with
+real OpenSSH in an isolated temporary root, existing key bytes unchanged across
+repeat, and distinct keys for separate roots. Actual canonical rebuilt-image proof
+must show no shared base-image keys, two guest clones with distinct fingerprints,
+and persistent guest fingerprints across service restart and reboot. The required
+SSH/routing/lease/reboot proof remains unchanged and must pass.
+
+This bounded observed prerequisite is within the approved Ubuntu SSH-parity scope;
+root accepted it for design amendment on 2026-10-08. Independent amendment review
+precedes implementation; cumulative final-review budget remains 0/2.

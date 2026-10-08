@@ -150,6 +150,10 @@ def _prepare_image(tmp_path: Path, *, foreign: bool = False, fail: str = ""):
     (root / "tmp").mkdir(parents=True)
     (root / "etc/netplan").mkdir(parents=True)
     (root / "usr/bin").mkdir(parents=True)
+    (root / "usr/lib/systemd/system").mkdir(parents=True)
+    (root / "usr/lib/systemd/system/ssh.service").write_text(
+        "[Service]\nExecStartPre=/usr/sbin/sshd -t\n"
+    )
     (root / "usr/bin/networkd-dispatcher").write_text("native")
     (root / "usr/bin/networkd-dispatcher").chmod(0o755)
     if foreign:
@@ -159,6 +163,7 @@ def _prepare_image(tmp_path: Path, *, foreign: bool = False, fail: str = ""):
         "kdive-networkd-ssh-return-route",
         "kdive-ubuntu-network.yaml",
         "kdive-networkd-startup.conf",
+        "kdive-ubuntu-ssh-host-keys.conf",
     ]:
         shutil.copyfile(ASSETS / name, root / "tmp" / name)
     tasks = yaml.safe_load(
@@ -169,13 +174,13 @@ def _prepare_image(tmp_path: Path, *, foreign: bool = False, fail: str = ""):
     argv = task["ansible.builtin.command"]["argv"]
     command = argv[argv.index("--run-command") + 1]
     command = re.sub(
-        r"/(?:tmp/|etc/|usr/local/|usr/bin/networkd-dispatcher)",
+        r"/(?:tmp/|etc/|run/|usr/local/|usr/lib/|usr/bin/networkd-dispatcher)",
         lambda m: str(root) + m.group(),
         command,
     )
     binary = tmp_path / "commands"
     binary.mkdir()
-    for name in ["netplan", "systemctl", "ip"]:
+    for name in ["netplan", "systemctl", "ip", "ssh-keygen"]:
         script = binary / name
         script.write_text(
             f'#!/bin/sh\nprintf "%s\\n" "{name} $*" >> "$RECORD"\n'
@@ -247,3 +252,99 @@ def test_role_propagates_native_preparation_failure(tmp_path, fail):
     _, command, env, _ = _prepare_image(tmp_path, fail=fail)
     proc = subprocess.run(["/bin/sh", "-c", command], env=env, capture_output=True, text=True)
     assert proc.returncode == 29
+
+
+def test_role_installs_per_guest_hostkeys_without_running_keygen_in_image(tmp_path):
+    root, command, env, record = _prepare_image(tmp_path)
+    import shutil
+
+    for source in ASSETS.glob("kdive-*"):
+        if source.is_file():
+            shutil.copyfile(source, root / "tmp" / source.name)
+    proc = subprocess.run(["/bin/sh", "-c", command], env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    dropin = root / "etc/systemd/system/ssh.service.d/50-kdive-host-keys.conf"
+    assert dropin.stat().st_mode & 0o777 == 0o644
+    assert dropin.read_text().splitlines() == [
+        "[Service]",
+        "ExecStartPre=",
+        "ExecStartPre=/usr/bin/ssh-keygen -A",
+        "ExecStartPre=/usr/sbin/sshd -t",
+    ]
+    assert not any(line.startswith("ssh-keygen ") for line in record.read_text().splitlines())
+
+
+@pytest.mark.parametrize("foreign", ["extra", "continued", "spaced", "dropin", "owned-changed"])
+def test_role_refuses_unknown_ssh_prechecks_before_override(tmp_path, foreign):
+    root, command, env, _ = _prepare_image(tmp_path)
+    unit = root / "usr/lib/systemd/system/ssh.service"
+    if foreign == "extra":
+        unit.write_text(unit.read_text() + "ExecStartPre=/usr/bin/operator-check\n")
+    elif foreign == "continued":
+        unit.write_text("[Service]\nExecStartPre=/usr/sbin/sshd -t \\\n -f /operator.conf\n")
+    elif foreign == "spaced":
+        unit.write_text(unit.read_text() + "  ExecStartPre = /usr/bin/operator-check\n")
+    else:
+        target = root / "etc/systemd/system/ssh.service.d"
+        target.mkdir(parents=True)
+        name = "50-kdive-host-keys.conf" if foreign == "owned-changed" else "operator.conf"
+        (target / name).write_text("[Service]\nExecStartPre=/usr/bin/operator-check\n")
+    proc = subprocess.run(["/bin/sh", "-c", command], env=env, capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert "SSH" in proc.stderr
+    target = root / "etc/systemd/system/ssh.service.d/50-kdive-host-keys.conf"
+    assert not target.exists() or "operator-check" in target.read_text()
+
+
+def test_native_hostkeys_are_unique_per_clone_and_preserved_on_repeat(tmp_path):
+    import hashlib
+
+    fingerprints = []
+    for name in ("clone-a", "clone-b"):
+        root = tmp_path / name
+        keys = root / "etc/ssh"
+        keys.mkdir(parents=True)
+        first = {}
+        for _ in range(2):
+            subprocess.run(["ssh-keygen", "-A", "-f", str(root)], check=True, capture_output=True)
+            current = {
+                p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in keys.glob("ssh_host_*")
+            }
+            assert current
+            if _:
+                assert current == first
+            first = current
+        fingerprints.append(first)
+    assert fingerprints[0].keys() == fingerprints[1].keys()
+    assert all(fingerprints[0][key] != fingerprints[1][key] for key in fingerprints[0])
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_key_generation_precedes_validation_and_failure_stops_start(tmp_path, fail):
+    commands = [
+        line.removeprefix("ExecStartPre=")
+        for line in (ASSETS / "kdive-ubuntu-ssh-host-keys.conf").read_text().splitlines()
+        if line.startswith("ExecStartPre=") and line != "ExecStartPre="
+    ]
+    record = tmp_path / "calls"
+    for name in ("ssh-keygen", "sshd"):
+        script = tmp_path / name
+        script.write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "{name} $*" >> "$RECORD"\n'
+            f"exit {31 if fail and name == 'ssh-keygen' else 0}\n"
+        )
+        script.chmod(0o755)
+    result = None
+    for command in commands:
+        binary, *args = command.split()
+        result = subprocess.run(
+            [str(tmp_path / Path(binary).name), *args],
+            env={**os.environ, "RECORD": str(record)},
+            check=False,
+        )
+        if result.returncode:
+            break  # systemd does not execute later prechecks after a failed ExecStartPre.
+    assert result is not None and result.returncode == (31 if fail else 0)
+    assert record.read_text().splitlines() == (
+        ["ssh-keygen -A"] if fail else ["ssh-keygen -A", "sshd -t"]
+    )

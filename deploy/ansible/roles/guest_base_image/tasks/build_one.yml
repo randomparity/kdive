@@ -245,6 +245,8 @@
       - "{{ guest_base_image_helper_dir }}/kdive-ubuntu-network.yaml:/tmp/kdive-ubuntu-network.yaml"
       - --upload
       - "{{ guest_base_image_helper_dir }}/kdive-networkd-startup.conf:/tmp/kdive-networkd-startup.conf"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-ubuntu-ssh-host-keys.conf:/tmp/kdive-ubuntu-ssh-host-keys.conf"
       - --run-command
       - |
         set -eu
@@ -260,6 +262,30 @@
             fi
           fi
         done
+        command -v ssh-keygen
+        if [ -e /etc/systemd/system/ssh.service ] || [ -L /etc/systemd/system/ssh.service ] ||
+            ! awk '
+              /^[[:space:]]*ExecStartPre[[:space:]]*=/ {
+                count++
+                if ($0 != "ExecStartPre=/usr/sbin/sshd -t") bad = 1
+              }
+              END { exit bad || count != 1 }
+            ' /usr/lib/systemd/system/ssh.service; then
+          echo 'kdive: unfamiliar Ubuntu SSH prechecks; rebuild from a clean supported image' >&2
+          exit 1
+        fi
+        for dropin in /etc/systemd/system/ssh.service.d/*.conf \
+            /run/systemd/system/ssh.service.d/*.conf /usr/lib/systemd/system/ssh.service.d/*.conf; do
+          if [ -e "$dropin" ] || [ -L "$dropin" ]; then
+            if [ "$dropin" != /etc/systemd/system/ssh.service.d/50-kdive-host-keys.conf ] || [ -L "$dropin" ] ||
+                ! cmp -s "$dropin" /tmp/kdive-ubuntu-ssh-host-keys.conf; then
+              echo 'kdive: foreign Ubuntu SSH drop-in; rebuild from a clean supported image' >&2
+              exit 1
+            fi
+          fi
+        done
+        install -d -o root -g root -m 0755 /etc/systemd/system/ssh.service.d
+        install -o root -g root -m 0644 /tmp/kdive-ubuntu-ssh-host-keys.conf /etc/systemd/system/ssh.service.d/50-kdive-host-keys.conf
         install -d -o root -g root -m 0755 /etc/netplan /usr/local/libexec
         install -o root -g root -m 0600 /tmp/kdive-ubuntu-network.yaml /etc/netplan/60-kdive.yaml
         install -o root -g root -m 0755 /tmp/kdive-ssh-return-route /usr/local/libexec/kdive-ssh-return-route
@@ -274,7 +300,8 @@
         install -o root -g root -m 0644 /tmp/kdive-networkd-startup.conf /etc/systemd/system/networkd-dispatcher.service.d/50-kdive-startup.conf
         netplan generate
         systemctl enable systemd-networkd.service networkd-dispatcher.service
-        rm -f /tmp/kdive-ssh-return-route /tmp/kdive-networkd-ssh-return-route /tmp/kdive-ubuntu-network.yaml /tmp/kdive-networkd-startup.conf
+        rm -f /tmp/kdive-ssh-return-route /tmp/kdive-networkd-ssh-return-route /tmp/kdive-ubuntu-network.yaml \
+          /tmp/kdive-networkd-startup.conf /tmp/kdive-ubuntu-ssh-host-keys.conf
   when:
     - image.distro == 'ubuntu'
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool

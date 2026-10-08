@@ -45,8 +45,11 @@ netplan/networkd lease events with the same source-route helper
 images to install that policy. It removes only the main-table DHCP default through the
 identified restricted slirp interface and gateway, preserving ordinary primary-interface
 egress, static routes and DNS. Native startup replay restores policy after dispatcher restart;
-foreign netplan YAML is a build error requiring a clean supported image. Bare has no sshd
-or network policy and explicitly has no remote SSH parity; its bootability remains unvalidated.
+foreign netplan YAML is a build error requiring a clean supported image.
+Ubuntu SSH generates missing host keys at service startup, separately for each clone,
+and preserves them on reboot. Unknown SSH prechecks or foreign service drop-ins
+also require a clean supported image; shared-image host keys are not generated.
+Bare has no sshd or network policy and explicitly has no remote SSH parity; its bootability remains unvalidated.
 
 The baked `kdive-install-kernel` keeps `crashkernel=` in the `kdive` slot only when the requested
 cmdline carries one (the [ADR-0082](../../adr/0082-remote-install-in-guest-kernel.md) amendment
