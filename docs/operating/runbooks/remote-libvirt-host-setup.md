@@ -39,8 +39,14 @@ For remote SSH parity (`ssh_addr`/`ssh_range`), the image must carry the SSH-for
 from [ADR-0721](../../adr/0721-remote-ssh-forward-return-path-is-a-guest-source-route.md). The
 image playbook installs it into images that ship NetworkManager (the Fedora and Rocky entries).
 An image staged before that change does not have it: rebuild it with `force_image_rebuild=true`,
-or its SSH forward accepts connections and never answers. The Ubuntu 24.04 and bare images do
-not carry it yet (#3091).
+or its SSH forward accepts connections and never answers. Ubuntu 24.04 uses native
+netplan/networkd lease events with the same source-route helper
+([ADR-0763](../../adr/0763-ubuntu-remote-guest-network-policy.md)). Rebuild older Ubuntu
+images to install that policy. It removes only the main-table DHCP default through the
+identified restricted slirp interface and gateway, preserving ordinary primary-interface
+egress, static routes and DNS. Native startup replay restores policy after dispatcher restart;
+foreign netplan YAML is a build error requiring a clean supported image. Bare has no sshd
+or network policy and explicitly has no remote SSH parity; its bootability remains unvalidated.
 
 The baked `kdive-install-kernel` keeps `crashkernel=` in the `kdive` slot only when the requested
 cmdline carries one (the [ADR-0082](../../adr/0082-remote-install-in-guest-kernel.md) amendment
