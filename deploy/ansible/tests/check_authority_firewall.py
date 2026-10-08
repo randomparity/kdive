@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import yaml
+
 HERE = Path(__file__).resolve().parent
 
 
@@ -16,7 +18,7 @@ def play(name, variables, env, *, passes=True):
     result = subprocess.run(
         [
             "ansible-playbook",
-            str(HERE / f"{name}.yml"),
+            str(Path(name) if Path(name).is_absolute() else HERE / f"{name}.yml"),
             "-i",
             "localhost,",
             "--tags",
@@ -148,25 +150,128 @@ def check_marker_refusals(root, variables, env):
         json.dumps(original_value | {"pending": bad_tuple | {"port": 18443, "source": "::/0"}}),
     ):
         marker.write_text(malformed)
+        before_backend = (root / "backend-calls.jsonl").read_text()
         before = (root / "calls.jsonl").read_text()
         play("authority_firewall", variables, env, passes=False)
         assert (root / "calls.jsonl").read_text() == before
+        assert (root / "backend-calls.jsonl").read_text() == before_backend
     marker.write_text(original)
     for path, unsafe, safe in ((marker, 0o644, 0o600), (marker.parent, 0o755, 0o700)):
         path.chmod(unsafe)
+        before_backend = (root / "backend-calls.jsonl").read_text()
         before = (root / "calls.jsonl").read_text()
         play("authority_firewall", variables, env, passes=False)
         assert (root / "calls.jsonl").read_text() == before
+        assert (root / "backend-calls.jsonl").read_text() == before_backend
         path.chmod(safe)
     for path in (marker, marker.parent):
         retained = path.with_name(path.name + "-retained")
         path.rename(retained)
         path.symlink_to(retained, target_is_directory=retained.is_dir())
+        before_backend = (root / "backend-calls.jsonl").read_text()
         before = (root / "calls.jsonl").read_text()
         play("authority_firewall", variables, env, passes=False)
         assert (root / "calls.jsonl").read_text() == before
+        assert (root / "backend-calls.jsonl").read_text() == before_backend
         path.unlink()
         retained.rename(path)
+
+
+def replace_backend_tasks(tasks):
+    for task in tasks:
+        for operation in ("package", "systemd_service", "service_facts", "stat"):
+            key = "ansible.builtin." + operation
+            if key in task:
+                task["kdive.test.backend"] = {"operation": operation, **(task.pop(key) or {})}
+        for key in ("block", "rescue", "always"):
+            if key in task:
+                replace_backend_tasks(task[key])
+
+
+def reset_backend(root, *, running=False):
+    (root / "backend.json").write_text(
+        json.dumps(
+            {
+                "packages": ["firewalld", "python3-firewall"] if running else [],
+                "running": running,
+                "enabled": running,
+                "management": [],
+            }
+        )
+    )
+    (root / "backend-calls.jsonl").write_text("")
+
+
+def check_backend_contract(root, family, variables, env):
+    selected = variables | {"ansible_port": 2222, "gdbstub_acl_authority_port": 18443}
+    # This first real-role call must install the missing backend before its first rule.
+    play("authority_firewall", selected, env)
+    state = json.loads((root / "backend.json").read_text())
+    assert set(state["packages"]) == (
+        {"firewalld", "python3-firewall"} if family == "RedHat" else {"ufw"}
+    )
+    if family == "RedHat":
+        assert state["running"] and state["enabled"] and state["management"] == ["2222/tcp"]
+        assert "changed=0 " in play("authority_firewall", selected, env)
+        reset_backend(root, running=True)
+        play("authority_firewall", selected, env)
+        assert json.loads((root / "backend.json").read_text())["management"] == []
+    play("authority_firewall", variables, env)
+    failures = ("package", "management", "systemd_service") if family == "RedHat" else ("package",)
+    for failure in failures:
+        reset_backend(root)
+        before = (root / "rules.json").read_text()
+        play("authority_firewall", selected, env | {"FAIL_BACKEND": failure}, passes=False)
+        assert (root / "rules.json").read_text() == before
+        assert not json.loads((root / "backend.json").read_text())["running"]
+    if family == "RedHat":
+        for port in (0, 65536, 16514, 47000, 47099):
+            reset_backend(root)
+            play("authority_firewall", selected | {"ansible_port": port}, env, passes=False)
+            state = json.loads((root / "backend.json").read_text())
+            assert not state["running"] and state["management"] == []
+    check_rescue(root, variables, env)
+    reset_backend(root)
+    print(f"backend {family}: first install, management, running policy, failures passed")
+
+
+def check_rescue(root, variables, env):
+    source = yaml.safe_load(
+        (HERE.parent / "roles/provider_authority_host/tasks/main.yml").read_text()
+    )
+    convergence = next(task for task in source if "block" in task)
+    replace_backend_tasks([convergence])
+    for task in convergence["block"]:
+        if "ansible.builtin.include_role" in task:
+            # Restrict the external role boundary to its real prerequisite/authority tasks.
+            task["ansible.builtin.include_role"]["tasks_from"] = "authority.yml"
+        if "ansible.builtin.include_tasks" in task:
+            task.pop("ansible.builtin.include_tasks")
+            task["ansible.builtin.fail"] = {"msg": "controlled post-firewall failure"}
+    convergence["tags"] = ["authority_firewall"]
+    path = root / "rescue.yml"
+    path.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "hosts": "localhost",
+                    "connection": "local",
+                    "gather_facts": False,
+                    "tasks": [convergence],
+                }
+            ],
+            sort_keys=False,
+        )
+    )
+    selected = variables | {"provider_authority_host_enabled": False}
+    for failure, phase in (
+        ("package", "Protected-port firewall convergence"),
+        ("", "Disabled provider authority cleanup"),
+    ):
+        reset_backend(root)
+        output = play(str(path), selected, env | {"FAIL_BACKEND": failure}, passes=False)
+        assert phase + " failed;" in output, output
+        assert json.loads((root / "backend.json").read_text())["authority_stopped"]
 
 
 def main():
@@ -176,7 +281,13 @@ def main():
         root = Path(scratch)
         env = os.environ.copy()
         env["ANSIBLE_CONFIG"] = str(HERE.parent / "ansible.cfg")
-        env["ANSIBLE_ROLES_PATH"] = str(HERE.parent / "roles")
+        roles = root / "roles"
+        shutil.copytree(HERE.parent / "roles/gdbstub_acl", roles / "gdbstub_acl")
+        for path in (roles / "gdbstub_acl/tasks").glob("*.yml"):
+            tasks = yaml.safe_load(path.read_text())
+            replace_backend_tasks(tasks)
+            path.write_text(yaml.safe_dump(tasks, sort_keys=False))
+        env["ANSIBLE_ROLES_PATH"] = str(roles) + ":" + str(HERE.parent / "roles")
         env["ANSIBLE_INJECT_FACT_VARS"] = "False"
         env["FAKE_AUTHORITY_FIREWALL_ROOT"] = str(root)
         env["ANSIBLE_COLLECTIONS_PATH"] = (
@@ -191,7 +302,11 @@ def main():
             )
             dest.mkdir(parents=True)
             shutil.copyfile(HERE / "firewall_action.py", dest / f"{module}.py")
+        dest = root / "collections/ansible_collections/kdive/test/plugins/action"
+        dest.mkdir(parents=True)
+        shutil.copyfile(HERE / "backend_action.py", dest / "backend.py")
         for family in ("Debian", "RedHat"):
+            reset_backend(root)
             if family == "RedHat":
                 protected = [
                     {
@@ -219,11 +334,13 @@ def main():
             (root / "rules.json").write_text(json.dumps(protected))
             variables = {
                 "ansible_facts": {"os_family": family},
+                "ansible_python_interpreter": sys.executable,
                 "worker_cidr": "192.0.2.0/24",
                 "gdbstub_range": "47000:47099",
                 "gdbstub_acl_authority_port": None,
                 "gdbstub_acl_authority_state_path": str(root / "managed/authority.json"),
             }
+            check_backend_contract(root, family, variables, env)
             play("authority_firewall", variables, env)
             assert not (root / "managed/authority.json").exists()
             check_interrupted_transition(root, family, variables, env)

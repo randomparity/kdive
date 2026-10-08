@@ -7,11 +7,21 @@
 
 - name: Converge the production authority
   block:
+    - name: Identify firewall convergence for bounded failure reporting
+      ansible.builtin.set_fact:
+        provider_authority_host_failure_phase: Protected-port firewall convergence
+
     - name: Apply the shared protected-port firewall owner
       ansible.builtin.include_role:
         name: gdbstub_acl
       vars:
         gdbstub_acl_authority_port: "{{ provider_authority_host_network_port if provider_authority_host_enabled else none }}"
+
+    - name: Identify authority convergence for bounded failure reporting
+      ansible.builtin.set_fact:
+        provider_authority_host_failure_phase: >-
+          {{ 'Provider authority convergence or readiness' if provider_authority_host_enabled
+             else 'Disabled provider authority cleanup' }}
 
     - name: Install the enabled production authority
       ansible.builtin.include_tasks: install.yml
@@ -35,4 +45,6 @@
 
     - name: Fail the authority deployment with bounded diagnostics
       ansible.builtin.fail:
-        msg: Provider authority convergence or readiness failed; the service remains stopped.
+        msg: >-
+          {{ provider_authority_host_failure_phase | default('Provider host convergence') }} failed;
+          any installed authority service remains stopped.
