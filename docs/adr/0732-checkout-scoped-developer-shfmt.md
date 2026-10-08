@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted (2026-10-07).
+Accepted (2026-10-07)
+
 Partially supersedes ADR-0694 only for shfmt installation and developer-check selection.
 
 ## Context

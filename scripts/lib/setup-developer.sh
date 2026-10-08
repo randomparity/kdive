@@ -64,14 +64,14 @@ dev_install_archive() (
 
 dev_install_shfmt() (
   set -euo pipefail
-  local private_bin binary
+  local private_bin binary version
   mkdir -p "$1"
   private_bin="$(cd -- "$1" && pwd -P)"
   binary="${private_bin}/shfmt"
-  if [[ ! -x "${binary}" ]] || [[ "$("${binary}" --version)" != v3.13.1 ]]; then
+  if [[ ! -x "${binary}" ]] || ! version="$("${binary}" --version)" || [[ "${version}" != v3.13.1 ]]; then
     GOBIN="${private_bin}" GOTOOLCHAIN=auto go install mvdan.cc/sh/v3/cmd/shfmt@v3.13.1
   fi
-  if [[ "$("${binary}" --version)" != v3.13.1 ]]; then
+  if ! version="$("${binary}" --version)" || [[ "${version}" != v3.13.1 ]]; then
     printf 'Installed checkout-local shfmt is not v3.13.1; inspect the Go build and rerun just setup.\n' >&2
     exit 1
   fi

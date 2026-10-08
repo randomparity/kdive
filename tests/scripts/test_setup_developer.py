@@ -249,6 +249,8 @@ def test_helm_rebuilds_matching_version_without_release_flags(tmp_path: Path) ->
         ("nonexecutable", "v3.13.1", 1),
         ("dangling", "v3.13.1", 1),
         ("broken", "v3.13.1", 1),
+        ("bad-status", "v3.13.1", 1),
+        (None, "bad-status", 1),
     ],
 )
 def test_shfmt_selection_and_forwarding(
@@ -282,6 +284,8 @@ def test_shfmt_selection_and_forwarding(
                 path.chmod(0o644)
             elif version == "broken":
                 _stub(path, "exit 9\n")
+            elif version == "bad-status":
+                _stub(path, "echo v3.13.1\nexit 9\n")
     result = subprocess.run(
         [str(scripts / "shfmt.sh"), "argument with spaces", "-d"],
         env={**os.environ, "PATH": str(bindir)},
@@ -297,7 +301,15 @@ def test_shfmt_selection_and_forwarding(
 
 
 @pytest.mark.parametrize(
-    "initial,failure", [(None, ""), ("v3.14.1", ""), (None, "go"), (None, "version")]
+    "initial,failure",
+    [
+        (None, ""),
+        ("v3.14.1", ""),
+        ("bad-status", ""),
+        (None, "go"),
+        (None, "version"),
+        (None, "status"),
+    ],
 )
 def test_private_shfmt_install_preserves_host_and_reuses_exact_pin(
     tmp_path: Path, initial: str | None, failure: str
@@ -310,7 +322,10 @@ def test_private_shfmt_install_preserves_host_and_reuses_exact_pin(
     _stub(system / "shfmt", "echo v3.14.1\n")
     original = (system / "shfmt").read_bytes()
     if initial:
-        _stub(private / "shfmt", f"echo {initial}\n")
+        _stub(
+            private / "shfmt",
+            "echo v3.13.1\nexit 9\n" if initial == "bad-status" else f"echo {initial}\n",
+        )
     log = tmp_path / "go.log"
     _stub(
         system / "go",
@@ -321,6 +336,7 @@ echo install >> "$TEST_LOG"
 version=v3.13.1
 [[ "$TEST_FAILURE" != version ]] || version=v3.14.1
 printf '#!/bin/bash\necho %s\n' "$version" > "$GOBIN/shfmt"
+[[ "$TEST_FAILURE" != status ]] || printf 'exit 9\n' >> "$GOBIN/shfmt"
 chmod +x "$GOBIN/shfmt"
 """,
     )
