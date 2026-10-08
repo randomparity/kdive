@@ -111,9 +111,16 @@ The recipe installs the complete developer toolchain before syncing the locked e
 building the capture-bootstrap manifest, installing Ansible collections, and installing and
 running the commit hooks. Native libraries and tools come from distribution packages (root
 or sudo required); pinned user tools go into `uv tool dir --bin`. These include `prek`,
-ShellCheck, shfmt, actionlint, Helm, gitleaks, and promtool. Docker and Compose are required
+ShellCheck, actionlint, Helm, gitleaks, and promtool. Docker and Compose are required
 for developer setup, as are the compiler and native headers exercised by the tests.
 Go tools build natively, and POWER builds ShellCheck with Cabal when no release binary exists.
+
+KDIVE installs its pinned shfmt 3.13.1 into `build/dev-tools/bin` within each checkout.
+`just lint-shell` and developer preflight prefer that formatter; when it is absent, they accept
+only ambient shfmt 3.13.1. An invalid private formatter fails with a setup remedy. The isolated
+commit hook retains its separate pin. Setup does not change host PATH or remove an existing
+shared-user formatter; reconcile pre-existing host-tool drift through its owner before testing
+retained-toolchain preservation. See [ADR-0732](../adr/0732-checkout-scoped-developer-shfmt.md).
 
 An installation failure or inaccessible Docker daemon fails setup before dependency sync.
 Setup preserves an existing Docker installation and does not change group membership or
