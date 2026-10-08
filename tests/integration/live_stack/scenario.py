@@ -234,16 +234,31 @@ def probe_new_boot(
 
     A drained reboot job (``control.power`` ``cycle``, ``runs.boot``) can precede the old boot
     going away, so the old boot can still answer SSH for a while afterwards.
+    ``command`` must be a read-only, repeatable probe: transport failures and per-attempt
+    timeouts retry within the existing reboot readiness budget.
     """
     deadline = time.monotonic() + _REBOOT_DEADLINE_S
+    last = "no probe completed"
     while True:
-        probe = ssh_probe(endpoint, key, command)
-        if probe.get("boot_id") != boot_id:
-            return probe
-        assert time.monotonic() < deadline, (
-            f"boot_id unchanged {_REBOOT_DEADLINE_S:.0f} s after the reboot drained"
-        )
-        time.sleep(5.0)
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"reboot SSH readiness exceeded {_REBOOT_DEADLINE_S:.0f} s: {last}"
+        try:
+            result = ssh(endpoint, key, command, deadline_s=0, timeout_s=min(120.0, remaining))
+        except subprocess.TimeoutExpired:
+            last = "SSH probe timed out"
+        else:
+            if result.returncode == 255:
+                last = "SSH transport unavailable"
+            else:
+                assert result.returncode == 0, (
+                    f"ssh probe exit {result.returncode}: {result.stderr[-500:]}"
+                )
+                probe = parse_probe(result.stdout)
+                assert probe.get("boot_id"), "SSH probe returned no boot_id"
+                if probe["boot_id"] != boot_id:
+                    return probe
+                last = "boot_id unchanged"
+        time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
 
 
 async def ssh_endpoint(op: LiveStackClient, system_id: str) -> Endpoint:
