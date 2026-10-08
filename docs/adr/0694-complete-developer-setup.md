@@ -4,6 +4,9 @@
 
 Accepted (2026-09-27)
 
+Partially superseded by [ADR-0732](0732-checkout-scoped-developer-shfmt.md) for shfmt
+installation and developer-check selection only.
+
 Supersedes ADR-0393 and ADR-0673 only for the `just setup` installation path.
 Their report-only and host-tool requirements remain applicable elsewhere.
 
