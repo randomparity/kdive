@@ -206,11 +206,17 @@ rejected, never published), and publishes row-first.
 owns local build inputs, pinned base sources, and curated guest-tool versions. Family customizers
 own package installation; avoid copying their package/version tables into another guide.
 
-Optional `customization_kernel` is a nonempty catalog string naming the exact bare version or
-`vmlinuz-<version>` filename for the transient customization boot (ADR-0731). Missing or stale
-explicit matches fail; omission preserves the existing single-kernel requirement. If a template
-changes, inspect its kernels and explicitly refresh the value with new build evidence. This field
-neither prunes kernels nor supplies a final provisioning hint; rerun the required image-smoke cell.
+Optional `retained_kernel` names the exact bare version or `vmlinuz-<version>` filename
+for Fedora x86_64 builds (ADR-0761). It selects the customization boot and retains that release
+in the finished image. After ordinary customization, RPM checks then removes only other-release
+`kernel`, `kernel-core`, `kernel-modules-core`, `kernel-modules`, and `kernel-modules-extra`
+packages using normal dependency checks and scriptlets. Selected-release and unrelated packages
+remain. Publication requires exactly one non-rescue kernel matching the selection with its initramfs.
+Omission preserves existing behavior. The retired `customization_kernel` key is rejected;
+replace it only after accepting the package-removal effects. Missing/stale selections, unsupported
+families or architectures, RPM dependency failures and invalid final inventories fail the build.
+Inspect the template/package inventory and explicitly refresh the value or template, then rebuild
+and rerun the unchanged unhinted image-smoke cell. This supplies no provisioning hint.
 
 Runtime capture capability depends on the target kernel and available evidence. Use
 `images.describe` and the [images guide](../../guide/toolsets/images.md) to distinguish supported,

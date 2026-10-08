@@ -1,5 +1,7 @@
 # Customization-kernel selection for the Fedora regression image
 
+Superseded by [the retained-kernel design](2026-10-08-fedora-retained-kernel-design.md).
+
 ## Authority and problem
 
 **Approved (2026-10-07).** The operator approved the interface and value; scope6049320869
@@ -29,7 +31,7 @@ Read-only inspection of the retained upstream template found this exact version 
 saved entry and its referenced BLS linux/initrd lines; both matching files exist in `/boot`.
 That evidence justifies the proposed constant; production code will not parse bootloader defaults.
 A changed upstream template missing that kernel fails closed and requires an explicit catalog
-refresh with fresh build evidence. See [ADR0731](../../adr/0731-customization-kernel-selection.md).
+refresh with fresh build evidence. See [ADR0760](../../adr/0760-customization-kernel-selection.md).
 
 The shared builder remains the sole customization owner; there is no caller migration or alternate
 selection pipeline. Keep the finished image's existing kernel-count/config discovery semantics.

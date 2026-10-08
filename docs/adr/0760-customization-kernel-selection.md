@@ -1,8 +1,8 @@
-# 0731 — Explicit catalog kernel selection for customization boot
+# 0760 — Explicit catalog kernel selection for customization boot
 
 ## Status
 
-Accepted (2026-10-07).
+Accepted (2026-10-07). Superseded by [ADR-0761](0761-explicit-retained-kernel.md).
 
 ## Context
 

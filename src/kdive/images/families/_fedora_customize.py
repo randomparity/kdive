@@ -11,6 +11,7 @@ firstboot renderer of the customization boot consume (ADR-0345).
 from __future__ import annotations
 
 from pathlib import Path
+from shlex import quote
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families.base import CustomizeContext
@@ -341,3 +342,37 @@ def debug_image_steps(packages: tuple[str, ...]) -> list[Step]:
     if "drgn" not in packages:
         return []
     return drgn_helper_steps()
+
+
+def retained_kernel_step(hint: str) -> RunCommand:
+    """Retain the explicit running Fedora kernel using bounded RPM transactions (ADR-0761)."""
+    return RunCommand(f"""\
+keep={quote(hint.removeprefix("vmlinuz-"))}
+running=$(uname -r)
+if [ "$running" != "$keep" ]; then
+    printf '%s\n' 'kernel retention: running kernel differs from retained_kernel' >&2
+    exit 1
+fi
+core=$(rpm -q --qf '%{{VERSION}}-%{{RELEASE}}.%{{ARCH}}' "kernel-core-$keep")
+if [ "$core" != "$keep" ]; then
+    printf '%s\n' 'kernel retention: selected kernel-core package is missing or ambiguous' >&2
+    exit 1
+fi
+inventory=$(rpm -qa --qf '%{{NAME}}\t%{{VERSION}}-%{{RELEASE}}.%{{ARCH}}\t%{{NEVRA}}\n')
+set --
+while IFS="$(printf '\t')" read -r name release nevra; do
+    case "$name" in
+        kernel|kernel-core|kernel-modules-core|kernel-modules|kernel-modules-extra)
+            if [ "$release" != "$keep" ]; then
+                set -- "$@" "$nevra"
+            fi
+            ;;
+    esac
+done <<RPM_INVENTORY
+$inventory
+RPM_INVENTORY
+if [ "$#" -gt 0 ]; then
+    rpm --erase --test "$@"
+    rpm --erase "$@"
+fi
+""")

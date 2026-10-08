@@ -213,3 +213,72 @@ def test_cloud_init_helper_installs_cloud_init_only_on_non_cloud_base(tmp_path: 
     scratch = installed(_ci_steps(tmp_path, is_cloud_image=False))
     assert "cloud-init" not in cloud  # ships cloud-init already
     assert "cloud-init" in scratch  # virt-builder base needs it installed
+
+
+@pytest.mark.parametrize("hint", ["selected", "vmlinuz-selected", "selected; touch injected"])
+@pytest.mark.parametrize(
+    "failure", ["", "running", "core", "wrong-core", "inventory", "test", "erase", "no-old"]
+)
+def test_retained_kernel_transaction(
+    tmp_path: Path, hint: str, failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep = hint.removeprefix("vmlinuz-")
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.setenv("KEEP", keep)
+    monkeypatch.setenv("FAILURE", failure)
+    monkeypatch.setenv("RPM_LOG", str(tmp_path / "rpm.log"))
+    uname = tmp_path / "uname"
+    uname.write_text(
+        '#!/bin/sh\nif [ "$FAILURE" = running ]; then echo other; else echo "$KEEP"; fi\n'
+    )
+    uname.chmod(0o755)
+    rpm = tmp_path / "rpm"
+    rpm.write_text("""#!/bin/sh
+case "$1" in
+-q)
+    [ "$FAILURE" != core ] || exit 13
+    if [ "$FAILURE" = wrong-core ]; then echo other; else printf '%s' "$KEEP"; fi ;;
+-qa)
+    [ "$FAILURE" != inventory ] || exit 14
+    printf 'kernel-core\\t%s\\tselected-core\\n' "$KEEP"
+    printf 'unrelated\\told\\tunrelated-package\\n'
+    if [ "$FAILURE" != no-old ]; then
+        for name in kernel kernel-core kernel-modules-core kernel-modules kernel-modules-extra; do
+            printf '%s\\told\\t%s-old\\n' "$name" "$name"
+        done
+    fi ;;
+--erase)
+    printf '%s\\n' "$@" >> "$RPM_LOG"
+    if [ "$2" = --test ]; then
+        [ "$FAILURE" != test ] || exit 15
+    else
+        [ "$FAILURE" != erase ] || exit 16
+    fi ;;
+*) exit 99 ;;
+esac
+""")
+    rpm.chmod(0o755)
+    result = subprocess.run(
+        ["/bin/sh", "-ec", _fedora_customize.retained_kernel_step(hint).sh],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) == (failure in ("", "no-old")), result.stderr
+    assert not (tmp_path / "injected").exists()
+    log = tmp_path / "rpm.log"
+    if failure in ("running", "core", "wrong-core", "inventory", "no-old"):
+        assert not log.exists()
+    else:
+        transaction = [
+            "kernel-old",
+            "kernel-core-old",
+            "kernel-modules-core-old",
+            "kernel-modules-old",
+            "kernel-modules-extra-old",
+        ]
+        expected = ["--erase", "--test", *transaction]
+        if failure != "test":
+            expected += ["--erase", *transaction]
+        assert log.read_text().splitlines() == expected
