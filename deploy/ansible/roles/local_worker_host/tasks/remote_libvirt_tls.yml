@@ -67,6 +67,32 @@
       group: "{{ live_vm_host_worker_libvirt_group }}"
       mode: "0750"
 
+- name: Inspect fixed remote-libvirt credential leaves without following links
+  ansible.builtin.stat:
+    path: "/var/lib/kdive/secrets/remote-libvirt/{{ item }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+  loop:
+    - clientcert.pem
+    - clientkey.pem
+    - cacert.pem
+  register: local_worker_host_remote_tls_leaves
+
+- name: Refuse directories at fixed remote-libvirt credential paths
+  ansible.builtin.assert:
+    that: not item.stat.exists or not item.stat.isdir
+    fail_msg: Remove the directory at the fixed credential path before installing TLS refs.
+  loop: "{{ local_worker_host_remote_tls_leaves.results }}"
+
+- name: Remove credential leaf links before installing fixed TLS files
+  ansible.builtin.file:
+    path: "/var/lib/kdive/secrets/remote-libvirt/{{ item.item }}"
+    state: absent
+    follow: false
+  loop: "{{ local_worker_host_remote_tls_leaves.results }}"
+  when: item.stat.islnk | default(false)
+
 - name: Install protected remote-libvirt client TLS files
   ansible.builtin.copy:
     src: "{{ item.source }}"

@@ -147,6 +147,8 @@ def remote_tls_installation() -> None:
         "parent-file",
         "child-file",
         "leaf-link",
+        "leaf-directory",
+        "leaf-directory-link",
     )
     with tempfile.TemporaryDirectory(prefix="kdive-remote-tls-") as directory:
         for case in cases:
@@ -167,10 +169,15 @@ def remote_tls_installation() -> None:
             if case == "off-existing":
                 child.mkdir(parents=True)
                 (child / "clientkey.pem").write_text("retained credential")
+            if case == "leaf-directory":
+                (child / "clientkey.pem").mkdir(parents=True)
+            if case == "leaf-directory-link":
+                child.mkdir(parents=True)
+                (child / "clientkey.pem").symlink_to(sentinel)
             if case == "leaf-link":
                 child.mkdir(parents=True)
                 (child / "clientkey.pem").symlink_to(marker)
-            if case.endswith("-link") and case not in {"source-link", "leaf-link"}:
+            if case in {"parent-link", "child-link"}:
                 (parent if case == "parent-link" else child).symlink_to(sentinel)
             if case.endswith("-file"):
                 (parent if case == "parent-file" else child).write_text("untouched")
@@ -195,7 +202,7 @@ def remote_tls_installation() -> None:
                 for module in ("ansible.builtin.file", "ansible.builtin.copy"):
                     if module in task:
                         task[module]["owner"] = user
-                if "ansible.builtin.file" in task:
+                if task.get("ansible.builtin.file", {}).get("state") == "directory":
                     task["loop"][0]["group"] = group
             task_file = base / "tls.yml"
             task_file.write_text(yaml.safe_dump(copied))
@@ -221,17 +228,32 @@ def remote_tls_installation() -> None:
             result = playbook(play, "--diff")
             require(
                 (result.returncode == 0)
-                == (case in {"good", "off", "off-existing", "source-readonly", "leaf-link"}),
+                == (
+                    case
+                    in {
+                        "good",
+                        "off",
+                        "off-existing",
+                        "source-readonly",
+                        "leaf-link",
+                        "leaf-directory-link",
+                    }
+                ),
                 f"remote TLS {case}: {result.stdout} {result.stderr}",
             )
             require("PRIVATE_FIXTURE_" not in result.stdout + result.stderr, "TLS output leak")
             require(marker.read_text() == "unchanged", "substitution changed outside sentinel")
+            require(list(sentinel.iterdir()) == [marker], "copied into outside directory")
+            if case == "leaf-directory":
+                require(not list((child / "clientkey.pem").iterdir()), "copied into leaf directory")
+                require(not (child / "clientcert.pem").exists(), "copied before leaf validation")
+                require(not (child / "cacert.pem").exists(), "copied before leaf validation")
             if case == "off-existing":
                 require(
                     (child / "clientkey.pem").read_text() == "retained credential",
                     "disabled TLS changed existing credential",
                 )
-            if case in {"good", "source-readonly", "leaf-link"}:
+            if case in {"good", "source-readonly", "leaf-link", "leaf-directory-link"}:
                 require(parent.stat().st_mode & 0o777 == 0o711, "secrets parent mode")
                 require(child.stat().st_mode & 0o777 == 0o750, "remote TLS directory mode")
                 for name, src in zip(
@@ -269,10 +291,10 @@ require(
     "runner system Python probe must immediately precede the Ubuntu guard",
 )
 actual_tasks.pop(python_guard - 1)
-require(len(actual_tasks) == 350, f"runner listed {len(actual_tasks)} baseline tasks, expected 350")
+require(len(actual_tasks) == 353, f"runner listed {len(actual_tasks)} baseline tasks, expected 353")
 for index, (expected, actual) in enumerate(zip(expected_tasks, actual_tasks, strict=True), 1):
     require(expected == actual, f"runner task {index} changed: {expected!r} -> {actual!r}")
-print("ok runner: 350 ordered task names and tags match the updated baseline")
+print("ok runner: 353 ordered task names and tags match the updated baseline")
 
 defaults = yaml.safe_load((ANSIBLE / "roles/local_worker_host/defaults/main.yml").read_text())
 expected_packages = (TESTS / "fixtures/ubuntu-worker-packages-2391.txt").read_text().splitlines()
