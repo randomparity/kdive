@@ -37,6 +37,39 @@ _BYTES_PER_GB = 1024**3
 _SHARED_LIBVIRT_FILE_MODE = 0o664
 
 
+def ensure_shared_artifact_directory(path: Path) -> None:
+    """Grant the existing provider group directory cleanup access (ADR-0739).
+
+    Preserve every other mode bit and both owner IDs. A restrictive directory owned by
+    another slot requires an explicit, quiesced owner/admin repair; never take it over.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except PermissionError as exc:
+        raise CategorizedError(
+            "cannot inspect shared artifact directory; have its owner or administrator verify "
+            "parent access and, after quiescing this System, repair group rwx on the exact "
+            "directory if required",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"path": str(path)},
+        ) from exc
+    try:
+        current = os.fstat(fd)
+        mode = stat.S_IMODE(current.st_mode)
+        if mode & 0o070 == 0o070:
+            return
+        if current.st_uid != os.geteuid():
+            raise CategorizedError(
+                "shared artifact directory needs group rwx; quiesce this System and have its "
+                "owner or administrator verify the directory and grant g+rwx on this exact path",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"path": str(path)},
+            )
+        os.fchmod(fd, mode | 0o070)
+    finally:
+        os.close(fd)
+
+
 def baseline_dir(system_id: UUID | str) -> str:
     """The per-System directory holding the extracted baseline kernel/initrd (ADR-0272)."""
     return f"{ROOTFS_DIR}/{system_id}-baseline"
