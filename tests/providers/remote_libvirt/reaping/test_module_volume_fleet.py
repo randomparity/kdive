@@ -144,30 +144,66 @@ def test_fleet_runs_in_worker_and_bridges_retention_to_event_loop(
     assert all(owners for name, owners in events if name == "owners")
 
 
-def test_reachable_host_without_authority_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    called = False
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_authorityless_fleet_has_no_io(count: int) -> None:
+    class UnopenedFleet(Fleet):
+        def connection(self, config):
+            pytest.fail("authority-less host must not open a connection")
+
+    async def retained():
+        pytest.fail("authority-less host must not read retention")
+
+    def sender(_binding):
+        pytest.fail("authority-less host must not construct sender")
+
+    fleet = UnopenedFleet([(_config(str(i), authority=False), object()) for i in range(count)])
+    assert asyncio.run(_reaper(fleet, sender).reap_module_volumes(retained)) == 0
+
+
+@pytest.mark.parametrize("authority_first", [False, True])
+def test_mixed_fleet_skips_before_connection(monkeypatch, authority_first):
+    plain, eligible = _config("plain", authority=False), _config("eligible")
+    hosts = [(plain, object()), (eligible, object())]
+    if authority_first:
+        hosts.reverse()
+    opened, swept, bindings = [], [], []
+
+    class CheckedFleet(Fleet):
+        @contextmanager
+        def connection(self, config):
+            opened.append(config)
+            assert config is eligible
+            yield object()
+
+    def sweep(conn, pool, identity, **kwargs):
+        swept.append(pool)
+        return 3
+
+    def sender(binding):
+        bindings.append(binding)
+        return Sender()
+
     monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.reaping.module_volumes.reap_orphaned_module_volumes",
-        lambda *_args, **_kwargs: pytest.fail("reap must not start without authority"),
+        "kdive.providers.remote_libvirt.reaping.module_volumes.reap_orphaned_module_volumes", sweep
     )
 
-    async def scenario() -> None:
-        nonlocal called
+    async def retained():
+        return []
 
-        async def retained() -> list[ModuleVolumeKey]:
-            nonlocal called
-            called = True
-            return []
+    assert asyncio.run(_reaper(CheckedFleet(hosts), sender).reap_module_volumes(retained)) == 3
+    assert opened == [eligible] and swept == [eligible.storage_pool]
+    assert bindings == [eligible.authority]
 
-        with pytest.raises(CategorizedError) as caught:
-            reaper = _reaper(Fleet([(_config("host", authority=False), object())]))
-            await reaper.reap_module_volumes(retained)
-        assert caught.value.category is ErrorCategory.CONFLICT
 
-    asyncio.run(scenario())
-    assert not called
+def test_configured_host_without_sender_still_fails():
+    async def retained():
+        pytest.fail("retention must not run without sender")
+
+    with pytest.raises(CategorizedError) as caught:
+        asyncio.run(
+            _reaper(Fleet([(_config("host"), object())]), None).reap_module_volumes(retained)
+        )
+    assert caught.value.category is ErrorCategory.CONFLICT
 
 
 def test_no_reachable_host_fails_for_worker_retry_without_reading_retention() -> None:
@@ -182,9 +218,14 @@ def test_no_reachable_host_fails_for_worker_retry_without_reading_retention() ->
             return []
 
         with pytest.raises(CategorizedError) as caught:
-            await _reaper(Fleet([(_config("down"), RuntimeError("down"))])).reap_module_volumes(
-                retained
-            )
+            await _reaper(
+                Fleet(
+                    [
+                        (_config("plain", authority=False), object()),
+                        (_config("down"), RuntimeError("down")),
+                    ]
+                )
+            ).reap_module_volumes(retained)
         assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
     asyncio.run(scenario())
