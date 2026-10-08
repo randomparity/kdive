@@ -96,7 +96,12 @@ def toolchain_command(entry: RootfsCatalogEntry) -> str:
 
 
 def ssh(
-    endpoint: Endpoint, key: Path, command: str, *, deadline_s: float = 300.0
+    endpoint: Endpoint,
+    key: Path,
+    command: str,
+    *,
+    deadline_s: float = 300.0,
+    timeout_s: float = 120.0,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``command`` as root at ``endpoint``, retrying while sshd is down."""
     argv = [
@@ -122,7 +127,7 @@ def ssh(
     deadline = time.monotonic() + deadline_s
     while True:
         result = subprocess.run(  # noqa: S603 - fixed argv  # nosec B603
-            argv, capture_output=True, text=True, timeout=120.0, check=False
+            argv, capture_output=True, text=True, timeout=timeout_s, check=False
         )
         # 255 is ssh's own failure (sshd not answering yet); anything else is the command's.
         if result.returncode != 255 or time.monotonic() >= deadline:

@@ -12,6 +12,23 @@ class ActionModule(ActionBase):
     def run(self, tmp=None, task_vars=None):
         result = super().run(tmp, task_vars)
         root = Path(os.environ["FAKE_AUTHORITY_FIREWALL_ROOT"])
+        backend_path = root / "backend.json"
+        backend = json.loads(backend_path.read_text())
+        args = self._task.args
+        redhat = self._task.action == "ansible.posix.firewalld"
+        required = {"firewalld", "python3-firewall"} if redhat else {"ufw"}
+        if not required <= set(backend["packages"]):
+            return result | {"failed": True, "msg": "firewall backend packages absent"}
+        if args.get("offline"):
+            assert args["permanent"] and not args["immediate"]
+            if os.environ.get("FAIL_BACKEND") == "management":
+                return result | {"failed": True, "msg": "controlled offline failure"}
+            changed = args["port"] not in backend["management"]
+            backend["management"] = sorted(set(backend["management"]) | {args["port"]})
+            backend_path.write_text(json.dumps(backend))
+            return result | {"changed": changed}
+        if redhat and not (backend["running"] and backend["enabled"]):
+            return result | {"failed": True, "msg": "firewalld not enabled and running"}
         rules_path = root / "rules.json"
         rules = json.loads(rules_path.read_text()) if rules_path.exists() else []
         args = self._task.args.copy()

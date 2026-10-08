@@ -545,3 +545,21 @@ or explicitly reconciles them. Prefer restoring the failed dependency and retryi
 
 `stack-down.sh --wipe` drops the Postgres and SeaweedFS volumes and reaps all `kdive-*` libvirt domains
 and their overlay disks, so the next `stack-services.sh` starts from a clean schema and an empty bucket.
+
+### Legacy baseline and install-staging directory permissions
+
+Baseline directories and persistent install-staging System/Run directories grant the existing
+provider group read, write and search access ([ADR-0739](../../adr/0739-shared-group-artifact-directories.md)).
+This lets another worker slot or the operator-owned reconciler remove their contents. Kernel and
+initrd file modes, directory owners/groups and other permission bits are unchanged. Optional
+separate install scratch directories retain their existing policy.
+
+A restrictive legacy directory owned by another slot fails with a configuration error rather
+than being changed by that slot. Before repair, quiesce all work for the affected System and
+identify its exact baseline directory and each persistent staging System/Run directory. Inspect
+each with `stat`: it must be a real directory, not a symbolic link, with the expected creator and
+configured provider group. Have that owner or an administrator run `chmod g+rwx` with only those
+verified directory paths as arguments. Then retry the existing cleanup or installation operation.
+Do not recurse, use wildcards, change roots or siblings, change file modes, change owners/groups,
+or repair a symlink. Missing parent traversal or incorrect root/group provisioning must be fixed
+through the host preparation contract; changing child modes cannot correct those prerequisites.

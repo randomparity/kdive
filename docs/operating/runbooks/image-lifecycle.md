@@ -113,6 +113,54 @@ unprivileged. Under SELinux the output file also needs the `virt_image_t` label 
 can read it under `qemu:///system` (a host-side file label, independent of the guest-internal
 SELinux the plane disables).
 
+## Refresh a pruned cloud-image source
+
+Versioned URLs can disappear from rolling vendor storage. A download failure does not justify
+switching a row to an unchecked `latest` URL or disabling its SHA-256 check. Refresh the
+selected row in `fixtures/local-libvirt/rootfs_catalog.toml`:
+
+1. Find a versioned replacement for the same distribution, release and architecture in the
+   vendor index: [CentOS Stream 9](https://cloud.centos.org/centos/9-stream/x86_64/images/),
+   [CentOS Stream 10](https://cloud.centos.org/centos/10-stream/x86_64/images/), or
+   [Tumbleweed appliances](https://download.opensuse.org/tumbleweed/appliances/).
+   Tumbleweed's snapshot also determines the row's `version`; CentOS keeps its major release.
+2. Download that exact image and its vendor checksum metadata into an owned build workspace.
+   CentOS publishes a `.SHA256SUM` sidecar with `SHA256 (filename) = digest`; Tumbleweed
+   publishes `.sha256` with `digest  filename`. Match the checksum entry to the exact basename.
+   Compute `sha256sum IMAGE` and compare the full digest before changing the catalog. Stop on
+   a missing checksum, download failure or mismatch; rediscover the candidate if it was pruned
+   during verification. Preserve the vendor URL, checksum record and downloaded byte digest.
+3. Update the selected row's exact URL and SHA-256, and its snapshot version where applicable.
+   Keep unrelated rows unchanged, including other architectures: an x86_64 download does not
+   verify a ppc64le source. Build with the catalog's default package set; do not copy the
+   Fedora example's `--package` overrides into another distribution. For example:
+
+   ```bash
+   python -m kdive build-fs \
+     --image centos-stream-kdive-ready-9 \
+     --workspace ~/.local/share/kdive/build/images \
+     --dest ~/.local/share/kdive/build/images/centos-stream-kdive-ready-9.qcow2
+   ```
+
+   For another row, change both the image name and destination basename. The acquisition path
+   independently verifies the catalog checksum again.
+4. After a successful build, inspect the emitted provenance sidecar and the guest's installed
+   package inventory. Check the recorded `makedumpfile_version` and `drgn_version` against the
+   executable version markers produced by customization. Update the row's package annotations
+   and corresponding curated expectations in `tests/images/test_rootfs_catalog.py` from those
+   observations. Missing packages or incomplete version evidence require investigation.
+5. Run the built-image verification below and the affected image-smoke parameters in the
+   [live-testing guide](live-testing.md). Record candidate/deployed revisions, source and output
+   digests, guest OS/architecture, accelerator, results and owned cleanup. A successful build
+   or direct boot does not replace the MCP image-smoke cell. Keep a blocked or skipped cell
+   explicit and rerun it once its prerequisite is available.
+6. Run the catalog tests and repository guardrails before submitting the refresh. Retain the
+   evidence with the change so the selected bytes and package observations are reviewable.
+
+Repeat this procedure when a vendor prunes the replacement. The checksum binds the downloaded
+bytes; it does not promise that the vendor will retain them indefinitely. No automatic updater
+or archival mirror is configured by this procedure.
+
 ## Verify the built image
 
 Follow [live-stack setup](live-stack.md) to configure and start the runtime, then the

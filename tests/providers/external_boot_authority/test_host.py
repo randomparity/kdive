@@ -46,12 +46,18 @@ from kdive.providers.external_boot_authority.service import (
     AuthorityServiceError,
     ExternalBootAuthorityService,
 )
+from kdive.providers.ports.external_boot import (
+    ExternalBootActivationBinding,
+    ExternalBootPlan,
+    OpaqueProviderRef,
+)
 from tests.providers.external_boot_authority.service_support import (
     _Adapter,
     _mutation,
     _Repository,
     _takeover,
 )
+from tests.support.external_boot_plan import external_boot_plan
 
 
 @pytest.fixture
@@ -1149,6 +1155,45 @@ def test_manifest_without_mutation_binding_fails_closed(
         host._build_mutation_service(config)  # noqa: SLF001
 
 
+def _assert_maximum_materialization_admitted(
+    materializer: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = external_boot_plan(uuid4(), uuid4()).model_dump(by_alias=True)
+    definitions = ExternalBootPlan.model_json_schema()["$defs"]
+    for field, model, names in (
+        ("bundle", "BundleSource", ("decoded_kernel_size_bytes",)),
+        ("module_obligation", "ModuleObligation", ("member_count", "uncompressed_bytes")),
+    ):
+        for name in names:
+            data[field][name] = definitions[model]["properties"][name]["maximum"]
+    for field, model in (("initrd", "InitrdSource"), ("debuginfo", "DebuginfoSource")):
+        data[field] = {
+            "key": field,
+            "version": "v1",
+            "sha256": "sha256:" + "0" * 64,
+            "size_bytes": definitions[model]["properties"]["size_bytes"]["maximum"],
+        }
+    plan = ExternalBootPlan.model_validate(data)
+
+    def stage(actual: ExternalBootPlan, descriptor: int) -> None:
+        assert actual == plan
+        assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
+        raise RuntimeError("staging reached")
+
+    monkeypatch.setattr(
+        materializer, "_artifact_stager", SimpleNamespace(materialize_artifacts=stage)
+    )
+    binding = ExternalBootActivationBinding(
+        system_id=plan.ownership.system_id,
+        run_id=plan.ownership.run_id,
+        activation_id=str(uuid4()),
+    )
+    with pytest.raises(RuntimeError, match="staging reached"):
+        materializer.materialize(
+            plan, binding, OpaqueProviderRef(ref="authority/current"), float("inf")
+        )
+
+
 def test_host_constructs_mutation_chain_for_checked_provider_socket(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1243,7 +1288,10 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
     assert len(system_inputs) == 1
     assert system_inputs[0][0].__class__ is Connection
     assert system_inputs[0][1] is cast(Any, service._adapter)._executor  # noqa: SLF001
-    asyncio.run(service.close())
+    try:
+        _assert_maximum_materialization_admitted(operations._materializer, monkeypatch)  # noqa: SLF001
+    finally:
+        asyncio.run(service.close())
     assert closed == [True]
 
 

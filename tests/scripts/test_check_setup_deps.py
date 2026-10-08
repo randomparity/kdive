@@ -72,8 +72,15 @@ def _run(
         "KDIVE_BOOT_DIR": str(tmp_path / "absent-boot"),
         **(extra_env or {}),
     }
+    script = SCRIPT
+    if args == ["--setup"]:
+        scripts = tmp_path / "scripts"
+        scripts.mkdir(exist_ok=True)
+        script = scripts / SCRIPT.name
+        shutil.copy2(SCRIPT, script)
+        shutil.copy2(SCRIPT.parent / "shfmt.sh", scripts / "shfmt.sh")
     return subprocess.run(
-        [BASH, str(SCRIPT), *(args or [])],
+        [BASH, str(script), *(args or [])],
         env=env,
         capture_output=True,
         text=True,
@@ -1242,8 +1249,31 @@ def test_developer_preflight_succeeds_without_live_vm_tools(tmp_path: Path) -> N
     )
     for tool in tools.split():
         _stub(bindir, tool, "#!/bin/sh\nexit 0\n")
+    _stub(bindir, "shfmt", "#!/bin/sh\necho v3.13.1\n")
     result = _run("ubuntu", str(bindir), tmp_path, args=["--setup"])
     assert result.returncode == 0, result.stderr
     assert "Developer dependencies are present" in result.stdout
     assert "Future dependencies" in result.stderr
     assert "virt-builder" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "private,ambient,missing",
+    [
+        (None, "v3.13.1", False),
+        (None, "v3.14.1", True),
+        ("v3.13.1", "v3.14.1", False),
+        ("v3.14.1", "v3.13.1", True),
+    ],
+)
+def test_developer_preflight_uses_checkout_formatter(
+    tmp_path: Path, private: str | None, ambient: str, missing: bool
+) -> None:
+    bindir = _bin(tmp_path)
+    _stub(bindir, "shfmt", f"#!/bin/sh\necho {ambient}\n")
+    if private:
+        local = tmp_path / "build/dev-tools/bin"
+        local.mkdir(parents=True)
+        _stub(local, "shfmt", f"#!/bin/sh\necho {private}\n")
+    result = _run("ubuntu", str(bindir), tmp_path, args=["--setup"])
+    assert ("run just setup for the checkout-local pinned formatter" in result.stderr) == missing

@@ -176,7 +176,7 @@ arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.6"  # bundled in kexec-tools 2.0.29
 drgn_version = "0.0.33"  # EPEL 9 (python-drgn 0.0.33-2.el9)
-source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-20260622.0.x86_64.qcow2", sha256 = "ed8421c7ce25d0e21cbeb561c906f52b2eed2a99aa3df88ec7616773ae1ebd1a" }  # pragma: allowlist secret
+source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-20261006.0.x86_64.qcow2", sha256 = "bc181b85ceaac9bc48651faab29ca0707fc7ff597854adaef1f0fa5f144ac01f" }  # pragma: allowlist secret
 
 [[image]]
 name = "centos-stream-kdive-ready-9-ppc64le"
@@ -198,7 +198,7 @@ arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.8"  # separate pkg, el10
 drgn_version = "0.0.33"  # EPEL 10 (python-drgn 0.0.33-1.el10)
-source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-20260622.0.x86_64.qcow2", sha256 = "508a48761d1a28c98046256e8f77b0ea34d751791a5629bb216743ef98526d0b" }  # pragma: allowlist secret
+source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-20261006.0.x86_64.qcow2", sha256 = "48f9e2ed8b38dd8acd5e3a19b19f348c354358559bec474857c7d1c3425bd719" }  # pragma: allowlist secret
 
 [[image]]
 name = "centos-stream-kdive-ready-10-ppc64le"
@@ -272,13 +272,13 @@ source = { kind = "cloud-image", url = "https://cloud-images.ubuntu.com/releases
 [[image]]
 name = "opensuse-tumbleweed-kdive-ready"
 distro = "opensuse-tumbleweed"
-version = "20260919"
+version = "20261005"
 family = "suse"
 arch = "x86_64"
 kind = "debug"
 makedumpfile_version = "1.7.7"
 drgn_version = "0.1.0"
-source = { kind = "cloud-image", url = "https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-1.0.0-Cloud-Snapshot20260919.qcow2", sha256 = "bddab63272d36e2893b6b50561278511bb29e17000fb21c135fecf0e8553518d" }  # pragma: allowlist secret
+source = { kind = "cloud-image", url = "https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-1.0.0-Cloud-Snapshot20261005.qcow2", sha256 = "38e9d698326ea459b5bec85611b14c736b13109ea43330beb40daebcf81e1f32" }  # pragma: allowlist secret
 
 [[image]]
 name = "opensuse-leap-kdive-ready-15.6"

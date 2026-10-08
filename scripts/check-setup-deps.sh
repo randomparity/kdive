@@ -553,7 +553,12 @@ probe_all() {
   require_command recommended make "${distro}"
   # Fedora and EL package none of these tools.
   require_tool "${hook_tier}" shellcheck "https://github.com/koalaman/shellcheck#installing"
-  require_tool recommended shfmt "go install mvdan.cc/sh/v3/cmd/shfmt@latest"
+  if ((SETUP_MODE)); then
+    "${BASH_SOURCE[0]%/*}/shfmt.sh" --version >/dev/null 2>&1 ||
+      note_manual recommended shfmt 'run just setup for the checkout-local pinned formatter'
+  else
+    require_tool recommended shfmt "go install mvdan.cc/sh/v3/cmd/shfmt@latest"
+  fi
   require_tool "${hook_tier}" just "uv tool install rust-just"
   require_tool "${hook_tier}" prek "uv tool install prek"
   # `just check-pr-body` scans a PR/issue body before `gh ... --body-file` publishes it.
