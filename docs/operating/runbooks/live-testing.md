@@ -818,21 +818,51 @@ carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_
 exported `KDIVE_SYSTEMS_TOML`. The lanes are local-libvirt only; an `ops.diagnostics` cell that
 sees a remote-libvirt check stops `blocked` rather than probe a remote seam.
 
-The tools only read, so each cell works in a fresh `cov-<hex>` project whose snapshot must not
-change. What the cells leave behind is history the snapshot excludes:
+The tools only read. Except for the secret-presence fixture below, each cell works in a
+fresh `cov-<hex>` project whose snapshot must not change. What the cells leave behind is history the snapshot excludes:
 
 - `audit_log`, `platform_audit_log` and `tool_invocation` rows from the cells' own calls, which
   the `audit.query` and `ops.tool_trail` cells read back;
 - one allocation per `inventory.list` cell in `KDIVE_PROJECT`, requested and released;
 - the `diagnostics_worker_check` jobs `ops.diagnostics` enqueues.
 
-The two `secrets.list` functional cells per lane record `blocked`: the cell proves no configured
-secret value is served, but no local-lane call makes the server register a secret, so presence
-has nothing to compare with. pytest reports them as failed. `ops.export_systems_toml` is never
-called with `persist`. A cell killed mid-run can leave its allocation granted;
-`demo-down.sh --wipe --yes` clears it with the history above.
+The four `secrets.list` functional cells use an owned Fedora 44 local System, the
+verified longterm fixture under `KDIVE_FIXTURE_ROOT/longterm`, and a successful
+`debug.start_session` with `drgn-live`. The existing server path registers the
+System's bootstrap key. They require an empty server listing before setup and
+attach, then exactly `<process-global>` through the selected direct/gateway
+exposure, with no configured or owned-key value in the answer. A server already
+holding a secret blocks before creating the fixture: restart it first.
 
-Last run: candidate `86ed1b021` (server, worker and reconciler at that SHA in both lanes), a
+Run these four functional cells separately from other live cells, on an idle
+operator-owned stack. For each configuration, use the canonical stack bring-up
+with `KDIVE_WORKER_DEATH_VERIFIER=disabled` (default) or `docker` (recovery), verify
+all three role SHAs, and select one exposure's functional cell:
+
+```sh
+uv run python -m pytest tests/integration/test_operator_tool_cells_live.py \
+  -k 'secrets.list and functional and direct' -vv --tb=short
+```
+
+Repeat with `gateway`; the opposite configuration's parameter is skipped, not
+counted as proof. Each successful cell records source presence and actual owned
+session, System, disk, allocation-capacity and bootstrap-key cleanup. Terminal
+history remains. The server's global registration deliberately remains after
+resource cleanup: it lasts until that process exits. Between cells and after the
+last cell, stop the owned server through the canonical stack lifecycle, verify
+its old PID exited, start the same candidate again, and retain an authenticated
+empty `secrets.list` answer alongside the cell records. Record the old/new PID,
+configuration and candidate identity without tokens or key material. Do not use
+registry clearing, DB deletion or a synthetic response as cleanup evidence.
+
+An unavailable image/kernel or failing attach prerequisite cannot qualify the
+cell. Preserve that failure and its owned cleanup evidence. These cells prove
+secret presence, not image-builder provenance, introspection or native POWER.
+`ops.export_systems_toml` is never called with `persist`. A killed run can leave
+owned resources; use their recorded IDs for supported cleanup, preserving shared
+images and prior histories.
+
+Historical pre-positive-control run: candidate `86ed1b021` (server, worker and reconciler at that SHA in both lanes), a
 disposable Fedora 44 x86_64 lab guest; earlier runs at `44503b3bf` and `f1150fc13` gave the same
 result. Each lane recorded its 62 cells and skipped the other
 lane's 62; the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`. `qualify` reported

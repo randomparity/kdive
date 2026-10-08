@@ -12,7 +12,6 @@ live-testing.md`` covers the precondition and the run.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import secrets
 import subprocess
@@ -21,7 +20,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import partial
-from pathlib import Path
 from typing import Any, LiteralString, cast
 
 import psycopg
@@ -30,7 +28,6 @@ from psycopg.rows import dict_row
 
 import kdive.config as config
 from kdive.config.cli_settings import CLI_CLIENT_ID
-from kdive.config.core_settings import SECRETS_ROOT
 from kdive.diagnostics.checks import SECRET_REF_ID
 from kdive.diagnostics.contracts import WORKER_UNAVAILABLE_DETAIL
 from kdive.diagnostics.contributions.multiarch_gdb import (
@@ -45,10 +42,10 @@ from kdive.inventory.path import systems_toml_path
 from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from kdive.security.audit import args_digest
-from kdive.security.secrets.secrets import read_secret_file
 from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.secret_presence import prove_secret_presence
 from tests.integration.live_stack.tool_cells import (
     Boundary,
     Exposure,
@@ -484,38 +481,6 @@ async def _trail(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str
     return {"calls": len(rows), "paged": len(pages)}
 
 
-def _lane_secrets() -> set[str]:
-    """The lane's secret setting values, and the content of each that names a secret file."""
-    root = Path(config.require(SECRETS_ROOT))
-    found: set[str] = set()
-    for setting in config.all_settings():
-        value = config.get(setting) if setting.secret else None
-        if not value:
-            continue
-        found.add(value)
-        # A value that is no reference under the root is itself the secret.
-        with contextlib.suppress(OSError, ValueError):
-            found.add(read_secret_file(root, value))
-    return {v for v in found if v.strip()}
-
-
-async def _secrets(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
-    env = one(await caller.call("secrets.list", {}, caller.token(grants), discover=True))
-    labels = cast(list[str], env.data["secrets"])
-    assert labels == sorted(set(labels)), f"labels are not sorted and unique: {labels}"
-    # A string scope comes only from a remote-libvirt artifact channel, absent on local lanes.
-    assert set(labels) <= {"<process-global>", "<scoped>"}, f"unexpected labels {labels}"
-    served = env.model_dump_json()
-    # Count, never list: an assertion naming the matches would print the secrets themselves.
-    leaked = sum(value in served for value in _lane_secrets())
-    assert leaked == 0, f"{leaked} configured secret value(s) were served"
-    raise ScenarioStop(
-        Outcome.BLOCKED,
-        f"secrets.list served {labels} with no secret leaked, but presence has no positive "
-        "control: no local-lane call makes the server register a secret",
-    )
-
-
 _FUNCTIONAL: dict[str, Callable[..., Awaitable[dict[str, object]]]] = {
     "audit.query": _audit,
     "inventory.list": _inventory,
@@ -524,7 +489,6 @@ _FUNCTIONAL: dict[str, Callable[..., Awaitable[dict[str, object]]]] = {
     "ops.export_systems_toml": _export_systems,
     "ops.jobs_list": _jobs,
     "ops.tool_trail": _trail,
-    "secrets.list": _secrets,
 }
 
 
@@ -562,6 +526,9 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     caller = HttpCaller(cast(Exposure, cell.exposure), base_url, issuer)
     project = _fresh()
     snapshot = partial(project_state, db_url, project)
+    if cell.kind == "functional" and cell.operation == "secrets.list":
+        await prove_secret_presence(run, base_url, issuer, db_url)
+        return
     if cell.kind == "functional":
         body = cast(Functional, partial(_FUNCTIONAL[cell.operation], db_url=db_url))
         grants = _functional_grants(cell.operation, project)
