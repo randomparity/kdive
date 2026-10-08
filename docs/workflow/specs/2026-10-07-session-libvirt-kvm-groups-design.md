@@ -14,7 +14,7 @@ initializing the configured worker-group socket. Login membership is not daemon 
 
 ## Decision and ownership
 
-Apply [ADR0730](../../adr/0730-system-manager-starts-operator-session-libvirt.md).
+Apply [ADR0737](../../adr/0737-system-manager-starts-operator-session-libvirt.md).
 The role installs only `kdive-libvirtd-live.service` at system scope, running as the same
 operator UID/primary group with the already granted KVM and worker socket groups.
 Keep the executable, configuration, PID/socket tuple, session URI and runtime directories.

@@ -154,7 +154,7 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    provisioning. Active legacy units and live unmanaged daemons are refused before takeover;
    an unmanaged daemon requires its exact targeted stop after draining. Do not restart the
    user manager or change device permissions. Provisioning removes only the inactive legacy
-   unit, preserving unrelated user services. See [ADR-0730](../../adr/0730-system-manager-starts-operator-session-libvirt.md). If the endpoint is nonetheless unreachable at job time,
+   unit, preserving unrelated user services. See [ADR-0737](../../adr/0737-system-manager-starts-operator-session-libvirt.md). If the endpoint is nonetheless unreachable at job time,
    `scripts/live-stack/stack-services.sh` recovers by starting that same operator-owned daemon directly as
    the invoking user (`libvirtd --config /etc/kdive/libvirtd-live.conf --pid-file
    /run/kdive/live-libvirt/libvirt/libvirtd.pid`, idempotent on a live pid) — never `sudo`: the

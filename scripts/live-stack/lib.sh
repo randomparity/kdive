@@ -408,7 +408,7 @@ nodedev_ok() {
 # recovery path starts this same daemon directly as the invoking user — the runner service account
 # has no sudo and the Debian-family runner ships no virtqemud, so a system-daemon fallback can
 # never work there. A direct start remains unmanaged even if the system unit is installed;
-# provisioning requires a drain and targeted stop before taking ownership (ADR-0730).
+# provisioning requires a drain and targeted stop before taking ownership (ADR-0737).
 #
 # Idempotently ensure the dedicated session daemon is running. A pid file pointing at a live
 # process short-circuits; otherwise start it exactly as the provisioning role does (same binary,
