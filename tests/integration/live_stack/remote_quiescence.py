@@ -10,6 +10,7 @@ import multiprocessing
 import select
 import shlex
 import subprocess  # noqa: S404 - fixed SSH protocol  # nosec B404
+import tempfile
 from contextlib import contextmanager
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -145,24 +146,45 @@ def tls(configuration: RemoteCaptureConfiguration):  # noqa: ANN201 - contextman
         yield connection
 
 
-def mutate(configuration: RemoteCaptureConfiguration, domain: str, node: str, port: int) -> None:
+def mutate(
+    configuration: RemoteCaptureConfiguration,
+    domain: str,
+    node: str,
+    port: int,
+    events: Connection,
+    scratch: str,
+) -> None:
     """Native QMP blocks while the accepted NBD peer withholds its handshake."""
-    with tls(configuration) as connection:
-        command = {
-            "execute": "blockdev-add",
-            "arguments": {
-                "driver": "nbd",
-                "node-name": node,
-                "server": {"type": "inet", "host": "127.0.0.1", "port": str(port)},
-            },
-        }
-        libvirt_qemu.qemuMonitorCommand(connection.lookupByName(domain), json.dumps(command), 0)
+    tempfile.tempdir = scratch
+    try:
+        with tls(configuration) as connection:
+            command = {
+                "execute": "blockdev-add",
+                "arguments": {
+                    "driver": "nbd",
+                    "node-name": node,
+                    "server": {"type": "inet", "host": "127.0.0.1", "port": str(port)},
+                },
+            }
+            handle = connection.lookupByName(domain)
+            events.send("entered")
+            reply = json.loads(libvirt_qemu.qemuMonitorCommand(handle, json.dumps(command), 0))
+            error = reply.get("error") if isinstance(reply, dict) else None
+            events.send(("returned", error if isinstance(error, dict) else "unexpected-completion"))
+    except Exception as exc:
+        events.send(("failed", type(exc).__name__))
+        raise
 
 
 def probe(
-    configuration: RemoteCaptureConfiguration, domain: str, node: str, events: Connection
+    configuration: RemoteCaptureConfiguration,
+    domain: str,
+    node: str,
+    events: Connection,
+    scratch: str,
 ) -> None:
     """Observe native-call entry without substituting the production probe or its results."""
+    tempfile.tempdir = scratch
     native = libvirt_qemu.qemuMonitorCommand
 
     def entered(domain: object, cmd: str, flags: int) -> str:
@@ -199,20 +221,35 @@ def ordered(
     configuration: RemoteCaptureConfiguration, domain: str, destination: str
 ) -> dict[str, object]:
     """Require acceptance, a held fresh probe, client death, then ordered absence."""
-    node = "q2816-" + uuid4().hex
+    node = "q2816-" + uuid4().hex[:12]
     context = multiprocessing.get_context("spawn")
     receive_end, send_end = context.Pipe(duplex=False)
+    mutation_receive, mutation_send = context.Pipe(duplex=False)
     barrier = Barrier(destination)
+    scratch = tempfile.TemporaryDirectory(prefix="q2816-pki-")
     mutator = None
     fresh = None
     try:
         port = int(barrier.read())
         assert 0 < port < 65536, "invalid listener port"
-        mutator = context.Process(target=mutate, args=(configuration, domain, node, port))
+        mutator = context.Process(
+            target=mutate, args=(configuration, domain, node, port, mutation_send, scratch.name)
+        )
         mutator.start()
-        assert barrier.read() == "accepted", "NBD mutation was not accepted"
+        assert receive(mutation_receive, 10) == "entered", "mutation did not enter native monitor"
+        try:
+            accepted = barrier.read()
+        except AssertionError:
+            if mutation_receive.poll(0):
+                raise AssertionError(
+                    f"native mutation returned before acceptance: {mutation_receive.recv()}"
+                ) from None
+            raise
+        assert accepted == "accepted", "NBD mutation was not accepted"
         assert mutator.is_alive(), "accepted mutation returned before release"
-        fresh = context.Process(target=probe, args=(configuration, domain, node, send_end))
+        fresh = context.Process(
+            target=probe, args=(configuration, domain, node, send_end, scratch.name)
+        )
         fresh.start()
         assert receive(receive_end, 10) == "entered", "fresh native probe did not enter"
         assert not receive_end.poll(0.5), "fresh probe acknowledged a held mutation"
@@ -245,6 +282,7 @@ def ordered(
             "ordering": "fresh-qmp-connection",
             "node_absent": True,
             "listener_closed": True,
+            "tls_materialization_cleanup": True,
             "resource_and_domain_matched": True,
         }
     finally:
@@ -260,6 +298,10 @@ def ordered(
                     assert not process.is_alive(), "owned monitor process survived cleanup"
             receive_end.close()
             send_end.close()
+            mutation_receive.close()
+            mutation_send.close()
+            scratch.cleanup()
+            assert not Path(scratch.name).exists(), "owned TLS materialization remains"
 
 
 async def configuration_for(db_url: str, system_id: str) -> RemoteCaptureConfiguration:

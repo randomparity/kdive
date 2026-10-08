@@ -7,6 +7,7 @@ import json
 import socket
 import sys
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -34,7 +35,19 @@ def configuration() -> RemoteCaptureConfiguration:
 
 
 @pytest.mark.parametrize(
-    "fault", [None, "accept", "early", "death", "kill", "timeout", "identity", "node", "listener"]
+    "fault",
+    [
+        None,
+        "accept",
+        "early",
+        "death",
+        "kill",
+        "timeout",
+        "identity",
+        "node",
+        "listener",
+        "native-return",
+    ],
 )
 def test_ordering_requires_all_native_boundary_observations(
     monkeypatch: pytest.MonkeyPatch,
@@ -53,6 +66,11 @@ def test_ordering_requires_all_native_boundary_observations(
 
         def start(self) -> None:
             self.alive = True
+            assert len(self.args[2].encode()) <= 31, "native QEMU block-node name limit"
+            # Abrupt native-client death bypasses its materialization finally.
+            directory = Path(self.args[-1]) / f"materialized-{len(processes)}"
+            directory.mkdir(mode=0o700)
+            (directory / "clientkey.pem").write_text("synthetic test material")
 
         def is_alive(self) -> bool:
             return self.alive
@@ -83,7 +101,7 @@ def test_ordering_requires_all_native_boundary_observations(
             self.receives += 1
             if self.receives == 1:
                 return "entered"
-            config, domain, node, _pipe = processes[1].args
+            config, domain, node, _pipe, _scratch = processes[1].args
             return (
                 str(uuid4() if fault == "identity" else config.resource_id),
                 domain,
@@ -101,7 +119,10 @@ def test_ordering_requires_all_native_boundary_observations(
             self.process = SimpleNamespace(wait=lambda timeout: 1 if fault == "listener" else 0)
 
         def read(self) -> str:
-            return next(self.messages)
+            message = next(self.messages)
+            if fault == "native-return" and message == "accepted":
+                raise AssertionError("no acceptance")
+            return message
 
         def release(self) -> None:
             events.append("release")
@@ -118,14 +139,25 @@ def test_ordering_requires_all_native_boundary_observations(
         node = processes[0].args[2] if fault == "node" else "other"
         return '{"return":[{"node-name":"' + node + '"}]}'
 
+    class MutationPipe(Pipe):
+        def poll(self, _timeout: float) -> bool:
+            self.polls += 1
+            return self.polls == 1 or fault == "native-return"
+
+        def recv(self) -> object:
+            self.receives += 1
+            return "entered" if self.receives == 1 else ("returned", {"class": "GenericError"})
+
     pipe = Pipe()
+    mutation_pipe = MutationPipe()
+    pipes = iter(((pipe, pipe), (mutation_pipe, mutation_pipe)))
     monkeypatch.setattr(proof, "Barrier", Barrier)
     monkeypatch.setattr(proof, "tls", tls)
     monkeypatch.setattr(proof.libvirt_qemu, "qemuMonitorCommand", monitor)
     monkeypatch.setattr(
         proof.multiprocessing,
         "get_context",
-        lambda method: SimpleNamespace(Pipe=lambda duplex: (pipe, pipe), Process=Process),
+        lambda method: SimpleNamespace(Pipe=lambda duplex: next(pipes), Process=Process),
     )
     if fault is None:
         result = proof.ordered(configuration, "owned-domain", "provider.invalid")
@@ -136,6 +168,7 @@ def test_ordering_requires_all_native_boundary_observations(
             proof.ordered(configuration, "owned-domain", "provider.invalid")
     assert "barrier-closed" in events
     assert all(not process.is_alive() for process in processes)
+    assert all(not Path(process.args[-1]).exists() for process in processes)
     assert events[-2:] == ["pipe-closed", "pipe-closed"]
 
 
@@ -291,3 +324,33 @@ def test_guest_identity_requires_actual_matching_agent_results(
         with pytest.raises(AssertionError):
             proof.guest_identity(configuration, "owned-domain")
     assert programs == ["/usr/bin/cat", "/usr/bin/uname"]
+
+
+def test_native_child_materializes_only_under_parent_owned_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configuration: RemoteCaptureConfiguration,
+) -> None:
+    monkeypatch.setattr(proof.tempfile, "tempdir", str(tmp_path))
+    owned = tmp_path / "owned"
+    owned.mkdir(mode=0o700)
+    materialized = []
+
+    @contextmanager
+    def tls(_configuration):  # noqa: ANN001, ANN202 - TLS materialization boundary
+        directory = Path(proof.tempfile.mkdtemp(prefix="kdive-remote-pki-"))
+        (directory / "clientkey.pem").write_text("synthetic material")
+        materialized.append(directory)
+        yield SimpleNamespace(lookupByName=lambda name: object())
+
+    def terminate(*args):  # noqa: ANN002, ANN202 - native client death boundary
+        raise SystemExit(15)
+
+    monkeypatch.setattr(proof, "tls", tls)
+    monkeypatch.setattr(proof.libvirt_qemu, "qemuMonitorCommand", terminate)
+    receive, send = proof.multiprocessing.Pipe(duplex=False)
+    with receive, send:
+        with pytest.raises(SystemExit):
+            proof.mutate(configuration, "owned-domain", "owned-node", 12345, send, str(owned))
+        assert receive.recv() == "entered"
+    assert materialized and all(path.parent == owned for path in materialized)
