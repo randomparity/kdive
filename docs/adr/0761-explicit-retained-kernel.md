@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted (2026-10-08). Supersedes ADR-0760’s customization-only field for this unmerged interface.
+Accepted (2026-10-08)
+
+Supersedes ADR-0760’s customization-only field for this unmerged interface.
 
 ## Context
 

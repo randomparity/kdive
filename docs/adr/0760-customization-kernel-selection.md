@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted (2026-10-07). Superseded by [ADR-0761](0761-explicit-retained-kernel.md).
+Accepted (2026-10-07)
+
+Superseded by [ADR-0761](0761-explicit-retained-kernel.md).
 
 ## Context
 
