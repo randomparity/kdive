@@ -9,8 +9,16 @@ from pathlib import Path
 import pytest
 import yaml
 
+from kdive.kernel_config.parse import parse_kernel_config
+from kdive.kernel_config.requirements import CRASH_CAPTURE, feature_requirement
+from kdive.kernel_config.support import unmet_clauses
 from scripts import kernel_fixtures as fixture
 from tests.scripts.kernel_fixture_support import repository as repository
+
+
+@pytest.mark.parametrize("symbol", ["KEXEC", "KEXEC_FILE", "CRASH_DUMP"])
+def test_default_fragment_requests_kdump_syscalls(symbol: str) -> None:
+    assert fixture.config_values(fixture.CONFIG.read_text()).get(f"CONFIG_{symbol}") == "y"
 
 
 @pytest.mark.parametrize(
@@ -402,5 +410,73 @@ def test_failed_compilation_never_writes_manifest(tmp_path: Path, monkeypatch) -
     with pytest.raises(subprocess.CalledProcessError):
         fixture.build(
             source, output, baseline="longterm", arch="x86_64", config=fixture.CONFIG, jobs=1
+        )
+    assert not (output / "manifest.json").exists()
+
+
+@pytest.mark.parametrize(
+    "arch,custom,dropped",
+    [
+        ("x86_64", False, ""),
+        ("ppc64le", False, ""),
+        ("x86_64", True, ""),
+        ("x86_64", False, "FW_CFG_SYSFS"),
+        ("x86_64", False, "EROFS_FS"),
+        ("x86_64", False, "EROFS_FS_ZIP_LZMA"),
+        ("x86_64", False, "OVERLAY_FS"),
+    ],
+)
+def test_default_capture_input_preserves_arch_and_custom_policy(
+    tmp_path: Path, monkeypatch, arch: str, custom: bool, dropped: str
+) -> None:
+    monkeypatch.setattr(fixture.platform, "machine", lambda: arch)
+    monkeypatch.setattr(fixture, "toolchain_identity", lambda: {"gcc": "test"})
+    output = tmp_path / "out"
+    config = fixture.CONFIG
+    if custom:
+        config = tmp_path / "custom.config"
+        config.write_text(
+            fixture.CONFIG.read_text() + "CONFIG_FW_CFG_SYSFS=n\nCONFIG_EROFS_FS=n\n"
+            "CONFIG_EROFS_FS_ZIP_LZMA=n\nCONFIG_OVERLAY_FS=n\n"
+        )
+
+    def command(argv, **kwargs):
+        if argv[0] == "git":
+            return "1"
+        if argv[0] == "make":
+            if argv[-1] in {"defconfig", "ppc64le_defconfig"}:
+                (output / ".config").write_text("CONFIG_PROC_VMCORE=y\nCONFIG_RELOCATABLE=y\n")
+            elif argv[-1] == "olddefconfig":
+                if dropped:
+                    effective = output / ".config"
+                    effective.write_text(
+                        effective.read_text().replace(f"CONFIG_{dropped}=y", f"CONFIG_{dropped}=n")
+                    )
+            else:
+                raise RuntimeError("compilation boundary reached")
+        return ""
+
+    monkeypatch.setattr(fixture, "command", command)
+    error = ValueError if dropped else RuntimeError
+    message = f"CONFIG_{dropped}" if dropped else "compilation boundary reached"
+    with pytest.raises(error, match=message):
+        fixture.build(
+            tmp_path / "source", output, baseline="longterm", arch=arch, config=config, jobs=1
+        )
+    expected = config.read_text()
+    if arch == "x86_64" and not custom:
+        expected += (
+            "CONFIG_FW_CFG_SYSFS=y\nCONFIG_EROFS_FS=y\n"
+            "CONFIG_EROFS_FS_ZIP_LZMA=y\nCONFIG_OVERLAY_FS=y\n"
+        )
+    assert (output / "input.config").read_text() == expected
+    if not dropped:
+        missing = unmet_clauses(
+            parse_kernel_config((output / ".config").read_bytes()),
+            feature_requirement(CRASH_CAPTURE),
+            arch=arch,
+        )
+        assert [sorted(clause.symbols) for clause in missing] == (
+            [["FW_CFG_SYSFS"]] if custom else []
         )
     assert not (output / "manifest.json").exists()
