@@ -61,6 +61,7 @@ from kdive.images.families._fedora_customize import (
 from kdive.images.families._fedora_customize import (
     readiness_unit as _readiness_unit,
 )
+from kdive.images.families._fedora_customize import retained_kernel_step
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.renderers import (
     partition_steps,
@@ -110,6 +111,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
     ExtractBaselineKernel,
     _real_extract_baseline_kernel,
     baseline_kernel_names,
+    select_kernel_and_initrd,
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
     CUSTOMIZE_SCRIPT_PATH,
@@ -487,7 +489,7 @@ class RootfsCustomization:
 
 @dataclass(frozen=True, slots=True)
 class RootfsProvenanceInspection:
-    """Advisory probes used only to describe the completed image."""
+    """Image probes; boot entries also enforce the opted-in retained-kernel postcondition."""
 
     inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
     probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE
@@ -614,6 +616,8 @@ class LocalLibvirtRootfsBuildPlane:
         self._customization.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
         family.normalize(staged)
         self._boot_customize(staged, family, work_dir, spec=spec, entry=entry)
+        if entry.retained_kernel is not None:
+            self._verify_retained_kernel(staged, entry.retained_kernel)
         self._customization.seal_customized_image(
             staged,
             unit_name=CUSTOMIZE_UNIT,
@@ -621,6 +625,20 @@ class LocalLibvirtRootfsBuildPlane:
         )
         self._customization.verify_cloud_init(staged)
         return staged
+
+    def _verify_retained_kernel(self, staged: Path, hint: str) -> None:
+        entries = self._provenance.probe_boot_entries(staged)
+        if entries is None:
+            raise CategorizedError(
+                "cannot verify retained kernel; final boot inventory is unavailable",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        kernel, initrd = select_kernel_and_initrd(entries)
+        if kernel != f"vmlinuz-{hint.removeprefix('vmlinuz-')}" or initrd is None:
+            raise CategorizedError(
+                "final kernel or initramfs does not match retained_kernel; rebuild the image",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
 
     def _boot_customize(
         self,
@@ -637,6 +655,8 @@ class LocalLibvirtRootfsBuildPlane:
         try:
             ctx = self._context(unit_path, spec=spec, entry=entry)
             file_ops, exec_ops = partition_steps(family.customize_steps(ctx))
+            if entry.retained_kernel is not None:
+                exec_ops.append(retained_kernel_step(entry.retained_kernel))
             script = render_firstboot_script(
                 exec_ops,
                 install_command=family.install_command,
@@ -648,14 +668,18 @@ class LocalLibvirtRootfsBuildPlane:
             )
             unit = render_firstboot_unit(script_path=CUSTOMIZE_SCRIPT_PATH)
             self._customization.inject_offline(staged, file_ops, script, unit)
-            self._run_boot(staged, work_dir, spec.arch)
+            self._run_boot(staged, work_dir, spec.arch, entry.retained_kernel)
         finally:
             for path in cleanup:
                 path.unlink(missing_ok=True)
 
-    def _run_boot(self, staged: Path, work_dir: Path, arch: str) -> None:
+    def _run_boot(
+        self, staged: Path, work_dir: Path, arch: str, retained_kernel: str | None
+    ) -> None:
         """Extract the baseline kernel, render the build domain XML, and drive the boot to ok."""
-        baseline = self._customization.extract_baseline_kernel(staged, work_dir / "baseline", None)
+        baseline = self._customization.extract_baseline_kernel(
+            staged, work_dir / "baseline", retained_kernel
+        )
         _grant_hypervisor_traversal(work_dir)
         accel, emulator = self._customization.resolve_accel(arch)
         build_id = uuid4()

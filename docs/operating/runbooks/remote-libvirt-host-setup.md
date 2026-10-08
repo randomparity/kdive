@@ -107,6 +107,38 @@ also be unreachable from a remote guest. The worker rejects loopback endpoints b
 install/kdump transfer; it cannot establish that every other address has a working guest route.
 Verify routing and firewall rules for the actual guest-to-store path.
 
+### Docker forwarding
+
+Docker's iptables backend can set the IPv4 `FORWARD` policy to `DROP`. Libvirt's
+native nftables acceptance does not override a drop in that separate chain.
+Host-to-store success and guest SSH over the user-mode forward do not exercise
+the guest bridge's forwarding path.
+
+After firewall convergence, `site.yml` refuses the known-risk layout consisting
+of `FORWARD DROP`, only the unconditional `DOCKER-USER` then `DOCKER-FORWARD`
+jumps, and an empty `DOCKER-USER` chain (including a terminal `RETURN`). This is
+an actionable preflight, not automatic firewall repair. Even this signature can
+coexist with a custom downstream Docker allowance; the check does not interpret
+those chains. Other layouts and IPv6 are unverified, and later firewall changes
+can invalidate an earlier result. Setup success is not guest-egress evidence.
+
+Inspect the selected network with `virsh net-dumpxml NETWORK` and the rules with
+`iptables -S FORWARD` and `iptables -S DOCKER-USER`. The firewall administrator
+must configure an exception bounded to the selected guest bridge/subnet, the
+intended object-store address and TCP port, plus established return traffic.
+Preserve unrelated forwarding, management access, and the source restrictions on
+TLS and gdbstub ports. Do not globally accept forwarding or disable Docker's
+firewall management. Docker documents the
+[`DOCKER-USER` forwarding seam](https://docs.docker.com/engine/network/firewall-iptables/#allow-forwarding-between-host-interfaces).
+
+Persistence across Docker restarts and firewall reloads belongs to that
+administrator's configuration; KDIVE does not install or persist the exception.
+Rerun `site.yml`, then verify the actual guest-to-store path with a remote kernel
+install using the configured presigned endpoint. Follow the
+[remote live-stack procedure](remote-live-stack.md); retain the install result
+and owned-resource cleanup. A static check, a host request, or a missing probe
+cannot substitute for that live result.
+
 ### Optional: offer the base image's kernel config
 
 An image staged by Ansible does not automatically publish its `/boot/config-<version>` to KDIVE.
