@@ -342,7 +342,9 @@ class RemoteLibvirtModuleVolumeReaper:
                     clock=self._clock,
                 )
 
-            configs = self._connections.configs()
+            configs = [
+                config for config in self._connections.configs() if config.authority is not None
+            ]
             results = map_over_fleet(
                 self._connections,
                 reap_host,
