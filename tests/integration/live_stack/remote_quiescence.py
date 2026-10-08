@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import multiprocessing
 import select
 import shlex
 import subprocess  # noqa: S404 - fixed SSH protocol  # nosec B404
-import tempfile
 from contextlib import contextmanager
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -33,11 +33,14 @@ from kdive.providers.remote_libvirt.config import (
     remote_instance_names,
 )
 from kdive.providers.remote_libvirt.connection.transport import remote_connection
+from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings
+from tests.integration.live_stack.evidence import key_values
+from tests.integration.live_stack.image_smoke import os_matches
 from tests.integration.live_stack.remote_lifecycle import (
     REMOTE_REPRESENTATIVES,
     observer,
@@ -47,7 +50,6 @@ from tests.integration.live_stack.remote_lifecycle import (
     volume_sha256,
 )
 from tests.integration.live_stack.scenario import CellRun
-from tests.integration.live_stack.tool_cells import observe_guest
 
 # This fixed helper neither interprets commands nor writes host files. EOF and a
 # total deadline release the peer even if the owning test disappears.
@@ -278,7 +280,7 @@ async def configuration_for(db_url: str, system_id: str) -> RemoteCaptureConfigu
     )
 
 
-def verify_domain(configuration: RemoteCaptureConfiguration, domain: str, destination: str) -> None:
+def verify_domain(configuration: RemoteCaptureConfiguration, domain: str, destination: str) -> str:
     """Fail before the barrier if TLS and operator observation select different domains."""
     names = remote_instance_names()
     assert len(names) == 1, "expected exactly one configured remote instance"
@@ -292,6 +294,25 @@ def verify_domain(configuration: RemoteCaptureConfiguration, domain: str, destin
         assert selected.lookupByName(domain).UUIDString() == observed_uuid, (
             "TLS/observer domain mismatch"
         )
+    return hashlib.sha256(configuration.to_canonical_json() + observed_uuid.encode()).hexdigest()
+
+
+def guest_identity(configuration: RemoteCaptureConfiguration, domain: str) -> dict[str, str]:
+    """Read only native guest identity over the already selected Resource's agent."""
+    executor = GuestAgentExec(
+        agent_command=qemu_agent_command,
+        allowed_programs=frozenset({"/usr/bin/cat", "/usr/bin/uname"}),
+    )
+    with tls(configuration) as connection:
+        handle = connection.lookupByName(domain)
+        release = executor.run(handle, ["/usr/bin/cat", "/etc/os-release"])
+        arch = executor.run(handle, ["/usr/bin/uname", "-m"])
+    assert release.exit_status == arch.exit_status == 0, "guest identity command failed"
+    fields = key_values(release.stdout.decode())
+    fields["machine"] = arch.stdout.decode().strip()
+    image = REMOTE_REPRESENTATIVES["enterprise"]
+    assert os_matches(image, fields), "guest identity differs from bound catalog image"
+    return {"guest_os": f"{image.distro}:{image.version}", "guest_arch": image.arch}
 
 
 def cells() -> list[Cell]:
@@ -307,14 +328,12 @@ async def scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str)
     host = remote_host()
 
     async def body(op: LiveStackClient, system_id: str, _owned: list[str]) -> None:
-        with tempfile.TemporaryDirectory(prefix="remote-quiescence-") as directory:
-            await observe_guest(
-                run, op, system_id, Path(directory), REMOTE_REPRESENTATIVES["enterprise"]
-            )
         configuration = await configuration_for(db_url, system_id)
         domain = domain_name_for(UUID(system_id))
-        await asyncio.to_thread(verify_domain, configuration, domain, host.dest)
+        binding = await asyncio.to_thread(verify_domain, configuration, domain, host.dest)
+        run.observed |= await asyncio.to_thread(guest_identity, configuration, domain)
         result = await asyncio.to_thread(ordered, configuration, domain, host.dest)
+        result["resource_binding_sha256"] = binding
         for assertion in ("accepted-mutation", "client-terminated", "fresh-monitor-ordering"):
             run.prove(assertion, result)
 

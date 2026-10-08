@@ -490,8 +490,9 @@ The `live_vm_remote` carrier
 provisions an Enterprise Linux System over HTTP, then uses that System's actual
 Resource configuration for native libvirt TLS monitor clients. Export the normal
 live-stack environment, server database DSN, and `REMOTE_PROVIDER_SSH` operator
-observer destination. The staged Enterprise base image, guest SSH access and
-provider-side Python 3 are required. The normal three roles and clean test checkout
+observer destination. The staged Enterprise base image, its guest agent and provider-side Python 3
+are required. Guest identity is read through the existing constrained agent seam;
+no forwarded guest SSH port is needed. The normal three roles and clean test checkout
 must match the candidate commit.
 
 Before running the carrier, record the expected provider host and staged image:

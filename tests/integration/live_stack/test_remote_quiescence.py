@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import socket
 import sys
 from contextlib import contextmanager
@@ -245,3 +247,47 @@ def test_listener_closes_real_accepted_socket_on_release_or_controller_loss(
             socket.create_connection(("127.0.0.1", port), timeout=2)
     finally:
         barrier.close()
+
+
+@pytest.mark.parametrize("fault", [None, "distro", "arch", "exit"])
+def test_guest_identity_requires_actual_matching_agent_results(
+    monkeypatch: pytest.MonkeyPatch,
+    configuration: RemoteCaptureConfiguration,
+    fault: str | None,
+) -> None:
+    outputs = [
+        b"ID=debian\nVERSION_ID=13\n" if fault == "distro" else b"ID=rocky\nVERSION_ID=10.2\n",
+        b"ppc64le\n" if fault == "arch" else b"x86_64\n",
+    ]
+    programs = []
+
+    def agent(domain, raw, timeout, flags):  # noqa: ANN001, ANN202 - native agent boundary
+        command = json.loads(raw)
+        if command["execute"] == "guest-exec":
+            programs.append(command["arguments"]["path"])
+            return '{"return":{"pid":123}}'
+        return json.dumps(
+            {
+                "return": {
+                    "exited": True,
+                    "exitcode": 1 if fault == "exit" else 0,
+                    "out-data": base64.b64encode(outputs.pop(0)).decode(),
+                }
+            }
+        )
+
+    @contextmanager
+    def tls(_configuration):  # noqa: ANN001, ANN202 - native connection boundary
+        yield SimpleNamespace(lookupByName=lambda name: SimpleNamespace(name=lambda: name))
+
+    monkeypatch.setattr(proof, "tls", tls)
+    monkeypatch.setattr(proof, "qemu_agent_command", agent)
+    if fault is None:
+        assert proof.guest_identity(configuration, "owned-domain") == {
+            "guest_os": "rocky:10",
+            "guest_arch": "x86_64",
+        }
+    else:
+        with pytest.raises(AssertionError):
+            proof.guest_identity(configuration, "owned-domain")
+    assert programs == ["/usr/bin/cat", "/usr/bin/uname"]

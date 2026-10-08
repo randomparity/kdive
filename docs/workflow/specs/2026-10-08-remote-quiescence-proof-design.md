@@ -202,3 +202,8 @@ and complete member validation remain required.
 These corrections are prerequisites of this proof. Related native-call defects
 in remote traffic capture/reaping and debug transport reset remain with #3116
 and #3113 respectively; this change does not replace those planes.
+
+Guest identity uses the existing constrained guest-agent executor on that same
+Resource's TLS domain: fixed `cat /etc/os-release` and `uname -m` commands. Their
+exit status and observed distro, version and architecture must match the bound
+catalog image. This observation does not require forwarded guest SSH ports.
