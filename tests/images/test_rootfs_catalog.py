@@ -148,7 +148,7 @@ def test_suse_rows_pin_versioned_cloud_images() -> None:
     leap = cat["opensuse-leap-kdive-ready-15.6"].source
     assert isinstance(tumbleweed, CloudImageSource)
     assert isinstance(leap, CloudImageSource)
-    assert "Snapshot20260919" in tumbleweed.url
+    assert "Snapshot20261005" in tumbleweed.url
     assert "Build19.146" in leap.url
     assert tumbleweed.url.endswith(".qcow2") and leap.url.endswith(".qcow2")
     assert "Minimal-VM.x86_64" in tumbleweed.url
