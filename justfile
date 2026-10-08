@@ -573,6 +573,7 @@ test-ansible:
     TIMEFORMAT='run-external-boot-recovery-root.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-external-boot-recovery-root.sh
     TIMEFORMAT='run-local-worker-host.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-worker-host.py
     TIMEFORMAT='run-local-libvirt-host.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-libvirt-host.py
+    TIMEFORMAT='run-remote-egress-preflight.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-remote-egress-preflight.py
 
 # Lint and security-scan the GitHub Actions workflows.
 # actionlint-py bundles a prebuilt actionlint and upstream ships no ppc64le binary, so its
