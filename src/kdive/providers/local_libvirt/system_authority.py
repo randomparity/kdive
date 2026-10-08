@@ -209,7 +209,11 @@ class _Intent:
 
 @dataclass(frozen=True, slots=True)
 class _Completion:
-    """Private path-free receipt that makes one terminal authority observation replayable."""
+    """Private path-free receipt that makes one terminal authority observation replayable.
+
+    It is keyed by System and operation and replays for every later attempt generation; its
+    ``operation_digest`` records the generation that wrote it.
+    """
 
     system_id: UUID
     operation: AuthoritySystemOperation
@@ -378,9 +382,13 @@ class LocalAuthoritySystemProvider:
             self._reject_unowned_retained_artifacts(request.system_id)
             intent = self._candidate_intent(request, snapshot)
         self._require_matching_intent(intent, request, snapshot)
+        if self._verify_retained_provision_identity(intent):
+            # A later generation resumes a retained domain by observation: provisioning again
+            # would truncate the console log the readiness probe reads.
+            facts = self._provision_facts(intent)
+            return self._complete_provision_facts(intent, request, facts, create=True)
         if intent.deadline <= self._utc_now():
             raise LocalAuthoritySystemError("local authority provision deadline expired")
-        self._verify_retained_provision_identity(intent)
         self._provisioner.provision(
             request.system_id,
             snapshot.profile,
@@ -461,8 +469,6 @@ class LocalAuthoritySystemProvider:
                     completed_at=self._utc_now(),
                 )
             )
-        if completion.operation_digest != request.operation_digest:
-            raise LocalAuthoritySystemError("local authority completion does not match the request")
         self._remove_intent(intent)
         return self._absence_facts(
             request,
@@ -609,14 +615,17 @@ class LocalAuthoritySystemProvider:
             xml_digest=owned_system_semantic_identity(xml, intent.system_id, intent.overlay),
         )
 
-    def _verify_retained_provision_identity(self, intent: _Intent) -> None:
-        """Fence retries on the exact retained domain definition and no-alias private storage."""
+    def _verify_retained_provision_identity(self, intent: _Intent) -> bool:
+        """Fence retries on the exact retained domain definition and no-alias private storage.
+
+        Returns whether the retained domain is present.
+        """
         session = self._open_teardown(intent.system_id, intent.overlay, intent.baseline)
         try:
             inspection = session.inspect()
             if inspection.domain_absent:
                 self._require_retained_storage_is_safe(intent)
-                return
+                return False
             if not inspection.domain_validated or intent.xml_digest is None:
                 raise LocalAuthoritySystemError(
                     "retained local authority domain lacks exact intent"
@@ -634,6 +643,7 @@ class LocalAuthoritySystemProvider:
                 )
         finally:
             session.close()
+        return True
 
     def _complete_provision_facts(
         self,
@@ -657,8 +667,6 @@ class LocalAuthoritySystemProvider:
             )
         if completion is None:
             return facts
-        if completion.operation_digest != request.operation_digest:
-            raise LocalAuthoritySystemError("local authority completion does not match the request")
         return AuthoritySystemProvisionFacts(
             intent_identity=intent.identity,
             domain_owned=True,
@@ -731,8 +739,6 @@ class LocalAuthoritySystemProvider:
         completion = self._load_completion(request.system_id, request.operation)
         if completion is None:
             return None
-        if completion.operation_digest != request.operation_digest:
-            raise LocalAuthoritySystemError("local authority completion does not match the request")
         return completion.completed_at
 
     def _load_completion(
@@ -925,6 +931,11 @@ class LocalAuthoritySystemProvider:
         request: AuthoritySystemMutationRequestV1,
         snapshot: AuthoritySystemProvisionSnapshot,
     ) -> None:
+        """Bind the intent to its System subject, never to one attempt generation.
+
+        Migration 0149 gives each generation a new ``operation_digest``; the authority service
+        authenticates it before this provider runs, so a later generation resumes this intent.
+        """
         if (
             intent.system_id != request.system_id
             or intent.allocation_id != request.allocation_id
@@ -932,7 +943,6 @@ class LocalAuthoritySystemProvider:
             or intent.authority_instance != request.authority_instance
             or intent.root_identity != snapshot.root_identity
             or intent.bootstrap_identity != snapshot.bootstrap_identity
-            or intent.operation_digest != request.operation_digest
         ):
             raise LocalAuthoritySystemError("local authority intent does not match the request")
 
