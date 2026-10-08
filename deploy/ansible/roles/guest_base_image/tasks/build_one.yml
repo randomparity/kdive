@@ -274,15 +274,16 @@
           echo 'kdive: unfamiliar Ubuntu SSH prechecks; rebuild from a clean supported image' >&2
           exit 1
         fi
-        for dropin in /etc/systemd/system/ssh.service.d/*.conf \
-            /run/systemd/system/ssh.service.d/*.conf /usr/lib/systemd/system/ssh.service.d/*.conf; do
-          if [ -e "$dropin" ] || [ -L "$dropin" ]; then
-            if [ "$dropin" != /etc/systemd/system/ssh.service.d/50-kdive-host-keys.conf ] || [ -L "$dropin" ] ||
-                ! cmp -s "$dropin" /tmp/kdive-ubuntu-ssh-host-keys.conf; then
-              echo 'kdive: foreign Ubuntu SSH drop-in; rebuild from a clean supported image' >&2
-              exit 1
+        for unit_root in /etc/systemd/system /run/systemd/system /usr/lib/systemd/system; do
+          for dropin in "$unit_root"/ssh.service.d/*.conf "$unit_root"/sshd.service.d/*.conf "$unit_root"/service.d/*.conf; do
+            if [ -e "$dropin" ] || [ -L "$dropin" ]; then
+              if [ "$dropin" != /etc/systemd/system/ssh.service.d/50-kdive-host-keys.conf ] || [ -L "$dropin" ] ||
+                  ! cmp -s "$dropin" /tmp/kdive-ubuntu-ssh-host-keys.conf; then
+                echo 'kdive: foreign Ubuntu SSH drop-in; rebuild from a clean supported image' >&2
+                exit 1
+              fi
             fi
-          fi
+          done
         done
         install -d -o root -g root -m 0755 /etc/systemd/system/ssh.service.d
         install -o root -g root -m 0644 /tmp/kdive-ubuntu-ssh-host-keys.conf /etc/systemd/system/ssh.service.d/50-kdive-host-keys.conf

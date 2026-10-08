@@ -348,3 +348,17 @@ def test_key_generation_precedes_validation_and_failure_stops_start(tmp_path, fa
     assert record.read_text().splitlines() == (
         ["ssh-keygen -A"] if fail else ["ssh-keygen -A", "sshd -t"]
     )
+
+
+@pytest.mark.parametrize("directory", ["service.d", "sshd.service.d"])
+@pytest.mark.parametrize("search_root", ["etc", "run", "usr/lib"])
+def test_role_refuses_effective_alias_and_service_wide_prechecks(tmp_path, directory, search_root):
+    root, command, env, _ = _prepare_image(tmp_path)
+    foreign = root / search_root / "systemd/system" / directory / "10-vendor-precheck.conf"
+    foreign.parent.mkdir(parents=True)
+    original = b"[Service]\nExecStartPre=/usr/bin/vendor-check\n"
+    foreign.write_bytes(original)
+    proc = subprocess.run(["/bin/sh", "-c", command], env=env, capture_output=True, text=True)
+    assert proc.returncode != 0 and "SSH" in proc.stderr
+    assert foreign.read_bytes() == original
+    assert not (root / "etc/systemd/system/ssh.service.d/50-kdive-host-keys.conf").exists()
