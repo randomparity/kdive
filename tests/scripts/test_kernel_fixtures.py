@@ -422,6 +422,7 @@ def test_failed_compilation_never_writes_manifest(tmp_path: Path, monkeypatch) -
         ("x86_64", True, ""),
         ("x86_64", False, "FW_CFG_SYSFS"),
         ("x86_64", False, "EROFS_FS"),
+        ("x86_64", False, "EROFS_FS_ZIP_LZMA"),
         ("x86_64", False, "OVERLAY_FS"),
     ],
 )
@@ -435,8 +436,8 @@ def test_default_capture_input_preserves_arch_and_custom_policy(
     if custom:
         config = tmp_path / "custom.config"
         config.write_text(
-            fixture.CONFIG.read_text()
-            + "CONFIG_FW_CFG_SYSFS=n\nCONFIG_EROFS_FS=n\nCONFIG_OVERLAY_FS=n\n"
+            fixture.CONFIG.read_text() + "CONFIG_FW_CFG_SYSFS=n\nCONFIG_EROFS_FS=n\n"
+            "CONFIG_EROFS_FS_ZIP_LZMA=n\nCONFIG_OVERLAY_FS=n\n"
         )
 
     def command(argv, **kwargs):
@@ -464,7 +465,10 @@ def test_default_capture_input_preserves_arch_and_custom_policy(
         )
     expected = config.read_text()
     if arch == "x86_64" and not custom:
-        expected += "CONFIG_FW_CFG_SYSFS=y\nCONFIG_EROFS_FS=y\nCONFIG_OVERLAY_FS=y\n"
+        expected += (
+            "CONFIG_FW_CFG_SYSFS=y\nCONFIG_EROFS_FS=y\n"
+            "CONFIG_EROFS_FS_ZIP_LZMA=y\nCONFIG_OVERLAY_FS=y\n"
+        )
     assert (output / "input.config").read_text() == expected
     if not dropped:
         missing = unmet_clauses(

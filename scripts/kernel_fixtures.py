@@ -237,7 +237,10 @@ def build(
     fragment = config.read_text()
     # x86 capture needs fw_cfg; RHEL dracut also needs erofs and overlay to arm kdump.
     if arch == "x86_64" and config == CONFIG.resolve():
-        fragment += "CONFIG_FW_CFG_SYSFS=y\nCONFIG_EROFS_FS=y\nCONFIG_OVERLAY_FS=y\n"
+        fragment += (
+            "CONFIG_FW_CFG_SYSFS=y\nCONFIG_EROFS_FS=y\n"
+            "CONFIG_EROFS_FS_ZIP_LZMA=y\nCONFIG_OVERLAY_FS=y\n"
+        )
     toolchain = toolchain_identity()
     env = {
         k: v

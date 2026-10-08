@@ -90,3 +90,12 @@ same default-x86 branch. Preserve custom fragments and POWER defaults. Extend th
 existing selection test and dropped-option cases; rebuild both fresh outputs and
 rerun actual capture. Do not add unobserved SQUASHFS/XFS requirements or alter
 upload policy. Preserve all earlier build identities and failed capture evidence.
+
+The next rerun armed and booted the capture kernel, but its EROFS initramfs mount
+failed with `algorithm 1 isn't enabled on this kernel`. The pinned longterm source
+identifies algorithm 1 as LZMA and guards that decoder with `EROFS_FS_ZIP_LZMA`;
+the observed dracut command uses `--squash-compressor lzma`. Include
+`CONFIG_EROFS_FS_ZIP_LZMA=y` in the same default-x86 assembly to make the approved
+EROFS support usable for that actual initramfs. Kconfig selects its XZ decoder
+dependencies. Preserve the failed capture-kernel boot evidence and repeat both
+fresh builds and capture before consuming the one remaining final review.
