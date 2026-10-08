@@ -123,15 +123,19 @@ into `boot_throwaway_domain(mode=…)`.
 - **Daemon layout follows the host distro.** The supported Debian/Ubuntu lifecycle host
   uses monolithic `libvirtd`; Red Hat-family hosts use modular `virtqemud`. Use the
   endpoint published by host provisioning rather than assuming either layout.
-- **Guest confinement is named per environment.** Under **system mode** on the
-  RHEL-family self-hosted runner, staged images must be relabeled SELinux
-  `virt_image_t`; under system mode on an Ubuntu host, AppArmor's `libvirt-qemu`
-  profile applies. **Session mode still confines the domain** — qemu runs as
-  `svirt_t` with its own MCS categories — but the unprivileged daemon performs no
-  image *relabel*, so the static label on the image tree has to be one `svirt_t`
-  can use: `svirt_image_t`
+- **Guest confinement is named per environment.** On SELinux hosts, staged images
+  use `virt_image_t` in system mode and `svirt_image_t` in session mode. SELinux
+  session guests run as `svirt_t` with per-domain MCS categories, but the
+  unprivileged daemon performs no image relabel
   ([ADR-0640](../../adr/0640-static-svirt-image-label-for-session-mode-domains.md)).
-  A session-mode tier sidesteps the relabel, not sVirt.
+  On the supported Ubuntu AppArmor session deployment, the daemon's enforcing
+  profile does **not** confine its QEMU guests: capabilities report `none` and
+  guests run `unconfined`. The system endpoint advertises AppArmor capability;
+  that observation is not a system-mode guest proof or permission to switch
+  endpoints. [ADR-0741](../../adr/0741-apparmor-session-confinement-posture.md)
+  accepts this documented session limitation without changing daemon ownership.
+  The required host-install confinement assertion still fails for unconfined
+  guests; this posture does not qualify the Debian cell or release 0.5.0.
 - **Guest image and matching debuginfo** are staged at a known location and kept
   warm between runs on the self-hosted host.
 
@@ -1535,9 +1539,9 @@ experiment's workers and logs, not the current slot identity contract.
   [platform support](../platform-support.md) for why the project's `uv` dependency set does not
   supply the binding.
 - **Staged images need the right label on an SELinux host** — `virt_image_t` under
-  system mode, `svirt_image_t` under session mode (ADR-0640), or the
-  `libvirt-qemu` AppArmor profile on Ubuntu — and the rootfs's parent dir must be
-  writable, because the boot stages an overlay beside it.
+  system mode, `svirt_image_t` under session mode (ADR-0640). Ubuntu session guests
+  have no per-domain AppArmor confinement (ADR-0741). The rootfs's parent dir must
+  be writable, because the boot stages an overlay beside it.
 - **`pytest -m live_vm` selects all four families.** If you run a nightly for
   only one, declare which families you intend to run and let the fail-loud gate
   catch a missing declared family, rather than skipping to green.

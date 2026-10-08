@@ -34,8 +34,8 @@
   changed_when: false
 
 # Part 2: the delta check-local-libvirt.sh does not cover. On the Ubuntu target there is no
-# static disk label to assert (AppArmor/virt-aa-helper permits each domain's disk paths
-# dynamically), so the gate verifies group membership and the short XDG_RUNTIME_DIR directly.
+# static disk label to assert; session guests lack per-domain AppArmor confinement
+# (ADR-0741). Group/runtime checks below do not prove guest confinement.
 - name: Assert the service account is in kvm and libvirt
   ansible.builtin.command: "id -nG {{ live_vm_host_operator_user }}"
   register: live_vm_host_groups
