@@ -222,3 +222,12 @@ Use `playbooks/image.yml` to rebuild and stage its native helpers and Wicked pol
 existing guests are not migrated. Competing network configuration is refused.
 The native helper/network contract and failure diagnostics are in the
 [guest-helper guide](../remote-libvirt-guest-helpers/README.md#suse-leap-installation-and-networking).
+
+The pinned Leap15.6 cloud image is prepared in a fresh build work directory:
+its checksum-verified `.source` file remains read-only, while native `virt-resize`
+expands the third XFS partition into a new10 GiB qcow2 before package installation.
+The role requires12 GiB host free space and native XFS expansion support, checks
+partition starts, boot content and root identities, and promotes only verified output.
+A partial `.growing` or existing customization file is retained and refused on retry;
+select a fresh `guest_base_image_build_workdir`, preserving the failed artifacts.
+Other cloud image rows retain their existing preparation. See ADR-0767.

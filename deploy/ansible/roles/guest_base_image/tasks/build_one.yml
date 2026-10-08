@@ -62,11 +62,119 @@
   ansible.builtin.get_url:
     url: "{{ image.cloud_image_url }}"
     checksum: "{{ image.cloud_image_checksum | default(omit) }}"
-    dest: "{{ guest_base_image_qcow2 }}"
-    mode: "0644"
+    dest: >-
+      {{ guest_base_image_qcow2 ~ '.source'
+         if image.name == 'opensuse-leap-15.6-kdive-remote-base'
+         else guest_base_image_qcow2 }}
+    mode: "{{ '0444' if image.name == 'opensuse-leap-15.6-kdive-remote-base' else '0644' }}"
   when:
     - image.source == 'cloud-image'
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+
+- name: Grow the pinned Leap root into a fresh bounded image
+  ansible.builtin.command: # noqa: command-instead-of-module
+    # Native offline expansion has no Ansible module; checks gate promotion.
+    argv:
+      - python3
+      - -c
+      - |
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import re
+        import shutil
+        import stat
+        import subprocess
+        import sys
+
+        source, destination = map(Path, sys.argv[1:])
+        output = Path(str(destination) + '.growing')
+        expected = '0a5720416d423f98aacaa793a57d56ec045e3dd25cd88713952660ad00da53bd'
+
+
+        def require(condition, message):
+            if not condition:
+                raise ValueError('kdive Leap growth: ' + message)
+
+
+        def run(*args):
+            return subprocess.check_output(args, universal_newlines=True)
+
+
+        def digest(path):
+            value = hashlib.sha256()
+            with path.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    value.update(chunk)
+            return value.hexdigest()
+
+
+        def info(path):
+            value = json.loads(run('qemu-img', 'info', '--output=json', str(path)))
+            require(value['format'] == 'qcow2' and not value.get('backing-filename'),
+                    'expected standalone qcow2')
+            return value['virtual-size']
+
+
+        def snapshot(path):
+            text = run('guestfish', '--ro', '-a', str(path), 'run', ':', 'part-list', '/dev/sda',
+                       ':', 'echo', 'KDIVE_METADATA', ':', 'part-get-parttype', '/dev/sda',
+                       ':', 'vfs-type', '/dev/sda2', ':', 'vfs-type', '/dev/sda3',
+                       ':', 'vfs-uuid', '/dev/sda3', ':', 'part-get-gpt-guid', '/dev/sda', '3',
+                       ':', 'checksum-device', 'sha256', '/dev/sda1',
+                       ':', 'checksum-device', 'sha256', '/dev/sda2', ':', 'echo', 'KDIVE_SPACE',
+                       ':', 'mount-ro', '/dev/sda3', '/', ':', 'statvfs', '/')
+            parts, rest = text.split('KDIVE_METADATA\n')
+            metadata, space = rest.split('KDIVE_SPACE\n')
+            values = [int(v) for v in re.findall(r'part_(?:num|start|end|size): (\d+)', parts)]
+            identities = metadata.splitlines()
+            require(len(values) == 12 and len(identities) == 7, 'unexpected partition metadata')
+            require(identities[:3] == ['gpt', 'vfat', 'xfs'] and all(identities),
+                    'expected pinned GPT/EFI/XFS identity')
+            sizes = dict(re.findall(r'^(bsize|bavail): (\d+)$', space, re.M))
+            return values, identities, int(sizes['bsize']) * int(sizes['bavail'])
+
+
+        require(source.parent == destination.parent and source != destination,
+                'source/output must be distinct in one owned work directory')
+        require(source.parent.resolve() == source.parent and source.parent.stat().st_uid == os.geteuid()
+                and not source.parent.stat().st_mode & 0o022, 'untrusted work directory')
+        require(not source.is_symlink() and stat.S_ISREG(source.stat().st_mode)
+                and source.stat().st_uid == os.geteuid(), 'source must be owned regular non-symlink')
+        require(not os.path.lexists(destination) and not os.path.lexists(output),
+                'output exists; preserve evidence and select a fresh work directory')
+        require(digest(source) == expected, 'source checksum mismatch')
+        require(shutil.disk_usage(source.parent).free >= 12 * 1024**3, 'need 12 GiB free host space')
+        require('xfs' in run('virt-resize', '--machine-readable').splitlines(),
+                'native virt-resize lacks XFS expansion capability')
+        require(info(source) == 879755264, 'unexpected source virtual size')
+        before, identity, _ = snapshot(source)
+        require(before == [1,1048576,3145727,2097152,2,3145728,37748735,34603008,
+                           3,37748736,879738367,841989632], 'unexpected pinned partition layout')
+        source.chmod(0o444)
+        subprocess.check_call(['qemu-img', 'create', '-f', 'qcow2', str(output), '10G'])
+        subprocess.check_call(['virt-resize', '--format', 'qcow2', '--output-format', 'qcow2',
+                               '--align-first', 'never', '--expand', '/dev/sda3',
+                               '--unknown-filesystems', 'error', str(source), str(output)])
+        require(digest(source) == expected, 'source changed during expansion')
+        require(info(output) == 10737418240, 'unexpected output virtual size')
+        after, new_identity, free = snapshot(output)
+        require(after[:10] == before[:10] and after[10] > before[10]
+                and after[11] == after[10] - after[9] + 1, 'partition preservation/expansion failed')
+        require(new_identity == identity, 'boot contents or root identity changed')
+        require(free >= 8 * 1024**3, 'expanded root needs 8 GiB free before package refresh')
+        require(not os.path.lexists(destination), 'customization destination appeared')
+        output.rename(destination)
+        print(json.dumps({'source_sha256': expected, 'output_sha256': digest(destination),
+                          'before': before, 'after': after, 'identity': identity, 'root_free_bytes': free}))
+      - "{{ guest_base_image_qcow2 }}.source"
+      - "{{ guest_base_image_qcow2 }}"
+  when:
+    - image.name == 'opensuse-leap-15.6-kdive-remote-base'
+    - image.source == 'cloud-image'
+    - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
 
 - name: Customize the cloud image (packages + services) for {{ image.name }}
   ansible.builtin.command:  # noqa: command-instead-of-module
