@@ -62,6 +62,21 @@ dev_install_archive() (
   install -m 0755 "${temporary}/${member}" "${dev_bin}/${tool}"
 )
 
+dev_install_shfmt() (
+  set -euo pipefail
+  local private_bin binary
+  mkdir -p "$1"
+  private_bin="$(cd -- "$1" && pwd -P)"
+  binary="${private_bin}/shfmt"
+  if [[ ! -x "${binary}" ]] || [[ "$("${binary}" --version)" != v3.13.1 ]]; then
+    GOBIN="${private_bin}" GOTOOLCHAIN=auto go install mvdan.cc/sh/v3/cmd/shfmt@v3.13.1
+  fi
+  if [[ "$("${binary}" --version)" != v3.13.1 ]]; then
+    printf 'Installed checkout-local shfmt is not v3.13.1; inspect the Go build and rerun just setup.\n' >&2
+    exit 1
+  fi
+)
+
 dev_install_go_tool() {
   local tool="$1" module="$2" version="$3" ldflags="${4:-}" selected info
   selected="$(command -v "${tool}" || true)"
@@ -163,7 +178,7 @@ install_developer_dependencies() {
       cabal install ShellCheck-0.11.0 --installdir="${dev_bin}" --install-method=copy --overwrite-policy=always
     fi
   fi
-  dev_install_go_tool shfmt mvdan.cc/sh/v3/cmd/shfmt v3.13.1
+  dev_install_shfmt "${setup_scripts}/../build/dev-tools/bin"
   dev_install_go_tool actionlint github.com/rhysd/actionlint/cmd/actionlint v1.7.12
   dev_install_helm
   dev_install_go_tool gitleaks github.com/zricethezav/gitleaks/v8 v8.30.1

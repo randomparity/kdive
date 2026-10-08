@@ -72,6 +72,10 @@ dev_install_archive() {{
     printf '#!/bin/sh\\necho version: 0.11.0\\n' > "$TEST_BIN/shellcheck"
   fi
 }}
+dev_install_shfmt() {{
+  printf 'go shfmt %s\\n' "$*" >> "$TEST_LOG"
+  [[ "$TEST_FAILURE" != go ]]
+}}
 dev_install_go_tool() {{
   printf 'go %s\\n' "$*" >> "$TEST_LOG"
   [[ "$TEST_FAILURE" != go ]]
@@ -232,3 +236,159 @@ def test_helm_rebuilds_matching_version_without_release_flags(tmp_path: Path) ->
     for package in ("pkg/lint/rules", "pkg/chartutil"):
         assert f"{package}.k8sVersionMajor=1" in flags
         assert f"{package}.k8sVersionMinor=35" in flags
+
+
+@pytest.mark.parametrize(
+    ("private", "ambient", "expected"),
+    [
+        ("v3.13.1", "v3.14.1", 7),
+        (None, "v3.13.1", 7),
+        (None, "v3.14.1", 1),
+        (None, None, 1),
+        ("v3.14.1", "v3.13.1", 1),
+        ("nonexecutable", "v3.13.1", 1),
+        ("dangling", "v3.13.1", 1),
+        ("broken", "v3.13.1", 1),
+    ],
+)
+def test_shfmt_selection_and_forwarding(
+    tmp_path: Path, private: str | None, ambient: str | None, expected: int
+) -> None:
+    import shutil
+
+    root = tmp_path / "checkout with spaces"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy2(_ROOT / "scripts/shfmt.sh", scripts / "shfmt.sh")
+    bindir = tmp_path / "ambient"
+    bindir.mkdir()
+    (bindir / "bash").symlink_to("/bin/bash")
+    for path, version in [
+        (root / "build/dev-tools/bin/shfmt", private),
+        (bindir / "shfmt", ambient),
+    ]:
+        if version is None:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if version == "dangling":
+            path.symlink_to("absent")
+        else:
+            _stub(
+                path,
+                f'if [[ "$1" == --version ]]; then echo {version}; exit; fi\n'
+                'printf "%s\\n" "$@"\nexit 7\n',
+            )
+            if version == "nonexecutable":
+                path.chmod(0o644)
+            elif version == "broken":
+                _stub(path, "exit 9\n")
+    result = subprocess.run(
+        [str(scripts / "shfmt.sh"), "argument with spaces", "-d"],
+        env={**os.environ, "PATH": str(bindir)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == expected, result.stderr
+    if expected == 7:
+        assert result.stdout.splitlines() == ["argument with spaces", "-d"]
+    else:
+        assert "run just setup" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "initial,failure", [(None, ""), ("v3.14.1", ""), (None, "go"), (None, "version")]
+)
+def test_private_shfmt_install_preserves_host_and_reuses_exact_pin(
+    tmp_path: Path, initial: str | None, failure: str
+) -> None:
+    shared = tmp_path / "user-bin"
+    system = tmp_path / "system-bin"
+    private = tmp_path / "checkout with spaces/build/dev-tools/bin"
+    for path in (shared, system, private):
+        path.mkdir(parents=True)
+    _stub(system / "shfmt", "echo v3.14.1\n")
+    original = (system / "shfmt").read_bytes()
+    if initial:
+        _stub(private / "shfmt", f"echo {initial}\n")
+    log = tmp_path / "go.log"
+    _stub(
+        system / "go",
+        """
+[[ "$*" == 'install mvdan.cc/sh/v3/cmd/shfmt@v3.13.1' ]]
+echo install >> "$TEST_LOG"
+[[ "$TEST_FAILURE" != go ]]
+version=v3.13.1
+[[ "$TEST_FAILURE" != version ]] || version=v3.14.1
+printf '#!/bin/bash\necho %s\n' "$version" > "$GOBIN/shfmt"
+chmod +x "$GOBIN/shfmt"
+""",
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-euo",
+            "pipefail",
+            "-c",
+            'source "$1"; dev_install_shfmt "$2"; dev_install_shfmt "$2"; command -v shfmt',
+            "test",
+            str(_LIBRARY),
+            str(private),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{shared}:{system}:/usr/bin:/bin",
+            "TEST_LOG": str(log),
+            "TEST_FAILURE": failure,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert (system / "shfmt").read_bytes() == original
+    assert not (shared / "shfmt").exists()
+    if failure:
+        assert result.returncode != 0
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(system / "shfmt")
+        assert (
+            subprocess.check_output([str(private / "shfmt"), "--version"], text=True).strip()
+            == "v3.13.1"
+        )
+        assert log.read_text().splitlines() == ["install"]
+
+
+def test_lint_shell_dispatches_both_formatter_invocations(tmp_path: Path) -> None:
+    import shutil
+
+    just = shutil.which("just")
+    assert just is not None
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copy2(_ROOT / "scripts/shfmt.sh", scripts / "shfmt.sh")
+    shutil.copy2(_ROOT / "justfile", tmp_path / "justfile")
+    private = tmp_path / "build/dev-tools/bin"
+    private.mkdir(parents=True)
+    log = tmp_path / "calls"
+    _stub(
+        private / "shfmt",
+        'if [[ "$1" == --version ]]; then echo v3.13.1; exit; fi\n'
+        'printf "%s\\n" "$*" >> "$TEST_LOG"\n',
+    )
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    _stub(ambient / "shfmt", "exit 99\n")
+    _stub(ambient / "shellcheck", "exit 0\n")
+    result = subprocess.run(
+        [just, "--justfile", str(tmp_path / "justfile"), "lint-shell"],
+        env={**os.environ, "PATH": f"{ambient}:{os.environ['PATH']}", "TEST_LOG": str(log)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines()
+    assert len(calls) == 2
+    assert calls[0].startswith("-f scripts deploy/compose ")
+    assert calls[1].startswith("-i 2 -d scripts deploy/compose ")
