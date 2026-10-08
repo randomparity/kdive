@@ -264,10 +264,11 @@ def check_rescue(root, variables, env):
         )
     )
     selected = variables | {"provider_authority_host_enabled": False}
-    for failure, phase in (
-        ("package", "Protected-port firewall convergence"),
-        ("", "Disabled provider authority cleanup"),
-    ):
+    failures = ["package"]
+    if variables["ansible_facts"]["os_family"] == "RedHat":
+        failures.extend(["management", "systemd_service"])
+    cases = [(failure, "Protected-port firewall convergence") for failure in failures]
+    for failure, phase in [*cases, ("", "Disabled provider authority cleanup")]:
         reset_backend(root)
         output = play(str(path), selected, env | {"FAIL_BACKEND": failure}, passes=False)
         assert phase + " failed;" in output, output
