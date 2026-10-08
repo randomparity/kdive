@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from unittest.mock import create_autospec
 from uuid import UUID, uuid4
 
 import libvirt
+import libvirt_qemu
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -21,6 +23,78 @@ from kdive.providers.remote_libvirt.lifecycle.capture_operation import (
 from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 
 _PCAP_HEADER = b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00" + b"\x00" * 16
+
+
+def test_quiescence_uses_native_monitor_and_native_reply_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    domain = create_autospec(libvirt.virDomain, instance=True, spec_set=True)
+    connection = _Connection(domain)
+    commands: list[dict[str, object]] = []
+
+    def native_monitor(handle: object, raw: str, flags: int) -> str:
+        assert handle is domain and flags == 0
+        command = json.loads(raw)
+        assert "id" not in command, "libvirt owns the QMP request id"
+        commands.append(command)
+        reply: dict[str, object] = {"id": f"libvirt-{len(commands)}"}
+        if command["execute"] == "object-del":
+            reply["error"] = {"class": "GenericError", "desc": "object 'kdive-dump-job' not found"}
+        else:
+            reply["return"] = []
+        return json.dumps(reply)
+
+    monkeypatch.setattr(libvirt_qemu, "qemuMonitorCommand", native_monitor)
+    resource = uuid4()
+    result = RemoteLibvirtCaptureQuiescence(
+        resource_id=resource, connection=lambda: _ConnectionContext(connection)
+    ).prove_absent(resource, "kdive-remote", "kdive-dump-job")
+    assert result.resource_id == resource and result.result == "absent"
+    assert [command["execute"] for command in commands] == ["object-del", "qom-list"]
+    assert connection.closed
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {},
+        {"id": "", "return": []},
+        {"id": 7, "return": []},
+        {"id": "native", "error": {"class": "GenericError", "desc": "other not found"}},
+        {"id": "native", "error": {"class": "DeviceNotFound", "desc": "not found"}},
+        {"id": "native", "error": {"class": "GenericError", "desc": "object 'other' not found"}},
+        {
+            "id": "native",
+            "error": {"class": "GenericError", "desc": "object 'kdive-dump-job' not found"},
+            "return": [],
+        },
+    ],
+)
+def test_native_detach_rejects_uncorrelated_or_other_errors(reply: dict[str, object]) -> None:
+    resource = uuid4()
+    connection = _Connection(_Domain())
+    probe = RemoteLibvirtCaptureQuiescence(
+        resource_id=resource,
+        connection=lambda: _ConnectionContext(connection),
+        monitor=lambda _domain, _raw, _flags: json.dumps(reply),
+    )
+    with pytest.raises(CategorizedError):
+        probe.prove_absent(resource, "kdive-remote", "kdive-dump-job")
+    assert connection.closed
+
+
+def test_native_detach_does_not_accept_transport_not_found() -> None:
+    def failed(_domain: object, _raw: str, _flags: int) -> str:
+        raise libvirt.libvirtError("domain not found")
+
+    resource = uuid4()
+    probe = RemoteLibvirtCaptureQuiescence(
+        resource_id=resource,
+        connection=lambda: _ConnectionContext(_Connection(_Domain())),
+        monitor=failed,
+    )
+    with pytest.raises(CategorizedError, match="detach failed"):
+        probe.prove_absent(resource, "kdive-remote", "kdive-dump-job")
 
 
 def _request() -> CaptureRequest:
@@ -181,7 +255,15 @@ class _Domain:
         command = json.loads(raw)
         self.commands.append(command)
         if command["execute"] == "object-del":
-            raise libvirt.libvirtError("object not found")
+            return json.dumps(
+                {
+                    "id": "native-detach",
+                    "error": {
+                        "class": "GenericError",
+                        "desc": f"object '{command['arguments']['id']}' not found",
+                    },
+                }
+            )
         returned_members = (
             [{"name": "kdive-dump-job", "type": "child<filter-dump>"}]
             if self.present
@@ -189,8 +271,13 @@ class _Domain:
         )
         response: dict[str, object] = {"return": returned_members}
         if not self.unordered:
-            response["id"] = command["id"]
+            response["id"] = "native-query"
         return json.dumps(response)
+
+
+def _monitor(domain: object, raw: str, flags: int) -> str:
+    assert isinstance(domain, _Domain)
+    return domain.qemuMonitorCommand(raw, flags)
 
 
 class _Connection:
@@ -230,6 +317,7 @@ def test_remote_quiescence_opens_independent_resource_bound_tls_connection() -> 
     evidence = RemoteLibvirtCaptureQuiescence(
         resource_id=resource_id,
         connection=connection,
+        monitor=_monitor,
     ).prove_absent(resource_id, "kdive-remote", "kdive-dump-job")
 
     assert len(connections) == 1
@@ -263,6 +351,7 @@ def test_remote_quiescence_rejects_malformed_qom_members(members: list[object]) 
     probe = RemoteLibvirtCaptureQuiescence(
         resource_id=resource_id,
         connection=lambda: _ConnectionContext(_Connection(domain)),
+        monitor=_monitor,
     )
 
     with pytest.raises(CategorizedError, match="inconclusive shape"):
@@ -280,9 +369,17 @@ def test_remote_fresh_probe_waits_for_prior_accepted_monitor_mutation() -> None:
         def qemuMonitorCommand(self, raw: str, flags: int) -> str:  # noqa: N802
             command = json.loads(raw)
             if command["execute"] == "object-del":
-                raise libvirt.libvirtError("object not found")
+                return json.dumps(
+                    {
+                        "id": "native-detach",
+                        "error": {
+                            "class": "GenericError",
+                            "desc": f"object '{command['arguments']['id']}' not found",
+                        },
+                    }
+                )
             with monitor_lock:
-                return json.dumps({"return": [], "id": command["id"]})
+                return json.dumps({"return": [], "id": "native-query"})
 
     def prior_mutation() -> None:
         with monitor_lock:
@@ -296,6 +393,7 @@ def test_remote_fresh_probe_waits_for_prior_accepted_monitor_mutation() -> None:
     probe = RemoteLibvirtCaptureQuiescence(
         resource_id=resource_id,
         connection=lambda: _ConnectionContext(_Connection(domain)),
+        monitor=_monitor,
     )
     observer = threading.Thread(
         target=lambda: (
@@ -321,7 +419,9 @@ def test_remote_quiescence_fails_closed(failure: str) -> None:
             raise CategorizedError("unreachable", category=ErrorCategory.TRANSPORT_FAILURE)
         return _ConnectionContext(_Connection(domain))
 
-    probe = RemoteLibvirtCaptureQuiescence(resource_id=resource_id, connection=connection)
+    probe = RemoteLibvirtCaptureQuiescence(
+        resource_id=resource_id, connection=connection, monitor=_monitor
+    )
 
     with pytest.raises(CategorizedError):
         probe.prove_absent(
