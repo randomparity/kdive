@@ -3354,6 +3354,32 @@ def test_installer_makes_the_session_libvirt_runtime_root_boot_durable() -> None
     assert "systemd-tmpfiles --create" in installer
 
 
+def test_role_installs_the_same_boot_runtime_policy_as_the_installer() -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    names = [task["name"] for task in tasks]
+    name = "Install the session libvirt runtime tmpfiles policy"
+    policy = tasks[names.index(name)]["ansible.builtin.copy"]
+    assert policy["dest"] == "/etc/tmpfiles.d/kdive-live-libvirt.conf"
+    assert policy["owner"] == policy["group"] == "root"
+    assert policy["mode"] == "0644"
+    rendered = (
+        Environment(undefined=StrictUndefined)
+        .from_string(policy["content"])
+        .render(
+            live_vm_host_operator_user="operator", live_vm_host_worker_libvirt_group="socket-group"
+        )
+    )
+    installer_rules = (
+        "\n".join(line for line in _text(INSTALLER).splitlines() if line.startswith("d /run/kdive"))
+        .replace("${operator}", "operator")
+        .replace("${libvirt_group}", "socket-group")
+    )
+    assert rendered.strip() == installer_rules
+    assert names.index(name) < names.index(
+        "Enable the boot-persistent session libvirtd system unit"
+    )
+
+
 def test_session_libvirtd_unit_depends_on_a_runtime_root_it_cannot_create() -> None:
     """Pin the reason the tmpfiles rule exists, so removing it fails here rather than at boot.
 

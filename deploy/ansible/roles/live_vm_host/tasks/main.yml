@@ -1825,6 +1825,17 @@
       become_user: "{{ live_vm_host_authority_proof_account }}"
       changed_when: false
 
+- name: Install the session libvirt runtime tmpfiles policy
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/kdive-live-libvirt.conf
+    content: |
+      d /run/kdive 0755 root root -
+      d /run/kdive/live-libvirt 0750 {{ live_vm_host_operator_user }} {{ live_vm_host_worker_libvirt_group }} -
+      d /run/kdive/live-libvirt/libvirt 0750 {{ live_vm_host_operator_user }} {{ live_vm_host_worker_libvirt_group }} -
+    owner: root
+    group: root
+    mode: "0644"
+
 - name: Install the boot-persistent session libvirtd system unit
   ansible.builtin.copy:
     dest: /etc/systemd/system/kdive-libvirtd-live.service
