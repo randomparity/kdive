@@ -113,6 +113,20 @@ unprivileged. Under SELinux the output file also needs the `virt_image_t` label 
 can read it under `qemu:///system` (a host-side file label, independent of the guest-internal
 SELinux the plane disables).
 
+For worker-driven local publication, host preparation creates `/var/lib/kdive/build/images`
+with the existing operator/shared-provider-group ownership and mode `2770`, and labels that
+exact subtree `svirt_image_t` on enforcing SELinux hosts. The build handoff grants group
+traversal on owned directories, group read on regular files, and group write only on the staged
+customization disk. It preserves existing bits, owners/groups and the system-daemon access
+path. The published qcow2 retains the disk's group-write bit after atomic rename; provider-group
+members are cooperating principals, not isolated tenants ([ADR-0744](../../adr/0744-local-image-build-workspace-access.md)).
+
+A custom workspace needs the same shared-group ancestry and confinement prerequisites supplied
+by its operator. The runtime neither repairs ancestors nor changes service umasks or SELinux
+enforcement. Symlinks, multiply linked regular files, foreign-owned nodes and other nonregular
+nodes fail before customization boot; investigate the reported path rather than applying a
+recursive permission rewrite.
+
 ## Refresh a pruned cloud-image source
 
 Versioned URLs can disappear from rolling vendor storage. A download failure does not justify

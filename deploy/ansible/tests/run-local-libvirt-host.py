@@ -113,8 +113,12 @@ require(
 )
 require(
     uv_defaults["local_worker_host_svirt_image_directories"]
-    == ["/var/lib/kdive/rootfs", "/var/lib/kdive/install"],
-    "the play must own exactly the two ADR-0640 parent rules, never the nested rootfs/local rule",
+    == ["/var/lib/kdive/rootfs", "/var/lib/kdive/install", "/var/lib/kdive/build/images"],
+    "the play must own the ADR-0640 roots and ADR-0744 build/images subtree, not rootfs/local",
+)
+require(
+    "/var/lib/kdive/build/images" in uv_defaults["live_vm_host_worker_shared_directories"],
+    "the image workspace must use the existing shared-directory creation policy",
 )
 relabel = label_tasks_by_name["Relabel the kdive image directories"]
 require(relabel.get("when") == enforcing, "the relabel must be guarded on enforcing SELinux")

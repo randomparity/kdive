@@ -11,6 +11,7 @@ inject firstboot → customization boot → seal → verify → output`` (ADR-03
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 import subprocess
 import xml.etree.ElementTree as ET
@@ -1122,3 +1123,106 @@ def test_cloud_init_self_check_uses_the_scaled_budget(
 ) -> None:
     rootfs_build._run_cloud_init_guestfish(tmp_path / "img.qcow2", "is-file /etc/hosts\n")
     assert _timeouts(scaled_budget) == [_SCALED_SENTINEL]
+
+
+@pytest.mark.parametrize("mask", [0o022, 0o077])
+def test_hypervisor_handoff_preserves_identity_and_shares_only_disk_write(
+    tmp_path: Path, mask: int
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    work.chmod(0o2700)
+    previous = os.umask(mask)
+    try:
+        kernel_dir = work / "baseline"
+        kernel_dir.mkdir()
+        kernel = kernel_dir / "kernel"
+        kernel.write_bytes(b"kernel")
+        disk = work / "staged.qcow2"
+        disk.write_bytes(b"disk")
+    finally:
+        os.umask(previous)
+    before = {p: p.stat() for p in (work, kernel_dir, kernel, disk)}
+    rootfs_build._grant_hypervisor_traversal(work, disk)
+    for path, original in before.items():
+        now = path.stat()
+        extra = 0o011 if path.is_dir() else 0o044 | (0o020 if path == disk else 0)
+        assert stat.S_IMODE(now.st_mode) == stat.S_IMODE(original.st_mode) | extra
+        assert (now.st_uid, now.st_gid) == (original.st_uid, original.st_gid)
+    assert kernel.read_bytes() == b"kernel" and disk.read_bytes() == b"disk"
+    published = _build_common.publish_qcow2(tmp_path, image_name="published", scratch=disk)
+    assert stat.S_IMODE(published.stat().st_mode) == stat.S_IMODE(before[disk].st_mode) | 0o064
+
+
+@pytest.mark.parametrize(
+    "kind", ["symlink", "directory-symlink", "fifo", "foreign", "missing-disk"]
+)
+def test_handoff_rejects_unsafe_tree_before_any_permission_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    disk = work / "disk"
+    disk.write_bytes(b"disk")
+    disk.chmod(0o600)
+    outsider = tmp_path / "outside"
+    outsider.mkdir(mode=0o700)
+    leaf = work / "unsafe"
+    if kind == "symlink":
+        leaf.symlink_to(disk)
+    elif kind == "directory-symlink":
+        leaf.symlink_to(outsider, target_is_directory=True)
+    elif kind == "fifo":
+        os.mkfifo(leaf)
+    elif kind == "foreign":
+        monkeypatch.setattr(rootfs_build.os, "geteuid", lambda: work.stat().st_uid + 1)
+    elif kind == "missing-disk":
+        disk = work / "absent"
+    before = {p: p.stat() for p in (work, work / "disk", outsider)}
+    with pytest.raises(CategorizedError):
+        rootfs_build._grant_hypervisor_traversal(work, disk)
+    for path, original in before.items():
+        assert path.stat().st_mode == original.st_mode
+
+
+def test_handoff_rejects_replaced_node_and_closes_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    disk = work / "disk"
+    disk.write_bytes(b"original")
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"replacement")
+    replacement.chmod(0o600)
+    opened: list[int] = []
+    real_open = os.open
+
+    def replace_on_open(path: Path, flags: int) -> int:
+        if path == disk:
+            replacement.replace(disk)
+        fd = real_open(path, flags)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(rootfs_build.os, "open", replace_on_open)
+    with pytest.raises(CategorizedError):
+        rootfs_build._grant_hypervisor_traversal(work, disk)
+    assert disk.read_bytes() == b"replacement"
+    assert stat.S_IMODE(disk.stat().st_mode) == 0o600
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_handoff_rejects_hard_link_outside_workspace(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"untouched")
+    outside.chmod(0o600)
+    disk = work / "disk"
+    disk.hardlink_to(outside)
+    with pytest.raises(CategorizedError):
+        rootfs_build._grant_hypervisor_traversal(work, disk)
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o600
