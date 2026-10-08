@@ -193,7 +193,15 @@ with a clear message if it is not set in `host_vars/`.
   stages, boots, and connects its guest agent (provision / `host_dump` path), but
   `runs.install` (the `kdive-install-kernel` `grubby` path) needs a Debian helper variant
   — **unvalidated / tracked separately**.
-- The **scratch/bare** path is implemented but **unvalidated** (no scratch-capable test
+- Ubuntu remote images use their native netplan/networkd dispatcher for DHCP and the
+  lease-identified SSH return route. Rebuild existing staged images with
+  `force_image_rebuild=true`; unrelated netplan YAML is refused rather than overwritten.
+  The policy removes only the identified slirp DHCP default, preserving other routes and DNS.
+  Ubuntu SSH generates missing host keys at service startup, separately for each clone,
+  and preserves them on reboot. Unknown SSH prechecks or foreign service drop-ins
+  also require a clean supported image; shared-image host keys are not generated.
+- The **scratch/bare** image has no remote SSH parity: it installs neither sshd nor a
+  guest network policy. Its build path is implemented but **unvalidated** (no scratch-capable test
   host): it builds the rootfs from the host OS family but the bootloader install + boot
   must be confirmed on hardware, like the ppc64le note below. It is admitted only on
   Fedora/Debian-family hosts (`host_distros`, above), so that confirmation has to happen
