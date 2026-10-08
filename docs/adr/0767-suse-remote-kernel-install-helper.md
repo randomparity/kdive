@@ -12,6 +12,12 @@ The existing RHEL remote helper is Fedora BLS/grubby-specific. The pinned local 
 it has no grubby. Its persistent default is index zero. Adding a higher-version
 kernel to automatic discovery could change that default.
 
+The first canonical package build failed in repo2solv with `No space left on
+device` on the pinned image's small XFS root, before helper installation. The
+host had ample capacity. Package-not-found messages followed failed repository
+refresh and do not establish package-name defects. Expired signing-key and
+metadata warnings are retained; verification is not relaxed.
+
 ## Decision
 
 Add one x86_64 `opensuse-leap-15.6-kdive-remote-base`
@@ -19,6 +25,19 @@ cloud-image row matching the local Leap representative. Pin its official source
 URL and SHA-256 in the catalog. Pass an optional per-image `cloud_image_checksum`
 to the existing get_url checksum argument, as explicitly approved by the operator;
 other catalog rows retain their current behavior. This is one input to the existing downloader, not a refresh framework.
+
+For this exact pinned Leap row only, prepare a fresh 10 GiB qcow2 before package
+customization. This uses the existing native-builder size baseline, not a new
+catalog sizing API or an all-distribution default. Keep the verified downloaded
+source immutable and separate; preserve prior failed attempts. Refuse unfamiliar
+source geometry, missing native XFS expansion capability, insufficient host space,
+or an already-present partial output. Use native virt-resize to copy and expand
+only the third XFS partition into the new disk, preserving boot regions, partition
+starts and root identity. Verify these postconditions before promoting the fresh
+output to the existing customization path. A failed transform never reaches package
+installation or staging; retain its output for diagnosis and require a fresh owned
+work directory for retry. No host tool installation or package-trust change is added.
+Actual build/free-space and existing boot/lifecycle proofs establish sufficiency.
 
 Select a SUSE source variant for `kdive-install-kernel` from the existing catalog
 `distro=opensuse-leap`; retain the canonical installed basename, owner, permissions,

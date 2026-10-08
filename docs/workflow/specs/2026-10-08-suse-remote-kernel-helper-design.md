@@ -2,17 +2,18 @@
 
 ## Scope and source
 
-Status: amended design independently reviewed and scope-audited; implementation authorized.
+Status: approved geometry amendment prepared for independent design review and scope audit; no growth implementation authorized yet.
 
-Implement #3082 under ADR-0767 and ADR-0768. Frozen amended charter6065613666,
-retained token q3082-1f7d293a. Original scope/exclusions, the optional checksum input
-and the explicit native Wicked amendment are operator-approved. The latter adds
-native lease lifecycle/return routing to the same canonical image outcome. Debian
+Implement #3082 under ADR-0767 and ADR-0768. Frozen amended charter6067241872,
+retained token q3082-1f7d293a. Original scope/exclusions, the optional checksum input, native Wicked amendment
+and exact pinned-Leap offline growth proposal are operator-approved. Together these
+add native lease lifecycle/return routing and sufficient build geometry to the
+same canonical image outcome. Debian
 #3081, wider distribution coverage and native POWER #2818 remain excluded.
 
 ## Verified cause
 
-The current catalog has no SUSE row; a direct catalog assertion fails. The RHEL
+The original baseline catalog has no SUSE row; a direct catalog assertion fails. The RHEL
 helper requires grubby; main now has a separate Debian variant and family selector. Downloaded official Leap 15.6 Build19.146 bytes match the
 local catalog SHA-256 `0a5720416d423f98aacaa793a57d56ec045e3dd25cd88713952660ad00da53bd`.
 Read-only inspection finds GRUB2, dracut, XFS root, persistent `GRUB_DEFAULT=0`,
@@ -54,6 +55,62 @@ incompatibility is source/package evidence, not a claimed failed live install.
    Extend the merged guest_boot_kernel family selection for SUSE; its two existing
    callers already supply family. Preserve the Debian observer and tests.
    No automatic alternate-path probing, unchanged cell IDs/baselines and POWER owner.
+
+
+## Pinned Leap offline geometry preparation
+
+The canonical build at5f6021 failed during repository cache creation: repo2solv
+reported ENOSPC, then repository/package lookups failed. Source virtual size is
+879755264 bytes; XFS root total756716 KiB. Do not fix downstream package messages
+by renaming packages or disabling signature/metadata checks.
+
+Apply only to the exact canonical opensuse-leap15.6 row and approved SHA256. In a
+fresh root-owned build work directory, download to a distinct source filename,
+verify SHA256 before any transformation, and retain source read-only mode0444.
+All other cloud rows keep existing download/customization behavior. Preserve the
+previous failed work directory; never grow, overwrite or repurpose its image.
+
+Before creating output require qcow2 format, virtual879755264 bytes, one expected
+root device /dev/sda3 with XFS, and exactly these partition byte ranges:
+
+| Partition | Start | End | Size |
+|---|---:|---:|---:|
+| 1 | 1048576 | 3145727 | 2097152 |
+| 2 | 3145728 | 37748735 | 34603008 |
+| 3 | 37748736 | 879738367 | 841989632 |
+
+Inspect through existing native qemu-img/guestfish tools; require partition2 vfat
+and retain source partition-table type, root filesystem UUID and partition UUID,
+plus checksums of the first two partition contents. Fail closed on ambiguity or
+unexpected geometry. Verify virt-resize machine-readable capability includes xfs;
+no installation fallback. Require at least12 GiB available on the output filesystem
+for the10 GiB target plus source/metadata headroom. This is a preflight bound, not
+a reservation against unrelated host writes; later ENOSPC remains a propagated failure.
+Require source and output distinct regular non-symlink paths within the owned
+work directory, output and customization destination absent, and no backing file.
+
+Create only a fresh `qemu-img create -f qcow2 OUTPUT 10G`, then run
+`virt-resize --format qcow2 --output-format qcow2 --align-first never --expand /dev/sda3 --unknown-filesystems error SOURCE OUTPUT`.
+Use existing direct libguestfs backend and bounded appliance defaults. This is
+an offline copy/expand of a stopped image, not runtime overlay growth or a guest
+cloud-init dependency. No generic storage helper/framework or size field is added.
+
+Before promotion verify source checksum unchanged, output qcow2 virtual10737418240
+bytes with no backing file, unchanged partition count/type and all partition starts,
+unchanged partition1/2 sizes/content checksums, unchanged root filesystem/partition
+UUIDs, XFS root and expanded partition3/filesystem. Require at least8 GiB available
+inside the new root before package refresh; failure retains output without staging.
+Promote by same-filesystem rename into the existing customization filename only
+once all checks pass, then run existing package/helper/policy tasks unchanged.
+No existing output is replaced. Failure/interruption retains named source/output;
+a rerun with a partial output refuses with an actionable fresh-workdir requirement.
+A previously staged successful image retains the existing skip behavior.
+
+Record input/output hashes, native versions/capabilities, before/after geometry,
+root identity/free space and exact candidate in proof. Actual package build and
+original guest boot/default selection must pass; do not add a separate BIOS/UEFI
+matrix obligation. Existing Wicked A–F and both SUSE lifecycle cells remain required.
+Separate deployed network policy is unresolved and is not authorized by image growth.
 
 ## Native Wicked component and ownership
 
@@ -136,6 +193,8 @@ incompatibility is source/package evidence, not a claimed failed live install.
 - Invariants and assets at stake: prevent changed persistent boot default, duplicate KDIVE slots, caller-text
   execution, wrong family helper, checksum mismatch, routing based on stale or
   ambiguous lease data, unrelated route deletion and silent foreign-policy replacement.
+  Offline growth must preserve source bytes, boot partitions/starts and root identity;
+  refuse partial-output reuse or promotion before postconditions.
   Detect package/build capacity and tool failures, invalid uploaded release,
   dracut/GRUB/kdump errors, wrong kernel/module identity, native delegate/adapter
   failures, stale roles, failed SSH/egress, failed cleanup and unsupported native
@@ -145,7 +204,9 @@ incompatibility is source/package evidence, not a claimed failed live install.
   follows a failed install. Wicked can report readiness despite updater failure;
   this is explicitly accepted, not a traffic proof. Mutable repositories mean a
   pinned source is not a package lock. Hostile guest-root peers are outside this
-  existing trust boundary; no new isolation guarantee is claimed.
+  existing trust boundary; no new isolation guarantee is claimed. Host free-space
+  preflight is not reservation against unrelated writes; native failures retain
+  partial output and require a fresh owned work directory, not automatic cleanup.
 - Covered elsewhere: Debian changes (#3081), wider matrix (outside this issue)
   and native POWER (#2818) remain with their existing owners.
   Provider forwarding uses merged #3093; any missing deployed prerequisite is
