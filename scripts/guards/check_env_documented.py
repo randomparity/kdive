@@ -40,6 +40,9 @@ _NOT_ENV: frozenset[str] = frozenset(
     {
         # Non-env constants in product code.
         "KDIVE_METADATA_NS",  # object-store metadata namespace prefix
+        # Guestfish output delimiters in the pinned Leap image growth task, not env reads.
+        "KDIVE_METADATA",
+        "KDIVE_SPACE",
         "KDIVE_PROVIDER_CA",  # secret-ref label, not an env var
         "KDIVE_ROOTFS_AUTHORIZED_KEY",  # secret-ref label, not an env var
         "KDIVE_CLOUD_CFG_PATH",  # cloud-init drop-in guest path constant (ADR-0288), not an env var
