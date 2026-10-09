@@ -555,6 +555,11 @@ obligations or durable capture finalization.
 
 ## SUSE native image proof
 
+On untouched first boot, record the completed JeOS marker, skipped wizard units,
+stock SSH key-generation journal, hostkey metadata and actual listener before
+authorizing SSH. Manual keygen, daemon restart or timeout changes cannot supply
+this proof. Preserve prior failed firstboot evidence when rebuilding.
+
 Build `opensuse-leap-15.6-kdive-remote-base` through the image playbook and retain
 its source checksum, final image/package identity and installed helper hashes.
 Deploy matching server/worker/reconciler source before running the SUSE parameters

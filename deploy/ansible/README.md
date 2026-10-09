@@ -215,6 +215,11 @@ with a clear message if it is not set in `host_vars/`.
 
 ### Pinned SUSE remote image
 
+For this exact pinned row, fresh preparation completes the native JeOS marker
+only after validating vendor firstboot units and all native systemd load roots.
+Foreign overrides or unsafe/nonempty markers refuse staging; rebuild cleanly.
+The stock SSH key-generation units, cloud-init and vendor boot configuration remain.
+
 `opensuse-leap-15.6-kdive-remote-base` is the x86_64 Leap representative. Its
 `cloud_image_checksum` is passed to the existing downloader; omitted checksums
 preserve other rows' behavior. A source pin does not freeze installed package versions.

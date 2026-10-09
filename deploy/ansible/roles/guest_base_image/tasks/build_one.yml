@@ -584,6 +584,79 @@
   when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: false
 
+- name: Complete the pinned Leap native firstboot for {{ image.name }}
+  ansible.builtin.command: # noqa: command-instead-of-module
+    # Complete only the admitted fresh image through its native completion marker.
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --run-command
+      - |
+        set -eu
+        fail() { echo 'kdive: unsafe native firstboot state; rebuild supported Leap image' >&2; exit 1; }
+        safe() {
+          [ ! -L "$1" ] || fail
+          metadata=$(stat -c '%u:%g:%a' -- "$1")
+          [ "${metadata%:*}" = 0:0 ] && [ $((0${metadata##*:} & 022)) -eq 0 ] || fail
+        }
+        for root in /etc/systemd/system.control /run/systemd/system.control \
+            /run/systemd/transient /run/systemd/generator.early /etc/systemd/system \
+            /etc/systemd/system.attached /run/systemd/system /run/systemd/system.attached \
+            /run/systemd/generator /usr/local/lib/systemd/system /usr/lib/systemd/system \
+            /lib/systemd/system /run/systemd/generator.late; do
+          dir=$root
+          while :; do
+            if [ -e "$dir" ] || [ -L "$dir" ]; then
+              [ -d "$dir" ] || fail
+              safe "$dir"
+            fi
+            [ "$dir" != / ] || break
+            dir=${dir%/*}
+            [ -n "$dir" ] || dir=/
+          done
+          for unit in jeos-firstboot.service jeos-firstboot-snapshot.service; do
+            if [ "$root" != /usr/lib/systemd/system ] && { [ -e "$root/$unit" ] || [ -L "$root/$unit" ]; }; then fail; fi
+          done
+          for dropin in "$root"/service.d "$root"/jeos-.service.d "$root"/jeos-firstboot-.service.d \
+              "$root"/jeos-firstboot.service.d "$root"/jeos-firstboot-snapshot.service.d; do
+            [ -e "$dropin" ] || [ -L "$dropin" ] || continue
+            [ -d "$dropin" ] || fail
+            safe "$dropin"
+            for conf in "$dropin"/*.conf; do
+              [ -e "$conf" ] || [ -L "$conf" ] || continue
+              fail
+            done
+          done
+        done
+        for dir in /var /var/lib /var/lib/YaST2; do
+          [ -d "$dir" ] || fail
+          safe "$dir"
+        done
+        for unit in jeos-firstboot.service jeos-firstboot-snapshot.service; do
+          [ -f /usr/lib/systemd/system/"$unit" ] || fail
+          safe /usr/lib/systemd/system/"$unit"
+        done
+        sha256sum -c - <<'NATIVE'
+        417025b241083f36a95fe2080885863d72f87e0cf4355542274009a8c51f786c  /usr/lib/systemd/system/jeos-firstboot.service
+        236cead95a3590db91a10337132d6264f002916aecb93824a57537280be560ca  /usr/lib/systemd/system/jeos-firstboot-snapshot.service
+        NATIVE
+        marker=/var/lib/YaST2/reconfig_system
+        if [ -e "$marker" ] || [ -L "$marker" ]; then
+          [ -f "$marker" ] || fail
+          safe "$marker"
+          size=$(stat -c '%s' -- "$marker")
+          [ "$size" = 0 ] || fail
+          rm -- "$marker"
+        fi
+        [ ! -e "$marker" ] && [ ! -L "$marker" ] || fail
+  when:
+    - image.name == 'opensuse-leap-15.6-kdive-remote-base'
+    - image.source == 'cloud-image'
+    - image.cloud_image_checksum | default('') == 'sha256:0a5720416d423f98aacaa793a57d56ec045e3dd25cd88713952660ad00da53bd'
+    - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
+
 - name: Stage the finished image into the (root-owned) pool for {{ image.name }}
   ansible.builtin.copy:
     src: "{{ guest_base_image_qcow2 }}"

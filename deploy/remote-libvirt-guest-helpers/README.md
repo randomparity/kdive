@@ -101,6 +101,10 @@ crash-capture results. See [ADR-0766](../../docs/adr/0766-debian-remote-kernel-i
 
 ## SUSE Leap installation and networking
 
+The pinned prepared image completes the native JeOS firstboot marker before
+staging, with vendor-unit and override admission. Stock sshd generates host keys
+on untouched first boot; existing guests require a clean supported-image rebuild.
+
 The Leap15.6 catalog row selects `suse/kdive-install-kernel`, using native dracut,
 `grub2-mkconfig` and `grub2-reboot` with the same helper protocol. Uploaded artifacts
 remain in `/boot/kdive`; persistent distribution boot selection is unchanged.
