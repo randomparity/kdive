@@ -462,7 +462,11 @@
           echo 'kdive: foreign Wicked policy; rebuild from a clean supported Leap image' >&2
           exit 1
         done
-        for unit_root in /etc/systemd/system /run/systemd/system /usr/lib/systemd/system; do
+        for unit_root in /etc/systemd/system.control /run/systemd/system.control \
+            /run/systemd/transient /run/systemd/generator.early /etc/systemd/system \
+            /etc/systemd/system.attached /run/systemd/system /run/systemd/system.attached \
+            /run/systemd/generator /usr/local/lib/systemd/system /usr/lib/systemd/system \
+            /lib/systemd/system /run/systemd/generator.late; do
           for dropin in "$unit_root"/wickedd*.service.d/*.conf "$unit_root"/wicked.service.d/*.conf \
               "$unit_root"/service.d/*.conf; do
             [ -e "$dropin" ] || [ -L "$dropin" ] || continue
@@ -472,12 +476,13 @@
               exit 1
             fi
           done
-        done
-        for unit in /etc/systemd/system/wickedd*.service /etc/systemd/system/wicked.service; do
-          if [ -e "$unit" ] || [ -L "$unit" ]; then
-            echo 'kdive: foreign Wicked service override; rebuild from a clean supported Leap image' >&2
-            exit 1
-          fi
+          [ "$unit_root" != /usr/lib/systemd/system ] || continue
+          for unit in "$unit_root"/wickedd*.service "$unit_root"/wicked.service; do
+            if [ -e "$unit" ] || [ -L "$unit" ]; then
+              echo 'kdive: foreign Wicked service override; rebuild from a clean supported Leap image' >&2
+              exit 1
+            fi
+          done
         done
         for pair in kdive-wicked-policy.xml:/etc/wicked/kdive-ethernet-policy.xml \
             kdive-wicked-ssh-return-route:/usr/local/libexec/kdive-wicked/netconfig \

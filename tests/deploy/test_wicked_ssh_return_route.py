@@ -343,7 +343,9 @@ def test_native_route_failures_are_visible(guest, failure):
     assert "kdive Wicked return route" in result.stderr
 
 
-def prepare_image(tmp_path, *, foreign="", fail=""):
+def prepare_image(
+    tmp_path, *, foreign="", foreign_contents="foreign policy", symlink=False, fail=""
+):
     import re
     import shutil
 
@@ -370,12 +372,23 @@ def prepare_image(tmp_path, *, foreign="", fail=""):
     delegate.write_text("#!/bin/sh\nexit 0\n")
     delegate.chmod(0o755)
     (root / "etc/sysconfig/network/ifcfg-lo").write_text("stock loopback")
+    vendor = root / "usr/lib/systemd/system"
+    vendor.mkdir(parents=True, exist_ok=True)
+    for unit in ["wickedd.service", "wickedd-nanny.service", "wicked.service"]:
+        (vendor / unit).write_text("stock vendor unit\n")
     if foreign:
         p = root / foreign
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("foreign policy")
+        if symlink:
+            target = root / "tmp/foreign-startup.conf"
+            target.write_text(foreign_contents)
+            p.symlink_to(target)
+        else:
+            p.write_text(foreign_contents)
     script = re.sub(
-        r"/(?:etc|usr/local|usr/lib|run|var/lib|tmp)/", lambda match: str(root) + match[0], script
+        r"/(?:etc|usr/local|usr/lib|lib|run|var/lib|tmp)/",
+        lambda match: str(root) + match[0],
+        script,
     )
     bins = root / "bin"
     for name in ["wicked", "busctl", "ip", "systemctl", "sha256sum"]:
@@ -413,6 +426,9 @@ def test_canonical_policy_installation_and_idempotent_owned_paths(tmp_path):
     assert (root / "usr/local/libexec/kdive-wicked/netconfig").stat().st_mode & 0o777 == 0o755
     assert not (root / "usr/local/libexec/kdive-wicked-ssh-return-route").exists()
     assert (root / "etc/sysconfig/network/ifcfg-lo").read_text() == "stock loopback"
+    assert (
+        root / "usr/lib/systemd/system/wickedd-nanny.service"
+    ).read_text() == "stock vendor unit\n"
 
 
 @pytest.mark.parametrize(
@@ -431,6 +447,63 @@ def test_foreign_policy_refuses_before_owned_installation(tmp_path, foreign):
     assert result.returncode != 0
     assert "foreign" in result.stderr
     assert (root / foreign).read_text() == "foreign policy"
+    assert not (root / "usr/local/libexec/kdive-wicked/netconfig").exists()
+
+
+NATIVE_UNIT_ROOTS = [
+    "etc/systemd/system.control",
+    "run/systemd/system.control",
+    "run/systemd/transient",
+    "run/systemd/generator.early",
+    "etc/systemd/system",
+    "etc/systemd/system.attached",
+    "run/systemd/system",
+    "run/systemd/system.attached",
+    "run/systemd/generator",
+    "usr/local/lib/systemd/system",
+    "usr/lib/systemd/system",
+    "lib/systemd/system",
+    "run/systemd/generator.late",
+]
+
+
+@pytest.mark.parametrize("unit_root", NATIVE_UNIT_ROOTS)
+def test_native_unit_roots_refuse_foreign_startup_reset(tmp_path, unit_root):
+    foreign = f"{unit_root}/wickedd-nanny.service.d/99-foreign.conf"
+    contents = "[Service]\nExecStartPost=\n"
+    result, root = prepare_image(tmp_path, foreign=foreign, foreign_contents=contents)
+    assert result.returncode != 0
+    assert "foreign Wicked service drop-in" in result.stderr
+    assert (root / foreign).read_text() == contents
+    assert not (root / "usr/local/libexec/kdive-wicked/netconfig").exists()
+    assert not (root / "etc/systemd/system/wickedd-nanny.service.d/50-kdive-startup.conf").exists()
+
+
+@pytest.mark.parametrize(
+    "unit_root", [r for r in NATIVE_UNIT_ROOTS if r != "usr/lib/systemd/system"]
+)
+def test_native_nonvendor_unit_shadow_refuses_before_install(tmp_path, unit_root):
+    foreign = f"{unit_root}/wickedd-nanny.service"
+    result, root = prepare_image(tmp_path, foreign=foreign)
+    assert result.returncode != 0
+    assert "foreign Wicked service override" in result.stderr
+    assert (root / foreign).read_text() == "foreign policy"
+    assert not (root / "usr/local/libexec/kdive-wicked/netconfig").exists()
+
+
+@pytest.mark.parametrize("change", ["changed", "symlink", "different-root"])
+def test_only_exact_owned_startup_exception_is_admitted(tmp_path, change):
+    path = "etc/systemd/system/wickedd-nanny.service.d/50-kdive-startup.conf"
+    contents = (ASSETS / "kdive-wicked-startup.conf").read_text()
+    if change == "changed":
+        contents += "# foreign change\n"
+    elif change == "different-root":
+        path = "etc/systemd/system.control/wickedd-nanny.service.d/50-kdive-startup.conf"
+    result, root = prepare_image(
+        tmp_path, foreign=path, foreign_contents=contents, symlink=change == "symlink"
+    )
+    assert result.returncode != 0
+    assert (root / path).read_text() == contents
     assert not (root / "usr/local/libexec/kdive-wicked/netconfig").exists()
 
 
