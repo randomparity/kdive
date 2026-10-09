@@ -123,9 +123,9 @@ had no queued job. Readonly image evidence establishes the native source mapping
 
 | Native path | SHA256 |
 |---|---|
-| `/usr/lib/systemd/system/jeos-firstboot.service` | `417025b241083f36a95fe2080885863d72f87e0cf4355542274009a8c51f786c` |
-| `/usr/lib/systemd/system/jeos-firstboot-snapshot.service` | `236cead95a3590db91a10337132d6264f002916aecb93824a57537280be560ca` |
-| `/usr/sbin/jeos-firstboot` (cause evidence, unchanged) | `ccee10e06ec35fd4645dfde448ed23bd839b12f232acbd46f5d60e11705e7e20` |
+| `/usr/lib/systemd/system/jeos-firstboot.service` | `560fffbd70cb275b23129874fc9021d0ada78be166450a4948331ed280e561da` |
+| `/usr/lib/systemd/system/jeos-firstboot-snapshot.service` | `aca184ccdae7ba594e5f863ace6d78a2d7da8dd18c2282c53d42c5509c100c9d` |
+| `/usr/sbin/jeos-firstboot` (cause evidence, unchanged) | `32d6dca60d78c64f9a4a43902517318c07b142a67580db565f8b3e219fca4e55` |
 
 Both units condition on `/var/lib/YaST2/reconfig_system`; snapshot ExecStartPre
 removes it after native configuration. The pinned image marker is root-owned,

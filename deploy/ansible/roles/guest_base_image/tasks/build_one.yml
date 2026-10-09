@@ -638,8 +638,8 @@
           safe /usr/lib/systemd/system/"$unit"
         done
         sha256sum -c - <<'NATIVE'
-        417025b241083f36a95fe2080885863d72f87e0cf4355542274009a8c51f786c  /usr/lib/systemd/system/jeos-firstboot.service
-        236cead95a3590db91a10337132d6264f002916aecb93824a57537280be560ca  /usr/lib/systemd/system/jeos-firstboot-snapshot.service
+        560fffbd70cb275b23129874fc9021d0ada78be166450a4948331ed280e561da  /usr/lib/systemd/system/jeos-firstboot.service
+        aca184ccdae7ba594e5f863ace6d78a2d7da8dd18c2282c53d42c5509c100c9d  /usr/lib/systemd/system/jeos-firstboot-snapshot.service
         NATIVE
         marker=/var/lib/YaST2/reconfig_system
         if [ -e "$marker" ] || [ -L "$marker" ]; then

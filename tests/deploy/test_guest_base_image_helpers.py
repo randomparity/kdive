@@ -286,7 +286,8 @@ def test_growth_refuses_existing_output_or_untrusted_input(growth, existing):
         assert path.read_bytes() == b"retained evidence"
 
 
-# Exact native producer bytes from the checksum-pinned Leap image.
+# Native checksum/lstatns verify these bytes, including one terminal newline.
+# guestfish cat display adds a newline; it is not part of the unit file.
 JEOS_UNITS = {
     "jeos-firstboot.service": (
         "# SPDX-License-Identifier: MIT\n"
@@ -334,7 +335,6 @@ JEOS_UNITS = {
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
-        "\n"
     ),
     "jeos-firstboot-snapshot.service": (
         "# SPDX-License-Identifier: MIT\n"
@@ -370,7 +370,6 @@ JEOS_UNITS = {
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
-        "\n"
     ),
 }
 UNIT_ROOTS = (
