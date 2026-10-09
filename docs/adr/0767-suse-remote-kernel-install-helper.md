@@ -39,6 +39,13 @@ installation or staging; retain its output for diagnosis and require a fresh own
 work directory for retry. No host tool installation or package-trust change is added.
 Actual build/free-space and existing boot/lifecycle proofs establish sufficiency.
 
+After package/helper/Wicked preparation and before staging, complete only this
+pinned fresh output's native JeOS state by guarded removal of its normal
+`/var/lib/YaST2/reconfig_system` completion marker. Validate the native units and
+finite load-root admission specified in the issue design; refuse unexpected state.
+Keep stock units/key generation/authentication/cloud-init/Wicked/vendor boot;
+no runtime workaround, masking or mutation of source/old attempts/other images.
+
 Select a SUSE source variant for `kdive-install-kernel` from the existing catalog
 `distro=opensuse-leap`; retain the canonical installed basename, owner, permissions,
 argv, four subcommands and ADR-0489 exit classification. The worker protocol and
@@ -92,6 +99,8 @@ Native POWER and changes to the Debian helper remain outside this change.
   requires either surface.
 
 Primary references:
+
+- [Issue design and native completion-state source mapping](../workflow/specs/2026-10-08-suse-remote-kernel-helper-design.md#prepared-native-jeos-completion-state).
 
 - [Leap GRUB guide](https://doc.opensuse.org/documentation/leap/reference/html/book-reference/cha-grub2.html).
 - [Leap kdump configuration](https://manpages.opensuse.org/Leap-15.6/kdump/kdump.5.en.html).

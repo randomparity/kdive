@@ -2,11 +2,13 @@
 
 ## Scope and source
 
-Status: approved geometry implemented and built; corrected native registration design awaits confirming review and scope audit. Native qualification remains incomplete.
+Status: geometry and native registration implemented at c621a47d; operator-approved firstboot amendment requires scope audit before implementation. Native qualification remains incomplete.
 
 Implement #3082 under ADR-0767 and ADR-0768. Frozen amended charter6067241872,
 retained token q3082-1f7d293a. Original scope/exclusions, the optional checksum input, native Wicked amendment
-and exact pinned-Leap offline growth proposal are operator-approved. Together these
+and exact pinned-Leap offline growth proposal are operator-approved. The subsequent
+firstboot proposal SHA256 `2ffa5b02bdc4c3c243894b81687b4b91ff9d8ad0f6460480f019e20d74bd3846`
+explicitly authorizes the completion-marker rule below. Together these
 add native lease lifecycle/return routing and sufficient build geometry to the
 same canonical image outcome. Debian
 #3081, wider distribution coverage and native POWER #2818 remain excluded.
@@ -111,6 +113,48 @@ root identity/free space and exact candidate in proof. Actual package build and
 original guest boot/default selection must pass; do not add a separate BIOS/UEFI
 matrix obligation. Existing Wicked A–F and both SUSE lifecycle cells remain required.
 Separate deployed network policy is unresolved and is not authorized by image growth.
+
+## Prepared native JeOS completion state
+
+Actual c621a47d/cc16 firstboot had both DHCP leases but failed SSH authorization
+with `transport_failure / banner_timeout`. Native JeOS welcome dialogs were
+running; wicked/network/sshd jobs waited, SSH had no hostkeys or listener. Cloud-init
+had no queued job. Readonly image evidence establishes the native source mapping:
+
+| Native path | SHA256 |
+|---|---|
+| `/usr/lib/systemd/system/jeos-firstboot.service` | `417025b241083f36a95fe2080885863d72f87e0cf4355542274009a8c51f786c` |
+| `/usr/lib/systemd/system/jeos-firstboot-snapshot.service` | `236cead95a3590db91a10337132d6264f002916aecb93824a57537280be560ca` |
+| `/usr/sbin/jeos-firstboot` (cause evidence, unchanged) | `ccee10e06ec35fd4645dfde448ed23bd839b12f232acbd46f5d60e11705e7e20` |
+
+Both units condition on `/var/lib/YaST2/reconfig_system`; snapshot ExecStartPre
+removes it after native configuration. The pinned image marker is root-owned,
+regular, empty0644. Source libraries were not acquired; no unattended-answer behavior is inferred.
+Inspection retry1/closure0 and failed alias shell query remain failed evidence.
+
+Add one inline existing virt-customize run-command after package/helper/Wicked
+preparation and before staging, gated by exact canonical row/source checksum and
+existing rebuild condition. Require safe root-owned non-writable regular vendor
+units with the two exact hashes before marker mutation. Pinned systemd254.27
+`systemd-analyze --system unit-paths` actually returned these13 load roots:
+`/etc/systemd/system.control`, `/run/systemd/system.control`, `/run/systemd/transient`,
+`/run/systemd/generator.early`, `/etc/systemd/system`, `/etc/systemd/system.attached`,
+`/run/systemd/system`, `/run/systemd/system.attached`, `/run/systemd/generator`,
+`/usr/local/lib/systemd/system`, `/usr/lib/systemd/system`, `/lib/systemd/system`,
+`/run/systemd/generator.late`. Admit real safe ancestors/roots before unit reads;
+refuse shadow units outside the hashed vendor root and relevant `.conf` drop-ins
+at each root's `service.d`, `jeos-.service.d`, `jeos-firstboot-.service.d` and both
+full-unit `.d` paths. Native metadata proves `/lib` real root0:0 directory0755;
+`/lib/systemd` and its unit root are absent. No stock alias is observed: symlinked
+root/ancestor/drop-in paths refuse, including changed `/lib`; do not admit aliases.
+On the stopped fresh output require real safe
+root-owned marker parents, no symlink/nonregular marker, uid/gid0, zero size and
+no group/other write. Remove only that marker; absence after identical unit and
+parent admission succeeds. Admission failure preserves the marker; removal errors
+prevent staging.
+Do not chmod/chown it, run the wizard or change its units, password/authentication,
+stock SSH key generation, unrelated cloud-init, Wicked or vendor boot files.
+The immutable source, old attempts and other image rows are never targeted.
 
 ## Native Wicked component and ownership
 
@@ -228,7 +272,8 @@ Separate deployed network policy is unresolved and is not authorized by image gr
   execution, wrong family helper, checksum mismatch, routing based on stale or
   ambiguous lease data, unrelated route deletion and silent foreign-policy replacement.
   Offline growth must preserve source bytes, boot partitions/starts and root identity;
-  refuse partial-output reuse or promotion before postconditions.
+  refuse partial-output reuse or promotion before postconditions. Native completion
+  state must not bypass foreign units or destroy unsafe/nonempty marker data.
   Detect package/build capacity and tool failures, invalid uploaded release,
   dracut/GRUB/kdump errors, wrong kernel/module identity, native delegate/adapter
   failures, stale roles, failed SSH/egress, failed cleanup and unsupported native
@@ -247,6 +292,13 @@ Separate deployed network policy is unresolved and is not authorized by image gr
   retained as blocked evidence, never repaired with an ad-hoc firewall exception.
   No new provider API, daemon, timer, security-driver or rp_filter policy is included.
 
+## Threat model for the completion-state amendment
+
+- Boundary: root image preparation consumes native units/marker from the pinned fresh output.
+- Actor: trusted operator and existing package customization; concurrent hostile guest-root is excluded.
+- Controls: exact unit hashes, override/drop-in and path/metadata admission before exact marker removal; failures disclose operation/path, never keys or environment.
+- Outside: runtime repair, arbitrary images and configuration-answer/password policy; existing owners retain them.
+
 ## Verification
 
 - Causal catalog/helper selection regression, checksum rejection and exact staged
@@ -256,6 +308,15 @@ Separate deployed network policy is unresolved and is not authorized by image gr
   separate-boot handling, argument encoding, requested/inherited crashkernel,
   kdump explicit kernel path and preserved settings, boot-id/status/one-shot reboot,
   fetch75 versus deterministic failures. Controlled faults must make new tests red.
+- Execute the actual inline marker guard in the owning image fixture: exact native
+  unit bytes, removal/absence idempotence, changed unit, persistent control/attached
+  shadow/drop-in, unsafe root/ancestor/changed-lib-alias, unsafe marker parent,
+  symlink/FIFO/directory/nonempty/foreign-owner/writable marker refusal, command failure
+  and no staging on refusal. Removing each guard or marker removal must make its
+  targeted test red; restore exact bytes. Assert unrelated files unchanged.
+- Untouched rebuilt firstboot must have no interactive wizard pending, reach native
+  stock SSH key generation and listener, then authenticated forwarded SSH and primary
+  DNS/HTTPS. No restart/QGA repair/timeout increase can supply this proof.
 - Canonical image playbook builds/stages the new row; inspect actual package list,
   helper hashes, source checksum and final volume digest. No image injected into an
   existing guest substitutes for this build. Measured capacity bounds one image build.
