@@ -6,7 +6,8 @@ fixture kernel is uploaded, completed, installed in-guest and booted over HTTP, 
 reconnects with the same key, checks the running release and GNU build ID, reads the installed
 kernel's digest in the guest, loads a module from the upload, then releases and proves on the
 provider host that the domain, its volumes and the ``kdive-*`` domain set are reclaimed. SUSE
-records ``blocked`` (#3082); Debian requires its rebuilt family helper and guest return route.
+requires its rebuilt native family helper, Wicked policies and verified guest return route;
+Debian requires its rebuilt family helper and guest return route.
 Each parameter writes one version-1 ``Evidence``
 record under ``KDIVE_ARTIFACT_DIR``; ``docs/operating/runbooks/remote-live-stack.md`` §7 covers
 the topology, observer access, bindings, assembly and qualification.

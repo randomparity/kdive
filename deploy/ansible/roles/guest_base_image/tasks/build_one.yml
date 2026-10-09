@@ -61,11 +61,120 @@
 - name: Download the cloud image for {{ image.name }}
   ansible.builtin.get_url:
     url: "{{ image.cloud_image_url }}"
-    dest: "{{ guest_base_image_qcow2 }}"
-    mode: "0644"
+    checksum: "{{ image.cloud_image_checksum | default(omit) }}"
+    dest: >-
+      {{ guest_base_image_qcow2 ~ '.source'
+         if image.name == 'opensuse-leap-15.6-kdive-remote-base'
+         else guest_base_image_qcow2 }}
+    mode: "{{ '0444' if image.name == 'opensuse-leap-15.6-kdive-remote-base' else '0644' }}"
   when:
     - image.source == 'cloud-image'
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+
+- name: Grow the pinned Leap root into a fresh bounded image
+  ansible.builtin.command: # noqa: command-instead-of-module
+    # Native offline expansion has no Ansible module; checks gate promotion.
+    argv:
+      - python3
+      - -c
+      - |
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import re
+        import shutil
+        import stat
+        import subprocess
+        import sys
+
+        source, destination = map(Path, sys.argv[1:])
+        output = Path(str(destination) + '.growing')
+        expected = '0a5720416d423f98aacaa793a57d56ec045e3dd25cd88713952660ad00da53bd'
+
+
+        def require(condition, message):
+            if not condition:
+                raise ValueError('kdive Leap growth: ' + message)
+
+
+        def run(*args):
+            return subprocess.check_output(args, universal_newlines=True)
+
+
+        def digest(path):
+            value = hashlib.sha256()
+            with path.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    value.update(chunk)
+            return value.hexdigest()
+
+
+        def info(path):
+            value = json.loads(run('qemu-img', 'info', '--output=json', str(path)))
+            require(value['format'] == 'qcow2' and not value.get('backing-filename'),
+                    'expected standalone qcow2')
+            return value['virtual-size']
+
+
+        def snapshot(path):
+            text = run('guestfish', '--ro', '-a', str(path), 'run', ':', 'part-list', '/dev/sda',
+                       ':', 'echo', 'KDIVE_METADATA', ':', 'part-get-parttype', '/dev/sda',
+                       ':', 'vfs-type', '/dev/sda2', ':', 'vfs-type', '/dev/sda3',
+                       ':', 'vfs-uuid', '/dev/sda3', ':', 'part-get-gpt-guid', '/dev/sda', '3',
+                       ':', 'checksum-device', 'sha256', '/dev/sda1',
+                       ':', 'checksum-device', 'sha256', '/dev/sda2', ':', 'echo', 'KDIVE_SPACE',
+                       ':', 'mount-ro', '/dev/sda3', '/', ':', 'statvfs', '/')
+            parts, rest = text.split('KDIVE_METADATA\n')
+            metadata, space = rest.split('KDIVE_SPACE\n')
+            values = [int(v) for v in re.findall(r'part_(?:num|start|end|size): (\d+)', parts)]
+            identities = metadata.splitlines()
+            require(len(values) == 12 and len(identities) == 7, 'unexpected partition metadata')
+            require(identities[:3] == ['gpt', 'vfat', 'xfs'] and all(identities),
+                    'expected pinned GPT/EFI/XFS identity')
+            sizes = dict(re.findall(r'^(bsize|bavail): (\d+)$', space, re.M))
+            return values, identities, int(sizes['bsize']) * int(sizes['bavail'])
+
+
+        require(source.parent == destination.parent and source != destination,
+                'source/output must be distinct in one owned work directory')
+        require(source.parent.resolve() == source.parent and source.parent.stat().st_uid == os.geteuid()
+                and not source.parent.stat().st_mode & 0o022, 'untrusted work directory')
+        require(not source.is_symlink() and stat.S_ISREG(source.stat().st_mode)
+                and source.stat().st_uid == os.geteuid(), 'source must be owned regular non-symlink')
+        require(not os.path.lexists(destination) and not os.path.lexists(output),
+                'output exists; preserve evidence and select a fresh work directory')
+        require(digest(source) == expected, 'source checksum mismatch')
+        require(shutil.disk_usage(source.parent).free >= 12 * 1024**3, 'need 12 GiB free host space')
+        require('xfs' in run('virt-resize', '--machine-readable').splitlines(),
+                'native virt-resize lacks XFS expansion capability')
+        require(info(source) == 879755264, 'unexpected source virtual size')
+        before, identity, _ = snapshot(source)
+        require(before == [1,1048576,3145727,2097152,2,3145728,37748735,34603008,
+                           3,37748736,879738367,841989632], 'unexpected pinned partition layout')
+        source.chmod(0o444)
+        subprocess.check_call(['qemu-img', 'create', '-f', 'qcow2', str(output), '10G'])
+        subprocess.check_call(['virt-resize', '--format', 'qcow2', '--output-format', 'qcow2',
+                               '--align-first', 'never', '--expand', '/dev/sda3',
+                               '--unknown-filesystems', 'error', str(source), str(output)])
+        require(digest(source) == expected, 'source changed during expansion')
+        require(info(output) == 10737418240, 'unexpected output virtual size')
+        after, new_identity, free = snapshot(output)
+        require(after[:10] == before[:10] and after[10] > before[10]
+                and after[11] == after[10] - after[9] + 1, 'partition preservation/expansion failed')
+        require(new_identity == identity, 'boot contents or root identity changed')
+        require(free >= 8 * 1024**3, 'expanded root needs 8 GiB free before package refresh')
+        require(not os.path.lexists(destination), 'customization destination appeared')
+        output.rename(destination)
+        print(json.dumps({'source_sha256': expected, 'output_sha256': digest(destination),
+                          'before': before, 'after': after, 'identity': identity, 'root_free_bytes': free}))
+      - "{{ guest_base_image_qcow2 }}.source"
+      - "{{ guest_base_image_qcow2 }}"
+  when:
+    - image.name == 'opensuse-leap-15.6-kdive-remote-base'
+    - image.source == 'cloud-image'
+    - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
 
 - name: Customize the cloud image (packages + services) for {{ image.name }}
   ansible.builtin.command:  # noqa: command-instead-of-module
@@ -308,6 +417,100 @@
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: true
 
+# Leap retains native Wicked/netconfig; no NetworkManager or Ubuntu policy migration.
+- name: Install the Leap native network policy for {{ image.name }}
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-ssh-return-route:/tmp/kdive-ssh-return-route"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-wicked-ssh-return-route:/tmp/kdive-wicked-ssh-return-route"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-wicked-policy.xml:/tmp/kdive-wicked-policy.xml"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-wicked-server-local.xml:/tmp/kdive-wicked-server-local.xml"
+      - --upload
+      - "{{ guest_base_image_helper_dir }}/kdive-wicked-startup.conf:/tmp/kdive-wicked-startup.conf"
+      - --run-command
+      - |
+        set -eu
+        command -v wicked
+        command -v busctl
+        command -v ip
+        command -v python3
+        test -x /etc/wicked/extensions/netconfig
+        # These pinned native readers define source precedence and generic updater semantics.
+        sha256sum -c - <<'NATIVE'
+        29787e471d8f011e1e4148b897fe4a4dbaa7d98d40949e533b6d29968cd919a4  /etc/wicked/client.xml
+        8bbb7040755dabbf185bea2b19587bc84cc5e6a4c3d9e3919664bd29d3010800  /etc/wicked/common.xml
+        6cabde2f9efeb4a4a1a2ad6a427654c143bcb0e5afe5b64dfec30b80d54816cc  /etc/wicked/nanny.xml
+        f21672f780bef41db5521962ff73486b88c69785e629ce9972abf58f0777a479  /etc/wicked/server.xml
+        NATIVE
+        for policy in /etc/sysconfig/network/ifcfg-* /etc/sysconfig/network/ifroute-* \
+            /etc/wicked/ifconfig/* /run/wicked/nanny/policy*.xml /var/lib/wicked/nanny/policy*.xml \
+            /etc/wicked/*-local.xml /etc/wicked/local.xml /etc/wicked/client-firmware.xml \
+            /etc/wicked/client-nbft.xml; do
+          [ -e "$policy" ] || [ -L "$policy" ] || continue
+          case "$policy" in
+            /etc/sysconfig/network/ifcfg-lo|/etc/sysconfig/network/ifcfg.template) continue ;;
+            /etc/wicked/server-local.xml)
+              if [ ! -L "$policy" ] && cmp -s "$policy" /tmp/kdive-wicked-server-local.xml; then continue; fi ;;
+          esac
+          echo 'kdive: foreign Wicked policy; rebuild from a clean supported Leap image' >&2
+          exit 1
+        done
+        for unit_root in /etc/systemd/system.control /run/systemd/system.control \
+            /run/systemd/transient /run/systemd/generator.early /etc/systemd/system \
+            /etc/systemd/system.attached /run/systemd/system /run/systemd/system.attached \
+            /run/systemd/generator /usr/local/lib/systemd/system /usr/lib/systemd/system \
+            /lib/systemd/system /run/systemd/generator.late; do
+          for dropin in "$unit_root"/wickedd*.service.d/*.conf "$unit_root"/wicked.service.d/*.conf \
+              "$unit_root"/service.d/*.conf; do
+            [ -e "$dropin" ] || [ -L "$dropin" ] || continue
+            if [ "$dropin" != /etc/systemd/system/wickedd-nanny.service.d/50-kdive-startup.conf ] || \
+                [ -L "$dropin" ] || ! cmp -s "$dropin" /tmp/kdive-wicked-startup.conf; then
+              echo 'kdive: foreign Wicked service drop-in; rebuild from a clean supported Leap image' >&2
+              exit 1
+            fi
+          done
+          [ "$unit_root" != /usr/lib/systemd/system ] || continue
+          for unit in "$unit_root"/wickedd*.service "$unit_root"/wicked.service; do
+            if [ -e "$unit" ] || [ -L "$unit" ]; then
+              echo 'kdive: foreign Wicked service override; rebuild from a clean supported Leap image' >&2
+              exit 1
+            fi
+          done
+        done
+        for pair in kdive-wicked-policy.xml:/etc/wicked/kdive-ethernet-policy.xml \
+            kdive-wicked-ssh-return-route:/usr/local/libexec/kdive-wicked/netconfig \
+            kdive-wicked-startup.conf:/etc/systemd/system/wickedd-nanny.service.d/50-kdive-startup.conf; do
+          src=/tmp/${pair%%:*}; dst=${pair#*:}
+          if { [ -e "$dst" ] || [ -L "$dst" ]; } && \
+              { [ -L "$dst" ] || ! cmp -s "$src" "$dst"; }; then
+            echo 'kdive: foreign owned-path contents; rebuild from a clean supported Leap image' >&2
+            exit 1
+          fi
+        done
+        install -d -o root -g root -m 0755 /usr/local/libexec/kdive-wicked \
+          /etc/systemd/system/wickedd-nanny.service.d /etc/cloud/cloud.cfg.d
+        install -o root -g root -m 0755 /tmp/kdive-ssh-return-route /usr/local/libexec/kdive-ssh-return-route
+        install -o root -g root -m 0755 /tmp/kdive-wicked-ssh-return-route /usr/local/libexec/kdive-wicked/netconfig
+        install -o root -g root -m 0644 /tmp/kdive-wicked-policy.xml /etc/wicked/kdive-ethernet-policy.xml
+        install -o root -g root -m 0644 /tmp/kdive-wicked-server-local.xml /etc/wicked/server-local.xml
+        install -o root -g root -m 0644 /tmp/kdive-wicked-startup.conf /etc/systemd/system/wickedd-nanny.service.d/50-kdive-startup.conf
+        printf 'network: {config: disabled}\n' > /etc/cloud/cloud.cfg.d/99-kdive-network-policy.cfg
+        chmod 0644 /etc/cloud/cloud.cfg.d/99-kdive-network-policy.cfg
+        systemctl enable wicked.service
+        rm -f /tmp/kdive-ssh-return-route /tmp/kdive-wicked-ssh-return-route \
+          /tmp/kdive-wicked-policy.xml /tmp/kdive-wicked-server-local.xml /tmp/kdive-wicked-startup.conf
+  when:
+    - image.distro == 'opensuse-leap'
+    - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
+
 # --- Set the crashkernel reservation when a debuginfo/kdump image is requested. ---
 - name: Set the crashkernel reservation for {{ image.name }}
   ansible.builtin.command:  # noqa: command-instead-of-module
@@ -341,7 +544,9 @@
       {{ guest_base_image_helper_args
          + ['--copy-in', guest_base_image_helper_dir ~ '/'
             ~ ('debian/' if image.distro in ['debian', 'ubuntu']
-               and item == 'kdive-install-kernel' else '') ~ item ~ ':/usr/local/sbin/',
+               and item == 'kdive-install-kernel' else 'suse/'
+               if image.distro == 'opensuse-leap' and item == 'kdive-install-kernel'
+               else '') ~ item ~ ':/usr/local/sbin/',
             '--run-command', 'chown root:root /usr/local/sbin/' ~ item,
             '--run-command', 'chmod 0755 /usr/local/sbin/' ~ item,
             '--run-command',
@@ -383,6 +588,79 @@
         absolute path (ADR-0590); install coreutils in this image" >&2; exit 1; }
   when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: false
+
+- name: Complete the pinned Leap native firstboot for {{ image.name }}
+  ansible.builtin.command: # noqa: command-instead-of-module
+    # Complete only the admitted fresh image through its native completion marker.
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --run-command
+      - |
+        set -eu
+        fail() { echo 'kdive: unsafe native firstboot state; rebuild supported Leap image' >&2; exit 1; }
+        safe() {
+          [ ! -L "$1" ] || fail
+          metadata=$(stat -c '%u:%g:%a' -- "$1")
+          [ "${metadata%:*}" = 0:0 ] && [ $((0${metadata##*:} & 022)) -eq 0 ] || fail
+        }
+        for root in /etc/systemd/system.control /run/systemd/system.control \
+            /run/systemd/transient /run/systemd/generator.early /etc/systemd/system \
+            /etc/systemd/system.attached /run/systemd/system /run/systemd/system.attached \
+            /run/systemd/generator /usr/local/lib/systemd/system /usr/lib/systemd/system \
+            /lib/systemd/system /run/systemd/generator.late; do
+          dir=$root
+          while :; do
+            if [ -e "$dir" ] || [ -L "$dir" ]; then
+              [ -d "$dir" ] || fail
+              safe "$dir"
+            fi
+            [ "$dir" != / ] || break
+            dir=${dir%/*}
+            [ -n "$dir" ] || dir=/
+          done
+          for unit in jeos-firstboot.service jeos-firstboot-snapshot.service; do
+            if [ "$root" != /usr/lib/systemd/system ] && { [ -e "$root/$unit" ] || [ -L "$root/$unit" ]; }; then fail; fi
+          done
+          for dropin in "$root"/service.d "$root"/jeos-.service.d "$root"/jeos-firstboot-.service.d \
+              "$root"/jeos-firstboot.service.d "$root"/jeos-firstboot-snapshot.service.d; do
+            [ -e "$dropin" ] || [ -L "$dropin" ] || continue
+            [ -d "$dropin" ] || fail
+            safe "$dropin"
+            for conf in "$dropin"/*.conf; do
+              [ -e "$conf" ] || [ -L "$conf" ] || continue
+              fail
+            done
+          done
+        done
+        for dir in /var /var/lib /var/lib/YaST2; do
+          [ -d "$dir" ] || fail
+          safe "$dir"
+        done
+        for unit in jeos-firstboot.service jeos-firstboot-snapshot.service; do
+          [ -f /usr/lib/systemd/system/"$unit" ] || fail
+          safe /usr/lib/systemd/system/"$unit"
+        done
+        sha256sum -c - <<'NATIVE'
+        560fffbd70cb275b23129874fc9021d0ada78be166450a4948331ed280e561da  /usr/lib/systemd/system/jeos-firstboot.service
+        aca184ccdae7ba594e5f863ace6d78a2d7da8dd18c2282c53d42c5509c100c9d  /usr/lib/systemd/system/jeos-firstboot-snapshot.service
+        NATIVE
+        marker=/var/lib/YaST2/reconfig_system
+        if [ -e "$marker" ] || [ -L "$marker" ]; then
+          [ -f "$marker" ] || fail
+          safe "$marker"
+          size=$(stat -c '%s' -- "$marker")
+          [ "$size" = 0 ] || fail
+          rm -- "$marker"
+        fi
+        [ ! -e "$marker" ] && [ ! -L "$marker" ] || fail
+  when:
+    - image.name == 'opensuse-leap-15.6-kdive-remote-base'
+    - image.source == 'cloud-image'
+    - image.cloud_image_checksum | default('') == 'sha256:0a5720416d423f98aacaa793a57d56ec045e3dd25cd88713952660ad00da53bd'
+    - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
 
 - name: Stage the finished image into the (root-owned) pool for {{ image.name }}
   ansible.builtin.copy:

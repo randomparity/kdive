@@ -297,11 +297,12 @@ two pinned baselines in `fixtures/kernel/baselines.toml`. Fedora runs on
 `fedora-kdive-remote-base-43` and Enterprise Linux on `rocky-10-kdive-remote-base`
 (`REMOTE_REPRESENTATIVES` in `tests/integration/live_stack/remote_lifecycle.py`). Debian uses
 `ubuntu-2404-kdive-remote-base`, rebuilt with its native install helper (ADR-0766).
-SUSE records `blocked` because there is no SUSE remote base image (#3082). Debian's
-separate SSH return-route prerequisite remains #3091; a helper fix does not prove that leg. A parameter provisions the representative, uploads its baseline's
+SUSE uses `opensuse-leap-15.6-kdive-remote-base` with its native helper and Wicked
+policy (ADRs0767/0768). Each family still requires deployed networking and actual
+traffic evidence. A parameter provisions the representative, uploads its baseline's
 fixture kernel, completes the build, installs and boots it in the guest, reconnects over the SSH
 forward with the same key, checks the running release and GNU build ID against the fixture, reads
-the digest of the guest's `/boot/kdive/vmlinuz-<release>` for Debian or
+the digest of the guest's `/boot/kdive/vmlinuz-<release>` for Debian/SUSE or
 `/boot/vmlinuz-<release>` for other families, loads the `loop` module and compares its
 bytes with the uploaded copy, then releases and proves on the provider host that the domain is
 undefined, its volumes are gone and no new `kdive-*` domain remains, with kdive's capacity back to
@@ -551,3 +552,30 @@ The x86 cell is `remote-quiescence/remote-libvirt/x86_64`. The original fault an
 resource-limit cells remain required under #3117 and #3118; POWER evidence remains
 under #2818. This finite ordering observation does not establish those separate
 obligations or durable capture finalization.
+
+## SUSE native image proof
+
+On untouched first boot, record the completed JeOS marker, skipped wizard units,
+stock SSH key-generation journal, hostkey metadata and actual listener before
+authorizing SSH. Manual keygen, daemon restart or timeout changes cannot supply
+this proof. Preserve prior failed firstboot evidence when rebuilding.
+
+Build `opensuse-leap-15.6-kdive-remote-base` through the image playbook and retain
+its source checksum, final image/package identity and installed helper hashes.
+Deploy matching server/worker/reconciler source before running the SUSE parameters
+of `tests/integration/test_remote_deep_lifecycle_live.py`. Both longterm and stable
+cells require actual installed-kernel, module, boot and cleanup evidence.
+
+The Leap image retains Wicked. Its adapter creates encoded per-device hardware-class
+policies with native busctl createPolicy and verifies persistence before enable.
+Prove owned replay and same-name foreign-policy refusal without changing that policy;
+CLI success never proves acquisition. For a newly created test Ethernet fixture,
+register its owned native policy before activation. Before qualification, observe clean first-boot
+DHCP on both NICs, native generic batch processing, lease renewal/replacement and
+removal/reactivation, then native daemon restart and guest reboot. Confirm table2291
+source routing, preservation of primary/static routes, authenticated forwarded SSH
+and primary egress after these transitions. Do not infer traffic from a successful
+updater exit or Wicked's ready state; adapter failures are logged but are not a
+native readiness barrier. Use only an owned disposable guest for negative/lease
+replacement probes, and restore/clean its exact objects before qualification.
+A missing prerequisite or failed arm remains unmet evidence under #3082.

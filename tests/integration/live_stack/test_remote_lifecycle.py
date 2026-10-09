@@ -57,7 +57,8 @@ def test_every_remote_cell_family_is_represented_or_blocked() -> None:
     assert len(cells) == 8 and {c.guest_arch for c in cells} == {"x86_64"}
     for cell in cells:
         assert (cell.family in REMOTE_REPRESENTATIVES) != (cell.family in REMOTE_BLOCKED)
-    assert {"#3082"} == {reason.split(":")[0] for reason in REMOTE_BLOCKED.values()}
+    assert not REMOTE_BLOCKED
+    assert REMOTE_REPRESENTATIVES["suse"].version == "15.6"
 
 
 def test_representatives_are_ansible_catalog_rows_of_their_family() -> None:
@@ -188,7 +189,13 @@ def test_remote_kdive_domains_lists_only_kdive_domains() -> None:
 
 
 @pytest.mark.parametrize(
-    "family,directory", [("fedora", "/boot"), ("enterprise", "/boot"), ("debian", "/boot/kdive")]
+    "family,directory",
+    [
+        ("fedora", "/boot"),
+        ("enterprise", "/boot"),
+        ("debian", "/boot/kdive"),
+        ("suse", "/boot/kdive"),
+    ],
 )
 def test_guest_boot_kernel_reads_the_release_kernel(
     monkeypatch: pytest.MonkeyPatch, family: str, directory: str

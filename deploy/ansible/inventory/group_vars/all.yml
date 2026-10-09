@@ -89,6 +89,28 @@ kdive_image_catalog:
       - tar
       - openssl
       - python3
+  - name: opensuse-leap-15.6-kdive-remote-base
+    distro: opensuse-leap
+    version: "15.6"
+    source: cloud-image
+    arches: [x86_64]
+    cloud_image_url: >-
+      https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-15.6.0-Cloud-Build19.146.qcow2
+    cloud_image_checksum: sha256:0a5720416d423f98aacaa793a57d56ec045e3dd25cd88713952660ad00da53bd
+    packages:
+      - qemu-guest-agent
+      - kdump
+      - kexec-tools
+      - makedumpfile
+      - dracut
+      - grub2
+      - curl
+      - tar
+      - openssl
+      - python3
+      - coreutils
+      - openssh
+      - iproute2
   - name: rocky-10-kdive-remote-base
     distro: rocky
     version: "10"
