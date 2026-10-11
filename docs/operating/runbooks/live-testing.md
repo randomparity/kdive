@@ -487,6 +487,14 @@ canonical `provider_authority_host_system_manifest_source` and
 instance, immutable base, machine/network and fixed port ranges; validate it with the existing
 `validate_authority_system_provisioning.py` through role preflight, not an ad hoc format.
 
+Remote System bases also require `provider_authority_host_remote_module_enabled: true` and
+`provider_authority_host_remote_module_architectures` containing the selected supported
+architectures. Enable `remote_libvirt_module_appliance_enabled` and supply the corresponding
+pinned URL/SHA256 entries in `remote_libvirt_module_appliance_images` through the existing
+[module-appliance build and installation contract](../../../deploy/remote_module_appliance/README.md).
+The authority readiness check requires those installed assets and its private storage pool;
+installation readiness does not qualify a module operation or System construction.
+
 Review the authority network address/port and worker TLS route separately from ordinary libvirt
 TLS. Use the existing [remote setup contract](remote-libvirt-host-setup.md) and
 [remote provider configuration](../providers/remote-libvirt.md) for client credentials and the
