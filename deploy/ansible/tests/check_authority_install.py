@@ -67,9 +67,63 @@ def installation_play(root):
     return path
 
 
+def check_base_destination_guards(root):
+    tasks = []
+    for role, filename, prefix, remote in (
+        ("provider_authority_host", "install.yml", "provider_authority_host_system", True),
+        ("live_vm_host", "main.yml", "live_vm_host_authority_system", False),
+    ):
+        source = yaml.safe_load((HERE.parent / "roles" / role / "tasks" / filename).read_text())
+        inspect = next(
+            task
+            for task in source
+            if task["name"] == "Inspect authority System base destinations without following links"
+        )
+        expected = [
+            "/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/"
+            + "a" * 64
+            + ".qcow2"
+        ]
+        if remote:
+            expected.append("/var/lib/kdive/provider-authority/remote-libvirt-pool/base.qcow2")
+        tasks.extend(
+            [
+                {
+                    "name": "Render " + role + " base guard destinations",
+                    "ansible.builtin.set_fact": {"guard_paths": inspect["loop"]},
+                    "vars": {
+                        prefix + "_local_bases": [{"digest": "a" * 64}],
+                        prefix + "_remote_bases": [{"name": "base.qcow2"}],
+                    },
+                },
+                {
+                    "name": "Require actual selected base paths",
+                    "ansible.builtin.assert": {"that": "guard_paths == expected_paths"},
+                    "vars": {"expected_paths": expected},
+                },
+            ]
+        )
+    play = root / "base-guards.yml"
+    play.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "name": "Verify base guard rendering",
+                    "hosts": "localhost",
+                    "connection": "local",
+                    "gather_facts": False,
+                    "tasks": tasks,
+                }
+            ]
+        )
+    )
+    run(["ansible-playbook", "-i", "localhost,", str(play)])
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kdive-authority-install-") as scratch:
         root = Path(scratch)
+        check_base_destination_guards(root)
         source = root / "source"
         package = source / "src/kdive"
         package.mkdir(parents=True)
