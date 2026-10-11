@@ -474,6 +474,10 @@ sandboxing. Retain this limitation in the lane report.
 #### Dedicated remote composition
 
 Stage a clean checkout at the same candidate through the reviewed private provisioning workflow.
+Provision Python 3.14 and uv on the target first through the existing host prerequisite workflow;
+record their resolved paths in `provider_authority_host_python` and
+`provider_authority_host_uv_bin` in the approved plan. The authority role validates these tools
+but does not install them.
 Use [site.yml](../../../deploy/ansible/site.yml) with the dedicated target in
 `remote_libvirt_hosts`; never include the ordinary remote-provider assignment in this limit.
 Set `provider_authority_host_source_root` to that checkout, enable the authority and its mutation
