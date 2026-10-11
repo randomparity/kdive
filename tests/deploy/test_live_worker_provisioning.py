@@ -3486,3 +3486,38 @@ def test_local_worker_host_packages_provision_pahole_per_family() -> None:
         packages = defaults[family_list]
         assert isinstance(packages, list)
         assert provider in packages, family_list
+
+
+def test_installed_local_authority_play_preflights_without_runner() -> None:
+    path = ROOT / "deploy/ansible/playbooks/installed-local-authority.yml"
+    play = yaml.safe_load(_text(path))[0]
+    assert play["hosts"] == "live_vm_runners"
+    assert play["roles"] == ["libvirt_stack", "libvirt_pool_net", "live_vm_host"]
+    assert play["vars"]["live_vm_host_operator_user"] == ("{{ installed_authority_operator_user }}")
+    preflight = play["pre_tasks"][-1]
+    assert preflight["ansible.builtin.include_role"] == {
+        "name": "live_vm_host",
+        "tasks_from": "authority_preflight.yml",
+    }
+    assert "when" not in preflight
+    assert "playbooks/installed-local-authority.yml" in _text(ROOT / "justfile")
+
+
+def test_installed_local_authority_requires_pinned_enabled_inputs() -> None:
+    path = ROOT / "deploy/ansible/playbooks/installed-local-authority.yml"
+    tasks = yaml.safe_load(_text(path))[0]["pre_tasks"]
+    identity = tasks[0]["ansible.builtin.assert"]["that"]
+    assert "installed_authority_operator_user is defined" in identity
+    assert "installed_authority_operator_user | length > 0" in identity
+    assert "live_vm_repo_version is match('^[0-9a-f]{40}$')" in identity
+    assert "ansible_facts['distribution'] == 'Ubuntu'" in identity
+    assert "ansible_facts['distribution_version'] == '26.04'" in identity
+    assert "ansible_facts['architecture'] == 'x86_64'" in identity
+    assert tasks[1]["ansible.builtin.assert"]["that"] == [
+        "live_vm_host_authority_enabled | bool",
+        "live_vm_host_worker_authority_enabled | bool",
+        "live_vm_host_authority_local_mutation_enabled | bool",
+        "live_vm_host_authority_system_manifest_source | length > 0",
+    ]
+    assert tasks[1]["no_log"] is True
+    assert "when" not in tasks[0] and "when" not in tasks[1]
