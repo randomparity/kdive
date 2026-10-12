@@ -11,7 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
-from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
+from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod, capture_methods_for_arch
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
@@ -142,9 +142,9 @@ class VmcoreHandlers:
         )
 
 
-def _supported_method_values(runtime: ProviderRuntime) -> list[str]:
-    """Provider's supported core methods as sorted tokens for an error's ``supported`` set."""
-    return [m.value for m in sorted(runtime.support.capture_methods, key=lambda m: m.value)]
+def _method_values(methods: frozenset[CaptureMethod]) -> list[str]:
+    """Capture methods as sorted tokens for an error's ``supported``/``accepted_values`` set."""
+    return sorted(m.value for m in methods)
 
 
 def _resolve_capture_method(
@@ -160,7 +160,8 @@ def _resolve_capture_method(
     (else ``capability_unsupported``). An omitted method resolves through the System profile's
     ``capture_method`` clamped to the core-producing set; if that yields no descriptor-supported
     core method the call needs an explicit ``method`` (``missing_required_field`` — the provider may
-    support core methods, the caller omitted one).
+    support core methods, the caller omitted one). Both paths narrow the descriptor to the System's
+    profile architecture (ADR-0757), so an x86_64 System never admits fadump.
     """
     if method is not None:
         try:
@@ -173,25 +174,33 @@ def _resolve_capture_method(
             return _config_error(
                 object_id, data={"method": method, "reason": "method does not produce a vmcore"}
             )
-        if explicit not in runtime.support.capture_methods:
+        supported = runtime.support.capture_methods
+        if explicit is CaptureMethod.FADUMP and explicit in supported:
+            # Only fadump is architecture-gated, so other explicit methods skip the profile parse.
+            try:
+                supported = capture_methods_for_arch(supported, system_arch(system))
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(object_id, exc)
+        if explicit not in supported:
             return _capability_unsupported(
                 object_id,
                 capability=f"capture_method:{explicit.value}",
                 provider=runtime.support.component_sources.provider,
-                supported=_supported_method_values(runtime),
+                supported=_method_values(supported),
             )
         return explicit
     try:
         profile = ProvisioningProfile.parse(system.provisioning_profile)
+        supported = capture_methods_for_arch(runtime.support.capture_methods, profile.arch)
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(object_id, exc)
     resolved = runtime.profile_policy.capture_method(profile)
-    if resolved in _VMCORE_METHODS and resolved in runtime.support.capture_methods:
+    if resolved in _VMCORE_METHODS and resolved in supported:
         return resolved
     return _config_error_reason(
         object_id,
         ConfigErrorReason.MISSING_REQUIRED_FIELD,
-        accepted_values=_supported_method_values(runtime),
+        accepted_values=_method_values(supported),
         detail=(
             "this System's profile resolves to no implicit core capture method; "
             "pass an explicit core-producing method"
