@@ -104,6 +104,18 @@ async def ordinary_mutation_is_fenced(conn: AsyncConnection, system_id: UUID) ->
     return binding is not None and binding.ownership_state != "activated"
 
 
+async def preactivation_absence_is_proven(conn: AsyncConnection, system_id: UUID) -> bool:
+    """Whether the authority's consumed absence receipt proves a never-activated System gone.
+
+    Only allocation release may rely on it (ADR-0754); every other mutation keeps the fence.
+    """
+    cursor = await conn.execute(
+        "SELECT authority_system_preactivation_absence_proven(%s)", (system_id,)
+    )
+    row = await cursor.fetchone()
+    return row is not None and row[0] is True
+
+
 def authority_owned_provision_system_id(job: Job) -> UUID | None:
     """Return the System for a marked provision job, rejecting malformed authority payloads."""
     if job.kind is not JobKind.PROVISION or "authority_system_v1" not in job.payload:

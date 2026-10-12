@@ -400,6 +400,8 @@ def test_terminal_authority_system_receipt_repair_uses_the_fixed_batch_limit() -
                 if "list_authority_system" in query
                 else "finalize"
                 if "finalize_authority_system" in query
+                else "discharge"
+                if "discharge_exhausted_authority_system" in query
                 else "provision"
             )
 
@@ -425,12 +427,13 @@ def test_terminal_authority_system_receipt_repair_uses_the_fixed_batch_limit() -
             monkeypatch.setattr(job_repairs, "reclaim_system_core_after_provider_teardown", reclaim)
             assert (
                 await repair_terminal_authority_system_attempts(cast(Any, conn), cast(Any, store))
-                == 3
+                == 5
             )
-        assert events == ["provision", "list", "cleanup", "finalize"]
+        assert events == ["provision", "list", "cleanup", "finalize", "discharge"]
         assert conn.statements[0][1] == (100,)
         assert conn.statements[1][1] == (100,)
         assert conn.statements[2][1] == candidate
+        assert conn.statements[3][1] == (100,)
 
     asyncio.run(_run())
 
