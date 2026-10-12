@@ -26,8 +26,7 @@ RETURNS boolean LANGUAGE sql STABLE SET search_path = '' AS $$
           AND NOT EXISTS (
               SELECT 1 FROM public.authority_system_attempts AS pending
               WHERE pending.system_id = owner.system_id
-                AND (pending.state IN ('allocating', 'current')
-                     OR (pending.state = 'terminal' AND pending.consumed_at IS NULL))
+                AND pending.state IN ('allocating', 'current')
           )
     )
 $$;

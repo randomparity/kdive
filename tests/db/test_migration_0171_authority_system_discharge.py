@@ -402,31 +402,60 @@ def _discharged_residue(conn: psycopg.Connection) -> dict[str, Any]:
     return {**case, "provision_id": provision_id, "receipt_digest": digest}
 
 
-_REFUSALS: dict[str, LiteralString] = {
-    "live-lease": "UPDATE jobs SET lease_expires_at=clock_timestamp()+interval '5 minutes' "
-    "WHERE id=%(job)s",
-    "budget-remains": "UPDATE jobs SET attempt=2 WHERE id=%(job)s",
-    "not-running": "UPDATE jobs SET state='queued',worker_id=NULL,lease_expires_at=NULL "
-    "WHERE id=%(job)s",
-    "enqueued-after-receipt": "UPDATE jobs SET created_at=clock_timestamp()+interval '1 minute' "
-    "WHERE id=%(job)s",
-    "unmarked": "UPDATE jobs SET payload=payload-'authority_system_v1' WHERE id=%(job)s",
-    "foreign-identity": "UPDATE jobs SET payload=jsonb_set(payload,"
-    "'{authority_system_v1,resource_name}','\"other-host\"') WHERE id=%(job)s",
-    "foreign-system": "UPDATE jobs SET payload=jsonb_set(payload,"
-    "'{authority_system_v1,system_id}',to_jsonb(gen_random_uuid()::text)) WHERE id=%(job)s",
-    "teardown-operation": "UPDATE jobs SET payload=jsonb_set(payload,"
-    "'{authority_system_v1,operation}','\"preactivation-teardown\"') WHERE id=%(job)s",
-    "teardown-kind": "UPDATE jobs SET kind='teardown' WHERE id=%(job)s",
-    "active-attempt": "INSERT INTO authority_system_attempts (system_id,generation,operation,"
-    "job_id,job_attempt,worker_incarnation,request_attempt_id,operation_identity,"
-    "operation_digest) SELECT system_id,3,'provision',%(job)s,3,worker_incarnation,"
-    "gen_random_uuid(),'prior-provision',operation_digest FROM authority_system_attempts "
-    "WHERE job_id=%(job)s",
-    "head-moved": "UPDATE authority_system_ownership SET journal_digest='sha256:'||repeat('9',64) "
-    "WHERE system_id=%(system)s",
+_UNFREEZE: LiteralString = (
+    "ALTER TABLE authority_system_attempts DISABLE TRIGGER authority_system_attempts_immutable"
+)
+_REFREEZE: LiteralString = (
+    "ALTER TABLE authority_system_attempts ENABLE TRIGGER authority_system_attempts_immutable"
+)
+_REFUSALS: dict[str, tuple[LiteralString, ...]] = {
+    "live-lease": (
+        "UPDATE jobs SET lease_expires_at=clock_timestamp()+interval '5 minutes' WHERE id=%(job)s",
+    ),
+    "budget-remains": ("UPDATE jobs SET attempt=2 WHERE id=%(job)s",),
+    "not-running": (
+        "UPDATE jobs SET state='queued',worker_id=NULL,lease_expires_at=NULL WHERE id=%(job)s",
+    ),
+    "enqueued-after-receipt": (
+        "UPDATE jobs SET created_at=clock_timestamp()+interval '1 minute' WHERE id=%(job)s",
+    ),
+    "unmarked": ("UPDATE jobs SET payload=payload-'authority_system_v1' WHERE id=%(job)s",),
+    "foreign-identity": (
+        "UPDATE jobs SET payload=jsonb_set(payload,"
+        "'{authority_system_v1,resource_name}','\"other-host\"') WHERE id=%(job)s",
+    ),
+    "foreign-system": (
+        "UPDATE jobs SET payload=jsonb_set(payload,"
+        "'{authority_system_v1,system_id}',to_jsonb(gen_random_uuid()::text)) WHERE id=%(job)s",
+    ),
+    "teardown-operation": (
+        "UPDATE jobs SET payload=jsonb_set(payload,"
+        "'{authority_system_v1,operation}','\"preactivation-teardown\"') WHERE id=%(job)s",
+    ),
+    "teardown-kind": ("UPDATE jobs SET kind='teardown' WHERE id=%(job)s",),
+    "active-attempt": (
+        "INSERT INTO authority_system_attempts (system_id,generation,operation,job_id,"
+        "job_attempt,worker_incarnation,request_attempt_id,operation_identity,operation_digest) "
+        "SELECT system_id,3,'provision',%(job)s,3,worker_incarnation,gen_random_uuid(),"
+        "'prior-provision',operation_digest FROM authority_system_attempts WHERE job_id=%(job)s",
+    ),
+    "head-moved": (
+        "UPDATE authority_system_ownership SET journal_digest='sha256:'||repeat('9',64) "
+        "WHERE system_id=%(system)s",
+    ),
+    "unconsumed-receipt": (
+        _UNFREEZE,
+        "UPDATE authority_system_attempts SET consumed_at=NULL "
+        "WHERE system_id=%(system)s AND state='terminal'",
+        _REFREEZE,
+    ),
+    "foreign-attempt": (
+        _UNFREEZE,
+        "UPDATE authority_system_attempts SET system_id=%(other)s WHERE job_id=%(job)s",
+        _REFREEZE,
+    ),
 }
-_PROOF_REFUSALS = {"active-attempt", "head-moved"}
+_PROOF_REFUSALS = {"active-attempt", "head-moved", "unconsumed-receipt"}
 
 
 @pytest.mark.parametrize("refusal", sorted(_REFUSALS))
@@ -435,9 +464,18 @@ def test_discharge_and_release_proof_refuse_each_unproven_tuple(
 ) -> None:
     with psycopg.connect(migrated_url) as admin:
         residue = _discharged_residue(admin)
-        admin.execute(
-            _REFUSALS[refusal], {"job": residue["provision_id"], "system": residue["system_id"]}
+        other = _seed_direct_authority_case(
+            admin, operation="provision", ownership_state="provisioning"
         )
+        for statement in _REFUSALS[refusal]:
+            admin.execute(
+                statement,
+                {
+                    "job": residue["provision_id"],
+                    "system": residue["system_id"],
+                    "other": other["system_id"],
+                },
+            )
     before = _job(migrated_url, residue["provision_id"])
     reconciler = authority_role_dsns("kdive_reconciler")
     with psycopg.connect(reconciler) as conn:
@@ -544,7 +582,7 @@ def test_locked_candidate_defers_without_waiting(
             {"job": residue["provision_id"], "system": residue["system_id"]},
         )
         with psycopg.connect(authority_role_dsns("kdive_reconciler")) as conn:
-            conn.execute("SET lock_timeout='2s'")
+            conn.execute("SET statement_timeout='5s'")
             assert conn.execute(_DISCHARGE, (100,)).fetchone() == (0,)
         assert _job(migrated_url, residue["provision_id"])[0] == "running"
     with psycopg.connect(authority_role_dsns("kdive_reconciler")) as conn:
