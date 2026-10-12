@@ -526,6 +526,18 @@ stack after its cells, enqueued an `IMAGE_BUILD` job that failed on its first at
 and after the final `demo-down.sh --wipe --yes`, the provider defined no `kdive-` domain and its
 pool held only the base volume.
 
+Last refusal run (#3151): candidate `b1b8ddef6` (later commits change only this record), on a
+Fedora 44 x86_64 host with no provider host. That host had no fixed worker lifecycle, so
+`demo-up.sh` could not run there. The stack was `just stack-backends`, the runtime-role
+bootstrap and the server process at the candidate. It ran without a worker or reconciler, which
+the server-only refusal cells do not require. The run used the default configuration, then the
+server restarted with `KDIVE_WORKER_DEATH_VERIFIER=docker` for `recovery`. Bindings came from
+plain `bindings` without `--remote`, and `KDIVE_DATABASE_URL` was the migration-owner DSN. All
+four x86_64 remote `images.publish` functional cells recorded `unsupported`, and `qualify`
+qualified each one. Each record carried the control plane as its host, accelerator `none`, no
+guest and only the `server` role. The catalog rows, build-job count and `platform` snapshot of
+each fresh image name were unchanged across the call.
+
 ### Accepted-operation quiescence proof
 
 The `live_vm_remote` carrier
