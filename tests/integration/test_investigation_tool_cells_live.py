@@ -41,7 +41,7 @@ from kdive.images.rootfs.catalog import load_rootfs_catalog
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from kdive.providers.shared.runtime_paths import domain_name_for
-from scripts.coverage_campaign.contract import Cell
+from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES, Cell
 from tests.integration.live_stack.cleanup import capacity_in_use, domain_disks, release_and_verify
 from tests.integration.live_stack.scenario import (
     CellRun,
@@ -53,6 +53,7 @@ from tests.integration.live_stack.spine import LOCAL_ALLOCATION_DISK_GB, provisi
 from tests.integration.live_stack.tool_cells import (
     Boundary,
     Exposure,
+    FilteredListControl,
     Functional,
     Grants,
     HttpCaller,
@@ -850,15 +851,6 @@ _FUNCTIONAL: dict[str, Callable[..., Awaitable[dict[str, object]]]] = {
 _SYSTEM_TOOLS = frozenset({"artifacts.get", "artifacts.list"})
 _READERS = frozenset({"investigations.get", "investigations.list", *_SYSTEM_TOOLS})
 _RUN_TARGETS = frozenset({"artifacts.create_run_upload", "artifacts.fetch_raw"})
-# List tools that answer an empty page instead of rejecting; #3108 decides their evidence.
-_FILTERED = frozenset(
-    {
-        ("investigations.list", "authorization"),
-        ("investigations.list", "project-isolation"),
-        ("artifacts.list", "project-isolation"),
-    }
-)
-_FILTERED_OWNER = "#3108"
 # A non-member of the three upload tools gets configuration_error, the answer an absent owner
 # gets (artifacts/uploads.py _create_upload, complete_rootfs_upload.py); their cells compare it
 # with an absent-owner twin. investigations.open names its project, so it is denied outright.
@@ -937,17 +929,16 @@ def _rejection(tool: str, boundary: Boundary, project: str) -> Rejection:
     args = _valid(tool, project)
     if boundary == "authentication":
         return Rejection(args, _viewer(project))
-    filtered = _FILTERED_OWNER if (tool, boundary) in _FILTERED else None
     if boundary == "project-isolation":
         category = _ISOLATION.get(tool, ErrorCategory.NOT_FOUND)
         # _valid names an absent owner, so it is the twin the real owner's answer must match.
         twin = args if category is ErrorCategory.CONFIGURATION_ERROR else None
         categories = frozenset({category.value})
-        return Rejection(args, _stranger(), categories, filtered_by=filtered, absent_twin=twin)
+        return Rejection(args, _stranger(), categories, absent_twin=twin)
     if tool in _SYSTEM_TOOLS:
         return Rejection(args, _member(_funded_project()))
     grants = _member(project) if tool in _READERS else _viewer(project)
-    return Rejection(args, grants, filtered_by=filtered)
+    return Rejection(args, grants)
 
 
 def _target_setup(
@@ -981,6 +972,52 @@ async def _system_args(tool: str, db_url: str, system: _System) -> dict[str, obj
     return {"request": {"artifact_id": str(part["id"])}}
 
 
+async def _live_investigation(db_url: str, project: str) -> str:
+    """The one live investigation of ``project``: the item a filtered viewer must see."""
+    query = "SELECT id FROM investigations WHERE project = %s AND state = ANY(%s)"
+    rows = await _rows(db_url, query, (project, _LIVE_INVESTIGATIONS))
+    assert len(rows) == 1, f"project {project} holds {len(rows)} live investigations, not 1"
+    return str(rows[0]["id"])
+
+
+_PART: LiteralString = (
+    "SELECT * FROM artifacts WHERE id = %s AND owner_kind = 'systems' AND owner_id = %s "
+    "AND sensitivity = 'redacted'"
+)
+
+
+async def _part_state(db_url: str, system_id: str, part_id: str) -> dict[str, object]:
+    """The System's project and one console part: what a filtered ``artifacts.list`` protects.
+
+    Console rotation keeps adding parts (see ``_scenario``), so only the selected part and the
+    System's identity are protected (ADR-0756).
+    """
+    systems = await _rows(db_url, "SELECT id, project FROM systems WHERE id = %s", (system_id,))
+    parts = await _rows(db_url, _PART, (part_id, system_id))
+    assert len(systems) == 1 and len(parts) == 1, f"System {system_id} lost part {part_id}"
+    return {"system": systems[0], "part": parts[0]}
+
+
+async def _filtered_control(
+    db_url: str, project: str, system: _System | None
+) -> tuple[FilteredListControl, Snapshot | None]:
+    """The positive control of a filtered list cell and, for a System, its narrow snapshot."""
+    if system is None:
+        return FilteredListControl(
+            _viewer(project), partial(_live_investigation, db_url, project)
+        ), None
+    rows = await _rows(db_url, _SYSTEM_PARTS, (system.id,))
+    assert rows, f"System {system.id} has no redacted console part"
+    part = str(rows[0]["id"])
+
+    async def expected() -> str:
+        await _part_state(db_url, system.id, part)
+        return part
+
+    viewer = Grants(f"{project}-viewer", (system.project,), {system.project: "viewer"})
+    return FilteredListControl(viewer, expected), partial(_part_state, db_url, system.id, part)
+
+
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> None:
     cell, tool = run.cell, run.cell.operation
     caller = HttpCaller(cast(Exposure, cell.exposure), base_url, issuer)
@@ -993,7 +1030,8 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     system = None
     if tool in _SYSTEM_TOOLS and targeted:
         # Console rotation adds parts to the System whenever its guest writes enough, so its
-        # rows stay out of the snapshot; artifacts.list compares them inside its body.
+        # rows stay out of the snapshot; artifacts.list compares them inside its body, and its
+        # filtered isolation cell protects one selected part (_part_state).
         system = await _session_system(base_url, issuer, db_url)
     if cell.kind == "functional":
         body = cast(Functional, partial(_FUNCTIONAL[tool], db_url=db_url))
@@ -1006,6 +1044,10 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
         rejection = replace(rejection, args=await _system_args(tool, db_url, system))
     elif targeted and tool != "investigations.open":
         setup = _target_setup(base_url, issuer, project, tool)
+    if (tool, boundary) in FILTERED_LIST_BOUNDARIES:
+        control, narrow = await _filtered_control(db_url, project, system)
+        rejection = replace(rejection, filtered=control)
+        snapshot = narrow or snapshot
     await prove_rejection(run, caller, boundary, rejection, snapshot, setup=setup)
 
 
