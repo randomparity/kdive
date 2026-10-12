@@ -526,7 +526,7 @@ stack after its cells, enqueued an `IMAGE_BUILD` job that failed on its first at
 and after the final `demo-down.sh --wipe --yes`, the provider defined no `kdive-` domain and its
 pool held only the base volume.
 
-Last refusal run (#3151): candidate `b1b8ddef6` (later commits change only this record), on a
+Last refusal run (#3151): candidate `4b5eb9bd7` (later commits change only this record), on a
 Fedora 44 x86_64 host with no provider host. That host had no fixed worker lifecycle, so
 `demo-up.sh` could not run there. The stack was `just stack-backends`, the runtime-role
 bootstrap and the server process at the candidate. It ran without a worker or reconciler, which
