@@ -36,7 +36,9 @@ WHERE kind = 'provision'
    is `torn_down`. The System reaches `torn_down` only when the authority's
    preactivation-absence receipt is consumed.
 3. Release the Allocation with `allocations.release`. A consumed absence receipt admits release
-   even though the System never activated; no other operation is admitted by it.
+   even though the System never activated; no other operation is admitted by it. The
+   reconciler's lease-expiry sweep and orphaned-allocation reaper use the same admission, so
+   the Allocation may already be `expired` or `released` when you get here.
 
 The reconciler then cancels the exhausted `provision` job. The canceled job's `result_ref`
 holds the absence receipt digest. The job keeps its attempt count and receives no new attempt.

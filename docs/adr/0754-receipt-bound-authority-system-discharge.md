@@ -40,6 +40,9 @@ then `allocations.release`; the reconciler settles the exhausted predecessor.
 ## Consequences
 
 This is an operator-selected destructive discharge, not automatic provision retry.
+Every allocation-release caller shares the admission, so after the receipt the
+reconciler's lease-expiry sweep and orphaned-allocation reaper may also end the
+Allocation; neither can destroy a System or invent its absence.
 An unavailable authority or an unresolved provider conflict still blocks teardown;
 no absence is invented. Restoring the existing authority and repeating the supported
 teardown operation is required. Native POWER qualification remains separate.
