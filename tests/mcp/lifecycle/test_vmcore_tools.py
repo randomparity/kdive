@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, LiteralString, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -596,12 +596,23 @@ def test_fetch_vmcore_fadump_admitted_explicit_on_local(migrated_url: str) -> No
     asyncio.run(_run())
 
 
-async def _idempotency_count(pool: AsyncConnectionPool) -> int:
+async def _count(pool: AsyncConnectionPool, query: LiteralString) -> int:
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("SELECT count(*) AS n FROM idempotency_keys WHERE kind = 'vmcore.fetch'")
+        await cur.execute(query)
         row = await cur.fetchone()
     assert row is not None
     return int(row["n"])
+
+
+async def _protected_counts(pool: AsyncConnectionPool) -> tuple[int, int, int]:
+    """Capture jobs, vmcore.fetch idempotency keys, and external-boot activations."""
+    return (
+        await _job_count(pool),
+        await _count(
+            pool, "SELECT count(*) AS n FROM idempotency_keys WHERE kind = 'vmcore.fetch'"
+        ),
+        await _count(pool, "SELECT count(*) AS n FROM external_boot_activations"),
+    )
 
 
 @pytest.mark.parametrize("idempotency_key", [None, "k-fadump-x86"])
@@ -618,14 +629,36 @@ def test_fetch_vmcore_refuses_explicit_fadump_on_x86_64(
             resp = await handlers.fetch_vmcore(
                 pool, _ctx(), run_id=run_id, method="fadump", idempotency_key=idempotency_key
             )
-            jobs = await _job_count(pool)
-            keys = await _idempotency_count(pool)
+            counts = await _protected_counts(pool)
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert data_str(resp, "reason") == "capability_unsupported"
         assert data_str(resp, "capability") == "capture_method:fadump"
         assert resp.data["supported"] == ["host_dump", "kdump"]
-        assert (jobs, keys) == (0, 0)
+        assert counts == (0, 0, 0)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
+def test_systems_get_advertisement_agrees_with_fadump_admission(
+    migrated_url: str, arch: str
+) -> None:
+    # #3153 / ADR-0757: for one System and one runtime, fadump is advertised by systems.get iff
+    # vmcore.fetch admits it explicitly, so the two surfaces cannot drift apart.
+    from kdive.mcp.tools.lifecycle.systems.view import get_system
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            profile = _ppc64le_profile() if arch == "ppc64le" else None
+            sys_id, run_id = await _crashed_run(pool, profile=profile)
+            handlers = _real_local_handlers()
+            got = await get_system(pool, _ctx(), sys_id, resolver=handlers.resolver)
+            resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="fadump")
+        advertised = got.data["supported_capture_methods"]
+        assert isinstance(advertised, list)
+        assert ("fadump" in advertised) is (resp.status == "queued"), resp.data
+        assert ("fadump" in advertised) is (arch == "ppc64le")
 
     asyncio.run(_run())
 
