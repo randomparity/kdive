@@ -402,12 +402,37 @@ def _discharged_residue(conn: psycopg.Connection) -> dict[str, Any]:
     return {**case, "provision_id": provision_id, "receipt_digest": digest}
 
 
-_UNFREEZE: LiteralString = (
-    "ALTER TABLE authority_system_attempts DISABLE TRIGGER authority_system_attempts_immutable"
-)
-_REFREEZE: LiteralString = (
-    "ALTER TABLE authority_system_attempts ENABLE TRIGGER authority_system_attempts_immutable"
-)
+# Forged tuples bypass the immutability triggers and foreign keys that keep them unreachable.
+_UNFREEZE: LiteralString = "SET session_replication_role = replica"
+_REFREEZE: LiteralString = "SET session_replication_role = DEFAULT"
+
+
+def _forged(statement: LiteralString) -> tuple[LiteralString, ...]:
+    return (_UNFREEZE, statement, _REFREEZE)
+
+
+def _owner(assignment: LiteralString) -> tuple[LiteralString, ...]:
+    return _forged(
+        "UPDATE authority_system_ownership SET " + assignment + " WHERE system_id=%(system)s"
+    )
+
+
+def _receipt(assignment: LiteralString) -> tuple[LiteralString, ...]:
+    return _forged(
+        "UPDATE authority_system_attempts SET "
+        + assignment
+        + " WHERE system_id=%(system)s AND operation='preactivation-teardown'"
+    )
+
+
+def _marker(field: LiteralString) -> tuple[LiteralString, ...]:
+    return (
+        "UPDATE jobs SET payload=jsonb_set(payload,'{authority_system_v1,"
+        + field
+        + "}',to_jsonb(gen_random_uuid()::text)) WHERE id=%(job)s",
+    )
+
+
 _REFUSALS: dict[str, tuple[LiteralString, ...]] = {
     "live-lease": (
         "UPDATE jobs SET lease_expires_at=clock_timestamp()+interval '5 minutes' WHERE id=%(job)s",
@@ -443,19 +468,44 @@ _REFUSALS: dict[str, tuple[LiteralString, ...]] = {
         "UPDATE authority_system_ownership SET journal_digest='sha256:'||repeat('9',64) "
         "WHERE system_id=%(system)s",
     ),
-    "unconsumed-receipt": (
-        _UNFREEZE,
-        "UPDATE authority_system_attempts SET consumed_at=NULL "
-        "WHERE system_id=%(system)s AND state='terminal'",
-        _REFREEZE,
+    "unconsumed-receipt": _receipt("consumed_at=NULL"),
+    "foreign-attempt": _forged(
+        "UPDATE authority_system_attempts SET system_id=%(other)s WHERE job_id=%(job)s"
     ),
-    "foreign-attempt": (
-        _UNFREEZE,
-        "UPDATE authority_system_attempts SET system_id=%(other)s WHERE job_id=%(job)s",
-        _REFREEZE,
+    "terminal-own-attempt": _forged(
+        "UPDATE authority_system_attempts AS own SET state='terminal',superseded_at=NULL,"
+        "ack_sequence=r.ack_sequence,ack_digest=r.ack_digest,"
+        "quiescence_digest=r.quiescence_digest,acknowledged_at=r.acknowledged_at,"
+        "ack_head_sequence=r.ack_head_sequence,ack_head_digest=r.ack_head_digest,"
+        "terminal_head_sequence=r.terminal_head_sequence,"
+        "terminal_head_digest=r.terminal_head_digest,receipt_bytes=r.receipt_bytes,"
+        "receipt_digest=r.receipt_digest,receipt_disposition='retained-quarantine',"
+        "receipt_at=r.receipt_at,consumed_at=r.consumed_at "
+        "FROM authority_system_attempts AS r WHERE own.job_id=%(job)s "
+        "AND r.system_id=%(system)s AND r.operation='preactivation-teardown'"
     ),
+    "foreign-allocation": _marker("allocation_id"),
+    "foreign-resource": _marker("resource_id"),
+    "owner-not-torn-down": _owner("state='teardown-requested'"),
+    "owner-activated": _owner("first_activation_id=gen_random_uuid()"),
+    "head-not-terminal": _owner("journal_phase='observed'"),
+    "head-sequence-moved": _owner("journal_sequence=journal_sequence+1"),
+    "system-not-torn-down": _forged("UPDATE systems SET state='failed' WHERE id=%(system)s"),
+    "provision-receipt": _receipt("operation='provision'"),
+    "quarantine-receipt": _receipt("receipt_disposition='retained-quarantine'"),
 }
-_PROOF_REFUSALS = {"active-attempt", "head-moved", "unconsumed-receipt"}
+_PROOF_REFUSALS = {
+    "active-attempt",
+    "head-moved",
+    "unconsumed-receipt",
+    "owner-not-torn-down",
+    "owner-activated",
+    "head-not-terminal",
+    "head-sequence-moved",
+    "system-not-torn-down",
+    "provision-receipt",
+    "quarantine-receipt",
+}
 
 
 @pytest.mark.parametrize("refusal", sorted(_REFUSALS))
