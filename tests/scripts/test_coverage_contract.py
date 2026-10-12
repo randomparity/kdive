@@ -6,6 +6,7 @@ import pytest
 
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from scripts.coverage_campaign.contract import (
+    FILTERED_LIST_BOUNDARIES,
     Inventory,
     build_contract,
     load_mapping,
@@ -473,6 +474,30 @@ def test_remote_tool_scenarios_never_share_a_local_node(inventory: Inventory) ->
     same = [c for c in mapped if c.operation == local.operation]
     assert _DEEP_NODE not in {c.node_id for c in same if c.provider == "remote-libvirt"}
     assert _DEEP_NODE in {c.node_id for c in same if c.provider == "local-libvirt"}
+
+
+def test_filtered_list_boundaries_keep_their_twelve_rejection_cells(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+    filtered = [
+        c
+        for c in cells
+        if c.id.startswith("tool/")
+        and c.kind == "rejection"
+        and (c.operation, c.scenario_id.rsplit("/", 1)[1]) in FILTERED_LIST_BOUNDARIES
+    ]
+    assert len(filtered) == 12
+    assert {(c.configuration, c.exposure) for c in filtered} == {
+        (configuration, exposure)
+        for configuration in ("default", "recovery")
+        for exposure in ("direct", "gateway")
+    }
+    for cell in filtered:
+        boundary = cell.scenario_id.rsplit("/", 1)[1]
+        assert cell.owner == 3096 and cell.node_id is not None
+        assert cell.assertions == (boundary, "unchanged-state", "cleanup")
+        assert "empty page to the denied caller" in cell.observation
+    others = [c for c in cells if c.kind == "rejection" and c not in filtered]
+    assert not any("empty page" in c.observation for c in others)
 
 
 def test_remote_publish_functional_cells_are_server_only_admission_refusals(

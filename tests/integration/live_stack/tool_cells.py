@@ -60,7 +60,7 @@ from kdive.mcp.dev_harness import (
 )
 from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.responses import ToolResponse
-from scripts.coverage_campaign.contract import Cell, build_contract
+from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES, Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings, Outcome
 from tests.integration.live_stack.cleanup import disk_absent
 from tests.integration.live_stack.conftest import require_issuer, require_stack
@@ -286,11 +286,24 @@ async def operator_catalog(base_url: str, issuer: OidcIssuer, grants: Grants) ->
 
 
 @dataclass(frozen=True)
+class FilteredListControl:
+    """The positive control of a list tool that filters instead of rejecting (ADR-0756).
+
+    ``expected_item`` names, independently of the list call, a real protected item; ``grants``
+    are a viewer's, which must see that item listed by the same arguments and exposure.
+    """
+
+    grants: Grants
+    expected_item: Callable[[], Awaitable[str]]
+
+
+@dataclass(frozen=True)
 class Rejection:
     """One call a boundary must reject: its arguments, grants and accepted categories.
 
-    ``filtered_by`` names the issue that owns a list tool known to answer an empty page instead
-    of rejecting: that answer stops the cell ``blocked``, and a real rejection still qualifies.
+    ``filtered`` is required exactly for a contract-named filtering list boundary
+    (``FILTERED_LIST_BOUNDARIES``): its denied call must answer the canonical empty page after
+    the control proved the protected item visible to a viewer.
     ``absent_twin`` holds arguments naming an owner that does not exist: the rejected answer
     must be indistinguishable from the twin's, so a category shared with an unrelated failure
     cannot pass the cell.
@@ -299,7 +312,7 @@ class Rejection:
     args: Mapping[str, object]
     grants: Grants
     categories: frozenset[str] = frozenset({ErrorCategory.AUTHORIZATION_DENIED.value})
-    filtered_by: str | None = None
+    filtered: FilteredListControl | None = None
     absent_twin: Mapping[str, object] | None = None
 
 
@@ -351,9 +364,48 @@ async def _attempt(
         return exc
 
 
-def _filtered(result: Result) -> bool:
-    """A successful envelope listing nothing: a list tool filtering instead of rejecting."""
-    return isinstance(result, ToolResponse) and result.error_category is None and not result.items
+def _empty_page(tool: str, args: Mapping[str, object]) -> ToolResponse:
+    """The page a filtering list tool answers a caller who may see nothing (ADR-0756)."""
+    if tool == "investigations.list":
+        object_id, actions = "investigations", ["investigations.get", "investigations.open"]
+    else:
+        object_id, actions = str(args["system_id"]), ["artifacts.get"]
+    return ToolResponse.collection(
+        object_id,
+        "ok",
+        [],
+        suggested_next_actions=actions,
+        data={"truncated": False, "next_cursor": None},
+    )
+
+
+async def _observe_filtered(
+    caller: Caller, tool: str, rejection: Rejection, control: FilteredListControl
+) -> dict[str, object]:
+    """A viewer sees the known item, then the denied caller gets exactly the empty page."""
+    expected = await control.expected_item()
+    assert expected, f"{tool} has no independently known protected item"
+    seen = await _attempt(caller, tool, replace(rejection, grants=control.grants))
+    assert isinstance(seen, ToolResponse) and seen.status == "ok", (
+        f"{tool} control call failed: {_shape(seen)}"
+    )
+    assert seen.error_category is None and seen.detail is None, (
+        f"{tool} control call failed: {_shape(seen)}"
+    )
+    listed = [i.object_id for i in seen.items if i.error_category is None]
+    assert expected in listed, f"{tool} did not list the known item to a viewer ({len(listed)})"
+    result = await _attempt(caller, tool, rejection)
+    empty = _empty_page(tool, rejection.args).model_dump()
+    answer = result.model_dump() if isinstance(result, ToolResponse) else _shape(result)
+    differs = sorted(k for k in empty.keys() | answer.keys() if answer.get(k) != empty.get(k))
+    assert not differs, f"{tool} denied answer is not the empty page; differs in {differs}"
+    return {
+        "denied_visibility": {"status": "ok", "canonical_empty_page": True},
+        "viewer_control": {
+            "listed": len(listed),
+            "item_sha256": hashlib.sha256(expected.encode()).hexdigest(),
+        },
+    }
 
 
 def _answer(result: Result, args: Mapping[str, object]) -> dict[str, object]:
@@ -374,6 +426,13 @@ def _answer(result: Result, args: Mapping[str, object]) -> dict[str, object]:
 async def _observe(
     caller: Caller, tool: str, boundary: Boundary, rejection: Rejection
 ) -> dict[str, object]:
+    named = (tool, boundary) in FILTERED_LIST_BOUNDARIES
+    assert named == (rejection.filtered is not None), (
+        f"{tool} {boundary}: a filtering-list control is required exactly for "
+        "the contract's FILTERED_LIST_BOUNDARIES"
+    )
+    if rejection.filtered is not None:
+        return await _observe_filtered(caller, tool, rejection, rejection.filtered)
     if boundary == "authentication":
         genuine = caller.token(rejection.grants)
         status = await caller.post(tool, rejection.args, forge(genuine))
@@ -389,12 +448,6 @@ async def _observe(
             f"{tool} was not rejected by argument validation: {_shape(result)}"
         )
         return {"rejected": _shape(result)}
-    if rejection.filtered_by is not None and _filtered(result):
-        raise ScenarioStop(
-            Outcome.BLOCKED,
-            f"{tool} answered an empty page instead of rejecting the {boundary} call; "
-            f"{rejection.filtered_by} owns the decision",
-        )
     category = result.error_category if isinstance(result, ToolResponse) else None
     assert category is not None, f"{tool} was not rejected: {_shape(result)}"
     assert category in rejection.categories, (
@@ -436,16 +489,7 @@ async def prove_rejection(
     async with context as overrides:
         effective = replace(rejection, args={**rejection.args, **overrides})
         before = await snapshot()
-        try:
-            observation = await _observe(caller, operation, boundary, effective)
-        except ScenarioStop as stop:
-            # The record's impediment is the generic missing-prerequisite; this artifact names
-            # the owner and what the call answered.
-            blocked = {"cell": run.cell.id, "boundary": boundary, "blocked": str(stop)}
-            run.artifacts.append(
-                run.writer.artifact({**blocked, "filtered_by": rejection.filtered_by})
-            )
-            raise
+        observation = await _observe(caller, operation, boundary, effective)
         run.prove(boundary, {"exposure": caller.exposure, **observation})
         after = await snapshot()
         assert after == before, f"protected state changed across the rejected {operation}"

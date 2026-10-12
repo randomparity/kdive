@@ -27,6 +27,7 @@ from tests.integration.live_stack.remote_lifecycle import RemoteHost
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.integration.live_stack.tool_cells import (
     RECOVERY_TOOLS,
+    FilteredListControl,
     Grants,
     HttpCaller,
     Rejection,
@@ -223,41 +224,202 @@ def test_category_boundaries_use_the_closed_set(tmp_path: Path) -> None:
         )
 
 
-_EMPTY_PAGE = ToolResponse.collection("investigations", "ok", [])
+_VIEWER = Grants("viewer", ("p",), {"p": "viewer"})
+_ITEM = "inv-1"
+_DENIED_PAGE = ToolResponse.collection(
+    "investigations",
+    "ok",
+    [],
+    suggested_next_actions=["investigations.get", "investigations.open"],
+    data={"truncated": False, "next_cursor": None},
+)
 
 
-def test_filtering_list_stops_blocked_naming_its_owner(tmp_path: Path) -> None:
-    run = _run(tmp_path, "validation")
-    filtered = Rejection({}, _GRANTS, filtered_by="#3108")
-    with pytest.raises(ScenarioStop, match="#3108") as stop:
+def _listed(*ids: str) -> ToolResponse:
+    items = [ToolResponse.success(i, "open") for i in ids]
+    return ToolResponse.collection(
+        "investigations",
+        "ok",
+        items,
+        suggested_next_actions=["investigations.get", "investigations.open"],
+        data={"truncated": False, "next_cursor": None},
+    )
+
+
+@dataclass
+class _Filtering(_Caller):
+    """Answers the viewer's token with ``control``, every other token with ``result``."""
+
+    control: ToolResponse = field(default_factory=lambda: _listed(_ITEM))
+
+    async def call(
+        self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
+    ) -> ToolResponse | list[ToolResponse]:
+        subject = str(claims_of(token)["sub"])
+        self.calls.append((tool, {**args, "subject": subject}))
+        return self.control if subject == _VIEWER.subject else cast(ToolResponse, self.result)
+
+
+def _list_run(
+    tmp_path: Path, tool: str = "investigations.list", boundary: str = "authorization"
+) -> CellRun:
+    cell = next(
+        c
+        for c in build_contract().cells
+        if c.operation == tool and c.kind == "rejection" and c.scenario_id.endswith("/" + boundary)
+    )
+    return CellRun(cell, EvidenceWriter(tmp_path))
+
+
+def _control(item: str = _ITEM) -> FilteredListControl:
+    async def expected() -> str:
+        return item
+
+    return FilteredListControl(_VIEWER, expected)
+
+
+def _filtered(tmp_path: Path, caller: _Caller, control: FilteredListControl) -> CellRun:
+    """Prove ``investigations.list``'s authorization cell against ``caller``."""
+    run = _list_run(tmp_path)
+    rejection = Rejection({"request": {"project": "p"}}, _GRANTS, filtered=control)
+    asyncio.run(prove_rejection(run, caller, "authorization", rejection, _snapshot(1, 1)))
+    return run
+
+
+def test_filtered_list_proves_denied_visibility(tmp_path: Path) -> None:
+    caller = _Filtering("gateway", _DENIED_PAGE)
+    run = _filtered(tmp_path, caller, _control())
+    assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
+    assert [args["subject"] for _, args in caller.calls] == ["viewer", "agent"]
+    assert all(args["request"] == {"project": "p"} for _, args in caller.calls)
+    proof = _artifact(run, "authorization")
+    assert proof["exposure"] == "gateway"
+    assert proof["denied_visibility"] == {"status": "ok", "canonical_empty_page": True}
+    assert proof["viewer_control"] == {
+        "listed": 1,
+        "item_sha256": hashlib.sha256(_ITEM.encode()).hexdigest(),
+    }
+    artifacts = _list_run(tmp_path, "artifacts.list", "project-isolation")
+    page = ToolResponse.collection(
+        "sys-1",
+        "ok",
+        [],
+        suggested_next_actions=["artifacts.get"],
+        data={"truncated": False, "next_cursor": None},
+    )
+    listed = page.model_copy(update={"items": [ToolResponse.success(_ITEM, "redacted")]})
+    rejection = Rejection({"system_id": "sys-1"}, _GRANTS, filtered=_control())
+    asyncio.run(
+        prove_rejection(
+            artifacts,
+            _Filtering("direct", page, control=listed),
+            "project-isolation",
+            rejection,
+            _snapshot(1, 1),
+        )
+    )
+    assert "project-isolation" in artifacts.assertions
+
+
+@pytest.mark.parametrize(
+    ("control", "item", "match"),
+    [
+        (_listed(), _ITEM, "did not list the known item"),
+        (_listed("inv-2"), _ITEM, "did not list the known item"),
+        (_listed(_ITEM), "", "no independently known protected item"),
+        (ToolResponse.failure("x", ErrorCategory.NOT_FOUND), _ITEM, "control call failed"),
+    ],
+    ids=["empty", "unrelated-item", "no-oracle", "control-error"],
+)
+def test_filtered_list_requires_known_visible_item(
+    tmp_path: Path, control: ToolResponse, item: str, match: str
+) -> None:
+    caller = _Filtering("direct", _DENIED_PAGE, control=control)
+    with pytest.raises(AssertionError, match=match):
+        _filtered(tmp_path, caller, _control(item))
+    assert all(args["subject"] == "viewer" for _, args in caller.calls)
+
+
+_LEAKS = {
+    "item": _listed(_ITEM),
+    "cursor": _DENIED_PAGE.model_copy(
+        update={"data": {"truncated": True, "next_cursor": "c", "count": 0}}
+    ),
+    "extra-data": _DENIED_PAGE.model_copy(update={"data": {**_DENIED_PAGE.data, "p": "x"}}),
+    "refs": _DENIED_PAGE.model_copy(update={"refs": {"project": "p"}}),
+    "detail": _DENIED_PAGE.model_copy(update={"detail": "hidden"}),
+    "object-id": _DENIED_PAGE.model_copy(update={"object_id": "p"}),
+    "actions": _DENIED_PAGE.model_copy(update={"suggested_next_actions": ["investigations.get"]}),
+    "status": _DENIED_PAGE.model_copy(update={"status": "partial"}),
+    "failure": ToolResponse.failure("investigations", ErrorCategory.AUTHORIZATION_DENIED),
+}
+
+
+@pytest.mark.parametrize("leak", sorted(_LEAKS))
+def test_filtered_list_requires_canonical_empty_envelope(tmp_path: Path, leak: str) -> None:
+    with pytest.raises(AssertionError, match="not the empty page"):
+        _filtered(tmp_path, _Filtering("direct", _LEAKS[leak]), _control())
+
+
+def test_filtered_exception_is_closed(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="FILTERED_LIST_BOUNDARIES"):
         asyncio.run(
             prove_rejection(
-                run, _Caller("direct", _EMPTY_PAGE), "authorization", filtered, _snapshot(1, 1)
+                _list_run(tmp_path),
+                _Filtering("direct", _DENIED_PAGE),
+                "authorization",
+                Rejection({}, _GRANTS),
+                _snapshot(1, 1),
             )
         )
-    assert stop.value.outcome is Outcome.BLOCKED
-    assert "authorization" not in run.assertions
-    retained = json.loads((run.writer.root / "artifacts" / run.artifacts[-1]).read_text())
-    assert retained["filtered_by"] == "#3108" and "empty page" in retained["blocked"]
-
-
-def test_filtering_list_that_rejects_still_qualifies(tmp_path: Path) -> None:
-    run = _run(tmp_path, "validation")
-    denied = ToolResponse.failure("x", ErrorCategory.AUTHORIZATION_DENIED)
-    filtered = Rejection({}, _GRANTS, filtered_by="#3108")
-    asyncio.run(
-        prove_rejection(run, _Caller("direct", denied), "authorization", filtered, _snapshot(1, 1))
-    )
-    assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
-    listed = ToolResponse.collection("investigations", "ok", [ToolResponse.success("i", "open")])
-    with pytest.raises(AssertionError, match="was not rejected"):
+    unlisted = _list_run(tmp_path, "artifacts.list", "authorization")
+    with pytest.raises(AssertionError, match="FILTERED_LIST_BOUNDARIES"):
         asyncio.run(
             prove_rejection(
-                _run(tmp_path, "validation"),
-                _Caller("direct", listed),
-                "project-isolation",
-                filtered,
+                unlisted,
+                _Filtering("direct", _DENIED_PAGE),
+                "authorization",
+                Rejection({"system_id": "s"}, _GRANTS, filtered=_control()),
                 _snapshot(1, 1),
+            )
+        )
+
+
+def test_filtered_list_brackets_both_calls_and_cleans_up(tmp_path: Path) -> None:
+    state = [0]
+
+    @asynccontextmanager
+    async def setup() -> AsyncIterator[Mapping[str, object]]:
+        state[0] += 1
+        try:
+            yield {}
+        finally:
+            state[0] -= 1
+
+    async def snap() -> object:
+        return list(state)
+
+    failing = Rejection({}, _GRANTS, filtered=_control())
+    with pytest.raises(AssertionError, match="did not list"):
+        asyncio.run(
+            prove_rejection(
+                _list_run(tmp_path),
+                _Filtering("direct", _DENIED_PAGE, control=_listed()),
+                "authorization",
+                failing,
+                snap,
+                setup=setup,
+            )
+        )
+    assert state == [0]
+    with pytest.raises(AssertionError, match="protected state changed"):
+        asyncio.run(
+            prove_rejection(
+                _list_run(tmp_path),
+                _Filtering("direct", _DENIED_PAGE),
+                "authorization",
+                failing,
+                _snapshot({"t": [0]}, {"t": [1]}),
             )
         )
 

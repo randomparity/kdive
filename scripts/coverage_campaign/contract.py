@@ -31,6 +31,15 @@ _KERNEL_INPUTS = (
     "compiler_id",
     "kernel_build_id",
 )
+# List tools that answer a denied caller with an empty page instead of a failure (ADR-0756):
+# their rejection cells prove denied visibility against a positive control.
+FILTERED_LIST_BOUNDARIES = frozenset(
+    {
+        ("investigations.list", "authorization"),
+        ("investigations.list", "project-isolation"),
+        ("artifacts.list", "project-isolation"),
+    }
+)
 # Reviewed admission refusals: the server answers these functional cells synchronously, so they
 # observe the server host alone, with no guest, image or accelerator.
 _ADMISSION_REFUSALS = {
@@ -259,7 +268,11 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                             scenario_id=scenario_id + "/" + boundary,
                             kind="rejection",
                             observation=(
-                                f"Verify {boundary} rejection for {row.tool} "
+                                f"Verify {boundary} denies visibility for {row.tool}: a known "
+                                "item listed to a viewer, an empty page to the denied caller, "
+                                "and unchanged protected state."
+                                if (row.tool, boundary) in FILTERED_LIST_BOUNDARIES
+                                else f"Verify {boundary} rejection for {row.tool} "
                                 "and unchanged protected state."
                             ),
                             assertions=(boundary, "unchanged-state", "cleanup"),
