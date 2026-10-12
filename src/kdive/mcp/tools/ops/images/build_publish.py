@@ -88,9 +88,9 @@ async def publish(
 
     The one job builds, validates, and publishes the catalog row, so a fresh build and the
     promotion of a realized ``defined`` baseline both land through this path. The
-    ``platform_operator`` gate runs first, so a denial writes no job. remote-libvirt has no
-    ``IMAGE_BUILD`` plane, so an authorized remote request is refused with ``not_implemented``
-    before any audit or enqueue (ADR-0759).
+    ``platform_operator`` gate runs first, so a denial writes no job. The ``IMAGE_BUILD`` handler
+    has no remote catalog build or provider-pool staging, so an authorized remote-libvirt request
+    is refused with ``not_implemented`` before any audit or enqueue (ADR-0759).
     """
     with bind_context(principal=ctx.principal):
         try:

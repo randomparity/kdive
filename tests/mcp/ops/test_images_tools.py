@@ -371,8 +371,9 @@ def test_publish_unprivileged_denied_audited_no_pool_mutation(migrated_url: str)
 
 
 def test_publish_remote_operator_refused_before_enqueue_or_audit(migrated_url: str) -> None:
-    # ADR-0759: remote-libvirt has no IMAGE_BUILD plane, so admission refuses it synchronously
-    # instead of enqueuing a job the worker can only fail. Repeating the call changes nothing.
+    # ADR-0759: the IMAGE_BUILD handler has no remote catalog build or staging, so admission
+    # refuses remote-libvirt instead of enqueuing a job the worker can only fail. Repeating the
+    # call changes nothing.
     async def _run() -> None:
         catalog = await _catalog_rows(migrated_url)
         async with _pool(migrated_url) as pool:
