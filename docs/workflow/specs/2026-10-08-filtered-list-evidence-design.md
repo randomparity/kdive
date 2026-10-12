@@ -103,5 +103,5 @@ necessary, belongs under existing support-module ownership.
 Live proof uses the existing investigation tool-cell pytest node, selecting exactly
 those twelve IDs across two separately catalog-proven configurations. Capture
 candidate role identities, setup/control/denied observations and session teardown.
-Run focused checks, lint/type, docs/records/hooks, then the mandatory managed pre-push
-full gate once authorized implementation is complete. No full gate for this design.
+Run focused checks, lint/type, the docs, records and hook gates, then the mandatory
+managed pre-push full gate once authorized implementation is complete.
