@@ -11,7 +11,10 @@ for parameters and returned fields.
    signature or a successful watch job does not establish that state. If state and evidence
    disagree, preserve the console and follow the returned recovery guidance; do not force
    another crash just to change state. See resource://kdive/docs/guide/toolsets/control.md.
-2. Choose a provider-supported core method: `kdump`, `fadump`, or `host_dump`. Omitting
+2. Choose a core method (`kdump`, `fadump`, or `host_dump`) from `data.supported_capture_methods`
+   in the `systems.get` result from step 1; it is narrowed to the System's architecture, and
+   `vmcore.fetch` refuses a method outside it with `capability_unsupported` (for example
+   `fadump` on x86_64). The list shows compatibility only, not capture readiness. Omitting
    `method` uses the System profile's choice only if it resolves to a supported core method;
    otherwise supply one explicitly. Console and gdbstub methods do not produce a vmcore.
    Kdump/fadump need prepared guest crash-capture support. Admission rejects known-negative
