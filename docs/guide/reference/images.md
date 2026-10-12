@@ -141,12 +141,14 @@ Enqueue an image build job that publishes the built image to the catalog.
 One job covers build, validation, and catalog publication, so this is also the entry
 point for promoting an already-realized ``defined`` baseline. Re-issuing it for the same
 ``provider``/``name`` returns the existing job rather than enqueuing a second one.
+A remote-libvirt request enqueues nothing and answers ``not_implemented``: remote base
+images are built and staged by the operator's Ansible image playbook.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | yes | The catalog image name to build and publish. |
 | `packages` | array<string> | no | Optional package override; omitted uses the provider catalog default. |
-| `provider` | string | yes | The provider whose plane builds the image. |
+| `provider` | string | yes | The provider whose plane builds the image: local-libvirt. remote-libvirt is refused with not_implemented; stage remote images with the Ansible image playbook instead. |
 
 ## `images.upload`
 
