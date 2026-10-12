@@ -45,8 +45,9 @@ Catalog mutations have different roles:
 
 - `images.upload` registers a quarantined project-private image; `images.delete` removes one.
   Both require the owning project's operator role.
-- `images.publish` builds and publishes a public base image through a job; it requires
-  `platform_operator`.
+- `images.publish` builds and publishes a public local-libvirt base image through a job; it
+  requires `platform_operator`. It answers remote-libvirt with `not_implemented` and enqueues
+  nothing: an operator stages remote base images with the Ansible image playbook.
 - `images.extend` changes a private image's retention deadline; `images.prune_expired` runs
   the expired-private-image sweep. Both require `platform_admin`. Extending retention does
   not install packages or extend an Allocation.

@@ -93,6 +93,6 @@ only server role/host observations, no guest or KVM; wrong host architecture, st
 candidate, missing reviewed rule and wrong outcome must fail. Preserve rejection-cell
 metadata and their ordinary provider binding. A named binding unit test verifies the
 admission branch never requests provider image/volume probes.
-Run lint/type, docs/CLI generation guards and hooks before commit; installed mandatory
+Run lint/type, doc and CLI generation guards and hooks before commit; installed mandatory
 pre-push owns full just ci. Independent final/security review precedes delivery. No
 release or native POWER qualification is inferred.

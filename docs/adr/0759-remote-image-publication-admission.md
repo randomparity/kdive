@@ -2,9 +2,11 @@
 
 ## Status
 
-Accepted (2026-10-12). Issue #3151; the operator approved this refusal on 2026-10-12.
+Accepted (2026-10-12)
 
 ## Context
+
+Issue #3151. The operator approved this refusal on 2026-10-12.
 
 `images.publish` authorizes an operator then unconditionally enqueues `IMAGE_BUILD`.
 `image_build._resolve_catalog_build` rejects remote-libvirt before resolving its build
@@ -52,7 +54,7 @@ POWER. No provider-host or guest observation is fabricated. Their binding path e
 them from ordinary provider-lane image/KVM contexts. All existing authentication,
 authorization and validation cells remain separate and unchanged.
 
-## Alternatives
+## Considered & rejected
 
 - **Judgment:** Implement remote build, guest-family helper installation, provider-pool staging and
   cleanup now. This creates new publication/installation ownership across hosts and
