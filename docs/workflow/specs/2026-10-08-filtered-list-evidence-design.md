@@ -92,10 +92,10 @@ existing grants and session lifetime; no product write or extra VM is required.
 ## Validation
 
 Owning shared-harness tests cover control presence and exact target, canonical empty
-shape, all leak fields and unlisted pairs in both exposures, snapshot mutation and
-cleanup failure, plus unchanged ordinary rejection and absent-owner behavior.
-Contract tests preserve twelve cells/kinds/assertions; qualifier tests accept their
-complete rejection records and reject success outcome or missing assertions.
+shape, all leak fields and unlisted pairs (the predicate ignores exposure), snapshot
+mutation and cleanup failure, plus unchanged ordinary rejection and absent-owner behavior.
+Contract tests preserve twelve cells/kinds/assertions. The qualifier is unchanged; its
+existing controlled-fault tests already reject a substituted outcome or a missing assertion.
 A controlled violation removing the target check must redden the nonmatching-item
 case. Do not import collected test modules; new reusable fixture code, only if
 necessary, belongs under existing support-module ownership.
