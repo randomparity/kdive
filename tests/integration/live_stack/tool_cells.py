@@ -553,6 +553,11 @@ def boundary_of(cell: Cell) -> Boundary:
     return cast(Boundary, boundary)
 
 
+def admission_refusal(cell: Cell) -> bool:
+    """A server-only admission refusal (ADR-0759): an unsupported cell observing no guest."""
+    return cell.kind == "unsupported" and cell.guest_arch is None
+
+
 def tool_cells(tools: Sequence[str]) -> list[Cell]:
     """The contract's cells of ``tools``."""
     return [cell for cell in build_contract().cells if cell.operation in tools]
@@ -579,8 +584,7 @@ def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
     another host architecture is skipped before the stack is read; any other remote cell's host
     is the provider host, which its frame observes.
     """
-    refusal = cell.kind == "unsupported" and cell.guest_arch is None
-    on_server = cell.provider != "remote-libvirt" or refusal
+    on_server = cell.provider != "remote-libvirt" or admission_refusal(cell)
     if on_server and cell.host_arch not in (None, platform.machine()):
         pytest.skip(f"{cell.id} runs on a {cell.host_arch} host")
     base_url = require_stack()
@@ -632,8 +636,7 @@ def bindings(
             {"host_os": host_os, "host_arch": host_arch, "accelerator": "none"}
         )
         for c in bound
-        if c.provider == "service"
-        or (c.kind == "unsupported" and c.guest_arch is None and c.host_arch == host_arch)
+        if c.provider == "service" or (admission_refusal(c) and c.host_arch == host_arch)
     }
     native = [c for c in bound if c.provider == "local-libvirt" and c.guest_arch == host_arch]
     published = [c for c in native if c.operation == PUBLISH_TOOL and c.kind == "functional"]

@@ -81,6 +81,7 @@ from tests.integration.live_stack.tool_cells import (
     Guest,
     HttpCaller,
     Rejection,
+    admission_refusal,
     boundary_of,
     lane_target,
     observe_guest,
@@ -590,7 +591,7 @@ def _cells() -> list[Cell]:
         if (c.provider == _LOCAL and c.guest_arch == host)
         or (c.provider == _REMOTE and c.guest_arch in REMOTE_LANE_FAMILIES)
         # ADR-0759's server-only admission refusals run on the stack of their architecture.
-        or (c.kind == "unsupported" and c.guest_arch is None and c.host_arch == host)
+        or (admission_refusal(c) and c.host_arch == host)
     ]
 
 
