@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
@@ -23,6 +25,10 @@ from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_
 
 PUBLISH_TOOL = "images.publish"
 PLATFORM_PROJECT = "platform"
+REMOTE_PUBLISH_REFUSAL = (
+    "images.publish does not build remote-libvirt images; build and stage the base volume with "
+    "deploy/ansible/playbooks/image.yml (docs/operating/runbooks/remote-libvirt-host-setup.md)"
+)
 
 
 def _denied(object_id: str) -> ToolResponse:
@@ -82,7 +88,9 @@ async def publish(
 
     The one job builds, validates, and publishes the catalog row, so a fresh build and the
     promotion of a realized ``defined`` baseline both land through this path. The
-    ``platform_operator`` gate runs first, so a denial writes no job.
+    ``platform_operator`` gate runs first, so a denial writes no job. remote-libvirt has no
+    ``IMAGE_BUILD`` plane, so an authorized remote request is refused with ``not_implemented``
+    before any audit or enqueue (ADR-0759).
     """
     with bind_context(principal=ctx.principal):
         try:
@@ -96,4 +104,8 @@ async def publish(
                 args={"name": payload.name},
             )
             return _denied(payload.name)
+        if payload.provider == ResourceKind.REMOTE_LIBVIRT.value:
+            return ToolResponse.failure(
+                payload.name, ErrorCategory.NOT_IMPLEMENTED, detail=REMOTE_PUBLISH_REFUSAL
+            )
         return await _enqueue_image_build(pool, ctx, payload=payload)

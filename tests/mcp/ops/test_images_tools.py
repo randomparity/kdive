@@ -259,15 +259,22 @@ async def _call_registered_tool(tool: object, *args: object) -> ToolResponse:
     return result
 
 
-def _publish(pool: AsyncConnectionPool, ctx: RequestContext):
+def _publish(pool: AsyncConnectionPool, ctx: RequestContext, provider: str = "local-libvirt"):
     return image_build_publish.publish(
         pool,
         ctx,
         payload=ImageBuildPayload(
-            provider="local-libvirt",
+            provider=provider,
             name="fedora-kdive-ready-44",
         ),
     )
+
+
+async def _catalog_rows(url: str) -> list[tuple[object, ...]]:
+    conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
+    async with conn, conn.cursor() as cur:
+        await cur.execute("SELECT provider, name, state FROM image_catalog ORDER BY id")
+        return list(await cur.fetchall())
 
 
 # --- registrar boundary --------------------------------------------------------------------
@@ -359,6 +366,55 @@ def test_publish_unprivileged_denied_audited_no_pool_mutation(migrated_url: str)
         # A project-only token holds no platform role, so the platform-denial recorder
         # does not write a platform_audit_log row (matching ops siblings).
         assert await _platform_audit_rows(migrated_url) == []
+
+    asyncio.run(_run())
+
+
+def test_publish_remote_operator_refused_before_enqueue_or_audit(migrated_url: str) -> None:
+    # ADR-0759: remote-libvirt has no IMAGE_BUILD plane, so admission refuses it synchronously
+    # instead of enqueuing a job the worker can only fail. Repeating the call changes nothing.
+    async def _run() -> None:
+        catalog = await _catalog_rows(migrated_url)
+        async with _pool(migrated_url) as pool:
+            first = await _publish(pool, _operator_ctx(), "remote-libvirt")
+            second = await _publish(pool, _operator_ctx(), "remote-libvirt")
+        for resp in (first, second):
+            assert resp.error_category == ErrorCategory.NOT_IMPLEMENTED.value
+            assert resp.retryable is False
+            assert resp.object_id == "fedora-kdive-ready-44"
+            assert resp.detail == image_build_publish.REMOTE_PUBLISH_REFUSAL
+            assert resp.refs == {}
+            assert resp.suggested_next_actions == []
+        assert await _job_rows(migrated_url) == []
+        assert await _platform_audit_rows(migrated_url) == []
+        assert await _catalog_rows(migrated_url) == catalog
+
+    asyncio.run(_run())
+
+
+def test_publish_remote_denial_precedes_refusal(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            admin = await _publish(pool, _admin_ctx(), "remote-libvirt")
+            member = await _publish(pool, _member_ctx(), "remote-libvirt")
+        assert admin.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        assert member.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        assert await _job_rows(migrated_url) == []
+        assert await _platform_audit_rows(migrated_url) == [
+            ("ops-admin", "platform_admin", "images.publish", "denied:fedora-kdive-ready-44")
+        ]
+
+    asyncio.run(_run())
+
+
+def test_publish_unknown_provider_still_enqueues(migrated_url: str) -> None:
+    # Only remote-libvirt is refused at admission; any other provider keeps its worker-side
+    # rejection unchanged (ADR-0759 is not a generic provider validation).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _publish(pool, _operator_ctx(), "fault-inject")
+        assert resp.error_category is None
+        assert [kind for kind, _ in await _job_rows(migrated_url)] == ["image_build"]
 
     asyncio.run(_run())
 
