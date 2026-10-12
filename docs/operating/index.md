@@ -45,6 +45,7 @@ Step-by-step procedures for live runs and operational tasks.
 | [Build-use recovery](../guide/reference/ops.md#opsrecover_build_use) | Pin listing and recovery after durable worker termination |
 | [Diagnostic verification](runbooks/doctor-exit-criterion.md) | Seeded-fault evidence and the limits of doctor checks |
 | [Stuck `tearing_down` System](runbooks/stuck-tearing-down-system.md) | Ending a `tearing_down` System with external-boot history through the authority teardown |
+| [Exhausted authority System provision](runbooks/exhausted-authority-system-provision.md) | Discharging a never-activated System whose final provision attempt lost its worker |
 | [Live testing](runbooks/live-testing.md) | How to run each live test tier (`live_stack`, `live_vm`, `live_vm_tcg`) and its environment contract |
 
 ## Investigation
