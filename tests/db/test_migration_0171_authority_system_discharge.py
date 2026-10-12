@@ -45,6 +45,7 @@ from tests.db.test_migration_0149_authority_system_provisioning import (
 
 _DISCHARGE = "SELECT discharge_exhausted_authority_system_provisions(%s::integer)"
 _PROOF = "SELECT authority_system_preactivation_absence_proven(%s)"
+_COUNT = "SELECT count_claimable_worker_jobs(ARRAY['default'])"
 _CLAIM = "SELECT id FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])"
 _BOOTSTRAP_IDENTITY = "sha256:" + hashlib.sha256(b"ssh-ed25519 YWFhYQ== kdive-system").hexdigest()
 _ADMIN = RequestContext("p", "discharge", ("proj",), {"proj": Role.ADMIN})
@@ -256,6 +257,13 @@ def _finalize_by_worker(role_dsns: _RoleDsns, case: dict[str, Any], absence: dic
         ).fetchone()
 
 
+def _assert_unclaimable(role_dsns: _RoleDsns, case: dict[str, Any]) -> None:
+    """Claim and queue-depth counting both still refuse the exhausted job."""
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        assert worker.execute(_COUNT).fetchone() == (0,)
+        assert worker.execute(_CLAIM, (case["worker"], case["credential"])).fetchone() is None
+
+
 def _scalar(dsn: str, query: LiteralString, params: tuple[object, ...]) -> Any:
     with psycopg.connect(dsn) as conn:
         row = conn.execute(query, params).fetchone()
@@ -309,6 +317,7 @@ def test_worker_absence_receipt_discharges_exhausted_provision_and_admits_releas
     stuck = ("running", 3, 3, case["worker"], False, None)
     assert _job(migrated_url, case["job_id"]) == stuck
     assert _reconcile(reconciler) == 0
+    _assert_unclaimable(authority_role_dsns, case)
     assert _scalar(server, _PROOF, (case["system_id"],)) is False
     denied = _release(server, case["allocation_id"])
     assert denied.status == "error"
@@ -326,16 +335,14 @@ def test_worker_absence_receipt_discharges_exhausted_provision_and_admits_releas
     )
     assert _scalar(server, _PROOF, (case["system_id"],)) is True
     assert _scalar(reconciler, _PROOF, (case["system_id"],)) is True
-    with psycopg.connect(authority_role_dsns("kdive_worker")) as worker:
-        assert worker.execute(_CLAIM, (case["worker"], case["credential"])).fetchone() is None
+    _assert_unclaimable(authority_role_dsns, case)
 
     assert _reconcile(reconciler) == 1
     discharged = ("canceled", 3, 3, None, True, absence["receipt_digest"])
     assert _job(migrated_url, case["job_id"]) == discharged
     assert _reconcile(reconciler) == 0
     assert _job(migrated_url, case["job_id"]) == discharged
-    with psycopg.connect(authority_role_dsns("kdive_worker")) as worker:
-        assert worker.execute(_CLAIM, (case["worker"], case["credential"])).fetchone() is None
+    _assert_unclaimable(authority_role_dsns, case)
 
     released = _release(server, case["allocation_id"])
     assert released.status == "released", released
@@ -486,6 +493,13 @@ _REFUSALS: dict[str, tuple[LiteralString, ...]] = {
     ),
     "foreign-allocation": _marker("allocation_id"),
     "foreign-resource": _marker("resource_id"),
+    "foreign-provider": (
+        "UPDATE jobs SET payload=jsonb_set(payload,'{authority_system_v1,provider_kind}',"
+        "'\"remote-libvirt\"') WHERE id=%(job)s",
+    ),
+    "foreign-authority": _marker("authority_instance"),
+    "foreign-profile": _marker("profile_identity"),
+    "foreign-root": _marker("root_identity"),
     "owner-not-torn-down": _owner("state='teardown-requested'"),
     "owner-activated": _owner("first_activation_id=gen_random_uuid()"),
     "head-not-terminal": _owner("journal_phase='observed'"),
