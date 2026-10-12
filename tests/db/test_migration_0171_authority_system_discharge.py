@@ -37,11 +37,11 @@ from kdive.services.external_boot.admission import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
-from tests.db.external_boot_authority_support import _apply_through, _apply_version, _RoleDsns
-from tests.db.test_migration_0149_authority_system_provisioning import (
+from tests.db.authority_system_support import (
     _seed_direct_authority_case,
     _seed_direct_terminal_attempt,
 )
+from tests.db.external_boot_authority_support import _apply_through, _apply_version, _RoleDsns
 
 _DISCHARGE = "SELECT discharge_exhausted_authority_system_provisions(%s::integer)"
 _PROOF = "SELECT authority_system_preactivation_absence_proven(%s)"
