@@ -501,6 +501,44 @@ async def prove_rejection(
     run.prove("cleanup", {"owned": owned, "snapshot_sha256": _digest(start)})
 
 
+async def prove_refusal(
+    run: CellRun, caller: Caller, refusal: Rejection, detail: str, snapshot: Snapshot
+) -> None:
+    """Prove an authorized call is refused as ``not_implemented`` and writes nothing (ADR-0759).
+
+    ``effect`` is the exact refusal envelope: not retryable, the requested object, ``detail``, no
+    job reference and no next action. ``cleanup`` is the unchanged snapshot around the call. The
+    request is retained before the call, so a failed proof still names what an operator must
+    clean up.
+    """
+    operation = run.cell.operation
+    before = await snapshot()
+    request = {"cell": run.cell.id, "request": dict(refusal.args), "before": before}
+    run.artifacts.append(run.writer.artifact(request))
+    result = await caller.call(operation, refusal.args, caller.token(refusal.grants), discover=True)
+    assert isinstance(result, ToolResponse), f"expected one envelope, got {len(result)}"
+    refused = {
+        "error_category": result.error_category,
+        "retryable": result.retryable,
+        "object_id": result.object_id == refusal.args.get("name"),
+        "detail": result.detail == detail,
+        "refs": dict(result.refs),
+        "suggested_next_actions": result.suggested_next_actions,
+    }
+    assert refused == {
+        "error_category": ErrorCategory.NOT_IMPLEMENTED.value,
+        "retryable": False,
+        "object_id": True,
+        "detail": True,
+        "refs": {},
+        "suggested_next_actions": [],
+    }, f"{operation} {refusal.args} was not refused at admission: {refused}"
+    after = await snapshot()
+    assert after == before, f"the refused {operation} {refusal.args} changed protected state"
+    run.prove("effect", {"exposure": caller.exposure, "refused": refused})
+    run.prove("cleanup", {"owned": [], "snapshot_sha256": _digest(before)})
+
+
 Functional = Callable[[HttpCaller, Grants], Awaitable[dict[str, object]]]
 
 
@@ -559,6 +597,11 @@ def boundary_of(cell: Cell) -> Boundary:
     return cast(Boundary, boundary)
 
 
+def admission_refusal(cell: Cell) -> bool:
+    """A server-only admission refusal (ADR-0759): an unsupported cell observing no guest."""
+    return cell.kind == "unsupported" and cell.guest_arch is None
+
+
 def tool_cells(tools: Sequence[str]) -> list[Cell]:
     """The contract's cells of ``tools``."""
     return [cell for cell in build_contract().cells if cell.operation in tools]
@@ -580,11 +623,13 @@ ToolScenario = Callable[[CellRun, str, OidcIssuer, str], Awaitable[None]]
 def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
     """Prove the configuration, skip another configuration's cell, else run and record it.
 
-    A completed rejection cell records ``rejection``, a functional one ``success``. A local
-    provider cell of another host architecture is skipped before the stack is read; a remote
-    cell's host is the provider host, which its frame observes.
+    A completed rejection cell records ``rejection``, an unsupported one ``unsupported`` and a
+    functional one ``success``. A local provider cell, or a server-only admission refusal, of
+    another host architecture is skipped before the stack is read; any other remote cell's host
+    is the provider host, which its frame observes.
     """
-    if cell.provider != "remote-libvirt" and cell.host_arch not in (None, platform.machine()):
+    on_server = cell.provider != "remote-libvirt" or admission_refusal(cell)
+    if on_server and cell.host_arch not in (None, platform.machine()):
         pytest.skip(f"{cell.id} runs on a {cell.host_arch} host")
     base_url = require_stack()
     try:
@@ -601,9 +646,8 @@ def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
         run.artifacts.append(run.writer.artifact(proof))
         await scenario(run, url, issuer, db_url)
 
-    run_cell(
-        cell, proven, proves=Outcome.REJECTION if cell.kind == "rejection" else Outcome.SUCCESS
-    )
+    proves = {"rejection": Outcome.REJECTION, "unsupported": Outcome.UNSUPPORTED}
+    run_cell(cell, proven, proves=proves.get(cell.kind, Outcome.SUCCESS))
 
 
 def bindings(
@@ -627,7 +671,8 @@ def bindings(
     host and its ``image_sha256`` the staged base volume's digest, null when unstaged. ``kernel``
     fills only the kernel fields a cell declares. A functional ``images.publish`` cell boots
     ``PUBLISHED_IMAGES[(host_arch, exposure)]``, the image it publishes, with a null
-    ``image_sha256``.
+    ``image_sha256``. An unsupported provider cell without a guest is a server-only admission
+    refusal (ADR-0759): like a service cell it binds this host alone, on its own architecture.
     """
     bound = [c for c in cells if c.scenario_id.startswith("tool/") and c.node_id]
     contexts = {
@@ -635,7 +680,7 @@ def bindings(
             {"host_os": host_os, "host_arch": host_arch, "accelerator": "none"}
         )
         for c in bound
-        if c.provider == "service"
+        if c.provider == "service" or (admission_refusal(c) and c.host_arch == host_arch)
     }
     native = [c for c in bound if c.provider == "local-libvirt" and c.guest_arch == host_arch]
     published = [c for c in native if c.operation == PUBLISH_TOOL and c.kind == "functional"]

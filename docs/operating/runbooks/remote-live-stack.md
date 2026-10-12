@@ -453,10 +453,17 @@ them. The bodies and rejection boundaries are the local cells' of the
 - The four `runs.release_external_boot` functional cells stop `blocked`: no runbook provisions a
   remote provider authority, and an authority on the instance would route every remote install
   and boot through external boot.
-- The four `images.publish` functional cells stop `blocked`: the `IMAGE_BUILD` handler builds
-  catalog images for local-libvirt only. Remote base images are staged with
-  `deploy/ansible/playbooks/image.yml`.
-- Both blocked kinds first probe the provider host, so their records carry it as their host.
+- The four `images.publish` functional cells record `unsupported`: `images.publish` refuses
+  remote-libvirt at admission with `not_implemented`
+  ([ADR-0759](../../adr/0759-remote-image-publication-admission.md)), and remote base images are
+  staged with `deploy/ansible/playbooks/image.yml`. Each cell calls the tool as a platform operator
+  through its exposure with a fresh image name. It requires the exact refusal envelope, with no
+  job reference or next action, and an unchanged catalog, build-job count and `platform` snapshot.
+  The cell observes the server alone: its record carries the control plane as its host, with no
+  guest, image or accelerator. Plain `bindings` without `--remote` binds it, and a run on any
+  candidate stack of its architecture proves it; it needs no provider host.
+- The blocked release cells first probe the provider host, so their records carry it as their
+  host.
 - `runs.*` rejection cells aim at one unbound `remote-libvirt` Run in the stack's remote System
   target project. `images.publish` rejection cells aim at `fedora-kdive-remote-base-43` with
   provider `remote-libvirt`; their snapshot holds that name's catalog rows and build jobs.
@@ -486,9 +493,9 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Each configuration records 48 cells: 6 `success`, 38 `rejection` and 4 `blocked`, and skips the
-other configuration's 48. `qualify` then qualifies 88 of the 96 and lists the 8 blocked cells,
-so it exits non-zero by design. After an interrupted run, release the leftover allocation as §7
+Each configuration records 48 cells: 6 `success`, 38 `rejection`, 2 `unsupported` and 2
+`blocked`, and skips the other configuration's 48. `qualify` then qualifies 92 of the 96 and lists
+the 4 blocked release cells, so it exits non-zero by design. After an interrupted run, release the leftover allocation as §7
 says before the wipe. After the run, `demo-down.sh --wipe --yes` clears the stack. Then check the
 provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no `kdive-` overlay
 volume.
@@ -518,6 +525,18 @@ stack after its cells, enqueued an `IMAGE_BUILD` job that failed on its first at
 `remote-libvirt`. No record or artifact carried a host name or address. After each configuration
 and after the final `demo-down.sh --wipe --yes`, the provider defined no `kdive-` domain and its
 pool held only the base volume.
+
+Last refusal run (#3151): candidate `4b5eb9bd7` (later commits change only this record), on a
+Fedora 44 x86_64 host with no provider host. That host had no fixed worker lifecycle, so
+`demo-up.sh` could not run there. The stack was `just stack-backends`, the runtime-role
+bootstrap and the server process at the candidate. It ran without a worker or reconciler, which
+the server-only refusal cells do not require. The run used the default configuration, then the
+server restarted with `KDIVE_WORKER_DEATH_VERIFIER=docker` for `recovery`. Bindings came from
+plain `bindings` without `--remote`, and `KDIVE_DATABASE_URL` was the migration-owner DSN. All
+four x86_64 remote `images.publish` functional cells recorded `unsupported`, and `qualify`
+qualified each one. Each record carried the control plane as its host, accelerator `none`, no
+guest and only the `server` role. The catalog rows, build-job count and `platform` snapshot of
+each fresh image name were unchanged across the call.
 
 ### Accepted-operation quiescence proof
 
