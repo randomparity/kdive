@@ -227,6 +227,13 @@ the job already in flight. The build worker runs the same plane this runbook dro
 validates the guest contract (libguestfs inspection — a build missing agent/kdump/drgn/helpers is
 rejected, never published), and publishes row-first.
 
+`publish` builds local-libvirt images only. An authorized `--provider remote-libvirt` request is
+refused at once with `not_implemented`: it enqueues no job, writes no catalog row and returns no
+job reference ([ADR-0759](../../adr/0759-remote-image-publication-admission.md)). Build and stage a
+remote base volume with `deploy/ansible/playbooks/image.yml` instead, as the
+[remote host setup](remote-libvirt-host-setup.md#2-prepare-guest-images) describes. An unauthorized
+caller is still denied before the provider is considered.
+
 ## Catalog inputs and runtime capability
 
 [`fixtures/local-libvirt/rootfs_catalog.toml`](../../../fixtures/local-libvirt/rootfs_catalog.toml)

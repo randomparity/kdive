@@ -19,7 +19,8 @@ from kdive.mcp.dev_harness import LiveStackToolError, OidcIssuer, make_keypair
 from kdive.mcp.responses import ToolResponse
 from kdive.serialization import JsonValue
 from scripts.coverage_campaign.contract import Cell, build_contract
-from scripts.coverage_campaign.evidence import Outcome
+from scripts.coverage_campaign.evidence import Evidence, Outcome
+from scripts.coverage_campaign.results import qualify
 from tests.integration.live_stack import scenario, tool_cells
 from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
 from tests.integration.live_stack.remote_lifecycle import RemoteHost
@@ -34,6 +35,7 @@ from tests.integration.live_stack.tool_cells import (
     configuration_of,
     forge,
     prove_functional,
+    prove_refusal,
     prove_rejection,
     rejected_by_validation,
 )
@@ -721,3 +723,186 @@ def test_published_image_binds_the_product(tmp_path: Path) -> None:
     assert inputs.cells[reject.id].guest_os == "fedora:44"
     assert inputs.cells[reject.id].image_sha256 == lane
     assert inputs.cells[install.id].image_sha256 == lane
+
+
+def _refusal(arch: str, exposure: str = "direct") -> Cell:
+    return next(
+        c
+        for c in build_contract().cells
+        if c.operation == "images.publish"
+        and c.provider == "remote-libvirt"
+        and c.kind == "unsupported"
+        and c.host_arch == arch
+        and (c.configuration, c.exposure) == ("default", exposure)
+    )
+
+
+def test_admission_refusals_bind_the_server_host_alone() -> None:
+    # ADR-0759: the refusal involves no provider host, guest, image or accelerator.
+    native, foreign = _bound(_refusal("x86_64")), _bound(_refusal("ppc64le"))
+    host = RemoteHost("operator@provider.example", "default", "rocky:10.2", "x86_64", "kvm")
+
+    def no_probe(*_: object) -> str:
+        raise AssertionError("an admission refusal must not probe a provider volume")
+
+    for remote in (None, host):
+        inputs = bindings(
+            "a" * 40,
+            host_os="fedora:44",
+            host_arch="x86_64",
+            matrix="b" * 64,
+            cells=[native, foreign],
+            staged=lambda _name: None,
+            remote=remote,
+            digest=no_probe,
+            volumes=no_probe,
+        )
+        assert set(inputs.cells) == {native.id}
+        assert inputs.cells[native.id].model_dump(exclude_none=True) == {
+            "host_os": "fedora:44",
+            "host_arch": "x86_64",
+            "accelerator": "none",
+        }
+
+
+def test_admission_refusal_runs_on_its_server_arch(monkeypatch: pytest.MonkeyPatch) -> None:
+    def stack() -> str:
+        raise RuntimeError("stack read")
+
+    async def never(*_: object) -> None:
+        raise AssertionError("the scenario must not run")
+
+    monkeypatch.setattr(tool_cells, "require_stack", stack)
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
+    with pytest.raises(pytest.skip.Exception, match="ppc64le"):
+        tool_cells.run_tool_cell(_refusal("ppc64le"), never)
+    with pytest.raises(RuntimeError, match="stack read"):
+        tool_cells.run_tool_cell(_refusal("x86_64"), never)
+
+
+def _refusal_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cell: Cell,
+    host_arch: str = "x86_64",
+    candidate: str = "a" * 40,
+    proves: Outcome = Outcome.UNSUPPORTED,
+    via_frame: bool = False,
+) -> tuple[bool, tuple[str, ...]]:
+    """Record ``cell`` through the real frame on a server-only stack, then qualify it."""
+    contract = build_contract()
+    contract = replace(contract, cells=(cell,))
+    roles = {"server": candidate}
+    identity = RunIdentity(candidate, contract.matrix_sha256, "fedora:44", host_arch, True, roles)
+    monkeypatch.setattr(tool_cells, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(tool_cells, "require_issuer", lambda: object())
+    monkeypatch.setattr(tool_cells, "server_configuration", lambda *_: ("default", []))
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: host_arch)
+    monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
+    monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
+    monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
+
+    async def body(run: CellRun, *_: object) -> None:
+        for name in cell.assertions:
+            run.prove(name, {})
+
+    if via_frame:
+        tool_cells.run_tool_cell(cell, body)
+    else:
+        scenario.run_cell(cell, body, proves=proves)
+    (record,) = (tmp_path / "records").glob("*.json")
+    result = Evidence.model_validate_json(record.read_text())
+    inputs = bindings(
+        "a" * 40,
+        host_os="fedora:44",
+        host_arch="x86_64",
+        matrix=contract.matrix_sha256,
+        cells=[cell],
+        staged=lambda _name: None,
+    )
+    (verdict,) = qualify(contract, inputs, [result]).cells
+    return verdict.qualified, verdict.reasons
+
+
+def test_admission_refusal_record_qualifies_without_guest_or_kvm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cell = _bound(_refusal("x86_64"))
+    assert _refusal_verdict(tmp_path, monkeypatch, cell=cell, via_frame=True) == (True, ())
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"host_arch": "ppc64le"}, "input-context-mismatch"),
+        ({"candidate": "c" * 40}, "candidate-mismatch"),
+        ({"proves": Outcome.SUCCESS}, "outcome-kind-mismatch"),
+        ({"rule": None}, "unsupported-without-reviewed-rule"),
+    ],
+)
+def test_admission_refusal_record_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, object], reason: str
+) -> None:
+    cell = _bound(_refusal("x86_64"))
+    host_arch = str(change.get("host_arch", "x86_64"))
+    candidate = str(change.get("candidate", "a" * 40))
+    proves = cast(Outcome, change.get("proves", Outcome.UNSUPPORTED))
+    if "rule" in change:
+        cell = replace(cell, unsupported_reason=None)
+    qualified, reasons = _refusal_verdict(
+        tmp_path, monkeypatch, cell=cell, host_arch=host_arch, candidate=candidate, proves=proves
+    )
+    assert not qualified and reason in reasons
+
+
+_REFUSAL = Rejection({"provider": "remote-libvirt", "name": "img"}, _GRANTS)
+_REFUSED = ToolResponse.failure("img", ErrorCategory.NOT_IMPLEMENTED, detail="stage it")
+
+
+def test_refusal_proves_the_exact_envelope_and_unchanged_state(tmp_path: Path) -> None:
+    run = CellRun(_refusal("x86_64"), EvidenceWriter(tmp_path))
+    caller = _Caller("gateway", result=_REFUSED)
+    asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "s")))
+    assert set(run.assertions) == {"effect", "cleanup"}
+    assert caller.calls == [("images.publish", _REFUSAL.args)]
+    assert len(run.artifacts) == 1  # the request, retained before the call
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _OK,
+        ToolResponse.denied("img"),
+        ToolResponse.failure("img", ErrorCategory.NOT_IMPLEMENTED, detail="other"),
+        ToolResponse.failure("other", ErrorCategory.NOT_IMPLEMENTED, detail="stage it"),
+        ToolResponse.failure(
+            "img", ErrorCategory.NOT_IMPLEMENTED, detail="stage it", refs={"job": "j"}
+        ),
+        ToolResponse.failure(
+            "img",
+            ErrorCategory.NOT_IMPLEMENTED,
+            detail="stage it",
+            suggested_next_actions=["jobs.wait"],
+        ),
+        ConnectionError("transport"),
+    ],
+)
+def test_refusal_fails_on_any_other_answer(
+    tmp_path: Path, result: ToolResponse | Exception
+) -> None:
+    run = CellRun(_refusal("x86_64"), EvidenceWriter(tmp_path))
+    caller = _Caller("direct", result=result)
+    with pytest.raises((AssertionError, ConnectionError)):
+        asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "s")))
+    assert not run.assertions
+    assert len(run.artifacts) == 1  # the failed proof still names the request
+
+
+def test_refusal_fails_when_state_changed(tmp_path: Path) -> None:
+    run = CellRun(_refusal("x86_64"), EvidenceWriter(tmp_path))
+    caller = _Caller("direct", result=_REFUSED)
+    with pytest.raises(AssertionError, match="changed protected state"):
+        asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "t")))
+    assert not run.assertions

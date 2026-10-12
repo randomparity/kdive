@@ -10,8 +10,10 @@ kernel fixture and calls the tool in the cell's exposure. The functional ``image
 publishes its exposure's :data:`~tests.integration.live_stack.tool_cells.PUBLISHED_IMAGES` image
 and boots it. The
 release functional cells stop ``blocked``: the demo-up lane configures no external-boot
-authority. A remote cell runs on the provider host's remote lane; its ``images.publish``
-functional cell also stops ``blocked``, since no remote catalog image build exists. A ``runs.*``
+authority. A remote cell runs on the provider host's remote lane, except the remote
+``images.publish`` cell: admission refuses it with ``not_implemented`` (ADR-0759), so that cell
+calls the tool on this host's stack and records ``unsupported`` once the refusal left the catalog,
+build jobs and ``platform`` state unchanged. A ``runs.*``
 rejection cell aims at one unbound Run of its provider in the stack's lane-target project; an
 ``images.publish`` one at the published image's name (the remote lane image's name remotely).
 ``docs/operating/runbooks/live-testing.md`` covers the local run, ``remote-live-stack.md`` the
@@ -42,6 +44,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.images.rootfs.catalog import load_rootfs_catalog
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.ops.images.build_publish import REMOTE_PUBLISH_REFUSAL
 from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from scripts.kernel_fixtures import identity
@@ -78,12 +81,14 @@ from tests.integration.live_stack.tool_cells import (
     Guest,
     HttpCaller,
     Rejection,
+    admission_refusal,
     boundary_of,
     lane_target,
     observe_guest,
     on_lane_system,
     one,
     project_state,
+    prove_refusal,
     prove_rejection,
     run_tool_cell,
     settled,
@@ -115,11 +120,6 @@ _NO_REMOTE_AUTHORITY = (
     "the [[remote_libvirt]] authority tuple) and an authority-lane System frame; no runbook "
     "provisions one, and an authority would route every remote install and boot through "
     "external boot"
-)
-_NO_REMOTE_PUBLISH = (
-    "images.publish builds catalog images for local-libvirt only: the IMAGE_BUILD handler "
-    "answers remote-libvirt with configuration_error (not implemented); remote base images are "
-    "staged with deploy/ansible/playbooks/image.yml"
 )
 
 
@@ -424,10 +424,7 @@ async def _functional(
     remote = run.cell.provider == _REMOTE
     blocked = {"runs.release_external_boot": _NO_AUTHORITY}
     if remote:
-        blocked = {
-            "runs.release_external_boot": _NO_REMOTE_AUTHORITY,
-            PUBLISH_TOOL: _NO_REMOTE_PUBLISH,
-        }
+        blocked = {"runs.release_external_boot": _NO_REMOTE_AUTHORITY}
     if tool in blocked:
         if remote:
             # A read-only probe, so the blocked record carries the provider host like the rest.
@@ -550,8 +547,26 @@ def _rejected_image(cell: Cell) -> str:
     return PUBLISHED_IMAGES[(platform.machine(), cell.exposure)]
 
 
+async def _refused_publish(run: CellRun, caller: HttpCaller, db_url: str) -> None:
+    """ADR-0759: a platform operator's remote publish is refused before any write.
+
+    The name is fresh, so a leaked job or catalog row would be this call's alone.
+    """
+    name = f"cov-refused-{secrets.token_hex(4)}"
+    await prove_refusal(
+        run,
+        caller,
+        Rejection({"provider": _REMOTE, "name": name}, _platform_operator()),
+        REMOTE_PUBLISH_REFUSAL,
+        partial(_publish_state, db_url, _REMOTE, name),
+    )
+
+
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> None:
     caller = HttpCaller(cast(Exposure, run.cell.exposure), base_url, issuer)
+    if run.cell.kind == "unsupported":
+        await _refused_publish(run, caller, db_url)
+        return
     if run.cell.kind == "functional":
         await _functional(run, caller, base_url, issuer, db_url)
         return
@@ -575,6 +590,8 @@ def _cells() -> list[Cell]:
         for c in tool_cells(TOOLS)
         if (c.provider == _LOCAL and c.guest_arch == host)
         or (c.provider == _REMOTE and c.guest_arch in REMOTE_LANE_FAMILIES)
+        # ADR-0759's server-only admission refusals run on the stack of their architecture.
+        or (admission_refusal(c) and c.host_arch == host)
     ]
 
 
