@@ -1,5 +1,6 @@
 """Run production package tasks with real uv against a same-path source-only upgrade."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -120,10 +121,122 @@ def check_base_destination_guards(root):
     run(["ansible-playbook", "-i", "localhost,", str(play)])
 
 
+def check_appliance_consumer(root):
+    tasks = yaml.safe_load(
+        (HERE.parent / "roles/provider_authority_host/tasks/install.yml").read_text()
+    )
+    task = next(
+        t
+        for t in tasks
+        if t["name"] == "Verify selected installed appliances as the authority before service start"
+    )
+    assert task.pop("become") and task.pop("become_user") == "kdive-provider-authority"
+    task["become"] = False
+    argv = task["ansible.builtin.command"]["argv"]
+    appliance = root / "appliance"
+    root.chmod(0o755)
+    for architecture in ["x86_64", "ppc64le"]:
+        directory = appliance / architecture
+        (directory / "image").mkdir(parents=True)
+        for parent in (appliance, directory, directory / "image"):
+            parent.chmod(0o755)
+        files = {"image/vmlinuz": b"kernel", "image/initramfs.cpio": b"initramfs"}
+        for name, content in files.items():
+            (directory / name).write_bytes(content)
+            (directory / name).chmod(0o644)
+        manifest = {
+            "architecture": architecture,
+            "format": "kdive-remote-module-appliance-v1",
+            "initramfs_files": [],
+            "files": [
+                {
+                    "path": name,
+                    "size_bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+                for name, content in files.items()
+            ],
+        }
+        (directory / "manifest.json").write_text(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        (directory / "manifest.json").chmod(0o644)
+    # Import while the checkout is reachable, then drop root's DAC bypass before the
+    # unmodified production command opens any fixture. No system account is created.
+    wrapper = (
+        "import os, pwd\nfrom pathlib import Path\n"
+        "from kdive.providers.external_boot_authority import host\n"
+        "from kdive.providers.remote_libvirt import remote_module_authority_host\n"
+        f"host._REMOTE_MODULE_APPLIANCE_ROOT = Path({str(appliance)!r})\n"
+        "if os.geteuid() == 0:\n"
+        "    account = pwd.getpwnam('nobody')\n"
+        "    os.setgroups([])\n    os.setgid(account.pw_gid)\n    os.setuid(account.pw_uid)\n"
+    )
+    argv[0] = sys.executable
+    argv[2] = wrapper + argv[2]
+    marker = root / "appliance-start"
+    play = root / "appliance-check.yml"
+    play.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "hosts": "localhost",
+                    "connection": "local",
+                    "gather_facts": False,
+                    "vars": {
+                        "provider_authority_host_remote_module_enabled": True,
+                        "provider_authority_host_remote_module_architectures": [
+                            "x86_64",
+                            "ppc64le",
+                        ],
+                    },
+                    "tasks": [
+                        task,
+                        {
+                            "name": "Record reaching service start",
+                            "ansible.builtin.copy": {
+                                "dest": str(marker),
+                                "content": "started",
+                                "mode": "0600",
+                            },
+                        },
+                    ],
+                }
+            ]
+        )
+    )
+
+    def check(passes, error=""):
+        marker.unlink(missing_ok=True)
+        result = subprocess.run(
+            ["ansible-playbook", "-i", "localhost,", str(play)],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=150,
+        )
+        assert (result.returncode == 0) == passes, result.stdout + result.stderr
+        assert marker.exists() == passes, result.stdout + result.stderr
+        assert error in result.stdout + result.stderr
+
+    check(True)
+    kernel = appliance / "x86_64/image/vmlinuz"
+    kernel.write_bytes(b"broken")
+    check(False, "installed appliance file differs from its manifest")
+    kernel.write_bytes(b"kernel")
+    try:
+        appliance.chmod(0)
+        check(False, "PermissionError")
+    finally:
+        appliance.chmod(0o755)
+    check(True)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kdive-authority-install-") as scratch:
         root = Path(scratch)
         check_base_destination_guards(root)
+        check_appliance_consumer(root)
         source = root / "source"
         package = source / "src/kdive"
         package.mkdir(parents=True)

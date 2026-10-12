@@ -203,6 +203,15 @@ def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() ->
             True,
         ),
         ({"system_manifest": "/protected/manifest.json"}, False),
+        ({"appliance_root": "/private/other"}, True),
+        (
+            {
+                "remote_module": True,
+                "architectures": ["x86_64"],
+                "appliance_root": "/private/other",
+            },
+            False,
+        ),
     ],
 )
 def test_local_mutation_preflight_is_executable_and_fails_closed(
@@ -237,6 +246,7 @@ def test_local_mutation_preflight_is_executable_and_fails_closed(
         "system_local_bases": [],
         "system_remote_bases": [],
         "fault_proof": False,
+        "appliance_root": "/var/lib/kdive/remote-module-appliance/v1",
     }
     values.update(override)
     result = subprocess.run(
@@ -249,6 +259,42 @@ def test_local_mutation_preflight_is_executable_and_fails_closed(
     assert (result.returncode == 0) is accepted
     if not accepted:
         assert result.stderr.strip() == "invalid or incomplete provider authority deployment inputs"
+
+
+def test_selected_appliances_are_checked_as_authority_before_start_and_handlers() -> None:
+    tasks = yaml.safe_load((ROLE / "tasks/install.yml").read_text())
+    probe = _named(
+        tasks, "Verify selected installed appliances as the authority before service start"
+    )
+    assert probe["become"] is True
+    assert probe["become_user"] == "kdive-provider-authority"
+    assert probe["changed_when"] is False
+    assert probe["when"] == "provider_authority_host_remote_module_enabled | bool"
+    assert probe["timeout"] == 60
+    assert probe["loop"] == "{{ provider_authority_host_remote_module_architectures }}"
+    assert (
+        tasks.index(probe)
+        < tasks.index(
+            _named(
+                tasks, "Start the configured authority after firewall and protected inputs converge"
+            )
+        )
+        < tasks.index(_named(tasks, "Apply deployed-input restarts before proving readiness"))
+    )
+
+
+def test_authority_preflight_renders_the_appliance_default_before_other_role_defaults() -> None:
+    tasks = yaml.safe_load((ROLE / "tasks/preflight.yml").read_text())
+    validation = next(t for t in tasks if "closed authority deployment inputs" in t["name"])
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["to_json"] = json.dumps
+    template = environment.from_string(validation["ansible.builtin.command"]["stdin"])
+    values = _yaml(ROLE / "defaults/main.yml") | {"ansible_facts": {"os_family": "Debian"}}
+    assert json.loads(template.render(values))["appliance_root"] == (
+        "/var/lib/kdive/remote-module-appliance/v1"
+    )
+    values["remote_libvirt_module_appliance_install_dir"] = "/private/other"
+    assert json.loads(template.render(values))["appliance_root"] == "/private/other"
 
 
 def test_system_provisioning_validator_requires_exact_local_manifest_mapping(

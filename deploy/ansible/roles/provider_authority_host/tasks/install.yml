@@ -548,6 +548,24 @@
 - name: Consume the shared private authority libvirt endpoint tasks
   ansible.builtin.import_tasks: libvirt.yml
 
+- name: Verify selected installed appliances as the authority before service start
+  ansible.builtin.command:
+    argv:
+      - /opt/kdive-provider-authority/.venv/bin/python
+      - -c
+      - |
+        import sys
+        from kdive.providers.external_boot_authority.host import _REMOTE_MODULE_APPLIANCE_ROOT
+        from kdive.providers.remote_libvirt.remote_module_authority_host import load_installed_remote_module_appliance
+        load_installed_remote_module_appliance(_REMOTE_MODULE_APPLIANCE_ROOT, sys.argv[1])
+      - "{{ item }}"
+  become: true
+  become_user: kdive-provider-authority
+  changed_when: false
+  timeout: 60
+  loop: "{{ provider_authority_host_remote_module_architectures }}"
+  when: provider_authority_host_remote_module_enabled | bool
+
 - name: Start the configured authority after firewall and protected inputs converge
   ansible.builtin.systemd_service:
     name: kdive-external-boot-authority.service

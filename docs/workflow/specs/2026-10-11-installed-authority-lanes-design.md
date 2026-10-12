@@ -24,6 +24,16 @@ Use existing `deploy/ansible/site.yml` and `provider_authority_host` for the sep
 remote target. Stage its clean exact-candidate checkout through the existing private infrastructure
 workflow. There is no second remote installer and no registration of a GitHub runner.
 
+The operator-approved root amendment (2026-10-12) places immutable remote module assets at
+`/var/lib/kdive/remote-module-appliance/v1`, outside the restricted ordinary boot pool and the
+mutable authority home. Change the fixed consumer default, installer default and both architecture
+examples together. Authority-enabled remote-module preflight rejects a different destination.
+Before starting the service or flushing its restart handlers, run the installed bounded loader
+as the authority for each selected architecture. Keep the network-dependent one-shot CLI after
+service start. No environment/API/schema, group membership, ordinary permissions or SELinux policy
+changes are part of this correction. Preserve the old installed tree without a lookup fallback.
+Separate exact-candidate deployment approval remains required; native POWER stays pending.
+
 Extend `docs/operating/runbooks/live-testing.md` with the operator sequence: observe ownership,
 snapshots, consumers, nested KVM, confinement and headroom; obtain exact restore/install approval;
 reference protected DSNs/PKI/worker credentials, manifest/base digests and bounded capacity;
@@ -60,6 +70,13 @@ new playbook to the existing `just lint-ansible` syntax-check list.
   HTTP cells #3186; native POWER #2818. Coverage #2803 remains unchanged; no release publication.
 
 ## Validation
+
+Test fixed-root parity across the consumer, installer and both architecture examples. Exercise
+destination mismatch rejection and disabled-mode behavior. The existing deployment harness runs
+the real loader command over canonical fixture assets: valid bytes proceed, corruption or denied
+ancestor traversal prevents the following start marker. Validate as an unprivileged identity,
+including privilege drop when the harness runs as root. Actual QEMU access and guest confinement
+at the new root remain System qualification obligations under #3184.
 
 Extend provisioning structural tests for runner-free composition, preflight ordering, required
 lane inputs and the syntax-check gate. Observe the new test fail before adding the playbook;

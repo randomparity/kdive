@@ -495,6 +495,20 @@ pinned URL/SHA256 entries in `remote_libvirt_module_appliance_images` through th
 The authority readiness check requires those installed assets and its private storage pool;
 installation readiness does not qualify a module operation or System construction.
 
+The production authority and installer use `/var/lib/kdive/remote-module-appliance/v1`,
+outside the ordinary boot pool and the mutable authority home. Authority-enabled remote-module
+deployments reject a different `remote_libvirt_module_appliance_install_dir` before host mutation.
+Keep these assets root-owned and read-only; do not grant the authority ordinary pool group access
+or change ordinary pool permissions to make them readable. The role runs the installed loader as
+the authority before service start, then retains its post-start readiness probe. Root-only digest
+verification cannot prove the authority can traverse the installation path.
+
+For an upgrade from the former appliance location, review installation at the new location before
+starting the new candidate; retain the old tree until separately approved retirement. There is no
+fallback to the old path. Loader success does not establish QEMU access or guest confinement at
+the new location: observe those through the separate System qualification, including SELinux on
+the selected host. Do not relax host policy to substitute for that proof.
+
 Review the authority network address/port and worker TLS route separately from ordinary libvirt
 TLS. Use the existing [remote setup contract](remote-libvirt-host-setup.md) and
 [remote provider configuration](../providers/remote-libvirt.md) for client credentials and the
