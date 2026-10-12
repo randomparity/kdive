@@ -12,7 +12,8 @@ Pass the Run ID, not a System or artifact ID. Check systems.get first: a watch v
 or console signature does not mark the System CRASHED. A non-CRASHED System is refused.
 Do not force another crash just to change state; preserve existing console evidence.
 An active external boot requires the owning Run; other activation states can refuse
-capture. The chosen core-producing method must be supported by the provider.
+capture. The chosen core-producing method must be supported by the provider for this
+System's guest architecture (systems.get data.supported_capture_methods).
 
 Omitting method resolves it from the System profile; a profile with no supported core
 method needs an explicit choice. Kdump/fadump admission rejects known-negative kernel
@@ -32,5 +33,5 @@ For raw download use artifacts.fetch_raw(run_id, asset="vmcore") (contributor, U
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `method` | `console`, `host_dump`, `gdbstub`, `kdump`, `fadump` (nullable) | no | Core-producing capture method (kdump/fadump/host_dump) the bound provider must advertise. Omit to resolve the System profile's method; a profile with no implicit core method requires an explicit one. |
+| `method` | `console`, `host_dump`, `gdbstub`, `kdump`, `fadump` (nullable) | no | Core-producing capture method (kdump/fadump/host_dump) listed in the System's systems.get supported_capture_methods; fadump is refused on x86_64. Omit to resolve the System profile's method; a profile with no implicit core method requires an explicit one. |
 | `run_id` | string | yes | The Run ID whose bound System is CRASHED; not a System or artifact ID. |
