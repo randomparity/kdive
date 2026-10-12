@@ -79,8 +79,9 @@ runtime with x86 crashed System/Run to prove capability_unsupported and zero new
 activation mutations and keyed rows; preserve existing ppc positive tests.
 System read tests compare architecture metadata with resolution for the same System,
 including provider absence, malformed profile, empty set and unchanged list behavior.
-Resource tests continue expecting the static superset, and wrapper schema assertions
-prove the new field's contract is agent-visible. No imports from collected test modules.
+Resource tests continue expecting the static superset. The wrapper text is prose; the
+docs-check gate keeps the generated tool reference in step with it. No imports from
+collected test modules.
 
 Run the #2814 x86 local fadump cells when its carrier is available: four unsupported
 functional and four capability cells across two configurations and two exposures.
