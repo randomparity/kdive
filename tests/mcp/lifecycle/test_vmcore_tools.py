@@ -596,6 +596,61 @@ def test_fetch_vmcore_fadump_admitted_explicit_on_local(migrated_url: str) -> No
     asyncio.run(_run())
 
 
+async def _idempotency_count(pool: AsyncConnectionPool) -> int:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT count(*) AS n FROM idempotency_keys WHERE kind = 'vmcore.fetch'")
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row["n"])
+
+
+@pytest.mark.parametrize("idempotency_key", [None, "k-fadump-x86"])
+def test_fetch_vmcore_refuses_explicit_fadump_on_x86_64(
+    migrated_url: str, idempotency_key: str | None
+) -> None:
+    # #3153 / ADR-0757: local-libvirt's descriptor includes fadump (a provider-wide superset), but
+    # an x86_64 guest cannot do fadump capture, so the explicit request is capability_unsupported
+    # before any job or idempotency record exists.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _sys_id, run_id = await _crashed_run(pool)
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(
+                pool, _ctx(), run_id=run_id, method="fadump", idempotency_key=idempotency_key
+            )
+            jobs = await _job_count(pool)
+            keys = await _idempotency_count(pool)
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert data_str(resp, "reason") == "capability_unsupported"
+        assert data_str(resp, "capability") == "capture_method:fadump"
+        assert resp.data["supported"] == ["host_dump", "kdump"]
+        assert (jobs, keys) == (0, 0)
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_explicit_fadump_on_malformed_profile_is_typed(migrated_url: str) -> None:
+    # The architecture check parses the profile; a corrupt one stays a typed configuration_error.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, run_id = await _crashed_run(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE systems SET provisioning_profile = %s::jsonb WHERE id = %s",
+                    ('{"arch": 7}', sys_id),
+                )
+            resp = await _real_local_handlers().fetch_vmcore(
+                pool, _ctx(), run_id=run_id, method="fadump"
+            )
+            jobs = await _job_count(pool)
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert jobs == 0
+
+    asyncio.run(_run())
+
+
 async def _set_console_only_profile(pool: AsyncConnectionPool, sys_id: str) -> None:
     """Rewrite the System's profile so capture_method(profile) resolves to non-core CONSOLE."""
     from psycopg.types.json import Jsonb
@@ -635,6 +690,8 @@ def test_fetch_vmcore_no_method_console_only_requires_explicit_method(migrated_u
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert data_str(resp, "reason") == "missing_required_field"
+        # The accepted set is the x86_64 System's, so fadump is not offered (#3153).
+        assert resp.data["accepted_values"] == ["host_dump", "kdump"]
         assert jobs == 0
 
     asyncio.run(_run())
