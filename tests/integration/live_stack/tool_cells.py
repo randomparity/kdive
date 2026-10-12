@@ -463,10 +463,14 @@ async def prove_refusal(
     """Prove an authorized call is refused as ``not_implemented`` and writes nothing (ADR-0759).
 
     ``effect`` is the exact refusal envelope: not retryable, the requested object, ``detail``, no
-    job reference and no next action. ``cleanup`` is the unchanged snapshot around the call.
+    job reference and no next action. ``cleanup`` is the unchanged snapshot around the call. The
+    request is retained before the call, so a failed proof still names what an operator must
+    clean up.
     """
     operation = run.cell.operation
     before = await snapshot()
+    request = {"cell": run.cell.id, "request": dict(refusal.args), "before": before}
+    run.artifacts.append(run.writer.artifact(request))
     result = await caller.call(operation, refusal.args, caller.token(refusal.grants), discover=True)
     assert isinstance(result, ToolResponse), f"expected one envelope, got {len(result)}"
     refused = {
@@ -474,7 +478,7 @@ async def prove_refusal(
         "retryable": result.retryable,
         "object_id": result.object_id == refusal.args.get("name"),
         "detail": result.detail == detail,
-        "refs": sorted(result.refs),
+        "refs": dict(result.refs),
         "suggested_next_actions": result.suggested_next_actions,
     }
     assert refused == {
@@ -482,11 +486,11 @@ async def prove_refusal(
         "retryable": False,
         "object_id": True,
         "detail": True,
-        "refs": [],
+        "refs": {},
         "suggested_next_actions": [],
-    }, f"{operation} was not refused at admission: {refused}"
+    }, f"{operation} {refusal.args} was not refused at admission: {refused}"
     after = await snapshot()
-    assert after == before, f"the refused {operation} changed protected state"
+    assert after == before, f"the refused {operation} {refusal.args} changed protected state"
     run.prove("effect", {"exposure": caller.exposure, "refused": refused})
     run.prove("cleanup", {"owned": [], "snapshot_sha256": _digest(before)})
 

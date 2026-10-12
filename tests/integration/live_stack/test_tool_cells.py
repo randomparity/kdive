@@ -867,6 +867,7 @@ def test_refusal_proves_the_exact_envelope_and_unchanged_state(tmp_path: Path) -
     asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "s")))
     assert set(run.assertions) == {"effect", "cleanup"}
     assert caller.calls == [("images.publish", _REFUSAL.args)]
+    assert len(run.artifacts) == 1  # the request, retained before the call
 
 
 @pytest.mark.parametrize(
@@ -896,6 +897,7 @@ def test_refusal_fails_on_any_other_answer(
     with pytest.raises((AssertionError, ConnectionError)):
         asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "s")))
     assert not run.assertions
+    assert len(run.artifacts) == 1  # the failed proof still names the request
 
 
 def test_refusal_fails_when_state_changed(tmp_path: Path) -> None:
