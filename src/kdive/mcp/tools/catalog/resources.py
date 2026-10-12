@@ -341,5 +341,9 @@ def register(
         **below the rootfs image's ISA floor** (``x86-64-v2`` for EL9/RHEL-family) produces a
         non-booting System — admission validates only that the host can deliver the model, not that
         the image can run on it.
+
+        ``data.supported_capture_methods`` is the provider-wide set across every guest
+        architecture the provider can host; it is not a given System's set or a readiness claim.
+        Read ``systems.get``'s ``data.supported_capture_methods`` for a System's own architecture.
         """
         return await describe_resource(pool, current_context(), resource_id, resolver=resolver)

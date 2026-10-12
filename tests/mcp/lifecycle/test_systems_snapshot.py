@@ -8,7 +8,9 @@ the worker never runs, so only the synchronous admission + enqueue is under test
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -35,6 +37,7 @@ from kdive.domain.capacity.state import (
     SnapshotState,
     SystemState,
 )
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import (
     Allocation,
@@ -56,9 +59,12 @@ from kdive.mcp.tools.lifecycle.systems.snapshot import (
     snapshot_system,
 )
 from kdive.mcp.tools.lifecycle.systems.view import get_system
+from kdive.providers.assembly.composition import build_local_runtime
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied
+from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.mcp._seed import _PROFILE as _X86_PROFILE
 from tests.mcp.systems_support import ctx as _ctx
 from tests.mcp.systems_support import provider_resolver
 from tests.services.external_boot.conftest import seed_activation
@@ -70,7 +76,9 @@ def _pool(url: str) -> AsyncConnectionPool:
     return AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
 
 
-async def _seed_system(pool: AsyncConnectionPool, state: SystemState) -> UUID:
+async def _seed_system(
+    pool: AsyncConnectionPool, state: SystemState, *, profile: dict[str, Any] | None = None
+) -> UUID:
     async with pool.connection() as conn:
         res = await RESOURCES.insert(
             conn,
@@ -107,7 +115,7 @@ async def _seed_system(pool: AsyncConnectionPool, state: SystemState) -> UUID:
                 project="proj",
                 allocation_id=alloc.id,
                 state=state,
-                provisioning_profile={},
+                provisioning_profile=profile if profile is not None else {},
                 domain_name="kdive-x",
             ),
         )
@@ -672,6 +680,91 @@ def test_systems_get_surfaces_supports_traffic_capture(migrated_url: str) -> Non
     asyncio.run(scenario())
 
 
+def _ppc64le_profile() -> dict[str, Any]:
+    profile = deepcopy(_X86_PROFILE)
+    profile["arch"] = "ppc64le"
+    profile["provider"]["local-libvirt"]["domain_xml_params"] = {"machine": "pseries"}
+    profile["provider"]["local-libvirt"]["crashkernel"] = "512M"
+    return profile
+
+
+def _real_local_resolver() -> ProviderResolver:
+    runtime = build_local_runtime(secret_registry=SecretRegistry())
+    return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
+
+
+@pytest.mark.parametrize(
+    ("profile", "expected"),
+    [
+        (_X86_PROFILE, ["host_dump", "kdump"]),
+        (_ppc64le_profile(), ["fadump", "host_dump", "kdump"]),
+    ],
+    ids=["x86_64", "ppc64le"],
+)
+def test_systems_get_capture_methods_follow_the_guest_arch(
+    migrated_url: str, profile: dict[str, Any], expected: list[str]
+) -> None:
+    # #3153 / ADR-0757: the real local-libvirt descriptor is a provider-wide superset including
+    # fadump; systems.get narrows it by the System's profile (guest) architecture, the same
+    # selector vmcore.fetch admits against. Nothing here reads the pytest host's architecture.
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY, profile=deepcopy(profile))
+            resp = await get_system(pool, _ctx(), str(sid), resolver=_real_local_resolver())
+            assert resp.data["supported_capture_methods"] == expected
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("methods", "expected"),
+    [
+        (frozenset({CaptureMethod.HOST_DUMP}), ["host_dump"]),
+        (frozenset(), []),
+    ],
+    ids=["no-fadump-provider", "empty-provider"],
+)
+def test_systems_get_capture_methods_never_exceed_the_provider(
+    migrated_url: str, methods: frozenset[CaptureMethod], expected: list[str]
+) -> None:
+    # A ppc64le guest never gains a method its provider lacks; a known-empty set stays [].
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY, profile=_ppc64le_profile())
+            resolver = provider_resolver(supported_capture_methods=methods)
+            resp = await get_system(pool, _ctx(), str(sid), resolver=resolver)
+            assert resp.data["supported_capture_methods"] == expected
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
+def test_systems_get_omits_capture_methods_for_an_unparsable_profile(migrated_url: str) -> None:
+    # An unparsable profile makes the architecture unknown: only the capture-method field is
+    # omitted; the independently known provider capabilities stay readable.
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            resp = await get_system(pool, _ctx(), str(sid), resolver=provider_resolver())
+            assert resp.status == "ready"
+            assert "supported_capture_methods" not in resp.data
+            assert resp.data["supports_snapshots"] is True
+            assert resp.data["supports_traffic_capture"] is True
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
 def test_systems_get_resilient_when_provider_unregistered(migrated_url: str) -> None:
     # A System whose provider kind is no longer registered (disabled/uncomposed) cannot resolve a
     # runtime; systems.get must still return the System envelope (so an agent can read state and
@@ -684,6 +777,7 @@ def test_systems_get_resilient_when_provider_unregistered(migrated_url: str) -> 
             resp = await get_system(pool, _ctx(), str(sid), resolver=ProviderResolver({}))
             assert resp.status == "ready"
             assert "supports_snapshots" not in resp.data
+            assert "supported_capture_methods" not in resp.data
         finally:
             await pool.close()
 
