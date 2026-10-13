@@ -13,6 +13,15 @@ source "${here}/libvirt-uri.sh"
 readonly LIFECYCLE_SOCKET=/run/kdive/live-worker-lifecycle.sock
 readonly WORKER_PYTHON=/opt/kdive-live-worker-lifecycle/.venv/bin/python
 readonly WORKER_EXECUTABLE="${here}/worker-from-checkout"
+# Test-staging seam, not an operator knob (no KDIVE_ prefix): the root-published route file.
+: "${AUTHORITY_ROUTE_ENV:=/etc/kdive/live-worker-authority.env}"
+AUTHORITY_ROUTE_NAMES=(
+  KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE
+  KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET
+  KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF
+  KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF
+  KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF
+)
 
 usage() {
   echo "usage: scripts/live-stack/worker-lifecycle.sh" \
@@ -174,6 +183,40 @@ require_worker_path_access() {
   done
 }
 
+# Forward the installed fixed-worker authority route (ADR-0770, #3215). An absent file is a host
+# without a worker authority client; a present one must be exact, and a contradicting preset is
+# refused rather than honoured, because a worker on another route fails only later, at the
+# authority. The content is literal data: names are matched against the allowlist before the
+# indirect expansion, and nothing is evaluated.
+load_published_authority_route() {
+  local line name value seen=" "
+  local invalid="${AUTHORITY_ROUTE_ENV} must contain exactly the five worker authority route assignments"
+  local -a lines
+  [[ -e "$AUTHORITY_ROUTE_ENV" || -L "$AUTHORITY_ROUTE_ENV" ]] || return 0
+  require_exact_file "$AUTHORITY_ROUTE_ENV" 644 || return 1
+  mapfile -t lines <"$AUTHORITY_ROUTE_ENV"
+  ((${#lines[@]} == ${#AUTHORITY_ROUTE_NAMES[@]})) || {
+    echo "$invalid" >&2
+    return 1
+  }
+  for line in "${lines[@]}"; do
+    name="${line%%=*}"
+    value="${line#*=}"
+    [[ $line == *=* && -n $value && " ${AUTHORITY_ROUTE_NAMES[*]} " == *" ${name} "* &&
+      $seen != *" ${name} "* ]] || {
+      echo "$invalid" >&2
+      return 1
+    }
+    seen+="${name} "
+    if [[ -n ${!name:-} && ${!name} != "$value" ]]; then
+      echo "${name} contradicts the installed route in ${AUTHORITY_ROUTE_ENV};" \
+        "unset it to use the installed route" >&2
+      return 1
+    fi
+    export "${name}=${value}"
+  done
+}
+
 # Print the inventory path the operator's server and reconciler resolve, but only when it declares
 # a [[remote_libvirt]] instance: a local-only stack sends today's request unchanged (#3086).
 resolve_worker_inventory() {
@@ -210,6 +253,7 @@ request() {
   if [[ "$operation" == start ]]; then
     require_start_prerequisites || return 1
     libvirt_uri="$(load_published_libvirt_uri)" || return 1
+    load_published_authority_route || return 1
     inventory="$(resolve_worker_inventory)" || return
     if [[ -n "$inventory" ]]; then
       require_worker_path_access "$inventory" r "worker inventory" || return 1
