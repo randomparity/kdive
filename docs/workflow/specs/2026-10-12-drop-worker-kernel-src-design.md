@@ -33,7 +33,8 @@ Remove the worker-side plumbing end to end. Do not make it optional.
 5. **Configuration.** Delete the `KERNEL_SRC` registry setting. Catalogue `KDIVE_KERNEL_SRC` in
    `src/kdive/config/external_env.py` as a `test`-scope variable: the built kernel tree read by
    the live proofs and operator scripts, never by a worker. Delete the `KDIVE_SOURCE_ROOT` and
-   `KDIVE_WORKER_SOURCE_ROOT` entries, then regenerate `docs/guide/reference/config.md`.
+   `KDIVE_WORKER_SOURCE_ROOT` entries (no reference to either name remains, so the env-docs guard
+   stays green), then regenerate `docs/guide/reference/config.md`.
 6. **Host preparation** (`deploy/ansible/playbooks/local-libvirt-host.yml`). The task that makes
    kernel-tree ancestors traversable exists only to satisfy the removed `rx` check. Remove the
    kernel root from that task and drop `local_libvirt_host_kernel_source` and its resolved fact.
@@ -63,19 +64,25 @@ is a historical inequality.
 
 Consequences:
 
-- A host whose `/opt/kdive-live-worker-lifecycle/.venv` predates this change fails closed. Every
-  `worker-lifecycle.sh` operation stops in `require_compatible_lifecycle` with
-  `installed lifecycle protocol does not match this checkout; reprovision the runner`, before any
-  request is sent or slot is mutated. `deploy/ansible/roles/live_vm_host/tasks/verify.yml` fails
-  the same comparison. Running workers keep running, and stop and recover also need the
-  reprovisioned venv.
-- Deploy order: update the checkout first, then reprovision with
-  `just prepare-local-libvirt-host` (local-libvirt hosts) or the `live_vm_host` role or
-  `deploy/systemd/install-live-worker-lifecycle.sh` (runners). Only then start workers. The
-  self-hosted native `live_vm` job does not install the lifecycle venv, so it fails closed on
-  this PR and on every later run until its runner is reprovisioned.
-- Rollback: `git revert` alone strands the host again in the other direction. Revert, then
-  reprovision once more.
+- A host whose `/opt/kdive-live-worker-lifecycle/.venv` predates this change fails closed:
+  `start`, `stop`, `status`, `recover` and `compatibility` stop in `require_compatible_lifecycle`
+  with `installed lifecycle protocol does not match this checkout; reprovision the runner` before
+  any request is sent or slot is mutated (`diagnostics` skips the check and still runs).
+  `deploy/ansible/roles/live_vm_host/tasks/verify.yml` fails the same comparison. Running workers
+  keep running, but a skewed checkout cannot stop them.
+- Deploy order: stop the stack on the current checkout (`examples/local-libvirt/demo-down.sh` or
+  `scripts/live-stack/stack-down.sh`), then update the checkout, then reprovision with
+  `just prepare-local-libvirt-host` (local-libvirt hosts) or the `live_vm_host` role /
+  `deploy/systemd/install-live-worker-lifecycle.sh` (runners), then start.
+- Recovery for an operator who switched the checkout with workers running: check out the
+  previous commit, stop the stack, switch back, reprovision, start. Never `stack-down.sh --force`
+  for this; it strands fences.
+- Rollback mirrors the deploy order: stop, revert, reprovision, start. `git revert` alone strands
+  the host in the other direction.
+- The self-hosted native `live_vm` job runs only on `schedule` or `workflow_dispatch`
+  (`.github/workflows/live.yml`) and never installs the lifecycle venv, so this PR's checks stay
+  green and the job fails closed at its first run after merge until the runner is reprovisioned
+  with the `live_vm_host` role. The PR body names that action for whoever merges.
 
 ## Failure model
 
@@ -88,8 +95,9 @@ Consequences:
    - A worker still receives every variable it reads. Removing two names it never reads cannot
      drop a consumed one.
 3. **Accepted failure classes.**
-   - The native `live_vm` job is red until its runner is reprovisioned. This is bounded and stated
-     above, and it is the existing skew guard working as designed.
+   - The native `live_vm` job is red from its first post-merge run until its runner is
+     reprovisioned; the action and its owner (the merger) are stated above and in the PR body. It
+     is the existing skew guard working as designed.
    - A `worker.env` written by a pre-upgrade witness keeps the two names until that slot is next
      prepared. The gate drops them, and no reader exists.
    - An operator who exported `KDIVE_KERNEL_SRC` for the workers sees no change in behaviour,
@@ -124,6 +132,13 @@ Consequences:
 - **Default `KDIVE_DEMO_WORKSPACE` to a new directory.** This is judgment. It is a behaviour change
   outside the issue. Hosts without a tree already set the variable, as `scripts/host_install_proof.py`
   does.
+
+## Follow-ups outside this surface
+
+- `scripts/host_install_proof.py` still fetches `~/src/linux` citing the retired README
+  prerequisite and traversal grant; dropping that fetch would let it exercise the no-tree path.
+- `.github/workflows/live.yml` comments and `tests/scripts/test_live_workflow_shape.py` docstrings
+  still say the worker captures `KDIVE_KERNEL_SRC` (the fetches themselves are excluded).
 
 ## Success
 

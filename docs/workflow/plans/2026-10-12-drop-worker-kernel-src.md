@@ -59,10 +59,13 @@ requires it, or the reverse, is one broken protocol, not two reviewable steps.
   and `KDIVE_WORKER_SOURCE_ROOT=/srv/kdive` lines from `_ENVIRONMENT_WITHOUT_INVENTORY` in
   `test_systemd_worker_state.py`. `test_environment_carries_the_inventory_only_when_one_is_sent`
   is red until the witness stops rendering them. Green: `just test-verbose tests/processes/lifecycle/systemd/test_systemd_worker_state.py`.
-- The gate drops the names. Mode: focused-test. In `tests/deploy/test_live_worker_gate.py`, keep
-  both names in the input fixture (lines 65 and 90), which models a pre-upgrade `worker.env`.
-  Delete them from the expected worker environment (lines 274 and 312). Red: the gate still
-  passes them through. Green: `just test-verbose tests/deploy/test_live_worker_gate.py`.
+- The gate drops a pre-upgrade name. Mode: focused-test. In `tests/deploy/test_live_worker_gate.py`,
+  keep `"KDIVE_KERNEL_SRC": "/checkout/linux"` in the input fixture (line 65), which models a
+  pre-upgrade `worker.env`, and delete it from the expected worker environment (line 274). Delete
+  the `KDIVE_WORKER_SOURCE_ROOT` entries at lines 90 and 312 outright: Task 2 removes that name's
+  catalogue entry, and `scripts/guards/check_env_documented.py` scans `tests/`, so any remaining
+  literal turns `just env-docs-check` red. Red: the gate still passes `KDIVE_KERNEL_SRC` through.
+  Green: `just test-verbose tests/deploy/test_live_worker_gate.py`.
 - The launcher builds a start without a kernel tree. Mode: focused-test. In
   `_lifecycle_start_with_inventory`, delete the `"KDIVE_KERNEL_SRC": "/tmp/kernel",` entry, then
   add `env.pop("KDIVE_KERNEL_SRC", None)` after the `KDIVE_SECRETS_ROOT` pop so an inherited
@@ -76,8 +79,10 @@ requires it, or the reverse, is one broken protocol, not two reviewable steps.
    - Delete `"source_root": "/srv/kdive",` from `systemd_worker_support.py`.
    - Delete `source_root="/src/kdive",` from `_settings()` in `test_systemd_worker_lifecycle.py`.
    - In `test_systemd_worker_contract.py`, switch the UTF-8 boundary cases from `source_root` to
-     `rootfs_dir`, keeping their values, assertions, and `test_start_rejects_relative_worker_paths`
-     intact.
+     `rootfs_dir`, keeping their values and assertions. Switch
+     `test_start_rejects_relative_worker_paths` to `settings["rootfs_dir"] = "relative/rootfs"` and
+     `pytest.raises(ValidationError, match="worker paths must be absolute")`, so it still bites on
+     `validate_absolute_path` rather than on `extra_forbidden`.
    - Delete the remaining `"KDIVE_KERNEL_SRC": "/tmp/kernel",` entries at the two other launcher
      harnesses in `test_live_stack_scripts.py`. They stub `require_start_prerequisites`.
 2. Run the four green commands above and confirm each named test is red for the stated reason.
@@ -112,7 +117,7 @@ requires it, or the reverse, is one broken protocol, not two reviewable steps.
    `just lint`, `just type`, and `just lint-shell`. All should pass. Then commit
    `fix(lifecycle): drop the unread worker kernel source root`.
 
-**Acceptance:** `rg -n 'source_root|KDIVE_SOURCE_ROOT|WORKER_SOURCE_ROOT' src/kdive/processes scripts/live-stack deploy/systemd/bin`
+**Acceptance:** `rg -n 'source_root|KDIVE_SOURCE_ROOT|WORKER_SOURCE_ROOT' src/kdive/processes scripts/live-stack deploy/systemd/bin tests/deploy tests/processes tests/scripts/test_live_stack_scripts.py`
 matches nothing. All lifecycle tests are green.
 
 ## Task 2: retire the `KERNEL_SRC` setting
@@ -146,7 +151,8 @@ matches nothing. All lifecycle tests are green.
    +    ),
    ```
 
-   Delete the `KDIVE_SOURCE_ROOT` and `KDIVE_WORKER_SOURCE_ROOT` entries.
+   Delete the `KDIVE_SOURCE_ROOT` and `KDIVE_WORKER_SOURCE_ROOT` entries. Task 1 removed every
+   reference to both names, so the guard has nothing left to flag.
 4. Replace the `scripts/live-stack/env.sh` comment above the `KDIVE_KERNEL_SRC` block with:
 
    ```text
@@ -233,26 +239,36 @@ which prints both `local-libvirt-host:` pass lines.
 5. Run the green command, `just lint-shell`, and `just docs-links`. All should pass. Commit
    `docs(local-libvirt): the demo needs a workspace, not a kernel tree`.
 
-## Task 5: full gate and live proof
+## Task 5: full gate, live proof, and PR body
 
 1. Run `just ci > <scratch>/ci.log 2>&1 < /dev/null`. Expect exit 0.
-2. Live proof on the assigned lab x86_64 guest, following the dispatcher's host contract:
-   - Deploy the base commit, run `just prepare-local-libvirt-host`, and start workers with a
-     placeholder `KDIVE_KERNEL_SRC`, which gives the base-provisioned lifecycle venv.
-   - Check out the candidate and run `worker-lifecycle.sh status`. Expect
-     `installed lifecycle protocol does not match this checkout; reprovision the runner`.
-   - Stop the stack and remove the placeholder. Reprovision with the candidate's
-     `just prepare-local-libvirt-host`, then open a fresh login.
-   - With no `~/src/linux` and `KDIVE_KERNEL_SRC` unset, run `KDIVE_DEMO_WORKSPACE=<empty dir>
-     examples/local-libvirt/demo-up.sh`. Expect exit 0 and all slots started.
-   - Run one catalog-image provision, then tear down.
-   - If the base-venv arm cannot run on the guest, record why and run only the candidate arm.
+2. Live proof on a fresh lab x86_64 guest with no `~/src/linux` (the dispatcher assigns the
+   guest; its address stays private). Prerequisites the recipes enforce:
+   `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` exported, `just install-ansible-collections` run, and the
+   login in the `kvm` and `docker` groups. Record the base as `git merge-base origin/main HEAD` at
+   proof time.
+   - Base arm: check out the base, run `just setup` and `just prepare-local-libvirt-host`, and
+     start no workers. Check out the candidate and run `scripts/live-stack/worker-lifecycle.sh
+     compatibility`. Expect a non-zero exit and `installed lifecycle protocol does not match this
+     checkout; reprovision the runner`. No workers run, so nothing needs stopping.
+   - Candidate arm: run the candidate's `just prepare-local-libvirt-host`, open a fresh login,
+     confirm `compatibility` exits 0, then with `KDIVE_KERNEL_SRC` unset run
+     `KDIVE_DEMO_WORKSPACE=<empty dir> examples/local-libvirt/demo-up.sh`. Expect exit 0 and
+     all slots started. Run one catalog-image provision, then `examples/local-libvirt/demo-down.sh`.
+   - If the base arm cannot run on the guest, record why and run only the candidate arm.
+   - Keep sanitized evidence under the worktree's private `.agent/` directory.
+3. The PR body carries: the identity change (hash moves, version stays 1); the stop → update →
+   reprovision → start deploy order and the mirrored rollback; the recovery line for a checkout
+   switched under running workers, with no `--force`; the post-merge native `live_vm` reprovision
+   action and its owner; and a public-safe summary of the live arms (host class, exit codes, the
+   fail-closed message), never the guest address.
 
 ## Spec coverage
 
 | Spec item | Task |
 |-----------|------|
-| Launcher, contract, witness, gate (1–4) and Rollout | 1, 5 |
+| Launcher, contract, witness, gate (1–4) | 1 |
+| Rollout (fail-closed proof, deploy order, PR body) | 5 |
 | Configuration (5), comment (8) | 2 |
 | Host preparation (6) | 3 |
 | Demo (7) | 4 |
