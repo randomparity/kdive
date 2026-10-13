@@ -465,6 +465,87 @@ _reconcile_libvirt_tuple() {
   _libvirt_tuple_action="start"
 }
 
+# `--daemon` returns once the daemon has written its pid file and is listening, but libvirt
+# initializes its drivers only afterwards, in a background thread, and accepts no client until
+# that finishes. Driver initialization creates state directories under the runtime tree, so
+# locking the tree before it is done makes initialization fail and the daemon exit (#3208). A
+# completed client connection is the first outside sign that it is done. Every check here is
+# read-only: the tree stays exactly as the daemon is writing it. The operator owns the tree until
+# the lock and can repoint the pid file at anything, so it is read as the operator, with a bound.
+_await_libvirt_daemon_ready() {
+  local pid_path="$1" operator="$2" uri="$3" timeout_seconds="$4" deadline pid="" probe_error=""
+
+  deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
+    if [[ -z $pid && -f $pid_path && ! -L $pid_path ]]; then
+      pid="$(
+        timeout -k 1 1 runuser -u "$operator" -- head -c 32 -- "$pid_path" 2>/dev/null
+      )" || pid=""
+      [[ $pid =~ ^[1-9][0-9]*$ ]] || pid=""
+    fi
+    if [[ -n $pid ]] && ! kill -0 "$pid" 2>/dev/null; then
+      echo "session libvirt daemon $pid exited during initialization" >&2
+      return 1
+    fi
+    if [[ -n $pid ]] && probe_error="$(
+      timeout 5 runuser -u "$operator" -- virsh -q -c "$uri" uri 2>&1 >/dev/null
+    )"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "session libvirt daemon was not ready within ${timeout_seconds}s;" \
+    "last probe: ${probe_error:-none}" >&2
+  return 1
+}
+
+# A daemonized libvirt daemon detaches from the installer's stderr. Where journald runs it logs
+# there; otherwise to ~/.cache/libvirt/<daemon>.log of the account it runs as.
+_report_libvirt_daemon_log() {
+  local operator_uid="$1" daemon="$2" since="$3"
+
+  echo "the daemon's own journal since its launch:" >&2
+  journalctl --no-pager --quiet --output=short-iso --lines=40 --since="@$since" \
+    "_UID=$operator_uid" "_COMM=$daemon" >&2 || :
+  echo "(without journald the daemon logs to ~/.cache/libvirt/$daemon.log of uid $operator_uid)" >&2
+}
+
+_start_libvirt_daemon() {
+  local runtime_parent="$1" runtime_root="$2" operator="$3" operator_uid="$4" group_gid="$5"
+  local lock_uid="$6" libvirt_pid_path libvirt_socket_path launched_at ready=true
+
+  if ! command -v virsh >/dev/null; then
+    echo "virsh is required to confirm the session libvirt daemon is ready" >&2
+    return 1
+  fi
+  libvirt_pid_path="$runtime_root/libvirt/$_libvirt_pid"
+  libvirt_socket_path="$runtime_root/libvirt/$_libvirt_socket"
+  launched_at="$(date +%s)"
+  # Launch with explicit core and memlock limits rather than whatever the escalation path left.
+  # The session daemon starts QEMU workloads and needs to pass both limits through. We are root
+  # here, so raising their hard limits is permitted before runuser drops privileges.
+  if ! prlimit --memlock=unlimited --core=unlimited -- runuser -u "$operator" -- \
+    env XDG_RUNTIME_DIR="$runtime_root" \
+    "$_libvirt_executable" --daemon --config "/etc/kdive/$_libvirt_config" \
+    --pid-file "$libvirt_pid_path"; then
+    echo "selected $_libvirt_family $_libvirt_daemon failed to start" >&2
+    _report_libvirt_daemon_log "$operator_uid" "$_libvirt_daemon" "$launched_at"
+    return 1
+  fi
+  _await_libvirt_daemon_ready "$libvirt_pid_path" "$operator" "$_libvirt_uri" 60 || ready=false
+  _lock_libvirt_runtime "$runtime_parent" "$runtime_root" \
+    "$operator_uid" "$group_gid" "$lock_uid" "$lock_uid"
+  _reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_daemon" \
+    "$operator_uid" "$group_gid"
+  _restore_libvirt_runtime
+  if [[ $ready != true || $_libvirt_tuple_action != adopt ]]; then
+    echo "selected $_libvirt_family $_libvirt_daemon did not produce a complete live tuple;" \
+      "inspect $libvirt_pid_path and $libvirt_socket_path, then rerun" >&2
+    _report_libvirt_daemon_log "$operator_uid" "$_libvirt_daemon" "$launched_at"
+    return 1
+  fi
+}
+
 _select_libvirt_tuple() {
   local os_release="$1"
   local ID="" ID_LIKE="" distro_tokens
@@ -862,24 +943,8 @@ _reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_d
 libvirt_tuple_action="$_libvirt_tuple_action"
 _restore_libvirt_runtime
 if [[ $libvirt_tuple_action == start ]]; then
-  # Launch with explicit core and memlock limits rather than whatever the escalation path left.
-  # The session daemon starts QEMU workloads and needs to pass both limits through. We are root
-  # here, so raising their hard limits is permitted before runuser drops privileges.
-  prlimit --memlock=unlimited --core=unlimited -- runuser -u "$operator" -- \
-    env XDG_RUNTIME_DIR=/run/kdive/live-libvirt \
-    "$_libvirt_executable" --daemon --config "/etc/kdive/$_libvirt_config" \
-    --pid-file "$libvirt_pid_path"
-  _lock_libvirt_runtime /run/kdive /run/kdive/live-libvirt \
-    "$operator_uid" "$libvirt_group_gid" 0 0
-  _reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_daemon" \
-    "$operator_uid" "$libvirt_group_gid"
-  libvirt_tuple_action="$_libvirt_tuple_action"
-  _restore_libvirt_runtime
-  if [[ $libvirt_tuple_action != adopt ]]; then
-    echo "selected $_libvirt_family $_libvirt_daemon did not produce a complete live tuple;" \
-      "inspect $libvirt_pid_path and $libvirt_socket_path, then rerun" >&2
-    exit 1
-  fi
+  _start_libvirt_daemon /run/kdive /run/kdive/live-libvirt \
+    "$operator" "$operator_uid" "$libvirt_group_gid" 0
 fi
 
 systemctl daemon-reload
