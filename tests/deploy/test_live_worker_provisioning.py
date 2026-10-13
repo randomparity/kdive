@@ -8,6 +8,7 @@ import re
 import socket
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import cast
 
@@ -2836,12 +2837,22 @@ _FAKE_COMMANDS = {
 def _run_fake_libvirt_start(
     tmp_path: Path, *, init_delay: float, failure: str = ""
 ) -> subprocess.CompletedProcess[str]:
+    # The daemon socket lives under the runtime root, and a pytest-xdist tmp_path pushes it past
+    # the 108-byte AF_UNIX path limit, so the runtime root gets a short directory of its own.
+    with tempfile.TemporaryDirectory(prefix="kdive-") as short_root:
+        return _start_fake_libvirt(
+            tmp_path, Path(short_root) / "live-libvirt", init_delay=init_delay, failure=failure
+        )
+
+
+def _start_fake_libvirt(
+    tmp_path: Path, runtime_root: Path, *, init_delay: float, failure: str
+) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for name, body in _FAKE_COMMANDS.items():
         (bin_dir / name).write_text(body, encoding="utf-8")
         (bin_dir / name).chmod(0o755)
-    runtime_root = tmp_path / "kdive" / "live-libvirt"
     (runtime_root / "libvirt").mkdir(parents=True, mode=0o750)
     command = r"""
 source "$1"
@@ -2854,7 +2865,9 @@ _lock_libvirt_runtime() {
   _installer_lock "$@"
 }
 eval "$(declare -f _await_libvirt_daemon_ready | sed '1s/^_await/_installer_await/')"
-_await_libvirt_daemon_ready() { _installer_await_libvirt_daemon_ready "$1" "$2" "$3" 2; }
+_await_libvirt_daemon_ready() {
+  _installer_await_libvirt_daemon_ready "$1" "$2" "$3" "${FAKE_READY_TIMEOUT:-$4}"
+}
 _start_libvirt_daemon "$2" "$3" op "$4" "$5" "$4"
 """
     env = {
@@ -2866,6 +2879,8 @@ _start_libvirt_daemon "$2" "$3" op "$4" "$5" "$4"
     }
     if failure:
         env[failure] = "1"
+    if failure == "FAKE_NEVER_READY":
+        env["FAKE_READY_TIMEOUT"] = "2"
     try:
         return subprocess.run(
             [
