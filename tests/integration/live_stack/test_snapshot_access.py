@@ -37,6 +37,7 @@ def test_snapshot_preflight_names_each_unreadable_table() -> None:
     message = str(raised.value)
     assert "investigation_build_use_recoveries, worker_incarnations" in message
     assert "KDIVE_MIGRATION_DATABASE_URL" in message
+    assert "server DSN" not in message
 
 
 def test_snapshot_preflight_passes_a_dsn_that_reads_every_table() -> None:

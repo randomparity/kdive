@@ -571,8 +571,9 @@ async def require_snapshot_read_access(
     if denied:
         raise PermissionError(
             f"KDIVE_DATABASE_URL cannot SELECT {', '.join(denied)}; the protected-state snapshot "
-            "reads authority-private tables, so set KDIVE_DATABASE_URL to the migration-owner "
-            "DSN (KDIVE_MIGRATION_DATABASE_URL), not the server DSN"
+            "reads every table with a project column, some of them authority-private. The "
+            "documented harness DSN is the migration-owner DSN: "
+            'KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"'
         )
 
 
