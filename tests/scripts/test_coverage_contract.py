@@ -595,3 +595,37 @@ def test_unsupported_capability_gains_its_refusal_cell(inventory: Inventory) -> 
         assert functional.unsupported_reason == "ProviderSupport.supports_snapshots"
     # Identities other than the added refusals are unchanged.
     assert {c.id for c in changed} - added == {c.id for c in baseline}
+
+
+_POWER_SNAPSHOT_TOOLS = {"control.power", *_SNAPSHOT_TOOLS}
+_LOCAL_CONTROL_TOOLS = {
+    "control.capture_traffic",
+    "control.diagnostic_sysrq",
+    "control.watch_for_crash",
+}
+
+
+def test_power_snapshot_owners_follow_the_approved_split(inventory: Inventory) -> None:
+    # Campaign scope (2026-10-07): #2815 proves the five local x86_64 power/snapshot tools; local
+    # traffic/SysRq/watch is #3115's, remote #3116's and every ppc64le cell the POWER lane's.
+    cells = [
+        c
+        for c in build_contract(inventory=inventory).cells
+        if c.operation in _POWER_SNAPSHOT_TOOLS | _LOCAL_CONTROL_TOOLS
+    ]
+    for cell in cells:
+        expected = (
+            2818
+            if cell.guest_arch == "ppc64le"
+            else 3116
+            if cell.provider == "remote-libvirt"
+            else 3115
+            if cell.operation in _LOCAL_CONTROL_TOOLS
+            else 2815
+        )
+        assert cell.owner == expected, cell.id
+    counts = {o: len([c for c in cells if c.owner == o]) for o in (2815, 2818, 3115, 3116)}
+    assert counts == {2815: 100, 2818: 320, 3115: 60, 3116: 160}
+    owned = [c for c in cells if c.owner == 2815]
+    assert {c.kind for c in owned if c.id.endswith("/functional")} == {"functional"}
+    assert len([c for c in owned if c.kind == "functional"]) == 20
