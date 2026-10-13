@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import struct
+from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -16,6 +19,7 @@ from tests.integration.live_stack.capture_cells import (
     PANIC,
     TOOLS,
     CaptureTarget,
+    Session,
     crash_profile,
     lane_keys,
     options,
@@ -27,8 +31,9 @@ from tests.integration.live_stack.capture_cells import (
     transcript_names,
     vmcoreinfo,
 )
-from tests.integration.live_stack.scenario import ScenarioStop
-from tests.integration.live_stack.tool_cells import boundary_of
+from tests.integration.live_stack.image_smoke import Endpoint
+from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.tool_cells import Guest, HttpCaller, boundary_of
 
 _MANIFEST = {"build_id": "ab" * 20, "release": "6.18.54-kdive"}
 _INFO = f"OSRELEASE={_MANIFEST['release']}\nPAGESIZE=4096\nBUILD-ID={'ab' * 20}\n".encode()
@@ -207,8 +212,11 @@ def test_rejection_covers_every_boundary_of_every_tool() -> None:
             assert call.categories == {expected}
 
 
-def test_vmcore_fetch_rejection_names_a_core_method() -> None:
+def test_vmcore_fetch_rejection_names_the_cell_method() -> None:
     assert rejection("vmcore.fetch", "authorization", _TARGET).args["method"] == "kdump"
+    call = rejection("vmcore.fetch", "validation", _TARGET, method="fadump")
+    assert call.args["method"] == "fadump"
+    assert "method" not in rejection("postmortem.crash", "authorization", _TARGET).args
 
 
 def test_panic_seen_needs_the_panic_and_the_release() -> None:
@@ -264,3 +272,29 @@ def test_missing_dependency_blocks() -> None:
         require_tool(ToolResponse.failure("r", ErrorCategory.NOT_FOUND, detail="x"), "crash")
     done = ToolResponse.success("r", "ok")
     assert require_tool(done, "crash") is done
+
+
+class _Caller:
+    def __init__(self, answer: ToolResponse) -> None:
+        self.answer = answer
+
+    async def call(
+        self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
+    ) -> ToolResponse:
+        return self.answer
+
+
+def _session(answer: ToolResponse) -> Session:
+    run = cast(CellRun, SimpleNamespace(cell=SimpleNamespace(operation="postmortem.crash")))
+    caller = cast(HttpCaller, _Caller(answer))
+    return Session(run, cast(Guest, None), caller, "t", _MANIFEST, "run-1", Endpoint("h", 22))
+
+
+def test_exposed_call_missing_a_dependency_is_blocked() -> None:
+    missing = ToolResponse.failure("r", ErrorCategory.MISSING_DEPENDENCY, detail="no crash(8)")
+    with pytest.raises(ScenarioStop) as stop:
+        asyncio.run(_session(missing).exposed(run_id="run-1"))
+    assert stop.value.outcome is Outcome.BLOCKED
+    other = ToolResponse.failure("r", ErrorCategory.NOT_FOUND, detail="x")
+    with pytest.raises(AssertionError):
+        asyncio.run(_session(other).exposed(run_id="run-1"))

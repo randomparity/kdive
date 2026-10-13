@@ -81,7 +81,7 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
             run,
             caller,
             boundary,
-            rejection(cell.operation, boundary, target),
+            rejection(cell.operation, boundary, target, method=cell.scenario_id.split("/")[2]),
             snapshot_of(db_url, target),
         )
         return

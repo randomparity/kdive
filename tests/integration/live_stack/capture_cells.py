@@ -26,6 +26,7 @@ import struct
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -109,7 +110,6 @@ _ID = {tool: "run_id" for tool in TOOLS} | {
     "introspect.script": "session_id",
 }
 _EXTRA: dict[str, dict[str, object]] = {
-    "vmcore.fetch": {"method": "kdump"},
     "introspect.run": {"helper": "sysinfo"},
     "introspect.script": {"script": "print(1)"},
 }
@@ -292,38 +292,40 @@ def require_core(info: bytes, manifest: Mapping[str, Any]) -> None:
     assert releases == [manifest["release"]], "the core's release is not the fixture's"
 
 
-async def _download(url: str, path: Path) -> tuple[str, int]:
+async def _download(op: LiveStackClient, run_id: str, path: Path | None) -> str:
+    """One fresh ``artifacts.fetch_raw`` read of the core: its SHA-256, kept at ``path`` if set."""
+    env = ok(await scalar(op, "artifacts.fetch_raw", run_id=run_id, asset="vmcore"), "raw")
+    url = env.refs.get("download_uri")
+    assert url, "artifacts.fetch_raw returned no download URI"
     digest, size = hashlib.sha256(), 0
-    async with (
-        httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT_S) as http,
-        http.stream("GET", url) as response,
-    ):
-        response.raise_for_status()
-        with path.open("wb") as out:
+    with path.open("wb") if path is not None else nullcontext() as out:
+        async with (
+            httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT_S) as http,
+            http.stream("GET", url) as response,
+        ):
+            response.raise_for_status()
             async for chunk in response.aiter_bytes(1 << 20):
                 digest.update(chunk)
                 size += len(chunk)
-                out.write(chunk)
-    return digest.hexdigest(), size
+                if out is not None:
+                    out.write(chunk)
+    assert size == env.data.get("size_bytes"), "the core's size is not the advertised size"
+    return digest.hexdigest()
 
 
-async def raw_core(op: LiveStackClient, run_id: str, scratch: Path) -> tuple[str, int, bytes]:
-    """Two independent downloads of the raw core: equal bytes, the advertised size, VMCOREINFO."""
-    reads = []
-    for attempt in ("a", "b"):
-        env = ok(await scalar(op, "artifacts.fetch_raw", run_id=run_id, asset="vmcore"), "raw")
-        url = env.refs.get("download_uri")
-        assert url, "artifacts.fetch_raw returned no download URI"
-        path = scratch / f"core-{attempt}"
-        sha, size = await _download(url, path)
-        assert size == env.data.get("size_bytes"), "the core's size is not the advertised size"
-        reads.append((sha, size, path))
-    assert reads[0][0] == reads[1][0], "two reads of the stored core returned different bytes"
-    reads[1][2].unlink()
-    with reads[0][2].open("rb") as core:
+async def raw_core(op: LiveStackClient, run_id: str, scratch: Path) -> tuple[str, bytes]:
+    """Two independent reads of the raw core with equal bytes, and its VMCOREINFO.
+
+    Only the first read is kept on disk, and only until its VMCOREINFO is read.
+    """
+    path = scratch / "core"
+    first = await _download(op, run_id, path)
+    with path.open("rb") as core:
         info = vmcoreinfo(core)
-    reads[0][2].unlink()
-    return reads[0][0], reads[0][1], info
+    path.unlink()
+    second = await _download(op, run_id, None)
+    assert first == second, "two reads of the stored core returned different bytes"
+    return first, info
 
 
 # --- functional cells -----------------------------------------------------------------------
@@ -350,7 +352,9 @@ class Session:
     async def exposed(self, **args: object) -> ToolResponse:
         """The tool under test, through the cell's exposure and token."""
         tool = self.run.cell.operation
-        return one(await self.caller.call(tool, args, self.token, discover=True))
+        result = await self.caller.call(tool, args, self.token, discover=True)
+        # Classified before any success assertion, so a missing dependency stays ``blocked``.
+        return require_tool(result, tool) if isinstance(result, ToolResponse) else one(result)
 
     async def shell(self, command: str) -> dict[str, str]:
         result = await asyncio.to_thread(ssh, self.endpoint, self.guest.key, command)
@@ -383,7 +387,7 @@ class Session:
         project, op = self.guest.project, self.guest.op
         if exposed:
             env = await self.exposed(system_id=self.guest.system_id)
-            await drained(op, "crash", ok(env, "crash").object_id)
+            await drained(op, "crash", env.object_id)
         else:
             token = mint_role_token(
                 self.caller.issuer, project=project, agent_session=f"{project}-sess", role="admin"
@@ -400,8 +404,8 @@ class Session:
         if exposed:
             env = await self.exposed(**args)
         else:
-            env = await scalar(self.guest.op, "vmcore.fetch", **args)
-        job = await drained(self.guest.op, "capture", require_tool(env, "capture").object_id)
+            env = require_tool(await scalar(self.guest.op, "vmcore.fetch", **args), "capture")
+        job = await drained(self.guest.op, "capture", env.object_id)
         refs = await captured_vmcore_refs(self.guest.op, "capture", job, run_id=self.run_id)
         assert not raw_vmcore_refs(refs), "a capture ref exposes the raw core"
         return refs
@@ -445,7 +449,7 @@ async def vmcore_body(s: Session) -> dict[str, object]:
         await s.armed()
     await s.crash()
     refs = await s.capture(method, exposed=True)
-    sha, size, info = await raw_core(s.guest.op, s.run_id, s.guest.scratch)
+    sha, info = await raw_core(s.guest.op, s.run_id, s.guest.scratch)
     require_core(info, s.manifest)
     return {
         "method": method,
@@ -454,7 +458,7 @@ async def vmcore_body(s: Session) -> dict[str, object]:
         "raw_refs_exposed": 0,
         "artifact_id_sha256": hashlib.sha256(refs[0].encode()).hexdigest(),
         "core_sha256": sha,
-        "core_bytes": size,
+        "size_matches": True,
         "reads_identical": True,
         "build_id": s.manifest["build_id"],
         "release": s.manifest["release"],
@@ -474,7 +478,7 @@ async def _captured(s: Session) -> tuple[dict[str, str], str]:
 async def from_vmcore_body(s: Session) -> dict[str, object]:
     """Offline drgn names the fixture release, the guest's node and the loaded ``loop``."""
     facts, _name = await _captured(s)
-    report = require_tool(await s.exposed(run_id=s.run_id), "introspect").data.get("report")
+    report = (await s.exposed(run_id=s.run_id)).data.get("report")
     sysinfo = section(report, "sysinfo")
     assert sysinfo["release"] == s.manifest["release"], "offline release is not the fixture's"
     assert sysinfo["machine"] == "x86_64", f"offline machine {sysinfo['machine']!r}"
@@ -486,7 +490,7 @@ async def from_vmcore_body(s: Session) -> dict[str, object]:
 async def postmortem_body(s: Session) -> dict[str, object]:
     """crash(8) over the core names the fixture release, the sentinel and ``loop``."""
     _facts, name = await _captured(s)
-    env = require_tool(await s.exposed(run_id=s.run_id, commands=["sys", "ps", "mod"]), "crash")
+    env = await s.exposed(run_id=s.run_id, commands=["sys", "ps", "mod"])
     transcript = env.data.get("transcript")
     assert isinstance(transcript, str), "postmortem.crash returned no transcript"
     missing = transcript_names(transcript, s.manifest["release"], name, "loop")
@@ -501,7 +505,7 @@ async def run_body(s: Session) -> dict[str, object]:
     try:
         reports = {}
         for helper in ("sysinfo", "modules"):
-            env = require_tool(await s.exposed(session_id=session, helper=helper), helper)
+            env = await s.exposed(session_id=session, helper=helper)
             assert "missing_debuginfo" not in env.data, f"{helper} ran without debuginfo"
             reports[helper] = section(env.data.get("report"), helper)
     finally:
@@ -518,7 +522,7 @@ async def script_body(s: Session) -> dict[str, object]:
     name, pid = await s.sentinel()
     session = await s.drgn_session()
     try:
-        env = require_tool(await s.exposed(session_id=session, script=SCRIPT), "script")
+        env = await s.exposed(session_id=session, script=SCRIPT)
     finally:
         await s.end(session)
     output = env.data.get("output")
@@ -699,10 +703,17 @@ def _stranger() -> Any:
     return grants(other, "admin")
 
 
-def rejection(tool: str, boundary: Boundary, target: CaptureTarget) -> Rejection:
-    """The call ``boundary`` must reject, aimed at the capture target."""
+def rejection(
+    tool: str, boundary: Boundary, target: CaptureTarget, *, method: str = "kdump"
+) -> Rejection:
+    """The call ``boundary`` must reject, aimed at the capture target.
+
+    ``method`` is the capture method a ``vmcore.fetch`` call names: the cell's variant.
+    """
     key = _ID[tool]
     args: dict[str, object] = {key: target.id_for(tool), **_EXTRA.get(tool, {})}
+    if tool == "vmcore.fetch":
+        args["method"] = method
     gate = GATES[tool]
     if boundary == "validation":
         return Rejection({**args, key: 7}, grants(target.project, gate))
