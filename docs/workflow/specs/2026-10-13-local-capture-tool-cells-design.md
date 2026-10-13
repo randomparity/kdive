@@ -130,7 +130,7 @@ boots the fixture on a scratch `CellRun` and caches only the lane keys.
 |---|---|---|
 | authentication | the tool's arguments; a viewer token re-signed by an untrusted key | HTTP 401; the issued token's call is not 401 |
 | authorization | the tool's gate role minus one: operator for admin, viewer for contributor, member with no role for viewer | `authorization_denied` |
-| project-isolation | an operator of another project, with an absent-id twin | `configuration_error` (`force_crash`, `introspect.run`, `introspect.script`) or `not_found`, identical to the twin's masked answer |
+| project-isolation | an admin of another project (so the tool is visible to it), with an absent-id twin | `configuration_error` (`force_crash`, `introspect.run`, `introspect.script`) or `not_found`, identical to the twin's masked answer |
 | validation | the id argument given as an integer | the frame's validation rule |
 
 Protected state is the target project's snapshot, the jobs naming the target's
