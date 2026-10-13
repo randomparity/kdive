@@ -997,6 +997,48 @@ customization boot could not read the worker's build workspace ("Cannot access s
 build workspace held no leftovers afterwards. After `demo-down.sh --wipe --yes` the worker's
 libvirt defined no `kdive-` domain and `KDIVE_INSTALL_STAGING` was empty.
 
+#### Power and snapshot tool cells (#2815)
+
+`tests/integration/test_power_snapshot_tool_cells_live.py::test_power_snapshot_tool_cell` carries
+the 100 x86_64 local-libvirt cells of `control.power`, `systems.snapshot`, `systems.restore`,
+`systems.list_snapshots` and `systems.delete_snapshot`: 20 `functional` and 80 rejection cells.
+Both libvirt providers support snapshots, so these tools have no `capability` cell
+([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md), amended
+2026-10-13). The [design](../../workflow/specs/2026-10-08-local-power-snapshot-proof-design.md)
+lists what each cell compares. The prerequisites are the run tool cells' above, including the
+verified `longterm` fixture; the cells need no provider authority. Run both configurations into
+one evidence root, then assemble and qualify as in the System section:
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix KDIVE_ARTIFACT_DIR=$(mktemp -d)
+export KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack tests/integration/test_power_snapshot_tool_cells_live.py
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack tests/integration/test_power_snapshot_tool_cells_live.py
+```
+
+- Each functional cell provisions `fedora-kdive-ready-44`, boots the fixture kernel through the
+  deep-lifecycle checks and then calls only its tool through the cell's exposure. The guest
+  holds a value on disk, one in `/dev/shm` and a sentinel process. The disk value is read after
+  `sync` and `vm.drop_caches=3`, so a restore that brings back RAM alone cannot pass.
+- `systems.snapshot` and `systems.restore` restore a memory checkpoint and require the
+  checkpoint's boot ID, both values and the same process. `systems.restore` also restores
+  paused (libvirt and the System both `paused`, then `control.power` `resume`), and last a
+  disk-only checkpoint: the disk value rolls back in a new boot. A disk-only checkpoint may
+  give the domain a new overlay disk, which the cleanup proves absent with the others.
+- `systems.list_snapshots` compares two checkpoints, newest first, with libvirt's.
+  `systems.delete_snapshot` checks both ledgers and that the name can be used again.
+- `control.power` runs `off` (domain `shutoff`, System still `ready`), `on`, `reset` and
+  `cycle` (each a new boot), then `resume` from a paused restore.
+- Rejection cells aim at the stack's torn-down lane target. Beside the project rows, they
+  compare the target's `jobs` rows and check that its domain is still undefined.
+
+The ppc64le local cells share the node but are owner #2818's; the remote cells are #3116's.
+
 #### Break-glass provider tool cells (#3112)
 
 `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell` carries the 136
