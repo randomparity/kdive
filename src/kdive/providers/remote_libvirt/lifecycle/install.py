@@ -68,6 +68,8 @@ _DEFAULT_GET_EXPIRY_S = 3600
 _DEFAULT_INSTALL_TIMEOUT_S = 1800.0
 _DEFAULT_BOOT_TIMEOUT_S = 300.0
 _DEFAULT_BOOT_POLL_S = 2.0
+# Bound on the agent fault text a baseline boot_timeout carries, so job details stay small.
+_AGENT_ERROR_DETAIL_CHARS = 256
 # Arming the capture kernel means dracut building a kdump initramfs in-guest, which took ~90s
 # on a Rocky 10 guest. It runs AFTER the guest is otherwise up, so the boot window alone does
 # not cover it.
@@ -409,7 +411,7 @@ class RemoteLibvirtInstall:
                             "system_id": str(system_id),
                             "timeout_s": self._boot_timeout_s,
                             "last_agent_category": exc.category.value,
-                            "last_agent_error": str(exc),
+                            "last_agent_error": str(exc)[:_AGENT_ERROR_DETAIL_CHARS],
                         },
                     ) from exc
                 _log.debug("boot-id baseline: agent not up yet (%s)", exc.category.value)

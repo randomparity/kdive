@@ -54,7 +54,12 @@ because qemu opens the staged base in place as the overlay's backing file (obser
 denied svirt_t read of the var_lib_t base), the svirt_image_t label list. ADR-0442 rejected
 pre-creating this root because a non-co-located reconciler probe would read an empty root as
 co-located and mass-delete bases; that ADR's decision 2 removed the probe (the worker now
-performs the reclaim), so the premise of the rejection no longer holds. Existing carriers keep their behavior.
+performs the reclaim), so the premise of the rejection no longer holds. The recursive svirt_image_t:s0 label extends
+ADR-0640's static shared-root posture to uploaded bases: every local guest domain may read and
+write an s0 object, so a compromised qemu could reach another investigation's staged base, as it
+already can a catalog or cached base. That is the same accepted posture, not per-investigation
+sVirt isolation. Cross-slot group access for the per-investigation staging directories is a
+separate product defect owned by #3214. Existing carriers keep their behavior.
 
 Add a live carrier and domain support alongside existing live_stack lifecycle support;
 use CellRun/run_cell, verified kernel fixtures, public MCP allocation/provision/install/
