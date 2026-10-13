@@ -20,11 +20,13 @@ ownership cannot be re-proven is left in place and reported. The live node is
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import subprocess  # noqa: S404 - fixed argv, no shell  # nosec B404
@@ -47,15 +49,19 @@ from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from kdive.providers.shared.runtime_paths import UPLOADS_DIR, domain_name_for
 from scripts.coverage_campaign.contract import Cell, build_contract
-from scripts.coverage_campaign.evidence import Outcome
+from scripts.coverage_campaign.evidence import Context, InputBindings, Outcome
 from tests.integration.live_stack.cleanup import capacity_in_use, domain_disks, release_and_verify
 from tests.integration.live_stack.deep_lifecycle import (
     FIXTURE_ROOT_ENV,
     KERNEL_PROBE,
+    Fixture,
+    bound_kernel,
     deep_body,
     file_sha256,
+    kernel_inputs,
     load_fixture,
 )
+from tests.integration.live_stack.evidence import os_identity
 from tests.integration.live_stack.image_smoke import Endpoint, ssh, staged_image
 from tests.integration.live_stack.scenario import (
     ACCELERATORS,
@@ -299,7 +305,6 @@ def prove_minimum(
     assert len(disks) == 1, f"expected one owned overlay, found {len(disks)}"
     capacity = size(disks[0])
     assert capacity == SMALL.disk_gb * GIB, f"overlay virtual size {capacity}"
-    run.observed["applied_bound"] = "small"
     run.prove("minimum-cpu-ram", {"shape": want, "domain": sizing, "overlay_bytes": capacity})
 
 
@@ -613,6 +618,8 @@ class Held:
         accelerator = ET.fromstring(xml).get("type", "")  # noqa: S314  # nosec B314
         self.run.observed["accelerator"] = ACCELERATORS.get(accelerator, "none")
         self.disks = domain_disks(xml)
+        assert self.sampler is not None
+        await self.sampler.sample(self.op)
         return self.system_id
 
     async def prove_held(self, extra: dict[str, object] | None = None) -> None:
@@ -709,11 +716,22 @@ def fixture() -> tuple[Path, dict[str, Any]]:
         raise ScenarioStop(Outcome.BLOCKED, f"longterm fixture: {exc}") from None
 
 
-async def registered(op: LiveStackClient, run: CellRun) -> RootfsCatalogEntry:
-    """The representative catalog image, registered; its digest is the cell's image input."""
+async def registered(
+    op: LiveStackClient, run: CellRun, kernel: tuple[Path, dict[str, Any]]
+) -> RootfsCatalogEntry:
+    """The registered representative image; record it and the fixture kernel as cell inputs.
+
+    Every cell binds the guest and kernel it was set up with, including a cell whose provision
+    is refused before that kernel could boot.
+    """
     entry = load_rootfs_catalog()[IMAGE]
     acquired = await acquire_image(op, IMAGE, entry.arch)
-    run.observed["image_sha256"] = str(acquired["digest"]).removeprefix("sha256:")
+    run.observed |= {
+        "image_sha256": str(acquired["digest"]).removeprefix("sha256:"),
+        "guest_os": f"{entry.distro}:{entry.version}",
+        "guest_arch": entry.arch,
+        **kernel_inputs(*kernel),
+    }
     return entry
 
 
@@ -742,7 +760,7 @@ async def local_minimum(
     tree, manifest = fixture()
 
     async def body(held: Held) -> None:
-        entry = await registered(held.op, run)
+        entry = await registered(held.op, run, (tree, manifest))
         shape = await small_shape(held.op)
         system_id = await held.provision_ready(
             catalog_profile(entry, IMAGE, f"{PROJECT}-unread", SMALL)
@@ -772,12 +790,13 @@ async def local_insufficient_disk(
     run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, *, tmp: Path
 ) -> None:
     """A provision whose upload cannot be staged fails ``infrastructure_failure``, leaks nothing."""
+    tree, manifest = fixture()
     image = staged_image(IMAGE)
     if image is None:
         raise ScenarioStop(Outcome.BLOCKED, f"{IMAGE} is not staged; build it first")
 
     async def body(held: Held) -> None:
-        entry = await registered(held.op, run)
+        entry = await registered(held.op, run, (tree, manifest))
         investigation = ok(
             await scalar(
                 held.op, "investigations.open", project=PROJECT, title="insufficient disk"
@@ -791,7 +810,6 @@ async def local_insufficient_disk(
             need = image.stat().st_size
             free = await asyncio.to_thread(statvfs, mount.target)
             assert free["f_bavail"] * free["block"] < need, f"bound {free} holds {need} bytes"
-            run.observed["applied_bound"] = f"{BOUND_MIB}MiB"
             since = time.time()
             job = await held.provision(
                 upload_profile(entry.arch, checksum), investigation_id=investigation
@@ -799,6 +817,10 @@ async def local_insufficient_disk(
             assert held.sampler is not None
             env = await wait_terminal(held.op, job, held.sampler, deadline_s=1800.0)
             terminal = await attempts(db_url, job, since)
+            # No domain ever existed; the accelerator is the one admission resolved for it.
+            got = await scalar(held.op, "systems.get", system_id=held.system_id)
+            accel = got.data.get("accel")
+            run.observed["accelerator"] = accel if accel in {"kvm", "tcg"} else "none"
             journal = await asyncio.to_thread(worker_journal, since)
             assert (env.status, env.error_category) == ("failed", "infrastructure_failure"), (
                 f"provision {env.status} {env.error_category}"
@@ -815,6 +837,7 @@ async def local_insufficient_disk(
                 {
                     "category": env.error_category,
                     **asdict(terminal),
+                    "bound_mib": BOUND_MIB,
                     "statvfs": free,
                     "needed": need,
                 },
@@ -867,7 +890,7 @@ async def local_slow_boot(
     window = local_window_s()
 
     async def body(held: Held) -> None:
-        entry = await registered(held.op, run)
+        entry = await registered(held.op, run, (tree, manifest))
         system_id = await held.provision_ready(catalog_profile(entry, IMAGE, f"{PROJECT}-unread"))
         endpoint, key = await authorize_ssh(held.op, system_id, tmp, "slow-boot")
         investigation = ok(
@@ -901,7 +924,7 @@ async def local_slow_boot(
             )
             installed = await asyncio.to_thread(domain_kernel, system_id, endpoint, key, release)
             held.disks.append(installed[1])
-            run.observed["kernel_sha256"] = installed[0]
+            assert installed[0] == run.observed["kernel_sha256"], "installed kernel differs"
             job, started = await timed_boot(held.op, run_id, force=False)
             await drain_job(held.op, "baseline-boot", job)
             baseline = time.monotonic() - started
@@ -922,7 +945,6 @@ async def local_slow_boot(
             assert (late["status"], late["category"]) == ("failed", "boot_timeout"), late
             assert per.count == per.budget, per
             assert set(per.per_attempt) <= {"boot_timeout", "unknown"}, per
-            run.observed["applied_bound"] = f"delay {inside}s/{beyond}s, window {window:.0f}s"
             run.prove(
                 "slow-boot", {"delays": delays, "inside": proof, "beyond": {**late, **asdict(per)}}
             )
@@ -980,3 +1002,58 @@ async def held_journal(endpoint: Endpoint, key: Path, *, deadline_s: float) -> d
         if {"delay_end", "ready_start"} <= marks.keys() or time.monotonic() >= deadline:
             return marks
         await asyncio.sleep(_SAMPLE_S)
+
+
+def bindings(
+    candidate: str,
+    *,
+    root: Path | None,
+    host_os: str,
+    host_arch: str,
+    matrix: str,
+    staged: Callable[[str], Path | None] = staged_image,
+    fixture_at: Fixture = load_fixture,
+) -> InputBindings:
+    """The expected ``Context`` of every local #3118 cell; null where unstaged or unbuilt."""
+    entry = load_rootfs_catalog()[IMAGE]
+    image = staged(IMAGE)
+    kernel = bound_kernel(root, "longterm", host_arch, fixture_at)
+    contexts = {
+        cell.id: Context.model_validate(
+            {
+                "host_os": host_os,
+                "host_arch": host_arch,
+                "guest_os": f"{entry.distro}:{entry.version}",
+                "guest_arch": entry.arch,
+                "accelerator": cell.accelerator,
+                "image_sha256": file_sha256(image) if image is not None else None,
+                **kernel,
+            }
+        )
+        for cell in cells("local-libvirt")
+    }
+    return InputBindings(version=1, candidate_sha=candidate, matrix_sha256=matrix, cells=contexts)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Write local resource-boundary input bindings.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    write = commands.add_parser("bindings")
+    write.add_argument("--candidate", required=True)
+    write.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args(argv)
+    root = os.environ.get(FIXTURE_ROOT_ENV)
+    inputs = bindings(
+        args.candidate,
+        root=Path(root) if root else None,
+        host_os=os_identity(Path("/etc/os-release").read_text(encoding="utf-8")),
+        host_arch=platform.machine(),
+        matrix=build_contract().matrix_sha256,
+    )
+    args.out.write_text(inputs.model_dump_json(indent=1) + "\n", encoding="utf-8")
+    print(f"wrote {len(inputs.cells)} binding(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

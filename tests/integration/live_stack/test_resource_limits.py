@@ -222,3 +222,26 @@ def test_unmount_refuses_while_the_filesystem_holds_anything(
     with pytest.raises(AssertionError, match="still holds"):
         rl.unmount_bounded(mount)
     assert [c[0] for c in calls] == ["find"]
+
+
+def test_bindings_bind_every_local_cell_and_leave_unbuilt_inputs_null(tmp_path: Path) -> None:
+    image = tmp_path / "rocky.qcow2"
+    image.write_bytes(b"qcow")
+
+    def unbuilt(*_a: object) -> tuple[Path, dict[str, object]]:
+        raise ValueError("no fixture")
+
+    inputs = rl.bindings(
+        "a" * 40,
+        root=tmp_path,
+        host_os="rocky:10",
+        host_arch="x86_64",
+        matrix="b" * 64,
+        staged=lambda _name: image,
+        fixture_at=unbuilt,
+    )
+    assert set(inputs.cells) == {c.id for c in rl.cells("local-libvirt")}
+    for context in inputs.cells.values():
+        assert (context.guest_os, context.accelerator) == ("rocky:10", "kvm")
+        assert context.image_sha256 == rl.file_sha256(image)
+        assert context.kernel_build_id is None
