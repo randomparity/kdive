@@ -62,16 +62,18 @@ async def _rows(
 async def _assert_table_privileges(conn: psycopg.AsyncConnection) -> None:
     unreadable = await _rows(
         conn,
-        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
-        "AND NOT has_table_privilege(format('public.%I', tablename), 'SELECT')",
+        "SELECT c.relname FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
+        "AND NOT has_table_privilege(c.oid, 'SELECT')",
     )
     assert unreadable == [], f"harness cannot SELECT {unreadable}"
     writes = await _rows(
         conn,
-        "SELECT t.tablename, p.privilege FROM pg_tables AS t "
+        "SELECT c.relname, p.privilege FROM pg_class AS c "
+        "JOIN pg_namespace AS n ON n.oid = c.relnamespace "
         "CROSS JOIN unnest(ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS p(privilege) "
-        "WHERE t.schemaname = 'public' "
-        "AND has_table_privilege(format('public.%I', t.tablename), p.privilege)",
+        "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
+        "AND has_table_privilege(c.oid, p.privilege)",
     )
     assert set(writes) == _WRITES
 
