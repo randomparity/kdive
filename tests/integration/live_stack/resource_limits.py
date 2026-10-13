@@ -516,7 +516,11 @@ def delay_unit(release: str, delay_s: int) -> str:
 
     ``oneshot`` with no start timeout so systemd cannot cut the delay short; the condition
     keeps the delay off every other kernel, so the baseline kernel and shutdown are unaffected.
+    Each mark carries the guest's own uptime when it was written: the journal stamps a line
+    when it receives it, which can shorten the measured span below the sleep. ``$$`` is
+    systemd's escape for a literal ``$``.
     """
+    stamp = "read u _ < /proc/uptime; echo"
     return (
         "[Unit]\n"
         f"Description=kdive #3118 slow-boot delay ({delay_s}s)\n"
@@ -525,7 +529,8 @@ def delay_unit(release: str, delay_s: int) -> str:
         "\n[Service]\n"
         "Type=oneshot\n"
         "TimeoutStartSec=infinity\n"
-        f"ExecStart=/bin/sh -c 'echo {DELAY_MARK}-start; sleep {delay_s}; echo {DELAY_MARK}-end'\n"
+        f"ExecStart=/bin/sh -c '{stamp} {DELAY_MARK}-start $$u; sleep {delay_s}; "
+        f"{stamp} {DELAY_MARK}-end $$u'\n"
         "\n[Install]\n"
         "WantedBy=multi-user.target\n"
     )
@@ -561,10 +566,12 @@ def delay_ordering(journal_json: str) -> dict[str, float]:
         t = int(entry["__MONOTONIC_TIMESTAMP"]) / 1e6
         message = str(entry.get("MESSAGE", ""))
         unit = entry.get("UNIT") or entry.get("_SYSTEMD_UNIT")
-        if message == f"{DELAY_MARK}-start":
-            marks.setdefault("delay_start", t)
-        elif message == f"{DELAY_MARK}-end":
-            marks.setdefault("delay_end", t)
+        mark, _, uptime = message.partition(" ")
+        if mark in (f"{DELAY_MARK}-start", f"{DELAY_MARK}-end"):
+            kind = mark.rsplit("-", 1)[1]
+            if f"delay_{kind}" not in marks:
+                marks[f"delay_{kind}"] = t
+                marks[f"uptime_{kind}"] = float(uptime)
         elif unit == "qemu-guest-agent.service" and message.startswith("Start"):
             marks.setdefault("agent_start", t)
         elif unit == "kdive-ready.service" and message.startswith("Start"):
@@ -578,7 +585,7 @@ def delay_held(marks: dict[str, float], delay_s: int) -> list[str]:
     if missing:
         return [f"journal lacks {missing}"]
     problems = []
-    lasted = marks["delay_end"] - marks["delay_start"]
+    lasted = marks["uptime_end"] - marks["uptime_start"]
     if lasted < delay_s:
         problems.append(f"delay lasted {lasted:.0f} s")
     for dependent in ("ready_start", "agent_start"):

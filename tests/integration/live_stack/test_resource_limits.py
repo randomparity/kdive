@@ -136,10 +136,18 @@ def test_arm_command_writes_the_unit_verbatim() -> None:
     assert words[3:5] == [">", f"/etc/systemd/system/{rl.DELAY_UNIT}"]
 
 
-def _entries(**at: float) -> str:
+def _entries(written: dict[str, float] | None = None, /, **at: float) -> str:
+    """Journal lines received at ``at``; a delay mark carries the uptime it was ``written`` at."""
+    wrote = {**at, **(written or {})}
     rows = {
-        "delay_start": {"MESSAGE": f"{rl.DELAY_MARK}-start", "_SYSTEMD_UNIT": rl.DELAY_UNIT},
-        "delay_end": {"MESSAGE": f"{rl.DELAY_MARK}-end", "_SYSTEMD_UNIT": rl.DELAY_UNIT},
+        "delay_start": {
+            "MESSAGE": f"{rl.DELAY_MARK}-start {wrote.get('delay_start', 0):.2f}",
+            "_SYSTEMD_UNIT": rl.DELAY_UNIT,
+        },
+        "delay_end": {
+            "MESSAGE": f"{rl.DELAY_MARK}-end {wrote.get('delay_end', 0):.2f}",
+            "_SYSTEMD_UNIT": rl.DELAY_UNIT,
+        },
         "agent_start": {
             "MESSAGE": "Started qemu-guest-agent.service - QEMU Guest Agent.",
             "UNIT": "qemu-guest-agent.service",
@@ -159,8 +167,23 @@ def test_delay_held_when_the_delay_runs_in_full_before_both_dependents() -> None
     marks = rl.delay_ordering(
         _entries(delay_start=10, delay_end=250.5, agent_start=251, ready_start=252)
     )
-    assert marks == {"delay_start": 10, "delay_end": 250.5, "agent_start": 251, "ready_start": 252}
+    assert marks == {
+        "delay_start": 10,
+        "uptime_start": 10,
+        "delay_end": 250.5,
+        "uptime_end": 250.5,
+        "agent_start": 251,
+        "ready_start": 252,
+    }
     assert rl.delay_held(marks, 240) == []
+
+
+def test_delay_length_is_the_guests_own_stamps_not_journal_receipt() -> None:
+    # The start line reached the journal late; the unit's own stamps still span the full delay.
+    late = _entries({"delay_start": 10.0}, delay_start=11.0, delay_end=250.0, ready_start=251)
+    assert rl.delay_held(rl.delay_ordering(late), 240) == []
+    short = _entries({"delay_end": 200.0}, delay_start=10, delay_end=250.0, ready_start=251)
+    assert rl.delay_held(rl.delay_ordering(short), 240) == ["delay lasted 190 s"]
 
 
 @pytest.mark.parametrize(
