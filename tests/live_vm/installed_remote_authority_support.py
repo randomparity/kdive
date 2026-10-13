@@ -1,4 +1,4 @@
-"""Closed installed remote-authority proof inputs and fixed SSH controls."""
+"""Closed installed remote-authority proof inputs, fixed SSH controls and the private observer."""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ import stat
 import subprocess
 import time
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Annotated, Literal, cast
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -21,8 +23,11 @@ CONFIG_ENV = "KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG"
 _PREFIX = re.compile(r"kdive-2151-[0-9a-f]{12}-[0-9a-f]{8}")
 _PROOF_SOCKET = Path("/run/kdive/provider-authority/proof-control/control.sock")
 _AUTHORITY_PYTHON = "/usr/bin/python3"
+_AUTHORITY_VENV_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
+_REVISION = "/opt/kdive-provider-authority/revision"
 _MAX_CONFIG_BYTES = 16_384
 _MAX_CONTROL_BYTES = 1024
+_MAX_INVENTORY_BYTES = 1_048_576
 
 _FAULT_BARRIER_METADATA = """
 import os
@@ -68,6 +73,49 @@ try:
 finally:
     connection.close()
 sys.stdout.buffer.write(response)
+"""
+
+# Root runs this with the authority's interpreter in isolated mode; its only argument is a UUID.
+# The pool name comes from the installed authority environment, with the authority's own default
+# and name pattern (kdive.providers.external_boot_authority.host.AuthorityHostConfig).
+_INVENTORY = """
+import json
+import os
+import re
+import sys
+from uuid import UUID
+
+import libvirt
+from defusedxml.ElementTree import fromstring
+
+if len(sys.argv) > 2:
+    raise SystemExit("inventory takes at most one System UUID")
+name = "kdive-" + str(UUID(sys.argv[1])) if len(sys.argv) == 2 else None
+pool_name = "default"
+with open("/etc/kdive/provider-authority.env", encoding="utf-8") as environment:
+    for line in environment:
+        key, _, value = line.rstrip("\\n").partition("=")
+        if key == "KDIVE_REMOTE_LIBVIRT_STORAGE_POOL":
+            pool_name = value
+if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", pool_name) is None:
+    raise SystemExit("installed authority storage pool name is invalid")
+conn = libvirt.open("qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock")
+if conn is None:
+    raise SystemExit("authority daemon connection returned no handle")
+try:
+    domains = sorted(domain.name() for domain in conn.listAllDomains(0))
+    pool = conn.storagePoolLookupByName(pool_name)
+    pool.refresh(0)
+    volumes = sorted(pool.listVolumes())
+    system = None
+    if name in domains:
+        domain = conn.lookupByName(name)
+        kind = fromstring(domain.XMLDesc(0)).get("type", "")
+        system = {"active": domain.isActive() == 1, "type": kind}
+finally:
+    conn.close()
+print(json.dumps({"arch": os.uname().machine, "domains": domains, "volumes": volumes,
+                  "system": system}))
 """
 
 
@@ -141,6 +189,8 @@ def _ssh(
     command: tuple[str, ...],
     *,
     payload: bytes = b"",
+    limit: int = _MAX_CONTROL_BYTES,
+    timeout: float = 15,
 ) -> bytes:
     stdout, stderr, returncode = _run_bounded_command(
         (
@@ -154,8 +204,8 @@ def _ssh(
             shlex.join(command),
         ),
         payload=payload,
-        timeout=15,
-        stdout_limit=_MAX_CONTROL_BYTES,
+        timeout=timeout,
+        stdout_limit=limit,
         stderr_limit=_MAX_CONTROL_BYTES,
     )
     if returncode != 0:
@@ -296,3 +346,73 @@ def restart_authority_after_fault(config: RemoteAuthorityProofConfig) -> None:
     status = _ssh(config, ("systemctl", "is-active", config.authority_service))
     if status != b"active\n":
         raise AssertionError("remote authority service did not return active after restart")
+
+
+@dataclass(frozen=True)
+class RemoteDomain:
+    """The System's domain on the remote authority daemon: running, and its libvirt type."""
+
+    active: bool
+    kind: str
+
+
+@dataclass(frozen=True)
+class RemoteAuthorityInventory:
+    """The remote authority's host architecture, domains, private pool volumes and one System."""
+
+    arch: str
+    domains: list[str]
+    volumes: list[str]
+    system: RemoteDomain | None
+
+
+def _names(value: object) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(name, str) for name in value):
+        raise AssertionError("remote authority inventory is malformed")
+    return [str(name) for name in value]
+
+
+def _remote_domain(value: object) -> RemoteDomain | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"active", "type"}:
+        raise AssertionError("remote authority inventory is malformed")
+    active, kind = value.get("active"), value.get("type")
+    if not isinstance(active, bool) or not isinstance(kind, str):
+        raise AssertionError("remote authority inventory is malformed")
+    return RemoteDomain(active, kind)
+
+
+def remote_authority_inventory(
+    config: RemoteAuthorityProofConfig, system_id: str | None = None
+) -> RemoteAuthorityInventory:
+    """Read the remote authority's private daemon and pool as root; name one System to observe."""
+    command: tuple[str, ...] = ("sudo", "-n", _AUTHORITY_VENV_PYTHON, "-I", "-c", _INVENTORY)
+    if system_id is not None:
+        command += (str(UUID(system_id)),)
+    stdout = _ssh(config, command, limit=_MAX_INVENTORY_BYTES, timeout=120)
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise AssertionError("remote authority inventory is malformed") from None
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"arch", "domains", "volumes", "system"}
+        or not isinstance(data["arch"], str)
+    ):
+        raise AssertionError("remote authority inventory is malformed")
+    return RemoteAuthorityInventory(
+        data["arch"],
+        _names(data["domains"]),
+        _names(data["volumes"]),
+        _remote_domain(data["system"]),
+    )
+
+
+def require_installed_authority(config: RemoteAuthorityProofConfig) -> None:
+    """Refuse unless the remote authority unit is active at the configured revision."""
+    if _ssh(config, ("systemctl", "is-active", config.authority_service)) != b"active\n":
+        raise AssertionError("the remote authority service is not active")
+    revision = _ssh(config, ("sudo", "-n", "cat", _REVISION)).strip()
+    if revision != config.installed_revision.encode():
+        raise AssertionError("the installed remote authority revision does not match the config")

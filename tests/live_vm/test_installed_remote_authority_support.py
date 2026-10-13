@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -15,9 +18,13 @@ import pytest
 from tests.live_vm import installed_remote_authority_support as carrier
 from tests.live_vm.installed_remote_authority_support import (
     CONFIG_ENV,
+    RemoteAuthorityInventory,
     RemoteAuthorityProofConfig,
+    RemoteDomain,
     fault_barrier_request,
     load_config,
+    remote_authority_inventory,
+    require_installed_authority,
     restart_authority_after_fault,
 )
 
@@ -292,3 +299,201 @@ def test_terminate_process_group_reaps_a_zombie_only_group() -> None:
     carrier._terminate_process_group(process)
 
     assert process.returncode is not None
+
+
+_SYSTEM = "11111111-2222-4333-8444-555555555555"
+_INVENTORY = {"arch": "x86_64", "domains": ["kdive-x"], "volumes": ["base.qcow2"], "system": None}
+
+
+def _inventory_ssh(
+    monkeypatch: pytest.MonkeyPatch, stdout: bytes
+) -> list[tuple[tuple[str, ...], float, int]]:
+    calls: list[tuple[tuple[str, ...], float, int]] = []
+
+    def run(
+        argv: tuple[str, ...], *, payload: bytes, timeout: float, stdout_limit: int, **_k: object
+    ) -> tuple[bytes, bytes, int]:
+        calls.append((argv, timeout, stdout_limit))
+        return stdout, b"", 0
+
+    monkeypatch.setattr(carrier, "_run_bounded_command", run)
+    return calls
+
+
+def test_inventory_runs_the_fixed_program_as_root_over_the_bounded_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system = {**_INVENTORY, "system": {"active": True, "type": "kvm"}}
+    calls = _inventory_ssh(monkeypatch, json.dumps(system).encode())
+    inventory = remote_authority_inventory(_config(), _SYSTEM)
+    assert inventory == RemoteAuthorityInventory(
+        "x86_64", ["kdive-x"], ["base.qcow2"], RemoteDomain(True, "kvm")
+    )
+    ((argv, timeout, limit),) = calls
+    assert argv[:7] == (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "--",
+        "authority-proof-host",
+    )
+    assert shlex.split(argv[7]) == [
+        "sudo",
+        "-n",
+        "/opt/kdive-provider-authority/.venv/bin/python",
+        "-I",
+        "-c",
+        carrier._INVENTORY,
+        _SYSTEM,
+    ]
+    assert (timeout, limit) == (120, 1_048_576)
+
+
+def test_inventory_refuses_a_non_uuid_before_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _inventory_ssh(monkeypatch, b"{}")
+    with pytest.raises(ValueError):
+        remote_authority_inventory(_config(), "kdive-x; reboot")
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        b"not-json",
+        json.dumps([_INVENTORY]).encode(),
+        json.dumps({k: v for k, v in _INVENTORY.items() if k != "arch"}).encode(),
+        json.dumps({**_INVENTORY, "extra": 1}).encode(),
+        json.dumps({**_INVENTORY, "arch": 64}).encode(),
+        json.dumps({**_INVENTORY, "domains": "kdive-x"}).encode(),
+        json.dumps({**_INVENTORY, "volumes": [1]}).encode(),
+        json.dumps({**_INVENTORY, "system": {"active": "yes", "type": "kvm"}}).encode(),
+        json.dumps({**_INVENTORY, "system": {"active": True}}).encode(),
+    ],
+)
+def test_inventory_rejects_malformed_output(
+    monkeypatch: pytest.MonkeyPatch, document: bytes
+) -> None:
+    _inventory_ssh(monkeypatch, document)
+    with pytest.raises(AssertionError, match="malformed"):
+        remote_authority_inventory(_config())
+
+
+class _FakeDomain:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def name(self) -> str:
+        return self._name
+
+    def XMLDesc(self, _flags: int) -> str:  # noqa: N802 - libvirt's method name
+        return "<domain type='kvm'/>"
+
+    def isActive(self) -> int:  # noqa: N802 - libvirt's method name
+        return 1
+
+
+class _FakePool:
+    def refresh(self, _flags: int) -> None:
+        pass
+
+    def listVolumes(self) -> list[str]:  # noqa: N802 - libvirt's method name
+        return ["kdive-x-overlay.qcow2", "base.qcow2"]
+
+
+class _FakeConnection:
+    def __init__(self, pools: list[str]) -> None:
+        self.pools = pools
+
+    def listAllDomains(self, _flags: int) -> list[_FakeDomain]:  # noqa: N802 - libvirt's name
+        return [_FakeDomain(f"kdive-{_SYSTEM}"), _FakeDomain("other")]
+
+    def lookupByName(self, name: str) -> _FakeDomain:  # noqa: N802 - libvirt's method name
+        return _FakeDomain(name)
+
+    def storagePoolLookupByName(self, name: str) -> _FakePool:  # noqa: N802 - libvirt's name
+        self.pools.append(name)
+        return _FakePool()
+
+    def close(self) -> None:
+        pass
+
+
+def _run_program(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], environment: str
+) -> tuple[list[str], list[str], dict[str, object]]:
+    """Execute the fixed program with a fake libvirt and a fake installed environment file."""
+    pools: list[str] = []
+    opened: list[str] = []
+
+    def connect(uri: str) -> _FakeConnection:
+        opened.append(uri)
+        return _FakeConnection(pools)
+
+    monkeypatch.setitem(sys.modules, "libvirt", types.SimpleNamespace(open=connect))
+    monkeypatch.setattr(sys, "argv", ["-c", _SYSTEM])
+
+    def fake_open(path: str, **_kwargs: object) -> io.StringIO:
+        assert path == "/etc/kdive/provider-authority.env"
+        return io.StringIO(environment)
+
+    exec(  # noqa: S102 - the module's own fixed program  # nosec B102
+        compile(carrier._INVENTORY, "inventory", "exec"),
+        {"__name__": "inventory", "open": fake_open},
+    )
+    return pools, opened, json.loads(capsys.readouterr().out)
+
+
+def test_program_reads_the_installed_pool_and_the_private_socket(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pools, opened, output = _run_program(
+        monkeypatch,
+        capsys,
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE=a\nKDIVE_REMOTE_LIBVIRT_STORAGE_POOL=pool-a\n",
+    )
+    assert pools == ["pool-a"]
+    assert opened == [
+        "qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock"
+    ]
+    assert output["domains"] == ["kdive-" + _SYSTEM, "other"]
+    assert output["volumes"] == ["base.qcow2", "kdive-x-overlay.qcow2"]
+    assert output["system"] == {"active": True, "type": "kvm"}
+    assert output["arch"] == os.uname().machine
+
+
+def test_program_defaults_the_pool_like_the_authority(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pools, _opened, _output = _run_program(monkeypatch, capsys, "KDIVE_OTHER=1\n")
+    assert pools == ["default"]
+
+
+def test_program_refuses_an_unsafe_pool_name(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="pool name is invalid"):
+        _run_program(monkeypatch, capsys, "KDIVE_REMOTE_LIBVIRT_STORAGE_POOL=../pool\n")
+
+
+def test_installed_authority_gate_refuses_an_inactive_unit_or_another_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def host(active: int, revision: bytes) -> None:
+        def run(argv: tuple[str, ...], **_kwargs: object) -> tuple[bytes, bytes, int]:
+            if "is-active" in argv[-1]:
+                return (b"active\n", b"", 0) if active == 0 else (b"inactive\n", b"", active)
+            assert argv[-1] == "sudo -n cat /opt/kdive-provider-authority/revision"
+            return revision, b"", 0
+
+        monkeypatch.setattr(carrier, "_run_bounded_command", run)
+
+    host(0, b"1" * 40 + b"\n")
+    require_installed_authority(_config())
+    host(3, b"1" * 40 + b"\n")
+    with pytest.raises(RuntimeError, match="remote authority control failed"):
+        require_installed_authority(_config())
+    host(0, b"2" * 40 + b"\n")
+    with pytest.raises(AssertionError, match="revision"):
+        require_installed_authority(_config())
