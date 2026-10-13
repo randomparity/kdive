@@ -684,6 +684,53 @@ installed kernel behind (#3078).
 | `enterprise/longterm`, `enterprise/stable` | `rocky:10` | success |
 | `suse/longterm`, `suse/stable` | `opensuse-leap:15.6` | success |
 
+#### Local resource-boundary cells (#3118)
+
+`tests/integration/test_resource_limits_live.py::test_local_resource_boundary` has one parameter
+for each `failure-resource/local-libvirt/x86_64/{minimum-cpu-ram,insufficient-disk,slow-boot}`
+cell. Every parameter uses the `rocky-kdive-ready-10` image and the longterm fixture kernel, and
+proves its resource outcome plus `no-duplicates`, `protected-state` and `cleanup`:
+
+- `minimum-cpu-ram` requests the seeded `small` shape (1 vCPU, 1024 MiB, 10 GB). It checks the
+  domain XML and the overlay's virtual size, then uploads, installs and boots the fixture kernel
+  and reconnects over SSH.
+- `insufficient-disk` opens an investigation and mounts a 64 MiB test-owned loop filesystem
+  (`mkfs.ext4 -m 0`) at that investigation's new directory under `/var/lib/kdive/rootfs-uploads`.
+  It uploads the staged image as the investigation's rootfs and provisions it. Every attempt
+  must fail the staging precheck with `infrastructure_failure`, and nothing may be left staged or
+  defined. After release it unmounts, detaches and removes the directory, then closes the
+  investigation.
+- `slow-boot` installs the fixture kernel and times a plain `runs.boot`. It then writes a
+  `oneshot` delay unit, active only on the fixture kernel's release and ordered before
+  `kdive-ready` and the guest agent. A forced boot with a delay inside half the readiness window
+  must succeed. A delay longer than the window plus 60 s must fail every attempt with
+  `boot_timeout`. The guest's own journal must show each delay ran in full before
+  `kdive-ready` started.
+
+The test reads the fixed workers' journal (`journalctl -u 'kdive-live-worker@*'`) to label each
+attempt, so the operator needs journal access (the `systemd-journal` group). It also needs
+`sudo -n` for the loop filesystem and for reading worker-owned disks. The window is
+`KDIVE_LIBVIRT_BOOT_WINDOW_S` (default 900 s), so `slow-boot` runs for about an hour at the
+default.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix
+python3 scripts/kernel_fixtures.py build --baseline longterm --arch "$(uname -m)" \
+  --source "$KDIVE_FIXTURE_ROOT/src-longterm" --output "$KDIVE_FIXTURE_ROOT/longterm" --jobs "$(nproc)"
+examples/local-libvirt/build-image.sh rocky-kdive-ready-10
+uv run python -m tests.integration.live_stack.resource_limits bindings --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+uv run python -m pytest -m live_stack tests/integration/test_resource_limits_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+A cell whose loop filesystem cannot be proven unchanged keeps it mounted and records
+`bounded_mount: retained`; unmount it by hand after checking that no job is running. The three
+`remote-libvirt` cells have no carrier yet and report `pending-implementation`.
+
 #### Core tool cells and server configurations (#2811)
 
 `tests/integration/test_core_tool_cells_live.py::test_core_tool_cell` has one parameter for each
