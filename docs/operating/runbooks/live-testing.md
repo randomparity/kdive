@@ -553,8 +553,9 @@ Retire only explicitly owned proof objects after confirming terminal provider ef
 remove shared backends, bases or journals to make a failure disappear. The existing local
 `authority_host_teardown.yml` is an authority retirement operation requiring its own reviewed
 inputs, not routine per-test cleanup; remote retirement follows its separately reviewed plan.
-Preserve narrower blockers under their existing owners: #3138, #3143, #3144/#3148,
-#3130/#3131/#3135. System framing, fault construction and HTTP qualification belong to
+Preserve narrower blockers under their existing owners: #3138, #3144/#3148,
+#3130/#3131/#3135. Exhausted-job recovery (#3143) is merged; report a recurrence as a new
+issue. System framing, fault construction and HTTP qualification belong to
 #3184–#3186. Do not publish the release from this procedure.
 
 ### Installed remote authority proof prerequisite
