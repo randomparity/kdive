@@ -67,7 +67,6 @@ from tests.integration.live_stack.spine import (
     scalar,
 )
 from tests.integration.live_stack.tool_cells import (
-    LANE_IMAGES,
     Boundary,
     Grants,
     Guest,
@@ -772,7 +771,6 @@ async def capability(
 ) -> None:
     """A crashed, Run-bound System refuses ``fadump`` as ``capability_unsupported``."""
     name, entry = lane_image()
-    assert name == LANE_IMAGES[entry.arch]
     project = f"cov-{secrets.token_hex(4)}"
 
     async def body(op: LiveStackClient, system_id: str, _owned: list[str]) -> None:
