@@ -8,8 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from scripts.coverage_campaign.contract import Contract, build_contract
+from scripts.coverage_campaign.evidence import Context, Evidence, InputBindings, Outcome
+from scripts.coverage_campaign.results import qualify
 from tests.integration.live_stack import resource_limits as rl
-from tests.integration.live_stack.evidence import EvidenceWriter
+from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity, build_record
 from tests.integration.live_stack.scenario import CellRun
 
 _JOB = "0b9ee7c4-5d0e-4c58-9a51-6c1f1b1f0a01"
@@ -302,3 +305,57 @@ def test_a_host_without_the_uploads_directory_is_blocked(
     with pytest.raises(rl.ScenarioStop) as stop:
         rl.mount_bounded(_JOB, tmp_path, 1)
     assert stop.value.outcome is rl.Outcome.BLOCKED
+
+
+_HEAD = "a" * 40
+_CONTEXT = {
+    "host_os": "rocky:10.2",
+    "host_arch": "x86_64",
+    "guest_os": "rocky:10",
+    "guest_arch": "x86_64",
+    "accelerator": "kvm",
+    "image_sha256": "1" * 64,
+    "kernel_sha256": "2" * 64,
+    "kernel_source_sha": "3" * 40,
+    "kernel_config_sha256": "4" * 64,
+    "compiler_id": "5" * 64,
+    "kernel_build_id": "6" * 40,
+}
+
+
+def _record(run: CellRun, contract: Contract) -> Evidence:
+    roles = {"server": _HEAD, "worker": _HEAD, "reconciler": _HEAD}
+    identity = RunIdentity(_HEAD, contract.matrix_sha256, "rocky:10.2", "x86_64", True, roles)
+    return build_record(
+        run.cell,
+        identity,
+        outcome=Outcome.SUCCESS,
+        context=Context.model_validate(_CONTEXT),
+        duration_s=1.0,
+        assertions=run.assertions,
+        artifacts=run.artifacts,
+    )
+
+
+def test_each_local_cell_qualifies_only_with_its_exact_assertions(tmp_path: Path) -> None:
+    contract = build_contract()
+    inputs = InputBindings(
+        version=1,
+        candidate_sha=_HEAD,
+        matrix_sha256=contract.matrix_sha256,
+        cells={c.id: Context.model_validate(_CONTEXT) for c in rl.cells("local-libvirt")},
+    )
+    for cell in rl.cells("local-libvirt"):
+        run = CellRun(cell, EvidenceWriter(tmp_path))
+        for name in (*cell.assertions, "upload", "boot-identity"):  # deep_body's sub-proofs too
+            run.prove(name, {"cell": cell.id})
+        undemoted = _record(run, contract)
+        rl.demote_substeps(run)
+        results = qualify(contract, inputs, [_record(run, contract)]).cells
+        verdict = next(v for v in results if v.cell.id == cell.id)
+        assert verdict.qualified, (cell.id, verdict.reasons)
+        results = qualify(contract, inputs, [undemoted]).cells
+        assert (
+            "required-assertions-mismatch"
+            in next(v for v in results if v.cell.id == cell.id).reasons
+        )

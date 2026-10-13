@@ -192,7 +192,8 @@ boot wait. A retry could then exhaust its attempts without reporting the `BOOT_T
 actually had. The baseline read now polls the agent-down categories inside the boot window, as
 step 3 does; an agent that never answers in that window is `BOOT_TIMEOUT` and no reboot is
 attempted. A non-zero helper exit still maps through ADR-0489 at once, and any other fault still
-propagates. Both categories are retryable, so the queue's retry decision is unchanged. The
+propagates. The baseline wait and the post-reboot wait are consecutive windows, so one attempt can
+take up to two boot windows (plus the kdump arming window) before it fails. Both categories are retryable, so the queue's retry decision is unchanged. The
 agent-down categories also cover a domain that is not running and a malformed agent reply, which
 now spend the boot window before failing; the `BOOT_TIMEOUT` therefore names the last agent
 category and error in its details instead of presuming a slow boot. Operator decision
