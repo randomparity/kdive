@@ -798,7 +798,10 @@ async def local_insufficient_disk(
     tree, manifest = fixture()
     image = staged_image(IMAGE)
     if image is None:
-        raise ScenarioStop(Outcome.BLOCKED, f"{IMAGE} is not staged; build it first")
+        raise ScenarioStop(
+            Outcome.BLOCKED,
+            f"no staged {IMAGE} in KDIVE_SYSTEMS_TOML; build it and export the inventory path",
+        )
 
     async def body(held: Held) -> None:
         entry = await registered(held.op, run, (tree, manifest))

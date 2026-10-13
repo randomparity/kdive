@@ -721,6 +721,8 @@ python3 scripts/kernel_fixtures.py build --baseline longterm --arch "$(uname -m)
 examples/local-libvirt/build-image.sh rocky-kdive-ready-10
 uv run python -m tests.integration.live_stack.resource_limits bindings --candidate "$sha" --out inputs.json
 export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+# insufficient-disk uploads the staged image file; pytest sandboxes the XDG default inventory.
+export KDIVE_SYSTEMS_TOML=$HOME/.config/kdive/systems.toml
 uv run python -m pytest -m live_stack tests/integration/test_resource_limits_live.py
 uv run python -m tests.integration.live_stack.evidence assemble \
   "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
