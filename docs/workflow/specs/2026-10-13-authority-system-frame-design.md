@@ -18,6 +18,9 @@ One new module, `tests/integration/live_stack/authority_lane.py`, adds
 `on_authority_system(run, base_url, issuer, db_url, *, project, body)`, the third System frame.
 It is selected explicitly by the carrier, never derived from `cell.roles`: obligation groups mark
 `authority` for reasons other than the frame (D1-A removes one).
+Completion criterion 1 was amended to this explicit carrier selection by operator decision
+(2026-10-13); the ordinary `Lane`/`LaneFrame`/`on_lane_system` frames, boundary assertions and
+evidence owners stay unchanged, and the `tool_cells.py` docstring names the third frame.
 
 **Why a sibling and not a `Lane`.** `on_lane_system` observes the guest by authorizing an SSH key
 and the `LaneFrame` body receives only `(op, system_id, owned)`. The fixture System's domain is
