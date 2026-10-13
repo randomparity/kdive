@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 
 import pytest
@@ -638,3 +639,32 @@ def test_power_snapshot_owners_follow_the_approved_split(inventory: Inventory) -
     owned = [c for c in cells if c.owner == 2815]
     assert {c.kind for c in owned if c.id.endswith("/functional")} == {"functional"}
     assert len([c for c in owned if c.kind == "functional"]) == 20
+
+
+_CAPTURE_TOOLS = {
+    "control.force_crash",
+    "introspect.from_vmcore",
+    "introspect.run",
+    "introspect.script",
+    "postmortem.crash",
+    "vmcore.fetch",
+}
+
+
+def test_capture_owners_follow_the_approved_split(inventory: Inventory) -> None:
+    # Operator split (2026-10-06) and decision D1-A (2026-10-13): #2814 proves the x86_64 local
+    # cells without the authority role; remote is #3114's and every ppc64le cell the POWER lane's.
+    cells = [c for c in build_contract(inventory=inventory).cells if c.operation in _CAPTURE_TOOLS]
+    assert cells and all("authority" not in c.roles for c in cells)
+    for cell in cells:
+        expected = (
+            2818
+            if cell.guest_arch == "ppc64le"
+            else 3114
+            if cell.provider == "remote-libvirt"
+            else 2814
+        )
+        assert cell.owner == expected, cell.id
+    local = [c for c in cells if c.owner == 2814]
+    kinds = Counter(c.kind for c in local)
+    assert (len(local), kinds["functional"], kinds["unsupported"]) == (164, 28, 4)

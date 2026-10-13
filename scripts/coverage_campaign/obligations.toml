@@ -238,7 +238,6 @@ kernel = true
 owner = 2814
 execution = "provider"
 kernel = true
-authority = true
 [groups.tools]
 "control.force_crash" = "Observe the deliberate guest panic and durable crash transition with matching evidence."
 "introspect.from_vmcore" = "Compare offline kernel facts from the real dump with matching build/workload identities."
