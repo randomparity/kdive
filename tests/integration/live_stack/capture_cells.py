@@ -181,9 +181,9 @@ def lane_keys(observed: Mapping[str, object]) -> dict[str, object]:
 
 
 def require_tool(env: ToolResponse, phase: str) -> ToolResponse:
-    """``env`` when it succeeded; ``blocked`` when the worker host lacks a dependency."""
+    """``env`` when it succeeded; ``blocked`` when the stack lacks a dependency."""
     if env.error_category == ErrorCategory.MISSING_DEPENDENCY.value:
-        raise ScenarioStop(Outcome.BLOCKED, f"{phase}: the worker host lacks a dependency")
+        raise ScenarioStop(Outcome.BLOCKED, f"{phase}: the stack lacks a dependency")
     return ok(env, phase)
 
 
@@ -193,9 +193,7 @@ async def drained(op: LiveStackClient, phase: str, job_id: str) -> ToolResponse:
         return await drain_job(op, phase, job_id)
     except SpinePhaseError as exc:
         if exc.error_category == ErrorCategory.MISSING_DEPENDENCY.value:
-            raise ScenarioStop(
-                Outcome.BLOCKED, f"{phase}: the worker host lacks a dependency"
-            ) from None
+            raise ScenarioStop(Outcome.BLOCKED, f"{phase}: the stack lacks a dependency") from None
         raise
 
 
