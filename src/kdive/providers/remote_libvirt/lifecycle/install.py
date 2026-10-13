@@ -403,7 +403,14 @@ class RemoteLibvirtInstall:
                         "guest agent did not answer the pre-reboot boot-id read within the "
                         "boot window",
                         category=ErrorCategory.BOOT_TIMEOUT,
-                        details={"system_id": str(system_id), "timeout_s": self._boot_timeout_s},
+                        # The wait also absorbs a stopped domain or a malformed agent reply,
+                        # so name the last agent fault rather than presume a slow boot.
+                        details={
+                            "system_id": str(system_id),
+                            "timeout_s": self._boot_timeout_s,
+                            "last_agent_category": exc.category.value,
+                            "last_agent_error": str(exc),
+                        },
                     ) from exc
                 _log.debug("boot-id baseline: agent not up yet (%s)", exc.category.value)
             self._sleep(self._boot_poll_s)

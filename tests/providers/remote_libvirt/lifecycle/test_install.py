@@ -620,7 +620,12 @@ def test_boot_agent_silent_through_the_baseline_window_is_boot_timeout() -> None
     assert str(excinfo.value) == (
         "guest agent did not answer the pre-reboot boot-id read within the boot window"
     )
-    assert excinfo.value.details == {"system_id": str(system_id), "timeout_s": 5.0}
+    assert excinfo.value.details == {
+        "system_id": str(system_id),
+        "timeout_s": 5.0,
+        "last_agent_category": "transport_failure",
+        "last_agent_error": "qemu-guest-agent command failed (agent unreachable or not connected)",
+    }
     assert "boot" not in argv_subs
 
 
