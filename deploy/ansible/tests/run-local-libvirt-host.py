@@ -30,6 +30,30 @@ require(
     "role order differs",
 )
 
+# community.libvirt virt_pool/virt_net ignore `autostart` in a task that also sets `state`
+# (#3203), so each object libvirt_pool_net activates needs its own autostart-only task.
+pool_net_tasks = yaml.safe_load((ANSIBLE / "roles/libvirt_pool_net/tasks/main.yml").read_text())
+libvirt_args = [
+    (module, task[module])
+    for task in pool_net_tasks
+    for module in ("community.libvirt.virt_pool", "community.libvirt.virt_net")
+    if module in task
+]
+require(
+    not any("state" in args and "autostart" in args for _, args in libvirt_args),
+    "a libvirt_pool_net task combines state and autostart; the module ignores autostart there",
+)
+for module, name in (
+    ("community.libvirt.virt_pool", "default"),
+    ("community.libvirt.virt_pool", "{{ libvirt_pool_net_boot_artifact_pool_name }}"),
+    ("community.libvirt.virt_net", "{{ libvirt_network }}"),
+):
+    require(
+        (module, {"name": name, "state": "active"}) in libvirt_args
+        and (module, {"name": name, "autostart": True}) in libvirt_args,
+        f"{module} {name} must be activated and autostarted by separate tasks",
+    )
+
 # The lifecycle installer below (deploy/systemd/install-live-worker-lifecycle.sh) runs as root
 # through this play's `become: true` and resolves `uv` with a bare `command -v uv`; a host
 # provisioned per docs/operating/install.md installs uv to ~/.local/bin, which root's sudo

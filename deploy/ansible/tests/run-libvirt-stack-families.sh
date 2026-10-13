@@ -18,6 +18,7 @@ defaults = yaml.safe_load((role / "defaults/main.yml").read_text())
 tasks = yaml.safe_load((role / "tasks/main.yml").read_text())
 jinja = NativeEnvironment(undefined=StrictUndefined)
 jinja.filters["extract"] = lambda value, mapping: mapping[value]
+jinja.tests["changed"] = lambda result: bool(result.get("changed"))
 
 
 def require(condition, message):
@@ -74,7 +75,8 @@ expected = {
         "elfutils-libelf-devel", "openssl-devel", "dwarves",
     ],
     "Suse": [
-        "libvirt-daemon-qemu", "libvirt-daemon-proxy", "libvirt-client", "qemu-tools",
+        "libvirt-daemon-qemu", "libvirt-daemon-proxy", "libvirt-daemon-config-network",
+        "libvirt-client", "qemu-tools",
         "guestfs-tools", "e2fsprogs", "virt-install", "gnutls", "libseccomp2",
         "python3-libvirt-python", "python3-lxml", "make", "tar",
         "gcc", "binutils", "bison", "flex", "bc", "perl",
@@ -225,5 +227,29 @@ require(
     group["ansible.builtin.user"]["append"] is True,
     "operator group membership is not additive",
 )
-print("libvirt_stack families: six package routes, daemon models, guard, and operator passed")
+require(
+    install["Suse"].get("register") == "libvirt_stack_suse_install",
+    "Suse package install result is not registered for the network daemon reload",
+)
+reload = module_task(
+    "ansible.builtin.command", "Reload network definitions in a running virtnetworkd (Suse)"
+)
+require(
+    reload["ansible.builtin.command"]["argv"]
+    == ["systemctl", "try-restart", "virtnetworkd.service"],
+    "network daemon reload must try-restart virtnetworkd so a stopped daemon stays stopped",
+)
+require(
+    tasks.index(reload) == tasks.index(install["Suse"]) + 1,
+    "network daemon reload must directly follow the Suse package install",
+)
+for family, changed, expected_reload in (
+    ("Suse", True, True), ("Suse", False, False), ("RedHat", True, False), ("Debian", True, False),
+):
+    facts = {"ansible_os_family": family, "libvirt_stack_suse_install": {"changed": changed}}
+    require(
+        all(evaluate(condition, **facts) for condition in reload["when"]) == expected_reload,
+        f"network daemon reload route differs for {family} changed={changed}",
+    )
+print("libvirt_stack families: packages, daemon models, network reload, guard, operator passed")
 PY
