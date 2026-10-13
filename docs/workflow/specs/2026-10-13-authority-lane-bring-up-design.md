@@ -38,8 +38,11 @@ values come from `live_vm_host_worker_authority_{instance,request_socket,server_
 client_certificate_ref,client_key_ref}`. With the client disabled, the role removes the file.
 `verify.yml` checks the owner, mode and exact content when enabled, and absence when disabled.
 `playbooks/authority_host_teardown.yml` removes the file with the other authority endpoint
-artifacts and asserts that it is gone. None of the values is a secret: the refs name files under
-the worker secrets root, and the instance and socket are host configuration.
+artifacts and asserts that it is gone. The file carries no credential bytes. The settings
+registry marks `KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF` `secret=True`
+(`src/kdive/providers/external_boot_authority/settings.py`) so that it is redacted, but its value
+is a root-relative path to a `0440` file under a `0750` root. Publishing it at `0644` discloses a
+path that is already the role default; the key stays unreadable to non-members.
 
 ### Route forwarding (`worker-lifecycle.sh start`)
 
@@ -79,10 +82,14 @@ descriptions in `src/kdive/config/external_env.py` and the generated config refe
 `select_lane` in `tests/integration/live_stack/authority_lane.py` loads `KDIVE_SYSTEMS_TOML` with
 `kdive.inventory.loader.load_inventory`. If it declares local-libvirt entries and every one of them
 carries `authority_instance`, the frame stops `blocked` before any read or write, naming the
-supported configuration. The existing check on the allocated resource stays. The runbook
-documents that configuration: the lane inventory with only the `[[local_libvirt]]` entry's
-`authority_instance` line removed. The `[[remote_libvirt]]` authority tuple stays unchanged.
-Until #3144/#3148 land, this is the lane's working inventory.
+supported configuration. A file that fails to load (`InventoryError`) also stops `blocked`,
+naming the variable. The existing check on the allocated resource stays. The runbook documents
+that configuration: a separate copy of the lane inventory with only the `[[local_libvirt]]`
+entry's `authority_instance` line removed. The routed inventory file itself is not edited, so
+the authority resource's routing is unchanged; the `[[remote_libvirt]]` authority tuple is the
+same in both copies. The server and fixed workers read the inventory themselves, so the whole
+stack is brought up with `KDIVE_SYSTEMS_TOML` naming the fixture copy and the harness exports the
+same path. Switching back to the routed file is another `stack-services.sh` run.
 
 ### Runbooks
 
@@ -119,8 +126,8 @@ published file. `scripts/live-stack/README.md` gets one sentence on the route fi
 - **Controls:** metadata check, a five-name allowlist, `mapfile` literal parsing with no `eval`,
   the indirect expansion `${!name}` only after the allowlist match, refusal of contradictions,
   and an address/port charset check before interpolation.
-- **Out of scope:** secrets. The file carries refs only; credential bytes stay in the
-  protected secrets root.
+- **Out of scope:** credential bytes. The file carries refs only, and the key itself stays in
+  the protected secrets root.
 
 ## Testing
 
@@ -130,7 +137,7 @@ published file. `scripts/live-stack/README.md` gets one sentence on the route fi
   loopback, wildcard, LAN address, bracketed and bare IPv6, invalid port, invalid address).
 - `tests/deploy/test_live_worker_provisioning.py`: the role publishes, verifies and withdraws the
   file. Teardown removes it.
-- `tests/integration/live_stack/test_authority_lane.py`: an all-routed inventory stops `blocked`
-  with no calls; a plain or empty-local inventory proceeds.
+- `tests/integration/live_stack/test_authority_lane.py`: an all-routed inventory and an invalid
+  inventory stop `blocked` with no calls; a plain or empty-local inventory proceeds.
 - Live: the #3184 frame proof on the installed lane with none of the three overrides, under a
   separately approved plan.

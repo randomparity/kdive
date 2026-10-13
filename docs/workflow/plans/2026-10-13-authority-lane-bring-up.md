@@ -116,9 +116,12 @@ format Task 1 reads.
 **Verification:**
 - Contract: rendered content equals the Task 1 format. `Mode: focused-test` —
   `tests/deploy/test_live_worker_provisioning.py::test_worker_authority_route_file_is_published_and_withdrawn`
-  renders the publish task's `content` with jinja2 (`StrictUndefined`) over the role defaults
-  plus `inventory_hostname`, and asserts five lines in order, root:root `0644`, `when` on the
-  enabled flag, and a sibling `state: absent` task under the negated flag. Red: no task names the
+  renders the publish task's `content` with jinja2 (`StrictUndefined`) over the `live_vm_host`
+  defaults plus `inventory_hostname: lane-host`, re-rendering until the text stops changing (the
+  instance default nests two templates), and asserts the five lines in order with the INSTANCE
+  line equal to `lane-host`, root:root `0644`, the `when` string on
+  `live_vm_host_worker_authority_enabled` (defined in `local_worker_host` defaults, so asserted
+  as text, not rendered), and a sibling `state: absent` task under the negated flag. Red: no task names the
   path. Green: `just test-verbose tests/deploy/test_live_worker_provisioning.py -k authority_route`.
 - Contract: verify and teardown. `Mode: focused-test` — the same test asserts `verify.yml` checks
   mode `0644` and exact content, and that the teardown's removal and absence loops list the path.
@@ -206,12 +209,15 @@ address keeps `localhost` in the derived URL." Run `just config-docs`, `just con
 ## Task 4 — refuse an all-routed lane inventory before mutation
 
 **Interfaces:** consumes `kdive.inventory.loader.load_inventory(path: Path) -> InventoryDoc`
-and `InventoryDoc.local_libvirt[*].authority_instance`. Provides constant `NO_PLAIN_BLOCKED`.
+and `InventoryDoc.local_libvirt[*].authority_instance`, and `kdive.inventory.errors.InventoryError`.
+Provides constant `NO_PLAIN_BLOCKED`.
 
 **Verification:** `Mode: focused-test` —
 `test_all_routed_inventory_is_blocked_before_mutation` writes a `schema_version = 2` inventory
 whose one `[[local_libvirt]]` carries `authority_instance` and asserts `ScenarioStop`
-`BLOCKED`, the message names `authority_instance`, and `calls == []`. `_fake_lane` now writes a
+`BLOCKED`, the message names `authority_instance`, and `calls == []`;
+`test_invalid_inventory_is_blocked_before_mutation` writes `schema_version = 1` and asserts the
+same stop naming `KDIVE_SYSTEMS_TOML`. `_fake_lane` now writes a
 plain-entry inventory, so the existing success test covers the proceed path. Red: the frame calls
 `require_lane` first. Green:
 `just test-verbose tests/integration/live_stack/test_authority_lane.py`.
@@ -219,7 +225,10 @@ plain-entry inventory, so the existing success test covers the proceed path. Red
 Steps: write the test, see red; in `select_lane`, after the file check:
 
 ```python
-    local = load_inventory(Path(inventory)).local_libvirt
+    try:
+        local = load_inventory(Path(inventory)).local_libvirt
+    except InventoryError as exc:
+        raise ScenarioStop(Outcome.BLOCKED, f"{SYSTEMS_TOML_ENV} is invalid: {exc}") from exc
     if local and all(entry.authority_instance for entry in local):
         raise ScenarioStop(Outcome.BLOCKED, NO_PLAIN_BLOCKED)
 ```
@@ -239,13 +248,27 @@ Steps: write the ADR (Status Accepted, Context, Decision, Consequences, Consider
 In `live-testing.md`, under "Candidate evidence and cleanup": the bring-up forwards the route
 from `/etc/kdive/live-worker-authority.env`, a contradicting export is refused, and `ADDR:PORT`
 port values derive working default DSNs. Under the frame section step 2: the fixture-mode
-inventory (the lane file with only the local entry's `authority_instance` removed), why a plain
-resource cannot sit beside the routed one, and the pre-mutation stop. In the proof command, use
+inventory (a separate copy of the lane file with only the local entry's `authority_instance`
+removed; the routed file is not edited), that the whole stack is brought up on that copy with the
+harness exporting the same path and a `stack-services.sh` run switches back, why a plain resource
+cannot sit beside the routed one, and the pre-mutation stop. In the proof command, use
 `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"` as it stands. In `self-hosted-kvm-runner.md`,
 name the published file where it says refs are published. Add one sentence to
 `scripts/live-stack/README.md`. Commit `docs: document the installed authority lane bring-up`.
 
+## Live proof hand-off (separately approved)
+
+Not a build task. After the PR's CI is green, a private plan held for root approval (naming its
+SHA-256) runs on the lane: the stack stopped, the backends up, `installed-local-authority.yml` at
+the candidate SHA with `live_vm_host_worker_authority_enabled` (its `verify.yml` must pass), the
+route file read back root-side, then `stack-services.sh` on the fixture-mode copy with no route
+exports and no explicit DSNs, `just onboard` separately with stdin from `/dev/null`, a second
+`stack-services.sh` run (restart), and the frame command from `live-testing.md` with
+`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`. Observed signals: the route preflight answers
+`route-ok` after both bring-ups, the slot's worker environment carries the five values, the
+harness DSN connects, and both frame tests pass with the before and after inventories equal.
+
 ## Rollback
 
 Each task is one revertible commit. A lane converged with Task 2 keeps a root file that
-pre-change checkouts ignore.
+pre-change checkouts ignore; disabling the worker client and converging removes it.

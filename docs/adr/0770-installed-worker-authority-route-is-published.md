@@ -33,7 +33,9 @@ the request. An absent file changes nothing.
   route, change the role inputs and converge.
 - The lifecycle request schema and the witness are unchanged; the route values are still
   validated there.
-- The file names no secret: the refs are paths under the protected secrets root.
+- The file carries no credential bytes. The registry marks the client-key ref `secret=True` for
+  redaction (`src/kdive/providers/external_boot_authority/settings.py`), but its value is a
+  root-relative path to a `0440` file under a `0750` root, and that path is the role default.
 
 ## Considered & rejected
 
@@ -48,3 +50,6 @@ the request. An absent file changes nothing.
   libvirt endpoint still names a working daemon. An overridden route names an authority identity
   the installed client files do not match, so honouring it only defers the failure to the
   authority.
+- **Add the five lines to `/etc/kdive/live-worker-libvirt.env`.** verified:
+  `load_published_libvirt_uri` in `scripts/live-stack/libvirt-uri.sh` refuses any file that does
+  not hold exactly one `KDIVE_LIBVIRT_URI` line, so every existing reader would fail closed.
