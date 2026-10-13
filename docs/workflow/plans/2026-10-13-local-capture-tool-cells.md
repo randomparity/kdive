@@ -104,7 +104,9 @@ Steps:
 
 Verification: Mode: task-test-not-applicable — `deep_body` only runs against a
 live stack; its return value is consumed and asserted by the capture carrier
-(Task 4), and `just type` checks the two existing callers ignore it.
+(Task 4), and `just type` checks that its four existing callers
+(`test_deep_lifecycle_live.py`, `test_remote_deep_lifecycle_live.py`,
+`test_run_tool_cells_live.py`, `live_stack/power_snapshots.py`) ignore it.
 
 Steps: change `deep_body`'s return annotation to `str`, keep `run_id` defined
 before the `try`, and `return run_id` after the `finally`. Update the docstring
@@ -116,7 +118,7 @@ Interfaces it provides (used by Task 4):
 
 ```python
 TOOLS: tuple[str, ...]                     # the six tools
-def options(cell: Cell) -> str             # "kdump" | "host_dump" | "live"
+def options(cell: Cell) -> str  # "kdump" | "host_dump" | "live"; ppc64le: blocked stop
 def crash_profile(profile: dict[str, object], options: str) -> dict[str, object]
 def grants(project: str, role: str | None) -> Grants   # reused from power_snapshots
 async def functional(run, caller, token, tree, manifest, guest) -> dict[str, object]
@@ -124,19 +126,22 @@ async def unsupported(run, tree, manifest, guest) -> dict[str, object]
 async def capture_target(run, base_url, issuer, db_url) -> CaptureTarget
 def rejection(tool: str, boundary: Boundary, target: CaptureTarget) -> Rejection
 def snapshot_of(db_url: str, target: CaptureTarget) -> Snapshot
-async def capability(run, caller, guest) -> None   # proves capability/unchanged-state
+async def capability(run, caller, base_url, issuer, db_url) -> None  # lane frame
 ```
 
 Pure helpers (unit-tested):
 
-- `core_identity(chunks: Iterable[bytes]) -> CoreIdentity` streams bytes,
-  carrying a 256-byte overlap so a key split across chunks is found, and
-  collects every value of `BUILD-ID=` (hex) and `OSRELEASE=` (printable, to
-  newline or NUL) plus the SHA-256 and size. `CoreIdentity` is a frozen
-  dataclass `(sha256: str, size: int, build_ids: frozenset[str], releases:
-  frozenset[str])`.
-- `require_core(identity, manifest)` asserts at least one value of each key
-  and that the sets equal `{manifest["build_id"]}` and `{manifest["release"]}`.
+- `vmcoreinfo(core: BinaryIO) -> bytes` reads the VMCOREINFO block only: for
+  an ELF64 core (`\x7fELF`), the `PT_NOTE` note named `VMCOREINFO`; for a
+  kdump-compressed core (`KDUMP   ` signature), the block at the sub-header's
+  `offset_vmcoreinfo`/`size_vmcoreinfo` (sub-header at `block_size`, the
+  `int` at header offset 428; the two fields at sub-header offsets 32 and 40).
+  Any other format, or no block, raises `AssertionError`.
+- `require_core(info: bytes, manifest)` requires exactly one `BUILD-ID=` line
+  equal to `manifest["build_id"]` and one `OSRELEASE=` line equal to
+  `manifest["release"]`.
+- `lane_keys(observed) -> dict[str, object]` keeps `guest_os`, `guest_arch`,
+  `accelerator` and `image_sha256` only.
 - `panic_seen(text: str, release: str) -> bool`: the text contains
   `Kernel panic - not syncing` and `release`.
 - `transcript_names(transcript, *facts) -> list[str]`: the facts missing from
@@ -150,9 +155,10 @@ Pure helpers (unit-tested):
 
 Verification:
 
-- Contract: core identity scan finds keys inside and across chunk boundaries and
-  rejects a mismatched build ID. Mode: focused-test,
-  `tests/integration/live_stack/test_capture_cells.py::test_core_identity_*`;
+- Contract: the VMCOREINFO reader on synthetic ELF and kdump-compressed cores
+  (a stray `OSRELEASE=%s` outside the note is ignored; an unknown format and a
+  mismatched build ID fail). Mode: focused-test,
+  `tests/integration/live_stack/test_capture_cells.py::test_vmcoreinfo_*`;
   red before the module exists (import error); green:
   `just test-verbose tests/integration/live_stack/test_capture_cells.py`.
 - Contract: per-tool provision options and the profile edit. Mode:
@@ -161,6 +167,12 @@ Verification:
   boundary. Mode: focused-test, `test_rejection_*`, same command.
 - Contract: console panic and transcript matching. Mode: focused-test,
   `test_panic_seen_*`, `test_transcript_names_*`, same command.
+- Contract: a rejection record carries no kernel field. Mode: focused-test,
+  `test_lane_keys_drop_kernel_fields`, same command.
+- Contract: `missing_dependency` stops as blocked. Mode: focused-test,
+  `test_missing_dependency_blocks`, same command (`require_tool(env, phase)`
+  raises `ScenarioStop(BLOCKED)` on that category, `AssertionError` on any other
+  error).
 - Contract: live bodies (crash, capture, introspection, sessions, targets).
   Mode: task-test-not-applicable — they drive a real stack and guest; Task 4's
   live run is their proof, and the unit tests above cover every pure decision
@@ -179,32 +191,41 @@ Functional bodies follow the spec's table. Shared steps:
   `/root/kcov<hex>`, starts it detached for 3600 s and returns its name and pid.
 - `armed(endpoint, key)` polls `cat /sys/kernel/kexec_crash_loaded` every 5 s
   for 600 s until `1`.
-- `crash(op_admin, system_id)` calls `control.force_crash`, drains the job and
-  waits for `crashed` (`spine.drain_job`, `spine.await_system_state`).
+- `crash(op_admin, system_id)` calls `control.force_crash`, drains the job to
+  `succeeded` and waits for `crashed` (`spine.drain_job`,
+  `spine.await_system_state`).
 - `capture(client, run_id, method)` calls `vmcore.fetch`, drains the job,
   requires `succeeded`, returns `spine.captured_vmcore_refs` and asserts
   `spine.raw_vmcore_refs` is empty.
-- `raw_core(op, run_id) -> CoreIdentity` calls `artifacts.fetch_raw(run_id,
-  asset="vmcore")` and streams `refs.download_uri` with `httpx` through
-  `core_identity`; the size must equal `data.size_bytes`.
+- `raw_core(op, run_id, scratch) -> tuple[str, bytes]` calls
+  `artifacts.fetch_raw(run_id, asset="vmcore")` twice, streams each
+  `refs.download_uri` with `httpx` to a scratch file while hashing, requires
+  equal SHA-256 and sizes equal to `data.size_bytes`, and returns the digest and
+  `vmcoreinfo` of the file.
 
 `capture_target` follows `tool_cells.lane_target`: a module-level cache keyed by
-`base_url`, a `_Failed` replay, the frame `on_lane_system` with `live`
-options, a body that boots the fixture, opens a drgn-live session and ends it,
-then `tool_cells.settled` on the project after the frame's cleanup.
+`base_url`, a `_Failed` replay, the frame `on_lane_system` with `target`
+options run on a scratch `CellRun`, a body that boots the fixture, opens a
+drgn-live session and ends it, then `tool_cells.settled` on the project after
+the frame's cleanup. The cached `observed` is `lane_keys(scratch.observed)`.
 
-`capability` runs inside `on_catalog_system` (the lane frame) with `host_dump`
-options: `runs.create` on the ready System, crash through an admin client, then
-`tool_cells.prove_rejection`-equivalent steps (`_observe` is private, so the
-body calls `caller.call` and asserts `refused_for_capability`), with the
-protected state being the Run's jobs and artifacts and the System's state.
+`capability` runs `on_catalog_system(run, ..., image=LANE_IMAGES[arch], body,
+provision=<host_dump wrapper>)`. The body calls
+`tool_cells.observe_guest(run, op, system_id, scratch, entry)`, opens an
+investigation, `runs.create(investigation_id=..., system_id=...,
+build_profile=spine.build_profile("x86_64"))`, crashes through an admin client,
+waits on `tool_cells.settled(db_url, project)`, then
+`tool_cells.prove_rejection(run, caller, "capability", Rejection({"run_id":
+run_id, "method": "fadump"}, grants(project, "contributor")), snapshot)` where
+the snapshot is the Run's jobs and artifacts and the System's state; finally it
+closes the investigation. The frame proves `cleanup`.
 
 ## Task 4 — the carrier and the bindings
 
 Verification:
 
-- Contract: every x86_64 local capture cell binds the carrier node; remote
-  cells stay unbound. Mode: focused-test, extend
+- Contract: all 324 local capture cells (164 x86_64, 160 ppc64le, which share
+  the scenario ids) bind the carrier node; remote cells stay unbound. Mode: focused-test, extend
   `test_pending_cells_have_owned_assertions_but_no_invented_nodes` with the
   capture count and node, and add the six tools to its `bound` set; red before
   the `[implementations]` rows; green with the contract test command.
