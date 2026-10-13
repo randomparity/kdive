@@ -113,7 +113,8 @@ operator chose this on 2026-10-13.
   DSN, it asserts the following:
   - `has_table_privilege` gives `SELECT` on every public table.
   - The write privileges are exactly the four grants above.
-  - `CREATE` on the schema is denied.
+  - `CREATE` on the schema is denied. The test also attempts `CREATE TABLE`, `ALTER TABLE` and
+    `DROP TABLE` in rolled-back transactions and observes `InsufficientPrivilege` for each.
   - The role holds no membership and owns nothing.
   - `kdive_server`, `kdive_worker`, `kdive_reconciler` and `kdive_lifecycle_witness` still lack
     `SELECT` on the three 0104 tables, and no ACL entry on them grants to `PUBLIC`.

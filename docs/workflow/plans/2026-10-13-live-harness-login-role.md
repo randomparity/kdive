@@ -75,7 +75,9 @@ Steps:
       every table.
    2. The set of `(table, privilege)` for which `INSERT`, `UPDATE`, `DELETE` or `TRUNCATE` holds
       equals the four grants.
-   3. `has_schema_privilege('public','CREATE')` is false.
+   3. `has_schema_privilege('public','CREATE')` is false. Each of `CREATE TABLE harness_probe(x int)`,
+      `ALTER TABLE public.budgets ADD COLUMN harness_probe int` and `DROP TABLE public.quotas`,
+      run in its own rolled-back transaction, raises `psycopg.errors.InsufficientPrivilege`.
    4. No `pg_auth_members` row has `member = 'kdive-harness'::regrole`, and no `pg_class` row is
       owned by it.
    5. For each role in `('kdive_server','kdive_worker','kdive_reconciler','kdive_lifecycle_witness')`
