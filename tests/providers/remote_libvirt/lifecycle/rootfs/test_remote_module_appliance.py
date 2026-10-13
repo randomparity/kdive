@@ -101,8 +101,8 @@ def test_direct_kernel_appliance_uses_the_installed_three_disk_mapping() -> None
     req = replace(
         request(Clock()),
         appliance_volume=None,
-        appliance_kernel="/var/lib/libvirt/kdive/module-appliance/v1/x86_64/image/vmlinuz",
-        appliance_initrd="/var/lib/libvirt/kdive/module-appliance/v1/x86_64/image/initramfs.cpio",
+        appliance_kernel="/var/lib/kdive/remote-module-appliance/v1/x86_64/image/vmlinuz",
+        appliance_initrd="/var/lib/kdive/remote-module-appliance/v1/x86_64/image/initramfs.cpio",
     )
 
     root = ET.fromstring(render_remote_module_appliance(req))

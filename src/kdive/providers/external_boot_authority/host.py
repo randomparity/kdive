@@ -102,7 +102,7 @@ _DATABASE_CONNECTION_OPTIONS = (
 _AUTHORITY_INSTALL_DIR = Path("/opt/kdive-provider-authority")
 _AUTHORITY_CREDENTIALS_SOURCE_DIR = Path("/etc/kdive/credentials/provider-authority")
 _AUTHORITY_STATE_DIR = Path("/var/lib/kdive/provider-authority")
-_REMOTE_MODULE_APPLIANCE_ROOT = Path("/var/lib/libvirt/kdive/module-appliance/v1")
+_REMOTE_MODULE_APPLIANCE_ROOT = Path("/var/lib/kdive/remote-module-appliance/v1")
 _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 _UNPINNED_SYSTEM_INSTALLATION = object()
 

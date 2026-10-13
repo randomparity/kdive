@@ -203,6 +203,15 @@ def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() ->
             True,
         ),
         ({"system_manifest": "/protected/manifest.json"}, False),
+        ({"appliance_root": "/private/other"}, True),
+        (
+            {
+                "remote_module": True,
+                "architectures": ["x86_64"],
+                "appliance_root": "/private/other",
+            },
+            False,
+        ),
     ],
 )
 def test_local_mutation_preflight_is_executable_and_fails_closed(
@@ -237,6 +246,7 @@ def test_local_mutation_preflight_is_executable_and_fails_closed(
         "system_local_bases": [],
         "system_remote_bases": [],
         "fault_proof": False,
+        "appliance_root": "/var/lib/kdive/remote-module-appliance/v1",
     }
     values.update(override)
     result = subprocess.run(
@@ -249,6 +259,42 @@ def test_local_mutation_preflight_is_executable_and_fails_closed(
     assert (result.returncode == 0) is accepted
     if not accepted:
         assert result.stderr.strip() == "invalid or incomplete provider authority deployment inputs"
+
+
+def test_selected_appliances_are_checked_as_authority_before_start_and_handlers() -> None:
+    tasks = yaml.safe_load((ROLE / "tasks/install.yml").read_text())
+    probe = _named(
+        tasks, "Verify selected installed appliances as the authority before service start"
+    )
+    assert probe["become"] is True
+    assert probe["become_user"] == "kdive-provider-authority"
+    assert probe["changed_when"] is False
+    assert probe["when"] == "provider_authority_host_remote_module_enabled | bool"
+    assert probe["timeout"] == 60
+    assert probe["loop"] == "{{ provider_authority_host_remote_module_architectures }}"
+    assert (
+        tasks.index(probe)
+        < tasks.index(
+            _named(
+                tasks, "Start the configured authority after firewall and protected inputs converge"
+            )
+        )
+        < tasks.index(_named(tasks, "Apply deployed-input restarts before proving readiness"))
+    )
+
+
+def test_authority_preflight_renders_the_appliance_default_before_other_role_defaults() -> None:
+    tasks = yaml.safe_load((ROLE / "tasks/preflight.yml").read_text())
+    validation = next(t for t in tasks if "closed authority deployment inputs" in t["name"])
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["to_json"] = json.dumps
+    template = environment.from_string(validation["ansible.builtin.command"]["stdin"])
+    values = _yaml(ROLE / "defaults/main.yml") | {"ansible_facts": {"os_family": "Debian"}}
+    assert json.loads(template.render(values))["appliance_root"] == (
+        "/var/lib/kdive/remote-module-appliance/v1"
+    )
+    values["remote_libvirt_module_appliance_install_dir"] = "/private/other"
+    assert json.loads(template.render(values))["appliance_root"] == "/private/other"
 
 
 def test_system_provisioning_validator_requires_exact_local_manifest_mapping(
@@ -806,3 +852,61 @@ def test_local_fixed_workers_receive_protected_authority_client_files() -> None:
     assert "Require protected regular fixed-worker authority client sources" in preflight
     assert "delegate_to: localhost" in preflight
     assert "no_log: true" in preflight
+
+
+@pytest.mark.parametrize("layout", ["dist-packages", "lib64/python3.14/site-packages"])
+def test_authority_discovers_native_guestfs_and_verifies_installed_import(
+    tmp_path: Path, layout: str
+) -> None:
+    tasks = _tasks(ROLE / "tasks" / "install.yml")
+    locate = _named(tasks, "Locate the system libguestfs binding files")
+    command = cast(dict[str, list[str]], locate["ansible.builtin.command"])["argv"]
+    assert command[0] == "{{ provider_authority_host_python }}"
+    native = tmp_path / layout
+    native.mkdir(parents=True)
+    for name in ("guestfs", "libguestfsmod"):
+        (native / (name + ".py")).write_text("", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, *command[1:]],
+        env={**os.environ, "PYTHONPATH": str(native)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        str(native / "guestfs.py"),
+        str(native / "libguestfsmod.py"),
+    ]
+    site = _named(tasks, "Locate the authority venv site-packages")
+    site_argv = cast(dict[str, list[str]], site["ansible.builtin.command"])["argv"]
+    assert site_argv[0] == "/opt/kdive-provider-authority/.venv/bin/python"
+    assert "sysconfig.get_path('platlib')" in site_argv[-1]
+    link = _named(tasks, "Symlink the libguestfs binding into the authority venv")
+    assert "provider_authority_host_venv_site.stdout" in str(link["ansible.builtin.file"])
+    verify = _named(tasks, "Verify the authority venv imports the native libguestfs binding")
+    verify_argv = cast(dict[str, list[str]], verify["ansible.builtin.command"])["argv"]
+    assert verify_argv == [site_argv[0], "-c", "import guestfs, libguestfsmod"]
+    assert tasks.index(locate) < tasks.index(site) < tasks.index(link) < tasks.index(verify)
+    for task in (locate, site, link, verify):
+        assert task["when"] == "provider_authority_host_local_mutation_enabled | bool"
+
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(tmp_path / "venv")], check=True
+    )
+    python = tmp_path / "venv/bin/python"
+    destination = subprocess.check_output([str(python), *site_argv[1:]], text=True).strip()
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["basename"] = lambda value: Path(value).name
+    link_args = cast(dict[str, str], link["ansible.builtin.file"])
+    for source in json.loads(result.stdout):
+        target = environment.from_string(link_args["dest"]).render(
+            provider_authority_host_venv_site={"stdout": destination}, item=source
+        )
+        Path(target).symlink_to(source)
+    imported = subprocess.run([str(python), *verify_argv[1:]], capture_output=True, check=False)
+    assert imported.returncode == 0, imported.stderr
+    (native / "libguestfsmod.py").write_text("raise ImportError('unusable native binding')\n")
+    broken = subprocess.run([str(python), *verify_argv[1:]], capture_output=True, check=False)
+    assert broken.returncode != 0
+    assert b"unusable native binding" in broken.stderr
