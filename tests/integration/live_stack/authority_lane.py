@@ -25,6 +25,7 @@ import subprocess  # noqa: S404 - fixed argv, no shell  # nosec B404
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -78,6 +79,7 @@ from tests.mcp.json_data import data_str
 
 # Test-only input, unprefixed so env-docs-check does not require it in the product catalog.
 CONFIG_ENV = "LOCAL_AUTHORITY_LANE_CONFIG"
+SYSTEMS_TOML_ENV = "KDIVE_SYSTEMS_TOML"
 # The fixed worker input the fixture script copies onto the private daemon.
 FIXTURE_ROOTFS = "/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2"
 _AUTHORITY_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
@@ -343,7 +345,8 @@ class AuthoritySystem:
     """A ``ready`` authority-owned System as the frame's body sees it.
 
     ``config`` and ``ledger`` are the invocation's: a body records each Investigation it opens in
-    ``ledger`` (the frame closes any still open) and releases its own Runs.
+    ``ledger`` (the frame closes any still open). A body releases every external boot it starts,
+    in a ``finally`` block: the frame does not, and a held activation fails its cleanup.
     """
 
     op: LiveStackClient
@@ -384,6 +387,11 @@ def select_lane(run: CellRun) -> AuthorityLaneConfig:
         )
     if config.system_mode == "public":
         raise ScenarioStop(Outcome.BLOCKED, PUBLIC_BLOCKED)
+    # The routed-resource guard reads the lane's inventory; the test session sandboxes the XDG
+    # default and keeps only an exported path (tests/conftest.py), so an unset path would pass it.
+    inventory = os.environ.get(SYSTEMS_TOML_ENV, "")
+    if not inventory or not Path(inventory).is_file():
+        raise ScenarioStop(Outcome.BLOCKED, f"{SYSTEMS_TOML_ENV} must name the lane's systems.toml")
     return config
 
 

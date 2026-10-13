@@ -1100,12 +1100,15 @@ provisioning is blocked by #3144 and #3148, and an attempt strands its allocatio
 2. It acquires the lane image, requests an allocation and provisions a System over HTTP with the
    fixed rootfs `/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2` pinned to that image's
    registered digest. Stage the lane image's bytes there first, as for the installed carrier.
-   The allocated resource must carry no `authority_instance`; otherwise the frame releases the
-   allocation and stops `blocked`.
+   The allocated resource must carry no `authority_instance` in the lane's `systems.toml`;
+   otherwise the frame releases the allocation and stops `blocked`. Export
+   `KDIVE_SYSTEMS_TOML` naming that file: the test session sandboxes the XDG default, and the
+   frame stops `blocked` without it.
 3. It moves the System onto the private daemon with `provision-authority-fixture.py`, runs the
    confinement probes and the fixture's read-only verification, then runs the cell body.
 4. Cleanup drains every open job of the System and its Runs, closes the Investigations the body
-   recorded, removes the five fixture names, tears the System down, releases the allocation, and
+   recorded (a body releases every external boot it starts itself; a held activation fails the
+   cleanup), removes the five fixture names, tears the System down, releases the allocation, and
    requires the step-1 listing and the capacity in use to be unchanged. A cleanup failure fails
    the cell.
 
@@ -1115,6 +1118,7 @@ The frame's own proof runs with:
 
 ```sh
 KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
+KDIVE_SYSTEMS_TOML=~/.config/kdive/systems.toml \
 LOCAL_AUTHORITY_LANE_CONFIG=/protected/authority-lane.json \
   uv run python -m pytest tests/integration/test_authority_lane_frame_live.py -m live_stack -v
 ```

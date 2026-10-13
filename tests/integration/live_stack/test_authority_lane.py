@@ -81,6 +81,9 @@ def _fake_lane(
     """Replace every host, database and HTTP boundary with a recorder; return the call log."""
     calls: list[str] = []
     monkeypatch.setenv(authority_lane.CONFIG_ENV, str(_config(tmp_path, mode)))
+    inventory = tmp_path / "systems.toml"
+    inventory.write_text("", encoding="utf-8")
+    monkeypatch.setenv(authority_lane.SYSTEMS_TOML_ENV, str(inventory))
 
     def record(name: str, result: object = None) -> Any:
         def sync(*_args: object, **_kwargs: object) -> object:
@@ -199,6 +202,15 @@ def test_public_mode_is_blocked_before_mutation(
         _frame(_run(tmp_path), _body_ok)
     assert stop.value.outcome is Outcome.BLOCKED
     assert "#3144" in str(stop.value) and "#3148" in str(stop.value)
+    assert calls == []
+
+
+def test_missing_lane_inventory_is_blocked(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = _fake_lane(monkeypatch, tmp_path)
+    monkeypatch.delenv(authority_lane.SYSTEMS_TOML_ENV)
+    with pytest.raises(ScenarioStop, match=authority_lane.SYSTEMS_TOML_ENV) as stop:
+        _frame(_run(tmp_path), _body_ok)
+    assert stop.value.outcome is Outcome.BLOCKED
     assert calls == []
 
 
