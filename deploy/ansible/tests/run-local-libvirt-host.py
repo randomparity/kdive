@@ -153,6 +153,10 @@ require(
     "/var/lib/kdive/rootfs-cache" in uv_defaults["live_vm_host_worker_shared_directories"],
     "the persistent published-image cache must use the shared-directory creation policy",
 )
+require(
+    "/var/lib/kdive/rootfs-uploads" in uv_defaults["live_vm_host_worker_shared_directories"],
+    "the uploaded-rootfs staging root must exist for the workers, who cannot create it",
+)
 relabel = label_tasks_by_name["Relabel the kdive image directories"]
 require(relabel.get("when") == enforcing, "the relabel must be guarded on enforcing SELinux")
 require(
