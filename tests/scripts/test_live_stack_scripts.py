@@ -2257,6 +2257,9 @@ def test_demo_up_installs_mcp_json_into_demo_workspace_not_kernel_src() -> None:
     )
     assert "KDIVE_KERNEL_SRC}/.mcp.json" not in text
     assert 'if [[ -z "${KDIVE_DEMO_WORKSPACE:-}" ]]; then' in text
+    # #3193: demo-up.sh runs under `set -u` and the stack needs no kernel tree, so an unguarded
+    # reference would abort the bring-up on a host without one.
+    assert "${KDIVE_KERNEL_SRC}" not in text
 
 
 def test_demo_up_guest_image_hint_names_the_shared_catalog_entry() -> None:

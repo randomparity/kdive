@@ -36,10 +36,10 @@ demo walkthrough below. Otherwise:
   `systems.toml` so an agent can provision it by catalog name. `build-image.sh` builds and
   registers one from the rootfs catalog (Fedora 44 is the kdump-capable default); it needs the
   backends up, so run it after `demo-up.sh`.
-- A kernel source tree at `KDIVE_KERNEL_SRC` (default `~/src/linux`).
-- A workspace to install the MCP client config into, at `KDIVE_DEMO_WORKSPACE` (default
-  `KDIVE_KERNEL_SRC`). Set it separately from `KDIVE_KERNEL_SRC` if that tree is also a live
-  proof's kernel fixture, so `demo-up.sh` does not write `.mcp.json` into it.
+- A directory to open your MCP client in, at `KDIVE_DEMO_WORKSPACE` (default `KDIVE_KERNEL_SRC`
+  when set; required otherwise). The stack itself needs no kernel tree. Set it separately from
+  `KDIVE_KERNEL_SRC` if that tree is also a live proof's kernel fixture, so `demo-up.sh` does not
+  write `.mcp.json` into it.
 - The installed lifecycle worker environment, `/opt/kdive-live-worker-lifecycle/.venv`, needs
   the libguestfs binding to provision, build images, and capture kdump locally, and drgn for
   local kdump capture. The lifecycle installer/host role owns that environment, and the
@@ -153,7 +153,7 @@ Everything is overridable from the environment before running the scripts:
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `KDIVE_PROJECT` | `demo` | Project the stack seeds and the token grants `admin` on. |
-| `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test. |
+| `KDIVE_KERNEL_SRC` | `~/src/linux` when it exists | Your kernel tree, if any: the default workspace and the live proofs' kernel fixture. The workers never read it. |
 | `KDIVE_DEMO_WORKSPACE` | same as `KDIVE_KERNEL_SRC` | Directory `.mcp.json` is installed into. Defaults to the kernel tree, but set it separately when `KDIVE_KERNEL_SRC` doubles as a live proof's kernel fixture (#2760) — a demo bring-up must not add files to a tree a proof run also uses. |
 | `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` (`…/fedora-kdive-ready-44-ppc64le.qcow2` on a ppc64le host) | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
 | `KDIVE_LIBVIRT_URI` | the endpoint in `/etc/kdive/live-worker-libvirt.env` | libvirt connection every consumer drives — the operator-owned session daemon the lifecycle installer published. `qemu:///system` until the contract is installed, which `demo-up.sh` refuses. |
