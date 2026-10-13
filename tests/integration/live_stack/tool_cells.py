@@ -38,7 +38,7 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Literal, Protocol, cast, get_args
+from typing import Literal, Protocol, TypeIs, cast, get_args
 
 import httpx
 import psycopg
@@ -106,7 +106,9 @@ from tests.integration.live_stack.scenario import (
 )
 
 Exposure = Literal["direct", "gateway"]
-Boundary = Literal["authentication", "authorization", "project-isolation", "validation"]
+Boundary = Literal[
+    "authentication", "authorization", "project-isolation", "validation", "capability"
+]
 Result = ToolResponse | list[ToolResponse] | LiveStackToolError
 Snapshot = Callable[[], Awaitable[object]]
 Setup = Callable[[], AbstractAsyncContextManager[Mapping[str, object]]]
@@ -342,6 +344,20 @@ def rejected_by_validation(exposure: str, result: Result) -> bool:
     )
 
 
+def refused_for_capability(result: Result) -> TypeIs[ToolResponse]:
+    """ADR-0209's capability refusal, which a ``capability`` cell requires (ADR-0722, 2026-10-13).
+
+    ``configuration_error`` alone also answers schema and name failures; only the refusal carries
+    ``data.reason`` ``capability_unsupported``. ``tools.invoke`` passes the handler's envelope
+    through, so both exposures carry it.
+    """
+    return (
+        isinstance(result, ToolResponse)
+        and result.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        and result.data.get("reason") == "capability_unsupported"
+    )
+
+
 def _shape(result: Result) -> dict[str, object]:
     """A message-free description of ``result`` for evidence."""
     if isinstance(result, LiveStackToolError):
@@ -443,6 +459,11 @@ async def _observe(
         assert control != 401, f"the issued token's call to {tool} was also refused with 401"
         return {"http_status": status, "token": "foreign-signature", "issued_token_status": control}
     result = await _attempt(caller, tool, rejection)
+    if boundary == "capability":
+        assert refused_for_capability(result), (
+            f"{tool} was not refused for capability: {_shape(result)}"
+        )
+        return {"rejected": _shape(result), "capability": result.data.get("capability")}
     if boundary == "validation":
         assert rejected_by_validation(caller.exposure, result), (
             f"{tool} was not rejected by argument validation: {_shape(result)}"

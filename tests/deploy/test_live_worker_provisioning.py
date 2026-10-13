@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import socket
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import cast
 
@@ -2767,6 +2769,219 @@ def test_installer_launches_session_libvirt_with_unlimited_process_limits() -> N
     source = _text(INSTALLER)
 
     assert 'prlimit --memlock=unlimited --core=unlimited -- runuser -u "$operator"' in source
+
+
+def test_installer_waits_for_daemon_readiness_before_relocking_the_runtime() -> None:
+    source = _text(INSTALLER)
+    start = source[source.index("_start_libvirt_daemon() {") :]
+    start = start[: start.index("\n}\n")]
+
+    launch = start.index("--daemon")
+    wait = start.index("_await_libvirt_daemon_ready")
+    lock = start.index("_lock_libvirt_runtime")
+    assert launch < wait < lock < start.index("_reconcile_libvirt_tuple")
+    assert "_start_libvirt_daemon /run/kdive /run/kdive/live-libvirt" in source
+
+
+# A stand-in for `libvirtd --daemon` with libvirt's real start order: the launcher returns once
+# the pid file is written and the socket listens; driver initialization, which creates a state
+# directory under the runtime tree, runs afterwards.
+_FAKE_LIBVIRTD = """#!/usr/bin/python3
+import os
+import socket
+import sys
+import time
+
+pid_path = sys.argv[sys.argv.index("--pid-file") + 1]
+runtime_child = os.path.join(os.environ["XDG_RUNTIME_DIR"], "libvirt")
+if os.environ.get("FAKE_LAUNCH_FAILS"):
+    with open(os.environ["FAKE_JOURNAL"], "w", encoding="utf-8") as journal:
+        journal.write("libvirtd: Unable to obtain pidfile\\n")
+    sys.exit(1)
+status_read, status_write = os.pipe()
+if os.fork():
+    os.close(status_write)
+    os.read(status_read, 1)
+    sys.exit(0)
+os.setsid()
+null = os.open(os.devnull, os.O_RDWR)
+for fd in (0, 1, 2):
+    os.dup2(null, fd)
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(os.path.join(runtime_child, "libvirt-sock"))
+os.chmod(os.path.join(runtime_child, "libvirt-sock"), 0o770)
+listener.listen()
+with open(pid_path, "w", encoding="utf-8") as pid_file:
+    pid_file.write(f"{os.getpid()}\\n")
+os.write(status_write, b"0")
+time.sleep(float(os.environ["FAKE_INIT_DELAY"]))
+if os.environ.get("FAKE_INIT_FAILS"):
+    with open(os.environ["FAKE_JOURNAL"], "w", encoding="utf-8") as journal:
+        journal.write("libvirtd: Driver state initialization failed\\n")
+    sys.exit(1)
+os.mkdir(os.path.join(runtime_child, "hostdevmgr"))
+time.sleep(60)
+"""
+
+_FAKE_COMMANDS = {
+    "libvirtd": _FAKE_LIBVIRTD,
+    # The installer's own launch and probe paths, minus the privilege change.
+    "prlimit": '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n',
+    "runuser": '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n',
+    "journalctl": '#!/bin/sh\ncat -- "$FAKE_JOURNAL"\n',
+    # Ready exactly when the fake daemon's driver initialization has finished.
+    "virsh": '#!/bin/sh\ntest -z "$FAKE_NEVER_READY" && test -d "$XDG_READY_DIR"\n',
+}
+
+
+def _run_fake_libvirt_start(
+    tmp_path: Path, *, init_delay: float, failure: str = ""
+) -> subprocess.CompletedProcess[str]:
+    # The daemon socket lives under the runtime root, and a pytest-xdist tmp_path pushes it past
+    # the 108-byte AF_UNIX path limit, so the runtime root gets a short directory of its own.
+    with tempfile.TemporaryDirectory(prefix="kdive-") as short_root:
+        return _start_fake_libvirt(
+            tmp_path, Path(short_root) / "live-libvirt", init_delay=init_delay, failure=failure
+        )
+
+
+def _start_fake_libvirt(
+    tmp_path: Path, runtime_root: Path, *, init_delay: float, failure: str
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in _FAKE_COMMANDS.items():
+        (bin_dir / name).write_text(body, encoding="utf-8")
+        (bin_dir / name).chmod(0o755)
+    (runtime_root / "libvirt").mkdir(parents=True, mode=0o750)
+    command = r"""
+source "$1"
+_libvirt_family=Debian-family _libvirt_daemon=libvirtd _libvirt_config=libvirtd-live.conf
+_libvirt_socket=libvirt-sock _libvirt_pid=libvirtd.pid _libvirt_uri=qemu+unix:///session
+_libvirt_executable="$(command -v libvirtd)"
+eval "$(declare -f _lock_libvirt_runtime | sed '1s/^_lock_libvirt_runtime/_installer_lock/')"
+_lock_libvirt_runtime() {
+  [[ -d $XDG_READY_DIR ]] || echo "runtime locked before the daemon was ready" >&2
+  _installer_lock "$@"
+}
+eval "$(declare -f _await_libvirt_daemon_ready | sed '1s/^_await/_installer_await/')"
+_await_libvirt_daemon_ready() {
+  _installer_await_libvirt_daemon_ready "$1" "$2" "$3" "${FAKE_READY_TIMEOUT:-$4}"
+}
+_start_libvirt_daemon "$2" "$3" op "$4" "$5" "$4"
+"""
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_INIT_DELAY": str(init_delay),
+        "FAKE_JOURNAL": str(tmp_path / "journal"),
+        "XDG_READY_DIR": str(runtime_root / "libvirt" / "hostdevmgr"),
+    }
+    if failure:
+        env[failure] = "1"
+    if failure == "FAKE_NEVER_READY":
+        env["FAKE_READY_TIMEOUT"] = "2"
+    try:
+        return subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                command,
+                "bash",
+                str(INSTALLER),
+                str(runtime_root.parent),
+                str(runtime_root),
+                str(os.getuid()),
+                str(os.getgid()),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+    finally:
+        pid_path = runtime_root / "libvirt" / "libvirtd.pid"
+        if pid_path.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_path.read_text(encoding="utf-8")), 9)
+
+
+def test_installer_relocks_the_runtime_only_after_the_daemon_finishes_init(
+    tmp_path: Path,
+) -> None:
+    result = _run_fake_libvirt_start(tmp_path, init_delay=1.0)
+
+    assert result.returncode == 0, result.stderr
+    assert "runtime locked before the daemon was ready" not in result.stderr
+
+
+def test_installer_fails_fast_with_the_daemon_log_when_init_fails(tmp_path: Path) -> None:
+    result = _run_fake_libvirt_start(tmp_path, init_delay=0.5, failure="FAKE_INIT_FAILS")
+
+    assert result.returncode != 0
+    assert "exited during initialization" in result.stderr
+    assert "did not produce a complete live tuple" in result.stderr
+    assert "Driver state initialization failed" in result.stderr
+
+
+def test_installer_fails_when_a_live_daemon_never_becomes_ready(tmp_path: Path) -> None:
+    result = _run_fake_libvirt_start(tmp_path, init_delay=0.5, failure="FAKE_NEVER_READY")
+
+    assert result.returncode != 0
+    assert "was not ready within 2s" in result.stderr
+    assert "did not produce a complete live tuple" in result.stderr
+
+
+def test_installer_reports_the_daemon_journal_when_launch_fails(tmp_path: Path) -> None:
+    result = _run_fake_libvirt_start(tmp_path, init_delay=0, failure="FAKE_LAUNCH_FAILS")
+
+    assert result.returncode != 0
+    assert "failed to start" in result.stderr
+    assert "Unable to obtain pidfile" in result.stderr
+
+
+def test_installer_readiness_wait_does_not_follow_a_pid_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.write_text("999999999\n", encoding="utf-8")
+    pid_path = tmp_path / "libvirtd.pid"
+    pid_path.symlink_to(target)
+    runuser = tmp_path / "runuser"
+    runuser.write_text(_FAKE_COMMANDS["runuser"], encoding="utf-8")
+    runuser.chmod(0o755)
+    command = r"""
+source "$1"
+_await_libvirt_daemon_ready "$2" op qemu+unix:///session 1
+"""
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(pid_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "was not ready within 1s" in result.stderr
+    assert "999999999" not in result.stderr
+
+
+def test_installer_readiness_wait_is_bounded(tmp_path: Path) -> None:
+    command = r"""
+source "$1"
+_await_libvirt_daemon_ready "$2" op qemu+unix:///session 1
+"""
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(tmp_path / "absent.pid")],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "was not ready within 1s" in result.stderr
 
 
 def test_installer_adopts_complete_matching_live_tuple(tmp_path: Path) -> None:
