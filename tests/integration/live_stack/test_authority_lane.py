@@ -8,6 +8,7 @@ import subprocess
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.domain.capacity.state import SystemState
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell
@@ -24,9 +26,15 @@ from tests.integration.conftest import open_pool
 from tests.integration.live_stack import authority_lane
 from tests.integration.live_stack.evidence import EvidenceWriter
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.live_vm.installed_remote_authority_support import (
+    RemoteAuthorityInventory,
+    RemoteAuthorityProofConfig,
+    RemoteDomain,
+)
 
 _REVISION = "a" * 40
 _SYSTEM = "11111111-2222-4333-8444-555555555555"
+_DIGEST = "sha256:" + "d" * 64
 _INVENTORY = {"authority_domains": ["kdive-other"], "authority_roots": {}, "worker_domains": []}
 
 
@@ -176,14 +184,6 @@ def _frame(run: CellRun, body: authority_lane.AuthorityBody) -> None:
             run, "u", cast(OidcIssuer, object()), "db", project="cov-t", body=body
         )
     )
-
-
-def test_remote_cell_is_blocked(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    calls = _fake_lane(monkeypatch, tmp_path)
-    with pytest.raises(ScenarioStop, match="#3209") as stop:
-        _frame(_run(tmp_path, "remote-libvirt"), _body_ok)
-    assert stop.value.outcome is Outcome.BLOCKED
-    assert calls == []
 
 
 def test_unset_config_is_blocked(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -419,3 +419,329 @@ def test_open_jobs_names_the_system_and_its_runs(migrated_url: str) -> None:
             return await authority_lane._open_jobs(migrated_url, system)
 
     assert len(asyncio.run(scenario())) == 2
+
+
+_FILE_PREFIX = "kdive-2151-" + "a" * 12 + "-00000000"
+_REMOTE_INVENTORY = {"remote_authority_domains": ["kdive-other"], "remote_authority_volumes": []}
+
+
+def _remote_config(tmp_path: Path) -> Path:
+    path = tmp_path / "remote.json"
+    document = {
+        "installed_revision": _REVISION,
+        "project": "kdive-2151-project",
+        "resource_name": "remote-authority",
+        "authority_instance": "remote-instance",
+        "ownership_prefix": _FILE_PREFIX,
+        "ssh_target": "authority-host",
+        "authority_service": "kdive-external-boot-authority.service",
+    }
+    path.write_text(json.dumps(document), encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def _route(instance: str | None) -> Any:
+    authority = None if instance is None else SimpleNamespace(authority_instance=instance)
+    return lambda _name: SimpleNamespace(authority=authority)
+
+
+def _fake_remote_lane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, seen: list[authority_lane.AuthoritySystem]
+) -> tuple[list[str], authority_lane.AuthorityBody]:
+    """Replace the remote host, database and HTTP boundaries; return the call log and a body."""
+    calls: list[str] = []
+    monkeypatch.setenv(authority_lane.REMOTE_CONFIG_ENV, str(_remote_config(tmp_path)))
+    inventory = tmp_path / "systems.toml"
+    inventory.write_text("", encoding="utf-8")
+    monkeypatch.setenv(authority_lane.SYSTEMS_TOML_ENV, str(inventory))
+
+    def arecord(name: str, result: object = None) -> Any:
+        async def coroutine(*_args: object, **_kwargs: object) -> object:
+            calls.append(name)
+            return result
+
+        return coroutine
+
+    def observe(_config: object, system_id: str | None = None) -> RemoteAuthorityInventory:
+        calls.append("remote_inventory" if system_id is None else "remote_inventory(system)")
+        torn = calls.count("systems.teardown") == calls.count("systems.provision")
+        running = system_id is not None and not torn
+        return RemoteAuthorityInventory(
+            "x86_64", ["kdive-other"], [], RemoteDomain(True, "kvm") if running else None
+        )
+
+    def require(config: Any, _url: str) -> None:
+        calls.append("require_remote_lane")
+        assert config.ownership_prefix != _FILE_PREFIX
+
+    @asynccontextmanager
+    async def over_http(_url: str, _token: str) -> AsyncIterator[_Op]:
+        yield _Op(calls)
+
+    async def body(system: authority_lane.AuthoritySystem) -> dict[str, object]:
+        calls.append("body")
+        seen.append(system)
+        return {"observed": True}
+
+    patches: dict[str, Any] = {
+        "remote_config_for_resource": _route("remote-instance"),
+        "require_remote_lane": require,
+        "require_evidence_read_access": arecord("require_evidence_read_access"),
+        "remote_root": arecord("remote_root", ("resource-id", "image", "sha256:" + "c" * 64)),
+        "remote_authority_inventory": observe,
+        "mint_role_token": lambda *_a, **_k: "token",
+        "seed_metering": arecord("seed_metering"),
+        "capacity_in_use": arecord("capacity_in_use", 0),
+        "await_system_state": arecord("await_system_state"),
+        "require_root_provenance": arecord("require_root_provenance"),
+        "drain_system_jobs": arecord("drain_system_jobs", ["succeeded"]),
+        "_await_released": arecord("released"),
+    }
+    for name, value in patches.items():
+        monkeypatch.setattr(authority_lane, name, value)
+    monkeypatch.setattr(authority_lane.LiveStackClient, "over_http", over_http)
+    return calls, body
+
+
+def _remote(tmp_path: Path) -> CellRun:
+    return _run(tmp_path, "remote-libvirt")
+
+
+def test_remote_success_orders_effects_and_proves_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[authority_lane.AuthoritySystem] = []
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, seen)
+    run = _remote(tmp_path)
+    _frame(run, body)
+    order = [
+        "require_remote_lane",
+        "require_evidence_read_access",
+        "remote_root",
+        "remote_inventory",
+        "allocations.request",
+        "systems.provision",
+        "require_root_provenance",
+        "remote_inventory(system)",
+        "body",
+        "drain_system_jobs",
+        "systems.teardown",
+        "remote_inventory(system)",
+        "allocations.release",
+        "remote_inventory",
+    ]
+    assert [c for c in calls if c in set(order)] == order
+    assert set(run.assertions) == {"effect", "cleanup"}
+    assert run.observed["accelerator"] == "kvm"
+    assert run.observed["image_sha256"] == "c" * 64
+    assert seen[0].system_id == _SYSTEM
+    assert isinstance(seen[0].config, RemoteAuthorityProofConfig)
+
+
+def test_remote_prefix_is_minted_per_invocation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[authority_lane.AuthoritySystem] = []
+    _calls, body = _fake_remote_lane(monkeypatch, tmp_path, seen)
+    _frame(_remote(tmp_path), body)
+    _frame(_remote(tmp_path), body)
+    prefixes = [system.config.ownership_prefix for system in seen]
+    assert len(set(prefixes)) == 2 and _FILE_PREFIX not in prefixes
+    assert all(p.startswith("kdive-2151-" + "a" * 12 + "-") for p in prefixes)
+    assert all(system.ledger.prefix == system.config.ownership_prefix for system in seen)
+
+
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [
+        ("unset", authority_lane.REMOTE_CONFIG_ENV),
+        ("no-inventory", authority_lane.SYSTEMS_TOML_ENV),
+        ("unrouted", "authority_instance"),
+        ("other-instance", "authority_instance"),
+        ("undeclared", "authority_instance"),
+    ],
+)
+def test_remote_selection_stops_before_anything_is_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, change: str, match: str
+) -> None:
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, [])
+    if change == "unset":
+        monkeypatch.delenv(authority_lane.REMOTE_CONFIG_ENV)
+    elif change == "no-inventory":
+        monkeypatch.delenv(authority_lane.SYSTEMS_TOML_ENV)
+    elif change == "undeclared":
+
+        def undeclared(_name: str) -> object:
+            raise CategorizedError("no instance", category=ErrorCategory.CONFIGURATION_ERROR)
+
+        monkeypatch.setattr(authority_lane, "remote_config_for_resource", undeclared)
+    else:
+        instance = None if change == "unrouted" else "another-instance"
+        monkeypatch.setattr(authority_lane, "remote_config_for_resource", _route(instance))
+    with pytest.raises(ScenarioStop, match=match) as stop:
+        _frame(_remote(tmp_path), body)
+    assert stop.value.outcome is Outcome.BLOCKED
+    assert calls == []
+
+
+def test_remote_foreign_host_arch_is_blocked_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(
+        authority_lane,
+        "remote_authority_inventory",
+        lambda *_a: RemoteAuthorityInventory("ppc64le", [], [], None),
+    )
+    with pytest.raises(ScenarioStop, match="ppc64le") as stop:
+        _frame(_remote(tmp_path), body)
+    assert stop.value.outcome is Outcome.BLOCKED
+    assert "allocations.request" not in calls
+
+
+def test_remote_missing_root_is_blocked_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, [])
+
+    async def no_root(*_args: object) -> tuple[str, str, str]:
+        raise ScenarioStop(Outcome.BLOCKED, "no root")
+
+    monkeypatch.setattr(authority_lane, "remote_root", no_root)
+    with pytest.raises(ScenarioStop, match="no root"):
+        _frame(_remote(tmp_path), body)
+    assert "allocations.request" not in calls
+
+
+@pytest.mark.parametrize(
+    ("left", "match"),
+    [
+        (RemoteAuthorityInventory("x86_64", [], [], RemoteDomain(False, "kvm")), "domain remains"),
+        (
+            RemoteAuthorityInventory("x86_64", [], [f"kdive-{_SYSTEM}-overlay.qcow2"], None),
+            "volumes remain",
+        ),
+    ],
+)
+def test_remote_leftover_after_teardown_fails_before_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    left: RemoteAuthorityInventory,
+    match: str,
+) -> None:
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, [])
+    observe = authority_lane.remote_authority_inventory
+
+    def leftover(config: Any, system_id: str | None = None) -> RemoteAuthorityInventory:
+        if system_id is not None and "systems.teardown" in calls:
+            return left
+        return observe(config, system_id)
+
+    monkeypatch.setattr(authority_lane, "remote_authority_inventory", leftover)
+    run = _remote(tmp_path)
+    with pytest.raises(AssertionError, match=match):
+        _frame(run, body)
+    assert "allocations.release" not in calls
+    assert "cleanup" not in run.assertions
+
+
+def test_remote_inventory_drift_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, [])
+    observe = authority_lane.remote_authority_inventory
+
+    def drifted(config: Any, system_id: str | None = None) -> RemoteAuthorityInventory:
+        found = observe(config, system_id)
+        if system_id is None and "allocations.release" in calls:
+            return RemoteAuthorityInventory("x86_64", found.domains, ["stray"], None)
+        return found
+
+    monkeypatch.setattr(authority_lane, "remote_authority_inventory", drifted)
+    with pytest.raises(AssertionError, match="remote_authority_volumes"):
+        _frame(_remote(tmp_path), body)
+
+
+def test_remote_body_failure_still_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, [])
+    run = _remote(tmp_path)
+    with pytest.raises(_BodyFailed):
+        _frame(run, _body_fails)
+    assert calls.index("systems.teardown") < calls.index("allocations.release")
+    assert "cleanup" not in run.assertions
+    assert len(run.artifacts) == 1
+
+
+def test_remote_refused_provision_only_releases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, [])
+
+    class _Refusing(_Op):
+        async def call_tool(self, name: str, **args: object) -> ToolResponse:
+            if name == "systems.provision":
+                self.calls.append(name)
+                return ToolResponse(
+                    object_id="alloc",
+                    status="error",
+                    error_category=ErrorCategory.CONFIGURATION_ERROR,
+                )
+            return await super().call_tool(name, **args)
+
+    @asynccontextmanager
+    async def over_http(_url: str, _token: str) -> AsyncIterator[_Op]:
+        yield _Refusing(calls)
+
+    monkeypatch.setattr(authority_lane.LiveStackClient, "over_http", over_http)
+    run = _remote(tmp_path)
+    with pytest.raises(AssertionError):
+        _frame(run, body)
+    assert "systems.teardown" not in calls and "drain_system_jobs" not in calls
+    assert calls[-2:] == ["capacity_in_use", "remote_inventory"]
+    assert "allocations.release" in calls
+    assert len(run.artifacts) == 1
+
+
+def test_remote_root_selects_the_one_verified_catalog_image(migrated_url: str) -> None:
+    async def scenario() -> list[object]:
+        outcomes: list[object] = []
+        async with open_pool(migrated_url) as pool:
+            allocation = await seed_granted_allocation(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE resources SET kind='remote-libvirt', name='remote-a' WHERE id=("
+                    "SELECT resource_id FROM allocations WHERE id=%s)",
+                    (allocation,),
+                )
+
+            async def image(name: str, provenance: dict[str, object]) -> None:
+                async with pool.connection() as conn:
+                    await conn.execute(
+                        "INSERT INTO image_catalog (id, provider, name, arch, format, "
+                        "root_device, object_key, digest, provenance, visibility, state) VALUES "
+                        "(%s, 'remote-libvirt', %s, 'x86_64', 'qcow2', '/dev/vda', %s, %s, %s, "
+                        "'public', 'registered')",
+                        (uuid4(), name, f"{name}.qcow2", _DIGEST, Jsonb(provenance)),
+                    )
+
+            await image("unverified", {})
+            await image("verified", {"root_spec": {"schema": "root-spec-v1"}})
+            for resource in ("remote-a", "remote-b"):
+                try:
+                    outcomes.append(
+                        await authority_lane.remote_root(migrated_url, resource, "x86_64")
+                    )
+                except ScenarioStop as stop:
+                    outcomes.append(str(stop))
+            await image("second", {"root_spec": {"schema": "root-spec-v1"}})
+            try:
+                await authority_lane.remote_root(migrated_url, "remote-a", "x86_64")
+            except ScenarioStop as stop:
+                outcomes.append(str(stop))
+        return outcomes
+
+    selected, missing, ambiguous = asyncio.run(scenario())
+    assert isinstance(selected, tuple) and selected[1:] == ("verified", _DIGEST)
+    assert "remote-b" in str(missing)
+    assert "found 2" in str(ambiguous)
