@@ -2793,6 +2793,10 @@ import time
 
 pid_path = sys.argv[sys.argv.index("--pid-file") + 1]
 runtime_child = os.path.join(os.environ["XDG_RUNTIME_DIR"], "libvirt")
+if os.environ.get("FAKE_LAUNCH_FAILS"):
+    with open(os.environ["FAKE_JOURNAL"], "w", encoding="utf-8") as journal:
+        journal.write("libvirtd: Unable to obtain pidfile\\n")
+    sys.exit(1)
 status_read, status_write = os.pipe()
 if os.fork():
     os.close(status_write)
@@ -2830,7 +2834,7 @@ _FAKE_COMMANDS = {
 
 
 def _run_fake_libvirt_start(
-    tmp_path: Path, *, init_delay: float, init_fails: bool = False
+    tmp_path: Path, *, init_delay: float, failure: str = ""
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -2858,8 +2862,8 @@ _start_libvirt_daemon "$2" "$3" op "$4" "$5" "$4"
         "FAKE_JOURNAL": str(tmp_path / "journal"),
         "XDG_READY_DIR": str(runtime_root / "libvirt" / "hostdevmgr"),
     }
-    if init_fails:
-        env["FAKE_INIT_FAILS"] = "1"
+    if failure:
+        env[failure] = "1"
     try:
         return subprocess.run(
             [
@@ -2896,12 +2900,20 @@ def test_installer_relocks_the_runtime_only_after_the_daemon_finishes_init(
 
 
 def test_installer_fails_fast_with_the_daemon_log_when_init_fails(tmp_path: Path) -> None:
-    result = _run_fake_libvirt_start(tmp_path, init_delay=0.5, init_fails=True)
+    result = _run_fake_libvirt_start(tmp_path, init_delay=0.5, failure="FAKE_INIT_FAILS")
 
     assert result.returncode != 0
     assert "exited during initialization" in result.stderr
     assert "did not produce a complete live tuple" in result.stderr
     assert "Driver state initialization failed" in result.stderr
+
+
+def test_installer_reports_the_daemon_journal_when_launch_fails(tmp_path: Path) -> None:
+    result = _run_fake_libvirt_start(tmp_path, init_delay=0, failure="FAKE_LAUNCH_FAILS")
+
+    assert result.returncode != 0
+    assert "failed to start" in result.stderr
+    assert "Unable to obtain pidfile" in result.stderr
 
 
 def test_installer_readiness_wait_is_bounded(tmp_path: Path) -> None:
