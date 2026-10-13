@@ -19,6 +19,7 @@ from tests.integration.live_stack.cleanup import (
     disk_absent,
     domain_disks,
     release_and_verify,
+    system_failed,
 )
 
 _XML = """<domain type='kvm'><devices>
@@ -48,7 +49,9 @@ class _Client:
             return ToolResponse.collection("resources", "ok", items)
         if name == "systems.get" and self.system == "failed":
             # systems.get renders a failed System as a failure envelope.
-            return ToolResponse.failure("x", ErrorCategory.PROVISIONING_FAILURE)
+            return ToolResponse.failure(
+                "x", ErrorCategory.PROVISIONING_FAILURE, data={"current_status": "failed"}
+            )
         status = {"systems.get": self.system, "allocations.wait": "released"}.get(name, "ok")
         return ToolResponse.success("x", status)
 
@@ -115,6 +118,11 @@ def test_a_failed_system_is_released_without_a_teardown() -> None:
         "released",
         [0, 1, 0],
     )
+
+
+def test_an_unrelated_error_envelope_is_not_a_failed_system() -> None:
+    error = ToolResponse.failure("x", ErrorCategory.TRANSPORT_FAILURE)
+    assert not system_failed(error)
 
 
 def test_a_failed_release_must_find_the_system_still_failed() -> None:

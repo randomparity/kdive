@@ -51,7 +51,12 @@ from kdive.mcp.responses import ToolResponse
 from kdive.providers.shared.runtime_paths import UPLOADS_DIR, domain_name_for
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings, Outcome
-from tests.integration.live_stack.cleanup import capacity_in_use, domain_disks, release_and_verify
+from tests.integration.live_stack.cleanup import (
+    capacity_in_use,
+    domain_disks,
+    release_and_verify,
+    system_failed,
+)
 from tests.integration.live_stack.deep_lifecycle import (
     FIXTURE_ROOT_ENV,
     KERNEL_PROBE,
@@ -723,7 +728,7 @@ class Held:
             disks=self.disks,
             in_use_before=self.in_use_before,
             # Only a System already failed before the release may pass through `failed`.
-            from_failed=state.status in {"failed", "error"},
+            from_failed=system_failed(state),
         )
 
 

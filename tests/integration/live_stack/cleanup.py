@@ -74,6 +74,14 @@ def disk_absent(path: str, *, privileged_test: Callable[[str], int] = _sudo_test
     return False
 
 
+def system_failed(envelope: ToolResponse) -> bool:
+    """Whether a ``systems.get`` reply is the failure envelope of a System in state ``failed``.
+
+    Any tool failure is an ``error`` envelope; only this one names the System's own state.
+    """
+    return envelope.status == "error" and envelope.data.get("current_status") == "failed"
+
+
 async def capacity_in_use(client: LiveStackClient) -> int:
     """Summed ``in_use`` over every resource ``resources.availability`` reports."""
     env = await client.call_tool("resources.availability")
@@ -125,7 +133,7 @@ async def release_and_verify(
     ok(await scalar(client, "allocations.release", allocation_id=allocation_id), "release")
     if from_failed:
         state = await client.call_tool("systems.get", system_id=system_id)
-        assert isinstance(state, ToolResponse) and state.status in {"failed", "error"}, (
+        assert isinstance(state, ToolResponse) and system_failed(state), (
             f"the failed System is now {getattr(state, 'status', state)!r}"
         )
     else:

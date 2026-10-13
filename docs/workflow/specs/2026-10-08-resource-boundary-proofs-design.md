@@ -51,7 +51,10 @@ profile size; from_failed on release_and_verify for releasing a System that alre
 which stays in the terminal failed state). Operator decision (2026-10-13) also folds in the
 host-preparation fix: /var/lib/kdive/rootfs-uploads joins the worker shared directories and,
 because qemu opens the staged base in place as the overlay's backing file (observed: SELinux
-denied svirt_t read of the var_lib_t base), the svirt_image_t label list. Existing carriers keep their behavior.
+denied svirt_t read of the var_lib_t base), the svirt_image_t label list. ADR-0442 rejected
+pre-creating this root because a non-co-located reconciler probe would read an empty root as
+co-located and mass-delete bases; that ADR's decision 2 removed the probe (the worker now
+performs the reclaim), so the premise of the rejection no longer holds. Existing carriers keep their behavior.
 
 Add a live carrier and domain support alongside existing live_stack lifecycle support;
 use CellRun/run_cell, verified kernel fixtures, public MCP allocation/provision/install/
