@@ -95,7 +95,7 @@ for `control.force_crash`.
 |---|---|---|
 | `control.force_crash` | kdump | Admin token. The job drains `succeeded`; `systems.get` reads `crashed`; a console part sealed after the call contains `Kernel panic - not syncing` and the fixture release. |
 | `vmcore.fetch` (`kdump`, `host_dump`) | as named | After the operator crash, `vmcore.fetch(method)` drains `succeeded`; job, Run and artifact refs agree and expose no raw core; two `artifacts.fetch_raw` downloads give identical SHA-256 and the advertised size; the core's VMCOREINFO (the ELF `VMCOREINFO` note for `host_dump`, the kdump-compressed sub-header block for `kdump`) carries exactly one `BUILD-ID=` equal to the fixture build ID and one `OSRELEASE=` equal to the fixture release. Strings elsewhere in guest memory are not read. |
-| `introspect.from_vmcore` | kdump | After crash and kdump capture: `report.sysinfo.release` and `machine` equal the fixture release and `x86_64`, `nodename` equals the guest's, and `loop` is listed in `report.modules`. Success implies the server's build-ID provenance check passed. |
+| `introspect.from_vmcore` | kdump | After crash and kdump capture: `report.sysinfo.release` and `machine` equal the fixture release and `x86_64`, `nodename` equals the guest's, and `loop`, the module the fixture boot loaded as the controlled workload, is listed in `report.modules`. Success implies the server's build-ID provenance check passed. |
 | `postmortem.crash` | kdump | After crash and capture, `commands=["sys", "ps", "mod"]`: the transcript names the fixture release, the sentinel's command name and `loop`. |
 | `introspect.run` | live | After `debug.start_session(transport="drgn-live")` with no `missing_debuginfo`, helpers `sysinfo` and `modules` match the guest's release, nodename and `loop`; the session ends `detached`. |
 | `introspect.script` | live | Same session; a fixed drgn script prints the release and every thread whose `comm` starts `kcov`; output names the fixture release and exactly the sentinel's pid and name, `truncated` false; the session ends `detached`. |
@@ -103,10 +103,11 @@ for `control.force_crash`.
 
 Cleanup is the frame's existing proof: allocation released, System torn down,
 domain and owned disks absent, capacity restored. A crashed System releases
-through the same path. Captured cores and redacted logs are Run-owned product
-artifacts that the artifact retention policy reclaims; they are not owned
-resources of the cell. The record names their artifact ids as evidence, and the
-runbook states the object-store footprint of a run.
+through the same path. Captured cores and redacted logs are the tool's
+product: Run-owned `vmcore` artifacts, which no reclaim path removes today
+(artifact retention sweeps only build artifacts). They are retained evidence,
+not owned resources of the cell. The record names their artifact ids, and the
+runbook states a run's object-store footprint.
 
 ## Rejection preparation
 
@@ -164,9 +165,10 @@ and the frame proves cleanup.
      budget; bounded and visible.
    - A host_dump core is about as large as guest RAM (2 GiB); two downloads
      cost time, accepted for the immutability proof.
-   - Captured cores stay in the object store until retention reclaims them:
-     about 2.2 GiB per configuration's `host_dump` cells and a few hundred MiB
-     of kdump cores, stated in the runbook.
+   - Captured cores stay in the object store with no reclaim path: about
+     8 GiB of `host_dump` cores per configuration (four 2 GiB cores) and a
+     few hundred MiB of kdump cores, stated in the runbook. The missing
+     `vmcore` reclaim is a product gap returned as a follow-up candidate.
    - A worker host missing crash(8), drgn or the guestfs binding records
      `blocked`, not a pass.
 4. Covered elsewhere:
