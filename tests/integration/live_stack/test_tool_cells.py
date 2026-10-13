@@ -17,6 +17,7 @@ import pytest
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import LiveStackToolError, OidcIssuer, make_keypair
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._common import capability_unsupported
 from kdive.serialization import JsonValue
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Evidence, Outcome
@@ -218,6 +219,59 @@ def test_category_boundaries_use_the_closed_set(tmp_path: Path) -> None:
                 _run(tmp_path, "validation"),
                 _Caller("direct", ToolResponse.success("x", "ok")),
                 "authorization",
+                Rejection({}, _GRANTS),
+                _snapshot(1, 1),
+            )
+        )
+
+
+def _capability_refusal() -> ToolResponse:
+    return capability_unsupported(
+        "sys-1", capability="snapshot", provider="local-libvirt", supported=[]
+    )
+
+
+@pytest.mark.parametrize("exposure", ["direct", "gateway"])
+def test_capability_boundary_needs_the_capability_refusal(tmp_path: Path, exposure: str) -> None:
+    run = _run(tmp_path, "validation")
+    asyncio.run(
+        prove_rejection(
+            run,
+            _Caller(exposure, _capability_refusal()),
+            "capability",
+            Rejection({}, _GRANTS),
+            _snapshot(1, 1),
+        )
+    )
+    proof = _artifact(run, "capability")
+    assert proof["capability"] == "snapshot"
+    assert proof["rejected"] == {"status": "error", "error_category": "configuration_error"}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        ToolResponse.failure("sys-1", ErrorCategory.CONFIGURATION_ERROR),
+        ToolResponse.failure(
+            "sys-1", ErrorCategory.CONFIGURATION_ERROR, data={"reason": "invalid_snapshot_name"}
+        ),
+        ToolResponse.failure(
+            "sys-1", ErrorCategory.AUTHORIZATION_DENIED, data={"reason": "capability_unsupported"}
+        ),
+        ToolResponse.success("sys-1", "queued"),
+        LiveStackToolError("systems.snapshot", "1 validation error"),
+    ],
+    ids=["bare-configuration-error", "other-reason", "other-category", "success", "tool-error"],
+)
+def test_capability_boundary_refuses_any_other_answer(
+    tmp_path: Path, answer: ToolResponse | LiveStackToolError
+) -> None:
+    with pytest.raises(AssertionError, match="was not refused for capability"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "validation"),
+                _Caller("direct", answer),
+                "capability",
                 Rejection({}, _GRANTS),
                 _snapshot(1, 1),
             )

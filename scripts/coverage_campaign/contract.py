@@ -259,7 +259,9 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         boundaries.append("project-isolation")
                     if row.parameters.get("properties"):
                         boundaries.append("validation")
-                    if group.capabilities.get(row.tool):
+                    # A supported capability's functional cell is its proof; only an
+                    # unsupported verdict has a refusal to prove (ADR-0722, 2026-10-13).
+                    if group.capabilities.get(row.tool) and not supported:
                         boundaries.append("capability")
                     cells.extend(
                         replace(
