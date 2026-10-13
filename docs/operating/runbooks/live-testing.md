@@ -1293,7 +1293,7 @@ provider defined a `kdive-` domain, and the provider pool held only its base vol
 lane for the HTTP tool cells that need one. A carrier selects it explicitly through
 `on_authority_system`; the ordinary `on_lane_system` and `lane_target` frames do not change. The
 frame observes the System on the authority's private daemon and private roots, never over SSH.
-The remote authority frame is #3209, and a remote cell stops `blocked` naming it.
+A `remote-libvirt` cell runs the remote branch below.
 
 `LOCAL_AUTHORITY_LANE_CONFIG` names an owner-only mode-`0400` or mode-`0600` JSON file
 with exactly `installed_revision` (the full 40-character SHA), `authority_service` (the literal
@@ -1336,6 +1336,38 @@ LOCAL_AUTHORITY_LANE_CONFIG=/protected/authority-lane.json \
 A killed run skips cleanup. Remove its fixture with the exact-name loop under
 [fixture cleanup](#installed-local-authority-carrier), then run `systems.teardown` for the System
 with an `admin` token for its project and wait for `torn_down`, then `allocations.release`.
+
+##### Remote authority branch (#3209)
+
+A `remote-libvirt` cell provisions on the installed remote authority instead. There is no fixture
+path: the frame uses public provisioning on the remote resource that routes to the authority.
+
+- `KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG` names the existing remote proof config
+  ([its contract](#installed-remote-authority-proof-prerequisite)). The frame replaces its
+  `ownership_prefix` with one minted per invocation.
+- `resource_name` must be declared in the `KDIVE_SYSTEMS_TOML` inventory with
+  `authority_instance` equal to the config's. The control-plane catalog must hold exactly one
+  registered public `remote-libvirt` image for the cell's architecture with a digest and an
+  inspected root (`root_spec`); admission refuses an authority-owned System without one. Otherwise
+  the cell stops `blocked` before any mutation.
+- The operator's batch-mode SSH to `ssh_target` and passwordless `sudo -n` there are required.
+  As root, the frame runs one fixed program with the authority's interpreter. The program reads
+  the pool name from `/etc/kdive/provider-authority.env`, then lists the private daemon's domains
+  and that pool's volumes.
+
+The frame gates on the remote unit and its installed revision, the control plane's `/readyz`
+revisions and the harness DSN's read access. It then provisions, requires the System's domain to
+be running on the private daemon, and runs the body. Cleanup drains the jobs, tears the System down
+through the authority, and requires no domain and no pool volume naming the System. It then
+releases the allocation and requires the daemon's domains and the pool's volumes unchanged. Add
+the config variable to the command above to run the remote arm; run one scenario at a time on the
+remote authority.
+
+A killed remote run skips cleanup. Run `systems.teardown` and wait for `torn_down`, then
+`allocations.release`. If a `kdive-<system-id>` domain or a `kdive-<system-id>-*` volume is still
+on the authority's private daemon, remove it as root on the authority host through
+`qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock`:
+`virsh destroy`, then `virsh undefine` the domain, then `virsh vol-delete --pool <pool>` the volume.
 
 ### `live_vm` (native) — a real kernel on real silicon
 
