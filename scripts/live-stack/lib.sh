@@ -50,6 +50,14 @@ live_stack_backends_up() {
   # The Postgres initdb bind source resolves to each checkout's absolute path. A second worktree
   # changes Compose's hash and would recreate a healthy database; apply backend config/image
   # changes explicitly with stack-down.sh before bringing it up again.
+  # oidc is stateless and publishes ${KDIVE_OIDC_PORT} only at container creation, so reusing a
+  # container left by a failed attempt under another port serves nothing on the new one. Recreate
+  # it alone (--no-deps) here; the wait below then covers it and `--no-recreate` still protects
+  # postgres and seaweedfs.
+  docker compose up --detach --force-recreate --no-deps oidc || {
+    docker compose ps >&2
+    return 1
+  }
   docker compose up --no-recreate --wait --wait-timeout 120 "${KDIVE_BACKEND_LONG_RUNNING[@]}" || {
     docker compose ps >&2
     return 1

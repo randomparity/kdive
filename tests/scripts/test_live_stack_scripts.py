@@ -4397,6 +4397,16 @@ def test_backends_stage_waits_only_on_the_long_running_backends(tmp_path: Path) 
     assert "seaweedfs-init" not in wait[0]
 
 
+def test_backends_stage_recreates_only_oidc(tmp_path: Path) -> None:
+    """oidc's host port is fixed at creation, so a container left by a failed attempt under
+    another KDIVE_OIDC_PORT must be replaced (#3195); the stateful backends must not be."""
+    result, log = _run_stack_services(tmp_path, "--stage", "backends")
+    assert result.returncode == 0, result.stderr
+    recreate = [ln for ln in log.read_text().splitlines() if "--force-recreate" in ln]
+    assert len(recreate) == 1, recreate
+    assert recreate[0].endswith("--no-deps oidc"), recreate[0]
+
+
 def test_backends_stage_runs_neither_obs_nor_the_app_tier_reconcile(tmp_path: Path) -> None:
     """Both are `services` phases: the backends-only path started neither, and the app-tier
     `rm -sf` is destructive against the containerized tier."""
