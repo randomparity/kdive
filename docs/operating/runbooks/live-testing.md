@@ -1060,8 +1060,10 @@ reads the System's `supported_capture_methods` and its `capability` cell proves 
 ([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md), amended
 2026-10-13). The [design](../../workflow/specs/2026-10-13-local-capture-tool-cells-design.md)
 lists what each cell compares. The prerequisites are the power and snapshot cells' above, plus
-crash(8), drgn and the libguestfs Python binding on the worker host; a tool answering
-`missing_dependency` records the cell `blocked`. Run both configurations into one evidence
+crash(8) and drgn in the MCP server's environment (`postmortem.crash` and
+`introspect.from_vmcore` run there; installing them only for the worker is not enough) and the
+libguestfs Python binding for the worker's kdump harvest. A tool answering `missing_dependency`
+records the cell `blocked`. Run both configurations into one evidence
 root, then assemble and qualify as in the System section:
 
 ```bash

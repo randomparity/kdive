@@ -83,8 +83,9 @@ Each functional cell owns one System in a fresh project:
 5. After a crash the cell drains the `force_crash` job to `succeeded` and waits
    for `systems.get` to read `crashed`.
 
-The worker host needs crash(8), drgn and the libguestfs Python binding (the
-kdump harvest). A tool answering `missing_dependency` stops the cell as
+The MCP server process runs `postmortem.crash` and `introspect.from_vmcore`, so
+it needs crash(8) and drgn; the worker needs the libguestfs Python binding (the
+kdump harvest); the guest image carries drgn for the live tools. A tool answering `missing_dependency` stops the cell as
 `blocked` with that reason, never as a pass or a product failure.
 
 Only the tool under test goes through the cell's exposure and token; supporting
@@ -169,8 +170,8 @@ and the frame proves cleanup.
      8 GiB of `host_dump` cores per configuration (four 2 GiB cores) and a
      few hundred MiB of kdump cores, stated in the runbook. The missing
      `vmcore` reclaim is a product gap returned as a follow-up candidate.
-   - A worker host missing crash(8), drgn or the guestfs binding records
-     `blocked`, not a pass.
+   - A server missing crash(8) or drgn, or a worker missing the guestfs
+     binding, records `blocked`, not a pass.
 4. Covered elsewhere:
    - Remote capture cells: #3114. ppc64le cells and native fadump: #2818.
    - POWER compressed core: #2763. Debug tools: #2813.
