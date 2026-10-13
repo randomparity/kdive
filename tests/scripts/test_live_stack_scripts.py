@@ -2273,13 +2273,76 @@ def test_demo_up_guest_image_hint_names_the_shared_catalog_entry() -> None:
     assert "build-image.sh fedora-kdive-ready-44" not in text
 
 
+_DERIVED_URLS = (
+    "KDIVE_HARNESS_DATABASE_URL",
+    "KDIVE_MIGRATION_DATABASE_URL",
+    "KDIVE_SERVER_DATABASE_URL",
+    "KDIVE_WORKER_DATABASE_URL",
+    "KDIVE_RECONCILER_DATABASE_URL",
+    "KDIVE_S3_ENDPOINT_URL",
+    "KDIVE_OIDC_ISSUER",
+    "KDIVE_OIDC_JWKS_URI",
+)
+_BACKEND_PORTS = ("KDIVE_POSTGRES_PORT", "KDIVE_SEAWEEDFS_PORT", "KDIVE_OIDC_PORT")
+
+
+def _derived_urls(**ports: str) -> subprocess.CompletedProcess[str]:
+    """Source env.sh with only `ports` set and print the URL defaults it derives from them."""
+    env = {k: v for k, v in os.environ.items() if k not in {*_DERIVED_URLS, *_BACKEND_PORTS}}
+    env |= {"KDIVE_LIBVIRT_URI": "qemu:///system", **ports}
+    printer = " ".join(f'"${name}"' for name in _DERIVED_URLS)
+    return _sourced(ROOT / "scripts/live-stack/env.sh", f'printf "%s\\n" {printer}', env)
+
+
 def test_client_urls_derive_from_the_configurable_ports() -> None:
-    # The port var must be the SINGLE source of truth: the client-facing DSN/endpoint defaults must
-    # reference the port var, not a second hardcoded literal that could silently drift from compose.
-    env = (ROOT / "scripts/live-stack/env.sh").read_text()
-    assert "localhost:${KDIVE_POSTGRES_PORT}/kdive" in env
-    assert "http://localhost:${KDIVE_SEAWEEDFS_PORT}" in env
-    assert "http://localhost:${KDIVE_OIDC_PORT}/default" in env
+    # The port var is the single source of truth for both the compose publish side and the client
+    # URL defaults, so a bare port keeps today's localhost URLs byte for byte.
+    result = _derived_urls(
+        KDIVE_POSTGRES_PORT="5434", KDIVE_SEAWEEDFS_PORT="8334", KDIVE_OIDC_PORT="8091"
+    )
+    assert result.returncode == 0, result.stderr
+    urls = dict(zip(_DERIVED_URLS, result.stdout.splitlines(), strict=True))
+    harness = "kdive-harness:kdive-harness-local"  # pragma: allowlist secret
+    assert urls["KDIVE_HARNESS_DATABASE_URL"] == f"postgresql://{harness}@localhost:5434/kdive"
+    assert all(urls[name].endswith("@localhost:5434/kdive") for name in _DERIVED_URLS[:5])
+    assert urls["KDIVE_S3_ENDPOINT_URL"] == "http://localhost:8334"
+    assert urls["KDIVE_OIDC_ISSUER"] == "http://localhost:8091/default"
+    assert urls["KDIVE_OIDC_JWKS_URI"] == "http://localhost:8091/default/jwks"
+
+
+@pytest.mark.parametrize(
+    ("port", "endpoint"),
+    [
+        ("5434", "localhost:5434"),
+        ("127.0.0.1:5434", "localhost:5434"),
+        ("0.0.0.0:5434", "localhost:5434"),
+        ("[::1]:5434", "localhost:5434"),
+        ("192.0.2.10:5434", "192.0.2.10:5434"),
+        ("db.example.test:5434", "db.example.test:5434"),
+        ("[2001:db8::1]:5434", "[2001:db8::1]:5434"),
+        ("2001:db8::1:5434", "[2001:db8::1]:5434"),
+    ],
+)
+def test_backend_endpoint_accepts_port_and_addr_port(port: str, endpoint: str) -> None:
+    """#3215: an ADDR:PORT publish value made every default DSN `localhost:ADDR:PORT`."""
+    result = _derived_urls(KDIVE_POSTGRES_PORT=port)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[0].endswith(f"@{endpoint}/kdive")
+
+
+def test_backend_endpoint_moves_the_oidc_issuer_to_a_published_address() -> None:
+    result = _derived_urls(KDIVE_OIDC_PORT="192.0.2.10:8090")
+    assert result.returncode == 0, result.stderr
+    assert "http://192.0.2.10:8090/default" in result.stdout.splitlines()
+
+
+@pytest.mark.parametrize("variable", _BACKEND_PORTS)
+@pytest.mark.parametrize("value", ["bad", "1.2.3.4:0", "1.2.3.4:70000", "a b:5434", "x/y:5434"])
+def test_backend_endpoint_rejects_an_unparseable_port(variable: str, value: str) -> None:
+    result = _derived_urls(**{variable: value})
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert f"{variable}={value} must be PORT or ADDR:PORT" in result.stderr
 
 
 def test_executable_live_stack_scripts_are_strict_bash() -> None:
