@@ -399,6 +399,165 @@ The mock-OIDC image selection note in the cross-platform guide covers the POWER 
 requirement; `qemu:///system` and root-process constraints also apply.
 
 
+### Separate installed authority lanes
+
+For #3183/#3152, assign an exclusive Ubuntu 26.04 x86_64 local-authority host and a
+separate Fedora 44 x86_64 remote-authority target. Keep the ordinary remote-provider lane on
+its existing assignment: adding an authority tuple changes install/boot routing. These lanes
+establish deployment prerequisites for #3184–#3186; readiness does not qualify their HTTP cells.
+Native POWER qualification remains pending under #2818, and #2803 coverage is unchanged.
+
+Before either host changes, retain a private observation of current ownership, snapshot level,
+running consumers and jobs, nested KVM usability, confinement mode, available CPU/RAM/disk and
+exclusive availability. A snapshot called `kernel-src` proves neither an installed authority nor
+a candidate revision. Budget one live scenario at a time from observed headroom; do not overlap
+kernel builds. Record the separate ordinary-provider assignment as well.
+
+Review the exact restore and installation plans before apply. Installation approval is separate
+from permission to restore a snapshot. The installation plan names:
+
+- the clean candidate's full commit SHA, target assignment and exact provisioning invocation;
+- protected input **references**, their owners/modes and certificate lifetime, authority modes
+  and routes, capacity bytes and concurrency, plus manifest/base SHA-256 digests and provenance;
+- backend/schema prerequisites, the database LOGIN's existing role membership, S3 access scope,
+  and the readiness, denial, deployed-identity and cleanup observations to run;
+- retained installation state versus proof-owned transient state, failure handling and the
+  exact-owned retirement or separately approved snapshot restore procedure.
+
+Keep addresses, accounts, inventory paths, credential locations and raw evidence private. Public
+results use anonymous lane labels and the candidate SHA. Do not publish credential values or
+put them in command-line extra vars. `--check` is not an approval bypass: some existing preflight
+commands deliberately run in check mode.
+
+#### Local composition without runner registration
+
+Use [installed-local-authority.yml](../../../deploy/ansible/playbooks/installed-local-authority.yml).
+It targets the existing `live_vm_runners` inventory group, reuses `libvirt_stack`,
+`libvirt_pool_net` and `live_vm_host`, and registers no GitHub runner. Set
+`installed_authority_operator_user` explicitly; it maps to the host role's operator account.
+Set `live_vm_repo_version` to the reviewed full 40-character SHA, not a branch or tag.
+
+The protected vars must enable `live_vm_host_authority_enabled`,
+`live_vm_host_worker_authority_enabled` and `live_vm_host_authority_local_mutation_enabled`,
+and supply `live_vm_host_authority_system_manifest_source` with
+`live_vm_host_authority_system_local_bases`. Existing preflight validates the canonical manifest
+and the immutable base digests before host roles run. The authority DSN/server key/server
+certificate/server CA/worker-client CA/health-client certificate/health-client key use the seven
+existing `live_vm_host_authority_*_source` inputs. Add the worker-client certificate/key sources
+and protected S3 shared-credentials source described in the
+[authority input contract](self-hosted-kvm-runner.md#external-boot-authority-diagnosis).
+Supply the lifecycle witness member DSN through the protected vars, too.
+
+A custom inventory outside this directory must carry the existing
+`inventory/group_vars/all.yml` and `inventory/group_vars/live_vm_runners.yml` settings it uses;
+Ansible does not load another inventory's adjacent group vars. Override their example network
+values, checkout/venv location and reservation concurrency with reviewed lane values. The
+runner default reserves six recovery slots; select capacity from current disk headroom, not
+that example. Account for the host PostgreSQL package installed by the authority role; the
+[stack port overrides](live-stack.md) allow a separate backend port when needed.
+
+From the clean candidate checkout, with shell variables naming the approved private inventory,
+vars file and single inventory alias:
+
+```bash
+cd deploy/ansible
+uv run --with 'ansible-core==2.21.1' ansible-playbook \
+  playbooks/installed-local-authority.yml -i "$AUTHORITY_INVENTORY" \
+  --limit "$LOCAL_AUTHORITY_LANE" --extra-vars "@$LOCAL_AUTHORITY_VARS"
+```
+
+The role installs the candidate, authority, fixed worker lifecycle and client route. Its existing
+one-shot readiness probe, installed revision check and worker/reconciler path/socket denial
+checks must pass. They prove authority artifact isolation. Ubuntu session guests lack
+per-domain AppArmor confinement (ADR-0741); an enforcing daemon profile does not prove guest
+sandboxing. Retain this limitation in the lane report.
+
+#### Dedicated remote composition
+
+Stage a clean checkout at the same candidate through the reviewed private provisioning workflow.
+Provision Python 3.14 and uv on the target first through the existing host prerequisite workflow;
+record their resolved paths in `provider_authority_host_python` and
+`provider_authority_host_uv_bin` in the approved plan. The authority role validates these tools
+but does not install them.
+Use [site.yml](../../../deploy/ansible/site.yml) with the dedicated target in
+`remote_libvirt_hosts`; never include the ordinary remote-provider assignment in this limit.
+Set `provider_authority_host_source_root` to that checkout, enable the authority and its mutation
+mode, and provide its existing seven protected credential-source inputs, S3 credential source,
+canonical `provider_authority_host_system_manifest_source` and
+`provider_authority_host_system_remote_bases`. The manifest binds the selected resource,
+instance, immutable base, machine/network and fixed port ranges; validate it with the existing
+`validate_authority_system_provisioning.py` through role preflight, not an ad hoc format.
+
+Remote System bases also require `provider_authority_host_remote_module_enabled: true` and
+`provider_authority_host_remote_module_architectures` containing the selected supported
+architectures. Enable `remote_libvirt_module_appliance_enabled` and supply the corresponding
+pinned URL/SHA256 entries in `remote_libvirt_module_appliance_images` through the existing
+[module-appliance build and installation contract](../../../deploy/remote_module_appliance/README.md).
+The authority readiness check requires those installed assets and its private storage pool;
+installation readiness does not qualify a module operation or System construction.
+
+The production authority and installer use `/var/lib/kdive/remote-module-appliance/v1`,
+outside the ordinary boot pool and the mutable authority home. Authority-enabled remote-module
+deployments reject a different `remote_libvirt_module_appliance_install_dir` before host mutation.
+Keep these assets root-owned and read-only; do not grant the authority ordinary pool group access
+or change ordinary pool permissions to make them readable. The role runs the installed loader as
+the authority before service start, then retains its post-start readiness probe. Root-only digest
+verification cannot prove the authority can traverse the installation path.
+
+For an upgrade from the former appliance location, review installation at the new location before
+starting the new candidate; retain the old tree until separately approved retirement. There is no
+fallback to the old path. Loader success does not establish QEMU access or guest confinement at
+the new location: observe those through the separate System qualification, including SELinux on
+the selected host. Do not relax host policy to substitute for that proof.
+
+Review the authority network address/port and worker TLS route separately from ordinary libvirt
+TLS. Use the existing [remote setup contract](remote-libvirt-host-setup.md) and
+[remote provider configuration](../providers/remote-libvirt.md) for client credentials and the
+resource's authority tuple. Keep TLS verification and SSH host-key checking enabled.
+
+```bash
+cd deploy/ansible
+uv run --with 'ansible-core==2.21.1' ansible-playbook site.yml \
+  -i "$AUTHORITY_INVENTORY" --limit "$REMOTE_AUTHORITY_LANE" \
+  --extra-vars "@$REMOTE_AUTHORITY_VARS"
+```
+
+The remote role preflights before host mutation and runs its configured installed readiness
+probe after firewall and service convergence. Its failure path withdraws failed readiness;
+a failed play is not usable qualification evidence. Fixed fault controls remain opt-in only
+on disposable lanes, as described below; they are not needed for routine readiness.
+
+#### Candidate evidence and cleanup
+
+After approved provisioning, use `scripts/live-stack/stack-services.sh` and `just onboard` on
+the local host, with the reviewed backend and provider configuration. Use the host stack described
+in the [live-stack runbook](live-stack.md), including its lifecycle witness member setup.
+Record the candidate full SHA and clean tree, manifest and actual immutable-base byte digests,
+and actual server, **each running worker**, reconciler and selected authority revisions.
+Resolve process build identifiers to full SHAs as ADR-0715 requires; read the installed authority
+revision at `/opt/kdive-provider-authority/revision` on the selected authority host. A missing,
+unknown, mismatched or skipped identity observation fails required evidence. Repeat identity
+observations when running a later carrier; the snapshot or this installation report is not a
+substitute. Use strict stack skew policy and retain the visible revision header for HTTP proofs.
+
+Keep a private per-lane result containing the exact command, exit code, readiness/denial
+observations, terminal effects and cleanup readback. Routine readiness creates no disposable
+System; the installation remains for downstream children. If the existing transient local
+proof is explicitly enabled, verify its incarnation is terminated and its temporary account,
+group and proof material are removed; a failed proof must retain a named cleanup obligation.
+Do not run the whole `prove-external-boot-authority-host.sh` carrier over a retained lane: it
+installs a predecessor and tears down its authority. Review any reuse of its disposable PKI/DSN
+preparation separately, including credential expiry and database grants.
+
+Retire only explicitly owned proof objects after confirming terminal provider effects. Do not
+remove shared backends, bases or journals to make a failure disappear. The existing local
+`authority_host_teardown.yml` is an authority retirement operation requiring its own reviewed
+inputs, not routine per-test cleanup; remote retirement follows its separately reviewed plan.
+Preserve narrower blockers under their existing owners: #3138, #3144/#3148,
+#3130/#3131/#3135. Exhausted-job recovery (#3143) is merged; report a recurrence as a new
+issue. System framing, fault construction and HTTP qualification belong to
+#3184–#3186. Do not publish the release from this procedure.
+
 ### Installed remote authority proof prerequisite
 
 The production `provider_authority_host` role keeps the ADR-0622 proof socket absent by default.
@@ -1047,6 +1206,56 @@ customization boot could not read the worker's build workspace ("Cannot access s
 '/var/lib/kdive/build/images/rootfs-build-<random>/<image>.qcow2' ... Permission denied"). The
 build workspace held no leftovers afterwards. After `demo-down.sh --wipe --yes` the worker's
 libvirt defined no `kdive-` domain and `KDIVE_INSTALL_STAGING` was empty.
+
+#### Power and snapshot tool cells (#2815)
+
+`tests/integration/test_power_snapshot_tool_cells_live.py::test_power_snapshot_tool_cell` carries
+the 100 x86_64 local-libvirt cells of `control.power`, `systems.snapshot`, `systems.restore`,
+`systems.list_snapshots` and `systems.delete_snapshot`: 20 `functional` and 80 rejection cells.
+Both libvirt providers support snapshots, so these tools have no `capability` cell
+([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md), amended
+2026-10-13). The [design](../../workflow/specs/2026-10-08-local-power-snapshot-proof-design.md)
+lists what each cell compares. The prerequisites are the run tool cells' above, including the
+verified `longterm` fixture; the cells need no provider authority. Run both configurations into
+one evidence root, then assemble and qualify as in the System section:
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix KDIVE_ARTIFACT_DIR=$(mktemp -d)
+export KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack tests/integration/test_power_snapshot_tool_cells_live.py
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack tests/integration/test_power_snapshot_tool_cells_live.py
+```
+
+- Each functional cell provisions `fedora-kdive-ready-44`, boots the fixture kernel through the
+  deep-lifecycle checks and then calls only its tool through the cell's exposure. The guest
+  holds a value on disk, one in `/dev/shm` and a sentinel process. The disk value is read after
+  `sync` and `vm.drop_caches=3`, so a restore that brings back RAM alone cannot pass.
+- `systems.snapshot` and `systems.restore` restore a memory checkpoint and require the
+  checkpoint's boot ID, both values and the same process. `systems.restore` also restores
+  paused (libvirt and the System both `paused`, then `control.power` `resume`), and last a
+  disk-only checkpoint: the disk value rolls back in a new boot. A disk-only checkpoint may
+  give the domain a new overlay disk, which the cleanup proves absent with the others.
+- `systems.list_snapshots` compares two checkpoints, newest first, with libvirt's.
+  `systems.delete_snapshot` checks both ledgers and that the name can be used again.
+- `control.power` runs `off` (domain `shutoff`, System still `ready`), `on`, `reset` and
+  `cycle` (each a new boot), then `resume` from a paused restore.
+- Rejection cells aim at the stack's torn-down lane target. Beside the project rows, they
+  compare the target's `jobs` rows and check that its domain is still undefined.
+
+The ppc64le local cells share the node but are owner #2818's; the remote cells are #3116's.
+
+Last run: candidate `924de2c59` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing and no
+provider authority installed, the `longterm` fixture `v6.18.54` built on that host. Each
+configuration recorded its 50 cells in about 28 minutes and skipped the other's 50. `qualify`
+reported all 100 qualified: 20 `success` and 80 `rejection`. After `demo-down.sh --wipe --yes`
+the worker's libvirt defined no domain, no overlay disk remained and `KDIVE_INSTALL_STAGING` was
+empty.
 
 #### Break-glass provider tool cells (#3112)
 

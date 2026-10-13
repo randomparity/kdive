@@ -7,6 +7,7 @@ import pytest
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from scripts.coverage_campaign.contract import (
     FILTERED_LIST_BOUNDARIES,
+    Cell,
     Inventory,
     build_contract,
     load_mapping,
@@ -122,6 +123,9 @@ _OPERATOR_NODE = "tests/integration/test_operator_tool_cells_live.py::test_opera
 _SYSTEM_NODE = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
 _RUN_NODE = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
 _BREAKGLASS_NODE = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+_POWER_NODE = (
+    "tests/integration/test_power_snapshot_tool_cells_live.py::test_power_snapshot_tool_cell"
+)
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _LIMITS_NODE = "tests/integration/test_resource_limits_live.py::test_local_resource_boundary"
 _REMOTE_DEEP_NODE = (
@@ -227,6 +231,11 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert len(remote_runs) == 192 and {c.node_id for c in remote_runs} == {_RUN_NODE}
     glass = [c for c in contract.cells if c.operation in _OPERATOR_SPLIT[3112]]
     assert len(glass) == 272 and {c.node_id for c in glass} == {_BREAKGLASS_NODE}
+    power = [c for c in contract.cells if c.operation in _POWER_SNAPSHOT_TOOLS]
+    local_power = [c for c in power if c.provider == "local-libvirt"]
+    # A local scenario id names no architecture, so the ppc64le cells (#2818's) share the node.
+    assert len(local_power) == 200 and {c.node_id for c in local_power} == {_POWER_NODE}
+    assert {c.node_id for c in power if c.provider == "remote-libvirt"} == {None}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -239,6 +248,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_SYSTEM_TOOLS,
         *_RUN_TOOLS,
         *_OPERATOR_SPLIT[3112],
+        *_POWER_SNAPSHOT_TOOLS,
     }
     limits = [c for c in contract.cells if c.owner == 3118]
     local_limits = [c for c in limits if c.provider == "local-libvirt"]
@@ -544,3 +554,93 @@ def test_remote_publish_functional_cells_are_server_only_admission_refusals(
     assert all(c.guest_arch == c.host_arch and c.accelerator != "none" for c in rejections)
     local = [c for c in cells if c.operation == "images.publish" and c.provider == "local-libvirt"]
     assert {c.kind for c in local} == {"functional", "rejection"}
+
+
+_SNAPSHOT_TOOLS = {
+    "systems.delete_snapshot",
+    "systems.list_snapshots",
+    "systems.restore",
+    "systems.snapshot",
+}
+
+
+def _capability_cells(cells: tuple[Cell, ...]) -> dict[str, Cell]:
+    return {c.id: c for c in cells if c.id.endswith("/capability")}
+
+
+def test_capability_cells_follow_the_support_verdict(inventory: Inventory) -> None:
+    # Operator decision R2 (2026-10-13), ADR-0722: a supported capability is proven by its
+    # functional cell, so only an unsupported verdict has a capability refusal to prove.
+    cells = build_contract(inventory=inventory).cells
+    by_id = {c.id: c for c in cells}
+    capability = _capability_cells(cells)
+    for cell in capability.values():
+        sibling = by_id[cell.id.removesuffix("/capability") + "/functional"]
+        assert sibling.kind == "unsupported" and sibling.unsupported_reason, cell.id
+        assert cell.kind == "rejection"
+        assert cell.assertions == ("capability", "unchanged-state", "cleanup")
+    # Every capability the libvirt providers serve is supported, except fadump on x86_64,
+    # which ArchTraits refuses after the provider verdict.
+    assert sorted(capability) == sorted(
+        f"tool/vmcore.fetch/fadump/{configuration}/{exposure}/local-libvirt/x86_64/capability"
+        for configuration in ("default", "recovery")
+        for exposure in ("direct", "gateway")
+    )
+    gated = {name for g in load_mapping().groups for name in g.capabilities}
+    supported = [c for c in cells if c.operation in gated and c.kind == "functional"]
+    assert supported and not any(c.id.rsplit("/", 1)[0] + "/capability" in by_id for c in supported)
+
+
+def test_unsupported_capability_gains_its_refusal_cell(inventory: Inventory) -> None:
+    support = dict(inventory.capabilities)
+    support["local-libvirt"] = replace(support["local-libvirt"], supports_snapshots=False)
+    baseline = build_contract(inventory=inventory).cells
+    changed = build_contract(inventory=replace(inventory, capabilities=support)).cells
+    added = _capability_cells(changed).keys() - _capability_cells(baseline).keys()
+    assert sorted(added) == sorted(
+        f"tool/{tool}/supports_snapshots/{configuration}/{exposure}/local-libvirt/{arch}/capability"
+        for tool in _SNAPSHOT_TOOLS
+        for configuration in ("default", "recovery")
+        for exposure in ("direct", "gateway")
+        for arch in inventory.arches
+    )
+    for cell_id in added:
+        functional = next(c for c in changed if c.id == cell_id.rsplit("/", 1)[0] + "/functional")
+        assert functional.kind == "unsupported"
+        assert functional.unsupported_reason == "ProviderSupport.supports_snapshots"
+    # Identities other than the added refusals are unchanged.
+    assert {c.id for c in changed} - added == {c.id for c in baseline}
+
+
+_POWER_SNAPSHOT_TOOLS = {"control.power", *_SNAPSHOT_TOOLS}
+_LOCAL_CONTROL_TOOLS = {
+    "control.capture_traffic",
+    "control.diagnostic_sysrq",
+    "control.watch_for_crash",
+}
+
+
+def test_power_snapshot_owners_follow_the_approved_split(inventory: Inventory) -> None:
+    # Campaign scope (2026-10-07): #2815 proves the five local x86_64 power/snapshot tools; local
+    # traffic/SysRq/watch is #3115's, remote #3116's and every ppc64le cell the POWER lane's.
+    cells = [
+        c
+        for c in build_contract(inventory=inventory).cells
+        if c.operation in _POWER_SNAPSHOT_TOOLS | _LOCAL_CONTROL_TOOLS
+    ]
+    for cell in cells:
+        expected = (
+            2818
+            if cell.guest_arch == "ppc64le"
+            else 3116
+            if cell.provider == "remote-libvirt"
+            else 3115
+            if cell.operation in _LOCAL_CONTROL_TOOLS
+            else 2815
+        )
+        assert cell.owner == expected, cell.id
+    counts = {o: len([c for c in cells if c.owner == o]) for o in (2815, 2818, 3115, 3116)}
+    assert counts == {2815: 100, 2818: 320, 3115: 60, 3116: 160}
+    owned = [c for c in cells if c.owner == 2815]
+    assert {c.kind for c in owned if c.id.endswith("/functional")} == {"functional"}
+    assert len([c for c in owned if c.kind == "functional"]) == 20

@@ -11,12 +11,15 @@ import subprocess
 import sys
 import tarfile
 import xml.etree.ElementTree as ET
+from dataclasses import fields
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 import yaml
 from jsonschema import Draft202012Validator
+
+from kdive.providers.external_boot_authority.host import AuthorityHostConfig
 
 ROOT = Path(__file__).resolve().parents[2]
 APPLIANCE = ROOT / "deploy" / "remote_module_appliance"
@@ -486,6 +489,24 @@ def test_ansible_installs_only_the_selected_supported_architectures() -> None:
     site = (ROOT / "deploy" / "ansible" / "site.yml").read_text(encoding="utf-8")
     assert "role: remote_libvirt_module_appliance" in site
     assert "remote_libvirt_module_appliance_enabled | bool" in site
+
+
+def test_installer_and_both_architecture_templates_match_the_fixed_consumer_root() -> None:
+    expected = Path("/var/lib/kdive/remote-module-appliance/v1")
+    consumer = next(
+        field
+        for field in fields(AuthorityHostConfig)
+        if field.name == "remote_module_appliance_root"
+    ).default
+    defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text())
+    assert consumer == expected
+    assert defaults["remote_libvirt_module_appliance_install_dir"] == str(expected)
+    for architecture in ("x86_64", "ppc64le"):
+        domain = ET.parse(APPLIANCE / f"domain-v1-{architecture}.xml")
+        assert domain.findtext("./os/kernel") == str(expected / architecture / "image/vmlinuz")
+        assert domain.findtext("./os/initrd") == str(
+            expected / architecture / "image/initramfs.cpio"
+        )
 
 
 def test_image_config_closes_architectures_bounds_and_paths() -> None:
