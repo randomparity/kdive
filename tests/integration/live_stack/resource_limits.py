@@ -360,39 +360,54 @@ def statvfs(target: Path) -> dict[str, int]:
     return {"block": int(size), "f_bfree": int(free), "f_bavail": int(avail)}
 
 
+def _exists(path: Path) -> bool:
+    status = subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
+        ["sudo", "-n", "test", "-e", str(path)], timeout=10.0, check=False
+    ).returncode
+    assert status in (0, 1), f"cannot observe {path}: sudo test exited {status}"
+    return status == 0
+
+
 def mount_bounded(investigation_id: str, workdir: Path, size_mib: int) -> BoundedMount:
     """Mount a fresh ``size_mib`` ext4 loop filesystem at the investigation's upload directory.
 
     The directory must not exist yet: it belongs to this new investigation, and mounting over
     a directory with content would hide it. The filesystem has no root reserve (``-m 0``), so
     a root writer cannot exceed the calibrated bound, and no ``lost+found``, so it is empty.
+    A failed step undoes the earlier ones, so a refused fixture leaves nothing behind.
     """
+    if not _exists(Path(UPLOADS_DIR)):
+        raise ScenarioStop(
+            Outcome.BLOCKED, f"host preparation did not create {UPLOADS_DIR} for the workers"
+        )
     target = Path(UPLOADS_DIR) / str(UUID(investigation_id))
-    if (
-        subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
-            ["sudo", "-n", "test", "-e", str(target)], timeout=10.0, check=False
-        ).returncode
-        != 1
-    ):
+    if _exists(target):
         raise ScenarioStop(Outcome.FAILURE, "the new investigation's upload directory exists")
     image = workdir / "bounded.img"
     subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
         ["fallocate", "-l", f"{size_mib}M", str(image)], check=True, timeout=60.0
     )
     loop = _sudo("losetup", "--find", "--show", "--", str(image)).strip()
-    mount = BoundedMount(image, loop, target)
-    _sudo("mkfs.ext4", "-q", "-m", "0", loop)
-    _sudo("mkdir", "--", str(target))
     options = "nodev,nosuid,noexec"
     context = _selinux_context(Path(UPLOADS_DIR))
     if context:
         options += f",context={context}"
-    _sudo("mount", "-t", "ext4", "-o", options, loop, str(target))
-    _sudo("rmdir", "--", str(target / "lost+found"))
-    _sudo("chown", f"--reference={UPLOADS_DIR}", "--", str(target))
-    _sudo("chmod", f"--reference={UPLOADS_DIR}", "--", str(target))
-    assert mounted_source(target) == loop, "the bounded filesystem is not at the upload directory"
-    return mount
+    try:
+        _sudo("mkfs.ext4", "-q", "-m", "0", loop)
+        _sudo("mkdir", "--", str(target))
+        _sudo("mount", "-t", "ext4", "-o", options, loop, str(target))
+        _sudo("rmdir", "--", str(target / "lost+found"))
+        _sudo("chown", f"--reference={UPLOADS_DIR}", "--", str(target))
+        _sudo("chmod", f"--reference={UPLOADS_DIR}", "--", str(target))
+        assert mounted_source(target) == loop, "the bounded filesystem is not at its directory"
+    except BaseException:
+        if mounted_source(target) == loop:
+            _sudo("umount", "--", str(target))
+        if _exists(target):
+            _sudo("rmdir", "--", str(target))
+        _sudo("losetup", "-d", loop)
+        raise
+    return BoundedMount(image, loop, target)
 
 
 def mounted_source(target: Path) -> str | None:

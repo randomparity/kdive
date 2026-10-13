@@ -245,3 +245,37 @@ def test_bindings_bind_every_local_cell_and_leave_unbuilt_inputs_null(tmp_path: 
         assert (context.guest_os, context.accelerator) == ("rocky:10", "kvm")
         assert context.image_sha256 == rl.file_sha256(image)
         assert context.kernel_build_id is None
+
+
+def test_a_failed_mount_undoes_the_loop_and_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    created: set[Path] = set()
+    calls: list[str] = []
+
+    def sudo(*argv: str, **_k: object) -> str:
+        calls.append(argv[0] if argv[0] != "losetup" else " ".join(argv[:2]))
+        if argv[0] == "mkdir":
+            created.add(Path(argv[-1]))
+        if argv[0] == "rmdir":
+            created.discard(Path(argv[-1]))
+        assert argv[0] != "mount", "mount refused"
+        return "/dev/loop7\n" if argv[:2] == ("losetup", "--find") else ""
+
+    monkeypatch.setattr(rl, "_sudo", sudo)
+    monkeypatch.setattr(rl, "_exists", lambda p: p == Path(rl.UPLOADS_DIR) or p in created)
+    monkeypatch.setattr(rl, "mounted_source", lambda _t: None)
+    monkeypatch.setattr(rl, "_selinux_context", lambda _p: None)
+    with pytest.raises(AssertionError, match="mount refused"):
+        rl.mount_bounded(_JOB, tmp_path, 1)
+    assert calls == ["losetup --find", "mkfs.ext4", "mkdir", "mount", "rmdir", "losetup -d"]
+    assert not created
+
+
+def test_a_host_without_the_uploads_directory_is_blocked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(rl, "_exists", lambda _p: False)
+    with pytest.raises(rl.ScenarioStop) as stop:
+        rl.mount_bounded(_JOB, tmp_path, 1)
+    assert stop.value.outcome is rl.Outcome.BLOCKED
