@@ -177,17 +177,12 @@ def domain_state(system_id: str) -> str:
 
 
 def checkpoints(system_id: str) -> list[str]:
-    """The domain's native snapshot names, oldest first."""
+    """The domain's native snapshot names, sorted by name."""
     conn, domain = _domain(system_id)
     try:
-        snaps = domain.listAllSnapshots()
-        dated = []
-        for snap in snaps:
-            created = ET.fromstring(snap.getXMLDesc(0)).findtext("creationTime")  # noqa: S314  # nosec B314
-            dated.append((int(created or 0), snap.getName()))
+        return sorted(snap.getName() for snap in domain.listAllSnapshots())
     finally:
         conn.close()
-    return [name for _, name in sorted(dated)]
 
 
 def domain_defined(system_id: str) -> bool:
@@ -238,7 +233,14 @@ class Session:
     async def job(self, tool: str, **args: object) -> ToolResponse:
         env = await self.call(tool, **args)
         assert env.status == "queued", f"{tool} answered {env.status}, not a queued job"
-        return await drain_job(self.guest.op, tool, env.object_id)
+        try:
+            return await drain_job(self.guest.op, tool, env.object_id)
+        finally:
+            # A disk-only checkpoint, or its restore or delete, can move the domain to another
+            # overlay. The System owns every disk it used, so the cleanup proves each absent.
+            for disk in domain_disks(self.guest.lane.xml(self.guest.system_id)):
+                if disk not in self.guest.owned:
+                    self.guest.owned.append(disk)
 
     async def status(self) -> str:
         env = ok(await scalar(self.guest.op, "systems.get", system_id=self.guest.system_id), "get")
@@ -278,10 +280,6 @@ class Session:
         rows = {str(r.get("name")): r for r in await self.listing()}
         assert rows.get(name, {}).get("state") == "available", f"{name} is not available"
         assert name in checkpoints(self.guest.system_id), f"libvirt holds no {name} checkpoint"
-        # A disk-only snapshot may switch the domain to a new overlay, which the System owns.
-        for disk in domain_disks(self.guest.lane.xml(self.guest.system_id)):
-            if disk not in self.guest.owned:
-                self.guest.owned.append(disk)
 
     async def restore(self, name: str, *, paused: bool = False) -> None:
         await self.job(
@@ -363,10 +361,11 @@ async def list_body(s: Session) -> dict[str, object]:
         (str(i.data.get("name")), i.data.get("state"), i.data.get("include_memory"))
         for i in env.items
     ]
-    # The tool lists newest first; libvirt's creation times order the same checkpoints oldest first.
+    # The tool lists newest first. libvirt's creation times have one-second resolution, so its
+    # inventory is compared as a set.
     assert rows == [(n, "available", True) for n in reversed(names)], f"listed {rows}"
     native = checkpoints(s.guest.system_id)
-    assert native == names, f"libvirt holds {native}"
+    assert native == sorted(names), f"libvirt holds {native}"
     for name in names:
         await s.delete(name)
     return {"listed": len(rows), "order": "newest-first", "matches_libvirt": True}
@@ -378,6 +377,8 @@ async def delete_body(s: Session) -> dict[str, object]:
     await s.seeded()
     await s.snapshot(name)
     await s.delete(name)
+    # Admission refuses a name whose row is still available (snapshot_name_in_use), so a new
+    # checkpoint under the same name shows the durable row is gone.
     await s.snapshot(name)
     await s.delete(name)
     return {"deleted": True, "name_reusable": True}

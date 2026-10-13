@@ -174,3 +174,32 @@ def test_protected_state_adds_the_target_jobs_and_domain(monkeypatch: pytest.Mon
 
 def test_grants_without_a_role_are_membership_only() -> None:
     assert power_snapshots.grants("p", None) == Grants("p-member", ("p",), {})
+
+
+def test_a_failed_job_still_owns_the_disks_it_switched_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cell = next(
+        c
+        for c in build_contract().cells
+        if c.operation == "systems.restore" and c.kind == "functional"
+    )
+
+    async def drain(*_args: object, **_kw: object) -> ToolResponse:
+        raise AssertionError("job failed")
+
+    monkeypatch.setattr(power_snapshots, "drain_job", drain)
+    monkeypatch.setattr(power_snapshots, "domain_disks", lambda _xml: ["base", "overlay-2"])
+    lane = type("L", (), {"xml": staticmethod(lambda _system_id: "<domain/>")})()
+    owned = ["base"]
+    guest = type("G", (), {"op": _Op(), "system_id": "s", "lane": lane, "owned": owned})()
+    session = Session(
+        CellRun(cell, EvidenceWriter(tmp_path)),
+        cast(Guest, guest),
+        cast(HttpCaller, _Caller()),
+        "token",
+        power_snapshots.Endpoint("h", 22),
+    )
+    with pytest.raises(AssertionError, match="job failed"):
+        asyncio.run(session.restore("n"))
+    assert owned == ["base", "overlay-2"]
