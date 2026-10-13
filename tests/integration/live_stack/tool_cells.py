@@ -16,6 +16,10 @@ provisions the lane image in the cell's project, observes the guest, proves the 
 and the owned ``cleanup``. :func:`lane_target` is the rejection target, one torn-down System per
 stack and provider.
 
+An authority-owned System has a third frame,
+:func:`~tests.integration.live_stack.authority_lane.on_authority_system`, which a carrier selects
+explicitly: it observes the System on the authority's private daemon rather than over SSH.
+
 ``python -m tests.integration.live_stack.tool_cells bindings --candidate SHA --out FILE`` writes
 the expected ``Context`` of every bound service tool cell and every bound local-libvirt tool cell
 native to this host; ``--remote`` adds the bound remote-libvirt cells of the provider host;
