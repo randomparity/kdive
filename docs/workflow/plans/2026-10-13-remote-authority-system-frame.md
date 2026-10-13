@@ -10,9 +10,12 @@ Tech stack: Python 3.14, pytest, psycopg, libvirt-python (remote, authority venv
 Spec: `docs/workflow/specs/2026-10-13-authority-system-frame-design.md`, section
 "Addendum: remote authority branch (#3209)".
 
-Expected implementation size: 330–430 changed lines (M) — two support functions and a program
-(~110), the remote branch and shared-helper extraction (~130), unit tests (~150), live arm and
-runbook (~40).
+Expected implementation size: 1050–1150 changed lines (M) — corrected after the build from the
+actual diff (1101 lines): support observer and gates ~125, frame branch and shared-helper
+extraction ~350, unit tests ~550 (the remote recorder, parametrized stops and cleanup failures, the
+program run against a fake libvirt, the catalog query against the migrated database), live arm and
+runbook ~80. The first estimate (330–430) under-counted the tests and the extraction; the frozen
+scope and design are unchanged.
 
 ## Global Constraints
 
