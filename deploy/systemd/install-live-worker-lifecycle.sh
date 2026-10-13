@@ -471,14 +471,16 @@ _reconcile_libvirt_tuple() {
 # locking the tree before it is done makes initialization fail and the daemon exit (#3208). A
 # completed client connection is the first outside sign that it is done. Every check here is
 # read-only: the tree stays exactly as the daemon is writing it. The operator owns the tree until
-# the lock, so the pid file can be swapped for a FIFO or device; the read is bounded too.
+# the lock and can repoint the pid file at anything, so it is read as the operator, with a bound.
 _await_libvirt_daemon_ready() {
   local pid_path="$1" operator="$2" uri="$3" timeout_seconds="$4" deadline pid="" probe_error=""
 
   deadline=$((SECONDS + timeout_seconds))
   while ((SECONDS < deadline)); do
-    if [[ -z $pid && -f $pid_path ]]; then
-      pid="$(timeout 1 head -c 32 -- "$pid_path" 2>/dev/null)" || pid=""
+    if [[ -z $pid && -f $pid_path && ! -L $pid_path ]]; then
+      pid="$(
+        timeout -k 1 1 runuser -u "$operator" -- head -c 32 -- "$pid_path" 2>/dev/null
+      )" || pid=""
       [[ $pid =~ ^[1-9][0-9]*$ ]] || pid=""
     fi
     if [[ -n $pid ]] && ! kill -0 "$pid" 2>/dev/null; then

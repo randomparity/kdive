@@ -2829,7 +2829,7 @@ _FAKE_COMMANDS = {
     "runuser": '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n',
     "journalctl": '#!/bin/sh\ncat -- "$FAKE_JOURNAL"\n',
     # Ready exactly when the fake daemon's driver initialization has finished.
-    "virsh": '#!/bin/sh\ntest -d "$XDG_READY_DIR"\n',
+    "virsh": '#!/bin/sh\ntest -z "$FAKE_NEVER_READY" && test -d "$XDG_READY_DIR"\n',
 }
 
 
@@ -2853,6 +2853,8 @@ _lock_libvirt_runtime() {
   [[ -d $XDG_READY_DIR ]] || echo "runtime locked before the daemon was ready" >&2
   _installer_lock "$@"
 }
+eval "$(declare -f _await_libvirt_daemon_ready | sed '1s/^_await/_installer_await/')"
+_await_libvirt_daemon_ready() { _installer_await_libvirt_daemon_ready "$1" "$2" "$3" 2; }
 _start_libvirt_daemon "$2" "$3" op "$4" "$5" "$4"
 """
     env = {
@@ -2908,12 +2910,42 @@ def test_installer_fails_fast_with_the_daemon_log_when_init_fails(tmp_path: Path
     assert "Driver state initialization failed" in result.stderr
 
 
+def test_installer_fails_when_a_live_daemon_never_becomes_ready(tmp_path: Path) -> None:
+    result = _run_fake_libvirt_start(tmp_path, init_delay=0.5, failure="FAKE_NEVER_READY")
+
+    assert result.returncode != 0
+    assert "was not ready within 2s" in result.stderr
+    assert "did not produce a complete live tuple" in result.stderr
+
+
 def test_installer_reports_the_daemon_journal_when_launch_fails(tmp_path: Path) -> None:
     result = _run_fake_libvirt_start(tmp_path, init_delay=0, failure="FAKE_LAUNCH_FAILS")
 
     assert result.returncode != 0
     assert "failed to start" in result.stderr
     assert "Unable to obtain pidfile" in result.stderr
+
+
+def test_installer_readiness_wait_does_not_follow_a_pid_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.write_text("999999999\n", encoding="utf-8")
+    pid_path = tmp_path / "libvirtd.pid"
+    pid_path.symlink_to(target)
+    command = r"""
+source "$1"
+_await_libvirt_daemon_ready "$2" op qemu+unix:///session 1
+"""
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(pid_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "was not ready within 1s" in result.stderr
+    assert "999999999" not in result.stderr
 
 
 def test_installer_readiness_wait_is_bounded(tmp_path: Path) -> None:
