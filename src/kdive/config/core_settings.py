@@ -488,14 +488,6 @@ BUILD_WORKSPACE = Setting(
     processes=_WORKER,
     help="Worker scratch root for kernel builds.",
 )
-KERNEL_SRC = Setting(
-    name="KDIVE_KERNEL_SRC",
-    parse=_str,
-    default="",
-    group="build",
-    processes=_WORKER,
-    help="Kernel source tree the worker builds from.",
-)
 BUILD_COMPONENT_ROOTS = Setting(
     name="KDIVE_BUILD_COMPONENT_ROOTS",
     parse=_str,
@@ -1076,7 +1068,6 @@ SETTINGS = [
     LIVE_SCRIPT_MAX_TIMEOUT_SECONDS,
     SECRETS_ROOT,
     BUILD_WORKSPACE,
-    KERNEL_SRC,
     BUILD_COMPONENT_ROOTS,
     LOCAL_BUILD_REMOTE_ALLOWLIST,
     BUILD_USER,
