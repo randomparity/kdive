@@ -168,7 +168,8 @@ message. Consumed only within `env.sh`.
 `localhost:5434`; `127.0.0.1:5434`, `0.0.0.0:5434`, `[::1]:5434` → `localhost:5434`;
 `192.0.2.10:5434` → `192.0.2.10:5434`; `[2001:db8::1]:5434` and `2001:db8::1:5434` →
 `[2001:db8::1]:5434`; `bad`, `1.2.3.4:0`, `1.2.3.4:70000`, `a b:5434`, `x/y:5434` → non-zero with
-the variable named. Red: today's text gives `localhost:192.0.2.10:5434` and rc 0. Green:
+the variable named; and `KDIVE_OIDC_PORT=192.0.2.10:8090` gives the issuer
+`http://192.0.2.10:8090/default`. Red: today's text gives `localhost:192.0.2.10:5434` and rc 0. Green:
 `just test-verbose tests/scripts/test_live_stack_scripts.py -k "endpoint or client_urls"`.
 
 Steps: write tests, see red; add before `database_host`:
@@ -250,7 +251,8 @@ from `/etc/kdive/live-worker-authority.env`, a contradicting export is refused, 
 port values derive working default DSNs. Under the frame section step 2: the fixture-mode
 inventory (a separate copy of the lane file with only the local entry's `authority_instance`
 removed; the routed file is not edited), that the whole stack is brought up on that copy with the
-harness exporting the same path and a `stack-services.sh` run switches back, why a plain resource
+harness exporting the same path and a `stack-services.sh` run switches back (only with no open
+authority-owned System, job or recovery on the lane), why a plain resource
 cannot sit beside the routed one, and the pre-mutation stop. In the proof command, use
 `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"` as it stands. In `self-hosted-kvm-runner.md`,
 name the published file where it says refs are published. Add one sentence to
