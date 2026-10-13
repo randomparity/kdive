@@ -87,7 +87,6 @@ def _gate_env(tmp_path: Path, python: Path) -> tuple[dict[str, str], Path]:
         "KDIVE_WORKER_INCARNATION_ID": _INCARNATION,
         "KDIVE_WORKER_INCARNATION_KIND": "local",
         "KDIVE_WORKER_PYTHON": str(python),
-        "KDIVE_WORKER_SOURCE_ROOT": "/checkout",
     }
     return env, slot
 
@@ -271,7 +270,6 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
         "KDIVE_FIXTURE_CATALOG_PATH": env["KDIVE_FIXTURE_CATALOG_PATH"],
         "KDIVE_HEALTH_BIND_ADDR": env["KDIVE_HEALTH_BIND_ADDR"],
         "KDIVE_INSTALL_STAGING": env["KDIVE_INSTALL_STAGING"],
-        "KDIVE_KERNEL_SRC": env["KDIVE_KERNEL_SRC"],
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": env[
             "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES"
         ],
@@ -309,7 +307,6 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
         ],
         "KDIVE_WORKER_INCARNATION_ID": _INCARNATION,
         "KDIVE_WORKER_INCARNATION_KIND": "local",
-        "KDIVE_WORKER_SOURCE_ROOT": env["KDIVE_WORKER_SOURCE_ROOT"],
     }
     monkeypatch.setattr(os, "environ", captured["environment"])
     environment = cast(dict[str, str], captured["environment"])

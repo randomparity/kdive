@@ -3537,7 +3537,6 @@ def _lifecycle_start_with_inventory(
         "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
         "KDIVE_INSTALL_STAGING": "/tmp/install",
         "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
-        "KDIVE_KERNEL_SRC": "/tmp/kernel",
         "KDIVE_WORKER_DATABASE_URL": "postgresql://worker-member/kdive",
         "AWS_ACCESS_KEY_ID": "access-key",
         "AWS_SECRET_ACCESS_KEY": "secret-key",  # pragma: allowlist secret
@@ -3545,6 +3544,8 @@ def _lifecycle_start_with_inventory(
     }
     if "KDIVE_SECRETS_ROOT" not in (extra_env or {}):
         env.pop("KDIVE_SECRETS_ROOT", None)
+    # #3193: start needs no kernel tree; drop an inherited value so it cannot mask that.
+    env.pop("KDIVE_KERNEL_SRC", None)
     result = subprocess.run(
         [
             "bash",
@@ -3656,7 +3657,6 @@ def test_lifecycle_start_rejects_mismatched_authority_geometry_before_request() 
             "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
             "KDIVE_INSTALL_STAGING": "/tmp/install",
             "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
-            "KDIVE_KERNEL_SRC": "/tmp/kernel",
             "KDIVE_WORKER_DATABASE_URL": "postgresql://worker-member/kdive",
             "AWS_ACCESS_KEY_ID": "access-key",
             "AWS_SECRET_ACCESS_KEY": "secret-key",  # pragma: allowlist secret
@@ -4120,7 +4120,6 @@ def test_lifecycle_request_construction_hides_oversized_secret_canaries(tmp_path
             "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
             "KDIVE_INSTALL_STAGING": "/tmp/install",
             "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
-            "KDIVE_KERNEL_SRC": "/tmp/kernel",
             "KDIVE_WORKER_DATABASE_URL": canary,
             "AWS_ACCESS_KEY_ID": canary,
             "AWS_SECRET_ACCESS_KEY": canary,
