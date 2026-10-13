@@ -118,7 +118,7 @@ BEGIN
         RAISE EXCEPTION 'local harness login kdive-harness has incompatible attributes'
             USING HINT = 'drop the role so the bootstrap re-creates it';
     END IF;
-    IF NOT pg_has_role(current_user, harness_oid, 'ADMIN') THEN
+    IF NOT pg_has_role(current_user, harness_oid, 'MEMBER WITH ADMIN OPTION') THEN
         RAISE EXCEPTION 'local harness login kdive-harness is not administered by %', current_user
             USING HINT = 'drop the role so the bootstrap re-creates it as the migration owner';
     END IF;
