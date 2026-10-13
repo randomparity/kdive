@@ -116,7 +116,10 @@ worker quiescence and no fetch lease/job/System dependent on its staged image; t
 and detach BEFORE closing the investigation, because the close-driven rootfs reclaim removes
 the UUID directory and cannot remove a live mountpoint (it would clear its drain marker and
 leave an orphan in the shared uploads root). After unmount, check the underlying directory
-is empty, then close the investigation and verify the reclaim removed the directory.
+is empty and remove the directory the test created, then close the investigation. The
+close-driven reclaim only runs after its grace period (a day by default), so the carrier does
+not wait on it. A host whose preparation never created the uploads root is a blocked cell, not
+a fixture the test may create.
 Uncertainty leaves the fixture mounted and retained. Existing image/catalog/object ownership cleanup remains
 explicit; failed cleanup never counts as the cleanup assertion.
 
@@ -136,7 +139,8 @@ Inside-window subcase: measure baseline, require substantial margin, choose a fi
 at least60s beyond baseline but below half the actual boot window. If those bounds cannot
 both hold, block this fixture instead of inflating product deadlines. Assert pending job,
 retained allocation/capacity while delayed, then successful fresh-kernel readiness.
-Beyond-window subcase: a fresh owned System has a persistent per-boot delay longer than
+Beyond-window subcase: the same owned System and Run, re-armed, have a persistent per-boot
+delay (forced runs.boot) longer than
 the actual configured window plus60s. Record each actual attempt phase/category and terminal
 job outcome. Remote boot reads the old boot ID via QGA before rebooting; with the R4 fix a
 retry that starts while the delayed boot is still in progress waits for the agent inside the
