@@ -595,6 +595,7 @@ class Held:
     domains_before: set[str]
     system_id: str | None = None
     disks: list[str] = field(default_factory=list)
+    overlays: list[str] = field(default_factory=list)
     sampler: Sampler | None = None
 
     async def provision(self, profile: dict[str, object], **args: object) -> str:
@@ -617,7 +618,8 @@ class Held:
         xml = await asyncio.to_thread(domain_xml, self.system_id)
         accelerator = ET.fromstring(xml).get("type", "")  # noqa: S314  # nosec B314
         self.run.observed["accelerator"] = ACCELERATORS.get(accelerator, "none")
-        self.disks = domain_disks(xml)
+        self.overlays = domain_disks(xml)
+        self.disks = list(self.overlays)
         assert self.sampler is not None
         await self.sampler.sample(self.op)
         return self.system_id
@@ -634,13 +636,16 @@ class Held:
         added = await asyncio.to_thread(kdive_domains) - self.domains_before
         assert systems == [self.system_id], f"Systems under the allocation: {systems}"
         assert added <= {domain_name_for(UUID(self.system_id))}, f"domains added: {sorted(added)}"
-        assert len(self.disks) <= 1, f"owned overlays: {len(self.disks)}"
+        overlays = (
+            domain_disks(await asyncio.to_thread(domain_xml, self.system_id)) if added else []
+        )
+        assert overlays == self.overlays and len(overlays) <= 1, f"owned overlays: {overlays}"
         self.run.prove(
             "no-duplicates",
             {
                 "systems": 1,
                 "domains_added": len(added),
-                "overlays": len(self.disks),
+                "overlays": len(overlays),
                 **(extra or {}),
             },
         )
