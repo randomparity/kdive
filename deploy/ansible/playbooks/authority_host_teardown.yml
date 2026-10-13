@@ -141,6 +141,7 @@
         - /etc/systemd/system/kdive-external-boot-authority.service
         - /etc/tmpfiles.d/kdive-provider-authority.conf
         - /etc/kdive/provider-authority.env
+        - /etc/kdive/live-worker-authority.env
         - /etc/kdive/libvirtd-external-boot-authority.conf
         - "{{ authority_state }}/.config/systemd/user/kdive-libvirtd-external-boot-authority.service"
         - "{{ authority_runtime }}"
@@ -367,6 +368,7 @@
         - /etc/systemd/system/kdive-external-boot-authority.service
         - /etc/tmpfiles.d/kdive-provider-authority.conf
         - /etc/kdive/provider-authority.env
+        - /etc/kdive/live-worker-authority.env
         - /etc/kdive/libvirtd-external-boot-authority.conf
         - "{{ authority_runtime }}"
         - "{{ authority_install }}"

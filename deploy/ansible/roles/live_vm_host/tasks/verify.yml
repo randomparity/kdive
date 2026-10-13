@@ -229,6 +229,34 @@
         (live_vm_host_worker_libvirt_env.content | b64decode)
         == 'KDIVE_LIBVIRT_URI=' + live_vm_host_worker_libvirt_uri + '\n'
 
+- name: Inspect the published fixed-worker authority route
+  ansible.builtin.stat:
+    path: /etc/kdive/live-worker-authority.env
+  register: live_vm_host_worker_authority_route_file
+
+- name: Assert the authority route is published only with the worker client
+  ansible.builtin.assert:
+    that: >-
+      live_vm_host_worker_authority_route_file.stat.exists
+      == (live_vm_host_worker_authority_enabled | bool)
+
+- name: Read the published fixed-worker authority route
+  ansible.builtin.slurp:
+    path: /etc/kdive/live-worker-authority.env
+  register: live_vm_host_worker_authority_route
+  when: live_vm_host_worker_authority_enabled | bool
+
+- name: Assert the authority route is public, root-owned and exact
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_worker_authority_route_file.stat.pw_name == "root"
+      - live_vm_host_worker_authority_route_file.stat.gr_name == "root"
+      - live_vm_host_worker_authority_route_file.stat.mode == "0644"
+      - >-
+        (live_vm_host_worker_authority_route.content | b64decode)
+        == lookup('ansible.builtin.template', 'live-worker-authority.env.j2')
+  when: live_vm_host_worker_authority_enabled | bool
+
 - name: Inspect the installed lifecycle revision
   ansible.builtin.stat:
     path: /opt/kdive-live-worker-lifecycle/revision
