@@ -1102,8 +1102,9 @@ provisioning is blocked by #3144 and #3148, and an attempt strands its allocatio
    registered digest. Stage the lane image's bytes there first, as for the installed carrier.
    The allocated resource must carry no `authority_instance` in the lane's `systems.toml`;
    otherwise the frame releases the allocation and stops `blocked`. Export
-   `KDIVE_SYSTEMS_TOML` naming that file: the test session sandboxes the XDG default, and the
-   frame stops `blocked` without it.
+   `KDIVE_SYSTEMS_TOML` naming the exact file the running server and fixed workers were started
+   with: the frame checks routing in its own process, the test session sandboxes the XDG default,
+   and the frame stops `blocked` without the variable.
 3. It moves the System onto the private daemon with `provision-authority-fixture.py`, runs the
    confinement probes and the fixture's read-only verification, then runs the cell body.
 4. Cleanup drains every open job of the System and its Runs, closes the Investigations the body
