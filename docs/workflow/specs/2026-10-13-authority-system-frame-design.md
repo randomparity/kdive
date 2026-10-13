@@ -31,7 +31,7 @@ per-System authority config and ledger, so it cannot fit those two contracts unc
 
 ### Lane configuration
 
-`KDIVE_LIVE_STACK_LOCAL_AUTHORITY_CONFIG` names an owner-only mode-0400/0600 JSON file, read with
+`LOCAL_AUTHORITY_LANE_CONFIG` names an owner-only mode-0400/0600 JSON file, read with
 the existing `load_config` metadata checks (moved into a shared reader). Closed fields:
 `installed_revision` (40 hex), `authority_service` (the literal
 `kdive-external-boot-authority.service`), `system_mode` (`fixture` | `public`). An unset variable

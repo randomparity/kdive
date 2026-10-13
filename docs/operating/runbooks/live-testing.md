@@ -1086,7 +1086,7 @@ lane for the HTTP tool cells that need one. A carrier selects it explicitly thro
 frame observes the System on the authority's private daemon and private roots, never over SSH.
 The remote authority frame is #3209, and a remote cell stops `blocked` naming it.
 
-`KDIVE_LIVE_STACK_LOCAL_AUTHORITY_CONFIG` names an owner-only mode-`0400` or mode-`0600` JSON file
+`LOCAL_AUTHORITY_LANE_CONFIG` names an owner-only mode-`0400` or mode-`0600` JSON file
 with exactly `installed_revision` (the full 40-character SHA), `authority_service` (the literal
 `kdive-external-boot-authority.service`) and `system_mode`. An unset variable stops the cell
 `blocked`. `system_mode: "public"` stops `blocked` before any mutation: public authority-owned
@@ -1115,7 +1115,7 @@ The frame's own proof runs with:
 
 ```sh
 KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
-KDIVE_LIVE_STACK_LOCAL_AUTHORITY_CONFIG=/protected/authority-lane.json \
+LOCAL_AUTHORITY_LANE_CONFIG=/protected/authority-lane.json \
   uv run python -m pytest tests/integration/test_authority_lane_frame_live.py -m live_stack -v
 ```
 

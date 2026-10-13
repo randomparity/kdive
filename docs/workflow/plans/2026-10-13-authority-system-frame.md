@@ -640,7 +640,7 @@ from tests.live_vm.installed_local_authority_support import (
 )
 from tests.mcp.json_data import data_str
 
-CONFIG_ENV = "KDIVE_LIVE_STACK_LOCAL_AUTHORITY_CONFIG"
+CONFIG_ENV = "LOCAL_AUTHORITY_LANE_CONFIG"
 # The fixed worker input the fixture script copies onto the private daemon.
 FIXTURE_ROOTFS = "/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2"
 _AUTHORITY_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
@@ -1141,7 +1141,7 @@ Verification:
   `test_authority_frame_success` and `test_authority_frame_body_failure`; skip when
   `CONFIG_ENV` is unset; red observed by the unit bite in Task 2 (a live red would need a
   deliberately broken lane). Green on the lane:
-  `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" KDIVE_LIVE_STACK_LOCAL_AUTHORITY_CONFIG=<file> uv run python -m pytest tests/integration/test_authority_lane_frame_live.py -m live_stack -v`.
+  `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" LOCAL_AUTHORITY_LANE_CONFIG=<file> uv run python -m pytest tests/integration/test_authority_lane_frame_live.py -m live_stack -v`.
 - Contract: runbook text. Mode: task-test-not-applicable — prose with no executable consumer.
 
 Steps:
@@ -1150,7 +1150,7 @@ Steps:
 ```python
 """The authority-owned System frame on the installed local-authority lane (#3184).
 
-Gated ``live_stack`` and dormant unless ``KDIVE_LIVE_STACK_LOCAL_AUTHORITY_CONFIG`` names the lane
+Gated ``live_stack`` and dormant unless ``LOCAL_AUTHORITY_LANE_CONFIG`` names the lane
 config: one body that opens an Investigation and passes, and one that raises. Each must leave the
 lane's domains, private artifacts and capacity as it found them.
 """

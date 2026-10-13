@@ -76,7 +76,8 @@ from tests.live_vm.installed_local_authority_support import (
 )
 from tests.mcp.json_data import data_str
 
-CONFIG_ENV = "KDIVE_LIVE_STACK_LOCAL_AUTHORITY_CONFIG"
+# Test-only input, unprefixed so env-docs-check does not require it in the product catalog.
+CONFIG_ENV = "LOCAL_AUTHORITY_LANE_CONFIG"
 # The fixed worker input the fixture script copies onto the private daemon.
 FIXTURE_ROOTFS = "/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2"
 _AUTHORITY_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
