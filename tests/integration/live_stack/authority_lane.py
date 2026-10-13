@@ -344,6 +344,8 @@ async def allocated_resource(db_url: str, allocation_id: str) -> str:
 class AuthoritySystem:
     """A ``ready`` authority-owned System as the frame's body sees it.
 
+    ``op`` is the frame's own client with the project's ``admin`` role, which teardown needs; a
+    body proves a tool through its cell's role-scoped caller, never through ``op``.
     ``config`` and ``ledger`` are the invocation's: a body records each Investigation it opens in
     ``ledger`` (the frame closes any still open). A body releases every external boot it starts,
     in a ``finally`` block: the frame does not, and a held activation fails its cleanup.
