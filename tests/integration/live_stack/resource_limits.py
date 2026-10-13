@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -387,11 +388,11 @@ def mount_bounded(investigation_id: str, workdir: Path, size_mib: int) -> Bounde
     subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
         ["fallocate", "-l", f"{size_mib}M", str(image)], check=True, timeout=60.0
     )
-    loop = _sudo("losetup", "--find", "--show", "--", str(image)).strip()
     options = "nodev,nosuid,noexec"
     context = _selinux_context(Path(UPLOADS_DIR))
     if context:
         options += f",context={context}"
+    loop = _sudo("losetup", "--find", "--show", "--", str(image)).strip()
     try:
         _sudo("mkfs.ext4", "-q", "-m", "0", loop)
         _sudo("mkdir", "--", str(target))
@@ -867,8 +868,8 @@ async def local_insufficient_disk(
             )
             await held.prove_held({"staged_entries": 0})
             released = await held.release()
-            unmounted = True
             removed = await asyncio.to_thread(unmount_bounded, mount)
+            unmounted = True
             closed = await scalar(
                 held.op, "investigations.close", investigation_id=investigation, summary="done"
             )
@@ -972,11 +973,15 @@ async def local_slow_boot(
                 "slow-boot", {"delays": delays, "inside": proof, "beyond": {**late, **asdict(per)}}
             )
             await held.prove_held()
-        finally:
-            closed = await scalar(
-                held.op, "investigations.close", investigation_id=investigation, summary="done"
-            )
-            assert closed.status == "closed", f"investigation {closed.status}"
+        except BaseException:
+            # Best effort, so a failed close cannot replace the fault the cell recorded.
+            with contextlib.suppress(Exception):
+                await scalar(held.op, "investigations.close", investigation_id=investigation)
+            raise
+        closed = await scalar(
+            held.op, "investigations.close", investigation_id=investigation, summary="done"
+        )
+        assert closed.status == "closed", f"investigation {closed.status}"
         run.prove("cleanup", await held.release())
 
     await on_local_allocation(run, base_url, issuer, db_url, DEFAULT_SIZING, body)
