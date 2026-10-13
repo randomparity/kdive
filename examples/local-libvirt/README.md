@@ -8,7 +8,7 @@ The server and reconciler run as you, the workers run in fixed slot accounts und
 root-owned lifecycle witness (ADR-0574; every worker incarnation is registered and credentialed
 by it), and all of them share one operator-owned **session libvirt daemon** the contract
 publishes. The stack onboards a project named **`demo`**, and an MCP client opened in your
-kernel tree (`~/src/linux` by default) drives that very checkout.
+demo workspace (`KDIVE_DEMO_WORKSPACE`, your kernel tree by default when you have one) drives it.
 
 This is the supported first-run path for a local-libvirt install. The scripts wrap the
 maintained [live-stack lifecycle](../../docs/operating/runbooks/live-stack.md), adding host
@@ -73,6 +73,9 @@ on it.
 
 ```bash
 KDIVE_CHECKOUT="$PWD"    # run this block from the KDIVE checkout
+# demo-up.sh installs .mcp.json into your kernel tree (KDIVE_KERNEL_SRC, ~/src/linux when it
+# exists). With no kernel tree, name any directory instead:
+#   export KDIVE_DEMO_WORKSPACE=~/kdive-demo; mkdir -p "$KDIVE_DEMO_WORKSPACE"
 
 # 0. Prepare the host using the installation guide, then log out and back in for the groups.
 examples/local-libvirt/install-host.sh
@@ -90,8 +93,8 @@ examples/local-libvirt/build-image.sh fedora-kdive-ready-44
 # 3. In the shell you launch your MCP client from, export a fresh token:
 export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
 
-# 4. Open your MCP client in the kernel tree — it reads the installed .mcp.json:
-cd ~/src/linux            # the .mcp.json demo-up.sh installed lives here
+# 4. Open your MCP client in the demo workspace — it reads the installed .mcp.json:
+cd "${KDIVE_DEMO_WORKSPACE:-$HOME/src/linux}"   # the .mcp.json demo-up.sh installed lives here
 # ...launch your MCP client (it connects to http://127.0.0.1:8000/mcp as Bearer $KDIVE_TOKEN)
 
 # 5. When finished, return to KDIVE and stop the stack (data is kept):
@@ -172,7 +175,7 @@ The daemon logs live under the XDG state dir (`$XDG_STATE_HOME`, default
 the repo. Set `XDG_STATE_HOME` or `KDIVE_STACK_LOG_DIR` to relocate them.
 
 If you change `KDIVE_HTTP_HOST`/`KDIVE_HTTP_PORT` from `127.0.0.1:8000`, edit the `url` in
-the installed `~/src/linux/.mcp.json` to match.
+the installed `$KDIVE_DEMO_WORKSPACE/.mcp.json` to match.
 
 ## Optional inventory (`systems.toml`)
 
