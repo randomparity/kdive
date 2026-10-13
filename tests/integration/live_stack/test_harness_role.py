@@ -44,7 +44,14 @@ _FENCE_TABLES = (
     "investigation_build_uses",
     "investigation_build_use_recoveries",
 )
-_RUNTIME_ROLES = ("kdive_server", "kdive_worker", "kdive_reconciler", "kdive_lifecycle_witness")
+_RUNTIME_ROLES = (
+    "kdive_server",
+    "kdive_worker",
+    "kdive_reconciler",
+    "kdive_lifecycle_witness",
+    "kdive_provider_authority",
+)
+_TABLE_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"]
 _DDL = (
     "CREATE TABLE public.harness_probe (x int)",
     "ALTER TABLE public.budgets ADD COLUMN harness_probe int",
@@ -79,8 +86,12 @@ async def _assert_table_privileges(conn: psycopg.AsyncConnection) -> None:
 
 
 async def _assert_no_ddl_membership_or_ownership(conn: psycopg.AsyncConnection) -> None:
-    [(may_create,)] = await _rows(conn, "SELECT has_schema_privilege('public', 'CREATE')")
-    assert may_create is False
+    [(schema_create, database_create)] = await _rows(
+        conn,
+        "SELECT has_schema_privilege('public', 'CREATE'), "
+        "has_database_privilege(current_database(), 'CREATE')",
+    )
+    assert (schema_create, database_create) == (False, False)
     for statement in _DDL:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             async with conn.transaction(force_rollback=True):
@@ -101,10 +112,10 @@ async def _assert_no_ddl_membership_or_ownership(conn: psycopg.AsyncConnection) 
 async def _assert_fence_revocations_hold(conn: psycopg.AsyncConnection) -> None:
     widened = await _rows(
         conn,
-        "SELECT r.role, t.name FROM unnest(%s::text[]) AS r(role) "
-        "CROSS JOIN unnest(%s::text[]) AS t(name) "
-        "WHERE has_table_privilege(r.role, format('public.%%I', t.name), 'SELECT')",
-        (list(_RUNTIME_ROLES), list(_FENCE_TABLES)),
+        "SELECT r.role, t.name, p.privilege FROM unnest(%s::text[]) AS r(role) "
+        "CROSS JOIN unnest(%s::text[]) AS t(name) CROSS JOIN unnest(%s::text[]) AS p(privilege) "
+        "WHERE has_table_privilege(r.role, format('public.%%I', t.name), p.privilege)",
+        (list(_RUNTIME_ROLES), list(_FENCE_TABLES), _TABLE_PRIVILEGES),
     )
     assert widened == [], f"0104 revocation widened: {widened}"
     public = await _rows(

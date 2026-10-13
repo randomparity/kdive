@@ -139,7 +139,13 @@ ALTER ROLE "kdive-harness"
     PASSWORD 'kdive-harness-local'; -- pragma: allowlist secret
 
 BEGIN;
+-- Reset every direct grant the harness could have picked up, then grant exactly its set.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM "kdive-harness";
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM "kdive-harness";
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM "kdive-harness";
+REVOKE ALL ON SCHEMA public FROM "kdive-harness";
+SELECT format('REVOKE ALL ON DATABASE %I FROM "kdive-harness"', current_database())
+\gexec
 GRANT USAGE ON SCHEMA public TO "kdive-harness";
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO "kdive-harness";
 GRANT INSERT, UPDATE ON TABLE public.budgets, public.quotas, public.resources TO "kdive-harness";
