@@ -50,6 +50,18 @@ async def _repair_terminal_authority_system_provisions(conn: AsyncConnection) ->
     return int(row[0])
 
 
+async def _discharge_exhausted_authority_system_provisions(conn: AsyncConnection) -> int:
+    async with conn.transaction(), conn.cursor() as cur:
+        await cur.execute(
+            "SELECT public.discharge_exhausted_authority_system_provisions(%s)",
+            (_TERMINAL_AUTHORITY_SYSTEM_REPAIR_LIMIT,),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("authority System exhausted provision discharge returned no result")
+    return int(row[0])
+
+
 async def _authority_system_teardown_candidates(
     conn: AsyncConnection,
 ) -> list[tuple[UUID, int, UUID, int, str, str]]:
@@ -88,6 +100,8 @@ async def repair_terminal_authority_system_attempts(
     Provision receipts can commit entirely in SQL. A preactivation-absence receipt first runs the
     idempotent core cleanup; its exact SQL finalizer refuses success until the durable cleanup facts
     are absent. Per-System failures retain the candidate for a later pass without starving siblings.
+    Last, an exhausted provision job whose System that receipt proved absent is canceled
+    (ADR-0754), so a teardown finalized here or by its worker settles its stranded predecessor.
     """
     repaired = await _repair_terminal_authority_system_provisions(conn)
     for candidate in await _authority_system_teardown_candidates(conn):
@@ -130,7 +144,7 @@ async def repair_terminal_authority_system_attempts(
             )
         else:
             raise RuntimeError("authority System teardown repair returned an invalid status")
-    return repaired
+    return repaired + await _discharge_exhausted_authority_system_provisions(conn)
 
 
 async def repair_abandoned_jobs(conn: AsyncConnection) -> int:

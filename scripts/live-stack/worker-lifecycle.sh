@@ -56,10 +56,6 @@ require_start_prerequisites() {
     echo "installed worker Python is missing: ${WORKER_PYTHON}" >&2
     return 1
   }
-  [[ "${KDIVE_KERNEL_SRC:-}" == /* && -d "${KDIVE_KERNEL_SRC}" ]] || {
-    echo "worker kernel source must be an existing absolute directory" >&2
-    return 1
-  }
   for slot in {1..8}; do
     id "kdive-worker-${slot}" >/dev/null 2>&1 || {
       echo "missing provisioned worker account kdive-worker-${slot}" >&2
@@ -93,7 +89,6 @@ require_start_prerequisites() {
   require_worker_path_access "$WORKER_PYTHON" rx "installed worker Python" || return 1
   require_worker_path_access "$WORKER_EXECUTABLE" rx "checkout worker launcher" || return 1
   require_worker_path_access "${repo_root}/src" rx "checkout worker source" || return 1
-  require_worker_path_access "${KDIVE_KERNEL_SRC}" rx "worker kernel source" || return 1
   require_worker_path_access "$KDIVE_ROOTFS_DIR" rwx "worker rootfs directory" || return 1
   require_worker_path_access "$KDIVE_BUILD_WORKSPACE" rwx "worker build workspace" || return 1
   require_worker_path_access "$KDIVE_INSTALL_STAGING" rwx "worker install staging" || return 1
@@ -222,11 +217,11 @@ request() {
     fi
   fi
   env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
-    -u KDIVE_RECONCILER_DATABASE_URL KDIVE_LIFECYCLE_OPERATION="$operation" \
+    -u KDIVE_RECONCILER_DATABASE_URL -u KDIVE_HARNESS_DATABASE_URL \
+    KDIVE_LIFECYCLE_OPERATION="$operation" \
     KDIVE_LIFECYCLE_COUNT="$count" \
     KDIVE_LIFECYCLE_LIBVIRT_URI="$libvirt_uri" KDIVE_WORKER_PYTHON="$WORKER_EXECUTABLE" \
     LIFECYCLE_SYSTEMS_TOML="$inventory" \
-    KDIVE_SOURCE_ROOT="${KDIVE_KERNEL_SRC:-}" \
     KDIVE_EXPECTED_SLOTS="${KDIVE_LIFECYCLE_EXPECTED_SLOTS:-}" "$py" - <<'PY'
 import os
 import sys
@@ -254,7 +249,6 @@ try:
                 "worker_count": count,
                 "settings": {
                     "python": os.environ["KDIVE_WORKER_PYTHON"],
-                    "source_root": os.environ["KDIVE_SOURCE_ROOT"],
                     "rootfs_dir": os.environ["KDIVE_ROOTFS_DIR"],
                     "build_workspace": os.environ["KDIVE_BUILD_WORKSPACE"],
                     "build_component_roots": os.environ["KDIVE_BUILD_COMPONENT_ROOTS"],

@@ -31,6 +31,22 @@ _KERNEL_INPUTS = (
     "compiler_id",
     "kernel_build_id",
 )
+# List tools that answer a denied caller with an empty page instead of a failure (ADR-0756):
+# their rejection cells prove denied visibility against a positive control.
+FILTERED_LIST_BOUNDARIES = frozenset(
+    {
+        ("investigations.list", "authorization"),
+        ("investigations.list", "project-isolation"),
+        ("artifacts.list", "project-isolation"),
+    }
+)
+# Reviewed admission refusals: the server answers these functional cells synchronously, so they
+# observe the server host alone, with no guest, image or accelerator.
+_ADMISSION_REFUSALS = {
+    ("remote-libvirt", "images.publish"): (
+        "ADR-0759: images.publish refuses remote-libvirt with not_implemented before enqueue"
+    ),
+}
 
 
 class OperationGroup(BaseModel):
@@ -234,7 +250,8 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         kind="functional" if supported else "unsupported",
                         unsupported_reason=None if supported else source,
                     )
-                    cells.append(cell)
+                    refusal = _ADMISSION_REFUSALS.get((provider, row.tool))
+                    cells.append(cell if refusal is None else _admission_refusal(cell, refusal))
                     boundaries = ["authentication"]
                     if row.scopes:
                         boundaries.append("authorization")
@@ -251,7 +268,11 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                             scenario_id=scenario_id + "/" + boundary,
                             kind="rejection",
                             observation=(
-                                f"Verify {boundary} rejection for {row.tool} "
+                                f"Verify {boundary} denies visibility for {row.tool}: a known "
+                                "item listed to a viewer, an empty page to the denied caller, "
+                                "and unchanged protected state."
+                                if (row.tool, boundary) in FILTERED_LIST_BOUNDARIES
+                                else f"Verify {boundary} rejection for {row.tool} "
                                 "and unchanged protected state."
                             ),
                             assertions=(boundary, "unchanged-state", "cleanup"),
@@ -262,6 +283,22 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         for boundary in boundaries
                     )
     return cells
+
+
+def _admission_refusal(cell: Cell, rule: str) -> Cell:
+    return replace(
+        cell,
+        observation=(
+            f"Verify {cell.operation} refuses {cell.provider} with not_implemented before enqueue "
+            "and leaves its catalog rows, build jobs and platform state unchanged."
+        ),
+        roles=("server",),
+        guest_arch=None,
+        accelerator="none",
+        inputs=(),
+        kind="unsupported",
+        unsupported_reason=rule,
+    )
 
 
 def image_family(image: RootfsCatalogEntry) -> str:

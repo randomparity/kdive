@@ -75,6 +75,18 @@ their binding failures before `tools.invoke` sees them, without `data.field_erro
 `gateway` validation cell for one of them fails under this rule until a later decision names
 its evidence.
 
+### Amendment (2026-10-12): three filtering list boundaries prove denied visibility (#3108)
+
+This is an amendment because a later decision supersedes part of decision 3 for three
+named cells only. [ADR-0756](0756-filtered-list-boundary-evidence.md) replaces the
+failure-envelope requirement for `investigations.list` `authorization`, `investigations.list`
+`project-isolation` and `artifacts.list` `project-isolation`. These tools filter the caller's
+view instead of failing. Their cells prove denial with a positive control. First, a viewer
+sees an independently known protected item. Then the denied caller gets the tool's canonical
+empty page in the same exposure. Protected-state equality and cleanup still apply. Every other
+`authorization` and `project-isolation` cell keeps the failure-envelope rule. The outcome
+`rejection` is unchanged.
+
 ## Consequences
 
 - Recovery-configuration evidence exists only from a run whose catalog proved it. A carrier of

@@ -1917,7 +1917,8 @@ async def assert_root_release_completion(db_url: str, operations: NormalOperatio
 
 
 # Every table the carriers read directly. Several are authority-private: the migrations revoke
-# them from PUBLIC and grant no read to kdive_server, so only the migration owner can read them.
+# them from PUBLIC and grant no read to kdive_server, so the carriers read them through the
+# development harness login, which the role bootstrap grants SELECT on every table (ADR-0769).
 _CARRIER_READ_TABLES = (
     "systems",
     "jobs",
@@ -1946,8 +1947,11 @@ async def require_evidence_read_access(db_url: str) -> None:
     if denied:
         raise PermissionError(
             f"KDIVE_DATABASE_URL role {role!r} cannot SELECT {', '.join(denied)}; the carrier "
-            "reads authority-private evidence tables, so set KDIVE_DATABASE_URL to the "
-            "migration-owner DSN (KDIVE_MIGRATION_DATABASE_URL), not the server DSN"
+            "reads authority-private evidence tables, so set "
+            'KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" (the least-privilege harness '
+            "login), not the server DSN; if it is already set, rerun the role bootstrap: "
+            "scripts/live-stack/stack-services.sh, or after `just stack-backends` "
+            "`env -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap`"
         )
 
 

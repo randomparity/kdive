@@ -466,7 +466,6 @@ def _slot_from_unit(unit: str) -> int:
 def _settings() -> WorkerSettings:
     return WorkerSettings(
         python="/usr/bin/python3.14",
-        source_root="/src/kdive",
         rootfs_dir="/var/lib/kdive/rootfs",
         build_workspace="/var/lib/kdive/build",
         build_component_roots="/var/lib/kdive/components",

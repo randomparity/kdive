@@ -322,6 +322,13 @@ def _register_systems_get(
         snapshot support. ``data.supports_traffic_capture`` likewise reports whether the provider
         can capture this System's traffic. Both capability fields are absent when the System's
         provider is no longer registered.
+
+        ``data.supported_capture_methods`` is the sorted list of the provider's capture methods
+        that this System's guest architecture can use (``fadump`` is dropped on ``x86_64``). It
+        is compatibility only: it does not prove the firmware, kernel, image or current System
+        state is capture-ready, and ``vmcore.fetch`` still accepts only core-producing methods.
+        Absent means unknown (provider unregistered or profile unreadable); ``[]`` means known
+        empty. Unlike ``resources.describe``'s provider-wide set, this is the per-System view.
         """
         return await _get_system(pool, current_context(), system_id, resolver=resolver)
 

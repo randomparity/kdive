@@ -60,7 +60,7 @@ from kdive.mcp.dev_harness import (
 )
 from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.responses import ToolResponse
-from scripts.coverage_campaign.contract import Cell, build_contract
+from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES, Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings, Outcome
 from tests.integration.live_stack.cleanup import disk_absent
 from tests.integration.live_stack.conftest import require_issuer, require_stack
@@ -286,11 +286,24 @@ async def operator_catalog(base_url: str, issuer: OidcIssuer, grants: Grants) ->
 
 
 @dataclass(frozen=True)
+class FilteredListControl:
+    """The positive control of a list tool that filters instead of rejecting (ADR-0756).
+
+    ``expected_item`` names, independently of the list call, a real protected item; ``grants``
+    are a viewer's, which must see that item listed by the same arguments and exposure.
+    """
+
+    grants: Grants
+    expected_item: Callable[[], Awaitable[str]]
+
+
+@dataclass(frozen=True)
 class Rejection:
     """One call a boundary must reject: its arguments, grants and accepted categories.
 
-    ``filtered_by`` names the issue that owns a list tool known to answer an empty page instead
-    of rejecting: that answer stops the cell ``blocked``, and a real rejection still qualifies.
+    ``filtered`` is required exactly for a contract-named filtering list boundary
+    (``FILTERED_LIST_BOUNDARIES``): its denied call must answer the canonical empty page after
+    the control proved the protected item visible to a viewer.
     ``absent_twin`` holds arguments naming an owner that does not exist: the rejected answer
     must be indistinguishable from the twin's, so a category shared with an unrelated failure
     cannot pass the cell.
@@ -299,7 +312,7 @@ class Rejection:
     args: Mapping[str, object]
     grants: Grants
     categories: frozenset[str] = frozenset({ErrorCategory.AUTHORIZATION_DENIED.value})
-    filtered_by: str | None = None
+    filtered: FilteredListControl | None = None
     absent_twin: Mapping[str, object] | None = None
 
 
@@ -351,9 +364,48 @@ async def _attempt(
         return exc
 
 
-def _filtered(result: Result) -> bool:
-    """A successful envelope listing nothing: a list tool filtering instead of rejecting."""
-    return isinstance(result, ToolResponse) and result.error_category is None and not result.items
+def _empty_page(tool: str, args: Mapping[str, object]) -> ToolResponse:
+    """The page a filtering list tool answers a caller who may see nothing (ADR-0756)."""
+    if tool == "investigations.list":
+        object_id, actions = "investigations", ["investigations.get", "investigations.open"]
+    else:
+        object_id, actions = str(args["system_id"]), ["artifacts.get"]
+    return ToolResponse.collection(
+        object_id,
+        "ok",
+        [],
+        suggested_next_actions=actions,
+        data={"truncated": False, "next_cursor": None},
+    )
+
+
+async def _observe_filtered(
+    caller: Caller, tool: str, rejection: Rejection, control: FilteredListControl
+) -> dict[str, object]:
+    """A viewer sees the known item, then the denied caller gets exactly the empty page."""
+    expected = await control.expected_item()
+    assert expected, f"{tool} has no independently known protected item"
+    seen = await _attempt(caller, tool, replace(rejection, grants=control.grants))
+    assert isinstance(seen, ToolResponse) and seen.status == "ok", (
+        f"{tool} control call failed: {_shape(seen)}"
+    )
+    assert seen.error_category is None and seen.detail is None, (
+        f"{tool} control call failed: {_shape(seen)}"
+    )
+    listed = [i.object_id for i in seen.items if i.error_category is None]
+    assert expected in listed, f"{tool} did not list the known item to a viewer ({len(listed)})"
+    result = await _attempt(caller, tool, rejection)
+    empty = _empty_page(tool, rejection.args).model_dump()
+    answer = result.model_dump() if isinstance(result, ToolResponse) else _shape(result)
+    differs = sorted(k for k in empty.keys() | answer.keys() if answer.get(k) != empty.get(k))
+    assert not differs, f"{tool} denied answer is not the empty page; differs in {differs}"
+    return {
+        "denied_visibility": {"status": "ok", "canonical_empty_page": True},
+        "viewer_control": {
+            "listed": len(listed),
+            "item_sha256": hashlib.sha256(expected.encode()).hexdigest(),
+        },
+    }
 
 
 def _answer(result: Result, args: Mapping[str, object]) -> dict[str, object]:
@@ -374,6 +426,13 @@ def _answer(result: Result, args: Mapping[str, object]) -> dict[str, object]:
 async def _observe(
     caller: Caller, tool: str, boundary: Boundary, rejection: Rejection
 ) -> dict[str, object]:
+    named = (tool, boundary) in FILTERED_LIST_BOUNDARIES
+    assert named == (rejection.filtered is not None), (
+        f"{tool} {boundary}: a filtering-list control is required exactly for "
+        "the contract's FILTERED_LIST_BOUNDARIES"
+    )
+    if rejection.filtered is not None:
+        return await _observe_filtered(caller, tool, rejection, rejection.filtered)
     if boundary == "authentication":
         genuine = caller.token(rejection.grants)
         status = await caller.post(tool, rejection.args, forge(genuine))
@@ -389,12 +448,6 @@ async def _observe(
             f"{tool} was not rejected by argument validation: {_shape(result)}"
         )
         return {"rejected": _shape(result)}
-    if rejection.filtered_by is not None and _filtered(result):
-        raise ScenarioStop(
-            Outcome.BLOCKED,
-            f"{tool} answered an empty page instead of rejecting the {boundary} call; "
-            f"{rejection.filtered_by} owns the decision",
-        )
     category = result.error_category if isinstance(result, ToolResponse) else None
     assert category is not None, f"{tool} was not rejected: {_shape(result)}"
     assert category in rejection.categories, (
@@ -436,16 +489,7 @@ async def prove_rejection(
     async with context as overrides:
         effective = replace(rejection, args={**rejection.args, **overrides})
         before = await snapshot()
-        try:
-            observation = await _observe(caller, operation, boundary, effective)
-        except ScenarioStop as stop:
-            # The record's impediment is the generic missing-prerequisite; this artifact names
-            # the owner and what the call answered.
-            blocked = {"cell": run.cell.id, "boundary": boundary, "blocked": str(stop)}
-            run.artifacts.append(
-                run.writer.artifact({**blocked, "filtered_by": rejection.filtered_by})
-            )
-            raise
+        observation = await _observe(caller, operation, boundary, effective)
         run.prove(boundary, {"exposure": caller.exposure, **observation})
         after = await snapshot()
         assert after == before, f"protected state changed across the rejected {operation}"
@@ -455,6 +499,44 @@ async def prove_rejection(
     assert final == start, f"the setup of the rejected {operation} left state behind"
     owned = sorted(str(value) for value in overrides.values())
     run.prove("cleanup", {"owned": owned, "snapshot_sha256": _digest(start)})
+
+
+async def prove_refusal(
+    run: CellRun, caller: Caller, refusal: Rejection, detail: str, snapshot: Snapshot
+) -> None:
+    """Prove an authorized call is refused as ``not_implemented`` and writes nothing (ADR-0759).
+
+    ``effect`` is the exact refusal envelope: not retryable, the requested object, ``detail``, no
+    job reference and no next action. ``cleanup`` is the unchanged snapshot around the call. The
+    request is retained before the call, so a failed proof still names what an operator must
+    clean up.
+    """
+    operation = run.cell.operation
+    before = await snapshot()
+    request = {"cell": run.cell.id, "request": dict(refusal.args), "before": before}
+    run.artifacts.append(run.writer.artifact(request))
+    result = await caller.call(operation, refusal.args, caller.token(refusal.grants), discover=True)
+    assert isinstance(result, ToolResponse), f"expected one envelope, got {len(result)}"
+    refused = {
+        "error_category": result.error_category,
+        "retryable": result.retryable,
+        "object_id": result.object_id == refusal.args.get("name"),
+        "detail": result.detail == detail,
+        "refs": dict(result.refs),
+        "suggested_next_actions": result.suggested_next_actions,
+    }
+    assert refused == {
+        "error_category": ErrorCategory.NOT_IMPLEMENTED.value,
+        "retryable": False,
+        "object_id": True,
+        "detail": True,
+        "refs": {},
+        "suggested_next_actions": [],
+    }, f"{operation} {refusal.args} was not refused at admission: {refused}"
+    after = await snapshot()
+    assert after == before, f"the refused {operation} {refusal.args} changed protected state"
+    run.prove("effect", {"exposure": caller.exposure, "refused": refused})
+    run.prove("cleanup", {"owned": [], "snapshot_sha256": _digest(before)})
 
 
 Functional = Callable[[HttpCaller, Grants], Awaitable[dict[str, object]]]
@@ -476,6 +558,27 @@ async def prove_functional(
     run.prove("cleanup", {"owned": owned, "snapshot_sha256": _digest(before)})
 
 
+async def require_snapshot_read_access(
+    conn: psycopg.AsyncConnection, tables: Sequence[str]
+) -> None:
+    """Fail before the snapshot reads when the DSN cannot SELECT a table, naming each one."""
+    cursor = await conn.execute(
+        "SELECT name FROM unnest(%s::text[]) WITH ORDINALITY AS t(name, position) "
+        "WHERE NOT has_table_privilege(format('public.%%I', name), 'SELECT') ORDER BY position",
+        (list(tables),),
+    )
+    denied = [str(row[0]) for row in await cursor.fetchall()]
+    if denied:
+        raise PermissionError(
+            f"KDIVE_DATABASE_URL cannot SELECT {', '.join(denied)}; the protected-state snapshot "
+            "reads every table with a project column, some of them authority-private. Set "
+            'KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" (the least-privilege harness '
+            "login); if it is already set, rerun the role bootstrap, which re-grants new tables: "
+            "scripts/live-stack/stack-services.sh, or after `just stack-backends` "
+            "`env -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap`"
+        )
+
+
 async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
     """Row count and row-text SHA-256 of ``project`` in every public table with a project column.
 
@@ -483,7 +586,7 @@ async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
     table the DSN cannot read fails the snapshot instead of leaving it.
     """
     async with await psycopg.AsyncConnection.connect(db_url) as conn:
-        # The documented DSN is the schema owner's; a read-only session keeps the snapshot a read.
+        # The harness login can write its seeding tables; a read-only session keeps this a read.
         await conn.set_read_only(True)
         cursor = await conn.execute(
             "SELECT c.relname FROM pg_catalog.pg_attribute a "
@@ -495,6 +598,7 @@ async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
         tables = [str(row[0]) for row in await cursor.fetchall()]
         tables = [t for t in tables if t not in _AUDIT_TABLES]
         assert tables, "no table carries a project column; the snapshot would observe nothing"
+        await require_snapshot_read_access(conn, tables)
         state: dict[str, list[object]] = {}
         for table in tables:
             query = sql.SQL(
@@ -513,6 +617,11 @@ def boundary_of(cell: Cell) -> Boundary:
     boundary = cell.scenario_id.rsplit("/", 1)[1]
     assert boundary in get_args(Boundary), f"{cell.scenario_id} names no rejection boundary"
     return cast(Boundary, boundary)
+
+
+def admission_refusal(cell: Cell) -> bool:
+    """A server-only admission refusal (ADR-0759): an unsupported cell observing no guest."""
+    return cell.kind == "unsupported" and cell.guest_arch is None
 
 
 def tool_cells(tools: Sequence[str]) -> list[Cell]:
@@ -536,11 +645,13 @@ ToolScenario = Callable[[CellRun, str, OidcIssuer, str], Awaitable[None]]
 def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
     """Prove the configuration, skip another configuration's cell, else run and record it.
 
-    A completed rejection cell records ``rejection``, a functional one ``success``. A local
-    provider cell of another host architecture is skipped before the stack is read; a remote
-    cell's host is the provider host, which its frame observes.
+    A completed rejection cell records ``rejection``, an unsupported one ``unsupported`` and a
+    functional one ``success``. A local provider cell, or a server-only admission refusal, of
+    another host architecture is skipped before the stack is read; any other remote cell's host
+    is the provider host, which its frame observes.
     """
-    if cell.provider != "remote-libvirt" and cell.host_arch not in (None, platform.machine()):
+    on_server = cell.provider != "remote-libvirt" or admission_refusal(cell)
+    if on_server and cell.host_arch not in (None, platform.machine()):
         pytest.skip(f"{cell.id} runs on a {cell.host_arch} host")
     base_url = require_stack()
     try:
@@ -557,9 +668,8 @@ def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
         run.artifacts.append(run.writer.artifact(proof))
         await scenario(run, url, issuer, db_url)
 
-    run_cell(
-        cell, proven, proves=Outcome.REJECTION if cell.kind == "rejection" else Outcome.SUCCESS
-    )
+    proves = {"rejection": Outcome.REJECTION, "unsupported": Outcome.UNSUPPORTED}
+    run_cell(cell, proven, proves=proves.get(cell.kind, Outcome.SUCCESS))
 
 
 def bindings(
@@ -583,7 +693,8 @@ def bindings(
     host and its ``image_sha256`` the staged base volume's digest, null when unstaged. ``kernel``
     fills only the kernel fields a cell declares. A functional ``images.publish`` cell boots
     ``PUBLISHED_IMAGES[(host_arch, exposure)]``, the image it publishes, with a null
-    ``image_sha256``.
+    ``image_sha256``. An unsupported provider cell without a guest is a server-only admission
+    refusal (ADR-0759): like a service cell it binds this host alone, on its own architecture.
     """
     bound = [c for c in cells if c.scenario_id.startswith("tool/") and c.node_id]
     contexts = {
@@ -591,7 +702,7 @@ def bindings(
             {"host_os": host_os, "host_arch": host_arch, "accelerator": "none"}
         )
         for c in bound
-        if c.provider == "service"
+        if c.provider == "service" or (admission_refusal(c) and c.host_arch == host_arch)
     }
     native = [c for c in bound if c.provider == "local-libvirt" and c.guest_arch == host_arch]
     published = [c for c in native if c.operation == PUBLISH_TOOL and c.kind == "functional"]

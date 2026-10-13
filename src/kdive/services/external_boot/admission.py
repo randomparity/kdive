@@ -17,7 +17,10 @@ from psycopg import AsyncConnection
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.services.systems.authority_owned import ordinary_mutation_is_fenced
+from kdive.services.systems.authority_owned import (
+    ordinary_mutation_is_fenced,
+    preactivation_absence_is_proven,
+)
 
 
 class ExternalBootOperation(StrEnum):
@@ -186,8 +189,13 @@ async def check_external_boot_admission(
     the next actions the caller cannot invoke for that project (ADR-0261). It is required
     rather than optional so a new call site cannot silently ship an unfiltered breadcrumb.
     """
-    if operation not in _AUTHORITY_PREACTIVATION_ADMITTED and await ordinary_mutation_is_fenced(
-        conn, system_id
+    if (
+        operation not in _AUTHORITY_PREACTIVATION_ADMITTED
+        and await ordinary_mutation_is_fenced(conn, system_id)
+        and not (
+            operation is ExternalBootOperation.ALLOCATION_RELEASE
+            and await preactivation_absence_is_proven(conn, system_id)
+        )
     ):
         raise ExternalBootDenied(
             f"{operation.value} is denied before the authority-owned System's first activation",

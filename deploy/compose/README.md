@@ -68,6 +68,10 @@ Helm deployments retain the external-provisioning contract: operators provide se
 members and do not run this explicitly local bootstrap. Set `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` and
 supply the migration, server, worker, reconciler, and lifecycle-witness DSNs to use that external
 path; the bootstrap one-shot then performs no database mutation.
+The same one-shot also creates the development-only `kdive-harness` login for the live-tier harness
+(ADR-0769): `SELECT` on every public table, `INSERT`/`UPDATE` on `budgets`, `quotas` and
+`resources`, and `INSERT` on `allocations`, re-granted on every run so tables added by later
+migrations are covered. It holds no membership, owns nothing, and no runtime role's grants change.
 
 The server, worker, and reconciler capabilities have ordinary application-table access. The
 lifecycle witness has none. Protected worker-incarnation and investigation-build-use mutation remains

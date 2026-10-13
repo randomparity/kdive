@@ -19,13 +19,15 @@ from kdive.mcp.dev_harness import LiveStackToolError, OidcIssuer, make_keypair
 from kdive.mcp.responses import ToolResponse
 from kdive.serialization import JsonValue
 from scripts.coverage_campaign.contract import Cell, build_contract
-from scripts.coverage_campaign.evidence import Outcome
+from scripts.coverage_campaign.evidence import Evidence, Outcome
+from scripts.coverage_campaign.results import qualify
 from tests.integration.live_stack import scenario, tool_cells
 from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
 from tests.integration.live_stack.remote_lifecycle import RemoteHost
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.integration.live_stack.tool_cells import (
     RECOVERY_TOOLS,
+    FilteredListControl,
     Grants,
     HttpCaller,
     Rejection,
@@ -34,6 +36,7 @@ from tests.integration.live_stack.tool_cells import (
     configuration_of,
     forge,
     prove_functional,
+    prove_refusal,
     prove_rejection,
     rejected_by_validation,
 )
@@ -221,41 +224,202 @@ def test_category_boundaries_use_the_closed_set(tmp_path: Path) -> None:
         )
 
 
-_EMPTY_PAGE = ToolResponse.collection("investigations", "ok", [])
+_VIEWER = Grants("viewer", ("p",), {"p": "viewer"})
+_ITEM = "inv-1"
+_DENIED_PAGE = ToolResponse.collection(
+    "investigations",
+    "ok",
+    [],
+    suggested_next_actions=["investigations.get", "investigations.open"],
+    data={"truncated": False, "next_cursor": None},
+)
 
 
-def test_filtering_list_stops_blocked_naming_its_owner(tmp_path: Path) -> None:
-    run = _run(tmp_path, "validation")
-    filtered = Rejection({}, _GRANTS, filtered_by="#3108")
-    with pytest.raises(ScenarioStop, match="#3108") as stop:
+def _listed(*ids: str) -> ToolResponse:
+    items = [ToolResponse.success(i, "open") for i in ids]
+    return ToolResponse.collection(
+        "investigations",
+        "ok",
+        items,
+        suggested_next_actions=["investigations.get", "investigations.open"],
+        data={"truncated": False, "next_cursor": None},
+    )
+
+
+@dataclass
+class _Filtering(_Caller):
+    """Answers the viewer's token with ``control``, every other token with ``result``."""
+
+    control: ToolResponse = field(default_factory=lambda: _listed(_ITEM))
+
+    async def call(
+        self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
+    ) -> ToolResponse | list[ToolResponse]:
+        subject = str(claims_of(token)["sub"])
+        self.calls.append((tool, {**args, "subject": subject}))
+        return self.control if subject == _VIEWER.subject else cast(ToolResponse, self.result)
+
+
+def _list_run(
+    tmp_path: Path, tool: str = "investigations.list", boundary: str = "authorization"
+) -> CellRun:
+    cell = next(
+        c
+        for c in build_contract().cells
+        if c.operation == tool and c.kind == "rejection" and c.scenario_id.endswith("/" + boundary)
+    )
+    return CellRun(cell, EvidenceWriter(tmp_path))
+
+
+def _control(item: str = _ITEM) -> FilteredListControl:
+    async def expected() -> str:
+        return item
+
+    return FilteredListControl(_VIEWER, expected)
+
+
+def _filtered(tmp_path: Path, caller: _Caller, control: FilteredListControl) -> CellRun:
+    """Prove ``investigations.list``'s authorization cell against ``caller``."""
+    run = _list_run(tmp_path)
+    rejection = Rejection({"request": {"project": "p"}}, _GRANTS, filtered=control)
+    asyncio.run(prove_rejection(run, caller, "authorization", rejection, _snapshot(1, 1)))
+    return run
+
+
+def test_filtered_list_proves_denied_visibility(tmp_path: Path) -> None:
+    caller = _Filtering("gateway", _DENIED_PAGE)
+    run = _filtered(tmp_path, caller, _control())
+    assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
+    assert [args["subject"] for _, args in caller.calls] == ["viewer", "agent"]
+    assert all(args["request"] == {"project": "p"} for _, args in caller.calls)
+    proof = _artifact(run, "authorization")
+    assert proof["exposure"] == "gateway"
+    assert proof["denied_visibility"] == {"status": "ok", "canonical_empty_page": True}
+    assert proof["viewer_control"] == {
+        "listed": 1,
+        "item_sha256": hashlib.sha256(_ITEM.encode()).hexdigest(),
+    }
+    artifacts = _list_run(tmp_path, "artifacts.list", "project-isolation")
+    page = ToolResponse.collection(
+        "sys-1",
+        "ok",
+        [],
+        suggested_next_actions=["artifacts.get"],
+        data={"truncated": False, "next_cursor": None},
+    )
+    listed = page.model_copy(update={"items": [ToolResponse.success(_ITEM, "redacted")]})
+    rejection = Rejection({"system_id": "sys-1"}, _GRANTS, filtered=_control())
+    asyncio.run(
+        prove_rejection(
+            artifacts,
+            _Filtering("direct", page, control=listed),
+            "project-isolation",
+            rejection,
+            _snapshot(1, 1),
+        )
+    )
+    assert "project-isolation" in artifacts.assertions
+
+
+@pytest.mark.parametrize(
+    ("control", "item", "match"),
+    [
+        (_listed(), _ITEM, "did not list the known item"),
+        (_listed("inv-2"), _ITEM, "did not list the known item"),
+        (_listed(_ITEM), "", "no independently known protected item"),
+        (ToolResponse.failure("x", ErrorCategory.NOT_FOUND), _ITEM, "control call failed"),
+    ],
+    ids=["empty", "unrelated-item", "no-oracle", "control-error"],
+)
+def test_filtered_list_requires_known_visible_item(
+    tmp_path: Path, control: ToolResponse, item: str, match: str
+) -> None:
+    caller = _Filtering("direct", _DENIED_PAGE, control=control)
+    with pytest.raises(AssertionError, match=match):
+        _filtered(tmp_path, caller, _control(item))
+    assert all(args["subject"] == "viewer" for _, args in caller.calls)
+
+
+_LEAKS = {
+    "item": _listed(_ITEM),
+    "cursor": _DENIED_PAGE.model_copy(
+        update={"data": {"truncated": True, "next_cursor": "c", "count": 0}}
+    ),
+    "extra-data": _DENIED_PAGE.model_copy(update={"data": {**_DENIED_PAGE.data, "p": "x"}}),
+    "refs": _DENIED_PAGE.model_copy(update={"refs": {"project": "p"}}),
+    "detail": _DENIED_PAGE.model_copy(update={"detail": "hidden"}),
+    "object-id": _DENIED_PAGE.model_copy(update={"object_id": "p"}),
+    "actions": _DENIED_PAGE.model_copy(update={"suggested_next_actions": ["investigations.get"]}),
+    "status": _DENIED_PAGE.model_copy(update={"status": "partial"}),
+    "failure": ToolResponse.failure("investigations", ErrorCategory.AUTHORIZATION_DENIED),
+}
+
+
+@pytest.mark.parametrize("leak", sorted(_LEAKS))
+def test_filtered_list_requires_canonical_empty_envelope(tmp_path: Path, leak: str) -> None:
+    with pytest.raises(AssertionError, match="not the empty page"):
+        _filtered(tmp_path, _Filtering("direct", _LEAKS[leak]), _control())
+
+
+def test_filtered_exception_is_closed(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="FILTERED_LIST_BOUNDARIES"):
         asyncio.run(
             prove_rejection(
-                run, _Caller("direct", _EMPTY_PAGE), "authorization", filtered, _snapshot(1, 1)
+                _list_run(tmp_path),
+                _Filtering("direct", _DENIED_PAGE),
+                "authorization",
+                Rejection({}, _GRANTS),
+                _snapshot(1, 1),
             )
         )
-    assert stop.value.outcome is Outcome.BLOCKED
-    assert "authorization" not in run.assertions
-    retained = json.loads((run.writer.root / "artifacts" / run.artifacts[-1]).read_text())
-    assert retained["filtered_by"] == "#3108" and "empty page" in retained["blocked"]
-
-
-def test_filtering_list_that_rejects_still_qualifies(tmp_path: Path) -> None:
-    run = _run(tmp_path, "validation")
-    denied = ToolResponse.failure("x", ErrorCategory.AUTHORIZATION_DENIED)
-    filtered = Rejection({}, _GRANTS, filtered_by="#3108")
-    asyncio.run(
-        prove_rejection(run, _Caller("direct", denied), "authorization", filtered, _snapshot(1, 1))
-    )
-    assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
-    listed = ToolResponse.collection("investigations", "ok", [ToolResponse.success("i", "open")])
-    with pytest.raises(AssertionError, match="was not rejected"):
+    unlisted = _list_run(tmp_path, "artifacts.list", "authorization")
+    with pytest.raises(AssertionError, match="FILTERED_LIST_BOUNDARIES"):
         asyncio.run(
             prove_rejection(
-                _run(tmp_path, "validation"),
-                _Caller("direct", listed),
-                "project-isolation",
-                filtered,
+                unlisted,
+                _Filtering("direct", _DENIED_PAGE),
+                "authorization",
+                Rejection({"system_id": "s"}, _GRANTS, filtered=_control()),
                 _snapshot(1, 1),
+            )
+        )
+
+
+def test_filtered_list_brackets_both_calls_and_cleans_up(tmp_path: Path) -> None:
+    state = [0]
+
+    @asynccontextmanager
+    async def setup() -> AsyncIterator[Mapping[str, object]]:
+        state[0] += 1
+        try:
+            yield {}
+        finally:
+            state[0] -= 1
+
+    async def snap() -> object:
+        return list(state)
+
+    failing = Rejection({}, _GRANTS, filtered=_control())
+    with pytest.raises(AssertionError, match="did not list"):
+        asyncio.run(
+            prove_rejection(
+                _list_run(tmp_path),
+                _Filtering("direct", _DENIED_PAGE, control=_listed()),
+                "authorization",
+                failing,
+                snap,
+                setup=setup,
+            )
+        )
+    assert state == [0]
+    with pytest.raises(AssertionError, match="protected state changed"):
+        asyncio.run(
+            prove_rejection(
+                _list_run(tmp_path),
+                _Filtering("direct", _DENIED_PAGE),
+                "authorization",
+                failing,
+                _snapshot({"t": [0]}, {"t": [1]}),
             )
         )
 
@@ -721,3 +885,186 @@ def test_published_image_binds_the_product(tmp_path: Path) -> None:
     assert inputs.cells[reject.id].guest_os == "fedora:44"
     assert inputs.cells[reject.id].image_sha256 == lane
     assert inputs.cells[install.id].image_sha256 == lane
+
+
+def _refusal(arch: str, exposure: str = "direct") -> Cell:
+    return next(
+        c
+        for c in build_contract().cells
+        if c.operation == "images.publish"
+        and c.provider == "remote-libvirt"
+        and c.kind == "unsupported"
+        and c.host_arch == arch
+        and (c.configuration, c.exposure) == ("default", exposure)
+    )
+
+
+def test_admission_refusals_bind_the_server_host_alone() -> None:
+    # ADR-0759: the refusal involves no provider host, guest, image or accelerator.
+    native, foreign = _bound(_refusal("x86_64")), _bound(_refusal("ppc64le"))
+    host = RemoteHost("operator@provider.example", "default", "rocky:10.2", "x86_64", "kvm")
+
+    def no_probe(*_: object) -> str:
+        raise AssertionError("an admission refusal must not probe a provider volume")
+
+    for remote in (None, host):
+        inputs = bindings(
+            "a" * 40,
+            host_os="fedora:44",
+            host_arch="x86_64",
+            matrix="b" * 64,
+            cells=[native, foreign],
+            staged=lambda _name: None,
+            remote=remote,
+            digest=no_probe,
+            volumes=no_probe,
+        )
+        assert set(inputs.cells) == {native.id}
+        assert inputs.cells[native.id].model_dump(exclude_none=True) == {
+            "host_os": "fedora:44",
+            "host_arch": "x86_64",
+            "accelerator": "none",
+        }
+
+
+def test_admission_refusal_runs_on_its_server_arch(monkeypatch: pytest.MonkeyPatch) -> None:
+    def stack() -> str:
+        raise RuntimeError("stack read")
+
+    async def never(*_: object) -> None:
+        raise AssertionError("the scenario must not run")
+
+    monkeypatch.setattr(tool_cells, "require_stack", stack)
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
+    with pytest.raises(pytest.skip.Exception, match="ppc64le"):
+        tool_cells.run_tool_cell(_refusal("ppc64le"), never)
+    with pytest.raises(RuntimeError, match="stack read"):
+        tool_cells.run_tool_cell(_refusal("x86_64"), never)
+
+
+def _refusal_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cell: Cell,
+    host_arch: str = "x86_64",
+    candidate: str = "a" * 40,
+    proves: Outcome = Outcome.UNSUPPORTED,
+    via_frame: bool = False,
+) -> tuple[bool, tuple[str, ...]]:
+    """Record ``cell`` through the real frame on a server-only stack, then qualify it."""
+    contract = build_contract()
+    contract = replace(contract, cells=(cell,))
+    roles = {"server": candidate}
+    identity = RunIdentity(candidate, contract.matrix_sha256, "fedora:44", host_arch, True, roles)
+    monkeypatch.setattr(tool_cells, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(tool_cells, "require_issuer", lambda: object())
+    monkeypatch.setattr(tool_cells, "server_configuration", lambda *_: ("default", []))
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: host_arch)
+    monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
+    monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
+    monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
+
+    async def body(run: CellRun, *_: object) -> None:
+        for name in cell.assertions:
+            run.prove(name, {})
+
+    if via_frame:
+        tool_cells.run_tool_cell(cell, body)
+    else:
+        scenario.run_cell(cell, body, proves=proves)
+    (record,) = (tmp_path / "records").glob("*.json")
+    result = Evidence.model_validate_json(record.read_text())
+    inputs = bindings(
+        "a" * 40,
+        host_os="fedora:44",
+        host_arch="x86_64",
+        matrix=contract.matrix_sha256,
+        cells=[cell],
+        staged=lambda _name: None,
+    )
+    (verdict,) = qualify(contract, inputs, [result]).cells
+    return verdict.qualified, verdict.reasons
+
+
+def test_admission_refusal_record_qualifies_without_guest_or_kvm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cell = _bound(_refusal("x86_64"))
+    assert _refusal_verdict(tmp_path, monkeypatch, cell=cell, via_frame=True) == (True, ())
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"host_arch": "ppc64le"}, "input-context-mismatch"),
+        ({"candidate": "c" * 40}, "candidate-mismatch"),
+        ({"proves": Outcome.SUCCESS}, "outcome-kind-mismatch"),
+        ({"rule": None}, "unsupported-without-reviewed-rule"),
+    ],
+)
+def test_admission_refusal_record_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, object], reason: str
+) -> None:
+    cell = _bound(_refusal("x86_64"))
+    host_arch = str(change.get("host_arch", "x86_64"))
+    candidate = str(change.get("candidate", "a" * 40))
+    proves = cast(Outcome, change.get("proves", Outcome.UNSUPPORTED))
+    if "rule" in change:
+        cell = replace(cell, unsupported_reason=None)
+    qualified, reasons = _refusal_verdict(
+        tmp_path, monkeypatch, cell=cell, host_arch=host_arch, candidate=candidate, proves=proves
+    )
+    assert not qualified and reason in reasons
+
+
+_REFUSAL = Rejection({"provider": "remote-libvirt", "name": "img"}, _GRANTS)
+_REFUSED = ToolResponse.failure("img", ErrorCategory.NOT_IMPLEMENTED, detail="stage it")
+
+
+def test_refusal_proves_the_exact_envelope_and_unchanged_state(tmp_path: Path) -> None:
+    run = CellRun(_refusal("x86_64"), EvidenceWriter(tmp_path))
+    caller = _Caller("gateway", result=_REFUSED)
+    asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "s")))
+    assert set(run.assertions) == {"effect", "cleanup"}
+    assert caller.calls == [("images.publish", _REFUSAL.args)]
+    assert len(run.artifacts) == 1  # the request, retained before the call
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _OK,
+        ToolResponse.denied("img"),
+        ToolResponse.failure("img", ErrorCategory.NOT_IMPLEMENTED, detail="other"),
+        ToolResponse.failure("other", ErrorCategory.NOT_IMPLEMENTED, detail="stage it"),
+        ToolResponse.failure(
+            "img", ErrorCategory.NOT_IMPLEMENTED, detail="stage it", refs={"job": "j"}
+        ),
+        ToolResponse.failure(
+            "img",
+            ErrorCategory.NOT_IMPLEMENTED,
+            detail="stage it",
+            suggested_next_actions=["jobs.wait"],
+        ),
+        ConnectionError("transport"),
+    ],
+)
+def test_refusal_fails_on_any_other_answer(
+    tmp_path: Path, result: ToolResponse | Exception
+) -> None:
+    run = CellRun(_refusal("x86_64"), EvidenceWriter(tmp_path))
+    caller = _Caller("direct", result=result)
+    with pytest.raises((AssertionError, ConnectionError)):
+        asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "s")))
+    assert not run.assertions
+    assert len(run.artifacts) == 1  # the failed proof still names the request
+
+
+def test_refusal_fails_when_state_changed(tmp_path: Path) -> None:
+    run = CellRun(_refusal("x86_64"), EvidenceWriter(tmp_path))
+    caller = _Caller("direct", result=_REFUSED)
+    with pytest.raises(AssertionError, match="changed protected state"):
+        asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "t")))
+    assert not run.assertions

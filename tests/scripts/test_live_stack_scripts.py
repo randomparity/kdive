@@ -227,7 +227,7 @@ def _lifecycle_status(
         "    values = [os.environ.get(name, '<missing>') for name in (\n"
         "        'KDIVE_DATABASE_URL', 'KDIVE_MIGRATION_DATABASE_URL',\n"
         "        'KDIVE_SERVER_DATABASE_URL', 'KDIVE_RECONCILER_DATABASE_URL',\n"
-        "        'KDIVE_WORKER_DATABASE_URL')]\n"
+        "        'KDIVE_HARNESS_DATABASE_URL', 'KDIVE_WORKER_DATABASE_URL')]\n"
         "    with open(os.environ['KDIVE_ENV_PROBE'], 'w') as probe:\n"
         "        probe.write('\\n'.join(values))\n"
         "    return LifecycleResponse.model_validate_json(os.environ['KDIVE_RESPONSE'].encode())\n"
@@ -250,6 +250,7 @@ def _lifecycle_status(
             "KDIVE_MIGRATION_DATABASE_URL": "migration-canary",
             "KDIVE_SERVER_DATABASE_URL": "server-canary",
             "KDIVE_RECONCILER_DATABASE_URL": "reconciler-canary",
+            "KDIVE_HARNESS_DATABASE_URL": "harness-canary",
             "KDIVE_WORKER_DATABASE_URL": "worker-canary",
         },
     )
@@ -845,6 +846,7 @@ def test_live_stack_env_exports_required_defaults() -> None:
         "KDIVE_SERVER_DATABASE_URL",
         "KDIVE_WORKER_DATABASE_URL",
         "KDIVE_RECONCILER_DATABASE_URL",
+        "KDIVE_HARNESS_DATABASE_URL",
         "KDIVE_OIDC_ISSUER",
         "KDIVE_OIDC_JWKS_URI",
         "KDIVE_OIDC_AUDIENCE",
@@ -2257,6 +2259,9 @@ def test_demo_up_installs_mcp_json_into_demo_workspace_not_kernel_src() -> None:
     )
     assert "KDIVE_KERNEL_SRC}/.mcp.json" not in text
     assert 'if [[ -z "${KDIVE_DEMO_WORKSPACE:-}" ]]; then' in text
+    # #3193: demo-up.sh runs under `set -u` and the stack needs no kernel tree, so an unguarded
+    # reference would abort the bring-up on a host without one.
+    assert "${KDIVE_KERNEL_SRC}" not in text
 
 
 def test_demo_up_guest_image_hint_names_the_shared_catalog_entry() -> None:
@@ -3537,7 +3542,6 @@ def _lifecycle_start_with_inventory(
         "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
         "KDIVE_INSTALL_STAGING": "/tmp/install",
         "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
-        "KDIVE_KERNEL_SRC": "/tmp/kernel",
         "KDIVE_WORKER_DATABASE_URL": "postgresql://worker-member/kdive",
         "AWS_ACCESS_KEY_ID": "access-key",
         "AWS_SECRET_ACCESS_KEY": "secret-key",  # pragma: allowlist secret
@@ -3545,6 +3549,10 @@ def _lifecycle_start_with_inventory(
     }
     if "KDIVE_SECRETS_ROOT" not in (extra_env or {}):
         env.pop("KDIVE_SECRETS_ROOT", None)
+    # #3193: start needs no kernel tree. Drop an inherited value, and point HOME at a tree-less
+    # directory so env.sh's ~/src/linux default cannot supply one either.
+    env.pop("KDIVE_KERNEL_SRC", None)
+    env["HOME"] = str(tmp_path)
     result = subprocess.run(
         [
             "bash",
@@ -3656,7 +3664,6 @@ def test_lifecycle_start_rejects_mismatched_authority_geometry_before_request() 
             "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
             "KDIVE_INSTALL_STAGING": "/tmp/install",
             "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
-            "KDIVE_KERNEL_SRC": "/tmp/kernel",
             "KDIVE_WORKER_DATABASE_URL": "postgresql://worker-member/kdive",
             "AWS_ACCESS_KEY_ID": "access-key",
             "AWS_SECRET_ACCESS_KEY": "secret-key",  # pragma: allowlist secret
@@ -3777,6 +3784,7 @@ def test_lifecycle_status_preserves_non_ok_response_and_scrubs_other_role_dsns(
         "<missing>",
         "<missing>",
         "<missing>",
+        "<missing>",
         "worker-canary",
     ]
 
@@ -3861,6 +3869,7 @@ def test_status_database_probe_scrubs_unrelated_role_dsns(tmp_path: Path) -> Non
             "KDIVE_MIGRATION_DATABASE_URL": "migration-canary",
             "KDIVE_WORKER_DATABASE_URL": "worker-canary",
             "KDIVE_RECONCILER_DATABASE_URL": "reconciler-canary",
+            "KDIVE_HARNESS_DATABASE_URL": "harness-canary",
         },
     )
     assert result.returncode == 0, result.stderr
@@ -3895,12 +3904,13 @@ def test_onboard_aliases_each_cli_invocation_to_its_own_authority(tmp_path: Path
     python = tmp_path / "python"
     python.write_text(
         "#!/bin/sh\n"
-        "printf '%s|%s|%s|%s|%s|%s\n' \"$*\" "
+        "printf '%s|%s|%s|%s|%s|%s|%s\n' \"$*\" "
         '"${KDIVE_DATABASE_URL:-<missing>}" '
         '"${KDIVE_MIGRATION_DATABASE_URL:-<missing>}" '
         '"${KDIVE_SERVER_DATABASE_URL:-<missing>}" '
         '"${KDIVE_WORKER_DATABASE_URL:-<missing>}" '
-        '"${KDIVE_RECONCILER_DATABASE_URL:-<missing>}" >> "$KDIVE_ONBOARD_PROBE"\n',
+        '"${KDIVE_RECONCILER_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_HARNESS_DATABASE_URL:-<missing>}" >> "$KDIVE_ONBOARD_PROBE"\n',
         encoding="utf-8",
     )
     python.chmod(0o755)
@@ -3922,6 +3932,7 @@ def test_onboard_aliases_each_cli_invocation_to_its_own_authority(tmp_path: Path
             "KDIVE_SERVER_DATABASE_URL": "server-canary",
             "KDIVE_WORKER_DATABASE_URL": "worker-canary",
             "KDIVE_RECONCILER_DATABASE_URL": "reconciler-canary",
+            "KDIVE_HARNESS_DATABASE_URL": "harness-canary",
         },
     )
     assert result.returncode == 0, result.stderr
@@ -3937,6 +3948,7 @@ def test_onboard_aliases_each_cli_invocation_to_its_own_authority(tmp_path: Path
             missing,
             missing,
             missing,
+            missing,
         ],
         "-m kdive seed-project": [
             "server-canary",
@@ -3944,11 +3956,13 @@ def test_onboard_aliases_each_cli_invocation_to_its_own_authority(tmp_path: Path
             "server-canary",
             missing,
             missing,
+            missing,
         ],
         "-m kdive verify-project": [
             "server-canary",
             missing,
             "server-canary",
+            missing,
             missing,
             missing,
         ],
@@ -3963,12 +3977,13 @@ def test_host_daemon_children_receive_only_their_role_database_authority(tmp_pat
     probe = tmp_path / "environment"
     python = tmp_path / "python"
     python.write_text(
-        "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s\\n' \"$*\" "
+        "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s\\n' \"$*\" "
         '"${KDIVE_DATABASE_URL:-<missing>}" '
         '"${KDIVE_MIGRATION_DATABASE_URL:-<missing>}" '
         '"${KDIVE_SERVER_DATABASE_URL:-<missing>}" '
         '"${KDIVE_WORKER_DATABASE_URL:-<missing>}" '
-        '"${KDIVE_RECONCILER_DATABASE_URL:-<missing>}" >> "$KDIVE_DAEMON_PROBE"\n',
+        '"${KDIVE_RECONCILER_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_HARNESS_DATABASE_URL:-<missing>}" >> "$KDIVE_DAEMON_PROBE"\n',
         encoding="utf-8",
     )
     python.chmod(0o755)
@@ -3986,6 +4001,7 @@ def test_host_daemon_children_receive_only_their_role_database_authority(tmp_pat
         KDIVE_SERVER_DATABASE_URL="server-canary",
         KDIVE_WORKER_DATABASE_URL="worker-canary",
         KDIVE_RECONCILER_DATABASE_URL="reconciler-canary",
+        KDIVE_HARNESS_DATABASE_URL="harness-canary",
     )
     assert result.returncode == 0, result.stderr
     deadline = time.monotonic() + 5
@@ -3995,8 +4011,9 @@ def test_host_daemon_children_receive_only_their_role_database_authority(tmp_pat
         time.sleep(0.05)
     rows = probe.read_text(encoding="utf-8").splitlines()
     assert set(rows) == {
-        "-m kdive server|server-canary|<missing>|server-canary|<missing>|<missing>",
-        "-m kdive reconciler|reconciler-canary|<missing>|<missing>|<missing>|reconciler-canary",
+        "-m kdive server|server-canary|<missing>|server-canary|<missing>|<missing>|<missing>",
+        "-m kdive reconciler|reconciler-canary|<missing>|<missing>|<missing>|reconciler-canary|"
+        "<missing>",
     }
 
 
@@ -4120,7 +4137,6 @@ def test_lifecycle_request_construction_hides_oversized_secret_canaries(tmp_path
             "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
             "KDIVE_INSTALL_STAGING": "/tmp/install",
             "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
-            "KDIVE_KERNEL_SRC": "/tmp/kernel",
             "KDIVE_WORKER_DATABASE_URL": canary,
             "AWS_ACCESS_KEY_ID": canary,
             "AWS_SECRET_ACCESS_KEY": canary,
@@ -4395,6 +4411,16 @@ def test_backends_stage_waits_only_on_the_long_running_backends(tmp_path: Path) 
     assert "--no-recreate" in wait[0], wait[0]
     assert wait[0].endswith("postgres seaweedfs oidc"), wait[0]
     assert "seaweedfs-init" not in wait[0]
+
+
+def test_backends_stage_recreates_only_oidc(tmp_path: Path) -> None:
+    """oidc's host port is fixed at creation, so a container left by a failed attempt under
+    another KDIVE_OIDC_PORT must be replaced (#3195); the stateful backends must not be."""
+    result, log = _run_stack_services(tmp_path, "--stage", "backends")
+    assert result.returncode == 0, result.stderr
+    recreate = [ln for ln in log.read_text().splitlines() if "--force-recreate" in ln]
+    assert len(recreate) == 1, recreate
+    assert recreate[0].endswith("--no-deps oidc"), recreate[0]
 
 
 def test_backends_stage_runs_neither_obs_nor_the_app_tier_reconcile(tmp_path: Path) -> None:

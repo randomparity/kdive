@@ -16,7 +16,6 @@
 | `KDIVE_BUILD_COMPONENT_ROOTS` | worker | — | no | Colon-separated extra component roots merged into a build. |
 | `KDIVE_BUILD_USER` | worker | — | no | Name of an unprivileged passwd account the worker drops to for local kernel builds (git clone + make) when it runs as root (ADR-0214). Empty/unset: a root worker refuses the local build lane (deny by default); a non-root worker ignores it. |
 | `KDIVE_BUILD_WORKSPACE` | worker | `/var/lib/kdive/build` | no | Worker scratch root for kernel builds. |
-| `KDIVE_KERNEL_SRC` | worker | `` | no | Kernel source tree the worker builds from. |
 | `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST` | worker | — | no | Comma-separated allowlist of git remotes the local (worker-local) build host may clone for a git kernel_source_ref. Each entry is a host (github.com) or host/path prefix (github.com/myorg). Empty/unset disables local git builds (deny by default). |
 
 ## catalog
@@ -295,6 +294,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_GUEST_IMAGE_SUSE_LEAP_15_6` | — | Path to the openSUSE Leap 15.6 *-kdive-ready qcow2 for the SUSE baseline SSH and v7.0 incomplete-core live_stack proofs (#825); unset → the Leap parameters skip. |
 | `KDIVE_GUEST_IMAGE_SUSE_TUMBLEWEED` | — | Path to the openSUSE Tumbleweed *-kdive-ready qcow2 for the SUSE baseline SSH and v7.0 incomplete-core live_stack proofs (#825); unset → the Tumbleweed parameters skip. |
 | `KDIVE_IMAGE` | — | Container image ref under test for the image smoke test; unset → the smoke test skips. |
+| `KDIVE_KERNEL_SRC` | `~/src/linux when that directory exists` | Built kernel tree the live proofs, `scripts/live-vm/preflight-env.sh`, and `scripts/operations/live_debug_build.py` read; `scripts/live-stack/env.sh` supplies the default. Workers never read it (ADR-0316). |
 | `KDIVE_LIVE_SSH_TARGET` | — | SSH target gating the criterion-5 live_stack tier; unset → the live_stack suite skips. |
 | `KDIVE_LIVE_VM_BZIMAGE` | — | Path to the kernel image matching KDIVE_LIVE_VM_VMLINUX for the gated local-libvirt preserve-crash and debug-stepping proofs; unset → those tests skip. |
 | `KDIVE_LIVE_VM_GDBMI_MODULE_KO` | — | Path to a loaded module .ko for the optional gated gdb-MI module-symbol load smoke. Unset → that portion of the test skips. |
@@ -358,6 +358,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_GRAFANA_PORT` | `3000` | Host port the compose `grafana` service publishes (obs profile). |
 | `KDIVE_GUESTFS_SYS_SITE` | `/usr/lib/python3/dist-packages` | System dir `check-setup-deps.sh` looks in for the libguestfs binding (guestfs.py) when deciding its three-state guestfs remedy and performing the venv symlink (ADR-0393). |
 | `KDIVE_GUEST_HELPERS_DIR` | `deploy/remote-libvirt-guest-helpers` | Guest-helper source directory `check-remote-libvirt.sh` inspects. |
+| `KDIVE_HARNESS_DATABASE_URL` | `local Compose harness DSN` | Least-privilege login DSN for the live-tier harness (ADR-0769): live_stack cells and the installed authority carriers take it as KDIVE_DATABASE_URL. The local role bootstrap creates the login; no runtime process receives it. |
 | `KDIVE_HOST_RUNTIME_DIRS` | `/var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs` | Space-separated runtime directories `preflight-env.sh host` asserts are writable. These paths are hardcoded in the provider (no setting redirects them) and live under root-owned `/var/lib/kdive`, so a non-root worker needs them pre-created; the default tracks the constants in `runtime_paths.py` and `lifecycle/storage.py`. |
 | `KDIVE_KERNEL_REF` | `v6.9` | Kernel ref (tag/branch/sha) `fetch-kernel-tree.sh` checks out. |
 | `KDIVE_KERNEL_REPO` | `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git` | Kernel git remote `fetch-kernel-tree.sh` clones. |
@@ -396,7 +397,6 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_SERVER_DATABASE_URL` | `local Compose server-member DSN` | Database login DSN supplied only to the host server process (and the Compose reference server service); external deployments override the local development member. |
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |
 | `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/stack-services.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, seaweedfs, oidc) still start. |
-| `KDIVE_SOURCE_ROOT` | — | Internal request-construction handoff from KDIVE_KERNEL_SRC to the worker source-root setting; start fails when it is not an existing absolute directory. |
 | `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory for the server/reconciler daemons `scripts/live-stack/lib.sh` starts; `examples/local-libvirt/env.sh` overrides the default to an XDG state path. |
 | `KDIVE_SYSTEM_PY_MINOR` | `$(python3 --version)` | System Python `X.Y` minor `check-setup-deps.sh` compares against the venv's for the libguestfs ABI check before symlinking the binding (ADR-0393). |
 | `KDIVE_TCG_BUDGET_BYTES` | `7000000000` | Enforced `/mnt` disk-budget ceiling for the hosted TCG set (~7 GB): a pre-stage free-space check for the whole budget and a post-stage staged-set footprint cap, each failing loud. |
@@ -410,7 +410,6 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_WORKER_COUNT` | `1` | How many fixed lifecycle-worker slots `scripts/live-stack/worker-lifecycle.sh` starts (live-stack bring-up forwards it to the witness). A worker runs one job at a time, so this is the local stack's job-concurrency knob. Values above 8 are refused before a lifecycle request is sent (`MAX_WORKER_COUNT` in `scripts/live-stack/lib.sh`). |
 | `KDIVE_WORKER_INCARNATION_NONCE` | — | Ephemeral 128-bit nonce generated by the reference Compose lifecycle gate and passed only to the never-started managed worker create; operators do not set it manually. |
 | `KDIVE_WORKER_PYTHON` | `/opt/kdive-live-worker-lifecycle/.venv/bin/python` | Lifecycle-generated handoff naming the installed Python executable that the worker gate executes; operators do not set it directly. |
-| `KDIVE_WORKER_SOURCE_ROOT` | — | Lifecycle-generated worker environment value carrying the validated absolute kernel source root from the current start request; operators set KDIVE_KERNEL_SRC instead. |
 
 ## In-guest helpers
 
