@@ -189,8 +189,9 @@ state and `/opt/kdive-provider-authority/revision` over the same seam.
 - the remote config variable is unset, or `KDIVE_SYSTEMS_TOML` does not name a file;
 - `resource_name` is not declared, or carries no authority route for `authority_instance`;
 - the control plane's catalog does not hold exactly one registered public `remote-libvirt` image
-  for the cell's architecture with a digest and a `root_spec` (admission refuses authority-owned
-  provisioning without a mechanically verified root); the database does not hold the resource;
+  for the cell's architecture with a digest and a `root_spec`, or the database does not hold the
+  resource. Admission's own root checks (authority, source kind, identity, architecture) still
+  run after allocation; a row that fails them is failure class 3.4, not a stop;
 - the remote host's architecture is not the cell's.
 
 **Lifecycle.**
@@ -247,15 +248,10 @@ states and the inventory digest; it never records the SSH target, pool name or h
 
 ### Remote success and validation
 
-1. A remote cell with no config, an unrouted resource, no verified root image or a foreign host
-   architecture stops `blocked` with no mutation.
+1. A remote cell with no config, an unrouted resource, no catalog image carrying a digest and a
+   `root_spec`, or a foreign host architecture stops `blocked` with no mutation.
 2. A passing body proves `effect` and `cleanup`; the remote inventory is unchanged.
 3. A failing body, a remaining domain or volume, and inventory drift each fail the scenario.
 4. Two invocations mint different prefixes; the config file's prefix is never used.
 
-Unit: `tests/live_vm/test_installed_remote_authority_support.py` (command shape, parsing,
-malformed and oversized output, the program run against a fake libvirt for pool selection and
-rejection, unit/revision gates) and `tests/integration/live_stack/test_authority_lane.py` (stops,
-order, cleanup failures, drift, prefix, the root and resource query). Live:
-`tests/integration/test_authority_lane_frame_live.py` gains a remote arm; until the lane's
-catalog provides a verified remote root it records the stop as a narrower blocker.
+Unit and live validation are listed per contract in the plan's Verification entries.

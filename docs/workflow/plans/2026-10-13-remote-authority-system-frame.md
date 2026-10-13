@@ -73,59 +73,33 @@ Verification:
 - Mode: focused-test — the program: executed with a fake `libvirt` module and a fake `open`, it
   uses the env file's pool, defaults to `default`, rejects `bad/pool`, and reports the System's
   facts. Red: wrong pool name in the fake's lookup.
-- Mode: focused-test — gates: inactive unit or a revision mismatch raises `AssertionError`.
+- Mode: focused-test — gates: an inactive unit (`systemctl is-active` exits non-zero, so the
+  seam raises `RuntimeError`) and a revision mismatch (`AssertionError`) both refuse.
 
 Steps:
 
 1. Add to `_ssh` keyword-only `limit: int = _MAX_CONTROL_BYTES, timeout: float = 15` and pass them
    as `stdout_limit=limit, timeout=timeout`; existing callers keep defaults.
-2. Add constants and the program:
+2. Add `_AUTHORITY_VENV_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"`,
+   `_REVISION = "/opt/kdive-provider-authority/revision"`, `_MAX_INVENTORY_BYTES = 1_048_576`, and
+   `_INVENTORY`: the merged local program (`authority_lane.py` `_INVENTORY`, same imports, UUID
+   argument, socket and System facts) with its private-root listing replaced by the pool read
+   below, and the output `{"arch": os.uname().machine, "domains": ..., "volumes": ...,
+   "system": ...}`:
 
 ```python
-_AUTHORITY_VENV_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
-_REVISION = "/opt/kdive-provider-authority/revision"
-_MAX_INVENTORY_BYTES = 1_048_576
-
-# Root runs this with the authority's interpreter in isolated mode; its only argument is a UUID.
-_INVENTORY = """
-import json
-import os
-import re
-import sys
-from uuid import UUID
-
-import libvirt
-from defusedxml.ElementTree import fromstring
-
-if len(sys.argv) > 2:
-    raise SystemExit("inventory takes at most one System UUID")
-name = "kdive-" + str(UUID(sys.argv[1])) if len(sys.argv) == 2 else None
 pool_name = "default"
 with open("/etc/kdive/provider-authority.env", encoding="utf-8") as environment:
     for line in environment:
-        key, _, value = line.rstrip("\\n").partition("=")
+        key, _, value = line.rstrip("\n").partition("=")
         if key == "KDIVE_REMOTE_LIBVIRT_STORAGE_POOL":
             pool_name = value
 if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", pool_name) is None:
     raise SystemExit("installed authority storage pool name is invalid")
-conn = libvirt.open("qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock")
-if conn is None:
-    raise SystemExit("authority daemon connection returned no handle")
-try:
-    domains = sorted(domain.name() for domain in conn.listAllDomains(0))
-    pool = conn.storagePoolLookupByName(pool_name)
-    pool.refresh(0)
-    volumes = sorted(pool.listVolumes())
-    system = None
-    if name in domains:
-        domain = conn.lookupByName(name)
-        kind = fromstring(domain.XMLDesc(0)).get("type", "")
-        system = {"active": domain.isActive() == 1, "type": kind}
-finally:
-    conn.close()
-print(json.dumps({"arch": os.uname().machine, "domains": domains, "volumes": volumes,
-                  "system": system}))
-"""
+# ... inside the connection's try block, after listing the domains:
+pool = conn.storagePoolLookupByName(pool_name)
+pool.refresh(0)
+volumes = sorted(pool.listVolumes())
 ```
 
 3. Add the dataclasses above and:
@@ -342,7 +316,9 @@ Verification:
 Steps:
 
 1. Parametrize the two live tests over `("local-libvirt", CONFIG_ENV)` and
-   `("remote-libvirt", REMOTE_CONFIG_ENV)`; skip an arm whose variable is unset.
+   `("remote-libvirt", REMOTE_CONFIG_ENV)`; skip an arm whose variable is unset. The remote arm's
+   `Cell` uses `provider="remote-libvirt"` and `host_arch = guest_arch = "x86_64"` (the remote
+   lane's family, `REMOTE_LANE_FAMILIES`), never the control plane's `platform.machine()`.
 2. Runbook: replace "The remote authority frame is #3209 …" with the remote branch's inputs
    (proof config, minted prefix, authority-routed resource, verified remote root image, one
    scenario at a time on the remote authority) and its manual cleanup after a killed run.
