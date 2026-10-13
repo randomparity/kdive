@@ -1350,8 +1350,9 @@ path: the frame uses public provisioning on the remote resource that routes to t
   registered public `remote-libvirt` image for the cell's architecture with a digest and an
   inspected root (`root_spec`); admission refuses an authority-owned System without one. Otherwise
   the cell stops `blocked` before any mutation.
-- The operator's batch-mode SSH to `ssh_target` and passwordless `sudo -n` there are required.
-  As root, the frame runs one fixed program with the authority's interpreter. The program reads
+- The operator's batch-mode SSH to `ssh_target` and passwordless `sudo -n -u
+  kdive-provider-authority` there are required. As that account, never root, the frame runs one
+  fixed program with the authority's interpreter. The program reads
   the pool name from `/etc/kdive/provider-authority.env`, then lists the private daemon's domains
   and that pool's volumes.
 

@@ -14,8 +14,8 @@ moves it onto the private daemon with ``scripts/live-vm/provision-authority-fixt
 
 A ``remote-libvirt`` cell runs the remote branch (#3209) on the installed remote authority that
 ``REMOTE_CONFIG_ENV`` names: public HTTP provisioning on the authority-routed remote resource,
-observed through a fixed root program over the operator's bounded SSH seam on the authority's
-private daemon and storage pool.
+observed through a fixed program run as the authority account over the operator's bounded SSH
+seam on the authority's private daemon and storage pool.
 """
 
 from __future__ import annotations
@@ -349,8 +349,10 @@ async def remote_root(db_url: str, resource: str, arch: str) -> tuple[str, str, 
         cursor = await conn.execute(_REMOTE_ROOTS, (arch,))
         images = await cursor.fetchall()
     if found is None:
+        # The name stays out of the reason: it comes from the private proof config.
         raise ScenarioStop(
-            Outcome.BLOCKED, f"the control plane holds no remote resource {resource}"
+            Outcome.BLOCKED,
+            "the control plane holds no remote-libvirt resource named by the proof config",
         )
     if len(images) != 1:
         raise ScenarioStop(

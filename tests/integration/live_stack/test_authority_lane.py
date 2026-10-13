@@ -743,5 +743,5 @@ def test_remote_root_selects_the_one_verified_catalog_image(migrated_url: str) -
 
     selected, missing, ambiguous = asyncio.run(scenario())
     assert isinstance(selected, tuple) and selected[1:] == ("verified", _DIGEST)
-    assert "remote-b" in str(missing)
+    assert "no remote-libvirt resource" in str(missing) and "remote-b" not in str(missing)
     assert "found 2" in str(ambiguous)

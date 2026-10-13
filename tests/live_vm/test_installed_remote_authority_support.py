@@ -320,7 +320,7 @@ def _inventory_ssh(
     return calls
 
 
-def test_inventory_runs_the_fixed_program_as_root_over_the_bounded_seam(
+def test_inventory_runs_the_fixed_program_as_the_authority_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     system = {**_INVENTORY, "system": {"active": True, "type": "kvm"}}
@@ -342,6 +342,8 @@ def test_inventory_runs_the_fixed_program_as_root_over_the_bounded_seam(
     assert shlex.split(argv[7]) == [
         "sudo",
         "-n",
+        "-u",
+        "kdive-provider-authority",
         "/opt/kdive-provider-authority/.venv/bin/python",
         "-I",
         "-c",
@@ -484,7 +486,10 @@ def test_installed_authority_gate_refuses_an_inactive_unit_or_another_revision(
         def run(argv: tuple[str, ...], **_kwargs: object) -> tuple[bytes, bytes, int]:
             if "is-active" in argv[-1]:
                 return (b"active\n", b"", 0) if active == 0 else (b"inactive\n", b"", active)
-            assert argv[-1] == "sudo -n cat /opt/kdive-provider-authority/revision"
+            assert (
+                argv[-1]
+                == "sudo -n -u kdive-provider-authority cat /opt/kdive-provider-authority/revision"
+            )
             return revision, b"", 0
 
         monkeypatch.setattr(carrier, "_run_bounded_command", run)

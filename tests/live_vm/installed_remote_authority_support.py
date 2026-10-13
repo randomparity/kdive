@@ -23,6 +23,9 @@ CONFIG_ENV = "KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG"
 _PREFIX = re.compile(r"kdive-2151-[0-9a-f]{12}-[0-9a-f]{8}")
 _PROOF_SOCKET = Path("/run/kdive/provider-authority/proof-control/control.sock")
 _AUTHORITY_PYTHON = "/usr/bin/python3"
+# The observer and the revision read run as the authority account, never root: the account owns
+# its interpreter tree, so root running it would hand that account root on the proof host.
+_AUTHORITY_ACCOUNT = "kdive-provider-authority"
 _AUTHORITY_VENV_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
 _REVISION = "/opt/kdive-provider-authority/revision"
 _MAX_CONFIG_BYTES = 16_384
@@ -75,9 +78,9 @@ finally:
 sys.stdout.buffer.write(response)
 """
 
-# Root runs this with the authority's interpreter in isolated mode; its only argument is a UUID.
-# The pool name comes from the installed authority environment, with the authority's own default
-# and name pattern (kdive.providers.external_boot_authority.host.AuthorityHostConfig).
+# The authority account runs this with its interpreter in isolated mode; its only argument is a
+# UUID. The pool name comes from the installed authority environment, with the authority's own
+# default and name pattern (kdive.providers.external_boot_authority.host.AuthorityHostConfig).
 _INVENTORY = """
 import json
 import os
@@ -386,8 +389,17 @@ def _remote_domain(value: object) -> RemoteDomain | None:
 def remote_authority_inventory(
     config: RemoteAuthorityProofConfig, system_id: str | None = None
 ) -> RemoteAuthorityInventory:
-    """Read the remote authority's private daemon and pool as root; name one System to observe."""
-    command: tuple[str, ...] = ("sudo", "-n", _AUTHORITY_VENV_PYTHON, "-I", "-c", _INVENTORY)
+    """Read the remote authority's private daemon and pool as its account; name one System."""
+    command: tuple[str, ...] = (
+        "sudo",
+        "-n",
+        "-u",
+        _AUTHORITY_ACCOUNT,
+        _AUTHORITY_VENV_PYTHON,
+        "-I",
+        "-c",
+        _INVENTORY,
+    )
     if system_id is not None:
         command += (str(UUID(system_id)),)
     stdout = _ssh(config, command, limit=_MAX_INVENTORY_BYTES, timeout=120)
@@ -413,6 +425,6 @@ def require_installed_authority(config: RemoteAuthorityProofConfig) -> None:
     """Refuse unless the remote authority unit is active at the configured revision."""
     if _ssh(config, ("systemctl", "is-active", config.authority_service)) != b"active\n":
         raise AssertionError("the remote authority service is not active")
-    revision = _ssh(config, ("sudo", "-n", "cat", _REVISION)).strip()
+    revision = _ssh(config, ("sudo", "-n", "-u", _AUTHORITY_ACCOUNT, "cat", _REVISION)).strip()
     if revision != config.installed_revision.encode():
         raise AssertionError("the installed remote authority revision does not match the config")

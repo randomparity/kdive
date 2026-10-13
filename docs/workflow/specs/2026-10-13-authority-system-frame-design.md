@@ -175,14 +175,15 @@ local branch.
 
 **Observer.** `remote_authority_inventory(config, system_id=None)` in
 `tests/live_vm/installed_remote_authority_support.py` runs one fixed program over the existing
-bounded SSH seam: `sudo -n /opt/kdive-provider-authority/.venv/bin/python -I -c <program>
-[<uuid>]`. Root reads the storage pool name from the installed authority environment
+bounded SSH seam: `sudo -n -u kdive-provider-authority
+/opt/kdive-provider-authority/.venv/bin/python -I -c <program> [<uuid>]`, as the authority account
+and never root (that account owns the interpreter tree). It reads the storage pool name from the installed authority environment
 (`/etc/kdive/provider-authority.env`, `KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, default `default`, the
 authority's own default), opens the private session socket
 `/run/kdive/provider-authority/libvirt/libvirt-sock`, refreshes the pool and reports the host
 architecture, the daemon's domain names, the pool's volume names and, for the named System,
 whether its domain runs and its domain type. `require_installed_authority(config)` reads the unit
-state and `/opt/kdive-provider-authority/revision` over the same seam.
+state and, as the same account, `/opt/kdive-provider-authority/revision` over the same seam.
 
 **Selection, before any mutation** (each a `blocked` stop):
 
@@ -218,10 +219,10 @@ states and the inventory digest; it never records the SSH target, pool name or h
 
 1. Actors and deployments: a campaign operator running one authority scenario at a time from the
    control-plane host of the installed lanes (#3183), with batch-mode SSH to the dedicated remote
-   authority host and passwordless `sudo -n` there.
+   authority host and passwordless `sudo -n -u kdive-provider-authority` there.
 2. Invariants and assets: the remote authority's other domains and pool volumes; released
    capacity; the private daemon and pool stay unreachable to workers (the frame only reads them,
-   as root, through the operator's own access); evidence free of host identities.
+   as the authority account, through the operator's own access); evidence free of host identities.
 3. Accepted failure classes:
    - A concurrent scenario on the remote authority changes the inventory: the frame fails (safe
      direction); the runbook requires exclusivity.
@@ -235,21 +236,24 @@ states and the inventory digest; it never records the SSH target, pool name or h
 
 ### Remote threat model
 
-- Boundary added: one fixed program run as root on the remote authority host over SSH. Widened:
+- Boundary added: one fixed program run as the authority account on the remote authority host
+  over SSH. Widened:
   the bounded SSH seam gains a larger output bound for this read (1 MiB stdout, 120 s).
-- Actors: the operator (trusted to run the lane); the remote host's root (trusted; it runs the
-  authority); worker identities (untrusted, not on this path).
+- Actors: the operator (trusted to run the lane); the authority account and every process sharing
+  its UID (its session daemon and the guests' QEMU) — untrusted for privilege, so nothing runs as
+  root on their files; worker identities (untrusted, not on this path).
 - Controls: the program is a module constant; its only argument is a `UUID` validated on both
   sides; the pool name is validated against the authority's own pattern before use; `shlex.join`
   quotes the remote command; output is bounded and parsed strictly into closed shapes; errors
   surface as type names in evidence.
-- Trust assumption: root runs the authority venv's interpreter, which lives under the
-  authority account's own install directory, so that account is trusted with root-equivalence on
-  this read path. The local lane's inventory makes the same assumption; the authority unit's
-  read-only system protection is what keeps the running service from rewriting it.
+- Controls on privilege: the program, its interpreter and the revision read run as the authority
+  account through `sudo -n -u`, so a replaced interpreter or module gains nothing; the account
+  already reads the environment file (group-readable), its own socket and the revision file. Its
+  answers are evidence, not a security decision: a compromised account can lie to the frame,
+  which then fails or passes a lane it already controls.
 - Out of scope: the remote authority's own isolation guarantees; SSH host-key and account
-  management (operator-preconfigured, batch mode only); hardening the installed interpreter's
-  ownership (a deployment change for both lanes).
+  management (operator-preconfigured, batch mode only); the local lane's root-run inventory
+  (merged #3184 code, not changed here).
 
 ### Remote success and validation
 
