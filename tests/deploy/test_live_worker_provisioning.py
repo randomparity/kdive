@@ -2931,6 +2931,9 @@ def test_installer_readiness_wait_does_not_follow_a_pid_symlink(tmp_path: Path) 
     target.write_text("999999999\n", encoding="utf-8")
     pid_path = tmp_path / "libvirtd.pid"
     pid_path.symlink_to(target)
+    runuser = tmp_path / "runuser"
+    runuser.write_text(_FAKE_COMMANDS["runuser"], encoding="utf-8")
+    runuser.chmod(0o755)
     command = r"""
 source "$1"
 _await_libvirt_daemon_ready "$2" op qemu+unix:///session 1
@@ -2940,6 +2943,7 @@ _await_libvirt_daemon_ready "$2" op qemu+unix:///session 1
         check=False,
         capture_output=True,
         text=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
         timeout=30,
     )
 
