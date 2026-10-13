@@ -392,8 +392,9 @@ def test_clean_run_schedules_its_steps_and_stages_no_kernel_tree(tmp_path: Path)
         phases={"first-boot": None, "second-boot": None},
         output=tmp_path,
     )
-    run_owned = ("observe-host", "operator-prerequisites")
-    assert [s.name for s in remote.steps] == [s for s in CLEAN_STEPS if s not in run_owned]
+    # run() observes the host; the operator step runs only with an operator file.
+    unscheduled = ("observe-host", "operator-prerequisites")
+    assert [s.name for s in remote.steps] == [s for s in CLEAN_STEPS if s not in unscheduled]
     for name, script in remote.scripts.items():
         assert "fetch-kernel-tree" not in script and "src/linux" not in script, name
 
