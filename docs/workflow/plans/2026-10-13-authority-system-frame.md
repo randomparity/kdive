@@ -12,9 +12,10 @@ whose two revision/route gates accept any object with `installed_revision`. Spec
 
 **Tech stack:** Python 3.14, pytest, psycopg 3, libvirt-python, pydantic 2.
 
-Expected implementation size: 850–1000 changed lines (L) — about 35 support-module lines, 475
-frame lines, 290 unit-test lines, 80 live self-test lines, 50 runbook lines and a docstring
-paragraph, from the file map.
+Expected implementation size: 1000–1150 changed lines (L) — about 35 support-module lines, 560
+frame lines, 400 unit-test lines, 90 live self-test lines, 60 runbook lines and a docstring
+paragraph, from the file map. The range sits at the L ceiling because review added the
+teardown, Run-job drain, partial-create and interruption paths.
 
 ## Global Constraints
 
@@ -100,7 +101,8 @@ class Revisioned(Protocol):
 Files: create `tests/integration/live_stack/authority_lane.py` and
 `tests/integration/live_stack/test_authority_lane.py`; edit the `tool_cells.py` docstring.
 
-Interfaces consumed: Task 1's names; existing `NativeAuthorityConfig`, `ResourceLedger`,
+Interfaces consumed: Task 1's names; existing `NativeAuthorityConfig`, `OwnedResource`,
+`ResourceLedger`,
 `provision_authority_fixture(db_url, config, ledger)`, `remove_authority_fixture(config, ledger)`,
 `require_authority_artifact_confinement(config, running_workers)`,
 `require_evidence_read_access(db_url)`; `acquire_image(op, name, arch)`, `domain_xml(system_id)`,
@@ -108,7 +110,11 @@ Interfaces consumed: Task 1's names; existing `NativeAuthorityConfig`, `Resource
 `release_and_verify`, `_await_released` (cleanup.py); `await_system_state`, `mint_role_token`,
 `ok`, `scalar`, `seed_metering`, `worker_libvirt_uri`, `LOCAL_ALLOCATION_DISK_GB`,
 `DRAIN_DEADLINE_S`, `POLL_INTERVAL_S` (spine.py); `lane_image()` (tool_cells.py);
-`data_str` (tests/mcp/json_data.py); `domain_name_for` (kdive).
+`data_str` (tests/mcp/json_data.py); `domain_name_for`, `local_authority_instance_for_resource`
+(`kdive.providers.local_libvirt.config`), `TERMINAL_INVESTIGATION_STATES`
+(`kdive.services.investigations.common`); for the database test `migrated_url`
+(tests/db/conftest.py via tests/integration/conftest.py), `open_pool`, and
+`seed_granted_allocation`, `seed_system`, `seed_running_run` (tests/integration/_seed.py).
 
 Interfaces produced (for #3186 and Task 3): `CONFIG_ENV`, `AuthorityLaneConfig`,
 `load_lane_config(environment=None)`, `AuthoritySystem`, `AuthorityBody`,
@@ -120,8 +126,16 @@ Verification (each focused-test red is observed by commenting out the named beha
 - `public` stops `blocked` naming #3144 and #3148 before any gate —
   `test_public_mode_is_blocked_before_mutation`.
 - A gate failure requests no allocation — `test_gate_failure_creates_nothing`.
-- Success order and proofs — `test_success_orders_effects_and_proves_cleanup` (red when the
-  confinement call is removed: the recorded order differs).
+- An authority-routed resource stops `blocked`, never provisions, releases its allocation —
+  `test_routed_resource_is_blocked_and_released`.
+- A failed fixture create removes the five fixed names before teardown —
+  `test_partial_fixture_create_removes_the_fixed_names`.
+- Cancellation still cleans up — `test_cancellation_still_cleans_up`.
+- The drain query names the System's and its Runs' open jobs only (database) —
+  `test_open_jobs_names_the_system_and_its_runs` (red when the `run_id` arm is removed).
+- Success order and proofs, including `systems.teardown` before `release_and_verify` —
+  `test_success_orders_effects_and_proves_cleanup` (red when the confinement call is removed:
+  the recorded order differs).
 - Body failure still cleans up and re-raises — `test_body_failure_still_cleans_up`.
 - Cleanup failure fails — `test_cleanup_failure_fails_the_scenario`.
 - Both fail — `test_body_and_cleanup_failures_are_grouped`.
@@ -144,14 +158,19 @@ import subprocess
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import uuid4
 from typing import Any, cast
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
+from kdive.domain.capacity.state import SystemState
 from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
+from tests.integration._seed import seed_granted_allocation, seed_running_run, seed_system
+from tests.integration.conftest import open_pool
 from tests.integration.live_stack import authority_lane
 from tests.integration.live_stack.evidence import EvidenceWriter
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
@@ -201,6 +220,8 @@ class _Op:
             return ToolResponse(object_id="job", status="queued", data={"system_id": _SYSTEM})
         if name == "jobs.wait":
             return ToolResponse(object_id="job", status="succeeded")
+        if name == "investigations.get":
+            return ToolResponse(object_id="inv", status="active")
         return ToolResponse(object_id="alloc", status="ok")
 
 
@@ -229,6 +250,12 @@ def _fake_lane(
     async def over_http(_url: str, _token: str) -> AsyncIterator[_Op]:
         yield _Op(calls)
 
+    async def fixture(_db: str, config: Any, ledger: Any) -> None:
+        calls.append(f"fixture-{config.fixture_mode}")
+        if config.fixture_mode == "create":
+            for name in authority_lane.fixture_names(_SYSTEM):
+                ledger.record(authority_lane.OwnedResource(kind="authority-fixture", identity=name))
+
     entry = type("Entry", (), {"arch": "x86_64", "distro": "fedora", "version": "44"})()
     patches: dict[str, Any] = {
         "lane_image": lambda: ("lane", entry),
@@ -243,20 +270,37 @@ def _fake_lane(
         "domain_xml": record("domain_xml", "<domain/>"),
         "domain_disks": lambda _xml: ["/worker/overlay.qcow2"],
         "require_root_provenance": arecord("require_root_provenance"),
-        "provision_authority_fixture": arecord("provision_authority_fixture"),
+        "allocated_resource": arecord("allocated_resource", "local"),
+        "local_authority_instance_for_resource": lambda _name: None,
+        "provision_authority_fixture": fixture,
         "require_authority_artifact_confinement": record("confinement"),
         "authority_inventory": record(
             "authority_inventory", {"system": {"active": True, "type": "kvm"}}
         ),
         "worker_domains": record("worker_domains", []),
         "drain_system_jobs": arecord("drain_system_jobs", ["succeeded"]),
-        "remove_authority_fixture": record("remove_authority_fixture"),
+        "remove_authority_fixture": _removal(calls),
         "release_and_verify": arecord("release_and_verify", {"system": "torn_down"}),
     }
     for name, value in patches.items():
         monkeypatch.setattr(authority_lane, name, value)
     monkeypatch.setattr(authority_lane.LiveStackClient, "over_http", over_http)
     return calls
+
+
+def record_async(calls: list[str], name: str) -> Any:
+    async def coroutine(*_args: object, **_kwargs: object) -> None:
+        calls.append(name)
+
+    return coroutine
+
+
+def _removal(calls: list[str]) -> Any:
+    def remove(_config: object, ledger: Any) -> None:
+        calls.append("remove_authority_fixture")
+        calls.extend(f"remove {r.identity}" for r in reversed(ledger.resources))
+
+    return remove
 
 
 async def _body_ok(system: authority_lane.AuthoritySystem) -> dict[str, object]:
@@ -332,12 +376,13 @@ def test_success_orders_effects_and_proves_cleanup(
         "allocations.request",
         "systems.provision",
         "require_root_provenance",
-        "provision_authority_fixture",
+        "fixture-create",
         "confinement",
-        "provision_authority_fixture",
+        "fixture-verify-existing",
         "authority_inventory",
         "drain_system_jobs",
         "remove_authority_fixture",
+        "systems.teardown",
         "release_and_verify",
         "lane_inventory",
     ]
@@ -346,6 +391,53 @@ def test_success_orders_effects_and_proves_cleanup(
     assert set(run.assertions) == {"effect", "cleanup"}
     assert run.observed["accelerator"] == "kvm"
     assert run.observed["image_sha256"] == "b" * 64
+
+
+def test_routed_resource_is_blocked_and_released(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _fake_lane(monkeypatch, tmp_path)
+    monkeypatch.setattr(authority_lane, "local_authority_instance_for_resource", lambda _n: "a")
+    monkeypatch.setattr(authority_lane, "_await_released", record_async(calls, "released"))
+    with pytest.raises(ScenarioStop, match="authority_instance") as stop:
+        _frame(_run(tmp_path), _body_ok)
+    assert stop.value.outcome is Outcome.BLOCKED
+    assert "systems.provision" not in calls
+    assert calls.index("allocations.request") < calls.index("allocations.release")
+    assert calls[-1] == "lane_inventory"
+
+
+def test_partial_fixture_create_removes_the_fixed_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _fake_lane(monkeypatch, tmp_path)
+
+    async def failed_create(_db: str, _config: object, _ledger: object) -> None:
+        raise RuntimeError("authority fixture create failed")
+
+    monkeypatch.setattr(authority_lane, "provision_authority_fixture", failed_create)
+    with pytest.raises(RuntimeError, match="create failed"):
+        _frame(_run(tmp_path), _body_ok)
+    removed = [
+        c.removeprefix("remove ")
+        for c in calls
+        if c.startswith("remove /") or c.startswith("remove kdive-")
+    ]
+    assert removed == list(reversed(authority_lane.fixture_names(_SYSTEM)))
+    assert calls.index("remove_authority_fixture") < calls.index("systems.teardown")
+
+
+def test_cancellation_still_cleans_up(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = _fake_lane(monkeypatch, tmp_path)
+
+    async def cancelled(_system: authority_lane.AuthoritySystem) -> dict[str, object]:
+        raise asyncio.CancelledError
+
+    run = _run(tmp_path)
+    with pytest.raises(asyncio.CancelledError):
+        _frame(run, cancelled)
+    assert "release_and_verify" in calls
+    assert len(run.artifacts) == 1
 
 
 def test_body_failure_still_cleans_up(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -385,6 +477,7 @@ def test_body_and_cleanup_failures_are_grouped(
     run = _run(tmp_path)
     with pytest.raises(ExceptionGroup) as group:
         _frame(run, _body_fails)
+    assert type(group.value) is ExceptionGroup
     first, second = group.value.exceptions
     assert isinstance(first, _BodyFailed) and isinstance(second, RuntimeError)
     assert len(run.artifacts) == 1
@@ -433,6 +526,36 @@ def test_authority_inventory_is_fixed_and_validated(monkeypatch: pytest.MonkeyPa
         authority_lane.authority_inventory()
     with pytest.raises(ValueError):
         authority_lane.authority_inventory("not-a-uuid")
+
+
+def test_open_jobs_names_the_system_and_its_runs(migrated_url: str) -> None:
+    async def scenario() -> list[str]:
+        async with open_pool(migrated_url) as pool:
+            allocation = await seed_granted_allocation(pool)
+            system = await seed_system(pool, allocation, SystemState.READY)
+            other = await seed_system(pool, allocation, SystemState.READY)
+            run = await seed_running_run(pool, system)
+            async with pool.connection() as conn:
+                for key, state, payload in (
+                    ("system", "queued", {"system_id": system}),
+                    ("run", "queued", {"run_id": run}),
+                    ("other", "queued", {"system_id": other}),
+                    ("done", "canceled", {"system_id": system}),
+                ):
+                    await conn.execute(
+                        "INSERT INTO jobs (id, kind, state, attempt, max_attempts, payload, "
+                        "authorizing, dedup_key) VALUES (%s, 'install', %s, 0, 3, %s, %s, %s)",
+                        (
+                            uuid4(),
+                            state,
+                            Jsonb(payload),
+                            Jsonb({"principal": "user-1", "project": "proj"}),
+                            key,
+                        ),
+                    )
+            return await authority_lane._open_jobs(migrated_url, system)
+
+    assert len(asyncio.run(scenario())) == 2
 ```
 
    Run the green command; expect `ModuleNotFoundError` for `authority_lane`.
@@ -474,10 +597,12 @@ import psycopg
 from pydantic import BaseModel, ConfigDict, Field
 
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
+from kdive.providers.local_libvirt.config import local_authority_instance_for_resource
 from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.services.investigations.common import TERMINAL_INVESTIGATION_STATES
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.cleanup import (
-    _await_released,
+    _await_released,  # the release wait of a frame that never got a System
     capacity_in_use,
     domain_disks,
     release_and_verify,
@@ -503,6 +628,7 @@ from tests.integration.live_stack.spine import (
 from tests.integration.live_stack.tool_cells import lane_image
 from tests.live_vm.installed_local_authority_support import (
     NativeAuthorityConfig,
+    OwnedResource,
     ResourceLedger,
     provision_authority_fixture,
     read_protected_config,
@@ -521,12 +647,24 @@ _AUTHORITY_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
 _REVISION = "/opt/kdive-provider-authority/revision"
 _MAX_INVENTORY_BYTES = 1_048_576
 _TERMINAL = frozenset({"succeeded", "failed", "canceled"})
+_AUTHORITY_ROOTFS = "/var/lib/kdive/provider-authority/rootfs"
+_AUTHORITY_CONSOLE = "/var/lib/kdive/provider-authority/console"
 REMOTE_BLOCKED = "the remote authority-owned System frame is #3209"
 PUBLIC_BLOCKED = (
     "public authority-owned provisioning is blocked by #3144 (the authority answers "
     "provider-conflict after it defines the domain and fences the allocation from release) and "
     "#3148 (the local System identity never matches libvirt's machine name); "
     "set system_mode to fixture"
+)
+ROUTED_BLOCKED = (
+    "fixture mode needs the lane's plain local-libvirt resource without an authority_instance; "
+    "an authority-routed resource makes systems.provision the blocked public path (#3144, #3148)"
+)
+# Every non-terminal job that names the System or one of its Runs.
+_OPEN_JOBS = (
+    "SELECT id::text FROM jobs WHERE state NOT IN ('succeeded', 'failed', 'canceled') "
+    "AND (payload->>'system_id' = %(system)s OR payload->>'run_id' IN "
+    "(SELECT id::text FROM runs WHERE system_id = %(system)s::uuid)) ORDER BY created_at"
 )
 
 # Root runs this with the authority's interpreter in isolated mode; its only argument is a UUID.
@@ -691,37 +829,63 @@ async def require_root_provenance(db_url: str, system_id: str, digest: str, arch
     assert (row[0], row[1]) == (digest, arch), "the System's root provenance is another image"
 
 
+async def _open_jobs(db_url: str, system_id: str) -> list[str]:
+    async with await psycopg.AsyncConnection.connect(db_url) as conn:
+        await conn.set_read_only(True)
+        cursor = await conn.execute(_OPEN_JOBS, {"system": system_id})
+        return [str(row[0]) for row in await cursor.fetchall()]
+
+
 async def drain_system_jobs(
     op: LiveStackClient, db_url: str, system_id: str, *, deadline_s: float = DRAIN_DEADLINE_S
 ) -> list[str]:
-    """Wait until every job of the System is terminal; return their terminal states."""
-    async with await psycopg.AsyncConnection.connect(db_url) as conn:
-        await conn.set_read_only(True)
-        cursor = await conn.execute(
-            "SELECT id::text FROM jobs WHERE payload->>'system_id' = %s "
-            "AND state NOT IN ('succeeded', 'failed', 'canceled') ORDER BY created_at",
-            (system_id,),
-        )
-        open_jobs = [str(row[0]) for row in await cursor.fetchall()]
+    """Wait until no job of the System or its Runs is open; return the terminal states seen.
+
+    The query repeats until it finds nothing, so a job queued during the drain is waited on too.
+    """
     deadline = time.monotonic() + deadline_s
     states: list[str] = []
-    for job_id in open_jobs:
-        while True:
+    while open_jobs := await _open_jobs(db_url, system_id):
+        for job_id in open_jobs:
             env = await scalar(op, "jobs.wait", job_id=job_id, timeout_s=60.0)
             if env.status in _TERMINAL:
                 states.append(env.status)
-                break
-            assert time.monotonic() < deadline, f"job {job_id} stayed {env.status}"
-            await asyncio.sleep(POLL_INTERVAL_S)
+        assert time.monotonic() < deadline, f"job(s) of System {system_id} stayed open"
+        await asyncio.sleep(POLL_INTERVAL_S)
     return states
+
+
+def fixture_names(system_id: str) -> list[str]:
+    """The five names a fixture create makes for ``system_id``, in creation order (runbook)."""
+    return [
+        f"{_AUTHORITY_ROOTFS}/{system_id}-fixture-base.qcow2",
+        f"{_AUTHORITY_ROOTFS}/{system_id}-baseline",
+        f"{_AUTHORITY_ROOTFS}/{system_id}-overlay.qcow2",
+        f"{_AUTHORITY_CONSOLE}/{system_id}.log",
+        domain_name_for(UUID(system_id)),
+    ]
+
+
+async def allocated_resource(db_url: str, allocation_id: str) -> str:
+    """The name of the Resource ``allocation_id`` holds."""
+    async with await psycopg.AsyncConnection.connect(db_url) as conn:
+        await conn.set_read_only(True)
+        cursor = await conn.execute(
+            "SELECT r.name FROM allocations a JOIN resources r ON r.id = a.resource_id "
+            "WHERE a.id = %s",
+            (allocation_id,),
+        )
+        row = await cursor.fetchone()
+    assert row is not None and row[0], f"allocation {allocation_id} holds no named resource"
+    return str(row[0])
 
 
 @dataclass(frozen=True)
 class AuthoritySystem:
     """A ``ready`` authority-owned System as the frame's body sees it.
 
-    ``config`` and ``ledger`` are the invocation's: a body records the Investigations and Runs
-    it opens in ``ledger`` and closes them before it returns.
+    ``config`` and ``ledger`` are the invocation's: a body records each Investigation it opens in
+    ``ledger`` (the frame closes any still open) and releases its own Runs.
     """
 
     op: LiveStackClient
@@ -781,16 +945,15 @@ async def on_authority_system(
     """Create an authority-owned System in ``project``, run ``body``, then prove ``cleanup``.
 
     ``body`` returns the ``effect`` observation; the frame adds the exposure. Cleanup runs
-    whether or not ``body`` raised.
+    whether or not ``body`` raised, including on interruption.
     """
     lane = select_lane(run)
     name, entry = lane_image()
     running = await asyncio.to_thread(require_lane, lane, base_url)
     await require_evidence_read_access(db_url)
     before = await asyncio.to_thread(lane_inventory)
-    token = mint_role_token(
-        issuer, project=project, agent_session=f"{project}-sess", role="operator"
-    )
+    # systems.teardown, which cleanup needs, is an admin operation.
+    token = mint_role_token(issuer, project=project, agent_session=f"{project}-sess", role="admin")
     async with LiveStackClient.over_http(base_url, token) as op:
         await seed_metering(db_url, project)
         digest = str((await acquire_image(op, name, entry.arch))["digest"])
@@ -816,11 +979,28 @@ async def on_authority_system(
         try:
             profile = fixture_profile(entry.arch, digest, f"{project}-unread")
             observed = await _create_and_run(run, frame, lane, running, profile, digest, body)
-        except Exception as primary:
+        except BaseException as primary:
             await _cleanup_after_failure(run, frame, primary)
             raise
         run.prove("effect", {"exposure": run.cell.exposure, **observed})
         run.prove("cleanup", await _cleanup(frame))
+
+
+async def _move_to_authority(frame: _Frame, config: NativeAuthorityConfig) -> None:
+    """Run the fixture create and record its names; a failed create records the fixed five."""
+    assert frame.ledger is not None and frame.system_id is not None
+    names = fixture_names(frame.system_id)
+    created = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
+    try:
+        await provision_authority_fixture(frame.db_url, config, created)
+    except BaseException:
+        for identity in names:
+            frame.ledger.record(OwnedResource(kind="authority-fixture", identity=identity))
+        raise
+    reported = [resource.identity for resource in created.resources]
+    for identity in reported:
+        frame.ledger.record(OwnedResource(kind="authority-fixture", identity=identity))
+    assert reported == names, "the fixture create reported names other than its five"
 
 
 async def _create_and_run(
@@ -834,6 +1014,9 @@ async def _create_and_run(
 ) -> dict[str, object]:
     """Provision through HTTP, move onto the private daemon, gate, observe, then run ``body``."""
     op = frame.op
+    resource = await allocated_resource(frame.db_url, frame.allocation)
+    if local_authority_instance_for_resource(resource) is not None:
+        raise ScenarioStop(Outcome.BLOCKED, ROUTED_BLOCKED)
     provisioned = ok(
         await scalar(op, "systems.provision", allocation_id=frame.allocation, profile=profile),
         "provision",
@@ -851,7 +1034,7 @@ async def _create_and_run(
         authority_service=lane.authority_service,
     )
     frame.fixture, frame.ledger = config, ResourceLedger(prefix, fixture_system=config.system_id)
-    await provision_authority_fixture(frame.db_url, config, frame.ledger)
+    await _move_to_authority(frame, config)
     await asyncio.to_thread(require_authority_artifact_confinement, config, running)
     verify = config.model_copy(update={"fixture_mode": "verify-existing"})
     await provision_authority_fixture(frame.db_url, verify, frame.ledger)
@@ -859,32 +1042,50 @@ async def _create_and_run(
     assert isinstance(facts, dict) and facts["active"] is True, (
         "the System's domain is not running on the authority daemon"
     )
-    worker = await asyncio.to_thread(worker_domains)
-    assert domain_name_for(UUID(system_id)) not in worker, "the worker daemon still defines it"
     run.observed["accelerator"] = ACCELERATORS.get(str(facts["type"]), "none")
     return await body(
         AuthoritySystem(op, frame.project, frame.allocation, system_id, config, frame.ledger)
     )
 
 
+async def _close_investigations(op: LiveStackClient, ledger: ResourceLedger) -> None:
+    for resource in reversed(ledger.resources):
+        if resource.kind != "investigation":
+            continue
+        current = await scalar(op, "investigations.get", investigation_id=resource.identity)
+        if current.status in TERMINAL_INVESTIGATION_STATES:
+            continue
+        ok(
+            await scalar(
+                op,
+                "investigations.close",
+                investigation_id=resource.identity,
+                summary="Authority System frame cleanup",
+            ),
+            "close-investigation",
+        )
+
+
 async def _cleanup(frame: _Frame) -> dict[str, object]:
-    """Drain, remove the fixture, release, then prove the lane inventory unchanged."""
+    """Drain, close, remove the fixture, tear down, release, then compare the inventory."""
     op = frame.op
-    drained: list[str] = []
-    if frame.system_id is not None:
-        drained = await drain_system_jobs(op, frame.db_url, frame.system_id)
     owned = [frame.allocation]
-    if frame.fixture is not None and frame.ledger is not None:
-        owned += [r.identity for r in frame.ledger.resources if r.kind == "authority-fixture"]
-        await asyncio.to_thread(remove_authority_fixture, frame.fixture, frame.ledger)
     if frame.system_id is None:
         ok(await scalar(op, "allocations.release", allocation_id=frame.allocation), "release")
         await _await_released(op, frame.allocation, DRAIN_DEADLINE_S, POLL_INTERVAL_S)
         in_use = await capacity_in_use(op)
         assert in_use == frame.in_use, f"capacity in use is {in_use}, not {frame.in_use}"
         released: dict[str, object] = {"allocation": "released", "in_use": in_use}
+        drained: list[str] = []
     else:
+        drained = await drain_system_jobs(op, frame.db_url, frame.system_id)
+        if frame.fixture is not None and frame.ledger is not None:
+            await _close_investigations(op, frame.ledger)
+            owned += [r.identity for r in frame.ledger.resources if r.kind == "authority-fixture"]
+            await asyncio.to_thread(remove_authority_fixture, frame.fixture, frame.ledger)
         owned.append(frame.system_id)
+        ok(await scalar(op, "systems.teardown", system_id=frame.system_id), "teardown")
+        await await_system_state(op, "teardown", frame.system_id, "torn_down")
         released = await release_and_verify(
             op,
             allocation_id=frame.allocation,
@@ -904,7 +1105,7 @@ async def _cleanup(frame: _Frame) -> dict[str, object]:
     }
 
 
-async def _cleanup_after_failure(run: CellRun, frame: _Frame, primary: Exception) -> None:
+async def _cleanup_after_failure(run: CellRun, frame: _Frame, primary: BaseException) -> None:
     """Clean up after a failed creation or body; a failed cleanup joins ``primary``."""
     try:
         result = await _cleanup(frame)
@@ -912,7 +1113,11 @@ async def _cleanup_after_failure(run: CellRun, frame: _Frame, primary: Exception
         # The type only: a message can carry host paths or a libvirt URI (ADR-0715 evidence).
         attempt: dict[str, object] = {"error": type(cleanup).__name__}
         run.artifacts.append(run.writer.artifact({"cell": run.cell.id, "cleanup-attempt": attempt}))
-        raise ExceptionGroup("authority frame and cleanup failures", [primary, cleanup]) from None
+        # A KeyboardInterrupt or cancellation stays a BaseExceptionGroup; two errors narrow to
+        # an ExceptionGroup.
+        raise BaseExceptionGroup(
+            "authority frame and cleanup failures", [primary, cleanup]
+        ) from None
     run.artifacts.append(run.writer.artifact({"cell": run.cell.id, "cleanup-attempt": result}))
 ```
 
@@ -920,8 +1125,9 @@ async def _cleanup_after_failure(run: CellRun, frame: _Frame, primary: Exception
    `authority_lane.on_authority_system`, chosen explicitly by its carrier.
 4. Run the focused command (expect pass), `just lint`, `just type`; commit
    `feat(test): frame authority-owned Systems for HTTP tool cells`.
-5. Bite check: commit first, then comment out the `require_authority_artifact_confinement` call
-   and the body-failure cleanup call in turn; observe the named tests red; restore with
+5. Bite check: commit first, then in turn comment out the `require_authority_artifact_confinement`
+   call, the `_cleanup_after_failure` call, the `systems.teardown` call and the `run_id` arm of
+   `_OPEN_JOBS`; observe the named tests red; restore each with
    `git checkout -- tests/integration/live_stack/authority_lane.py`.
 
 ## Task 3 — live self-test and runbook
@@ -945,8 +1151,8 @@ Steps:
 """The authority-owned System frame on the installed local-authority lane (#3184).
 
 Gated ``live_stack`` and dormant unless ``KDIVE_LIVE_STACK_LOCAL_AUTHORITY_CONFIG`` names the lane
-config: one body that passes and one that raises, each of which must leave the lane's domains,
-private artifacts and capacity as it found them.
+config: one body that opens an Investigation and passes, and one that raises. Each must leave the
+lane's domains, private artifacts and capacity as it found them.
 """
 
 from __future__ import annotations
@@ -969,6 +1175,8 @@ from tests.integration.live_stack.authority_lane import (
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.evidence import EvidenceWriter
 from tests.integration.live_stack.scenario import CellRun
+from tests.integration.live_stack.spine import ok, scalar
+from tests.live_vm.installed_local_authority_support import OwnedResource
 
 pytestmark = pytest.mark.live_stack
 
@@ -1006,8 +1214,16 @@ def _frame(run: CellRun, body: AuthorityBody) -> None:
 
 def test_authority_frame_success(tmp_path: Path) -> None:
     async def body(system: AuthoritySystem) -> dict[str, object]:
-        assert system.config.system_id.hex == system.system_id.replace("-", "")
-        return {"system": "observed"}
+        opened = await scalar(
+            system.op,
+            "investigations.open",
+            project=system.project,
+            title=system.config.ownership_prefix,
+        )
+        investigation = ok(opened, "open-investigation").object_id
+        # Left open on purpose: the frame closes every ledger Investigation still open.
+        system.ledger.record(OwnedResource(kind="investigation", identity=investigation))
+        return {"investigation": "opened"}
 
     run = _run(tmp_path)
     _frame(run, body)
