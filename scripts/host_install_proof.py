@@ -137,8 +137,8 @@ git fetch --quiet origin main
 rm -f "$HOME/kdive-candidate.bundle"
 git rev-parse HEAD
 """
-# examples/local-libvirt/README.md lists a kernel tree at KDIVE_KERNEL_SRC (default ~/src/linux)
-# as a prerequisite; host preparation grants workers traversal only to a tree that exists.
+# Stages the kernel tree scripts/live-stack/env.sh defaults KDIVE_KERNEL_SRC to (~/src/linux),
+# the fixture the live proofs read. The stack and its workers no longer need one (#3193).
 _KERNEL_SOURCE = """set -euo pipefail
 cd "$HOME/kdive"
 KDIVE_KERNEL_REF={commit} scripts/fetch-kernel-tree.sh "$HOME/src/linux"
