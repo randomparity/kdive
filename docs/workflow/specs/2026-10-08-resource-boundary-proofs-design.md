@@ -47,8 +47,11 @@ calling it failed. Retry ownership must remain one System/domain/overlay.
 Implemented shape: the host fixture operations are fixed-argv helpers inside
 tests/integration/live_stack/resource_limits.py rather than a separate script, and the shared
 frames gained two default-preserving parameters (scenario.Sizing for the local allocation and
-profile size; from_failed on await_system_state/release_and_verify for releasing a System that
-already failed). Existing carriers keep their behavior.
+profile size; from_failed on release_and_verify for releasing a System that already failed,
+which stays in the terminal failed state). Operator decision (2026-10-13) also folds in the
+host-preparation fix: /var/lib/kdive/rootfs-uploads joins the worker shared directories and,
+because qemu opens the staged base in place as the overlay's backing file (observed: SELinux
+denied svirt_t read of the var_lib_t base), the svirt_image_t label list. Existing carriers keep their behavior.
 
 Add a live carrier and domain support alongside existing live_stack lifecycle support;
 use CellRun/run_cell, verified kernel fixtures, public MCP allocation/provision/install/

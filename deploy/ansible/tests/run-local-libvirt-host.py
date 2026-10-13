@@ -142,8 +142,10 @@ require(
         "/var/lib/kdive/install",
         "/var/lib/kdive/build/images",
         "/var/lib/kdive/rootfs-cache",
+        "/var/lib/kdive/rootfs-uploads",
     ],
-    "the play must own the ADR-0640 roots and ADR-0764 build/images subtree, not rootfs/local",
+    "the play must own the ADR-0640 roots, the ADR-0764 build/images subtree and the uploaded-"
+    "rootfs staging root qemu reads in place, not rootfs/local",
 )
 require(
     "/var/lib/kdive/build/images" in uv_defaults["live_vm_host_worker_shared_directories"],
