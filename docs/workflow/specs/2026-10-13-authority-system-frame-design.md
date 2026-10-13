@@ -151,3 +151,111 @@ body fails the scenario.
   (subprocess, HTTP client, DB).
 - Live (`tests/integration/test_authority_lane_frame_live.py`, `live_stack`): a success body and
   a raising body on the installed local-authority lane.
+
+## Addendum: remote authority branch (#3209)
+
+Issue: #3209 (child of #3152), as narrowed by its "Scope correction" (operator decision,
+2026-10-13). Plan: `docs/workflow/plans/2026-10-13-remote-authority-system-frame.md`. This
+addendum replaces the remote `blocked` stop above; everything else in this spec is unchanged.
+
+### Remote scope
+
+`on_authority_system` sends a `remote-libvirt` cell to a remote branch in the same module. It
+reuses the frame's job drain, Investigation closing, root-provenance check, failure grouping and
+`AuthoritySystem` body contract. `tool_cells.py`, `Lane`, `LaneFrame` and `lane_for` stay
+unchanged. No fixture path exists remotely, so the branch provisions through public HTTP
+provisioning on the dedicated authority-routed remote resource. A failure of that first real
+construction is a finding to record as a narrower blocker, not to work around.
+
+**Configuration.** `KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG` names the existing closed
+`RemoteAuthorityProofConfig`; its fields are unchanged. The frame replaces the file's
+`ownership_prefix` with one minted per invocation (`kdive-2151-<revision12>-<hex8>`) and labels
+the body's `ResourceLedger` with it. `KDIVE_SYSTEMS_TOML` must name the lane's inventory, as for the
+local branch.
+
+**Observer.** `remote_authority_inventory(config, system_id=None)` in
+`tests/live_vm/installed_remote_authority_support.py` runs one fixed program over the existing
+bounded SSH seam: `sudo -n /opt/kdive-provider-authority/.venv/bin/python -I -c <program>
+[<uuid>]`. Root reads the storage pool name from the installed authority environment
+(`/etc/kdive/provider-authority.env`, `KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, default `default`, the
+authority's own default), opens the private session socket
+`/run/kdive/provider-authority/libvirt/libvirt-sock`, refreshes the pool and reports the host
+architecture, the daemon's domain names, the pool's volume names and, for the named System,
+whether its domain runs and its domain type. `require_installed_authority(config)` reads the unit
+state and `/opt/kdive-provider-authority/revision` over the same seam.
+
+**Selection, before any mutation** (each a `blocked` stop):
+
+- the remote config variable is unset, or `KDIVE_SYSTEMS_TOML` does not name a file;
+- `resource_name` is not declared, or carries no authority route for `authority_instance`;
+- the control plane's catalog does not hold exactly one registered public `remote-libvirt` image
+  for the cell's architecture with a digest and a `root_spec` (admission refuses authority-owned
+  provisioning without a mechanically verified root); the database does not hold the resource;
+- the remote host's architecture is not the cell's.
+
+**Lifecycle.**
+
+1. Gates: remote unit active and its installed revision equal to `installed_revision`;
+   `require_deployed_revision` for the server and every running fixed worker slot;
+   `require_evidence_read_access`. Then the **before** inventory: remote domains and pool volumes.
+2. An `admin` token, `seed_metering`, `allocations.request` by resource id, `systems.provision`
+   of a `disk-image` profile whose `base_image_source` is the selected catalog image, and a wait
+   for `ready`. `require_root_provenance` must match that image's digest and architecture.
+3. The observer must report the System's domain running on the private daemon; its type gives
+   `accelerator`. The body then runs as in the local branch.
+4. Cleanup, in order, stopping at the first failure: drain the System's and its Runs' jobs; close
+   open ledger Investigations; `systems.teardown` to `torn_down` (through the authority); the
+   observer must report no domain for the System and no pool volume naming its id; release the
+   allocation and require the capacity in use unchanged; the **after** inventory must equal
+   **before**. With no System, only the release and the inventory check run.
+
+Outcome and failure grouping are those of the local branch. Evidence records the image digest,
+guest architecture, accelerator, owned names (allocation, System id, domain name), drained job
+states and the inventory digest; it never records the SSH target, pool name or host paths.
+
+### Remote failure model
+
+1. Actors and deployments: a campaign operator running one authority scenario at a time from the
+   control-plane host of the installed lanes (#3183), with batch-mode SSH to the dedicated remote
+   authority host and passwordless `sudo -n` there.
+2. Invariants and assets: the remote authority's other domains and pool volumes; released
+   capacity; the private daemon and pool stay unreachable to workers (the frame only reads them,
+   as root, through the operator's own access); evidence free of host identities.
+3. Accepted failure classes:
+   - A concurrent scenario on the remote authority changes the inventory: the frame fails (safe
+     direction); the runbook requires exclusivity.
+   - A SIGKILL skips cleanup: the runbook's remote cleanup (teardown, release, manual removal on
+     the private daemon) covers it.
+   - Pool refresh during an authority operation can fail the read: the frame fails loud.
+   - A failed public provision (for example a fenced allocation) fails cleanup and leaves state
+     for the runbook: recorded as a narrower blocker, as the scope requires.
+4. Covered elsewhere: local branch (#3184); fault construction (#3185); qualification (#3186);
+   local provisioning defects (#3144/#3148); ownership admission (#3138).
+
+### Remote threat model
+
+- Boundary added: one fixed program run as root on the remote authority host over SSH. Widened:
+  the bounded SSH seam gains a larger output bound for this read (1 MiB stdout, 120 s).
+- Actors: the operator (trusted to run the lane); the remote host's root (trusted; it runs the
+  authority); worker identities (untrusted, not on this path).
+- Controls: the program is a module constant; its only argument is a `UUID` validated on both
+  sides; the pool name is validated against the authority's own pattern before use; `shlex.join`
+  quotes the remote command; output is bounded and parsed strictly into closed shapes; errors
+  surface as type names in evidence.
+- Out of scope: the remote authority's own isolation guarantees; SSH host-key and account
+  management (operator-preconfigured, batch mode only).
+
+### Remote success and validation
+
+1. A remote cell with no config, an unrouted resource, no verified root image or a foreign host
+   architecture stops `blocked` with no mutation.
+2. A passing body proves `effect` and `cleanup`; the remote inventory is unchanged.
+3. A failing body, a remaining domain or volume, and inventory drift each fail the scenario.
+4. Two invocations mint different prefixes; the config file's prefix is never used.
+
+Unit: `tests/live_vm/test_installed_remote_authority_support.py` (command shape, parsing,
+malformed and oversized output, the program run against a fake libvirt for pool selection and
+rejection, unit/revision gates) and `tests/integration/live_stack/test_authority_lane.py` (stops,
+order, cleanup failures, drift, prefix, the root and resource query). Live:
+`tests/integration/test_authority_lane_frame_live.py` gains a remote arm; until the lane's
+catalog provides a verified remote root it records the stop as a narrower blocker.
