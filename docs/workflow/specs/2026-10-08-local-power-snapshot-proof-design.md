@@ -222,8 +222,10 @@ worker libvirt/guest observations, database readback and evidence publication.
 No new runtime boundary or permission grant is introduced.
 
 Trust the assigned disposable host/operator and verified source fixture, not
-successful tool replies. Existing strict SSH identity/key handling applies;
-fixed commands contain only generated validated identifiers. Never serialize
+successful tool replies. The existing SSH helper authenticates with a fresh
+per-cell key but does not pin the guest's host key on the worker's loopback
+forward; the disposable host is trusted for that. Fixed commands contain only
+generated validated identifiers. Never serialize
 DSNs, tokens, hostnames, addresses, private paths or raw guest output into public
 evidence. Native observation opens only the configured selected endpoint and
 exact owned domain. Database observation uses bound values and readonly queries.
