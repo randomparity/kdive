@@ -87,6 +87,29 @@ empty page in the same exposure. Protected-state equality and cleanup still appl
 `authorization` and `project-isolation` cell keeps the failure-envelope rule. The outcome
 `rejection` is unchanged.
 
+### Amendment (2026-10-13): a capability cell follows the provider's support verdict (#2815)
+
+This amends the boundary list in the Context and decision 3, by operator decision R2
+(2026-10-13). The contract added a `capability` rejection cell to every capability-gated tool
+whatever the provider's verdict. Both libvirt providers support every gated capability, so
+those cells demanded a refusal no run can produce. A capability-gated tool's cells now follow
+their final verdict: the `ProviderSupport` verdict `_capability_variants` derives, after
+`_tool_cells` applies the `ArchTraits` fadump override:
+
+- **Supported.** The functional cell is the proof. No `capability` cell is generated.
+- **Unsupported.** The `unsupported` cell keeps its reviewed rule, and a `capability`
+  rejection cell proves the refusal. A real-issuer token with the cell's grants must receive
+  ADR-0209's refusal: a `configuration_error` envelope whose `data.reason` is
+  `capability_unsupported`. `configuration_error` alone also answers schema and name failures,
+  so it is not capability evidence. Protected state and cleanup follow decision 4, and the
+  outcome is `rejection`. The refusal comes from the tool's own admission, so the cell first
+  meets that tool's other preconditions: `vmcore.fetch` checks the CRASHED state before the
+  capture method, so its x86_64 `fadump` cell needs a crashed, Run-bound System (#2814).
+
+Cell identities and the other boundaries are unchanged. A provider that gains or loses a
+capability changes the cell set, which moves the contract digest, so a qualification against
+the old set fails `matrix-mismatch` rather than passing stale evidence.
+
 ## Consequences
 
 - Recovery-configuration evidence exists only from a run whose catalog proved it. A carrier of
