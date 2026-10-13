@@ -113,7 +113,9 @@ async def release_and_verify(
 ) -> dict[str, object]:
     """Release the Allocation and prove its owned domain, disks and capacity were reclaimed.
 
-    ``from_failed`` releases a System that already failed (see ``await_system_state``).
+    ``from_failed`` releases the Allocation of a System that already failed. ``failed`` is
+    terminal and such a System has no domain left to tear down, so it stays ``failed`` rather
+    than reaching ``torn_down``; everything else is proven the same way.
     """
     in_use_held = await capacity_in_use(client)
     assert in_use_held > in_use_before, (
@@ -121,9 +123,13 @@ async def release_and_verify(
         "resources.availability does not see this allocation"
     )
     ok(await scalar(client, "allocations.release", allocation_id=allocation_id), "release")
-    await await_system_state(
-        client, "cleanup", system_id, "torn_down", deadline_s=deadline_s, from_failed=from_failed
-    )
+    if from_failed:
+        state = await client.call_tool("systems.get", system_id=system_id)
+        assert isinstance(state, ToolResponse) and state.status in {"failed", "error"}, (
+            f"the failed System is now {getattr(state, 'status', state)!r}"
+        )
+    else:
+        await await_system_state(client, "cleanup", system_id, "torn_down", deadline_s=deadline_s)
     await _await_released(client, allocation_id, deadline_s, poll_s)
     conn = connect()
     try:
@@ -142,7 +148,7 @@ async def release_and_verify(
         f"capacity in use is {in_use_after}, not the {in_use_before} held before the allocation"
     )
     return {
-        "system": "torn_down",
+        "system": "failed" if from_failed else "torn_down",
         "allocation": "released",
         "domain": "absent",
         "disks_absent": len(disks),
