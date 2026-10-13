@@ -14,7 +14,10 @@ for parameters and returned fields.
 2. Choose a core method (`kdump`, `fadump`, or `host_dump`) from `data.supported_capture_methods`
    in the `systems.get` result from step 1; it is narrowed to the System's architecture, and
    `vmcore.fetch` refuses a method outside it with `capability_unsupported` (for example
-   `fadump` on x86_64). The list shows compatibility only, not capture readiness. Omitting
+   `fadump` on x86_64). The list shows compatibility only, not capture readiness. If the
+   field is absent, support is unknown (provider unregistered or profile unreadable): use
+   the provider-wide set from `resources.describe` and treat `vmcore.fetch` admission as
+   authoritative. If it is `[]`, no core method is available for this System. Omitting
    `method` uses the System profile's choice only if it resolves to a supported core method;
    otherwise supply one explicitly. Console and gdbstub methods do not produce a vmcore.
    Kdump/fadump need prepared guest crash-capture support. Admission rejects known-negative
