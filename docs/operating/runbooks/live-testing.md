@@ -716,8 +716,10 @@ Each pytest run reports 28 cells skipped for the other configuration: the second
 `…/default/default/…` cells, not the `…/default/recovery/…` ones. Run the pytest commands with
 `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`, the migration-owner DSN: the protected-state
 snapshot reads every table with a `project` column, some of which the server DSN cannot read, and
-it fails with `permission denied` rather than skipping one. A functional cell
-compares the tool's answer with the token's own claims, the fixture catalog and `systems.toml`
+it fails with `permission denied` rather than skipping one. The harness runs as the owner on
+purpose until a dedicated role lands; #3196 tracks a dedicated least-privilege role.
+
+A functional cell compares the tool's answer with the token's own claims, the fixture catalog and `systems.toml`
 read by the test process, or, for `tools.search`, the operator-direct catalog. A rejection cell
 proves its boundary (HTTP 401 for a token signed by a foreign key, where the issued token is not
 refused; a schema-validation failure for invalid arguments) and that the cell's project rows did not change. The tools create nothing, so

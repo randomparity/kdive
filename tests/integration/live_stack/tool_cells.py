@@ -558,6 +558,25 @@ async def prove_functional(
     run.prove("cleanup", {"owned": owned, "snapshot_sha256": _digest(before)})
 
 
+async def require_snapshot_read_access(
+    conn: psycopg.AsyncConnection, tables: Sequence[str]
+) -> None:
+    """Fail before the snapshot reads when the DSN cannot SELECT a table, naming each one."""
+    cursor = await conn.execute(
+        "SELECT name FROM unnest(%s::text[]) WITH ORDINALITY AS t(name, position) "
+        "WHERE NOT has_table_privilege(format('public.%%I', name), 'SELECT') ORDER BY position",
+        (list(tables),),
+    )
+    denied = [str(row[0]) for row in await cursor.fetchall()]
+    if denied:
+        raise PermissionError(
+            f"KDIVE_DATABASE_URL cannot SELECT {', '.join(denied)}; the protected-state snapshot "
+            "reads every table with a project column, some of them authority-private. The "
+            "documented harness DSN is the migration-owner DSN: "
+            'KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"'
+        )
+
+
 async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
     """Row count and row-text SHA-256 of ``project`` in every public table with a project column.
 
@@ -577,6 +596,7 @@ async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
         tables = [str(row[0]) for row in await cursor.fetchall()]
         tables = [t for t in tables if t not in _AUDIT_TABLES]
         assert tables, "no table carries a project column; the snapshot would observe nothing"
+        await require_snapshot_read_access(conn, tables)
         state: dict[str, list[object]] = {}
         for table in tables:
             query = sql.SQL(
