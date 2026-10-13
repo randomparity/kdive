@@ -121,6 +121,9 @@ _OPERATOR_NODE = "tests/integration/test_operator_tool_cells_live.py::test_opera
 _SYSTEM_NODE = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
 _RUN_NODE = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
 _BREAKGLASS_NODE = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
+_POWER_NODE = (
+    "tests/integration/test_power_snapshot_tool_cells_live.py::test_power_snapshot_tool_cell"
+)
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _REMOTE_DEEP_NODE = (
     "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
@@ -225,6 +228,11 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert len(remote_runs) == 192 and {c.node_id for c in remote_runs} == {_RUN_NODE}
     glass = [c for c in contract.cells if c.operation in _OPERATOR_SPLIT[3112]]
     assert len(glass) == 272 and {c.node_id for c in glass} == {_BREAKGLASS_NODE}
+    power = [c for c in contract.cells if c.operation in _POWER_SNAPSHOT_TOOLS]
+    local_power = [c for c in power if c.provider == "local-libvirt"]
+    # A local scenario id names no architecture, so the ppc64le cells (#2818's) share the node.
+    assert len(local_power) == 200 and {c.node_id for c in local_power} == {_POWER_NODE}
+    assert {c.node_id for c in power if c.provider == "remote-libvirt"} == {None}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -237,6 +245,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_SYSTEM_TOOLS,
         *_RUN_TOOLS,
         *_OPERATOR_SPLIT[3112],
+        *_POWER_SNAPSHOT_TOOLS,
     }
     unbound = [c for c in contract.cells if c.operation not in bound]
     assert all(c.node_id is None for c in unbound)
