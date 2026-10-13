@@ -64,7 +64,7 @@ def test_attempt_record_labels_only_a_reconciled_log(
 
 
 def _sampler(*samples: rl.Sample) -> rl.Sampler:
-    sampler = rl.Sampler("alloc", 4, lambda: set())
+    sampler = rl.Sampler("alloc", 4, set)
     sampler.samples.extend(samples)
     return sampler
 

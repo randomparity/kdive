@@ -182,6 +182,26 @@ async def job_row(db_url: str, job_id: str) -> dict[str, object]:
     return dict(row)
 
 
+@dataclass(frozen=True)
+class Attempts:
+    """A job's attempt counter and budget, terminal category and per-attempt categories."""
+
+    count: int
+    budget: int
+    terminal: str | None
+    per_attempt: list[str]
+
+
+async def attempts(db_url: str, job_id: str, since: float) -> Attempts:
+    """Reconcile the job row with the worker journal since ``since`` (see ``attempt_record``)."""
+    row = await job_row(db_url, job_id)
+    journal = await asyncio.to_thread(worker_journal, since)
+    terminal = None if row["error_category"] is None else str(row["error_category"])
+    count = cast(int, row["attempt"])
+    per = attempt_record(attempt_categories(journal, job_id), count, terminal)
+    return Attempts(count, cast(int, row["max_attempts"]), terminal, per)
+
+
 # --- protected state (spec: "Protected state and cleanup") ---------------------------------
 
 
@@ -240,20 +260,6 @@ async def wait_terminal(
             )
 
 
-def local_domains(system_id: str) -> Callable[[], set[str]]:
-    """The defined local domains named for ``system_id`` (zero or one when nothing duplicated)."""
-    name = domain_name_for(UUID(system_id))
-
-    def observe() -> set[str]:
-        conn = libvirt.open(worker_libvirt_uri())
-        try:
-            return {d.name() for d in conn.listAllDomains(0) if d.name() == name}
-        finally:
-            conn.close()
-
-    return observe
-
-
 def kdive_domains() -> set[str]:
     """Every ``kdive-`` domain the worker's libvirt defines."""
     conn = libvirt.open(worker_libvirt_uri())
@@ -261,6 +267,12 @@ def kdive_domains() -> set[str]:
         return {d.name() for d in conn.listAllDomains(0) if d.name().startswith("kdive-")}
     finally:
         conn.close()
+
+
+def local_domains(system_id: str) -> Callable[[], set[str]]:
+    """The defined local domains named for ``system_id`` (zero or one when nothing duplicated)."""
+    name = domain_name_for(UUID(system_id))
+    return lambda: kdive_domains() & {name}
 
 
 # --- minimum sizing ------------------------------------------------------------------------
@@ -566,8 +578,9 @@ def delay_held(marks: dict[str, float], delay_s: int) -> list[str]:
     if missing:
         return [f"journal lacks {missing}"]
     problems = []
-    if marks["delay_end"] - marks["delay_start"] < delay_s:
-        problems.append(f"delay lasted {marks['delay_end'] - marks['delay_start']:.0f} s")
+    lasted = marks["delay_end"] - marks["delay_start"]
+    if lasted < delay_s:
+        problems.append(f"delay lasted {lasted:.0f} s")
     for dependent in ("ready_start", "agent_start"):
         if dependent in marks and marks[dependent] < marks["delay_end"]:
             problems.append(f"{dependent} preceded the delay's end")
@@ -885,26 +898,6 @@ async def local_insufficient_disk(
     await on_local_allocation(run, base_url, issuer, db_url, DEFAULT_SIZING, body)
 
 
-@dataclass(frozen=True)
-class Attempts:
-    """A job's attempt counter and budget, terminal category and per-attempt categories."""
-
-    count: int
-    budget: int
-    terminal: str | None
-    per_attempt: list[str]
-
-
-async def attempts(db_url: str, job_id: str, since: float) -> Attempts:
-    """Reconcile the job row with the worker journal since ``since`` (see ``attempt_record``)."""
-    row = await job_row(db_url, job_id)
-    journal = await asyncio.to_thread(worker_journal, since)
-    terminal = None if row["error_category"] is None else str(row["error_category"])
-    count = cast(int, row["attempt"])
-    per = attempt_record(attempt_categories(journal, job_id), count, terminal)
-    return Attempts(count, cast(int, row["max_attempts"]), terminal, per)
-
-
 async def local_slow_boot(
     run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, *, tmp: Path
 ) -> None:
@@ -1005,9 +998,8 @@ async def delayed_boot(
     after = await asyncio.to_thread(probe_new_boot, endpoint, key, before["boot_id"], KERNEL_PROBE)
     assert after.get("release") == release, f"booted {after.get('release')!r}, not {release!r}"
     marks = await held_journal(endpoint, key, deadline_s=delay + 600.0)
-    assert not delay_held(marks, delay), (
-        f"the delay did not hold the boot: {delay_held(marks, delay)}"
-    )
+    problems = delay_held(marks, delay)
+    assert not problems, f"the delay did not hold the boot: {problems}"
     return {
         "job": job,
         "status": env.status,
