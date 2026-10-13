@@ -33,7 +33,7 @@ from tests.integration.live_stack.capture_cells import (
 )
 from tests.integration.live_stack.image_smoke import Endpoint
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
-from tests.integration.live_stack.tool_cells import Guest, HttpCaller, boundary_of
+from tests.integration.live_stack.tool_cells import Grants, Guest, HttpCaller, boundary_of
 
 _MANIFEST = {"build_id": "ab" * 20, "release": "6.18.54-kdive"}
 _INFO = f"OSRELEASE={_MANIFEST['release']}\nPAGESIZE=4096\nBUILD-ID={'ab' * 20}\n".encode()
@@ -219,11 +219,16 @@ def test_vmcore_fetch_rejection_names_the_cell_method() -> None:
     assert "method" not in rejection("postmortem.crash", "authorization", _TARGET).args
 
 
-def test_panic_seen_needs_the_panic_and_the_release() -> None:
+def test_panic_seen_needs_the_release_on_the_panic_record() -> None:
     line = f"{PANIC}: NMI: Not continuing\nCPU: 0 UID: 0 PID: 0 Comm: swapper Not tainted "
     assert panic_seen(line + "6.18.54-kdive #1", "6.18.54-kdive")
     assert not panic_seen(line + "6.17.0 #1", "6.18.54-kdive")
     assert not panic_seen("6.18.54-kdive booted", "6.18.54-kdive")
+    # The release elsewhere in the part is not the panic's.
+    banner = "Fedora Linux 44 (Kernel 6.18.54-kdive on x86_64)\n"
+    assert not panic_seen(banner + line + "6.17.0 #1", "6.18.54-kdive")
+    assert not panic_seen(line + "6.17.0 #1\n" + banner, "6.18.54-kdive")
+    assert not panic_seen(line + "6.18.54-kdive.1 #1", "6.18.54-kdive")
 
 
 def test_transcript_names_whole_words_only() -> None:
@@ -278,6 +283,9 @@ class _Caller:
     def __init__(self, answer: ToolResponse) -> None:
         self.answer = answer
 
+    def token(self, grants: Grants) -> str:
+        return "t"
+
     async def call(
         self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
     ) -> ToolResponse:
@@ -287,7 +295,8 @@ class _Caller:
 def _session(answer: ToolResponse) -> Session:
     run = cast(CellRun, SimpleNamespace(cell=SimpleNamespace(operation="postmortem.crash")))
     caller = cast(HttpCaller, _Caller(answer))
-    return Session(run, cast(Guest, None), caller, "t", _MANIFEST, "run-1", Endpoint("h", 22))
+    role = Grants("s", ("p",))
+    return Session(run, cast(Guest, None), caller, role, _MANIFEST, "run-1", Endpoint("h", 22))
 
 
 def test_exposed_call_missing_a_dependency_is_blocked() -> None:

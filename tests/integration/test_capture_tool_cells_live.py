@@ -23,12 +23,10 @@ from kdive.mcp.dev_harness import OidcIssuer
 from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.capture_cells import (
-    GATES,
     TOOLS,
     capability,
     capture_target,
     functional,
-    grants,
     options,
     provision_with,
     rejection,
@@ -90,10 +88,9 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     project = f"cov-{secrets.token_hex(4)}"
     body: LaneBody
     if cell.kind == "unsupported":
-        body = partial(unsupported, run, tree, manifest)
+        body = partial(unsupported, run, caller, tree, manifest)
     else:
-        token = caller.token(grants(project, GATES[cell.operation]))
-        body = partial(functional, run, caller, token, tree, manifest)
+        body = partial(functional, run, caller, tree, manifest)
     await on_lane_system(
         run,
         base_url,

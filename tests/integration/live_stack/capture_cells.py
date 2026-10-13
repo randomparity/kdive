@@ -20,13 +20,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import io
 import re
 import secrets
 import struct
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -69,6 +69,7 @@ from tests.integration.live_stack.spine import (
 from tests.integration.live_stack.tool_cells import (
     LANE_IMAGES,
     Boundary,
+    Grants,
     Guest,
     HttpCaller,
     Rejection,
@@ -119,6 +120,10 @@ _EXTRA: dict[str, dict[str, object]] = {
 _CRASH_OPTIONS = frozenset({"kdump", "host_dump", "target", "live"})
 _LANE_KEYS = ("guest_os", "guest_arch", "accelerator", "image_sha256")
 PANIC = "Kernel panic - not syncing"
+# The panic's dump_stack ``CPU:`` record follows it within a few lines.
+_PANIC_LINES = 8
+# VMCOREINFO sits right after a core's headers: QEMU's ELF note, makedumpfile's sub-header block.
+_CORE_PREFIX = 16 << 20
 _ARM_BUDGET_S = 600.0
 _CONSOLE_DEADLINE_S = 600.0
 _DOWNLOAD_TIMEOUT_S = 600.0
@@ -196,8 +201,10 @@ async def drained(op: LiveStackClient, phase: str, job_id: str) -> ToolResponse:
 
 
 def panic_seen(text: str, release: str) -> bool:
-    """A console text holding the kernel panic of ``release``."""
-    return PANIC in text and release in text
+    """A console panic whose own ``CPU:`` record, among the next lines, names ``release``."""
+    _, found, after = text.partition(PANIC)
+    record = re.compile(rf"\bCPU: \d+ .*(?<![\w.-]){re.escape(release)}(?![\w.-])")
+    return bool(found) and any(record.search(line) for line in after.splitlines()[:_PANIC_LINES])
 
 
 def transcript_names(transcript: str, *facts: str) -> list[str]:
@@ -292,40 +299,36 @@ def require_core(info: bytes, manifest: Mapping[str, Any]) -> None:
     assert releases == [manifest["release"]], "the core's release is not the fixture's"
 
 
-async def _download(op: LiveStackClient, run_id: str, path: Path | None) -> str:
-    """One fresh ``artifacts.fetch_raw`` read of the core: its SHA-256, kept at ``path`` if set."""
+async def _download(op: LiveStackClient, run_id: str) -> tuple[str, bytes]:
+    """One fresh ``artifacts.fetch_raw`` read of the core: its SHA-256 and its first bytes."""
     env = ok(await scalar(op, "artifacts.fetch_raw", run_id=run_id, asset="vmcore"), "raw")
     url = env.refs.get("download_uri")
     assert url, "artifacts.fetch_raw returned no download URI"
-    digest, size = hashlib.sha256(), 0
-    with path.open("wb") if path is not None else nullcontext() as out:
-        async with (
-            httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT_S) as http,
-            http.stream("GET", url) as response,
-        ):
-            response.raise_for_status()
-            async for chunk in response.aiter_bytes(1 << 20):
-                digest.update(chunk)
-                size += len(chunk)
-                if out is not None:
-                    out.write(chunk)
+    digest, size, prefix = hashlib.sha256(), 0, bytearray()
+    async with (
+        httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT_S) as http,
+        http.stream("GET", url) as response,
+    ):
+        response.raise_for_status()
+        async for chunk in response.aiter_bytes(1 << 20):
+            digest.update(chunk)
+            size += len(chunk)
+            if len(prefix) < _CORE_PREFIX:
+                prefix += chunk[: _CORE_PREFIX - len(prefix)]
     assert size == env.data.get("size_bytes"), "the core's size is not the advertised size"
-    return digest.hexdigest()
+    return digest.hexdigest(), bytes(prefix)
 
 
-async def raw_core(op: LiveStackClient, run_id: str, scratch: Path) -> tuple[str, bytes]:
+async def raw_core(op: LiveStackClient, run_id: str) -> tuple[str, bytes]:
     """Two independent reads of the raw core with equal bytes, and its VMCOREINFO.
 
-    Only the first read is kept on disk, and only until its VMCOREINFO is read.
+    Nothing is written to disk: the reads are hashed as they stream, and VMCOREINFO is read
+    from the first read's leading bytes.
     """
-    path = scratch / "core"
-    first = await _download(op, run_id, path)
-    with path.open("rb") as core:
-        info = vmcoreinfo(core)
-    path.unlink()
-    second = await _download(op, run_id, None)
+    first, prefix = await _download(op, run_id)
+    second, _ = await _download(op, run_id)
     assert first == second, "two reads of the stored core returned different bytes"
-    return first, info
+    return first, vmcoreinfo(io.BytesIO(prefix))
 
 
 # --- functional cells -----------------------------------------------------------------------
@@ -344,7 +347,7 @@ class Session:
     run: CellRun
     guest: Guest
     caller: HttpCaller
-    token: str
+    grants: Grants
     manifest: Mapping[str, Any]
     run_id: str
     endpoint: Endpoint
@@ -352,7 +355,9 @@ class Session:
     async def exposed(self, **args: object) -> ToolResponse:
         """The tool under test, through the cell's exposure and token."""
         tool = self.run.cell.operation
-        result = await self.caller.call(tool, args, self.token, discover=True)
+        # Minted per call: a functional sequence can outlast a token's lifetime.
+        token = self.caller.token(self.grants)
+        result = await self.caller.call(tool, args, token, discover=True)
         # Classified before any success assertion, so a missing dependency stays ``blocked``.
         return require_tool(result, tool) if isinstance(result, ToolResponse) else one(result)
 
@@ -449,7 +454,7 @@ async def vmcore_body(s: Session) -> dict[str, object]:
         await s.armed()
     await s.crash()
     refs = await s.capture(method, exposed=True)
-    sha, info = await raw_core(s.guest.op, s.run_id, s.guest.scratch)
+    sha, info = await raw_core(s.guest.op, s.run_id)
     require_core(info, s.manifest)
     return {
         "method": method,
@@ -569,24 +574,30 @@ async def boot(
 async def functional(
     run: CellRun,
     caller: HttpCaller,
-    token: str,
     tree: Path,
     manifest: Mapping[str, Any],
     guest: Guest,
 ) -> dict[str, object]:
-    """Boot the fixture kernel, then run the tool's sequence."""
+    """Boot the fixture kernel, then run the tool's sequence as the tool's gate role."""
     run_id, endpoint = await boot(run, guest, tree, manifest)
-    session = Session(run, guest, caller, token, manifest, run_id, endpoint)
+    role = grants(guest.project, GATES[run.cell.operation])
+    session = Session(run, guest, caller, role, manifest, run_id, endpoint)
     observed = await BODIES[run.cell.operation](session)
     return {"tool": run.cell.operation, **observed}
 
 
 async def unsupported(
-    run: CellRun, tree: Path, manifest: Mapping[str, Any], guest: Guest
+    run: CellRun, caller: HttpCaller, tree: Path, manifest: Mapping[str, Any], guest: Guest
 ) -> dict[str, object]:
-    """The fixture System's advertisement omits fadump and lists the x86_64 methods (ADR-0757)."""
+    """The fixture System's advertisement omits fadump and lists the x86_64 methods (ADR-0757).
+
+    ``systems.get`` goes through the cell's exposure, so a gateway cell reads it through
+    ``tools.invoke``.
+    """
     await boot(run, guest, tree, manifest)
-    env = ok(await scalar(guest.op, "systems.get", system_id=guest.system_id), "advertisement")
+    token = caller.token(grants(guest.project, "viewer"))
+    answer = await caller.call("systems.get", {"system_id": guest.system_id}, token, discover=True)
+    env = one(answer)
     methods = env.data.get("supported_capture_methods")
     assert isinstance(methods, list), "systems.get does not report supported_capture_methods"
     assert "fadump" not in methods, "the x86_64 System advertises fadump"
@@ -637,7 +648,7 @@ async def _prepare_target(
     async def body(guest: Guest) -> dict[str, object]:
         run_id, endpoint = await boot(scratch, guest, tree, manifest)
         caller = HttpCaller("direct", base_url, issuer)
-        s = Session(scratch, guest, caller, "", manifest, run_id, endpoint)
+        s = Session(scratch, guest, caller, grants(project, "viewer"), manifest, run_id, endpoint)
         session = await s.drgn_session()
         await s.end(session)
         ids.update(system=guest.system_id, run=run_id, session=session)
