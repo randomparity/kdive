@@ -25,7 +25,7 @@ grants:
 - `INSERT` and `UPDATE` on `budgets`, `quotas` and `resources`
 - `INSERT` on `allocations`
 
-It refuses a pre-existing role that is privileged, holds a membership, or owns anything. No
+It refuses a pre-existing role that is privileged, holds a membership, or owns any relation or schema. No
 migration creates or grants the role. `scripts/live-stack/env.sh` exports its DSN as
 `KDIVE_HARNESS_DATABASE_URL`. The operator chose this placement on 2026-10-13.
 
