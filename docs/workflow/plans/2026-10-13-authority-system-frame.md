@@ -756,10 +756,10 @@ def authority_inventory(system_id: str | None = None) -> dict[str, object]:
 
 
 def worker_domains() -> list[str]:
-    """The ``kdive-`` domains the worker's libvirt defines."""
+    """Every domain the worker's libvirt defines."""
     conn = libvirt.open(worker_libvirt_uri())
     try:
-        return sorted(d.name() for d in conn.listAllDomains(0) if d.name().startswith("kdive-"))
+        return sorted(domain.name() for domain in conn.listAllDomains(0))
     finally:
         conn.close()
 
@@ -1248,6 +1248,11 @@ def test_authority_frame_body_failure(tmp_path: Path) -> None:
    `systems.teardown`/`allocations.release` of a stranded System.
 3. `prek run` on staged files, `just lint`, `just type`; commit
    `test(live): prove the authority System frame on the installed lane`.
+4. Live proof, after #3183 (PR #3187) merges and the branch is refreshed onto it: on the
+   orchestrator-assigned installed local-authority lane deployed at this branch's head, stage
+   the lane image bytes at the fixed rootfs path, write the lane config (`fixture`), and run the
+   green command above under the campaign live-stack lock. Record both tests' results and the
+   lane inventory before and after; a failure is diagnosed, not retried.
 
 ## Deferrals
 

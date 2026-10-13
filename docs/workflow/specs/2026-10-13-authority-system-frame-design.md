@@ -93,7 +93,7 @@ stops the cell `blocked`.
    capacity check and f run.
 
 **Inventory** (one fixed root-run program): names of every domain on the authority daemon, the
-entry names of the two private artifact roots, and the worker daemon's `kdive-` domains. The
+entry names of the two private artifact roots, and every domain the worker daemon defines. The
 journal root is excluded: a lane is an audit record that outlives fixtures by design.
 
 **Outcome.** Success records `effect` and `cleanup` (owned names, inventory digest). A failed
@@ -124,8 +124,9 @@ body fails the scenario.
 
 ### Threat model
 
-- Boundaries added: two fixed programs run under `sudo -n` (the inventory/observer, as root
-  with the authority venv's Python); widened: none. Existing boundaries reused unchanged:
+- Boundaries added: one fixed program run under `sudo -n` (the inventory/observer, as root
+  with the authority venv's Python in isolated mode) and a `sudo -n cat` of the installed
+  revision file; widened: none. Existing boundaries reused unchanged:
   the fixture script, the confinement probes, the route preflight.
 - Actors: the local operator (trusted to run the lane); worker identities (untrusted for
   private artifacts, probed by confinement).
