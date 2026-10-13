@@ -243,8 +243,13 @@ states and the inventory digest; it never records the SSH target, pool name or h
   sides; the pool name is validated against the authority's own pattern before use; `shlex.join`
   quotes the remote command; output is bounded and parsed strictly into closed shapes; errors
   surface as type names in evidence.
+- Trust assumption: root runs the authority venv's interpreter, which lives under the
+  authority account's own install directory, so that account is trusted with root-equivalence on
+  this read path. The local lane's inventory makes the same assumption; the authority unit's
+  read-only system protection is what keeps the running service from rewriting it.
 - Out of scope: the remote authority's own isolation guarantees; SSH host-key and account
-  management (operator-preconfigured, batch mode only).
+  management (operator-preconfigured, batch mode only); hardening the installed interpreter's
+  ownership (a deployment change for both lanes).
 
 ### Remote success and validation
 

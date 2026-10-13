@@ -1364,8 +1364,9 @@ the config variable to the command above to run the remote arm; run one scenario
 remote authority.
 
 A killed remote run skips cleanup. Run `systems.teardown` and wait for `torn_down`, then
-`allocations.release`. If a `kdive-<system-id>` domain or a `kdive-<system-id>-*` volume is still
-on the authority's private daemon, remove it as root on the authority host through
+`allocations.release`. If a `kdive-<system-id>` domain, or a volume whose name contains the System
+id (overlays and `kdive-module-<system-id>-*` preparations), is still on the authority's private
+daemon, remove it as root on the authority host through
 `qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock`:
 `virsh destroy`, then `virsh undefine` the domain, then `virsh vol-delete --pool <pool>` the volume.
 
