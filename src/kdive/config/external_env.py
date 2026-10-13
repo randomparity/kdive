@@ -87,6 +87,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "unset → the live_stack suite skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_KERNEL_SRC",
+        "test",
+        "~/src/linux when that directory exists",
+        "Built kernel tree the live proofs, `scripts/live-vm/preflight-env.sh`, and "
+        "`scripts/operations/live_debug_build.py` read; `scripts/live-stack/env.sh` supplies the "
+        "default. Workers never read it (ADR-0316).",
+    ),
+    ExternalEnvVar(
         "KDIVE_GUEST_IMAGE_DEBIAN",
         "test",
         None,
@@ -788,25 +796,11 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "start; it is empty for non-start operations.",
     ),
     ExternalEnvVar(
-        "KDIVE_SOURCE_ROOT",
-        "script",
-        None,
-        "Internal request-construction handoff from KDIVE_KERNEL_SRC to the worker source-root "
-        "setting; start fails when it is not an existing absolute directory.",
-    ),
-    ExternalEnvVar(
         "KDIVE_EXPECTED_SLOTS",
         "script",
         None,
         "Internal status-response assertion handoff copied from KDIVE_LIFECYCLE_EXPECTED_SLOTS; "
         "unset or empty disables the assertion.",
-    ),
-    ExternalEnvVar(
-        "KDIVE_WORKER_SOURCE_ROOT",
-        "script",
-        None,
-        "Lifecycle-generated worker environment value carrying the validated absolute kernel "
-        "source root from the current start request; operators set KDIVE_KERNEL_SRC instead.",
     ),
     ExternalEnvVar(
         "KDIVE_PREFLIGHT_KDUMP",

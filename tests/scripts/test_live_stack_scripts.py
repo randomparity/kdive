@@ -2257,6 +2257,9 @@ def test_demo_up_installs_mcp_json_into_demo_workspace_not_kernel_src() -> None:
     )
     assert "KDIVE_KERNEL_SRC}/.mcp.json" not in text
     assert 'if [[ -z "${KDIVE_DEMO_WORKSPACE:-}" ]]; then' in text
+    # #3193: demo-up.sh runs under `set -u` and the stack needs no kernel tree, so an unguarded
+    # reference would abort the bring-up on a host without one.
+    assert "${KDIVE_KERNEL_SRC}" not in text
 
 
 def test_demo_up_guest_image_hint_names_the_shared_catalog_entry() -> None:
@@ -3537,7 +3540,6 @@ def _lifecycle_start_with_inventory(
         "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
         "KDIVE_INSTALL_STAGING": "/tmp/install",
         "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
-        "KDIVE_KERNEL_SRC": "/tmp/kernel",
         "KDIVE_WORKER_DATABASE_URL": "postgresql://worker-member/kdive",
         "AWS_ACCESS_KEY_ID": "access-key",
         "AWS_SECRET_ACCESS_KEY": "secret-key",  # pragma: allowlist secret
@@ -3545,6 +3547,10 @@ def _lifecycle_start_with_inventory(
     }
     if "KDIVE_SECRETS_ROOT" not in (extra_env or {}):
         env.pop("KDIVE_SECRETS_ROOT", None)
+    # #3193: start needs no kernel tree. Drop an inherited value, and point HOME at a tree-less
+    # directory so env.sh's ~/src/linux default cannot supply one either.
+    env.pop("KDIVE_KERNEL_SRC", None)
+    env["HOME"] = str(tmp_path)
     result = subprocess.run(
         [
             "bash",
@@ -3656,7 +3662,6 @@ def test_lifecycle_start_rejects_mismatched_authority_geometry_before_request() 
             "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
             "KDIVE_INSTALL_STAGING": "/tmp/install",
             "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
-            "KDIVE_KERNEL_SRC": "/tmp/kernel",
             "KDIVE_WORKER_DATABASE_URL": "postgresql://worker-member/kdive",
             "AWS_ACCESS_KEY_ID": "access-key",
             "AWS_SECRET_ACCESS_KEY": "secret-key",  # pragma: allowlist secret
@@ -4120,7 +4125,6 @@ def test_lifecycle_request_construction_hides_oversized_secret_canaries(tmp_path
             "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
             "KDIVE_INSTALL_STAGING": "/tmp/install",
             "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
-            "KDIVE_KERNEL_SRC": "/tmp/kernel",
             "KDIVE_WORKER_DATABASE_URL": canary,
             "AWS_ACCESS_KEY_ID": canary,
             "AWS_SECRET_ACCESS_KEY": canary,

@@ -512,9 +512,9 @@ jobs:
           tcg_wiring="$(scripts/live-vm/stage-tcg-images.sh)"
           eval "$tcg_wiring"
 
-          # The kernel tree must resolve BEFORE the app tier starts: stack-services.sh's
-          # restart_host_processes reads KDIVE_KERNEL_SRC when it forks the worker and otherwise
-          # defaults it to ${HOME}/src/linux, which no hosted runner has.
+          # The proof steps below read KDIVE_KERNEL_SRC as their kernel fixture; the workers do not
+          # (#3193). Resolve it before sourcing env.sh, whose ${HOME}/src/linux default no hosted
+          # runner has.
           export KDIVE_KERNEL_SRC
           KDIVE_KERNEL_SRC="$(
             scripts/fetch-kernel-tree.sh /var/lib/kdive/build/systemd-proof-linux
@@ -793,7 +793,7 @@ jobs:
           # export them here so the child mint-system.sh / preflight / pytest inherit the rootfs path.
           export KDIVE_LIVE_VM_ROOTFS KDIVE_LIVE_VM_BZIMAGE KDIVE_LIVE_VM_VMLINUX
 
-          # Fixed workers require one real, worker-traversable kernel source tree at startup.
+          # The live_vm preflight and proofs read this built kernel tree; workers do not (#3193).
           export KDIVE_KERNEL_SRC
           KDIVE_KERNEL_SRC="$(
             scripts/fetch-kernel-tree.sh /var/lib/kdive/build/native-live-linux

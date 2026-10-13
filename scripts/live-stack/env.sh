@@ -100,12 +100,10 @@ export KDIVE_LOG_LEVEL="${KDIVE_LOG_LEVEL:-INFO}"
 # native job for CI. A live_vm proof that cannot resolve it now fails instead of skipping, so an
 # absent value can no longer read as a passing tier.
 #
-# KDIVE_KERNEL_SRC: warm-tree kernel source for local builds. An explicit value is honored
-# verbatim. The convenience default ${HOME}/src/linux is HOME-relative, so a privileged restart
-# ($HOME -> /root) would silently re-point it to a nonexistent /root/src/linux and every build would
-# fail configuration_error with no signal until attempted (#701). So the default is only exported
-# when it resolves to an existing directory; otherwise KDIVE_KERNEL_SRC is left unset, which
-# ops.diagnostics surfaces as an honest local_kernel_src FAIL instead of a misleading green.
+# KDIVE_KERNEL_SRC: the built kernel tree the live proofs and operator scripts read as their
+# fixture (workers never read it; ADR-0316). An explicit value is honored verbatim. The
+# HOME-relative default ${HOME}/src/linux is exported only when it exists, so a privileged
+# shell ($HOME -> /root) leaves it unset and each proof's own preflight names the gap.
 if [[ -n "${KDIVE_KERNEL_SRC:-}" ]]; then
   export KDIVE_KERNEL_SRC
 elif [[ -n "${HOME:-}" && -d "${HOME}/src/linux" ]]; then

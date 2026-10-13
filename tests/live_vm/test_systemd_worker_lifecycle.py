@@ -109,9 +109,6 @@ def _assert_prerequisites() -> ProofContext:
     metadata = _SOCKET.stat()
     assert metadata.st_mode & 0o777 == 0o660
     assert _INSTALLED_PYTHON.is_file(), f"installed worker Python is absent: {_INSTALLED_PYTHON}"
-    kernel_source = Path(os.environ.get("KDIVE_KERNEL_SRC", ""))
-    assert kernel_source.is_absolute() and kernel_source.is_dir()
-    assert kernel_source.resolve().is_relative_to(Path("/var/lib/kdive/build"))
     admin_dsn = os.environ.get("KDIVE_MIGRATION_DATABASE_URL", "")
     worker_dsn = os.environ.get("KDIVE_WORKER_DATABASE_URL", "")
     assert admin_dsn and worker_dsn, "live-stack role DSNs were not exported"

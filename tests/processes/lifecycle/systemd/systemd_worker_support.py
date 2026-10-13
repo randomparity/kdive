@@ -7,7 +7,6 @@ def start_payload(**overrides: object) -> dict[str, object]:
     """Return the complete, explicitly allowed worker-runtime request."""
     settings: dict[str, object] = {
         "python": "/usr/bin/python3",
-        "source_root": "/srv/kdive",
         "rootfs_dir": "/var/lib/kdive/rootfs",
         "build_workspace": "/var/lib/kdive/build",
         "build_component_roots": "/srv/kdive/fixtures",

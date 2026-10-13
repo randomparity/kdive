@@ -704,7 +704,6 @@ KDIVE_DATABASE_URL={database_url}
 KDIVE_FIXTURE_CATALOG_PATH=/srv/kdive/fixtures/catalog.yaml
 KDIVE_HEALTH_BIND_ADDR=127.0.0.1:9465
 KDIVE_INSTALL_STAGING=/var/lib/kdive/install
-KDIVE_KERNEL_SRC=/srv/kdive
 KDIVE_LIBVIRT_URI='qemu+unix:///session?socket=/run/libvirt/virtqemud-sock'
 KDIVE_LOG_LEVEL=INFO
 KDIVE_ROOTFS_DIR=/var/lib/kdive/rootfs
@@ -715,7 +714,6 @@ KDIVE_WORKER_ACCEPTED_LANES=default,state-fenced
 KDIVE_WORKER_INCARNATION_ID=local-systemd:kdive-live-worker@1.service:{generation}
 KDIVE_WORKER_INCARNATION_KIND=local
 KDIVE_WORKER_PYTHON=/usr/bin/python3
-KDIVE_WORKER_SOURCE_ROOT=/srv/kdive
 """
 
 
