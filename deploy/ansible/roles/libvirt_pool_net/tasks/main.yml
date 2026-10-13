@@ -13,6 +13,12 @@
   community.libvirt.virt_pool:
     name: default
     state: active
+
+# community.libvirt virt_pool/virt_net return from their `state` branch before reading
+# `autostart`, so a combined task silently leaves autostart off. Set it on its own.
+- name: Autostart the storage pool
+  community.libvirt.virt_pool:
+    name: default
     autostart: true
 
 - name: Create the confined external-boot artifact pool directory
@@ -37,6 +43,10 @@
   community.libvirt.virt_pool:
     name: "{{ libvirt_pool_net_boot_artifact_pool_name }}"
     state: active
+
+- name: Autostart the external-boot artifact storage pool
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_boot_artifact_pool_name }}"
     autostart: true
 
 - name: Verify external-boot artifact pool confinement and permissions
@@ -57,8 +67,12 @@
       {{ libvirt_pool_net_boot_artifact_pool_owner }}:
       {{ libvirt_pool_net_boot_artifact_pool_stat.stat | default({}) }}
 
-- name: Ensure the default network is active and autostarted
+- name: Ensure the default network is active
   community.libvirt.virt_net:
     name: "{{ libvirt_network }}"
     state: active
+
+- name: Autostart the default network
+  community.libvirt.virt_net:
+    name: "{{ libvirt_network }}"
     autostart: true

@@ -64,6 +64,18 @@
          + libvirt_stack_qemu_packages }}
     state: present
   when: ansible_os_family == 'Suse'
+  register: libvirt_stack_suse_install
+
+# virtnetworkd reads network definitions only at startup, so one already running when
+# libvirt-daemon-config-network lands never sees `default`. try-restart leaves a stopped
+# daemon stopped; socket activation loads the definition on first use.
+- name: Reload network definitions in a running virtnetworkd (Suse)
+  ansible.builtin.command:
+    argv: [systemctl, try-restart, virtnetworkd.service]
+  when:
+    - ansible_os_family == 'Suse'
+    - libvirt_stack_suse_install is changed
+  changed_when: true
 
 # Daemon model is PER-DISTRO. Fedora/RHEL and SUSE ship modular daemons (virtqemud,
 # virtproxyd, ...); SLES 15 SP7 enables them by default (SUSE Virtualization Guide, chapter 8).
