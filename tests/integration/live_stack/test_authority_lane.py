@@ -27,6 +27,14 @@ from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 
 _REVISION = "a" * 40
 _SYSTEM = "11111111-2222-4333-8444-555555555555"
+_LOCAL_ENTRY = """
+[[local_libvirt]]
+name = "lane-local"
+cost_class = "local"
+host_uri = "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
+"""
+_PLAIN_INVENTORY = "schema_version = 2\n" + _LOCAL_ENTRY
+_ROUTED_INVENTORY = _PLAIN_INVENTORY + 'authority_instance = "lane-authority"\n'
 _INVENTORY = {"authority_domains": ["kdive-other"], "authority_roots": {}, "worker_domains": []}
 
 
@@ -82,7 +90,7 @@ def _fake_lane(
     calls: list[str] = []
     monkeypatch.setenv(authority_lane.CONFIG_ENV, str(_config(tmp_path, mode)))
     inventory = tmp_path / "systems.toml"
-    inventory.write_text("", encoding="utf-8")
+    inventory.write_text(_PLAIN_INVENTORY, encoding="utf-8")
     monkeypatch.setenv(authority_lane.SYSTEMS_TOML_ENV, str(inventory))
 
     def record(name: str, result: object = None) -> Any:
@@ -212,6 +220,33 @@ def test_missing_lane_inventory_is_blocked(monkeypatch: pytest.MonkeyPatch, tmp_
         _frame(_run(tmp_path), _body_ok)
     assert stop.value.outcome is Outcome.BLOCKED
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [(_ROUTED_INVENTORY, "authority_instance"), ("schema_version = 1\n", "is invalid")],
+    ids=["all-routed", "invalid"],
+)
+def test_unusable_lane_inventory_is_blocked_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str, reason: str
+) -> None:
+    """#3215: an all-routed or invalid inventory stops before any read, allocation or write."""
+    calls = _fake_lane(monkeypatch, tmp_path)
+    (tmp_path / "systems.toml").write_text(content, encoding="utf-8")
+    with pytest.raises(ScenarioStop) as stop:
+        _frame(_run(tmp_path), _body_ok)
+    assert stop.value.outcome is Outcome.BLOCKED
+    assert reason in str(stop.value)
+    assert calls == []
+
+
+def test_inventory_without_local_entries_proceeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _fake_lane(monkeypatch, tmp_path)
+    (tmp_path / "systems.toml").write_text("schema_version = 2\n", encoding="utf-8")
+    _frame(_run(tmp_path), _body_ok)
+    assert "allocations.request" in calls
 
 
 def test_gate_failure_creates_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
