@@ -224,6 +224,8 @@ which prints both `local-libvirt-host:` pass lines.
 
    - In the step-5 comment, change "defaults to the kernel tree" to "defaults to KDIVE_KERNEL_SRC
      when set".
+   - In the header comment (lines 7-8), change "merges the MCP client config into the kernel tree"
+     to "merges the MCP client config into the demo workspace (KDIVE_DEMO_WORKSPACE)".
 3. In `examples/local-libvirt/env.sh`, change the header to "(DB / OIDC / S3 / HTTP / kernel
    fixture)". In the second comment, replace "It already exports KDIVE_KERNEL_SRC=~/src/linux" with
    "It exports KDIVE_KERNEL_SRC=~/src/linux when that tree exists".
