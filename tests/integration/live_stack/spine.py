@@ -407,8 +407,12 @@ async def await_system_state(
     target: str,
     *,
     deadline_s: float = DRAIN_DEADLINE_S,
+    from_failed: bool = False,
 ) -> None:
     """Poll systems.get until the System reaches ``target`` state (or the deadline).
+
+    ``from_failed`` waits through a ``failed`` System instead of stopping on it, for a release
+    whose System failed its provision or boot before the teardown began.
 
     Each DISTINCT observed status is logged once with its elapsed offset (#2056), so a red
     proof carries its own state timeline: "stuck in provisioning" vs "cycling between
@@ -426,7 +430,7 @@ async def await_system_state(
             seen_status = env.status
         if env.status == target:
             return
-        if env.status in {"error", "failed"}:
+        if env.status in {"error", "failed"} and not from_failed:
             raise SpinePhaseError(
                 phase_name, f"system {env.status}", error_category=env.error_category
             )

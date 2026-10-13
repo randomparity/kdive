@@ -60,6 +60,25 @@ ACCELERATORS = {"kvm": "kvm", "qemu": "tcg"}
 _REBOOT_DEADLINE_S = 300.0
 
 
+@dataclass(frozen=True)
+class Sizing:
+    """A System's size; a named ``shape`` requests the Allocation by name instead (ADR-0067)."""
+
+    vcpu: int = 2
+    memory_mb: int = 2048
+    disk_gb: int = LOCAL_ALLOCATION_DISK_GB
+    shape: str | None = None
+
+    def request(self) -> dict[str, object]:
+        """The ``allocations.request`` sizing arguments."""
+        if self.shape is not None:
+            return {"shape": self.shape}
+        return {"vcpus": self.vcpu, "memory_gb": self.memory_mb // 1024, "disk_gb": self.disk_gb}
+
+
+DEFAULT_SIZING = Sizing()
+
+
 class ScenarioStop(Exception):  # noqa: N818 - control flow, not an error type
     """End the scenario with a recorded outcome other than an assertion failure."""
 
@@ -183,7 +202,9 @@ async def acquire_image(op: LiveStackClient, name: str, arch: str) -> dict[str, 
     return {"digest": digest, "arch": described.data.get("arch"), "os": described.data.get("os")}
 
 
-def catalog_profile(entry: RootfsCatalogEntry, name: str, unread_ref: str) -> dict[str, object]:
+def catalog_profile(
+    entry: RootfsCatalogEntry, name: str, unread_ref: str, sizing: Sizing = DEFAULT_SIZING
+) -> dict[str, object]:
     """A direct-kernel provisioning profile booting catalog image ``name``.
 
     ``kernel_source_ref`` is required by the profile schema but never read on provision
@@ -192,9 +213,9 @@ def catalog_profile(entry: RootfsCatalogEntry, name: str, unread_ref: str) -> di
     return {
         "schema_version": 1,
         "arch": entry.arch,
-        "vcpu": 2,
-        "memory_mb": 2048,
-        "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+        "vcpu": sizing.vcpu,
+        "memory_mb": sizing.memory_mb,
+        "disk_gb": sizing.disk_gb,
         "boot_method": "direct-kernel",
         "kernel_source_ref": unread_ref,
         "provider": {
@@ -306,6 +327,7 @@ async def on_catalog_system(
     image: str,
     body: CatalogBody,
     provision: Provision = provision_catalog,
+    sizing: Sizing = DEFAULT_SIZING,
 ) -> None:
     """Acquire ``image``, provision it to ``ready``, run ``body``, then prove ``cleanup``.
 
@@ -330,10 +352,8 @@ async def on_catalog_system(
                 op,
                 "allocations.request",
                 project=project,
-                vcpus=2,
-                memory_gb=2,
-                disk_gb=LOCAL_ALLOCATION_DISK_GB,
                 resource={"mode": "kind"},
+                **sizing.request(),
             ),
             "allocate",
         ).object_id
@@ -342,7 +362,7 @@ async def on_catalog_system(
         cleaned = False
         try:
             system_id = await provision(
-                op, allocation, catalog_profile(entry, image, f"{project}-unread")
+                op, allocation, catalog_profile(entry, image, f"{project}-unread", sizing)
             )
             xml = domain_xml(system_id)
             accelerator = ET.fromstring(xml).get("type", "")  # noqa: S314  # nosec B314

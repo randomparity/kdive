@@ -109,15 +109,21 @@ async def release_and_verify(
     absent: Callable[[str], bool] = disk_absent,
     deadline_s: float = DRAIN_DEADLINE_S,
     poll_s: float = POLL_INTERVAL_S,
+    from_failed: bool = False,
 ) -> dict[str, object]:
-    """Release the Allocation and prove its owned domain, disks and capacity were reclaimed."""
+    """Release the Allocation and prove its owned domain, disks and capacity were reclaimed.
+
+    ``from_failed`` releases a System that already failed (see ``await_system_state``).
+    """
     in_use_held = await capacity_in_use(client)
     assert in_use_held > in_use_before, (
         f"capacity in use is {in_use_held} while allocated, not above {in_use_before}; "
         "resources.availability does not see this allocation"
     )
     ok(await scalar(client, "allocations.release", allocation_id=allocation_id), "release")
-    await await_system_state(client, "cleanup", system_id, "torn_down", deadline_s=deadline_s)
+    await await_system_state(
+        client, "cleanup", system_id, "torn_down", deadline_s=deadline_s, from_failed=from_failed
+    )
     await _await_released(client, allocation_id, deadline_s, poll_s)
     conn = connect()
     try:
