@@ -1039,6 +1039,14 @@ uv run python -m pytest -m live_stack tests/integration/test_power_snapshot_tool
 
 The ppc64le local cells share the node but are owner #2818's; the remote cells are #3116's.
 
+Last run: candidate `924de2c59` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing and no
+provider authority installed, the `longterm` fixture `v6.18.54` built on that host. Each
+configuration recorded its 50 cells in about 28 minutes and skipped the other's 50. `qualify`
+reported all 100 qualified: 20 `success` and 80 `rejection`. After `demo-down.sh --wipe --yes`
+the worker's libvirt defined no domain, no overlay disk remained and `KDIVE_INSTALL_STAGING` was
+empty.
+
 #### Break-glass provider tool cells (#3112)
 
 `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell` carries the 136
