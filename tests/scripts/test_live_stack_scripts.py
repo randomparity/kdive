@@ -3544,8 +3544,10 @@ def _lifecycle_start_with_inventory(
     }
     if "KDIVE_SECRETS_ROOT" not in (extra_env or {}):
         env.pop("KDIVE_SECRETS_ROOT", None)
-    # #3193: start needs no kernel tree; drop an inherited value so it cannot mask that.
+    # #3193: start needs no kernel tree. Drop an inherited value, and point HOME at a tree-less
+    # directory so env.sh's ~/src/linux default cannot supply one either.
     env.pop("KDIVE_KERNEL_SRC", None)
+    env["HOME"] = str(tmp_path)
     result = subprocess.run(
         [
             "bash",
