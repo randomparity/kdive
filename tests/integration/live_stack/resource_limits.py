@@ -470,6 +470,17 @@ def _b64_sha256(path: Path) -> str:
         return base64.b64encode(hashlib.file_digest(stream, "sha256").digest()).decode()
 
 
+def _put_file(url: str, path: Path, headers: dict[str, str]) -> int:
+    """Stream ``path`` to a presigned PUT with its exact length; return the HTTP status.
+
+    A synchronous client, because an async one refuses a file-object body and the image is
+    too large to read into memory.
+    """
+    sized = {**headers, "Content-Length": str(path.stat().st_size)}
+    with path.open("rb") as body, httpx.Client(timeout=1800.0) as http:
+        return http.put(url, content=body, headers=sized).status_code
+
+
 async def upload_rootfs(op: LiveStackClient, investigation_id: str, image: Path) -> str:
     """Upload ``image`` as the investigation's rootfs; return its ``checksum_sha256`` handle."""
     declared = {"name": "rootfs", "sha256": _b64_sha256(image), "size_bytes": image.stat().st_size}
@@ -484,11 +495,9 @@ async def upload_rootfs(op: LiveStackClient, investigation_id: str, image: Path)
     )
     item = env.items[0]
     headers = cast(dict[str, str], item.data["required_headers"])
-    with image.open("rb") as body:
-        async with httpx.AsyncClient(timeout=1800.0) as http:
-            response = await http.put(item.refs["upload_url"], content=body, headers=headers)
+    status = await asyncio.to_thread(_put_file, item.refs["upload_url"], image, headers)
     # The status alone: an error would echo the presigned URL and its signature.
-    assert response.status_code == 200, f"presigned PUT answered HTTP {response.status_code}"
+    assert status == 200, f"presigned PUT answered HTTP {status}"
     done = ok(
         await scalar(
             op, "investigations.complete_rootfs_upload", investigation_id=investigation_id
