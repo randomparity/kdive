@@ -191,7 +191,7 @@ def checkpoints(system_id: str) -> list[str]:
 
 
 def domain_defined(system_id: str) -> bool:
-    """Whether the worker's libvirt defines the System's domain; any other fault raises."""
+    """Whether the worker's libvirt defines the domain: absent only on VIR_ERR_NO_DOMAIN."""
     conn = libvirt.open(worker_libvirt_uri())
     try:
         conn.lookupByName(domain_name_for(UUID(system_id)))

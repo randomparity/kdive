@@ -242,3 +242,13 @@ def test_domain_defined_never_reads_a_fault_as_absent(monkeypatch: pytest.Monkey
     with pytest.raises(power_snapshots.libvirt.libvirtError):
         power_snapshots.domain_defined(_TARGET.system_id)
     assert conn.closed
+
+
+def test_domain_defined_fails_when_libvirt_cannot_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(_uri: str) -> _Conn:
+        raise power_snapshots.libvirt.libvirtError("connect")
+
+    monkeypatch.setattr(power_snapshots.libvirt, "open", refuse)
+    monkeypatch.setattr(power_snapshots, "worker_libvirt_uri", lambda: "test:///")
+    with pytest.raises(power_snapshots.libvirt.libvirtError):
+        power_snapshots.domain_defined(_TARGET.system_id)
