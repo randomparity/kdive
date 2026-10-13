@@ -271,11 +271,10 @@ class RemoteLibvirtInstall:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a domain lookup fault (retryable —
                 it crosses the libvirtd socket); the helper exit-code contract's category for a
                 non-zero boot-id baseline read (``INSTALL_FAILURE`` unless the helper named the
-                failure transient, ADR-0489); ``TRANSPORT_FAILURE`` when the guest agent is
-                unreachable before the reboot; ``BOOT_TIMEOUT`` when no fresh boot_id appears
-                within the boot
-                window (a panic/hang manifests as the agent never reconnecting), or when a
-                crashkernel-reserving guest never arms its capture kernel.
+                failure transient, ADR-0489); ``BOOT_TIMEOUT`` when the guest agent never answers
+                the baseline read within the boot window, when no fresh boot_id appears within
+                the boot window (a panic/hang manifests as the agent never reconnecting), or when
+                a crashkernel-reserving guest never arms its capture kernel.
         """
         del accel  # remote-libvirt is KVM (accel=NULL); TCG scaling is local-only (ADR-0341)
         config = self._config_factory()
@@ -384,7 +383,30 @@ class RemoteLibvirtInstall:
         )
 
     def _read_boot_id(self, agent_exec: GuestAgentExec, domain: _Domain, system_id: UUID) -> str:
-        result = agent_exec.run(domain, [_HELPER, "boot-id"])
+        """Read the pre-reboot boot_id, first waiting out a guest that is still booting.
+
+        A retry of a boot that timed out starts while that attempt's reboot may still be in
+        progress, so its agent is down. Reading the baseline at once failed the retry with
+        ``TRANSPORT_FAILURE`` before it reached its own boot wait (#3118), so an unreachable
+        agent is polled inside the boot window, and one that never answers is a boot timeout.
+        """
+        deadline = self._monotonic() + self._boot_timeout_s
+        while True:
+            try:
+                result = agent_exec.run(domain, [_HELPER, "boot-id"])
+                break
+            except CategorizedError as exc:
+                if exc.category not in _REBOOT_EXPECTED:
+                    raise
+                if self._monotonic() >= deadline:
+                    raise CategorizedError(
+                        "guest agent did not answer the pre-reboot boot-id read within the "
+                        "boot window",
+                        category=ErrorCategory.BOOT_TIMEOUT,
+                        details={"system_id": str(system_id), "timeout_s": self._boot_timeout_s},
+                    ) from exc
+                _log.debug("boot-id baseline: agent not up yet (%s)", exc.category.value)
+            self._sleep(self._boot_poll_s)
         if result.exit_status != 0:
             # Same exit-code contract as install (ADR-0489): one mapping, so the two sites that
             # read a helper exit cannot drift into disagreeing about what a code means.

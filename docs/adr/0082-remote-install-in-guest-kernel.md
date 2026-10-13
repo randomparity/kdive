@@ -183,6 +183,18 @@ failing `BOOT_TIMEOUT`. The helper now removes `crashkernel=` from the `kdive` s
 when the requested cmdline carries none, so the iff holds for the booted cmdline. A kdump install
 is unchanged. Images staged before this change keep the old helper until rebuilt.
 
+### Amendment (2026-10-13): the baseline read waits for a booting guest (#3118)
+
+This qualifies Decision 3 step 1. The baseline read is no longer a single round-trip: a retried
+`boot()` starts while the timed-out attempt's reboot may still be in progress, so the guest agent
+is down, and reading at once failed the retry with `TRANSPORT_FAILURE` before it reached its own
+boot wait. A retry could then exhaust its attempts without reporting the `BOOT_TIMEOUT` the guest
+actually had. The baseline read now polls the agent-down categories inside the boot window, as
+step 3 does; an agent that never answers in that window is `BOOT_TIMEOUT` and no reboot is
+attempted. A non-zero helper exit still maps through ADR-0489 at once, and any other fault still
+propagates. Both categories are retryable, so the queue's retry decision is unchanged. Operator
+decision (2026-10-13) folded this fix into #3118.
+
 ## Consequences
 
 - **Zero core/port change.** `RemoteLibvirtInstall` satisfies the unchanged Installer/Booter
