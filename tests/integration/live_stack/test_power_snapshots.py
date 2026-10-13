@@ -203,3 +203,42 @@ def test_a_failed_job_still_owns_the_disks_it_switched_to(
     with pytest.raises(AssertionError, match="job failed"):
         asyncio.run(session.restore("n"))
     assert owned == ["base", "overlay-2"]
+
+
+class _Conn:
+    def __init__(self, code: int | None) -> None:
+        self.code, self.closed = code, False
+
+    def lookupByName(self, _name: str) -> object:  # noqa: N802 - libvirt binding name
+        if self.code is None:
+            return object()
+        error = power_snapshots.libvirt.libvirtError("lookup")
+        error.err = (self.code, 0, "", 0, "", None, None, 0, 0)
+        raise error
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize(
+    ("code", "defined"),
+    [(None, True), (power_snapshots.libvirt.VIR_ERR_NO_DOMAIN, False)],
+)
+def test_domain_defined_reads_the_lookup(
+    monkeypatch: pytest.MonkeyPatch, code: int | None, defined: bool
+) -> None:
+    conn = _Conn(code)
+    monkeypatch.setattr(power_snapshots.libvirt, "open", lambda _uri: conn)
+    monkeypatch.setattr(power_snapshots, "worker_libvirt_uri", lambda: "test:///")
+    assert power_snapshots.domain_defined(_TARGET.system_id) is defined
+    assert conn.closed
+
+
+def test_domain_defined_never_reads_a_fault_as_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A connection or lookup fault must fail the snapshot, not read as an absent domain.
+    conn = _Conn(power_snapshots.libvirt.VIR_ERR_INTERNAL_ERROR)
+    monkeypatch.setattr(power_snapshots.libvirt, "open", lambda _uri: conn)
+    monkeypatch.setattr(power_snapshots, "worker_libvirt_uri", lambda: "test:///")
+    with pytest.raises(power_snapshots.libvirt.libvirtError):
+        power_snapshots.domain_defined(_TARGET.system_id)
+    assert conn.closed

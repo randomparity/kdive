@@ -38,7 +38,12 @@ from kdive.providers.shared.runtime_paths import domain_name_for
 from tests.integration.live_stack.cleanup import domain_disks
 from tests.integration.live_stack.deep_lifecycle import deep_body, file_sha256
 from tests.integration.live_stack.image_smoke import Endpoint, parse_probe, ssh
-from tests.integration.live_stack.scenario import CellRun, probe_new_boot, ssh_endpoint
+from tests.integration.live_stack.scenario import (
+    CellRun,
+    domain_xml,
+    probe_new_boot,
+    ssh_endpoint,
+)
 from tests.integration.live_stack.spine import drain_job, ok, scalar, worker_libvirt_uri
 from tests.integration.live_stack.tool_cells import (
     Boundary,
@@ -186,11 +191,16 @@ def checkpoints(system_id: str) -> list[str]:
 
 
 def domain_defined(system_id: str) -> bool:
+    """Whether the worker's libvirt defines the System's domain; any other fault raises."""
+    conn = libvirt.open(worker_libvirt_uri())
     try:
-        conn, _ = _domain(system_id)
-    except libvirt.libvirtError:
+        conn.lookupByName(domain_name_for(UUID(system_id)))
+    except libvirt.libvirtError as exc:
+        if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
+            raise
         return False
-    conn.close()
+    finally:
+        conn.close()
     return True
 
 
@@ -198,12 +208,7 @@ def domain_kernel(
     system_id: str, _endpoint: Endpoint, _key: Path, _release: str
 ) -> tuple[str, str]:
     """The ``<os><kernel>`` file the domain boots (the install's staged kernel) and its digest."""
-    conn, domain = _domain(system_id)
-    try:
-        xml = domain.XMLDesc(0)
-    finally:
-        conn.close()
-    kernel = ET.fromstring(xml).findtext("./os/kernel")  # noqa: S314  # nosec B314
+    kernel = ET.fromstring(domain_xml(system_id)).findtext("./os/kernel")  # noqa: S314  # nosec B314
     assert kernel, "the installed domain names no direct kernel"
     return file_sha256(kernel), kernel
 
