@@ -395,7 +395,7 @@ Prerequisites, in addition to §7's topology, observer access and SSH-forward ru
 - `fedora-kdive-remote-base-43` is staged on the provider and declared as an `[[image]]`. The
   Rocky representative is not needed.
 - The control-plane stack runs the tool-cell lanes of the live-testing runbook: the sourced
-  `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`, an exported
+  `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, an exported
   `KDIVE_SYSTEMS_TOML` that declares the `[[remote_libvirt]]` instance, and the `default` and
   `KDIVE_WORKER_DEATH_VERIFIER=docker` (`recovery`) bring-ups.
 

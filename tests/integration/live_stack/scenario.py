@@ -106,8 +106,8 @@ def prerequisites() -> tuple[OidcIssuer, str]:
     if not db_url:
         raise ScenarioStop(
             Outcome.BLOCKED,
-            "KDIVE_DATABASE_URL unset; export the migration-owner DSN "
-            '(KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"): the server DSN cannot read '
+            "KDIVE_DATABASE_URL unset; set it to the least-privilege harness login "
+            '(KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"): the server DSN cannot read '
             "the authority-private tables the harness snapshots",
         )
     return issuer, db_url

@@ -1440,8 +1440,9 @@ def test_evidence_read_preflight_names_the_private_table_and_required_role(
     assert "external_boot_release_cleanup_receipts" in denied
     assert denied.isdisjoint({"systems", "jobs", "external_boot_activations"})
     assert repr(conninfo_to_dict(server_dsn)["user"]) in message
-    assert "KDIVE_DATABASE_URL" in message
-    assert "migration-owner DSN" in message
+    assert 'KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"' in message
+    assert "role-bootstrap" in message
+    assert "migration-owner" not in message
 
 
 def test_evidence_read_preflight_covers_every_table_the_carrier_sql_reads() -> None:
