@@ -23,6 +23,8 @@ from scripts.host_install_proof import (
     HostFacts,
     PhaseRecord,
     Step,
+    _drive,
+    _Remote,
     compose,
     console_has_release,
     family_matches,
@@ -359,6 +361,41 @@ def test_remote_argv_pins_host_keys_and_sends_the_script_as_one_argument() -> No
     ):
         assert pin in argv and pin in copy
     assert "-r" not in copy and "-r" in scp_argv(known, "a", "b", recursive=True)
+
+
+class _ScriptedRemote(_Remote):
+    """Records each step's script in place of running it; the guest image build fails."""
+
+    scripts: dict[str, str]
+
+    def _record(self, name: str, argv: list[str], timeout_s: float) -> Step:
+        self.scripts[name] = argv[-1]
+        result = Step(name, 1 if name == "guest-image" else 0, 0.0, DIGEST)
+        self.steps.append(result)
+        return result
+
+    def text(self, step: Step) -> str:
+        return ""
+
+
+def test_clean_run_schedules_its_steps_and_stages_no_kernel_tree(tmp_path: Path) -> None:
+    remote = _ScriptedRemote("op@lab", tmp_path / "known_hosts", tmp_path, [])
+    remote.scripts = {}
+    _drive(
+        remote,
+        bundle_dir=tmp_path / "bundle",
+        candidate=SHA,
+        image="ubuntu-kdive-ready-26.04",
+        node=NODE,
+        operator=None,
+        binding=_context(),
+        phases={"first-boot": None, "second-boot": None},
+        output=tmp_path,
+    )
+    run_owned = ("observe-host", "operator-prerequisites")
+    assert [s.name for s in remote.steps] == [s for s in CLEAN_STEPS if s not in run_owned]
+    for name, script in remote.scripts.items():
+        assert "fetch-kernel-tree" not in script and "src/linux" not in script, name
 
 
 def test_run_step_closes_stdin_and_records_timeouts(tmp_path: Path) -> None:
