@@ -60,6 +60,9 @@ libvirt_stack_packages_redhat:
 libvirt_stack_packages_suse:
   - libvirt-daemon-qemu
   - libvirt-daemon-proxy
+  # The modular SUSE daemons do not define the `default` network that libvirt_pool_net
+  # activates; this subpackage ships its definition (zypper skips recommends).
+  - libvirt-daemon-config-network
   - libvirt-client
   - qemu-tools
   - guestfs-tools

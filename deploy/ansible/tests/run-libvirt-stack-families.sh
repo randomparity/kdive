@@ -74,7 +74,8 @@ expected = {
         "elfutils-libelf-devel", "openssl-devel", "dwarves",
     ],
     "Suse": [
-        "libvirt-daemon-qemu", "libvirt-daemon-proxy", "libvirt-client", "qemu-tools",
+        "libvirt-daemon-qemu", "libvirt-daemon-proxy", "libvirt-daemon-config-network",
+        "libvirt-client", "qemu-tools",
         "guestfs-tools", "e2fsprogs", "virt-install", "gnutls", "libseccomp2",
         "python3-libvirt-python", "python3-lxml", "make", "tar",
         "gcc", "binutils", "bison", "flex", "bc", "perl",
