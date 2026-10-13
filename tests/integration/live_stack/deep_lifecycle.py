@@ -242,8 +242,10 @@ async def deep_body(
     tmp: Path,
     installed_kernel: InstalledKernel,
     step: StepCall | None = None,
-) -> None:
+) -> str:
     """Upload → install and boot → installed kernel → reconnect → build identity → module load.
+
+    Returns the id of the Run it booted; its investigation is closed on return.
 
     Provider-neutral: ``installed_kernel`` observes the kernel the install put in place, after the
     reboot into it; a host path it returns joins ``owned``, which the caller's cleanup proves
@@ -259,6 +261,7 @@ async def deep_body(
     investigation = ok(
         await scalar(op, "investigations.open", project=project, title="deep lifecycle"), "open"
     ).object_id
+    run_id = ""
     try:
         upload = tmp / "upload"
         run_id = ok(
@@ -295,6 +298,7 @@ async def deep_body(
             summary="deep lifecycle finished",
         )
         assert closed.status == "closed", f"investigation not closed: {closed.status}"
+    return run_id
 
 
 async def _upload(
