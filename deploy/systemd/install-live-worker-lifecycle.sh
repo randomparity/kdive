@@ -494,24 +494,25 @@ _await_libvirt_daemon_ready() {
   return 1
 }
 
-# A daemonized libvirt daemon detaches from the installer's stderr, so its own errors land only
-# in the unprivileged daemon's default log. Read it as the operator: the path is theirs to change.
+# A daemonized libvirt daemon detaches from the installer's stderr. Where journald runs it logs
+# there; otherwise to ~/.cache/libvirt/<daemon>.log of the account it runs as.
 _report_libvirt_daemon_log() {
-  local operator="$1" daemon="$2" home log
+  local operator_uid="$1" daemon="$2" since="$3"
 
-  home="$(getent passwd "$operator" | cut -d: -f6)" || home=""
-  log="$home/.cache/libvirt/$daemon.log"
-  echo "last lines of the daemon's own log, $log:" >&2
-  runuser -u "$operator" -- tail -n 40 -- "$log" >&2 ||
-    echo "(no readable daemon log at $log)" >&2
+  echo "the daemon's own journal since its launch:" >&2
+  journalctl --no-pager --quiet --output=short-iso --lines=40 --since="@$since" \
+    "_UID=$operator_uid" "_COMM=$daemon" >&2 ||
+    echo "(journal unreadable; without journald see ~/.cache/libvirt/$daemon.log of uid" \
+      "$operator_uid)" >&2
 }
 
 _start_libvirt_daemon() {
   local runtime_parent="$1" runtime_root="$2" operator="$3" operator_uid="$4" group_gid="$5"
-  local lock_uid="$6" libvirt_pid_path libvirt_socket_path ready=true
+  local lock_uid="$6" libvirt_pid_path libvirt_socket_path launched_at ready=true
 
   libvirt_pid_path="$runtime_root/libvirt/$_libvirt_pid"
   libvirt_socket_path="$runtime_root/libvirt/$_libvirt_socket"
+  launched_at="$(date +%s)"
   # Launch with explicit core and memlock limits rather than whatever the escalation path left.
   # The session daemon starts QEMU workloads and needs to pass both limits through. We are root
   # here, so raising their hard limits is permitted before runuser drops privileges.
@@ -528,7 +529,7 @@ _start_libvirt_daemon() {
   if [[ $ready != true || $_libvirt_tuple_action != adopt ]]; then
     echo "selected $_libvirt_family $_libvirt_daemon did not produce a complete live tuple;" \
       "inspect $libvirt_pid_path and $libvirt_socket_path, then rerun" >&2
-    _report_libvirt_daemon_log "$operator" "$_libvirt_daemon"
+    _report_libvirt_daemon_log "$operator_uid" "$_libvirt_daemon" "$launched_at"
     return 1
   fi
 }

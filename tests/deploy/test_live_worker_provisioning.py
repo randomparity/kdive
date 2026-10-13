@@ -2811,10 +2811,8 @@ with open(pid_path, "w", encoding="utf-8") as pid_file:
 os.write(status_write, b"0")
 time.sleep(float(os.environ["FAKE_INIT_DELAY"]))
 if os.environ.get("FAKE_INIT_FAILS"):
-    log_dir = os.path.join(os.environ["FAKE_HOME"], ".cache", "libvirt")
-    os.makedirs(log_dir, exist_ok=True)
-    with open(os.path.join(log_dir, "libvirtd.log"), "w", encoding="utf-8") as log:
-        log.write("error : Driver state initialization failed\\n")
+    with open(os.environ["FAKE_JOURNAL"], "w", encoding="utf-8") as journal:
+        journal.write("libvirtd: Driver state initialization failed\\n")
     sys.exit(1)
 os.mkdir(os.path.join(runtime_child, "hostdevmgr"))
 time.sleep(60)
@@ -2825,7 +2823,7 @@ _FAKE_COMMANDS = {
     # The installer's own launch and probe paths, minus the privilege change.
     "prlimit": '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n',
     "runuser": '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n',
-    "getent": '#!/bin/sh\nprintf "op:x:0:0::%s:/bin/sh\\n" "$FAKE_HOME"\n',
+    "journalctl": '#!/bin/sh\ncat -- "$FAKE_JOURNAL"\n',
     # Ready exactly when the fake daemon's driver initialization has finished.
     "virsh": '#!/bin/sh\ntest -d "$XDG_READY_DIR"\n',
 }
@@ -2857,7 +2855,7 @@ _start_libvirt_daemon "$2" "$3" op "$4" "$5" "$4"
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "FAKE_INIT_DELAY": str(init_delay),
-        "FAKE_HOME": str(tmp_path / "home"),
+        "FAKE_JOURNAL": str(tmp_path / "journal"),
         "XDG_READY_DIR": str(runtime_root / "libvirt" / "hostdevmgr"),
     }
     if init_fails:
