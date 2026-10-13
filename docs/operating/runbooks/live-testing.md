@@ -711,7 +711,8 @@ The test reads the fixed workers' journal (`journalctl -u 'kdive-live-worker@*'`
 attempt, so the operator needs journal access (the `systemd-journal` group). It also needs
 `sudo -n` for the loop filesystem and for reading worker-owned disks. The window is
 `KDIVE_LIBVIRT_BOOT_WINDOW_S` (default 900 s), so `slow-boot` runs for about an hour at the
-default.
+default. The test reads the variable from its own environment, so it must match the workers'
+setting.
 
 ```bash
 sha=$(git rev-parse HEAD)
@@ -730,7 +731,8 @@ uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --result
 ```
 
 A cell whose loop filesystem cannot be proven unchanged keeps it mounted and records
-`bounded_mount: retained`; unmount it by hand after checking that no job is running. The three
+`bounded_mount: retained` with its target, loop device and backing image; unmount and detach
+it by hand after checking that no job is running. The three
 `remote-libvirt` cells have no carrier yet and report `pending-implementation`.
 
 #### Core tool cells and server configurations (#2811)

@@ -198,7 +198,13 @@ async def attempts(db_url: str, job_id: str, since: float) -> Attempts:
     journal = await asyncio.to_thread(worker_journal, since)
     terminal = None if row["error_category"] is None else str(row["error_category"])
     count = cast(int, row["attempt"])
-    per = attempt_record(attempt_categories(journal, job_id), count, terminal)
+    lines = attempt_categories(journal, job_id)
+    if count and not lines:
+        # No line at all is an unreadable journal, not the lease-lapse gap "unknown" covers.
+        raise ScenarioStop(
+            Outcome.BLOCKED, "the worker journal shows no attempt; grant systemd-journal access"
+        )
+    per = attempt_record(lines, count, terminal)
     return Attempts(count, cast(int, row["max_attempts"]), terminal, per)
 
 
@@ -269,10 +275,9 @@ def kdive_domains() -> set[str]:
         conn.close()
 
 
-def local_domains(system_id: str) -> Callable[[], set[str]]:
-    """The defined local domains named for ``system_id`` (zero or one when nothing duplicated)."""
-    name = domain_name_for(UUID(system_id))
-    return lambda: kdive_domains() & {name}
+def new_domains(before: set[str]) -> Callable[[], set[str]]:
+    """Every ``kdive-`` domain defined since ``before`` (at most one when nothing duplicated)."""
+    return lambda: kdive_domains() - before
 
 
 # --- minimum sizing ------------------------------------------------------------------------
@@ -643,7 +648,9 @@ class Held:
             "provision",
         )
         self.system_id = str(env.data["system_id"])
-        self.sampler = Sampler(self.allocation, self.in_use_before, local_domains(self.system_id))
+        self.sampler = Sampler(
+            self.allocation, self.in_use_before, new_domains(self.domains_before)
+        )
         return env.object_id
 
     async def provision_ready(self, profile: dict[str, object]) -> str:
@@ -698,6 +705,7 @@ class Held:
     async def release(self) -> dict[str, object]:
         """Release and prove the System, domain, overlay and capacity reclaimed."""
         assert self.system_id is not None
+        state = await scalar(self.op, "systems.get", system_id=self.system_id)
         return await release_and_verify(
             self.op,
             allocation_id=self.allocation,
@@ -705,7 +713,8 @@ class Held:
             domain=domain_name_for(UUID(self.system_id)),
             disks=self.disks,
             in_use_before=self.in_use_before,
-            from_failed=True,
+            # Only a System already failed before the release may pass through `failed`.
+            from_failed=state.status in {"failed", "error"},
         )
 
 
@@ -875,7 +884,7 @@ async def local_insufficient_disk(
             )
             left = await asyncio.to_thread(entries, mount.target)
             assert not left, f"staging left {left}"
-            assert not await asyncio.to_thread(local_domains(str(held.system_id))), "domain defined"
+            assert not await asyncio.to_thread(new_domains(held.domains_before)), "domain defined"
             run.prove(
                 "insufficient-disk",
                 {
@@ -899,7 +908,14 @@ async def local_insufficient_disk(
             if not unmounted:
                 # Never unmount under a live operation: the attempt is evidence only.
                 run.artifacts.append(
-                    run.writer.artifact({"cell": run.cell.id, "bounded_mount": "retained"})
+                    run.writer.artifact(
+                        {
+                            "cell": run.cell.id,
+                            "bounded_mount": "retained",
+                            "investigation": investigation,
+                            **{k: str(v) for k, v in asdict(mount).items()},
+                        }
+                    )
                 )
 
     await on_local_allocation(run, base_url, issuer, db_url, DEFAULT_SIZING, body)
