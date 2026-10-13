@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, Protocol, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -1105,8 +1105,15 @@ def run_installed_local_authority_unresolved_call_takeover() -> None:
     asyncio.run(run())
 
 
+class Revisioned(Protocol):
+    """An operator config that names the installed candidate revision."""
+
+    @property
+    def installed_revision(self) -> str: ...
+
+
 def require_deployed_revision(
-    config: NativeAuthorityConfig,
+    config: Revisioned,
     base_url: str,
     running_workers: str,
     *,
@@ -1157,9 +1164,7 @@ def _active_worker_slots(running_workers: str) -> tuple[int, ...]:
     return slots
 
 
-def require_installed_authority_routes(
-    _config: NativeAuthorityConfig, running_workers: str
-) -> None:
+def require_installed_authority_routes(_config: Revisioned, running_workers: str) -> None:
     """Check the exact live server, authority, and active-worker route before mutation."""
     slots = _active_worker_slots(running_workers)
     result = _output(
@@ -1253,8 +1258,13 @@ def load_config(
     raw = env.get(env_name)
     if raw is None:
         return None
-    path = Path(raw)
-    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    data = read_protected_config(raw, "local authority proof config")
+    return NativeAuthorityConfig.model_validate_json(data)
+
+
+def read_protected_config(raw: str, label: str) -> bytes:
+    """The bytes of an owner-only mode-0400/0600 regular file of at most 16384 bytes."""
+    descriptor = os.open(Path(raw), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         metadata = os.fstat(descriptor)
         if (
@@ -1263,13 +1273,13 @@ def load_config(
             or stat.S_IMODE(metadata.st_mode) not in (0o400, 0o600)
             or not 0 < metadata.st_size <= 16_384
         ):
-            raise ValueError("local authority proof config has unsafe metadata")
+            raise ValueError(f"{label} has unsafe metadata")
         data = os.read(descriptor, 16_385)
     finally:
         os.close(descriptor)
     if len(data) > 16_384:
-        raise ValueError("local authority proof config exceeds 16384 bytes")
-    return NativeAuthorityConfig.model_validate_json(data)
+        raise ValueError(f"{label} exceeds 16384 bytes")
+    return data
 
 
 class OwnedResource(BaseModel):
