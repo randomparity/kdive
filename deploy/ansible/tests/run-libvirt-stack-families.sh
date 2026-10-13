@@ -235,7 +235,8 @@ reload = module_task(
     "ansible.builtin.command", "Reload network definitions in a running virtnetworkd (Suse)"
 )
 require(
-    reload["ansible.builtin.command"]["argv"] == ["systemctl", "try-restart", "virtnetworkd.service"],
+    reload["ansible.builtin.command"]["argv"]
+    == ["systemctl", "try-restart", "virtnetworkd.service"],
     "network daemon reload must try-restart virtnetworkd so a stopped daemon stays stopped",
 )
 require(
@@ -250,5 +251,5 @@ for family, changed, expected_reload in (
         all(evaluate(condition, **facts) for condition in reload["when"]) == expected_reload,
         f"network daemon reload route differs for {family} changed={changed}",
     )
-print("libvirt_stack families: package routes, daemon models, network reload, guard, operator passed")
+print("libvirt_stack families: packages, daemon models, network reload, guard, operator passed")
 PY
