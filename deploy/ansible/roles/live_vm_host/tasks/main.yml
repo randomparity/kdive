@@ -598,7 +598,7 @@
   loop: >-
     {{ (live_vm_host_authority_system_local_bases
         | map(attribute='digest')
-        | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/\\1.qcow2')
+        | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/\1.qcow2')
         | list)
        }}
   register: live_vm_host_authority_system_base_destinations

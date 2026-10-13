@@ -231,11 +231,11 @@
   loop: >-
     {{ (provider_authority_host_system_local_bases
         | map(attribute='digest')
-        | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/\\1.qcow2')
+        | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/\1.qcow2')
         | list)
        + (provider_authority_host_system_remote_bases
           | map(attribute='name')
-          | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/remote-libvirt-pool/\\1')
+          | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/remote-libvirt-pool/\1')
           | list) }}
   register: provider_authority_host_system_base_destinations
   when: provider_authority_host_system_manifest_source | length > 0
@@ -406,27 +406,43 @@
     mode: "0440"
 
 - name: Locate the system libguestfs binding files
-  ansible.builtin.find:
-    paths: /usr/lib/python3/dist-packages
-    patterns: [guestfs.py, "libguestfsmod*.so"]
+  ansible.builtin.command:
+    argv:
+      - "{{ provider_authority_host_python }}"
+      - -c
+      - >-
+        import json, guestfs, libguestfsmod;
+        print(json.dumps([guestfs.__file__, libguestfsmod.__file__]))
   register: provider_authority_host_libguestfs_files
+  changed_when: false
   when: provider_authority_host_local_mutation_enabled | bool
 
-- name: Require the local authority libguestfs binding
-  ansible.builtin.assert:
-    that: provider_authority_host_libguestfs_files.matched > 0
-    fail_msg: The target-native libguestfs Python binding is missing.
+- name: Locate the authority venv site-packages
+  ansible.builtin.command:
+    argv:
+      - /opt/kdive-provider-authority/.venv/bin/python
+      - -c
+      - "import sysconfig; print(sysconfig.get_path('platlib'))"
+  register: provider_authority_host_venv_site
+  changed_when: false
   when: provider_authority_host_local_mutation_enabled | bool
 
 - name: Symlink the libguestfs binding into the authority venv
   ansible.builtin.file:
-    src: "{{ item.path }}"
-    dest: >-
-      /opt/kdive-provider-authority/.venv/lib/python{{ ansible_python.version.major }}.{{
-      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+    src: "{{ item }}"
+    dest: "{{ provider_authority_host_venv_site.stdout }}/{{ item | basename }}"
     state: link
     force: true
-  loop: "{{ provider_authority_host_libguestfs_files.files | default([]) }}"
+  loop: "{{ provider_authority_host_libguestfs_files.stdout | from_json }}"
+  when: provider_authority_host_local_mutation_enabled | bool
+
+- name: Verify the authority venv imports the native libguestfs binding
+  ansible.builtin.command:
+    argv:
+      - /opt/kdive-provider-authority/.venv/bin/python
+      - -c
+      - import guestfs, libguestfsmod
+  changed_when: false
   when: provider_authority_host_local_mutation_enabled | bool
 
 - name: Inspect the authority recovery root without following links
@@ -531,6 +547,24 @@
 
 - name: Consume the shared private authority libvirt endpoint tasks
   ansible.builtin.import_tasks: libvirt.yml
+
+- name: Verify selected installed appliances as the authority before service start
+  ansible.builtin.command:
+    argv:
+      - /opt/kdive-provider-authority/.venv/bin/python
+      - -c
+      - |
+        import sys
+        from kdive.providers.external_boot_authority.host import _REMOTE_MODULE_APPLIANCE_ROOT
+        from kdive.providers.remote_libvirt.remote_module_authority_host import load_installed_remote_module_appliance
+        load_installed_remote_module_appliance(_REMOTE_MODULE_APPLIANCE_ROOT, sys.argv[1])
+      - "{{ item }}"
+  become: true
+  become_user: kdive-provider-authority
+  changed_when: false
+  timeout: 60
+  loop: "{{ provider_authority_host_remote_module_architectures }}"
+  when: provider_authority_host_remote_module_enabled | bool
 
 - name: Start the configured authority after firewall and protected inputs converge
   ansible.builtin.systemd_service:
