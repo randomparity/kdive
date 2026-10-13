@@ -571,9 +571,11 @@ async def require_snapshot_read_access(
     if denied:
         raise PermissionError(
             f"KDIVE_DATABASE_URL cannot SELECT {', '.join(denied)}; the protected-state snapshot "
-            "reads every table with a project column, some of them authority-private. The "
-            "documented harness DSN is the migration-owner DSN: "
-            'KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"'
+            "reads every table with a project column, some of them authority-private. Set "
+            'KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" (the least-privilege harness '
+            "login); if it is already set, rerun the role bootstrap, which re-grants new tables: "
+            "scripts/live-stack/stack-services.sh, or after `just stack-backends` "
+            "`env -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap`"
         )
 
 
@@ -584,7 +586,7 @@ async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
     table the DSN cannot read fails the snapshot instead of leaving it.
     """
     async with await psycopg.AsyncConnection.connect(db_url) as conn:
-        # The documented DSN is the schema owner's; a read-only session keeps the snapshot a read.
+        # The harness login can write its seeding tables; a read-only session keeps this a read.
         await conn.set_read_only(True)
         cursor = await conn.execute(
             "SELECT c.relname FROM pg_catalog.pg_attribute a "

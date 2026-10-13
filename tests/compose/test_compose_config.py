@@ -205,6 +205,8 @@ def test_clean_local_database_bootstraps_distinct_exact_login_members() -> None:
     for member, capability in _LOCAL_LOGIN_MEMBERS.values():
         assert member in script
         assert capability in script
+    assert 'CREATE ROLE "kdive-harness" LOGIN' in script
+    assert 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO "kdive-harness"' in script
 
 
 def test_every_runtime_waits_for_exact_local_role_bootstrap() -> None:

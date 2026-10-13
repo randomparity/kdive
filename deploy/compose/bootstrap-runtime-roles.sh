@@ -94,4 +94,61 @@ WHERE NOT EXISTS (
         AND capability.rolname = expected.capability_name
 )
 \gexec
+-- The live-tier harness login (ADR-0769, #3196): development-only, least privilege. It reads every
+-- public table (the protected-state snapshot and the carrier evidence reads) and makes only the
+-- seeding writes. Grants converge on every run, so a table a later migration adds is covered.
+DO $harness$
+DECLARE
+    harness_oid oid;
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'kdive-harness') THEN
+        CREATE ROLE "kdive-harness" LOGIN NOINHERIT NOSUPERUSER NOCREATEDB
+            NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+    END IF;
+    SELECT role.oid INTO harness_oid
+    FROM pg_catalog.pg_roles AS role
+    WHERE role.rolname = 'kdive-harness'
+        AND role.rolcanlogin
+        AND NOT role.rolsuper
+        AND NOT role.rolcreatedb
+        AND NOT role.rolcreaterole
+        AND NOT role.rolreplication
+        AND NOT role.rolbypassrls;
+    IF harness_oid IS NULL THEN
+        RAISE EXCEPTION 'local harness login kdive-harness has incompatible attributes'
+            USING HINT = 'drop the role so the bootstrap re-creates it';
+    END IF;
+    IF NOT pg_has_role(current_user, harness_oid, 'MEMBER WITH ADMIN OPTION') THEN
+        RAISE EXCEPTION 'local harness login kdive-harness is not administered by %', current_user
+            USING HINT = 'drop the role so the bootstrap re-creates it as the migration owner';
+    END IF;
+    -- Member side only: the ADMIN grant its creator holds on it is the other direction.
+    IF EXISTS (SELECT FROM pg_catalog.pg_auth_members WHERE member = harness_oid) THEN
+        RAISE EXCEPTION 'local harness login kdive-harness must not be a member of any role'
+            USING HINT = 'revoke its role memberships';
+    END IF;
+    IF EXISTS (SELECT FROM pg_catalog.pg_class WHERE relowner = harness_oid)
+        OR EXISTS (SELECT FROM pg_catalog.pg_namespace WHERE nspowner = harness_oid) THEN
+        RAISE EXCEPTION 'local harness login kdive-harness must own no relation or schema'
+            USING HINT = 'reassign or drop what it owns';
+    END IF;
+END
+$harness$;
+
+ALTER ROLE "kdive-harness"
+    PASSWORD 'kdive-harness-local'; -- pragma: allowlist secret
+
+BEGIN;
+-- Reset every direct grant the harness could have picked up, then grant exactly its set.
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM "kdive-harness";
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM "kdive-harness";
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM "kdive-harness";
+REVOKE ALL ON SCHEMA public FROM "kdive-harness";
+SELECT format('REVOKE ALL ON DATABASE %I FROM "kdive-harness"', current_database())
+\gexec
+GRANT USAGE ON SCHEMA public TO "kdive-harness";
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO "kdive-harness";
+GRANT INSERT, UPDATE ON TABLE public.budgets, public.quotas, public.resources TO "kdive-harness";
+GRANT INSERT ON TABLE public.allocations TO "kdive-harness";
+COMMIT;
 SQL

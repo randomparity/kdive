@@ -1,4 +1,4 @@
-"""The harness names the migration-owner DSN before an under-privileged DSN fails opaquely."""
+"""The harness names its least-privilege DSN before an under-privileged DSN fails opaquely."""
 
 from __future__ import annotations
 
@@ -36,7 +36,9 @@ def test_snapshot_preflight_names_each_unreadable_table() -> None:
         asyncio.run(require_snapshot_read_access(conn, tables))  # ty: ignore[invalid-argument-type]
     message = str(raised.value)
     assert "investigation_build_use_recoveries, worker_incarnations" in message
-    assert "KDIVE_MIGRATION_DATABASE_URL" in message
+    assert 'KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"' in message
+    assert "role-bootstrap" in message
+    assert '"$KDIVE_MIGRATION_DATABASE_URL"' not in message
     assert "server DSN" not in message
 
 
@@ -44,12 +46,13 @@ def test_snapshot_preflight_passes_a_dsn_that_reads_every_table() -> None:
     asyncio.run(require_snapshot_read_access(_Conn(set()), ["jobs"]))  # ty: ignore[invalid-argument-type]
 
 
-def test_unset_database_url_names_the_migration_owner_dsn(
+def test_unset_database_url_names_the_harness_dsn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(scenario, "require_issuer", lambda: object())
     monkeypatch.delenv("KDIVE_DATABASE_URL", raising=False)
     with pytest.raises(ScenarioStop) as raised:
         scenario.prerequisites()
-    assert "KDIVE_MIGRATION_DATABASE_URL" in str(raised.value)
+    assert 'KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"' in str(raised.value)
+    assert "KDIVE_MIGRATION_DATABASE_URL" not in str(raised.value)
     assert "export the server DSN" not in str(raised.value)

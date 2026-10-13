@@ -840,6 +840,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "reference reconciler service); external deployments override the local development "
         "member.",
     ),
+    ExternalEnvVar(
+        "KDIVE_HARNESS_DATABASE_URL",
+        "script",
+        "local Compose harness DSN",
+        "Least-privilege login DSN for the live-tier harness (ADR-0769): live_stack cells and the "
+        "installed authority carriers take it as KDIVE_DATABASE_URL. The local role bootstrap "
+        "creates the login; no runtime process receives it.",
+    ),
     # Host-published ports for the compose backends. Each is read by BOTH `docker-compose.yml`
     # (the publish side) and `scripts/live-stack/env.sh` (the client-facing DSN/endpoint), so an
     # override relocates the host mapping and the URL that reaches it together. Container-internal

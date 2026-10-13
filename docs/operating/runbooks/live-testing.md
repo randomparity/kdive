@@ -212,16 +212,17 @@ at that path and re-verify the SHA-256.
 **Carrier DSN.** The carrier reads authority-private tables for its evidence, for example
 `external_boot_release_cleanup_receipts`. The migrations revoke these tables from `PUBLIC` and
 give no read grant to `kdive_server`. Thus the server DSN that the other live tiers use cannot
-read them. Set `KDIVE_DATABASE_URL` to the migration-owner DSN, which is
-`KDIVE_MIGRATION_DATABASE_URL` in the
-[live-stack DSN table](live-stack.md#2-review-the-host-process-env). Before it provisions the
+read them. Set `KDIVE_DATABASE_URL` to the least-privilege harness login, which is
+`KDIVE_HARNESS_DATABASE_URL` in the
+[live-stack DSN table](live-stack.md#2-review-the-host-process-env). The role bootstrap creates
+that login and grants it `SELECT` on every table (ADR-0769). Before it provisions the
 fixture, the carrier checks that its DSN can `SELECT` each table that it reads. If the DSN
 cannot, the carrier fails before any mutation. The error names each table and the required DSN.
 
 Run only the focused carrier after provisioning and backend bring-up:
 
 ```sh
-KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL" \
+KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
 KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG=/protected/local-authority-carrier.json \
   uv run python -m pytest tests/live_vm/test_installed_local_authority.py -q
 ```
@@ -373,12 +374,12 @@ and provision a new disposable System; otherwise authority-routed install fails 
 Run only the focused carrier after provisioning and backend bring-up on the POWER host:
 
 ```sh
-KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL" \
+KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
 KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG=/protected/power-authority-carrier.json \
   uv run python -m pytest tests/live_vm/test_installed_local_authority_ppc64le.py -q
 ```
 
-This carrier also needs the migration-owner DSN in `KDIVE_DATABASE_URL`, and it does the same
+This carrier also needs the harness DSN in `KDIVE_DATABASE_URL`, and it does the same
 DSN check before any mutation. See the **Carrier DSN** paragraph in
 [Installed local authority carrier](#installed-local-authority-carrier).
 
@@ -432,6 +433,11 @@ is not implemented by this phase; do not report these helper-level checks as rem
 just stack-backends          # backends healthy, bucket verified, schema migrated
 just test-live-stack   # runs -m live_stack; skips cleanly if the stack is absent
 ```
+
+`just stack-backends` does not run the role bootstrap, so the runtime members and the harness login
+(`KDIVE_HARNESS_DATABASE_URL`) do not exist yet after it. The full `scripts/live-stack/stack-services.sh`
+bring-up runs the bootstrap. After a backends-only bring-up, run it yourself:
+`env -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap`.
 
 For a proof tied to a particular deployed revision, run the selected proof with
 strict skew and a visible pytest header:
@@ -714,10 +720,11 @@ uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --result
 
 Each pytest run reports 28 cells skipped for the other configuration: the second run must skip the
 `…/default/default/…` cells, not the `…/default/recovery/…` ones. Run the pytest commands with
-`KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`, the migration-owner DSN: the protected-state
-snapshot reads every table with a `project` column, some of which the server DSN cannot read, and
-it fails with `permission denied` rather than skipping one. The harness runs as the owner on
-purpose until a dedicated role lands; #3196 tracks a dedicated least-privilege role.
+`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, the least-privilege harness login: the
+protected-state snapshot reads every table with a `project` column, some of which the server DSN
+cannot read. The snapshot checks its access first. It fails before any read, naming each table it
+cannot `SELECT`, rather than skipping one. A table that a newer migration added is granted on the
+next role-bootstrap run.
 
 A functional cell compares the tool's answer with the token's own claims, the fixture catalog and `systems.toml`
 read by the test process, or, for `tools.search`, the operator-direct catalog. A rejection cell
@@ -750,7 +757,7 @@ Before the first lane, stage the public image the image cells read, once per hos
 re-registers it on the next bring-up's reconcile. Without it the image cells record `blocked`.
 Run pytest in a shell that sourced `examples/local-libvirt/env.sh`: the cells read the object
 store (`KDIVE_S3_*`, `AWS_*`), `KDIVE_LIBVIRT_URI` and the funded `KDIVE_PROJECT`, beside
-`KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`. Also export
+`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`. Also export
 `KDIVE_SYSTEMS_TOML=~/.config/kdive/systems.toml`: the test session sandboxes the XDG default and
 keeps only an exported path for a live tier (`tests/conftest.py`). The core
 `systems.profile_examples` cell reads the same file, so once an image is declared both carriers
@@ -826,7 +833,7 @@ cells of `audit.query`, `inventory.list`, `ops.diagnostics`, `ops.export_cost_cl
 harness, lanes, bindings and assembly; add it to each lane's pytest command. The
 [design](../../workflow/specs/2026-10-06-operator-tool-cells-design.md) lists what each
 functional cell compares and with which independent source. Its environment is the catalog
-carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"` and an
+carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"` and an
 exported `KDIVE_SYSTEMS_TOML`. The lanes are local-libvirt only; an `ops.diagnostics` cell that
 sees a remote-libvirt check stops `blocked` rather than probe a remote seam.
 
@@ -890,7 +897,7 @@ provider-lane carrier: the tool-cell harness binds these cells with the guest's 
 the `kvm` accelerator and the staged image digest, and frames them on a real System. The
 [design](../../workflow/specs/2026-10-06-system-tool-cells-design.md) lists what each functional
 cell compares and with which independent source. Its lanes, environment and assembly are the
-catalog carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`,
+catalog carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`,
 an exported `KDIVE_SYSTEMS_TOML`, KVM on the host, and the staged `fedora-kdive-ready-44` image,
 which every cell boots. Stage the image before writing the bindings: each provider binding carries
 the staged bytes' SHA-256, so a rebuilt image needs new bindings. The same file also carries the
