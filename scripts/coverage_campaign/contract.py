@@ -31,6 +31,11 @@ _KERNEL_INPUTS = (
     "compiler_id",
     "kernel_build_id",
 )
+# The local x86_64 control cells of #2815's group that #3115 proves; #2815 keeps power and the
+# snapshot tools (campaign scope, 2026-10-07).
+_LOCAL_CONTROL_TOOLS = frozenset(
+    {"control.capture_traffic", "control.diagnostic_sysrq", "control.watch_for_crash"}
+)
 # List tools that answer a denied caller with an empty page instead of a failure (ADR-0756):
 # their rejection cells prove denied visibility against a positive control.
 FILTERED_LIST_BOUNDARIES = frozenset(
@@ -224,14 +229,19 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                     if group.authority:
                         roles = (*roles, "authority")
                     owner = group.owner
-                    # Lifecycle and break-glass ppc64le cells wait for the POWER lane (#2818);
-                    # x86_64 remote System cells are #3080's, remote run/image cells #3120's.
-                    if group.owner in (3062, 3112, 3119) and arch == "ppc64le":
+                    # Lifecycle, break-glass and power/snapshot ppc64le cells wait for the POWER
+                    # lane (#2818); x86_64 remote System cells are #3080's, remote run/image
+                    # cells #3120's, remote power/snapshot/control cells #3116's.
+                    if group.owner in (2815, 3062, 3112, 3119) and arch == "ppc64le":
                         owner = 2818
                     elif group.owner == 3062 and provider == "remote-libvirt":
                         owner = 3080
                     elif group.owner == 3119 and provider == "remote-libvirt":
                         owner = 3120
+                    elif group.owner == 2815 and provider == "remote-libvirt":
+                        owner = 3116
+                    elif group.owner == 2815 and row.tool in _LOCAL_CONTROL_TOOLS:
+                        owner = 3115
                     cell = Cell(
                         identity + "/functional",
                         scenario_id + "/functional",
@@ -259,7 +269,9 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         boundaries.append("project-isolation")
                     if row.parameters.get("properties"):
                         boundaries.append("validation")
-                    if group.capabilities.get(row.tool):
+                    # A supported capability's functional cell is its proof; only an
+                    # unsupported verdict has a refusal to prove (ADR-0722, 2026-10-13).
+                    if group.capabilities.get(row.tool) and not supported:
                         boundaries.append("capability")
                     cells.extend(
                         replace(
