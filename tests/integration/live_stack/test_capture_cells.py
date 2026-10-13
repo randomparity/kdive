@@ -13,7 +13,6 @@ from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.capture_cells import (
-    GATES,
     PANIC,
     TOOLS,
     CaptureTarget,
@@ -192,8 +191,10 @@ def test_rejection_covers_every_boundary_of_every_tool() -> None:
         if boundary == "authentication":
             assert role == "viewer"
         if boundary == "authorization":
-            below = {"admin": "operator", "contributor": "viewer", "viewer": None}[GATES[tool]]
-            assert role == below and call.categories == {"authorization_denied"}
+            # One rank below each tool's gate: admin for force_crash, viewer for from_vmcore.
+            below = {"control.force_crash": "operator", "introspect.from_vmcore": None}
+            assert role == below.get(tool, "viewer")
+            assert call.categories == {"authorization_denied"}
         if boundary == "project-isolation":
             assert "cov-t" not in call.grants.projects
             assert set(call.grants.roles.values()) == {"admin"}
