@@ -358,6 +358,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_GRAFANA_PORT` | `3000` | Host port the compose `grafana` service publishes (obs profile). |
 | `KDIVE_GUESTFS_SYS_SITE` | `/usr/lib/python3/dist-packages` | System dir `check-setup-deps.sh` looks in for the libguestfs binding (guestfs.py) when deciding its three-state guestfs remedy and performing the venv symlink (ADR-0393). |
 | `KDIVE_GUEST_HELPERS_DIR` | `deploy/remote-libvirt-guest-helpers` | Guest-helper source directory `check-remote-libvirt.sh` inspects. |
+| `KDIVE_HARNESS_DATABASE_URL` | `local Compose harness DSN` | Least-privilege login DSN for the live-tier harness (ADR-0769): live_stack cells and the installed authority carriers take it as KDIVE_DATABASE_URL. The local role bootstrap creates the login; no runtime process receives it. |
 | `KDIVE_HOST_RUNTIME_DIRS` | `/var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs` | Space-separated runtime directories `preflight-env.sh host` asserts are writable. These paths are hardcoded in the provider (no setting redirects them) and live under root-owned `/var/lib/kdive`, so a non-root worker needs them pre-created; the default tracks the constants in `runtime_paths.py` and `lifecycle/storage.py`. |
 | `KDIVE_KERNEL_REF` | `v6.9` | Kernel ref (tag/branch/sha) `fetch-kernel-tree.sh` checks out. |
 | `KDIVE_KERNEL_REPO` | `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git` | Kernel git remote `fetch-kernel-tree.sh` clones. |

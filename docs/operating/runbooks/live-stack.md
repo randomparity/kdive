@@ -188,7 +188,7 @@ the child, exactly as `onboard.sh` does for its `verify-project` step (#2046):
 ```bash
 source scripts/live-stack/env.sh
 KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
-  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  env -u KDIVE_HARNESS_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
       -u KDIVE_RECONCILER_DATABASE_URL \
   uv run python -m kdive verify-profile-kinds
 ```

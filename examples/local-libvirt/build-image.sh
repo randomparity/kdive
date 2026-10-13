@@ -37,7 +37,7 @@ step() { printf '\n=== %s ===\n' "$1"; }
 # reconcile is the reconciler process's job, and no other authority's DSN is exposed to it.
 reconcile() {
   KDIVE_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL}" \
-    env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+    env -u KDIVE_HARNESS_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
     -u KDIVE_WORKER_DATABASE_URL \
     "${KDIVE_PYTHON}" -m kdive reconcile-systems "$@"
 }
