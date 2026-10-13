@@ -30,13 +30,17 @@ operator chose this on 2026-10-13.
 ## Design
 
 1. **Role.** The bootstrap adds the login `kdive-harness` (password `kdive-harness-local`) with the
-   same attribute check as the four runtime members: `LOGIN`, no superuser, no createdb, no
-   createrole, no replication, no bypassrls. It must also hold no role membership and own no
-   relation in the database. If it holds one, the script raises instead of converging. A
+   members' attribute check, except that it is `NOINHERIT`: `LOGIN`, no superuser, no createdb, no
+   createrole, no replication, no bypassrls. It must also be a member of no role (member side
+   only: the PG16+ ADMIN grant its creator holds runs the other way). It must own no relation
+   or schema, and the bootstrap user must hold ADMIN on it. Otherwise the script raises an
+   error that names the fix instead of converging. A
    bootstrap that drops ownership would be a destructive surprise. A role that owns or inherits
    more than its grants is not least privilege.
-2. **Grants.** These converge in one transaction on every bring-up. The bootstrap runs as the
-   table owner, after migrations:
+2. **Grants.** These converge in one transaction on every run of the role bootstrap. That run
+   happens on every services-stage bring-up (`stack-services.sh`, `demo-up.sh`), and
+   `just stack-backends` is followed by it explicitly, as is already the case for the runtime
+   members. The bootstrap runs as the table owner, after migrations:
    - `REVOKE ALL ON ALL TABLES IN SCHEMA public FROM "kdive-harness"`
    - `GRANT USAGE ON SCHEMA public`
    - `GRANT SELECT ON ALL TABLES IN SCHEMA public`, which covers tables a later migration adds
@@ -56,7 +60,9 @@ operator chose this on 2026-10-13.
 4. **Messages and runbooks.** The snapshot preflight (`tool_cells.py`), the
    `scenario.prerequisites` blocked reason and the carrier preflight
    (`installed_local_authority_support.py`) name `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`.
-   `live-testing.md` and the `live-stack.md` DSN table do the same. `deploy/compose/README.md`
+   `live-testing.md`, the `live-stack.md` DSN table, and the current prerequisite in
+   `remote-live-stack.md` do the same. The messages also name the bootstrap rerun for a DSN
+   that is already set. `deploy/compose/README.md`
    lists the harness login among the local-only members.
 
 ## Failure model
@@ -74,8 +80,12 @@ operator chose this on 2026-10-13.
    - The harness reads every public table, including any secret-bearing columns. It is accepted
      because the role exists only in the local dev database, behind a published dev password,
      next to a migration-owner DSN that already reads everything.
-   - A table added by a migration is unreadable to the harness until the next bring-up reruns
-     the bootstrap. The snapshot preflight then fails closed and names the table.
+   - A table added by a migration is unreadable to the harness until the role bootstrap runs
+     again. `--stage backends` and `just migrate` do not run it. The snapshot preflight then
+     fails closed, names the table, and names the bootstrap rerun as the fix.
+   - A harness refusal fails the whole role-bootstrap one-shot, and with it the local
+     bring-up. That is accepted because the refusal fires only on a foreign or privileged
+     `kdive-harness`, which needs an operator anyway.
 4. **Covered elsewhere.**
    - Externally provisioned databases supply their own members. That is the existing
      `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` contract.
@@ -106,9 +116,10 @@ operator chose this on 2026-10-13.
   - `CREATE` on the schema is denied.
   - The role holds no membership and owns nothing.
   - `kdive_server`, `kdive_worker`, `kdive_reconciler` and `kdive_lifecycle_witness` still lack
-    `SELECT` on the three 0104 tables.
-  - Both read preflights pass, and the `seed_metering` upserts succeed inside a transaction
-    that is rolled back.
+    `SELECT` on the three 0104 tables, and no ACL entry on them grants to `PUBLIC`.
+  - Both read preflights pass, and `seed_metering` succeeds against its fixed probe project.
+  - The `seed_granted_allocation` calls (`register_discovered_resource` and
+    `ALLOCATIONS.insert`) succeed inside a transaction that is then rolled back.
 
   It is red before the bootstrap change, because the login fails or the privileges are missing.
 - **Preflight messages** (focused-test): `test_snapshot_access.py` and

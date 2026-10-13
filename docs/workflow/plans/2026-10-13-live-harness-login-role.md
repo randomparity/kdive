@@ -45,7 +45,7 @@ lines, about 30 message and unit-test lines, and about 40 runbook lines.
 | `tests/scripts/test_live_stack_scripts.py` | export list and lifecycle scrub canary |
 | `tests/integration/live_stack/{tool_cells,scenario}.py`, `test_snapshot_access.py` | name the harness DSN |
 | `tests/live_vm/installed_local_authority_support.py`, `tests/live_vm/test_installed_local_authority_support.py` | name the harness DSN |
-| `docs/operating/runbooks/live-testing.md`, `docs/operating/runbooks/live-stack.md` | document the harness DSN |
+| `docs/operating/runbooks/{live-testing,live-stack,remote-live-stack}.md` | document the harness DSN |
 
 ## Task 1: harness login and grants
 
@@ -79,17 +79,30 @@ Steps:
    4. No `pg_auth_members` row has `member = 'kdive-harness'::regrole`, and no `pg_class` row is
       owned by it.
    5. For each role in `('kdive_server','kdive_worker','kdive_reconciler','kdive_lifecycle_witness')`
-      and each 0104 table, `has_table_privilege(role, 'public.'||t, 'SELECT')` is false.
+      and each 0104 table, `has_table_privilege(role, 'public.'||t, 'SELECT')` is false. No
+      `aclexplode(relacl)` entry on those tables has `grantee = 0` (`PUBLIC`).
    6. `require_snapshot_read_access` passes over every table with a `project` column, and
       `require_evidence_read_access(dsn)` returns.
-   7. Inside `conn.transaction()` with a forced rollback, the two `seed_metering` upserts for a
-      `harness-role-probe` project execute.
+   7. `spine.seed_metering(dsn, "harness-role-probe")` succeeds. It is an idempotent upsert of
+      one fixed probe project, the same row shape every live tier already leaves behind.
+   8. The calls `_seed.seed_granted_allocation` makes all succeed on one harness connection, inside
+      a transaction that is then rolled back:
+      - `register_discovered_resource(conn, LocalLibvirtDiscovery(...).list_resources()[0],
+        pool="local-libvirt", cost_class="local")`, with a probe `host_uri`
+      - `ALLOCATIONS.insert(conn, Allocation(...))`
+
+      No resource or allocation is left behind.
 2. Add `assert "kdive-harness" in script` to the compose bootstrap test. Run it and see red.
 3. Append to the bootstrap heredoc, after the membership `\gexec` blocks:
    1. A `DO $harness$` block. It creates `"kdive-harness" LOGIN NOINHERIT NOSUPERUSER NOCREATEDB
       NOCREATEROLE NOREPLICATION NOBYPASSRLS` when absent. It raises when the role is
-      non-login, superuser, createdb, createrole, replication or bypassrls, when it holds any
-      `pg_auth_members` membership, or when it owns any `pg_class` or `pg_namespace` row.
+      non-login, superuser, createdb, createrole, replication or bypassrls, and when it is a
+      member of any role (`pg_auth_members.member` is the harness; the PG16+ ADMIN grant the
+      creator holds is the other direction and is expected). It also raises when the role owns
+      any `pg_class` or `pg_namespace` row, and when `current_user` lacks ADMIN on it
+      (`NOT pg_has_role(current_user, 'kdive-harness', 'ADMIN')`). That last check means another
+      account created it, and the message names the fix: drop the role so the bootstrap
+      re-creates it as the migration owner.
    2. `ALTER ROLE` sets the password to the development value `kdive-harness-local`, carrying the SQL pragma.
    3. In `BEGIN … COMMIT`:
       - `REVOKE ALL ON ALL TABLES IN SCHEMA public FROM "kdive-harness"`
@@ -99,15 +112,19 @@ Steps:
       - `GRANT INSERT ON TABLE public.allocations`
 
    Add one README sentence.
-4. Under the flock, run this:
+4. Under the flock, run the whole proof in one sourced bash process, so env.sh's exported
+   `KDIVE_HARNESS_DATABASE_URL` reaches pytest:
    ```
-   bash -c 'export KDIVE_OIDC_PORT=18190; source scripts/live-stack/env.sh;
-   scripts/live-stack/stack-services.sh --stage backends;
-   env -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap'
+   flock /home/dave/src/kdive/.agent/campaigns/73d4edacff-livestack.lock bash -c '
+     set -euo pipefail; export KDIVE_OIDC_PORT=18190; source scripts/live-stack/env.sh
+     scripts/live-stack/stack-services.sh --stage backends
+     for pass in 1 2; do
+       env -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap
+       uv run python -m pytest tests/integration/live_stack/test_harness_role.py -m live_stack -rs -q
+     done'
    ```
-   Then run
-   `KDIVE_HARNESS_DATABASE_URL=… uv run python -m pytest tests/integration/live_stack/test_harness_role.py -m live_stack -q`.
-   Expect `1 passed`. Rerun the bootstrap to prove it is idempotent.
+   Expect `1 passed` with no skip on both passes. The second pass proves the bootstrap is
+   idempotent.
 5. Commit with `feat(compose): provision a least-privilege live harness login`.
 
 ## Task 2: export and scrub the DSN
@@ -159,19 +176,28 @@ Steps:
 Steps:
 
 1. Edit the tests and see red.
-2. Change the three messages to the form
-   `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" (the least-privilege harness login)`.
+2. Change the three messages so they say, in this form: set
+   `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"` (the least-privilege harness login). If it
+   is already set, rerun the role bootstrap (`scripts/live-stack/stack-services.sh`, or
+   `env -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap` after
+   `just stack-backends`). The scenario message keeps only the first sentence, because it fires
+   on an unset variable.
    Drop "the migration owner" from the comments at `tool_cells.py` (the read-only session
    comment) and `installed_local_authority_support.py:1920`.
 3. Edit `live-testing.md` at the carrier DSN paragraph, the POWER carrier, the tool-cells
    paragraph (including dropping the "#3196 tracks" sentence) and the catalog and later carriers.
    Edit the `live-stack.md` DSN table, adding a harness row and narrowing the migration row to
-   migration and bootstrap.
+   migration and bootstrap. In the `live_stack` section of `live-testing.md`, add the
+   role-bootstrap command after `just stack-backends`. Change the current prerequisite in
+   `remote-live-stack.md` (the tool-cell lanes bullet) to the harness DSN, and leave its dated
+   run record alone.
 4. Run the focused tests, `just lint`, `just type` and `just docs-check`. Commit with
    `docs(live-testing): run the harness on the least-privilege login`.
 
 ## Rollback
 
 Revert the commits. Without the bootstrap SQL, an existing dev database keeps the
-`kdive-harness` role with its grants, and that is harmless. To remove it, run
-`DROP OWNED BY "kdive-harness"; DROP ROLE "kdive-harness";` as the migration owner.
+`kdive-harness` role with its grants, and that is harmless. To remove it, run these as the
+migration owner:
+`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM "kdive-harness"; REVOKE ALL ON SCHEMA public FROM "kdive-harness"; DROP ROLE "kdive-harness";`
+`DROP OWNED BY` needs the role's privileges, which the NOINHERIT owner lacks.
