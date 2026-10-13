@@ -231,7 +231,8 @@ class Session:
         if tool == self.run.cell.operation:
             env = one(await self.caller.call(tool, args, self.token, discover=True))
         else:
-            env = await scalar(self.guest.op, tool, **args)
+            # Not ``scalar``: its positional ``name`` would collide with a snapshot's name.
+            env = one(await self.guest.op.call_tool(tool, **args))
         return ok(env, tool)
 
     async def job(self, tool: str, **args: object) -> ToolResponse:

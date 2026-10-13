@@ -126,22 +126,18 @@ class _Caller:
 class _Op:
     calls: list[str] = field(default_factory=list)
 
+    async def call_tool(self, tool: str, /, **_args: object) -> ToolResponse:
+        self.calls.append(tool)
+        return ToolResponse.success("job-2", "queued")
 
-def test_only_the_tool_under_test_uses_the_exposure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+
+def test_only_the_tool_under_test_uses_the_exposure(tmp_path: Path) -> None:
     cell = next(
         c
         for c in build_contract().cells
         if c.operation == "systems.restore" and c.kind == "functional"
     )
     op = _Op()
-
-    async def scalar(client: _Op, tool: str, **_args: object) -> ToolResponse:
-        client.calls.append(tool)
-        return ToolResponse.success("job-2", "queued")
-
-    monkeypatch.setattr(power_snapshots, "scalar", scalar)
     caller = _Caller()
     guest = type("G", (), {"op": op, "system_id": "s"})()
     session = Session(
