@@ -10,8 +10,12 @@ observes there and never through SSH: an authority System refuses ordinary mutat
 
 ``system_mode`` ``fixture`` provisions a System through HTTP with the fixed pinned rootfs, then
 moves it onto the private daemon with ``scripts/live-vm/provision-authority-fixture.py``.
-``public`` stops ``blocked`` before any mutation (#3144, #3148); a remote cell stops ``blocked``
-too (#3209).
+``public`` stops ``blocked`` before any mutation (#3144, #3148).
+
+A ``remote-libvirt`` cell runs the remote branch (#3209) on the installed remote authority that
+``REMOTE_CONFIG_ENV`` names: public HTTP provisioning on the authority-routed remote resource,
+observed through a fixed program run as the authority account over the operator's bounded SSH
+seam on the authority's private daemon and storage pool.
 """
 
 from __future__ import annotations
@@ -33,10 +37,12 @@ import libvirt
 import psycopg
 from pydantic import BaseModel, ConfigDict, Field
 
+from kdive.domain.errors import CategorizedError
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.providers.local_libvirt.config import local_authority_instance_for_resource
+from kdive.providers.remote_libvirt.config import remote_config_for_resource
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.services.investigations.common import TERMINAL_INVESTIGATION_STATES
 from scripts.coverage_campaign.evidence import Outcome
@@ -57,6 +63,7 @@ from tests.integration.live_stack.spine import (
     DRAIN_DEADLINE_S,
     LOCAL_ALLOCATION_DISK_GB,
     POLL_INTERVAL_S,
+    REMOTE_ALLOCATION_DISK_GB,
     await_system_state,
     mint_role_token,
     ok,
@@ -77,6 +84,18 @@ from tests.live_vm.installed_local_authority_support import (
     require_evidence_read_access,
     require_installed_authority_routes,
 )
+from tests.live_vm.installed_remote_authority_support import (
+    CONFIG_ENV as REMOTE_CONFIG_ENV,
+)
+from tests.live_vm.installed_remote_authority_support import (
+    RemoteAuthorityInventory,
+    RemoteAuthorityProofConfig,
+    remote_authority_inventory,
+    require_installed_authority,
+)
+from tests.live_vm.installed_remote_authority_support import (
+    load_config as load_remote_config,
+)
 from tests.mcp.json_data import data_str
 
 # Test-only input, unprefixed so env-docs-check does not require it in the product catalog.
@@ -90,7 +109,10 @@ _MAX_INVENTORY_BYTES = 1_048_576
 _TERMINAL = frozenset({"succeeded", "failed", "canceled"})
 _AUTHORITY_ROOTFS = "/var/lib/kdive/provider-authority/rootfs"
 _AUTHORITY_CONSOLE = "/var/lib/kdive/provider-authority/console"
-REMOTE_BLOCKED = "the remote authority-owned System frame is #3209"
+REMOTE_ROUTED_BLOCKED = (
+    "the remote frame needs the proof config's resource_name declared in the lane's systems.toml "
+    "with the config's authority_instance as its authority route"
+)
 PUBLIC_BLOCKED = (
     "public authority-owned provisioning is blocked by #3144 (the authority answers "
     "provider-conflict after it defines the domain and fences the allocation from release) and "
@@ -110,6 +132,12 @@ _OPEN_JOBS = (
     "SELECT id::text FROM jobs WHERE state NOT IN ('succeeded', 'failed', 'canceled') "
     "AND (payload->>'system_id' = %(system)s OR payload->>'run_id' IN "
     "(SELECT id::text FROM runs WHERE system_id = %(system)s::uuid)) ORDER BY created_at"
+)
+# Catalog images admission can bind as an authority-owned remote System's root (root_provenance).
+_REMOTE_ROOTS = (
+    "SELECT name, digest FROM image_catalog WHERE provider = 'remote-libvirt' AND arch = %s "
+    "AND state = 'registered' AND visibility = 'public' AND digest IS NOT NULL "
+    "AND provenance->'root_spec' IS NOT NULL ORDER BY name"
 )
 
 # Root runs this with the authority's interpreter in isolated mode; its only argument is a UUID.
@@ -246,6 +274,12 @@ def _output(*argv: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _running_workers() -> str:
+    return _output(
+        "systemctl", "list-units", "kdive-live-worker@*.service", "--state=running", "--no-legend"
+    ).stdout.strip()
+
+
 def require_lane(config: AuthorityLaneConfig, base_url: str) -> str:
     """Refuse unless the lane runs the configured candidate; return the running worker units."""
     active = _output("systemctl", "is-active", config.authority_service).stdout.strip()
@@ -255,12 +289,16 @@ def require_lane(config: AuthorityLaneConfig, base_url: str) -> str:
     assert installed.stdout.strip() == config.installed_revision, (
         "the installed authority revision does not match the lane config"
     )
-    running = _output(
-        "systemctl", "list-units", "kdive-live-worker@*.service", "--state=running", "--no-legend"
-    ).stdout.strip()
+    running = _running_workers()
     require_deployed_revision(config, base_url, running)
     require_installed_authority_routes(config, running)
     return running
+
+
+def require_remote_lane(config: RemoteAuthorityProofConfig, base_url: str) -> None:
+    """Refuse unless the remote authority and the control plane run the configured candidate."""
+    require_installed_authority(config)
+    require_deployed_revision(config, base_url, _running_workers())
 
 
 def fixture_profile(arch: str, digest: str, unread_ref: str) -> dict[str, object]:
@@ -280,6 +318,55 @@ def fixture_profile(arch: str, digest: str, unread_ref: str) -> dict[str, object
             }
         },
     }
+
+
+def remote_authority_profile(arch: str, image: str) -> dict[str, object]:
+    """A disk-image profile whose root is the catalog image ``image`` (``kernel_source_ref``
+    unread)."""
+    return {
+        "schema_version": 1,
+        "arch": arch,
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": REMOTE_ALLOCATION_DISK_GB,
+        "boot_method": "disk-image",
+        "kernel_source_ref": "remote-authority-unread",
+        "provider": {
+            "remote-libvirt": {
+                "base_image_source": {
+                    "kind": "catalog",
+                    "provider": "remote-libvirt",
+                    "name": image,
+                }
+            }
+        },
+    }
+
+
+async def remote_root(db_url: str, resource: str, arch: str) -> tuple[str, str, str]:
+    """The remote Resource's id and the one catalog image (name, digest) to root its System on."""
+    async with await psycopg.AsyncConnection.connect(db_url) as conn:
+        await conn.set_read_only(True)
+        cursor = await conn.execute(
+            "SELECT id::text FROM resources WHERE kind = 'remote-libvirt' AND name = %s",
+            (resource,),
+        )
+        found = await cursor.fetchone()
+        cursor = await conn.execute(_REMOTE_ROOTS, (arch,))
+        images = await cursor.fetchall()
+    if found is None:
+        # The name stays out of the reason: it comes from the private proof config.
+        raise ScenarioStop(
+            Outcome.BLOCKED,
+            "the control plane holds no remote-libvirt resource named by the proof config",
+        )
+    if len(images) != 1:
+        raise ScenarioStop(
+            Outcome.BLOCKED,
+            "remote authority provisioning needs exactly one registered public remote-libvirt "
+            f"catalog image for {arch} with a digest and an inspected root; found {len(images)}",
+        )
+    return str(found[0]), str(images[0][0]), str(images[0][1])
 
 
 async def require_root_provenance(db_url: str, system_id: str, digest: str, arch: str) -> None:
@@ -352,6 +439,9 @@ class AuthoritySystem:
 
     ``op`` is the frame's own client with the project's ``admin`` role, which teardown needs; a
     body proves a tool through its cell's role-scoped caller, never through ``op``.
+    ``config`` is the per-System fixture config on the local lane, and on a remote cell the remote
+    proof config with this invocation's ownership prefix (its ``project`` names the proof host's
+    carrier project, not this System's; use ``project``).
     ``config`` and ``ledger`` are the invocation's: a body records each Investigation it opens in
     ``ledger`` (the frame closes any still open). A body releases every external boot it starts,
     in a ``finally`` block: the frame does not, and a held activation fails its cleanup.
@@ -361,7 +451,7 @@ class AuthoritySystem:
     project: str
     allocation_id: str
     system_id: str
-    config: NativeAuthorityConfig
+    config: NativeAuthorityConfig | RemoteAuthorityProofConfig
     ledger: ResourceLedger
 
 
@@ -375,19 +465,27 @@ class _Frame:
     op: LiveStackClient
     db_url: str
     project: str
-    allocation: str
-    in_use: int
     before: dict[str, object]
+    remote: RemoteAuthorityProofConfig | None = None
+    allocation: str = ""
+    in_use: int = 0
     system_id: str | None = None
     worker_disks: list[str] = field(default_factory=list)
     fixture: NativeAuthorityConfig | None = None
     ledger: ResourceLedger | None = None
 
 
-def select_lane(run: CellRun) -> AuthorityLaneConfig:
-    """The runnable lane config, or a ``blocked`` stop before anything is read or written."""
-    if run.cell.provider == "remote-libvirt":
-        raise ScenarioStop(Outcome.BLOCKED, REMOTE_BLOCKED)
+def _require_systems_toml() -> Path:
+    # The routing guards read the lane's inventory; the test session sandboxes the XDG default
+    # and keeps only an exported path (tests/conftest.py), so an unset path would pass them.
+    inventory = os.environ.get(SYSTEMS_TOML_ENV, "")
+    if not inventory or not Path(inventory).is_file():
+        raise ScenarioStop(Outcome.BLOCKED, f"{SYSTEMS_TOML_ENV} must name the lane's systems.toml")
+    return Path(inventory)
+
+
+def select_lane() -> AuthorityLaneConfig:
+    """The runnable local lane config, or a ``blocked`` stop before anything is read or written."""
     config = load_lane_config()
     if config is None:
         raise ScenarioStop(
@@ -395,20 +493,37 @@ def select_lane(run: CellRun) -> AuthorityLaneConfig:
         )
     if config.system_mode == "public":
         raise ScenarioStop(Outcome.BLOCKED, PUBLIC_BLOCKED)
-    # The routed-resource guard reads the lane's inventory; the test session sandboxes the XDG
-    # default and keeps only an exported path (tests/conftest.py), so an unset path would pass it.
-    inventory = os.environ.get(SYSTEMS_TOML_ENV, "")
-    if not inventory or not Path(inventory).is_file():
-        raise ScenarioStop(Outcome.BLOCKED, f"{SYSTEMS_TOML_ENV} must name the lane's systems.toml")
+    inventory = _require_systems_toml()
     # One local-libvirt resource exists per worker libvirt endpoint, so fixture mode needs the
     # lane's fixture-mode inventory; refusing here stops before any allocation is requested.
     try:
-        local = load_inventory(Path(inventory)).local_libvirt
+        local = load_inventory(inventory).local_libvirt
     except InventoryError as exc:
         raise ScenarioStop(Outcome.BLOCKED, f"{SYSTEMS_TOML_ENV} is invalid: {exc}") from exc
     if local and all(entry.authority_instance for entry in local):
         raise ScenarioStop(Outcome.BLOCKED, NO_PLAIN_BLOCKED)
     return config
+
+
+def select_remote_lane() -> RemoteAuthorityProofConfig:
+    """The remote proof config with a freshly minted ownership prefix, or a ``blocked`` stop."""
+    config = load_remote_config()
+    if config is None:
+        raise ScenarioStop(
+            Outcome.BLOCKED,
+            f"{REMOTE_CONFIG_ENV} unset; name the installed remote-authority proof config",
+        )
+    _require_systems_toml()
+    try:
+        route = remote_config_for_resource(config.resource_name).authority
+    except CategorizedError:
+        route = None
+    if route is None or route.authority_instance != config.authority_instance:
+        raise ScenarioStop(Outcome.BLOCKED, REMOTE_ROUTED_BLOCKED)
+    prefix = f"kdive-2151-{config.installed_revision[:12]}-{secrets.token_hex(4)}"
+    return RemoteAuthorityProofConfig.model_validate(
+        config.model_dump() | {"ownership_prefix": prefix}
+    )
 
 
 def _digest(state: object) -> str:
@@ -429,7 +544,10 @@ async def on_authority_system(
     ``body`` returns the ``effect`` observation; the frame adds the exposure. Cleanup runs
     whether or not ``body`` raised, including on interruption.
     """
-    lane = select_lane(run)
+    if run.cell.provider == "remote-libvirt":
+        await _on_remote_authority_system(run, base_url, issuer, db_url, project=project, body=body)
+        return
+    lane = select_lane()
     name, entry = lane_image()
     running = await asyncio.to_thread(require_lane, lane, base_url)
     await require_evidence_read_access(db_url)
@@ -444,28 +562,126 @@ async def on_authority_system(
             "guest_os": f"{entry.distro}:{entry.version}",
             "guest_arch": entry.arch,
         }
-        in_use = await capacity_in_use(op)
-        allocation = ok(
-            await scalar(
-                op,
-                "allocations.request",
-                project=project,
-                vcpus=2,
-                memory_gb=2,
-                disk_gb=LOCAL_ALLOCATION_DISK_GB,
-                resource={"mode": "kind"},
-            ),
-            "allocate",
-        ).object_id
-        frame = _Frame(op, db_url, project, allocation, in_use, before)
-        try:
-            profile = fixture_profile(entry.arch, digest, f"{project}-unread")
-            observed = await _create_and_run(run, frame, lane, running, profile, digest, body)
-        except BaseException as primary:
-            await _cleanup_after_failure(run, frame, primary)
-            raise
-        run.prove("effect", {"exposure": run.cell.exposure, **observed})
-        run.prove("cleanup", await _cleanup(frame))
+        profile = fixture_profile(entry.arch, digest, f"{project}-unread")
+
+        async def create(frame: _Frame) -> dict[str, object]:
+            return await _create_and_run(run, frame, lane, running, profile, digest, body)
+
+        await _allocate_and_run(
+            run,
+            _Frame(op, db_url, project, before),
+            {"mode": "kind"},
+            disk_gb=LOCAL_ALLOCATION_DISK_GB,
+            create=create,
+        )
+
+
+async def _allocate_and_run(
+    run: CellRun,
+    frame: _Frame,
+    resource: dict[str, str],
+    *,
+    disk_gb: int,
+    create: Callable[[_Frame], Awaitable[dict[str, object]]],
+) -> None:
+    """Record the capacity and an allocation in ``frame``, create and run, then prove ``effect``
+    and ``cleanup``; cleanup runs whether or not creation or the body raised."""
+    op = frame.op
+    frame.in_use = await capacity_in_use(op)
+    frame.allocation = ok(
+        await scalar(
+            op,
+            "allocations.request",
+            project=frame.project,
+            vcpus=2,
+            memory_gb=2,
+            disk_gb=disk_gb,
+            resource=resource,
+        ),
+        "allocate",
+    ).object_id
+    try:
+        observed = await create(frame)
+    except BaseException as primary:
+        await _cleanup_after_failure(run, frame, primary)
+        raise
+    run.prove("effect", {"exposure": run.cell.exposure, **observed})
+    run.prove("cleanup", await _cleanup(frame))
+
+
+def _remote_state(inventory: RemoteAuthorityInventory) -> dict[str, object]:
+    """What the remote branch must leave as it found it: the authority's domains and volumes."""
+    return {
+        "remote_authority_domains": inventory.domains,
+        "remote_authority_volumes": inventory.volumes,
+    }
+
+
+async def _on_remote_authority_system(
+    run: CellRun,
+    base_url: str,
+    issuer: OidcIssuer,
+    db_url: str,
+    *,
+    project: str,
+    body: AuthorityBody,
+) -> None:
+    """The remote branch: provision publicly on the authority-routed resource, then the body."""
+    config = select_remote_lane()
+    arch = str(run.cell.guest_arch)
+    await asyncio.to_thread(require_remote_lane, config, base_url)
+    await require_evidence_read_access(db_url)
+    observed = await asyncio.to_thread(remote_authority_inventory, config)
+    if observed.arch != arch:
+        raise ScenarioStop(
+            Outcome.BLOCKED,
+            f"the remote authority host is {observed.arch}; {run.cell.id} needs {arch}",
+        )
+    resource_id, image, digest = await remote_root(db_url, config.resource_name, arch)
+    token = mint_role_token(issuer, project=project, agent_session=f"{project}-sess", role="admin")
+    async with LiveStackClient.over_http(base_url, token) as op:
+        await seed_metering(db_url, project)
+        run.observed |= {"image_sha256": digest.removeprefix("sha256:"), "guest_arch": arch}
+        profile = remote_authority_profile(arch, image)
+
+        async def create(frame: _Frame) -> dict[str, object]:
+            return await _create_remote_and_run(run, frame, config, profile, digest, body)
+
+        await _allocate_and_run(
+            run,
+            _Frame(op, db_url, project, _remote_state(observed), remote=config),
+            {"mode": "id", "resource_id": resource_id},
+            disk_gb=REMOTE_ALLOCATION_DISK_GB,
+            create=create,
+        )
+
+
+async def _create_remote_and_run(
+    run: CellRun,
+    frame: _Frame,
+    config: RemoteAuthorityProofConfig,
+    profile: dict[str, object],
+    digest: str,
+    body: AuthorityBody,
+) -> dict[str, object]:
+    """Provision through HTTP, observe the domain on the remote authority daemon, run ``body``."""
+    op = frame.op
+    frame.ledger = ResourceLedger(config.ownership_prefix)
+    provisioned = ok(
+        await scalar(op, "systems.provision", allocation_id=frame.allocation, profile=profile),
+        "provision",
+    )
+    system_id = frame.system_id = data_str(provisioned, "system_id")
+    await await_system_state(op, "provision", system_id, "ready")
+    await require_root_provenance(frame.db_url, system_id, digest, str(profile["arch"]))
+    facts = (await asyncio.to_thread(remote_authority_inventory, config, system_id)).system
+    assert facts is not None and facts.active, (
+        "the System's domain is not running on the remote authority daemon"
+    )
+    run.observed["accelerator"] = ACCELERATORS.get(facts.kind, "none")
+    return await body(
+        AuthoritySystem(op, frame.project, frame.allocation, system_id, config, frame.ledger)
+    )
 
 
 async def _move_to_authority(frame: _Frame, config: NativeAuthorityConfig) -> None:
@@ -548,16 +764,29 @@ async def _close_investigations(op: LiveStackClient, ledger: ResourceLedger) -> 
         )
 
 
+async def _release(frame: _Frame) -> dict[str, object]:
+    """Release the allocation and require the capacity in use back where it was."""
+    op = frame.op
+    ok(await scalar(op, "allocations.release", allocation_id=frame.allocation), "release")
+    await _await_released(op, frame.allocation, DRAIN_DEADLINE_S, POLL_INTERVAL_S)
+    in_use = await capacity_in_use(op)
+    assert in_use == frame.in_use, f"capacity in use is {in_use}, not {frame.in_use}"
+    return {"allocation": "released", "in_use": in_use}
+
+
+def _require_unchanged(before: dict[str, object], after: dict[str, object]) -> None:
+    changed = sorted(key for key in after if after[key] != before.get(key))
+    assert not changed, f"the authority lane inventory changed in {changed}"
+
+
 async def _cleanup(frame: _Frame) -> dict[str, object]:
     """Drain, close, remove the fixture, tear down, release, then compare the inventory."""
+    if frame.remote is not None:
+        return await _remote_cleanup(frame, frame.remote)
     op = frame.op
     owned = [frame.allocation]
     if frame.system_id is None:
-        ok(await scalar(op, "allocations.release", allocation_id=frame.allocation), "release")
-        await _await_released(op, frame.allocation, DRAIN_DEADLINE_S, POLL_INTERVAL_S)
-        in_use = await capacity_in_use(op)
-        assert in_use == frame.in_use, f"capacity in use is {in_use}, not {frame.in_use}"
-        released: dict[str, object] = {"allocation": "released", "in_use": in_use}
+        released = await _release(frame)
         drained: list[str] = []
     else:
         drained = await drain_system_jobs(op, frame.db_url, frame.system_id)
@@ -577,8 +806,34 @@ async def _cleanup(frame: _Frame) -> dict[str, object]:
             in_use_before=frame.in_use,
         )
     after = await asyncio.to_thread(lane_inventory)
-    changed = sorted(key for key in after if after[key] != frame.before.get(key))
-    assert not changed, f"the authority lane inventory changed in {changed}"
+    _require_unchanged(frame.before, after)
+    return {
+        **released,
+        "jobs_drained": sorted(drained),
+        "owned": owned,
+        "inventory_sha256": _digest(after),
+    }
+
+
+async def _remote_cleanup(frame: _Frame, config: RemoteAuthorityProofConfig) -> dict[str, object]:
+    """Drain, close, tear down through the authority, prove absence, release, compare."""
+    op = frame.op
+    owned = [frame.allocation]
+    drained: list[str] = []
+    if frame.system_id is not None:
+        drained = await drain_system_jobs(op, frame.db_url, frame.system_id)
+        if frame.ledger is not None:
+            await _close_investigations(op, frame.ledger)
+        ok(await scalar(op, "systems.teardown", system_id=frame.system_id), "teardown")
+        await await_system_state(op, "teardown", frame.system_id, "torn_down")
+        left = await asyncio.to_thread(remote_authority_inventory, config, frame.system_id)
+        assert left.system is None, "the System's domain remains on the remote authority daemon"
+        stranded = [volume for volume in left.volumes if frame.system_id in volume]
+        assert not stranded, f"the System's volumes remain in the authority pool: {stranded}"
+        owned += [frame.system_id, domain_name_for(UUID(frame.system_id))]
+    released = await _release(frame)
+    after = _remote_state(await asyncio.to_thread(remote_authority_inventory, config))
+    _require_unchanged(frame.before, after)
     return {
         **released,
         "jobs_drained": sorted(drained),
