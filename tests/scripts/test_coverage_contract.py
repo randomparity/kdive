@@ -40,8 +40,6 @@ def test_failure_ownership_and_remote_quiescence_binding(inventory: Inventory) -
         assert cell.scenario_id == cell.id
         assert cell.assertions == (failure, "no-duplicates", "protected-state", "cleanup")
         bound = _LIMIT_NODES.get(cell.provider) if cell.owner == 3118 else None
-        if cell.provider == "remote-libvirt" and failure == "insufficient-disk":
-            bound = None
         assert cell.node_id == bound
     proofs = [cell for cell in cells if cell.operation == "remote-quiescence"]
     assert {cell.guest_arch for cell in proofs} == set(inventory.arches)
@@ -262,7 +260,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     local_limits = [c for c in limits if c.provider == "local-libvirt"]
     assert len(local_limits) == 3 and {c.node_id for c in local_limits} == {_LIMITS_NODE}
     bound_limits = [c for c in limits if c.node_id is not None]
-    assert len(bound_limits) == 5
+    assert len(bound_limits) == 6
     unbound = [c for c in contract.cells if c.operation not in bound and c not in bound_limits]
     assert all(c.node_id is None for c in unbound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)

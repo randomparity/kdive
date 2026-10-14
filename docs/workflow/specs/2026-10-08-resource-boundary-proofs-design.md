@@ -23,11 +23,12 @@ Remote config._build_config reads storage_pool from operational environment, not
 Resource inventory. Fixed WorkerSettings, SlotStore._environment and the pre-import gate
 all omit it. An actual gate-function probe drops an exported task pool. Patching a running
 worker, changing a retained default pool, or bypassing lifecycle registration is forbidden.
-The existing Compose deployment is a supported remote-provider path: its lifecycle wrapper
-inherits COMPOSE_FILE and managed-worker overrides can pass the pool to all three roles.
-Compose config with the managed-worker profile verified this propagation, not runtime
-TLS/identity or live parity. Local proofs retain the managed host stack, never containerize
-local-libvirt. Remote proofs use a fresh task-scoped Compose project and in-network client.
+Implemented route (supersedes the earlier task-Compose plan): the fixed workers always use
+the provider host's `default` pool, and the remote-provider Ansible play places that pool at
+the documented inventory knob `storage_pool_target`. On a provider host assigned exclusively
+to this task, the operator sets that knob to a test-owned loop filesystem mounted before the
+play runs, so the default pool itself is the bounded fixture. No running worker, retained
+pool or shared filesystem is touched, and both stacks stay the managed host stack.
 
 Remote overlay creation is sparse and takes virtual capacity from the staged base. Merely
 making a pool smaller than virtual capacity does not force allocation failure. Local
@@ -114,17 +115,17 @@ its observed staging reservation. Assert infrastructure_failure,
 capacity-shortfall context, no partial staged object/domain/overlay, and retained allocation
 until explicit cleanup. Do not substitute a malformed qcow2 or fail on permissions.
 
-Remote: create a uniquely named libvirt directory pool over the owned mount through trusted
-operator SSH, stage only the task-copy valid10G base, and select that exact pool in all
-Compose roles. Verify runtime selection, not just the rendered Compose model. A positive
-control verifies this same base and pool work before constraining space. Reserve the
+Remote: the default pool's directory must be the loop ext4 mount whose backing file the
+operator names (RESOURCE_LIMIT_POOL_IMAGE); any other pool is a blocked cell, never filled.
+The remote minimum and slow-boot cells on the same pool are the positive control. Reserve the
 remaining space with one owned bounded ballast file inside this filesystem, leaving less
 than the measured overlay metadata requirement. Record statvfs and calibration; if sparse
 creation still succeeds, retain failure of the experiment and recalibrate only from observed
 allocation, never report a storage refusal that did not happen. Domain-start permission,
 TLS or missing-base failures do not satisfy this cell. Required result is actual storage
 create failure mapped provisioning_failure with no partial volume/domain after retries.
-No default pool mutation, quota on unrelated files or host-wide low-space condition.
+No quota on unrelated files or host-wide low-space condition. The ballast is removed after
+the terminal outcome and the pool's volume set must return to its prior contents.
 
 After failed provision reaches its actual terminal state, remove only owned ballast,
 release through public lifecycle and verify accounting and provider absence before pool

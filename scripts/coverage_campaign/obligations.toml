@@ -278,6 +278,7 @@ kernel = true
 "failure-resource/local-libvirt/x86_64/insufficient-disk" = "tests/integration/test_resource_limits_live.py::test_local_resource_boundary"
 "failure-resource/local-libvirt/x86_64/minimum-cpu-ram" = "tests/integration/test_resource_limits_live.py::test_local_resource_boundary"
 "failure-resource/local-libvirt/x86_64/slow-boot" = "tests/integration/test_resource_limits_live.py::test_local_resource_boundary"
+"failure-resource/remote-libvirt/x86_64/insufficient-disk" = "tests/integration/test_resource_limits_live.py::test_remote_resource_boundary"
 "failure-resource/remote-libvirt/x86_64/minimum-cpu-ram" = "tests/integration/test_resource_limits_live.py::test_remote_resource_boundary"
 "failure-resource/remote-libvirt/x86_64/slow-boot" = "tests/integration/test_resource_limits_live.py::test_remote_resource_boundary"
 "remote-quiescence/x86_64" = "tests/integration/test_remote_capture_operation_quiescence_live.py::test_remote_capture_operation_waits_for_fresh_monitor_ordering"

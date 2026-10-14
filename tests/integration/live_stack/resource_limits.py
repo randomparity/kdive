@@ -669,6 +669,7 @@ class Provider:
     size: Callable[[str], int]
     connect: Callable[[], Any]
     absent: Callable[[str], bool]
+    host: RemoteHost | None = None
 
 
 LOCAL = Provider(
@@ -690,6 +691,7 @@ def remote_provider(host: RemoteHost) -> Provider:
         partial(remote_capacity, host.dest),
         partial(observer, host.dest),
         partial(remote_volume_absent, host.dest),
+        host,
     )
 
 
@@ -1103,6 +1105,129 @@ async def local_insufficient_disk(
                 )
 
     await on_allocation(run, base_url, issuer, db_url, DEFAULT_SIZING, body)
+
+
+# The free space a full pool keeps: less than a qcow2 overlay's header and refcount tables.
+_BALLAST_KEEP_BYTES = 64 * 1024
+# Test-only input, unprefixed so env-docs-check does not require it in the product catalog.
+POOL_IMAGE_ENV = "RESOURCE_LIMIT_POOL_IMAGE"
+
+
+def host_run(dest: str, *argv: str, timeout: float = 120.0) -> str:
+    """Run fixed ``argv`` on the provider host over the operator's SSH; a non-zero exit fails."""
+    result = subprocess.run(  # noqa: S603,S607 - fixed argv, validated destination  # nosec B603 B607
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", dest, shlex.join(argv)],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    assert result.returncode == 0, f"provider-host {argv[0]} exited {result.returncode}"
+    return result.stdout
+
+
+def pool_target(dest: str, pool: str) -> Path:
+    """The directory the provider host's storage pool ``pool`` keeps its volumes in."""
+    conn = observer(dest)
+    try:
+        xml = conn.storagePoolLookupByName(pool).XMLDesc(0)
+    finally:
+        conn.close()
+    path = ET.fromstring(xml).findtext("./target/path")  # noqa: S314  # nosec B314
+    assert path, f"pool {pool} names no target path"
+    return Path(path)
+
+
+def bounded_pool(dest: str, target: Path, image: str) -> None:
+    """Refuse any pool whose directory is not the test-owned loop filesystem backed by ``image``.
+
+    Only that filesystem may be filled: a pool on a shared filesystem is never a fixture.
+    """
+    source = host_run(dest, "findmnt", "-n", "-o", "SOURCE,FSTYPE", "--mountpoint", str(target))
+    device, _, fstype = source.strip().partition(" ")
+    if not device.startswith("/dev/loop") or fstype.strip() != "ext4":
+        raise ScenarioStop(Outcome.BLOCKED, f"pool directory is not a loop ext4 mount: {source!r}")
+    backing = host_run(dest, "sudo", "-n", "losetup", "--noheadings", "-O", "BACK-FILE", device)
+    if backing.strip() != image:
+        raise ScenarioStop(Outcome.BLOCKED, "the pool's loop device is not the owned image")
+
+
+def pool_free(dest: str, target: Path) -> dict[str, int]:
+    size, free, avail = host_run(dest, "stat", "-f", "-c", "%S %f %a", str(target)).split()
+    return {"block": int(size), "f_bfree": int(free), "f_bavail": int(avail)}
+
+
+def pool_volumes(dest: str, pool: str) -> set[str]:
+    conn = observer(dest)
+    try:
+        handle = conn.storagePoolLookupByName(pool)
+        handle.refresh(0)
+        return set(handle.listVolumes())
+    finally:
+        conn.close()
+
+
+async def remote_insufficient_disk(
+    run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, *, tmp: Path
+) -> None:
+    """A provision whose overlay cannot be created fails ``provisioning_failure``, leaks nothing.
+
+    The provider host's pool sits on a test-owned loop filesystem; one owned ballast file
+    leaves less free space than a qcow2 overlay's metadata needs.
+    """
+    del tmp
+    image = os.environ.get(POOL_IMAGE_ENV)
+    if not image:
+        raise ScenarioStop(Outcome.BLOCKED, f"{POOL_IMAGE_ENV} unset; name the bounded pool image")
+
+    async def body(held: Held, guest: Guest, _kernel: Kernel) -> None:
+        host = held.provider.host
+        assert host is not None
+        target = await asyncio.to_thread(pool_target, host.dest, host.pool)
+        await asyncio.to_thread(bounded_pool, host.dest, target, image)
+        volumes = await asyncio.to_thread(pool_volumes, host.dest, host.pool)
+        before = await asyncio.to_thread(pool_free, host.dest, target)
+        ballast = target / f"q3118-ballast-{os.urandom(4).hex()}"
+        size = before["f_bavail"] * before["block"] - _BALLAST_KEEP_BYTES
+        await asyncio.to_thread(
+            host_run, host.dest, "sudo", "-n", "fallocate", "-l", str(size), str(ballast)
+        )
+        try:
+            bound = await asyncio.to_thread(pool_free, host.dest, target)
+            since = time.time()
+            job = await held.provision(guest.profile(DEFAULT_SIZING))
+            assert held.sampler is not None
+            env = await wait_terminal(held.op, job, held.sampler, deadline_s=1800.0)
+            terminal = await attempts(db_url, job, since)
+            assert (env.status, env.error_category) == ("failed", "provisioning_failure"), (
+                f"provision {env.status} {env.error_category}"
+            )
+            assert set(terminal.per_attempt) <= {"provisioning_failure", "unknown"}, terminal
+            left = await asyncio.to_thread(pool_volumes, host.dest, host.pool)
+            assert left - volumes == {ballast.name}, f"pool gained {sorted(left - volumes)}"
+            added = await asyncio.to_thread(held.provider.domains)
+            assert not added - held.domains_before, "a domain was defined"
+            got = await scalar(held.op, "systems.get", system_id=held.system_id)
+            accel = got.data.get("accel")  # admission's; no domain ever existed
+            run.observed["accelerator"] = accel if accel in {"kvm", "tcg"} else "none"
+            run.prove(
+                "insufficient-disk",
+                {
+                    "category": env.error_category,
+                    **asdict(terminal),
+                    "statvfs": {"before": before, "bounded": bound},
+                    "ballast_bytes": size,
+                },
+            )
+            await held.prove_held({"partial_volumes": 0})
+        finally:
+            await asyncio.to_thread(host_run, host.dest, "sudo", "-n", "rm", "--", str(ballast))
+        released = await held.release()
+        after = await asyncio.to_thread(pool_volumes, host.dest, host.pool)
+        assert after == volumes, f"pool volumes changed: {sorted(after ^ volumes)}"
+        run.prove("cleanup", {**released, "ballast": "removed", "pool_volumes": "unchanged"})
+
+    await boot_cell(run, base_url, issuer, db_url, sizing=DEFAULT_SIZING, remote=True, body=body)
 
 
 async def slow_boot(
