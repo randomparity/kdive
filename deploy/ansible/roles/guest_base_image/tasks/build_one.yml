@@ -511,6 +511,30 @@
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: true
 
+# --- Put the GRUB terminal on the serial console for RHEL-family images. ---
+# The upstream Rocky 10 cloud image sets GRUB_TERMINAL_OUTPUT="gfxterm", and a remote domain
+# carries no video device (only a serial console), so GRUB never draws its menu and the guest
+# spins before the kernel starts: no serial output and no guest agent. Serve GRUB on the serial
+# console as well as the default console, and regenerate the BIOS GRUB config in-guest.
+- name: Serve the GRUB terminal on the serial console for {{ image.name }}
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    # No Ansible module wraps virt-customize; the command module is the only option.
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --run-command
+      - |
+        set -eu
+        sed -i -e '/^GRUB_TERMINAL\(_INPUT\|_OUTPUT\)\?=/d' -e '/^GRUB_SERIAL_COMMAND=/d' /etc/default/grub
+        printf '%s\n' 'GRUB_TERMINAL="serial console"' \
+          'GRUB_SERIAL_COMMAND="serial --speed=115200"' >> /etc/default/grub
+        grub2-mkconfig -o /boot/grub2/grub.cfg
+  when:
+    - image.distro in ['fedora', 'rocky']
+    - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
+
 # --- Set the crashkernel reservation when a debuginfo/kdump image is requested. ---
 - name: Set the crashkernel reservation for {{ image.name }}
   ansible.builtin.command:  # noqa: command-instead-of-module
