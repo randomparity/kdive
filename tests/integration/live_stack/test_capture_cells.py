@@ -21,6 +21,7 @@ from tests.integration.live_stack.capture_cells import (
     CaptureTarget,
     Session,
     crash_profile,
+    kdump_armed,
     lane_keys,
     options,
     panic_seen,
@@ -307,3 +308,15 @@ def test_exposed_call_missing_a_dependency_is_blocked() -> None:
     other = ToolResponse.failure("r", ErrorCategory.NOT_FOUND, detail="x")
     with pytest.raises(AssertionError):
         asyncio.run(_session(other).exposed(run_id="run-1"))
+
+
+def test_kdump_armed_reads_the_crash_kernel_and_the_service() -> None:
+    assert kdump_armed({"loaded": "1", "kdump": "active"})
+    assert not kdump_armed({"loaded": "0", "kdump": "activating"})
+
+
+def test_kdump_service_failure_blocks_instead_of_waiting() -> None:
+    # A guest kernel missing a kdump prerequisite fails kdump.service; waiting cannot help.
+    with pytest.raises(ScenarioStop) as stop:
+        kdump_armed({"loaded": "0", "kdump": "failed"})
+    assert stop.value.outcome is Outcome.BLOCKED

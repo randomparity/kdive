@@ -197,6 +197,19 @@ async def drained(op: LiveStackClient, phase: str, job_id: str) -> ToolResponse:
         raise
 
 
+def kdump_armed(probe: Mapping[str, str]) -> bool:
+    """Whether the guest's crash kernel is loaded; ``blocked`` once its kdump service failed.
+
+    A failed service means the guest cannot build its kdump initramfs for the booted kernel, a
+    missing prerequisite that no wait resolves.
+    """
+    if probe.get("kdump") == "failed":
+        raise ScenarioStop(
+            Outcome.BLOCKED, "the guest's kdump.service failed to arm the fixture kernel"
+        )
+    return probe.get("loaded") == "1"
+
+
 def panic_seen(text: str, release: str) -> bool:
     """A console panic whose own ``CPU:`` record, among the next lines, names ``release``."""
     _, found, after = text.partition(PANIC)
@@ -334,6 +347,10 @@ _SENTINEL = (
     "cp /usr/bin/sleep /root/{name} && "
     "(setsid /root/{name} 3600 </dev/null >/dev/null 2>&1 & echo pid=$!)"
 )
+_ARM_PROBE = (
+    'printf "loaded=%s\\nkdump=%s\\n" "$(cat /sys/kernel/kexec_crash_loaded)" '
+    '"$(systemctl is-active kdump || true)"'
+)
 _FACTS = 'printf "release=%s\\nnodename=%s\\n" "$(uname -r)" "$(uname -n)"'
 
 
@@ -378,9 +395,7 @@ class Session:
     async def armed(self) -> None:
         """Wait until the guest's kdump service has loaded the crash kernel."""
         deadline = time.monotonic() + _ARM_BUDGET_S
-        while (await self.shell("echo loaded=$(cat /sys/kernel/kexec_crash_loaded)"))[
-            "loaded"
-        ] != "1":
+        while not kdump_armed(await self.shell(_ARM_PROBE)):
             assert time.monotonic() < deadline, f"kdump not armed within {_ARM_BUDGET_S:.0f} s"
             await asyncio.sleep(5.0)
 
