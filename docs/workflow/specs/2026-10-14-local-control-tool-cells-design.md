@@ -23,7 +23,7 @@ uses the cell's exposure.
   `show_memory`. Its artifact (read by `artifacts.get`) holds that header, then `Mem-Info:`, and
   `dmesg` holds one more header.
 - **watch_for_crash**: a 20 s watch ends `not_fired` with `20 <= elapsed_s <= 30`. A 180 s
-  watch then fires while the guest writes `<2>Kernel panic - not syncing: kdive-cov-<token>` to
+  watch then fires while the guest writes `<2>Kernel panic - not syncing: <token>` to
   `/dev/kmsg` every 2 s: `signature` is `Kernel panic`, `matched` holds the token. The writer is
   killed; no queued or running watch remains. A written signature (not a real panic)
   outlasts the pickup baseline and keeps the System `ready`.
