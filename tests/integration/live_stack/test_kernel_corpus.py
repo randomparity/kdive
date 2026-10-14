@@ -95,6 +95,7 @@ def test_symbol_sizes_are_distances_to_the_next_address() -> None:
 
 def test_crash_evidence_resolves_reliable_frames() -> None:
     evidence = crash_evidence(_OOPS, _MAP, "6.19.0")
+    assert str(evidence["banner"]).endswith("Linux version 6.19.0 (builder@kernel-fixture) #1 SMP")
     frames = cast(list[dict[str, object]], evidence["frames"])
     assert [f["symbol"] for f in frames] == [
         "__d_lookup",

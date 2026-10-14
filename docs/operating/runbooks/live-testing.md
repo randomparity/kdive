@@ -870,7 +870,9 @@ Every parameter verifies both fixtures of its case and requires the same `input.
 revision with `vmlinux`, installs and boots it, and checks that the domain boots the uploaded
 `bzImage`. `debug-or-crash-evidence` is the identity-bound artifact of the outcome:
 for `case-1/broken`, every reliable call-trace frame `symbol+0xOFF/0xSIZE` of the oops resolves
-in the fixture's `System.map` with that size and the console names the fixture release; for the
+in the fixture's `System.map` with that size (which rejects another kernel version, not the case's
+sibling revision) and the console banner names the fixture release, whose `-g<commit>` suffix
+identifies the revision; for the
 other cells, the running release and GNU build ID with the case's observation. Any other
 observation, including a timeout or a crash on a `fixed` revision, fails the cell. The frame then
 releases and proves cleanup, which also covers the halted guest of `case-1/broken`.
@@ -892,8 +894,10 @@ uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --result
 ```
 
 A missing `KDIVE_FIXTURE_ROOT`, or either revision of the case missing or rejected by `verify`, is
-`blocked` (`missing-prerequisite`). The four ppc64le cells share the node and report
-`missing-result` until a native POWER run (#2818) builds the revisions there.
+`blocked` (`missing-prerequisite`). The four ppc64le cells share the node. Without a ppc64le run
+they report `missing-result`; a run on a ppc64le host today records them `blocked`, because the
+case table and representative image are x86_64 only until #2818 supplies POWER fixtures and
+cases.
 
 #### Local resource-boundary cells (#3118)
 

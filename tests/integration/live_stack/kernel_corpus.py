@@ -191,7 +191,8 @@ def crash_evidence(console: str, system_map: str, release: str) -> dict[str, obj
     frames = oops_frames(console)
     resolved = resolve_frames(frames, symbol_sizes(system_map))
     assert resolved[0]["symbol"] in {"__d_lookup", "__d_lookup_rcu"}, resolved[0]
-    return {"release": release, "frames": resolved}
+    banner = next(line for line in console.splitlines() if f"Linux version {release} " in line)
+    return {"release": release, "banner": banner.strip(), "frames": resolved}
 
 
 def clean_console(console: str, release: str) -> dict[str, object]:

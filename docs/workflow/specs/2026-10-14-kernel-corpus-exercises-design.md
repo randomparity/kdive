@@ -103,8 +103,9 @@ Each parameter:
 
 ### Outcomes
 
-`case-1/broken`: the boot job drains `succeeded`; `runs.get` reports
-`boot_outcome = expected_crash_observed` and a matched line containing `RIP: 0010:__d_lookup`.
+`case-1/broken`: the boot job drains `succeeded` (the boot step records
+`expected_crash_observed`); `runs.get` carries `expected_boot_failure_matched_line` containing
+`RIP: 0010:__d_lookup` and no ready `data.boot_outcome`.
 The Run's console artifact (`refs.console`, read in full through `artifacts.get`) must contain
 `Dentry cache hash table entries: 1`, `BUG: unable to handle page fault`, the RIP line, and a
 `Linux version <release>` banner equal to the fixture release. `debug-or-crash-evidence`
@@ -113,8 +114,13 @@ resolves the RIP frame and every reliable call-trace frame `sym+0xOFF/0xSIZE` be
 to the next `System.map` address (the kallsyms size) equals `SIZE`, and `OFF < SIZE`. Frames
 marked `? ` are stack guesses and are skipped. At least three frames must resolve, the first in
 `__d_lookup` or `__d_lookup_rcu`; a frame naming a symbol or size absent from the map fails the
-cell. On the pre-check console all 14 reliable frames resolved against the matching build, and
-another build's map rejected them.
+cell. On the pre-check console all 14 reliable frames resolved against the matching build, and a
+case-2 build's map rejected them. The map check does not tell a case's two revisions apart: the
+fix leaves every traced symbol's size unchanged, so the fixed build's map resolves the same
+frames. Per-revision identity comes from the banner, whose release carries the revision's
+abbreviated commit (`6.19.0-g970296997869`), the uploaded `vmlinux` build ID that
+`runs.complete_build` accepted, and the domain's direct kernel equal to the uploaded `bzImage`.
+The record keeps the banner line beside the resolved frames.
 
 `case-1/fixed`: the boot drains `succeeded` with `boot_outcome` ready and no matched line. Over
 SSH, a new boot ID, `/proc/cmdline` containing `dhash_entries=1`, the running release and the
