@@ -263,6 +263,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_OPERATOR_SPLIT[3112],
         *_POWER_SNAPSHOT_TOOLS,
         *_CAPTURE_TOOLS,
+        *(c.operation for c in contract.cells if c.operation.startswith("debug.")),
     }
     limits = [c for c in contract.cells if c.owner == 3118]
     local_limits = [c for c in limits if c.provider == "local-libvirt"]
@@ -705,3 +706,31 @@ def test_capture_owners_follow_the_approved_split(inventory: Inventory) -> None:
     local = [c for c in cells if c.owner == 2814]
     kinds = Counter(c.kind for c in local)
     assert (len(local), kinds["functional"], kinds["unsupported"]) == (164, 28, 4)
+
+
+_DEBUG_NODE = "tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell"
+
+
+def test_debug_owners_and_carrier_follow_the_approved_split(inventory: Inventory) -> None:
+    # Approved exclusions (2026-10-07): #2813 proves the x86_64 local debug cells; remote is
+    # #3113's and every ppc64le cell the POWER lane's (#2818).
+    cells = [
+        c for c in build_contract(inventory=inventory).cells if c.operation.startswith("debug.")
+    ]
+    assert len({c.operation for c in cells}) == 21
+    for cell in cells:
+        expected = (
+            2818
+            if cell.guest_arch == "ppc64le"
+            else 3113
+            if cell.provider == "remote-libvirt"
+            else 2813
+        )
+        assert cell.owner == expected, cell.id
+    local = [c for c in cells if c.provider == "local-libvirt"]
+    owned = [c for c in local if c.owner == 2813]
+    kinds = Counter(c.kind for c in owned)
+    assert (len(owned), kinds["functional"], kinds["rejection"]) == (440, 88, 352)
+    assert not [c for c in owned if c.id.endswith("/capability")]
+    assert len(local) == 880 and {c.node_id for c in local} == {_DEBUG_NODE}
+    assert not [c for c in cells if c.provider == "remote-libvirt" and c.node_id]

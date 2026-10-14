@@ -1,0 +1,977 @@
+"""Local GDB debug tool cells over HTTP (#2813, ADR-0722).
+
+A functional cell provisions the lane image with a gdbstub through
+:func:`~tests.integration.live_stack.tool_cells.on_lane_system`, boots the verified ``longterm``
+kernel fixture (:func:`~tests.integration.live_stack.capture_cells.boot`), which uploads the Run's
+``vmlinux`` and loads ``loop``, then reads its ground truth from the guest before any attach halts
+it: ``/proc/version``, ``/proc/kallsyms`` and the ``loop`` ``.text`` base. The tool under test goes
+through the cell's exposure with its gate role; the session, breakpoint and resume calls around
+it use the frame's operator client. A ``vfs_read`` stop is the controlled workload: an SSH client
+banner written while the guest resumes makes guest ``sshd`` call ``read(2)``.
+
+A rejection cell aims at the stack's :func:`debug_target`: a torn-down fixture System, its Run and
+an ended gdbstub session. ``debug.list_sessions`` filters a denied caller's view, so its
+authorization and project-isolation cells prove denied visibility against a viewer who sees the
+target session (ADR-0756, amended 2026-10-14). No rejection record carries a kernel field, since
+no rejection cell declares kernel inputs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import copy
+import hashlib
+import secrets
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from functools import partial
+from pathlib import Path
+from typing import Any, cast
+from uuid import uuid4
+
+import psycopg
+
+from kdive.domain.errors import ErrorCategory
+from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
+from kdive.mcp.responses import ToolResponse
+from scripts.coverage_campaign.evidence import Outcome
+from tests.integration.live_stack.capture_cells import (
+    boot,
+    lane_keys,
+    protected_state,
+    require_tool,
+    section,
+)
+from tests.integration.live_stack.image_smoke import Endpoint, ssh
+from tests.integration.live_stack.power_snapshots import grants
+from tests.integration.live_stack.scenario import (
+    CellRun,
+    ScenarioStop,
+    provision_catalog,
+)
+from tests.integration.live_stack.spine import ok, scalar
+from tests.integration.live_stack.tool_cells import (
+    Boundary,
+    FilteredListControl,
+    Grants,
+    Guest,
+    HttpCaller,
+    Rejection,
+    Snapshot,
+    on_lane_system,
+    one,
+    settled,
+)
+
+TOOLS = (
+    "debug.advance",
+    "debug.backtrace",
+    "debug.clear_breakpoint",
+    "debug.clear_watchpoint",
+    "debug.continue",
+    "debug.disassemble",
+    "debug.end_session",
+    "debug.get_session",
+    "debug.interrupt",
+    "debug.list_breakpoints",
+    "debug.list_modules",
+    "debug.list_sessions",
+    "debug.list_watchpoints",
+    "debug.load_module_symbols",
+    "debug.read_frame",
+    "debug.read_memory",
+    "debug.read_registers",
+    "debug.resolve_symbol",
+    "debug.set_breakpoint",
+    "debug.set_watchpoint",
+    "debug.start_session",
+)
+# Each tool's project gate (src/kdive/mcp/exposure.py).
+GATES = {tool: "contributor" for tool in TOOLS} | {
+    "debug.get_session": "viewer",
+    "debug.list_sessions": "viewer",
+}
+_BELOW: dict[str, str | None] = {"contributor": "viewer", "viewer": None}
+# The fixed valid arguments beside each tool's id, for the rejection calls.
+_EXTRA: dict[str, dict[str, object]] = {
+    "debug.advance": {"mode": "out"},
+    "debug.clear_breakpoint": {"number": "1"},
+    "debug.clear_watchpoint": {"number": "1"},
+    "debug.continue": {"timeout_sec": 1.0},
+    "debug.disassemble": {"symbol": "vfs_read", "instruction_count": 4},
+    "debug.load_module_symbols": {"module": "loop"},
+    "debug.read_frame": {"level": 0},
+    "debug.read_memory": {"address": 4096, "byte_count": 8},
+    "debug.read_registers": {"registers": ["rip"]},
+    "debug.resolve_symbol": {"name": "vfs_read"},
+    "debug.set_breakpoint": {"location": "vfs_read"},
+    "debug.set_watchpoint": {"symbol": "jiffies_64", "byte_count": 8},
+}
+_LIST = "debug.list_sessions"
+# The lowest x86_64 kernel-half address: a register or stack pointer in the kernel is above it.
+KERNEL_BASE = 0xFFFF800000000000
+BREAK_AT = "vfs_read"
+WATCH = "jiffies_64"
+BANNER = "linux_banner"
+# A [loop] text function in .text, which load_module_symbols relocates.
+MODULE, MODULE_SYMBOL = "loop", "loop_queue_rq"
+_STOP_WAIT_S = 30.0
+_NO_STOP_WAIT_S = 5.0
+_ANSWER_S = 5.0
+_RESUME_LEAD_S = 1.0
+_REANSWER_S = 60.0
+
+
+# --- ground truth -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Truth:
+    """What the running guest says before any attach: the debugger's answers are checked here.
+
+    ``symbols`` holds the first core address of each name in ``/proc/kallsyms``, ``module`` the
+    ``[loop]`` text symbols, ``text`` every text address in order, and ``loop_text`` the
+    ``loop`` module's ``.text`` base from ``/sys/module``.
+    """
+
+    version: bytes
+    symbols: Mapping[str, int]
+    module: Mapping[str, int]
+    text: tuple[int, ...]
+    loop_text: int
+
+    def at(self, name: str) -> int:
+        address = self.symbols.get(name)
+        assert address, f"/proc/kallsyms names no {name}"
+        return address
+
+    def end_of(self, name: str) -> int:
+        """The next text address above ``name``'s: where its function ends at the latest."""
+        start = self.at(name)
+        following = [a for a in self.text if a > start]
+        assert following, f"no text symbol follows {name}"
+        return following[0]
+
+    def within(self, name: str, address: int) -> bool:
+        return self.at(name) <= address < self.end_of(name)
+
+
+def parse_kallsyms(
+    text: str, module: str = MODULE
+) -> tuple[dict[str, int], dict[str, int], tuple[int, ...]]:
+    """Core symbols, ``module``'s text symbols, and sorted text addresses of ``/proc/kallsyms``.
+
+    A pointer-restricted listing, all zero addresses, fails: no comparison could pass on it.
+    """
+    core: dict[str, int] = {}
+    owned: dict[str, int] = {}
+    addresses: set[int] = set()
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        address, kind, name = int(parts[0], 16), parts[1], parts[2]
+        owner = parts[3] if len(parts) > 3 else None
+        if kind in ("t", "T"):
+            addresses.add(address)
+        if owner is None:
+            core.setdefault(name, address)
+        elif owner == f"[{module}]" and kind in ("t", "T"):
+            owned.setdefault(name, address)
+    assert any(addresses), "/proc/kallsyms lists no nonzero text address (pointer restriction)"
+    return core, owned, tuple(sorted(addresses))
+
+
+def system_map_address(system_map: str, name: str) -> int:
+    """``name``'s address in a fixture ``System.map``."""
+    for line in system_map.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] == name:
+            return int(parts[0], 16)
+    raise AssertionError(f"System.map names no {name}")
+
+
+def hex_value(value: object) -> int:
+    """A gdb hex value such as ``0xffffffff81234567`` or ``0xffffffff81234567 <vfs_read+4>``."""
+    assert isinstance(value, str) and value.startswith("0x"), f"not a hex value: {value!r}"
+    return int(value.split()[0], 16)
+
+
+async def _guest(endpoint: Endpoint, key: Path, command: str) -> str:
+    result = await asyncio.to_thread(ssh, endpoint, key, command)
+    assert result.returncode == 0, f"guest command exited {result.returncode}"
+    return result.stdout
+
+
+async def read_truth(endpoint: Endpoint, key: Path, tree: Path) -> Truth:
+    """The guest's facts, with ``vfs_read`` matching the fixture's unrandomised ``System.map``."""
+    version = (await _guest(endpoint, key, "cat /proc/version")).encode()
+    core, owned, text = parse_kallsyms(await _guest(endpoint, key, "cat /proc/kallsyms"))
+    base = (await _guest(endpoint, key, f"cat /sys/module/{MODULE}/sections/.text")).strip()
+    truth = Truth(version, core, owned, text, hex_value(base))
+    mapped = system_map_address((tree / "System.map").read_text(encoding="utf-8"), BREAK_AT)
+    assert truth.at(BREAK_AT) == mapped, "the guest's vfs_read is not the fixture's (KASLR?)"
+    return truth
+
+
+async def answers(endpoint: Endpoint, timeout: float = _ANSWER_S) -> bool:
+    """Whether guest ``sshd`` sends its banner: false while the debugger halts the guest."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(endpoint.host, endpoint.port), timeout
+        )
+    except TimeoutError, OSError:
+        return False
+    try:
+        line = await asyncio.wait_for(reader.readline(), timeout)
+    except TimeoutError:
+        return False
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(writer.wait_closed(), timeout)
+    return line.startswith(b"SSH-")
+
+
+async def answers_again(endpoint: Endpoint) -> bool:
+    """Whether the guest answers within ``_REANSWER_S`` after a detach resumed it."""
+    deadline = asyncio.get_running_loop().time() + _REANSWER_S
+    while asyncio.get_running_loop().time() < deadline:
+        if await answers(endpoint):
+            return True
+    return False
+
+
+# --- provisioning ---------------------------------------------------------------------------
+
+
+def gdbstub_profile(profile: Mapping[str, object]) -> dict[str, object]:
+    """``profile`` with the local-libvirt gdbstub on and nothing else; the input is unchanged.
+
+    No ``crashkernel``: that would resolve the capture method to kdump and drop ``nokaslr``.
+    """
+    edited = copy.deepcopy(dict(profile))
+    local = cast(dict[str, Any], edited["provider"])["local-libvirt"]
+    local["debug"] = {**local.get("debug", {}), "gdbstub": True}
+    return edited
+
+
+async def provision_gdbstub(
+    op: LiveStackClient, allocation: str, profile: dict[str, object]
+) -> str:
+    return await provision_catalog(op, allocation, gdbstub_profile(profile))
+
+
+def checked(env: ToolResponse, phase: str) -> ToolResponse:
+    """``env`` when it succeeded; ``blocked`` when the stack lacks gdb or another dependency."""
+    if env.error_category == ErrorCategory.DEBUG_ATTACH_FAILURE.value and env.data.get(
+        "missing_tools"
+    ):
+        raise ScenarioStop(Outcome.BLOCKED, f"{phase}: the server host lacks a debugger")
+    return require_tool(env, phase)
+
+
+# --- functional cells -----------------------------------------------------------------------
+
+
+@dataclass
+class Session:
+    """A functional cell's booted fixture System, its ground truth and who issues each call."""
+
+    run: CellRun
+    guest: Guest
+    caller: HttpCaller
+    grants: Grants
+    manifest: Mapping[str, Any]
+    run_id: str
+    endpoint: Endpoint
+    truth: Truth
+    db_url: str
+    sessions: list[str] = field(default_factory=list)
+
+    @property
+    def variant(self) -> str:
+        return self.run.cell.scenario_id.split("/")[2]
+
+    async def exposed(self, **args: object) -> ToolResponse:
+        """The tool under test, through the cell's exposure and token."""
+        tool = self.run.cell.operation
+        # Minted per call: a functional sequence can outlast a token's lifetime.
+        token = self.caller.token(self.grants)
+        result = await self.caller.call(tool, args, token, discover=True)
+        return checked(result, tool) if isinstance(result, ToolResponse) else one(result)
+
+    async def raw(self, tool: str, /, **args: object) -> ToolResponse:
+        """A supporting call through the frame's operator client, whatever it answers."""
+        env = await self.guest.op.call_tool(tool, **args)
+        assert isinstance(env, ToolResponse), f"{tool} returned a list, expected one envelope"
+        return env
+
+    async def op(self, tool: str, /, **args: object) -> ToolResponse:
+        """A supporting call through the frame's operator client, which must succeed."""
+        return checked(await self.raw(tool, **args), tool)
+
+    async def start(self, transport: str = "gdbstub") -> str:
+        env = await self.op("debug.start_session", run_id=self.run_id, transport=transport)
+        self.sessions.append(env.object_id)
+        return env.object_id
+
+    async def end(self, session_id: str) -> None:
+        env = await self.op("debug.end_session", session_id=session_id)
+        assert env.status == "detached", f"the session ended {env.status}"
+        self.sessions.remove(session_id)
+
+    async def end_all(self) -> None:
+        """End every session this cell started and still holds."""
+        for session_id in list(self.sessions):
+            await self.end(session_id)
+
+    async def register(self, session_id: str, name: str = "rip") -> int:
+        env = await self.op("debug.read_registers", session_id=session_id, registers=[name])
+        return hex_value(env.data.get(name))
+
+    async def frames(self, session_id: str) -> list[dict[str, Any]]:
+        env = await self.op("debug.backtrace", session_id=session_id)
+        listed = env.data.get("frames")
+        assert isinstance(listed, list) and listed, "the backtrace has no frames"
+        return [cast(dict[str, Any], f) for f in listed]
+
+    async def breakpoint(self, session_id: str, location: str = BREAK_AT) -> str:
+        env = await self.op("debug.set_breakpoint", session_id=session_id, location=location)
+        return str(env.data["number"])
+
+    async def breakpoints(self, session_id: str) -> int:
+        env = await self.op("debug.list_breakpoints", session_id=session_id)
+        return cast(int, env.data["count"])
+
+    async def watchpoint(self, session_id: str) -> str:
+        env = await self.op(
+            "debug.set_watchpoint", session_id=session_id, symbol=WATCH, byte_count=8
+        )
+        return str(env.data["number"])
+
+    async def word(self, session_id: str, name: str) -> int:
+        address = self.truth.at(name)
+        env = await self.op(
+            "debug.read_memory", session_id=session_id, address=address, byte_count=8
+        )
+        return int.from_bytes(bytes.fromhex(str(env.data["memory_hex"])), "little")
+
+    async def resumed(self, call: Awaitable[ToolResponse]) -> ToolResponse:
+        """Await a resume while a client banner makes guest ``sshd`` call ``read(2)``."""
+        task = asyncio.ensure_future(call)
+        writer: asyncio.StreamWriter | None = None
+        try:
+            await asyncio.sleep(_RESUME_LEAD_S)
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.endpoint.host, self.endpoint.port), _STOP_WAIT_S
+            )
+            writer.write(b"SSH-2.0-kdive-debug-cell\r\n")
+            await writer.drain()
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+            if writer is not None:
+                writer.close()
+
+    async def proceed(self, session_id: str, wait: float = _STOP_WAIT_S) -> ToolResponse:
+        """An operator ``debug.continue`` with the read workload."""
+        return await self.resumed(
+            self.op("debug.continue", session_id=session_id, timeout_sec=wait)
+        )
+
+    async def stop_in_vfs_read(self, session_id: str) -> int:
+        """Run to a ``vfs_read`` hit, clear the breakpoint, and return the stopped ``rip``."""
+        number = await self.breakpoint(session_id)
+        stop = await self.proceed(session_id)
+        require_stop(stop, "breakpoint-hit")
+        await self.op("debug.clear_breakpoint", session_id=session_id, number=number)
+        rip = await self.register(session_id)
+        assert self.truth.within(BREAK_AT, rip), "the breakpoint stop is not in vfs_read"
+        return rip
+
+
+def require_stop(env: ToolResponse, reason: str) -> None:
+    """A ``stopped`` envelope for ``reason`` that did not time out."""
+    assert env.status == "stopped", f"expected a stop, got {env.status}"
+    assert env.data.get("timed_out") is False, "the resume timed out"
+    assert env.data.get("reason") == reason, f"stopped for {env.data.get('reason')!r}"
+
+
+def require_no_stop(env: ToolResponse) -> None:
+    """A resume that waited out its timeout: nothing it should no longer have stopped it."""
+    assert env.status == "stopped" and env.data.get("timed_out") is True, (
+        f"the resume stopped for {env.data.get('reason')!r} before its timeout"
+    )
+
+
+async def start_body(s: Session) -> dict[str, object]:
+    """A started session is live, usable, and holds the System's only attach of its transport."""
+    transport = s.variant
+    env = await s.exposed(run_id=s.run_id, transport=transport)
+    s.sessions.append(env.object_id)
+    assert env.status == "live", f"the session started {env.status}"
+    read = await s.op("debug.get_session", session_id=env.object_id)
+    record = (read.status, read.data.get("transport"), read.data.get("run_id"))
+    assert record == ("live", transport, s.run_id), f"the session record reads {record}"
+    assert read.data.get("system_id") == s.guest.system_id, "the session names another System"
+    if transport == "gdbstub":
+        usable = {"rip_kernel": await s.register(env.object_id) >= KERNEL_BASE}
+    else:
+        assert "missing_debuginfo" not in env.data, "drgn-live attached without debuginfo"
+        report = await s.op("introspect.run", session_id=env.object_id, helper="sysinfo")
+        release = section(report.data.get("report"), "sysinfo")["release"]
+        usable = {"release_matches": release == s.manifest["release"]}
+    assert all(usable.values()), f"the {transport} session is not usable: {usable}"
+    second = await s.raw("debug.start_session", run_id=s.run_id, transport=transport)
+    assert second.error_category == ErrorCategory.TRANSPORT_CONFLICT.value, (
+        f"a second {transport} attach answered {second.error_category}"
+    )
+    await s.end(env.object_id)
+    return {"transport": transport, "record": "live", **usable, "second_attach": "conflict"}
+
+
+async def end_body(s: Session) -> dict[str, object]:
+    """Ending detaches, resumes the halted guest and releases the single attach."""
+    session_id = await s.start()
+    await s.register(session_id)
+    assert not await answers(s.endpoint), "the guest answers while attached"
+    env = await s.exposed(session_id=session_id)
+    s.sessions.remove(session_id)
+    assert env.status == "detached", f"the session ended {env.status}"
+    read = await s.op("debug.get_session", session_id=session_id)
+    assert read.status == "detached", f"the session record reads {read.status}"
+    assert await answers_again(s.endpoint), "the guest did not resume after the detach"
+    again = await s.start()
+    await s.register(again)
+    await s.end(again)
+    return {"record": "detached", "guest_resumed": True, "reattach": True}
+
+
+async def get_body(s: Session) -> dict[str, object]:
+    """The read session matches the one started."""
+    session_id = await s.start()
+    env = await s.exposed(session_id=session_id)
+    seen = {k: env.data.get(k) for k in ("project", "run_id", "system_id", "transport")}
+    expected = {
+        "project": s.guest.project,
+        "run_id": s.run_id,
+        "system_id": s.guest.system_id,
+        "transport": "gdbstub",
+    }
+    assert (env.object_id, env.status, seen) == (session_id, "live", expected), "record differs"
+    await s.end(session_id)
+    return {"status": "live", "fields_match": sorted(expected)}
+
+
+async def _records(db_url: str, run_id: str) -> list[tuple[str, str]]:
+    """The Run's session rows, newest first, read directly from the database."""
+    async with await psycopg.AsyncConnection.connect(db_url) as conn:
+        await conn.set_read_only(True)
+        cursor = await conn.execute(
+            "SELECT id::text, state FROM debug_sessions WHERE run_id = %s "
+            "ORDER BY created_at DESC, id DESC",
+            (run_id,),
+        )
+        return [(str(row[0]), str(row[1])) for row in await cursor.fetchall()]
+
+
+async def list_body(s: Session) -> dict[str, object]:
+    """Filters and newest-first order match the session rows."""
+    first = await s.start()
+    await s.end(first)
+    second = await s.start()
+    rows = await _records(s.db_url, s.run_id)
+    assert rows == [(second, "live"), (first, "detached")], f"session rows read {rows}"
+    pages = {}
+    for state in (None, "live", "detached"):
+        request: dict[str, object] = {"run_id": s.run_id}
+        if state is not None:
+            request["state"] = state
+        env = await s.exposed(request=request)
+        pages[state or "all"] = [(i.object_id, i.status) for i in env.items]
+    assert pages == {
+        "all": rows,
+        "live": [r for r in rows if r[1] == "live"],
+        "detached": [r for r in rows if r[1] == "detached"],
+    }, f"the listed sessions differ from the rows: {pages}"
+    await s.end(second)
+    return {"filters": ["run_id", "state"], "order": "newest-first", "rows": len(rows)}
+
+
+async def continue_body(s: Session) -> dict[str, object]:
+    """Resuming reaches the ``vfs_read`` breakpoint with ``rip`` in ``vfs_read``."""
+    session_id = await s.start()
+    number = await s.breakpoint(session_id)
+    stop = await s.resumed(s.exposed(session_id=session_id, timeout_sec=_STOP_WAIT_S))
+    require_stop(stop, "breakpoint-hit")
+    rip = await s.register(session_id)
+    assert s.truth.within(BREAK_AT, rip), "the stop is not in vfs_read"
+    await s.op("debug.clear_breakpoint", session_id=session_id, number=number)
+    await s.end(session_id)
+    return {"reason": "breakpoint-hit", "rip_in": BREAK_AT}
+
+
+async def interrupt_body(s: Session) -> dict[str, object]:
+    """The interrupt halts a running guest and reports why it stopped."""
+    session_id = await s.start()
+    assert await answers(s.endpoint), "the guest does not answer before the interrupt"
+    env = await s.exposed(session_id=session_id)
+    assert env.status == "stopped" and env.data.get("timed_out") is False, "no clean stop"
+    assert not await answers(s.endpoint), "the guest still answers after the interrupt"
+    assert await s.register(session_id) >= KERNEL_BASE, "the halted rip is not a kernel address"
+    reason = env.data.get("reason")
+    await s.end(session_id)
+    assert reason, (
+        "debug.interrupt halted the guest but reported no stop reason: the attach had already "
+        "stopped it, and no public operation leaves a live session running (known gap, #2813)"
+    )
+    return {"halted": True, "reason": reason}
+
+
+async def advance_body(s: Session) -> dict[str, object]:
+    """``out`` from ``vfs_read`` stops at the return address frame 1 names."""
+    session_id = await s.start()
+    await s.stop_in_vfs_read(session_id)
+    frames = await s.frames(session_id)
+    assert frames[0].get("func") == BREAK_AT, f"frame 0 is {frames[0].get('func')!r}"
+    assert len(frames) > 1, "vfs_read has no caller frame"
+    returns_to = hex_value(frames[1].get("addr"))
+    env = await s.exposed(session_id=session_id, mode="out", timeout_sec=_STOP_WAIT_S)
+    require_stop(env, "function-finished")
+    rip = await s.register(session_id)
+    assert rip == returns_to, "advance out did not stop at the caller's return address"
+    await s.end(session_id)
+    return {"mode": "out", "reason": "function-finished", "rip_is_return_address": True}
+
+
+async def set_breakpoint_body(s: Session) -> dict[str, object]:
+    """The installed breakpoint is listed and reached in ``vfs_read``."""
+    session_id = await s.start()
+    env = await s.exposed(session_id=session_id, location=BREAK_AT)
+    number = str(env.data.get("number") or "")
+    assert env.status == "set" and number, "no breakpoint number returned"
+    assert await s.breakpoints(session_id) == 1, "the breakpoint is not listed"
+    require_stop(await s.proceed(session_id), "breakpoint-hit")
+    frames = await s.frames(session_id)
+    assert frames[0].get("func") == BREAK_AT, f"frame 0 is {frames[0].get('func')!r}"
+    assert s.truth.within(BREAK_AT, await s.register(session_id)), "the stop is not in vfs_read"
+    await s.op("debug.clear_breakpoint", session_id=session_id, number=number)
+    await s.end(session_id)
+    return {"listed": 1, "reason": "breakpoint-hit", "frame0": BREAK_AT}
+
+
+async def clear_breakpoint_body(s: Session) -> dict[str, object]:
+    """A cleared ``vfs_read`` breakpoint is gone and no longer stops the read workload."""
+    session_id = await s.start()
+    number = await s.breakpoint(session_id)
+    env = await s.exposed(session_id=session_id, number=number)
+    assert env.status == "cleared", f"the clear answered {env.status}"
+    assert await s.breakpoints(session_id) == 0, "the breakpoint is still listed"
+    require_no_stop(await s.proceed(session_id, _NO_STOP_WAIT_S))
+    await s.end(session_id)
+    return {"listed": 0, "stopped_by_workload": False}
+
+
+async def list_breakpoints_body(s: Session) -> dict[str, object]:
+    """The count follows the installed breakpoints; identifiers and locations are not listed."""
+    session_id = await s.start()
+    first = await s.breakpoint(session_id)
+    await s.breakpoint(session_id, "vfs_write")
+    both = await s.exposed(session_id=session_id)
+    await s.op("debug.clear_breakpoint", session_id=session_id, number=first)
+    one_left = await s.exposed(session_id=session_id)
+    await s.end(session_id)
+    counts = (both.data.get("count"), one_left.data.get("count"))
+    assert counts == (2, 1), f"the listed counts are {counts}"
+    assert "breakpoints" in both.data, (
+        "debug.list_breakpoints returns only a count, so its identifiers and locations cannot "
+        "be compared with the installed breakpoints (known gap, #2813)"
+    )
+    return {"counts": list(counts)}
+
+
+async def set_watchpoint_body(s: Session) -> dict[str, object]:
+    """The watched ``jiffies_64`` write stops the guest with a larger value."""
+    session_id = await s.start()
+    before = await s.word(session_id, WATCH)
+    env = await s.exposed(session_id=session_id, symbol=WATCH, byte_count=8)
+    number = str(env.data.get("number") or "")
+    assert env.status == "watching" and number, "no watchpoint number returned"
+    stop = await s.op("debug.continue", session_id=session_id, timeout_sec=_STOP_WAIT_S)
+    require_stop(stop, "watchpoint-trigger")
+    after = await s.word(session_id, WATCH)
+    assert after > before, "the watched value did not grow"
+    await s.op("debug.clear_watchpoint", session_id=session_id, number=number)
+    await s.end(session_id)
+    return {"reason": "watchpoint-trigger", "value_increased": True}
+
+
+async def clear_watchpoint_body(s: Session) -> dict[str, object]:
+    """A cleared ``jiffies_64`` watchpoint is gone and no longer stops the ticking guest."""
+    session_id = await s.start()
+    number = await s.watchpoint(session_id)
+    env = await s.exposed(session_id=session_id, number=number)
+    assert env.status == "cleared", f"the clear answered {env.status}"
+    listed = await s.op("debug.list_watchpoints", session_id=session_id)
+    assert listed.data.get("count") == 0, "the watchpoint is still listed"
+    stop = await s.op("debug.continue", session_id=session_id, timeout_sec=_NO_STOP_WAIT_S)
+    require_no_stop(stop)
+    await s.end(session_id)
+    return {"listed": 0, "stopped_by_tick": False}
+
+
+async def list_watchpoints_body(s: Session) -> dict[str, object]:
+    """The one installed watchpoint is listed with its number and expression."""
+    session_id = await s.start()
+    number = await s.watchpoint(session_id)
+    env = await s.exposed(session_id=session_id)
+    listed = env.data.get("watchpoints")
+    assert isinstance(listed, list), "no watchpoints listed"
+    seen = [(str(w.get("number")), w.get("expr")) for w in listed if isinstance(w, dict)]
+    assert (env.data.get("count"), seen) == (1, [(number, WATCH)]), f"listed {seen}"
+    await s.op("debug.clear_watchpoint", session_id=session_id, number=number)
+    await s.end(session_id)
+    return {"count": 1, "number_matches": True, "expr": WATCH}
+
+
+async def read_memory_body(s: Session) -> dict[str, object]:
+    """``linux_banner``'s bytes are the guest's ``/proc/version``."""
+    session_id = await s.start()
+    size = len(s.truth.version)
+    env = await s.exposed(session_id=session_id, address=s.truth.at(BANNER), byte_count=size)
+    await s.end(session_id)
+    read = bytes.fromhex(str(env.data.get("memory_hex")))
+    assert read == s.truth.version, "linux_banner differs from /proc/version"
+    assert read.startswith(f"Linux version {s.manifest['release']} ".encode()), "not the fixture"
+    return {"bytes": size, "sha256": hashlib.sha256(read).hexdigest(), "matches": True}
+
+
+async def read_registers_body(s: Session) -> dict[str, object]:
+    """Stopped in ``vfs_read``: ``rip`` lies in it and ``rsp`` is a kernel stack address."""
+    session_id = await s.start()
+    await s.stop_in_vfs_read(session_id)
+    env = await s.exposed(session_id=session_id, registers=["rip", "rsp"])
+    await s.end(session_id)
+    rip, rsp = hex_value(env.data.get("rip")), hex_value(env.data.get("rsp"))
+    assert s.truth.within(BREAK_AT, rip), "rip is not in vfs_read"
+    assert rsp >= KERNEL_BASE, "rsp is not a kernel address"
+    return {"rip_in": BREAK_AT, "rsp_kernel": True}
+
+
+async def resolve_body(s: Session) -> dict[str, object]:
+    """Resolved addresses equal the guest's ``/proc/kallsyms``."""
+    session_id = await s.start()
+    resolved = {}
+    for name in (BREAK_AT, BANNER):
+        env = await s.exposed(session_id=session_id, name=name)
+        resolved[name] = hex_value(env.data.get("address")) == s.truth.at(name)
+    await s.end(session_id)
+    assert all(resolved.values()), f"resolved addresses differ from kallsyms: {resolved}"
+    return {"matches": sorted(resolved)}
+
+
+async def disassemble_body(s: Session) -> dict[str, object]:
+    """Sixteen instructions from ``vfs_read``'s address, in order, inside the function."""
+    session_id = await s.start()
+    env = await s.exposed(session_id=session_id, symbol=BREAK_AT, instruction_count=16)
+    await s.end(session_id)
+    listed = env.data.get("instructions")
+    assert isinstance(listed, list) and len(listed) == 16, "not 16 instructions"
+    addresses = [hex_value(cast(dict[str, Any], i).get("address")) for i in listed]
+    assert addresses[0] == s.truth.at(BREAK_AT), "the first instruction is not vfs_read's"
+    assert addresses == sorted(set(addresses)), "instruction addresses are not increasing"
+    assert addresses[-1] < s.truth.end_of(BREAK_AT), "an instruction lies past vfs_read"
+    names = {cast(dict[str, Any], i).get("func_name") for i in listed}
+    assert names == {BREAK_AT}, f"instructions name {names}"
+    return {"instructions": 16, "first_at_symbol": True, "within_function": True}
+
+
+async def backtrace_body(s: Session) -> dict[str, object]:
+    """The read workload's stop walks from ``vfs_read`` up through the read syscall."""
+    session_id = await s.start()
+    rip = await s.stop_in_vfs_read(session_id)
+    env = await s.exposed(session_id=session_id)
+    await s.end(session_id)
+    listed = env.data.get("frames")
+    assert isinstance(listed, list) and listed, "the backtrace has no frames"
+    funcs = [cast(dict[str, Any], f).get("func") for f in listed]
+    top = cast(dict[str, Any], listed[0])
+    assert funcs[0] == BREAK_AT and hex_value(top.get("addr")) == rip, "frame 0 differs"
+    assert "ksys_read" in funcs, f"no ksys_read caller in {funcs[:6]}"
+    assert any(f and "syscall" in f for f in funcs), "the walk does not reach the syscall entry"
+    return {"frames": len(funcs), "frame0": BREAK_AT, "caller": "ksys_read"}
+
+
+async def read_frame_body(s: Session) -> dict[str, object]:
+    """Frame 0 is ``vfs_read`` at the stop; its arguments and locals are not returned."""
+    session_id = await s.start()
+    rip = await s.stop_in_vfs_read(session_id)
+    env = await s.exposed(session_id=session_id, level=0)
+    await s.end(session_id)
+    frame = env.data.get("frame")
+    assert isinstance(frame, dict), "no frame returned"
+    assert (frame.get("func"), hex_value(frame.get("addr"))) == (BREAK_AT, rip), "frame differs"
+    assert "args" in frame or "locals" in frame, (
+        "debug.read_frame returns no arguments or locals, so they cannot be compared with the "
+        "workload (known gap, #2813)"
+    )
+    return {"frame0": BREAK_AT}
+
+
+def _module_row(env: ToolResponse) -> dict[str, Any]:
+    listed = env.data.get("modules")
+    assert isinstance(listed, list), "no modules listed"
+    rows = [cast(dict[str, Any], m) for m in listed if isinstance(m, dict)]
+    found = [m for m in rows if m.get("name") == MODULE]
+    assert len(found) == 1, f"{MODULE} is listed {len(found)} times"
+    return found[0]
+
+
+async def list_modules_body(s: Session) -> dict[str, object]:
+    """``loop`` is listed at its ``/sys/module`` ``.text`` base, symbols not yet loaded."""
+    session_id = await s.start()
+    env = await s.exposed(session_id=session_id)
+    await s.end(session_id)
+    row = _module_row(env)
+    assert hex_value(row.get("base_address")) == s.truth.loop_text, "loop's base differs"
+    assert row.get("symbols_loaded") is False, "loop's symbols were already loaded"
+    return {"module": MODULE, "base_matches": True}
+
+
+async def load_module_symbols_body(s: Session) -> dict[str, object]:
+    """After the load, a ``loop`` function resolves to its ``/proc/kallsyms`` address."""
+    expected = s.truth.module.get(MODULE_SYMBOL)
+    assert expected, f"/proc/kallsyms lists no [{MODULE}] {MODULE_SYMBOL}"
+    session_id = await s.start()
+    before = await s.raw("debug.resolve_symbol", session_id=session_id, name=MODULE_SYMBOL)
+    assert before.error_category == ErrorCategory.SYMBOL_NOT_FOUND.value, (
+        f"{MODULE_SYMBOL} resolved before its module's symbols were loaded"
+    )
+    env = await s.exposed(session_id=session_id, module=MODULE, expected_base=s.truth.loop_text)
+    after = await s.op("debug.resolve_symbol", session_id=session_id, name=MODULE_SYMBOL)
+    await s.end(session_id)
+    assert env.status == "loaded" and env.data.get("symbols_loaded") is True, "not loaded"
+    assert hex_value(env.data.get("base_address")) == s.truth.loop_text, "loaded at another base"
+    assert hex_value(after.data.get("address")) == expected, f"{MODULE_SYMBOL} resolved elsewhere"
+    return {"module": MODULE, "symbol": MODULE_SYMBOL, "resolves_to_kallsyms": True}
+
+
+BODIES: dict[str, Callable[[Session], Awaitable[dict[str, object]]]] = {
+    "debug.advance": advance_body,
+    "debug.backtrace": backtrace_body,
+    "debug.clear_breakpoint": clear_breakpoint_body,
+    "debug.clear_watchpoint": clear_watchpoint_body,
+    "debug.continue": continue_body,
+    "debug.disassemble": disassemble_body,
+    "debug.end_session": end_body,
+    "debug.get_session": get_body,
+    "debug.interrupt": interrupt_body,
+    "debug.list_breakpoints": list_breakpoints_body,
+    "debug.list_modules": list_modules_body,
+    "debug.list_sessions": list_body,
+    "debug.list_watchpoints": list_watchpoints_body,
+    "debug.load_module_symbols": load_module_symbols_body,
+    "debug.read_frame": read_frame_body,
+    "debug.read_memory": read_memory_body,
+    "debug.read_registers": read_registers_body,
+    "debug.resolve_symbol": resolve_body,
+    "debug.set_breakpoint": set_breakpoint_body,
+    "debug.set_watchpoint": set_watchpoint_body,
+    "debug.start_session": start_body,
+}
+
+
+async def functional(
+    run: CellRun,
+    caller: HttpCaller,
+    tree: Path,
+    manifest: Mapping[str, Any],
+    db_url: str,
+    guest: Guest,
+) -> dict[str, object]:
+    """Boot the fixture, read the guest's truth, then run the tool's sequence as its gate role.
+
+    Every session the body started and still holds is ended, also on failure, before the
+    frame's cleanup probes the System.
+    """
+    run_id, endpoint = await boot(run, guest, tree, manifest)
+    truth = await read_truth(endpoint, guest.key, tree)
+    role = grants(guest.project, GATES[run.cell.operation])
+    session = Session(run, guest, caller, role, manifest, run_id, endpoint, truth, db_url)
+    try:
+        observed = await BODIES[run.cell.operation](session)
+    finally:
+        await session.end_all()
+    return {"tool": run.cell.operation, **observed}
+
+
+# --- rejection cells ------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DebugTarget:
+    """A torn-down fixture System, its Run and an ended gdbstub session."""
+
+    project: str
+    system_id: str
+    run_id: str
+    session_id: str
+    observed: dict[str, object]
+    artifacts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _Failed:
+    error: Exception
+    artifacts: tuple[str, ...]
+
+
+_TARGETS: dict[str, DebugTarget | _Failed] = {}
+
+
+async def _prepare_target(
+    run: CellRun,
+    base_url: str,
+    issuer: OidcIssuer,
+    db_url: str,
+    fixture: Callable[[], tuple[Path, dict[str, Any]]],
+    scratch: CellRun,
+) -> DebugTarget:
+    tree, manifest = fixture()
+    project = f"cov-{secrets.token_hex(4)}"
+    ids: dict[str, str] = {}
+
+    async def body(guest: Guest) -> dict[str, object]:
+        run_id, _endpoint = await boot(scratch, guest, tree, manifest)
+        started = checked(
+            await scalar(guest.op, "debug.start_session", run_id=run_id, transport="gdbstub"),
+            "target-start",
+        )
+        try:
+            checked(
+                await scalar(
+                    guest.op,
+                    "debug.read_registers",
+                    session_id=started.object_id,
+                    registers=["rip"],
+                ),
+                "target-attach",
+            )
+        finally:
+            ended = ok(
+                await scalar(guest.op, "debug.end_session", session_id=started.object_id),
+                "target-end",
+            )
+        assert ended.status == "detached", f"the target session ended {ended.status}"
+        ids.update(system=guest.system_id, run=run_id, session=started.object_id)
+        return {"debug_target": "prepared"}
+
+    await on_lane_system(
+        scratch,
+        base_url,
+        issuer,
+        db_url,
+        project=project,
+        body=body,
+        provision=provision_gdbstub,
+    )
+    await settled(db_url, project)
+    summary = run.writer.artifact(
+        {
+            "debug_target": {"system": "torn_down", "run": "booted", "session": "detached"},
+            "cleanup": scratch.assertions["cleanup"],
+        }
+    )
+    return DebugTarget(
+        project,
+        ids["system"],
+        ids["run"],
+        ids["session"],
+        lane_keys(scratch.observed),
+        (*scratch.artifacts, *scratch.assertions.values(), summary),
+    )
+
+
+async def debug_target(
+    run: CellRun,
+    base_url: str,
+    issuer: OidcIssuer,
+    db_url: str,
+    fixture: Callable[[], tuple[Path, dict[str, Any]]],
+) -> DebugTarget:
+    """The stack's rejection target, prepared on first use; a failure is replayed, not retried.
+
+    The fixture boot runs on a scratch record, so the cached context keeps only the lane keys.
+    """
+    cached = _TARGETS.get(base_url)
+    if cached is None:
+        scratch = CellRun(run.cell, run.writer)
+        try:
+            cached = await _prepare_target(run, base_url, issuer, db_url, fixture, scratch)
+        except Exception as exc:  # noqa: BLE001 - remembered and replayed for every cell
+            cached = _Failed(exc, (*scratch.artifacts, *scratch.assertions.values()))
+        _TARGETS[base_url] = cached
+    if isinstance(cached, _Failed):
+        run.artifacts.extend(cached.artifacts)
+        if isinstance(cached.error, ScenarioStop):
+            raise ScenarioStop(cached.error.outcome, str(cached.error))
+        raise AssertionError(f"the debug target could not be prepared: {cached.error!r}")
+    run.observed |= cached.observed
+    run.artifacts.extend(cached.artifacts)
+    return cached
+
+
+def _stranger() -> Grants:
+    other = f"cov-{secrets.token_hex(4)}"
+    return grants(other, "admin")
+
+
+def _args(tool: str, target: DebugTarget, variant: str, ident: object) -> dict[str, object]:
+    """The tool's call naming ``ident`` as its id, with fixed valid other arguments."""
+    if tool == _LIST:
+        return {"request": {"run_id": ident}}
+    if tool == "debug.start_session":
+        return {"run_id": ident, "transport": variant}
+    return {"session_id": ident, **_EXTRA.get(tool, {})}
+
+
+def rejection(tool: str, boundary: Boundary, target: DebugTarget, variant: str) -> Rejection:
+    """The call ``boundary`` must reject, aimed at the debug target.
+
+    ``variant`` is the cell's transport for ``debug.start_session``. ``debug.list_sessions``
+    filters its denied callers, so its authorization and project-isolation calls carry a viewer
+    control that must see the target session (ADR-0756).
+    """
+    own = target.run_id if tool in (_LIST, "debug.start_session") else target.session_id
+    args = _args(tool, target, variant, own)
+    gate = GATES[tool]
+    if boundary == "validation":
+        return Rejection(_args(tool, target, variant, 7), grants(target.project, gate))
+    if boundary == "authentication":
+        return Rejection(args, grants(target.project, "viewer"))
+    control = FilteredListControl(grants(target.project, "viewer"), partial(_known, target))
+    if boundary == "authorization":
+        denied = grants(target.project, _BELOW[gate])
+        return Rejection(args, denied, filtered=control if tool == _LIST else None)
+    assert boundary == "project-isolation", f"no {boundary} cell exists for {tool}"
+    if tool == _LIST:
+        return Rejection(args, _stranger(), filtered=control)
+    category = (
+        ErrorCategory.NOT_FOUND
+        if tool == "debug.get_session"
+        else ErrorCategory.CONFIGURATION_ERROR
+    )
+    twin = _args(tool, target, variant, str(uuid4()))
+    return Rejection(args, _stranger(), frozenset({category.value}), absent_twin=twin)
+
+
+async def _known(target: DebugTarget) -> str:
+    """The target session, known from its preparation rather than from any list call."""
+    return target.session_id
+
+
+def snapshot_of(db_url: str, target: DebugTarget) -> Snapshot:
+    return partial(protected_state, db_url, target.project, target.system_id, target.run_id)
