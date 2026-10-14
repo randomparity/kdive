@@ -1328,6 +1328,22 @@ uv run python -m pytest -m live_stack tests/integration/test_capture_tool_cells_
 
 The ppc64le local cells share the node but are owner #2818's; the remote cells are #3114's.
 
+Last run: candidate `f9a74e45c` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing, the
+`longterm` fixture `v6.18.54` built on that host. Each configuration recorded its 82 cells in
+about 31 minutes and skipped the other's 82. `qualify` reported 144 of the 164 cells qualified:
+132 `rejection` (including the four fadump `capability` refusals), 8 `success` (`introspect.run`
+and `introspect.script`) and 4 `unsupported`. Twenty did not qualify:
+
+- 16 kdump-based functional cells (`control.force_crash`, `vmcore.fetch` `kdump`,
+  `introspect.from_vmcore`, `postmortem.crash`) are `blocked`: the fixture kernel lacks
+  `CONFIG_SQUASHFS`, so the guest's `kdump.service` cannot build its initramfs (#3219).
+- 4 `vmcore.fetch` `host_dump` functional cells are `failure`: the live libvirt daemon cannot
+  write the core into the worker's private spool directory (#3220).
+
+After `demo-down.sh --wipe --yes` the worker's libvirt defined no `kdive-` domain and
+`KDIVE_INSTALL_STAGING` was empty.
+
 #### Break-glass provider tool cells (#3112)
 
 `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell` carries the 136
