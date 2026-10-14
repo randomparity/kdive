@@ -1116,6 +1116,45 @@ lane's 62; the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`. `qua
 120 of the 124 qualified, 28 `success` and 92 `rejection`, and the four `secrets.list`
 functional cells `blocked` with an empty listing and no secret served.
 
+#### Mutating operator tool cells (#3110)
+
+`tests/integration/test_operator_mutation_tool_cells_live.py::test_operator_mutation_tool_cell`
+carries the 216 cells of the fourteen mutating operator tools (`images.extend`,
+`images.prune_expired`, `inventory.clear_override`, `ops.reconcile_now`,
+`ops.reconcile_systems`, `ops.set_cost_class_coeff`, `ops.set_host_capacity`,
+`ops.set_queue_paused` and the six `resources.*` mutation tools) on the same harness, bindings and
+assembly as the cells above. The
+[design](../../workflow/specs/2026-10-14-operator-mutation-tool-cells-design.md) lists what each
+functional cell seeds, observes and restores.
+
+Run it on the installed local-authority lane: the `ops.reconcile_now` and `resources.drain`
+functional cells run inside the [authority-owned System frame](#authority-owned-system-frame-3184)
+and need its fixture-mode setup, and a lane with an installed authority records the authority's
+revision on every cell, so every role must run the candidate. Use the two bring-ups of the core
+cells (`KDIVE_WORKER_DEATH_VERIFIER=docker` for `recovery`) and, beside the catalog carrier's
+environment (`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, an exported
+`KDIVE_SYSTEMS_TOML`, the staged lane image), set `LOCAL_AUTHORITY_LANE_CONFIG`.
+The lane's inventory must declare one `[[remote_libvirt]]` or `[[fault_inject]]` host:
+`inventory.clear_override` detaches its cap, clears the entry and waits for the reconciler to
+restore the file's cap. The cell changes only that row's database values; it never reaches the
+remote host or places anything on it. Run one cell at a time on the lane, as for the frame.
+
+Cells change shared state while they run and restore it before they finish: the queue pause,
+the lane host's cordon (`resources.drain`), the declared host's cap, and the coefficient of the
+cell-owned class `cov-tool-cells`. A killed run can leave one of them behind. Restore them with an
+operator or admin token: `ops.set_queue_paused` with `paused=false`,
+`resources.set_scheduling` with `state=schedulable` on the lane host, `inventory.clear_override`
+for the declared host (the next reconcile restores its cap), and `ops.set_cost_class_coeff` back
+to the value recorded in the cell's evidence.
+
+What the cells leave behind is history or inert:
+
+- audit, platform-audit and tool-invocation rows;
+- allocation and ledger rows in each cell's fresh workload project;
+- one cordoned, lease-cleared runtime host per cell that placed an allocation (the retained
+  allocation rows keep a foreign key to it), owned by that workload project;
+- the `cov-tool-cells` coefficient row: no tool or reconcile deletes a coefficient.
+
 #### System lifecycle tool cells (#3062)
 
 `tests/integration/test_system_tool_cells_live.py::test_system_tool_cell` carries the 120 x86_64
