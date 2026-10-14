@@ -857,21 +857,24 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "script",
         "5432",
         "Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it "
-        "into the default role database DSNs (#1929).",
+        "into the default role database DSNs (#1929). Accepts `PORT` or `ADDR:PORT`; a loopback "
+        "or wildcard address keeps `localhost` in the derived URL.",
     ),
     ExternalEnvVar(
         "KDIVE_SEAWEEDFS_PORT",
         "script",
         "8333",
         "Host port the compose `seaweedfs` S3 API publishes; `scripts/live-stack/env.sh` folds "
-        "it into the default `KDIVE_S3_ENDPOINT_URL`.",
+        "it into the default `KDIVE_S3_ENDPOINT_URL`. Accepts `PORT` or `ADDR:PORT`; a loopback "
+        "or wildcard address keeps `localhost` in the derived URL.",
     ),
     ExternalEnvVar(
         "KDIVE_OIDC_PORT",
         "script",
         "8090",
         "Host port the compose `oidc` mock issuer publishes; `scripts/live-stack/env.sh` folds it "
-        "into the default `KDIVE_OIDC_ISSUER` and `KDIVE_OIDC_JWKS_URI`.",
+        "into the default `KDIVE_OIDC_ISSUER` and `KDIVE_OIDC_JWKS_URI`. Accepts `PORT` or "
+        "`ADDR:PORT`; a loopback or wildcard address keeps `localhost` in the derived URL.",
     ),
     ExternalEnvVar(
         "KDIVE_PROMETHEUS_PORT",
