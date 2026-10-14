@@ -25,9 +25,11 @@ inputs. No capability cell exists: local-libvirt supports all three (ADR-0722, 2
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import secrets
 import struct
+import subprocess  # noqa: S404 - the TimeoutExpired an ssh call raises  # nosec B404
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
@@ -43,6 +45,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.providers.shared.runtime_paths import domain_name_for, pcap_dir
 from tests.integration.live_stack.capture_cells import CaptureTarget, Session, boot, drained
+from tests.integration.live_stack.image_smoke import ssh
 from tests.integration.live_stack.power_snapshots import grants
 from tests.integration.live_stack.scenario import CellRun
 from tests.integration.live_stack.spine import full_artifact_text, ok, scalar, worker_libvirt_uri
@@ -186,6 +189,17 @@ async def _background(s: Session, command: str) -> str:
     return pid
 
 
+async def _stop(s: Session, pid: str) -> None:
+    """Best effort: a guest that stopped answering must not mask the cell's own outcome.
+
+    The System's teardown reclaims a writer this cannot reach.
+    """
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        await asyncio.to_thread(
+            ssh, s.endpoint, s.guest.key, f"kill {pid}", deadline_s=0.0, timeout_s=30.0
+        )
+
+
 async def _download(s: Session, artifact_id: str) -> bytes:
     env = ok(
         await scalar(
@@ -216,7 +230,7 @@ async def capture_body(s: Session, _db_url: str) -> dict[str, object]:
         env = await s.exposed(run_id=s.run_id, duration_s=_CAPTURE_S)
         job = await drained(s.guest.op, "capture", env.object_id)
     finally:
-        await s.shell(f"kill {pid} 2>/dev/null; echo stopped=1")
+        await _stop(s, pid)
     artifact = job.refs.get("result")
     assert artifact, "the capture job carries no pcap artifact"
     pcap = await _download(s, artifact)
@@ -270,7 +284,7 @@ async def watch_body(s: Session, db_url: str) -> dict[str, object]:
     try:
         fired = verdict_of(await drained(s.guest.op, "crash-watch", env.object_id))
     finally:
-        await s.shell(f"kill {pid} 2>/dev/null; echo stopped=1")
+        await _stop(s, pid)
     require_fired(fired, marker, FIRE_DEADLINE_S)
     assert await live_watches(db_url, system) == 0, "a watch job is still queued or running"
     return {
