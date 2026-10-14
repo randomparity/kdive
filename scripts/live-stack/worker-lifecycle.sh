@@ -190,7 +190,8 @@ require_worker_path_access() {
 # indirect expansion, and nothing is evaluated.
 load_published_authority_route() {
   local line name value seen=" "
-  local invalid="${AUTHORITY_ROUTE_ENV} must contain exactly the five worker authority route assignments"
+  local invalid="${AUTHORITY_ROUTE_ENV} must contain exactly the five worker authority route"
+  invalid+=" assignments"
   local -a lines
   [[ -e "$AUTHORITY_ROUTE_ENV" || -L "$AUTHORITY_ROUTE_ENV" ]] || return 0
   require_exact_file "$AUTHORITY_ROUTE_ENV" 644 || return 1
