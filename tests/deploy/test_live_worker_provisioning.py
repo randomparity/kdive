@@ -3736,3 +3736,73 @@ def test_installed_local_authority_requires_pinned_enabled_inputs() -> None:
     ]
     assert tasks[1]["no_log"] is True
     assert "when" not in tasks[0] and "when" not in tasks[1]
+
+
+_ROUTE_FILE = "/etc/kdive/live-worker-authority.env"
+ROUTE_TEMPLATE = ROLE / "templates" / "live-worker-authority.env.j2"
+_ROUTE_NAMES = (
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE",
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET",
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF",
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF",
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF",
+)
+
+
+def _render_fully(text: str, variables: dict[str, object]) -> str:
+    """Render until stable: role defaults nest templates (instance -> authority instance).
+
+    Ansible's template module and lookup keep a template's trailing newline; plain jinja2 drops it.
+    """
+    environment = Environment(undefined=StrictUndefined, keep_trailing_newline=True)
+    for _ in range(5):
+        rendered = environment.from_string(text).render(variables)
+        if rendered == text:
+            return rendered
+        text = rendered
+    raise AssertionError("role defaults did not settle")
+
+
+def _task(tasks: list[dict[str, object]], name: str) -> dict[str, object]:
+    return next(task for task in tasks if task.get("name") == name)
+
+
+def test_worker_authority_route_file_is_published_verified_and_withdrawn() -> None:
+    """#3215: the role publishes the route the lifecycle client forwards, in its exact format."""
+    tasks = cast(list[dict[str, object]], yaml.safe_load(MAIN_TASKS.read_text(encoding="utf-8")))
+    publish = _task(tasks, "Publish the fixed-worker authority route for stack bring-up")
+    template = cast(dict[str, str], publish["ansible.builtin.template"])
+    assert (template["src"], template["dest"]) == (ROUTE_TEMPLATE.name, _ROUTE_FILE)
+    assert (template["owner"], template["group"], template["mode"]) == ("root", "root", "0644")
+    assert publish["when"] == "live_vm_host_worker_authority_enabled | bool"
+    defaults = cast(dict[str, object], yaml.safe_load(DEFAULTS.read_text(encoding="utf-8")))
+    rendered = _render_fully(
+        ROUTE_TEMPLATE.read_text(encoding="utf-8"), {**defaults, "inventory_hostname": "lane-host"}
+    )
+    lines = rendered.splitlines()
+    assert [line.split("=", 1)[0] for line in lines] == list(_ROUTE_NAMES)
+    assert lines[0] == f"{_ROUTE_NAMES[0]}=lane-host"
+    assert lines[1].endswith("=/run/kdive/provider-authority/request/authority.sock")
+    assert lines[4].endswith("=external-boot-authority/client-key")
+    assert rendered.endswith("\n")
+
+    withdraw = _task(tasks, "Withdraw the fixed-worker authority route when the client is disabled")
+    assert withdraw["ansible.builtin.file"] == {"path": _ROUTE_FILE, "state": "absent"}
+    assert withdraw["when"] == "not (live_vm_host_worker_authority_enabled | bool)"
+
+    checks = cast(list[dict[str, object]], yaml.safe_load(VERIFY_TASKS.read_text(encoding="utf-8")))
+    exact = _task(checks, "Assert the authority route is public, root-owned and exact")
+    assertion = cast(dict[str, object], exact["ansible.builtin.assert"])
+    that = "\n".join(cast(list[str], assertion["that"]))
+    assert 'mode == "0644"' in that
+    assert f"lookup('ansible.builtin.template', '{ROUTE_TEMPLATE.name}')" in that
+    presence = _task(checks, "Assert the authority route is published only with the worker client")
+    assert "live_vm_host_worker_authority_enabled" in str(presence["ansible.builtin.assert"])
+
+    teardown = cast(list[dict[str, object]], yaml.safe_load(_text(AUTHORITY_TEARDOWN)))
+    plays = cast(list[dict[str, object]], teardown[0]["tasks"])
+    for name in (
+        "Remove authority unit and endpoint artifacts",
+        "Inspect removed authority endpoint artifacts",
+    ):
+        assert _ROUTE_FILE in cast(list[str], _task(plays, name)["loop"])

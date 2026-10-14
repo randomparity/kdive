@@ -26,7 +26,31 @@ export KDIVE_OIDC_PORT="${KDIVE_OIDC_PORT:-8090}"
 export KDIVE_PROMETHEUS_PORT="${KDIVE_PROMETHEUS_PORT:-9090}"
 export KDIVE_GRAFANA_PORT="${KDIVE_GRAFANA_PORT:-3000}"
 
-database_host="localhost:${KDIVE_POSTGRES_PORT}/kdive"
+# Client-facing host:port for a published backend port (#3215). The port variables also take
+# compose's ADDR:PORT publish form. A loopback or wildcard address keeps the localhost every default
+# URL used before (the OIDC issuer string is an identity), any other address becomes the URL host,
+# and anything else stops the sourcing caller instead of producing a malformed URL.
+backend_endpoint() {
+  local name="$1" value="${!1}" addr="" port
+  port="${value##*:}"
+  [[ $value == *:* ]] && addr="${value%:*}"
+  if [[ ! $port =~ ^[0-9]{1,5}$ ]] || ((10#$port < 1 || 10#$port > 65535)) ||
+    [[ -n $addr && (! $addr =~ ^[][A-Za-z0-9.:-]+$ || ! $addr =~ [A-Za-z0-9]) ]]; then
+    echo "${name}=${value} must be PORT or ADDR:PORT with a port from 1 to 65535" >&2
+    return 1
+  fi
+  case "$addr" in
+  "" | 127.0.0.1 | 0.0.0.0 | ::1 | :: | "[::1]" | "[::]") addr=localhost ;;
+  \[*\]) ;;
+  *:*) addr="[${addr}]" ;;
+  esac
+  printf '%s:%s' "$addr" "$port"
+}
+postgres_endpoint="$(backend_endpoint KDIVE_POSTGRES_PORT)" || return $?
+seaweedfs_endpoint="$(backend_endpoint KDIVE_SEAWEEDFS_PORT)" || return $?
+oidc_endpoint="$(backend_endpoint KDIVE_OIDC_PORT)" || return $?
+
+database_host="${postgres_endpoint}/kdive"
 # One DSN per host database authority (#1929): the migration owner plus one login member per
 # runtime process. No process may receive another authority's DSN, so there is deliberately no
 # shared KDIVE_DATABASE_URL default here; every consumer names its own variable and
@@ -49,8 +73,8 @@ export KDIVE_SERVER_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL:-${default_server_
 export KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-${default_worker_url}}"
 export KDIVE_RECONCILER_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL:-${default_reconciler_url}}"
 export KDIVE_HARNESS_DATABASE_URL="${KDIVE_HARNESS_DATABASE_URL:-${default_harness_url}}"
-export KDIVE_OIDC_ISSUER="${KDIVE_OIDC_ISSUER:-http://localhost:${KDIVE_OIDC_PORT}/default}"
-export KDIVE_OIDC_JWKS_URI="${KDIVE_OIDC_JWKS_URI:-http://localhost:${KDIVE_OIDC_PORT}/default/jwks}"
+export KDIVE_OIDC_ISSUER="${KDIVE_OIDC_ISSUER:-http://${oidc_endpoint}/default}"
+export KDIVE_OIDC_JWKS_URI="${KDIVE_OIDC_JWKS_URI:-http://${oidc_endpoint}/default/jwks}"
 export KDIVE_OIDC_AUDIENCE="${KDIVE_OIDC_AUDIENCE:-kdive}"
 # Lifetime (seconds) of the demo token onboard.sh and examples/local-libvirt/mint-token.sh mint.
 # Single source of truth: both scripts source this file, so this one default reaches both. The
@@ -70,7 +94,7 @@ if [[ -z "${KDIVE_OIDC_IMAGE+set}" && "$(uname -m 2>/dev/null || true)" == "ppc6
   grep -q 'emulated by qemu' /sys/firmware/devicetree/base/model 2>/dev/null; then
   export KDIVE_OIDC_IMAGE="ghcr.io/randomparity/mock-oauth2-server@sha256:e11ba633538714499356765720c05ef57ecb0ac70db4ca780f6a44d2e49a070a"
 fi
-export KDIVE_S3_ENDPOINT_URL="${KDIVE_S3_ENDPOINT_URL:-http://localhost:${KDIVE_SEAWEEDFS_PORT}}"
+export KDIVE_S3_ENDPOINT_URL="${KDIVE_S3_ENDPOINT_URL:-http://${seaweedfs_endpoint}}"
 export KDIVE_S3_BUCKET="${KDIVE_S3_BUCKET:-kdive-artifacts}"
 export KDIVE_S3_REGION="${KDIVE_S3_REGION:-us-east-1}"
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-kdive}"

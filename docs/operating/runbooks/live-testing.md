@@ -532,6 +532,15 @@ on disposable lanes, as described below; they are not needed for routine readine
 After approved provisioning, use `scripts/live-stack/stack-services.sh` and `just onboard` on
 the local host, with the reviewed backend and provider configuration. Use the host stack described
 in the [live-stack runbook](live-stack.md), including its lifecycle witness member setup.
+
+The role publishes the fixed-worker authority route in `/etc/kdive/live-worker-authority.env`, and
+every worker start, including each `stack-services.sh` restart, forwards it. Do not export the
+`KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_*` values: an export that contradicts the file is refused
+(ADR-0770). A backend port variable may hold `ADDR:PORT`, for example a Postgres bound to the
+lane address; `scripts/live-stack/env.sh` then builds the default DSNs, including
+`KDIVE_HARNESS_DATABASE_URL`, from that address, so no hand-written DSN is needed. A loopback or
+wildcard address keeps `localhost`. An unparseable value stops every script that sources
+`env.sh`, `stack-down.sh` and `stack-status.sh` included, until it is corrected.
 Record the candidate full SHA and clean tree, manifest and actual immutable-base byte digests,
 and actual server, **each running worker**, reconciler and selected authority revisions.
 Resolve process build identifiers to full SHAs as ADR-0715 requires; read the installed authority
@@ -842,6 +851,66 @@ installed kernel behind (#3078).
 | `fedora/longterm`, `fedora/stable` | `fedora:44` | success |
 | `enterprise/longterm`, `enterprise/stable` | `rocky:10` | success |
 | `suse/longterm`, `suse/stable` | `opensuse-leap:15.6` | success |
+
+#### Local resource-boundary cells (#3118)
+
+`tests/integration/test_resource_limits_live.py::test_local_resource_boundary` has one parameter
+for each `failure-resource/local-libvirt/x86_64/{minimum-cpu-ram,insufficient-disk,slow-boot}`
+cell. Every parameter uses the `rocky-kdive-ready-10` image and the longterm fixture kernel, and
+proves its resource outcome plus `no-duplicates`, `protected-state` and `cleanup`:
+
+- `minimum-cpu-ram` requests the seeded `small` shape (1 vCPU, 1024 MiB, 10 GB). It checks the
+  domain XML and the overlay's virtual size, then uploads, installs and boots the fixture kernel
+  and reconnects over SSH.
+- `insufficient-disk` opens an investigation and mounts a 64 MiB test-owned loop filesystem
+  (`mkfs.ext4 -m 0`) at that investigation's new directory under `/var/lib/kdive/rootfs-uploads`.
+  It uploads the staged image as the investigation's rootfs and provisions it. Every attempt
+  must fail the staging precheck with `infrastructure_failure`, and nothing may be left staged or
+  defined. After release it unmounts, detaches and removes the directory, then closes the
+  investigation.
+- `slow-boot` installs the fixture kernel and times a plain `runs.boot`. It then writes a
+  `oneshot` delay unit, active only on the fixture kernel's release and ordered before
+  `kdive-ready` and the guest agent. A forced boot with a delay inside half the readiness window
+  must succeed. A delay longer than the window plus 60 s must fail every attempt with
+  `boot_timeout`. The guest's own journal must show each delay ran in full before
+  `kdive-ready` started.
+
+The test reads the fixed workers' journal (`journalctl -u 'kdive-live-worker@*'`) to label each
+attempt, so the operator needs journal access (the `systemd-journal` group). It also needs
+`sudo -n` for the loop filesystem and for reading worker-owned disks. The window is
+`KDIVE_LIBVIRT_BOOT_WINDOW_S` (default 900 s), so `slow-boot` runs for about an hour at the
+default. The test reads the variable from its own environment, so it must match the workers'
+setting.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix
+python3 scripts/kernel_fixtures.py build --baseline longterm --arch "$(uname -m)" \
+  --source "$KDIVE_FIXTURE_ROOT/src-longterm" --output "$KDIVE_FIXTURE_ROOT/longterm" --jobs "$(nproc)"
+examples/local-libvirt/build-image.sh rocky-kdive-ready-10
+uv run python -m tests.integration.live_stack.resource_limits bindings --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+# insufficient-disk uploads the staged image file; pytest sandboxes the XDG default inventory.
+export KDIVE_SYSTEMS_TOML=$HOME/.config/kdive/systems.toml
+uv run python -m pytest -m live_stack tests/integration/test_resource_limits_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+A cell whose loop filesystem cannot be proven unchanged keeps it mounted and records
+`bounded_mount: retained` with its target, loop device and backing image; unmount and detach
+it by hand after checking that no job is running. The three `remote-libvirt` cells are in the
+[remote runbook](remote-live-stack.md#10-remote-resource-boundary-cells-3118).
+
+Last run: candidate `3a0081d02`, a Rocky 10.2 x86_64 KVM host (SELinux enforcing) with the
+longterm fixture. All three
+cells qualified. `slow-boot` measured a 6 s baseline boot; a 66 s delay reached ready, and a
+1020 s delay against the 900 s window ended all three attempts `boot_timeout`.
+`insufficient-disk` refused the 1.2 GB upload on its single attempt with about 53 MiB
+available, leaving nothing staged. Before the uploads root joined host preparation and the
+`svirt_image_t` labels, an uploaded rootfs could not be staged at all, and qemu was denied
+reading one in place.
 
 #### Core tool cells and server configurations (#2811)
 
@@ -1339,6 +1408,70 @@ other-domain set was empty, so the teardown cells' proof that unrelated resource
 the staged base surviving. Remote records carry the provider host as `rocky:10.2`. No record or
 artifact carried a host name or address. After the run, neither the worker's libvirt nor the
 provider defined a `kdive-` domain, and the provider pool held only its base volume.
+
+#### Authority-owned System frame (#3184)
+
+`tests/integration/live_stack/authority_lane.py` frames a System on the installed local-authority
+lane for the HTTP tool cells that need one. A carrier selects it explicitly through
+`on_authority_system`; the ordinary `on_lane_system` and `lane_target` frames do not change. The
+frame observes the System on the authority's private daemon and private roots, never over SSH.
+The remote authority frame is #3209, and a remote cell stops `blocked` naming it.
+
+`LOCAL_AUTHORITY_LANE_CONFIG` names an owner-only mode-`0400` or mode-`0600` JSON file
+with exactly `installed_revision` (the full 40-character SHA), `authority_service` (the literal
+`kdive-external-boot-authority.service`) and `system_mode`. An unset variable stops the cell
+`blocked`. `system_mode: "public"` stops `blocked` before any mutation: public authority-owned
+provisioning is blocked by #3144 and #3148, and an attempt strands its allocation.
+`system_mode: "fixture"` is the runnable path:
+
+1. The frame checks the authority unit, the installed revision, the `/readyz` revision of the
+   server and every running fixed worker slot, the installed routes and the harness DSN's read
+   access, then lists the authority daemon's domains, the two private roots' entries and the
+   worker daemon's domains.
+2. It acquires the lane image, requests an allocation and provisions a System over HTTP with the
+   fixed rootfs `/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2` pinned to that image's
+   registered digest. Stage the lane image's bytes there first, as for the installed carrier.
+   The allocated resource must carry no `authority_instance` in the lane's `systems.toml`;
+   otherwise the frame releases the allocation and stops `blocked`. Export
+   `KDIVE_SYSTEMS_TOML` naming the exact file the running server and fixed workers were started
+   with: the frame checks routing in its own process, the test session sandboxes the XDG default,
+   and the frame stops `blocked` without the variable. It also stops `blocked`, before any
+   allocation, when that file fails to load or routes every `[[local_libvirt]]` entry through an
+   `authority_instance`.
+3. It moves the System onto the private daemon with `provision-authority-fixture.py`, runs the
+   confinement probes and the fixture's read-only verification, then runs the cell body.
+4. Cleanup drains every open job of the System and its Runs, closes the Investigations the body
+   recorded (a body releases every external boot it starts itself; a held activation fails the
+   cleanup), removes the five fixture names, tears the System down, releases the allocation, and
+   requires the step-1 listing and the capacity in use to be unchanged. A cleanup failure fails
+   the cell.
+
+**Fixture-mode inventory.** A lane has one local-libvirt resource: resource rows are one per
+worker libvirt endpoint, so a plain `[[local_libvirt]]` entry cannot sit beside the routed one.
+Keep the lane's routed inventory file unchanged and make a separate copy in which only the
+`[[local_libvirt]]` entry's `authority_instance` line is removed. Place the copy beside the
+routed file with the same ownership and mode: the fixed workers read it, and a start refuses an
+inventory a worker slot cannot read. The `[[remote_libvirt]]`
+authority tuple stays the same in both, and the copy also declares the registered lane image.
+Bring the whole stack up on the copy (`KDIVE_SYSTEMS_TOML` naming it for `stack-services.sh`),
+and export the same path to the frame. Until #3144 and #3148 land, this copy is the lane's
+working inventory. To switch back, run `stack-services.sh` again with the routed file, and only
+when no authority-owned System, job or recovery is open on the lane.
+
+Use the harness DSN (`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`). Run one authority
+scenario at a time on the lane; another scenario's domains change the listing and fail the frame.
+The frame's own proof runs with:
+
+```sh
+KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
+KDIVE_SYSTEMS_TOML=~/.config/kdive/systems.toml \
+LOCAL_AUTHORITY_LANE_CONFIG=/protected/authority-lane.json \
+  uv run python -m pytest tests/integration/test_authority_lane_frame_live.py -m live_stack -v
+```
+
+A killed run skips cleanup. Remove its fixture with the exact-name loop under
+[fixture cleanup](#installed-local-authority-carrier), then run `systems.teardown` for the System
+with an `admin` token for its project and wait for `torn_down`, then `allocations.release`.
 
 ### `live_vm` (native) — a real kernel on real silicon
 

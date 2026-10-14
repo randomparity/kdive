@@ -40,7 +40,8 @@ def test_failure_ownership_and_remote_quiescence_binding(inventory: Inventory) -
         )
         assert cell.scenario_id == cell.id
         assert cell.assertions == (failure, "no-duplicates", "protected-state", "cleanup")
-        assert cell.node_id is None
+        bound = _LIMIT_NODES.get(cell.provider) if cell.owner == 3118 else None
+        assert cell.node_id == bound
     proofs = [cell for cell in cells if cell.operation == "remote-quiescence"]
     assert {cell.guest_arch for cell in proofs} == set(inventory.arches)
     for cell in proofs:
@@ -72,7 +73,8 @@ def test_failure_binding_is_provider_and_arch_specific(inventory: Inventory, pro
     mapped = build_contract(mapping=mapping, inventory=inventory).cells
     failures = [cell for cell in mapped if cell.operation == "failure-resource"]
     assert {cell.id for cell in failures if cell.node_id == _DEEP_NODE} == {selected.id}
-    assert all(cell.node_id is None for cell in failures if cell.id != selected.id)
+    unmapped = {cell.id: cell.node_id for cell in cells}
+    assert all(cell.node_id == unmapped[cell.id] for cell in failures if cell.id != selected.id)
 
 
 def test_registered_addition_requires_mapping(inventory: Inventory) -> None:
@@ -127,6 +129,13 @@ _POWER_NODE = (
 )
 _CAPTURE_NODE = "tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
+_LIMITS_NODE = "tests/integration/test_resource_limits_live.py::test_local_resource_boundary"
+_LIMIT_NODES = {
+    "local-libvirt": _LIMITS_NODE,
+    "remote-libvirt": (
+        "tests/integration/test_resource_limits_live.py::test_remote_resource_boundary"
+    ),
+}
 _REMOTE_DEEP_NODE = (
     "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
 )
@@ -255,7 +264,12 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_POWER_SNAPSHOT_TOOLS,
         *_CAPTURE_TOOLS,
     }
-    unbound = [c for c in contract.cells if c.operation not in bound]
+    limits = [c for c in contract.cells if c.owner == 3118]
+    local_limits = [c for c in limits if c.provider == "local-libvirt"]
+    assert len(local_limits) == 3 and {c.node_id for c in local_limits} == {_LIMITS_NODE}
+    bound_limits = [c for c in limits if c.node_id is not None]
+    assert len(bound_limits) == 6
+    unbound = [c for c in contract.cells if c.operation not in bound and c not in bound_limits]
     assert all(c.node_id is None for c in unbound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
