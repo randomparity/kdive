@@ -601,12 +601,12 @@ uv run python -m pytest -m live_stack tests/integration/test_resource_limits_liv
   -k test_remote_resource_boundary
 ```
 
-Last run: an openSUSE Leap 16 x86_64 provider host (KVM) behind a Rocky 10.2 control plane, with
-the bounded default pool on an 8 GiB loop filesystem. All three cells qualified. `slow-boot`
-measured a 16 s baseline boot; a 76 s delay reached ready, and a 420 s delay ended all three
-attempts `boot_timeout`, each retry waiting out the still-booting guest before its baseline
-read. `insufficient-disk` left 60 KiB available and the overlay creation failed
-`provisioning_failure` with no partial volume.
+Last run: candidate `3a0081d02`, an openSUSE Leap 16 x86_64 provider host (KVM) behind a Rocky
+10.2 control plane, with the bounded default pool on an 8 GiB loop filesystem. All three cells
+qualified. `slow-boot` measured a 16 s baseline boot; a 75 s delay reached ready, and a 420 s
+delay ended all three attempts `boot_timeout`, each retry waiting out the still-booting guest
+before its baseline read. `insufficient-disk` left 60 KiB available; the worker logged the
+overlay-create refusal and the job failed `provisioning_failure` with no partial volume.
 
 ## SUSE native image proof
 
