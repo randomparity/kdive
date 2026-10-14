@@ -59,6 +59,8 @@ def test_flow_records_count_only_the_token_flow() -> None:
     assert flow_records(_pcap([_udp(b"short")]), b"short") == 1
     # A capture cut inside its last record does not count that record.
     assert flow_records(_pcap(frames, cut=4), _TOKEN) == 2
+    # Even when only the cut record's padding is missing.
+    assert flow_records(_pcap([_udp(b"short")], cut=4), b"short") == 0
 
 
 def test_flow_records_reads_a_big_endian_capture() -> None:
