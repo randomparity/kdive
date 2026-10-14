@@ -1152,6 +1152,24 @@ def bounded_pool(dest: str, target: Path, image: str) -> None:
         raise ScenarioStop(Outcome.BLOCKED, "the pool's loop device is not the owned image")
 
 
+def provider_accelerator(dest: str) -> str:
+    """``kvm`` when the provider host's libvirt offers KVM guests, else ``tcg``."""
+    result = subprocess.run(  # noqa: S603,S607 - fixed argv, validated destination  # nosec B603 B607
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            dest,
+            "virsh -q -c qemu:///system domcapabilities --virttype kvm --arch x86_64",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60.0,
+        check=False,
+    )
+    return "kvm" if result.returncode == 0 and "<domainCapabilities>" in result.stdout else "tcg"
+
+
 def pool_free(dest: str, target: Path) -> dict[str, int]:
     size, free, avail = host_run(dest, "stat", "-f", "-c", "%S %f %a", str(target)).split()
     return {"block": int(size), "f_bfree": int(free), "f_bavail": int(avail)}
@@ -1207,9 +1225,9 @@ async def remote_insufficient_disk(
             assert left - volumes == {ballast.name}, f"pool gained {sorted(left - volumes)}"
             added = await asyncio.to_thread(held.provider.domains)
             assert not added - held.domains_before, "a domain was defined"
-            got = await scalar(held.op, "systems.get", system_id=held.system_id)
-            accel = got.data.get("accel")  # admission's; no domain ever existed
-            run.observed["accelerator"] = accel if accel in {"kvm", "tcg"} else "none"
+            # Remote admission resolves no accelerator and no domain ever existed, so record
+            # the one the provider host would have run it under.
+            run.observed["accelerator"] = await asyncio.to_thread(provider_accelerator, host.dest)
             run.prove(
                 "insufficient-disk",
                 {
