@@ -568,6 +568,7 @@ test-ansible:
     TIMEFORMAT='run-gdbstub-acl-prune.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
     TIMEFORMAT='run-github-runner-preflight.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-github-runner-preflight.sh
     TIMEFORMAT='run-guest-base-image-admission.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-guest-base-image-admission.sh
+    TIMEFORMAT='run-guest-image-console.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-guest-image-console.py
     TIMEFORMAT='run-remote-libvirt-facts-render.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-libvirt-facts-render.sh
     TIMEFORMAT='run-remote-module-appliance.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-module-appliance.sh
     TIMEFORMAT='run-external-boot-recovery-root.sh: %3R seconds'; time uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-external-boot-recovery-root.sh

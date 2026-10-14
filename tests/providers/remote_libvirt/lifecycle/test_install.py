@@ -574,13 +574,74 @@ def test_boot_tolerates_clean_nonzero_reboot_exit() -> None:
     _boot_install(handler).boot(uuid4())  # tolerated -> ready on boot-id change
 
 
-def test_boot_unreachable_agent_at_baseline_is_transport_failure() -> None:
+def test_boot_retry_waits_for_a_still_booting_guest_before_the_baseline_read() -> None:
+    # A retry after boot_timeout starts while the earlier attempt's reboot may still be in
+    # progress, so the guest agent is down. The baseline read waits for it inside the boot
+    # window instead of failing the retry with transport_failure before its own boot wait
+    # (#3118); the baseline is whatever boot the guest finally came up on.
+    state = {"reboots": 0, "baseline_down": 3, "post_reboot_down": 1}
+    argv_subs: list[str] = []
+
     def handler(argv: list[str]) -> AgentExecResult:
+        argv_subs.append(argv[1])
+        if argv[1] == "boot":
+            state["reboots"] += 1
+            raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+        if state["reboots"] == 0:
+            if state["baseline_down"] > 0:
+                state["baseline_down"] -= 1
+                raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+            return AgentExecResult(0, b"EARLIER-ATTEMPT-ID\n", b"")
+        if state["post_reboot_down"] > 0:
+            state["post_reboot_down"] -= 1
+            raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+        return AgentExecResult(0, b"FRESH-ID\n", b"")
+
+    _boot_install(handler).boot(uuid4())
+    assert state["reboots"] == 1
+    assert argv_subs[:4] == ["boot-id", "boot-id", "boot-id", "boot-id"]
+    assert argv_subs[4] == "boot"
+
+
+def test_boot_agent_silent_through_the_baseline_window_is_boot_timeout() -> None:
+    # An agent that never answers the baseline read within the boot window is a guest that did
+    # not come up in time — the same boot_timeout as a fresh boot that never appears — and no
+    # reboot is attempted against a guest whose state was never read.
+    argv_subs: list[str] = []
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        argv_subs.append(argv[1])
         raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+
+    system_id = uuid4()
+    with pytest.raises(CategorizedError) as excinfo:
+        _boot_install(handler, boot_timeout_s=5.0).boot(system_id)
+    assert excinfo.value.category is ErrorCategory.BOOT_TIMEOUT
+    assert str(excinfo.value) == (
+        "guest agent did not answer the pre-reboot boot-id read within the boot window"
+    )
+    assert excinfo.value.details == {
+        "system_id": str(system_id),
+        "timeout_s": 5.0,
+        "last_agent_category": "transport_failure",
+        "last_agent_error": "qemu-guest-agent command failed (agent unreachable or not connected)",
+    }
+    assert "boot" not in argv_subs
+
+
+def test_boot_baseline_refused_program_is_not_waited_out() -> None:
+    # Only the agent-down categories mean "still booting"; any other fault from the baseline
+    # read surfaces at once, exactly as before the wait existed.
+    calls: list[str] = []
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        calls.append(argv[1])
+        raise CategorizedError("refused", category=ErrorCategory.CONFIGURATION_ERROR)
 
     with pytest.raises(CategorizedError) as excinfo:
         _boot_install(handler).boot(uuid4())
-    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert calls == ["boot-id"]
 
 
 def test_boot_nonzero_baseline_boot_id_is_install_failure() -> None:

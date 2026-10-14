@@ -151,6 +151,7 @@ def test_ansible_timings_preserve_failure_and_stop_later_harnesses(
         "run-gdbstub-acl-prune.sh",
         "run-github-runner-preflight.sh",
         "run-guest-base-image-admission.sh",
+        "run-guest-image-console.py",
         "run-remote-libvirt-facts-render.sh",
         "run-remote-module-appliance.sh",
         "run-external-boot-recovery-root.sh",
