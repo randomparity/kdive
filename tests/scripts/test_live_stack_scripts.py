@@ -2337,7 +2337,9 @@ def test_backend_endpoint_moves_the_oidc_issuer_to_a_published_address() -> None
 
 
 @pytest.mark.parametrize("variable", _BACKEND_PORTS)
-@pytest.mark.parametrize("value", ["bad", "1.2.3.4:0", "1.2.3.4:70000", "a b:5434", "x/y:5434"])
+@pytest.mark.parametrize(
+    "value", ["bad", "1.2.3.4:0", "1.2.3.4:70000", "a b:5434", "x/y:5434", "::1", "[]:5434"]
+)
 def test_backend_endpoint_rejects_an_unparseable_port(variable: str, value: str) -> None:
     result = _derived_urls(**{variable: value})
     assert result.returncode != 0

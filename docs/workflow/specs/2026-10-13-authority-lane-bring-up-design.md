@@ -85,9 +85,9 @@ carries `authority_instance`, the frame stops `blocked` before any read or write
 supported configuration. A file that fails to load (`InventoryError`) also stops `blocked`,
 naming the variable. The existing check on the allocated resource stays. The runbook documents
 that configuration: a separate copy of the lane inventory with only the `[[local_libvirt]]`
-entry's `authority_instance` line removed. The routed inventory file itself is not edited, so
-the authority resource's routing is unchanged; the `[[remote_libvirt]]` authority tuple is the
-same in both copies. The server and fixed workers read the inventory themselves, so the whole
+entry's `authority_instance` line removed. The routed inventory file and the
+`[[remote_libvirt]]` authority tuple are unchanged; the local resource is unrouted only while the
+stack runs on the copy. The server and fixed workers read the inventory themselves, so the whole
 stack is brought up with `KDIVE_SYSTEMS_TOML` naming the fixture copy and the harness exports the
 same path. Switching back to the routed file is another `stack-services.sh` run.
 
@@ -105,7 +105,8 @@ published file. `scripts/live-stack/README.md` gets one sentence on the route fi
    authority lane or a developer host; the `live_vm_host` play run by an operator.
 2. **Invariants and assets at stake:** a worker must not get a route other than the installed
    authority's. Default DSNs must reach the published backend. Today's default URLs must not
-   change for bare `PORT` values. The authority resource's routing must stay the same.
+   change for bare `PORT` values. The routed inventory file and the remote authority tuple stay
+   unchanged; the local resource is unrouted only while the stack runs on the fixture copy.
 3. **Accepted failure classes:**
    - A caller who can set `AUTHORITY_ROUTE_ENV` and shadow `stat` on PATH can feed its own route.
      That caller already owns the environment the five values come from today.

@@ -35,7 +35,7 @@ backend_endpoint() {
   port="${value##*:}"
   [[ $value == *:* ]] && addr="${value%:*}"
   if [[ ! $port =~ ^[0-9]{1,5}$ ]] || ((10#$port < 1 || 10#$port > 65535)) ||
-    [[ -n $addr && ! $addr =~ ^[][A-Za-z0-9.:-]+$ ]]; then
+    [[ -n $addr && (! $addr =~ ^[][A-Za-z0-9.:-]+$ || ! $addr =~ [A-Za-z0-9]) ]]; then
     echo "${name}=${value} must be PORT or ADDR:PORT with a port from 1 to 65535" >&2
     return 1
   fi

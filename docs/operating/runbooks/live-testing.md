@@ -531,8 +531,7 @@ on disposable lanes, as described below; they are not needed for routine readine
 
 After approved provisioning, use `scripts/live-stack/stack-services.sh` and `just onboard` on
 the local host, with the reviewed backend and provider configuration. Use the host stack described
-in the [live-stack runbook](live-stack.md), including its lifecycle witness member setup. Run
-`just onboard` as its own command with stdin from `/dev/null`.
+in the [live-stack runbook](live-stack.md), including its lifecycle witness member setup.
 
 The role publishes the fixed-worker authority route in `/etc/kdive/live-worker-authority.env`, and
 every worker start, including each `stack-services.sh` restart, forwards it. Do not export the
