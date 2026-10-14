@@ -183,8 +183,8 @@ Verification:
 - Mode: focused-test — stops: unset config, undeclared or unrouted resource, zero or two root
   images, foreign host arch each raise `ScenarioStop(BLOCKED)` with no `allocations.request`.
   Red today: the remote cell stops with "#3209".
-- Mode: focused-test — success order: `require_remote_lane`, evidence access, `remote_root`,
-  inventory, `allocations.request`, `systems.provision`, root provenance, inventory(System), body,
+- Mode: focused-test — success order: `require_remote_lane`, evidence access, inventory,
+  `remote_root`, `allocations.request`, `systems.provision`, root provenance, inventory(System), body,
   drain, `systems.teardown`, inventory(System), `allocations.release`, inventory; `effect` and
   `cleanup` proven.
 - Mode: focused-test — cleanup failures: a remaining domain or a volume naming the System fails
@@ -224,13 +224,13 @@ async def _on_remote_authority_system(run, base_url, issuer, db_url, *, project,
     arch = run.cell.guest_arch
     await asyncio.to_thread(require_remote_lane, config, base_url)
     await require_evidence_read_access(db_url)
-    resource_id, image, digest = await remote_root(db_url, config.resource_name, arch)
     observed = await asyncio.to_thread(remote_authority_inventory, config)
     if observed.arch != arch:
         raise ScenarioStop(
             Outcome.BLOCKED,
             f"the remote authority host is {observed.arch}; {run.cell.id} needs {arch}",
         )
+    resource_id, image, digest = await remote_root(db_url, config.resource_name, arch)
     token = mint_role_token(issuer, project=project, agent_session=f"{project}-sess", role="admin")
     async with LiveStackClient.over_http(base_url, token) as op:
         await seed_metering(db_url, project)
