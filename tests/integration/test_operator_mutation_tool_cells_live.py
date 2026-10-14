@@ -389,10 +389,15 @@ def _restorer(grants: Grants) -> Grants:
 def _restoring(
     action: Callable[[], Awaitable[object]], what: str
 ) -> AbstractAsyncContextManager[None]:
-    """Run ``action`` on exit, success or failure; its own failure never hides the body's."""
+    """Run ``action`` on exit, success or failure; its own failure never hides the body's.
+
+    A tool answer ``action`` returns must be a success: a refused restore is a cleanup problem.
+    """
 
     async def restore() -> list[str]:
-        await action()
+        result = await action()
+        if isinstance(result, (ToolResponse, list)):
+            one(cast(ToolResponse | list[ToolResponse], result))
         return []
 
     return _cleaning(restore, what)

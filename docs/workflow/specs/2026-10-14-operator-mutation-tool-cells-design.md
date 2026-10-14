@@ -160,8 +160,10 @@ Grants: `platform_operator` for `ops.set_cost_class_coeff`, `ops.set_host_capaci
   against every non-terminal System's catalog rootfs (`image_referenced_by_live_system`), so the
   live System references `S`. Just before the call the expired private images are exactly `X`
   and `S`; the prune answers `pruned` 1; `X`'s row and object versions are gone; `S` (expired,
-  referenced) and `B` (not expired) remain. Restore: delete `S` and `B`, purge their objects,
-  check both; the frame tears the System down.
+  referenced) and `B` (not expired) remain. Before the body ends, `images.extend` re-arms `S`:
+  once the frame tears the System down `S` is expired and unreferenced, and the loop's prune
+  would race its owner's delete. Restore: delete `S` and `B`, purge their objects, check both;
+  the frame tears the System down.
 - **`ops.reconcile_now`** (authority): inside `on_authority_system` on an inner run. A fresh
   unmetered project `X` gets `R` (owner `X`) and a harness-inserted `granted` allocation `E` whose
   lease ended a minute ago. The pass answers `ok`; `E` is `expired`; the expiry audit row lies

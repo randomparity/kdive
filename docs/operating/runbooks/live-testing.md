@@ -1149,7 +1149,7 @@ cell-owned class `cov-tool-cells`. A killed run can leave one of them behind. Re
 operator or admin token: `ops.set_queue_paused` with `paused=false`,
 `resources.set_scheduling` with `state=schedulable` on the lane host, `inventory.clear_override`
 for the declared host (the next reconcile restores its cap). The `cov-tool-cells` coefficient
-needs no restore: no host outside a running cell carries the class.
+needs no restore: only cordoned residue hosts carry the class, so no placement prices with it.
 
 What the cells leave behind is history or inert:
 
