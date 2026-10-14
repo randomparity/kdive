@@ -1050,6 +1050,23 @@
     group: root
     mode: "0644"
 
+# The fixed-worker authority route for stack bring-up (ADR-0770, #3215): worker-lifecycle.sh
+# forwards these five values into each start request. Refs only; the key stays in the secrets root.
+- name: Publish the fixed-worker authority route for stack bring-up
+  ansible.builtin.template:
+    src: live-worker-authority.env.j2
+    dest: /etc/kdive/live-worker-authority.env
+    owner: root
+    group: root
+    mode: "0644"
+  when: live_vm_host_worker_authority_enabled | bool
+
+- name: Withdraw the fixed-worker authority route when the client is disabled
+  ansible.builtin.file:
+    path: /etc/kdive/live-worker-authority.env
+    state: absent
+  when: not (live_vm_host_worker_authority_enabled | bool)
+
 - name: Install the root-only lifecycle service configuration
   ansible.builtin.copy:
     dest: /etc/kdive/live-worker-lifecycle.conf

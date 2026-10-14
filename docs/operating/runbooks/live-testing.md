@@ -532,6 +532,15 @@ on disposable lanes, as described below; they are not needed for routine readine
 After approved provisioning, use `scripts/live-stack/stack-services.sh` and `just onboard` on
 the local host, with the reviewed backend and provider configuration. Use the host stack described
 in the [live-stack runbook](live-stack.md), including its lifecycle witness member setup.
+
+The role publishes the fixed-worker authority route in `/etc/kdive/live-worker-authority.env`, and
+every worker start, including each `stack-services.sh` restart, forwards it. Do not export the
+`KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_*` values: an export that contradicts the file is refused
+(ADR-0770). A backend port variable may hold `ADDR:PORT`, for example a Postgres bound to the
+lane address; `scripts/live-stack/env.sh` then builds the default DSNs, including
+`KDIVE_HARNESS_DATABASE_URL`, from that address, so no hand-written DSN is needed. A loopback or
+wildcard address keeps `localhost`. An unparseable value stops every script that sources
+`env.sh`, `stack-down.sh` and `stack-status.sh` included, until it is corrected.
 Record the candidate full SHA and clean tree, manifest and actual immutable-base byte digests,
 and actual server, **each running worker**, reconciler and selected authority revisions.
 Resolve process build identifiers to full SHAs as ADR-0715 requires; read the installed authority
@@ -1313,7 +1322,9 @@ provisioning is blocked by #3144 and #3148, and an attempt strands its allocatio
    otherwise the frame releases the allocation and stops `blocked`. Export
    `KDIVE_SYSTEMS_TOML` naming the exact file the running server and fixed workers were started
    with: the frame checks routing in its own process, the test session sandboxes the XDG default,
-   and the frame stops `blocked` without the variable.
+   and the frame stops `blocked` without the variable. It also stops `blocked`, before any
+   allocation, when that file fails to load or routes every `[[local_libvirt]]` entry through an
+   `authority_instance`.
 3. It moves the System onto the private daemon with `provision-authority-fixture.py`, runs the
    confinement probes and the fixture's read-only verification, then runs the cell body.
 4. Cleanup drains every open job of the System and its Runs, closes the Investigations the body
@@ -1321,6 +1332,18 @@ provisioning is blocked by #3144 and #3148, and an attempt strands its allocatio
    cleanup), removes the five fixture names, tears the System down, releases the allocation, and
    requires the step-1 listing and the capacity in use to be unchanged. A cleanup failure fails
    the cell.
+
+**Fixture-mode inventory.** A lane has one local-libvirt resource: resource rows are one per
+worker libvirt endpoint, so a plain `[[local_libvirt]]` entry cannot sit beside the routed one.
+Keep the lane's routed inventory file unchanged and make a separate copy in which only the
+`[[local_libvirt]]` entry's `authority_instance` line is removed. Place the copy beside the
+routed file with the same ownership and mode: the fixed workers read it, and a start refuses an
+inventory a worker slot cannot read. The `[[remote_libvirt]]`
+authority tuple stays the same in both, and the copy also declares the registered lane image.
+Bring the whole stack up on the copy (`KDIVE_SYSTEMS_TOML` naming it for `stack-services.sh`),
+and export the same path to the frame. Until #3144 and #3148 land, this copy is the lane's
+working inventory. To switch back, run `stack-services.sh` again with the routed file, and only
+when no authority-owned System, job or recovery is open on the lane.
 
 Use the harness DSN (`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`). Run one authority
 scenario at a time on the lane; another scenario's domains change the listing and fail the frame.

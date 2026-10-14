@@ -33,6 +33,8 @@ import libvirt
 import psycopg
 from pydantic import BaseModel, ConfigDict, Field
 
+from kdive.inventory.errors import InventoryError
+from kdive.inventory.loader import load_inventory
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.providers.local_libvirt.config import local_authority_instance_for_resource
 from kdive.providers.shared.runtime_paths import domain_name_for
@@ -98,6 +100,10 @@ PUBLIC_BLOCKED = (
 ROUTED_BLOCKED = (
     "fixture mode needs the lane's plain local-libvirt resource without an authority_instance; "
     "an authority-routed resource makes systems.provision the blocked public path (#3144, #3148)"
+)
+NO_PLAIN_BLOCKED = (
+    "the lane inventory routes every [[local_libvirt]] entry through an authority_instance; "
+    "run fixture mode on the lane's fixture-mode inventory (live-testing runbook)"
 )
 # Every non-terminal job that names the System or one of its Runs.
 _OPEN_JOBS = (
@@ -394,6 +400,14 @@ def select_lane(run: CellRun) -> AuthorityLaneConfig:
     inventory = os.environ.get(SYSTEMS_TOML_ENV, "")
     if not inventory or not Path(inventory).is_file():
         raise ScenarioStop(Outcome.BLOCKED, f"{SYSTEMS_TOML_ENV} must name the lane's systems.toml")
+    # One local-libvirt resource exists per worker libvirt endpoint, so fixture mode needs the
+    # lane's fixture-mode inventory; refusing here stops before any allocation is requested.
+    try:
+        local = load_inventory(Path(inventory)).local_libvirt
+    except InventoryError as exc:
+        raise ScenarioStop(Outcome.BLOCKED, f"{SYSTEMS_TOML_ENV} is invalid: {exc}") from exc
+    if local and all(entry.authority_instance for entry in local):
+        raise ScenarioStop(Outcome.BLOCKED, NO_PLAIN_BLOCKED)
     return config
 
 
