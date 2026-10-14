@@ -533,11 +533,15 @@ async def _build_uses(
     await stranded.kill()
     orphaned = await _listed_pins(caller, token, stranded, db_url)
     assert orphaned["holder_state"] == "terminated", orphaned
-    # Cleanup, not this cell's effect: recover the orphan so the restore finds no pin.
-    args = _recovery(stranded, "coverage cleanup")
-    recovered = one(await caller.call("ops.recover_build_use", args, token, discover=True))
-    assert recovered.status == "recovered", recovered
+    # The frame's restore recovers the orphan as cleanup.
     return {"active": active, "orphaned": orphaned}
+
+
+async def _recover_orphan(caller: HttpCaller, grants: Grants, stranded: Stranded) -> None:
+    """Cleanup, not evidence: recover a killed holder's pin the body left behind."""
+    args = _recovery(stranded, "coverage cleanup")
+    recovered = one(await caller.call("ops.recover_build_use", args, caller.token(grants)))
+    assert recovered.status == "recovered", f"cleanup recovery failed: {recovered}"
 
 
 async def _recover(
@@ -650,7 +654,15 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     if cell.kind == "functional" and cell.operation in _STRANDED:
         grants = _functional_grants(cell.operation, project)
         stranded = partial(_STRANDED[cell.operation], caller, grants, db_url=db_url)
-        await on_stranded_pin(run, base_url, issuer, db_url, project=project, body=stranded)
+        await on_stranded_pin(
+            run,
+            base_url,
+            issuer,
+            db_url,
+            project=project,
+            body=stranded,
+            recover=partial(_recover_orphan, caller, grants),
+        )
         return
     if cell.kind == "functional":
         body = cast(Functional, partial(_FUNCTIONAL[cell.operation], db_url=db_url))

@@ -86,10 +86,15 @@ two leaves the pin behind. The helper produces that state as follows:
    - A frozen holder that was never killed is thawed. It finishes the install and releases its pin
      itself. Its job is never canceled: `release_investigation_build_use` refuses a release once
      the job is not `running`, so a cancel would strand the pin under a live holder.
-   - A killed holder's install job is canceled through `jobs.cancel` first, so no restarted worker
-     reclaims it. Then the fleet is replaced: the helper counts the started slots in `status`
-     before the freeze, runs `worker-lifecycle.sh start <that count>`, and requires every slot to
-     come back started.
+   - A killed holder's pin is cleared first. If the body left the pin, the helper recovers it
+     through `ops.recover_build_use` as cleanup. That needs a holder already witnessed
+     `terminated`; otherwise the helper fails at once, naming the use id and the holder.
+   - The killed holder's install job is then canceled through `jobs.cancel`, so no restarted
+     worker reclaims it.
+   - The fleet is replaced with `worker-lifecycle.sh stop`, `recover` and
+     `start <the started slot count read before the freeze>`. Only `recover` resets the killed
+     unit's `failed` identity, which `start` would otherwise refuse. The helper requires every
+     slot to come back started.
    - The helper waits up to 5 minutes for the install job to be terminal and for no pin to remain
      for the investigation. If the install succeeded, its staged kernel joins the frame's owned
      paths. The helper then closes the investigation and returns to the frame, which proves
@@ -139,8 +144,11 @@ nothing. It may write a platform-audit row, which the snapshot excludes (ADR-072
 1. **Actors and deployments:**
    - an operator running the live tier on a disposable local lab host. The stack is started with
      `KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh`, the workers are the
-     installed `kdive-live-worker@N` units, and the operator has passwordless `sudo -n`
-     (`systemctl kill`, as the resource-limit carriers already require);
+     installed `kdive-live-worker@N` units, and the operator has non-interactive `sudo -n` for
+     `systemctl freeze`, `thaw` and `kill`. The helper checks `sudo -n systemctl --version` before
+     it creates anything; a refusal stops the cell `blocked`. This change adds no provisioning:
+     the operator account of a live lab host already has unrestricted `sudo -n`, which the
+     `live_vm` lifecycle proofs and the resource-limit fixtures also use;
    - CI, which runs only the unit and contract tests.
 2. **Invariants and assets at stake:**
    - honest outcomes. A lost freeze race, a missing fixture or a missing `sudo` grant stops the
@@ -154,8 +162,9 @@ nothing. It may write a platform-audit row, which the snapshot excludes (ADR-072
      cells write it, and they use the frame's cleanup proof, not the snapshot.
    - The fleet restart replaces every worker slot, not only the killed one. The cells run
      serially on a dedicated lane, so no other job is in flight.
-   - The killed install job is reclaimed after its lease expires. A later attempt may finish the
-     install on the cell's System. The restore waits for that before teardown.
+   - A `sudo` grant narrower than the whole `systemctl` command can pass the preflight and still
+     refuse `thaw`, which leaves a worker frozen. The named deployment grants unrestricted
+     `sudo -n`.
    - Docker- and Kubernetes-incarnation workers are not exercised. Recovery reads only the durable
      termination row, whatever the authority kind. Each lifecycle witness's own tests cover how
      that row is written.
@@ -169,6 +178,6 @@ nothing. It may write a platform-audit row, which the snapshot excludes (ADR-072
 | Contract | Mode | Evidence |
 |---|---|---|
 | R5 override and bindings | focused-test | `test_coverage_contract.py`: `ops.recover_build_use` functional roles are `("server", "worker")`; the 16 cells bind to the operator node; the unbound set shrinks by exactly them |
-| freeze-point and restore logic | focused-test | `tests/integration/live_stack/test_build_use_recovery.py` with fake `sudo`, lifecycle and database seams: a lost race stops `blocked` and thaws; the restore runs after a body failure; restore restarts the observed slot count |
+| freeze-point and restore logic | focused-test | `tests/integration/live_stack/test_build_use_recovery.py` with fake `sudo`, lifecycle and database seams: a lost race stops `blocked` and thaws; the kill waits for the unit's death; the restore thaws a live holder without canceling its job, and for a killed holder recovers a left pin, cancels the job, then runs stop, recover and start with the observed slot count; an unwitnessed orphan fails naming its pin |
 | live cells | task-test-not-applicable | proven by the `recovery`-lane lab run (`qualify` over the 16 cells) |
 | ADR amendment, runbook | task-test-not-applicable | prose; `just records` and `just docs-check` |

@@ -237,21 +237,34 @@ async def restore(
     stranded: Stranded | None,
     *,
     cancel: Callable[[], Awaitable[object]] | None,
+    recover: Callable[[Stranded], Awaitable[None]],
     job_id: str,
     investigation: str,
     slots: int,
 ) -> str | None:
-    """Thaw the live holder, or cancel the killed holder's install and replace it.
+    """Thaw the live holder, or clear the killed holder's pin and job and replace the fleet.
 
     A live holder finishes its install and releases the pin itself: a job canceled under it
     would refuse that release (``release_investigation_build_use`` requires a running job). A
-    killed holder's job is canceled before the fleet restarts, so no new worker reclaims it.
-    Then wait until the job is terminal and no pin is left. Returns the job's final state, or
-    ``None`` when no install was enqueued.
+    killed holder's pin is recovered through ``recover`` when the body left it, its job is
+    canceled so no restarted worker reclaims it, and the fleet is stopped, recovered (only
+    ``recover`` resets the killed unit's ``failed`` identity) and started again. Then wait until
+    the job is terminal and no pin is left. Returns the job's final state, or ``None`` when no
+    install was enqueued.
     """
     if stranded is not None and stranded.killed:
+        if await seams.rows(db_url, PINS, ([investigation],)):
+            incarnation = await stranded.incarnation()
+            assert incarnation["state"] == "terminated", (
+                f"pin {stranded.pin['use_id']} of {stranded.holder} is orphaned and its holder "
+                f"is {incarnation['state']}; recover it with ops.recover_build_use once the "
+                "lifecycle witness publishes the termination"
+            )
+            await recover(stranded)
         if cancel is not None:
             await cancel()
+        for operation in ("stop", "recover"):
+            await asyncio.to_thread(seams.lifecycle, operation)
         response = await asyncio.to_thread(seams.lifecycle, "start", str(slots))
         assert started_slots(response) == slots, f"fleet restart: {response.model_dump_json()}"
     elif stranded is not None:
@@ -274,15 +287,20 @@ async def on_stranded_pin(
     *,
     project: str,
     body: StrandedBody,
+    recover: Callable[[Stranded], Awaitable[None]],
     seams: Seams | None = None,
 ) -> None:
     """Strand a pin in ``project``, prove ``effect`` with ``body``, then prove the cleanup.
+
+    ``recover`` recovers a killed holder's pin through ``ops.recover_build_use`` when the body
+    did not; it is cleanup, not evidence.
 
     The System frame runs under its own :class:`CellRun`, so the guest it observes never enters
     this service cell's context; its cleanup proof becomes this cell's ``cleanup``.
     """
     seams = seams or Seams()
     tree, manifest = _fixture()
+    seams.sudo("systemctl", "--version")
     slots = started_slots(await asyncio.to_thread(seams.lifecycle, "status"))
     if not slots:
         raise ScenarioStop(Outcome.BLOCKED, "no started worker slot holds an install")
@@ -326,6 +344,7 @@ async def on_stranded_pin(
                 db_url,
                 stranded,
                 cancel=partial(scalar, op, "jobs.cancel", job_id=job_id) if job_id else None,
+                recover=recover,
                 job_id=job_id,
                 investigation=investigation,
                 slots=slots,

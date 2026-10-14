@@ -929,8 +929,8 @@ gateway's core tools also fails it, which happens when the server's `KDIVE_CLI_C
 from the test process's, and so does a missing mock-OIDC issuer. Cells of the other configuration
 skip and write no record. The server runs the `recovery` configuration only when it starts with a
 durable worker-death verifier, `docker` or `kubernetes`; `local` leaves the recovery tools out.
-On this lane `docker` has no reachable Docker death endpoint, so a recovery-tool call fails
-closed, which these cells never make. The two lanes are two bring-ups that share one evidence
+The verifier only gates registration. These cells never call a recovery tool; the
+[build-use recovery cells](#build-use-recovery-tool-cells-3111) do. The two lanes are two bring-ups that share one evidence
 root:
 
 ```bash
@@ -1137,8 +1137,8 @@ operator cells' environment. Each of the four functional cells strands a real pi
 4. Later it kills that unit with `sudo -n systemctl kill --signal=SIGKILL`, and has
    `scripts/live-stack/worker-lifecycle.sh status` publish the termination.
 
-So the operator needs non-interactive `sudo -n` for `systemctl`; a refused `sudo` stops the cell
-`blocked`. What each cell proves:
+So the operator needs non-interactive `sudo -n` for `systemctl` (`freeze`, `thaw`, `kill`); the
+cell checks it first, and a refused `sudo` stops the cell `blocked`. What each cell proves:
 
 - The `ops.build_uses_list` cell compares the listing with the project's pin rows twice, once
   while the holder is alive and once after it is killed. It then recovers the orphan as cleanup.
@@ -1151,9 +1151,10 @@ holder and stops the cell `blocked`; rerun it.
 
 Every cell restores the lane before its System teardown:
 
-- A killed holder's install job is canceled and the fleet is restarted with
-  `worker-lifecycle.sh start <the started slot count>`.
 - A live holder is thawed and finishes its install.
+- For a killed holder, any pin the cell left is recovered through the tool. The install job is
+  then canceled, and the fleet is replaced with `worker-lifecycle.sh stop`, `recover` and
+  `start <the started slot count>`.
 - The cell then requires that no pin is left.
 
 Run these cells serially on an otherwise idle stack: the restart replaces every worker slot.
@@ -1163,9 +1164,10 @@ uv run python -m pytest -m live_stack tests/integration/test_operator_tool_cells
   -k 'build_use' -vv --tb=short
 ```
 
-A failure after the kill and before the recovery can leave an orphaned pin. The failing cell
-names it, and the next `ops.recover_build_use` call with its holder clears it. Recovery rows,
-audit rows and the terminated incarnation stay as history.
+If the witness never published the killed holder's termination, the restore cannot recover its
+pin. The cell fails naming the use id and holder: run `worker-lifecycle.sh status`, then
+`ops.recover_build_use` with that holder. Recovery rows, audit rows and the terminated
+incarnation stay as history.
 
 #### System lifecycle tool cells (#3062)
 

@@ -121,12 +121,17 @@ def _restore(host: _Host, stranded: Stranded | None, cancels: list[str]) -> str 
         cancels.append("cancel")
         host.calls.append(("cancel",))
 
+    async def recover(pinned: Stranded) -> None:
+        host.calls.append(("recover-pin", pinned.holder))
+        host.pins = [[]]
+
     return asyncio.run(
         recovery.restore(
             host.seams(),
             "db",
             stranded,
             cancel=cancel,
+            recover=recover,
             job_id="j1",
             investigation="i1",
             slots=2,
@@ -138,7 +143,28 @@ def test_restore_cancels_a_killed_holders_job_before_restarting_the_fleet() -> N
     host = _Host(pins=[[]], job_states=["canceled"])
     stranded = Stranded("db", "p", _PIN, _UNIT, host.seams(), killed=True)
     assert _restore(host, stranded, []) == "canceled"
-    assert host.calls == [("cancel",), ("lifecycle", "start", "2")]
+    # Only `recover` resets the killed unit's failed identity; `start` alone would refuse it.
+    assert host.calls == [
+        ("cancel",),
+        ("lifecycle", "stop"),
+        ("lifecycle", "recover"),
+        ("lifecycle", "start", "2"),
+    ]
+
+
+def test_restore_recovers_a_pin_the_body_left_after_the_kill() -> None:
+    host = _Host(pins=[[_PIN]], job_states=["canceled"], incarnation_state="terminated")
+    stranded = Stranded("db", "p", _PIN, _UNIT, host.seams(), killed=True)
+    assert _restore(host, stranded, []) == "canceled"
+    assert host.calls[:2] == [("recover-pin", _HOLDER), ("cancel",)]
+
+
+def test_restore_names_an_orphan_whose_holder_was_never_witnessed() -> None:
+    host = _Host(pins=[[_PIN]], job_states=["canceled"])
+    stranded = Stranded("db", "p", _PIN, _UNIT, host.seams(), killed=True)
+    with pytest.raises(AssertionError, match="orphaned and its holder is active"):
+        _restore(host, stranded, [])
+    assert ("cancel",) not in host.calls
 
 
 def test_restore_thaws_a_live_holder_and_waits_for_its_own_release() -> None:
