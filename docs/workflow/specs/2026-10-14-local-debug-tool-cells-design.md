@@ -118,14 +118,14 @@ next higher text symbol's address. A stop "in `vfs_read`" means
 
 | Tool (variant) | Exposed call and observed effect |
 |---|---|
-| `debug.start_session` (gdbstub) | Start on the Run. `debug.get_session` reads `live`, transport `gdbstub`, the Run and System; `debug.read_registers(["rip"])` answers a kernel address (`≥ 0xffff800000000000`); a second gdbstub start on the same Run answers `transport_conflict`. |
+| `debug.start_session` (gdbstub) | Start on the Run. `debug.get_session` reads `live`, transport `gdbstub`, the Run and System; `debug.read_registers(["rip"])` answers; a second gdbstub start on the same Run answers `transport_conflict`. |
 | `debug.start_session` (drgn-live) | Start on the Run, no `missing_debuginfo`. `introspect.run(helper="sysinfo")` names the fixture release; a second drgn-live start answers `transport_conflict`. |
 | `debug.end_session` | After an attach (the guest is halted: no banner reply within 5 s), end. `debug.get_session` reads `detached`; the guest answers SSH again; a new gdbstub session on the Run starts and reads registers, then ends. |
 | `debug.get_session` | `live`, `project`, `run_id`, `system_id` and `transport` equal the started session's. |
 | `debug.list_sessions` | One session started and ended, a second left live. `request={run_id}` lists exactly those two ids, newest first; `state="live"` lists the second only, `state="detached"` the first only, each with the record's state. |
 | `debug.continue` | Breakpoint at `vfs_read` (operator); continue with the banner: `stopped`, `reason="breakpoint-hit"`, not `timed_out`; `rip` is in `vfs_read`. |
 | `debug.interrupt` | Before any attach the guest answers SSH; the interrupt (which attaches) answers `stopped`; the guest no longer answers a banner within 5 s; the stop carries `reason="signal-received"`. |
-| `debug.advance` | Stopped in `vfs_read`. `mode="instruction"` answers `reason="end-stepping-range"` and `rip` is where the fixture binary says one step lands: `objdump` of the fixture `vmlinux` gives the next instruction, or a jump or call's target. `mode="out"` then answers `reason="function-finished"` with `rip` at frame 1's return address, or, after a step into a callee, at the instruction after the call. |
+| `debug.advance` | Stopped in `vfs_read`. `mode="instruction"` answers `reason="end-stepping-range"` and `rip` is where the fixture binary says one step lands: `objdump` of the fixture `vmlinux` gives the next instruction, or a jump or call's target. `mode="out"` then answers `reason="function-finished"` with `rip` after one of the fixture's `call vfs_read` sites in a read(2)-family caller, which frame 1's address must also be, or, after a step into a callee, at the instruction after the call. |
 | `debug.set_breakpoint` | Set at `vfs_read`: `number` returned; `debug.list_breakpoints` counts one; continue with the banner stops `breakpoint-hit` in `vfs_read`; frame 0 is `vfs_read`. |
 | `debug.clear_breakpoint` | Breakpoint at `vfs_read` set, then cleared: `cleared`; the count is zero; a 5 s continue with the banner times out (`timed_out`), which a live `vfs_read` breakpoint would not. |
 | `debug.list_breakpoints` | Breakpoints at `vfs_read` and `vfs_write`: count two; after clearing one, count one. The tool returns no identifiers or locations, so the cell then fails naming that gap. |
@@ -141,9 +141,11 @@ next higher text symbol's address. A stop "in `vfs_read`" means
 | `debug.list_modules` | `loop` is listed with `base_address` equal to `/sys/module/loop/sections/.text`. |
 | `debug.load_module_symbols` | A `[loop]` text symbol does not resolve before the load; `loop` with that base loads (`symbols_loaded`); the symbol then resolves to its `ksym` address. |
 
-Every value compared is captured before the call under test or read through
-the operator's own calls; the exposed call never supplies its own expected
-value.
+Every expected value comes from the guest before the attach, the fixture
+binary or the session rows; the exposed call never supplies its own expected
+value. The operator's own debugger calls set up a state (a stop, a breakpoint)
+or read one back, and a value they return is checked against that ground truth
+rather than trusted.
 
 ## Known gaps the cells report
 

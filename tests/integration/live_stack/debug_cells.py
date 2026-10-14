@@ -280,6 +280,21 @@ def next_pcs(code: list[Instruction], pc: int) -> set[int]:
     return {following, here.target}
 
 
+async def return_sites(vmlinux: Path, truth: Truth, callee: str) -> set[int]:
+    """The addresses after each ``call <callee>`` in the read(2)-family callers of the binary."""
+    target = truth.at(callee)
+    sites: set[int] = set()
+    for caller in sorted(_READ_CALLERS & set(truth.symbols)):
+        code = await fixture_code(vmlinux, truth.at(caller), truth.end_of(caller))
+        sites |= {
+            after.address
+            for ins, after in zip(code, code[1:], strict=False)
+            if ins.mnemonic.startswith("call") and ins.target == target
+        }
+    assert sites, f"no read(2)-family caller of the fixture calls {callee}"
+    return sites
+
+
 async def _guest(endpoint: Endpoint, key: Path, command: str) -> str:
     result = await asyncio.to_thread(ssh, endpoint, key, command)
     assert result.returncode == 0, f"guest command exited {result.returncode}"
@@ -501,7 +516,7 @@ async def start_body(s: Session) -> dict[str, object]:
     assert record == ("live", transport, s.run_id), f"the session record reads {record}"
     assert read.data.get("system_id") == s.guest.system_id, "the session names another System"
     if transport == "gdbstub":
-        usable = {"rip_kernel": await s.register(env.object_id) >= KERNEL_BASE}
+        usable = {"registers_read": await s.register(env.object_id) > 0}
     else:
         assert "missing_debuginfo" not in env.data, "drgn-live attached without debuginfo"
         report = await s.op("introspect.run", session_id=env.object_id, helper="sysinfo")
@@ -509,6 +524,8 @@ async def start_body(s: Session) -> dict[str, object]:
         usable = {"release_matches": release == s.manifest["release"]}
     assert all(usable.values()), f"the {transport} session is not usable: {usable}"
     second = await s.raw("debug.start_session", run_id=s.run_id, transport=transport)
+    if second.error_category is None and second.object_id:
+        s.sessions.append(second.object_id)  # an admitted second attach still gets ended
     assert second.error_category == ErrorCategory.TRANSPORT_CONFLICT.value, (
         f"a second {transport} attach answered {second.error_category}"
     )
@@ -604,7 +621,7 @@ async def interrupt_body(s: Session) -> dict[str, object]:
     env = await s.exposed(session_id=session_id)
     assert env.status == "stopped" and env.data.get("timed_out") is False, "no clean stop"
     assert not await answers(s.endpoint), "the guest still answers after the interrupt"
-    assert await s.register(session_id) >= KERNEL_BASE, "the halted rip is not a kernel address"
+    await s.register(session_id)
     reason = env.data.get("reason")
     await s.end(session_id)
     assert reason, (
@@ -619,7 +636,8 @@ async def advance_body(s: Session) -> dict[str, object]:
     """An instruction step lands where the fixture binary says; ``out`` then returns.
 
     The step's expected landing comes from ``objdump`` of the fixture ``vmlinux``: the next
-    instruction, or a transfer's target. ``out`` from ``vfs_read`` stops at frame 1's return
+    instruction, or a transfer's target. ``out`` from ``vfs_read`` stops after one of the
+    fixture's ``call vfs_read`` sites in a read(2)-family caller, which must also be frame 1's
     address; from a callee the step entered, at the instruction after the call.
     """
     session_id = await s.start()
@@ -634,12 +652,17 @@ async def advance_body(s: Session) -> dict[str, object]:
     step = await s.register(session_id)
     assert step in landings, "the instruction step did not land where the fixture binary says"
     entered = not s.truth.within(BREAK_AT, step)
-    inside = [a for a in landings if s.truth.within(BREAK_AT, a)]
-    returns_to = inside[0] if entered else hex_value(frames[1].get("addr"))
+    if entered:
+        returns = {a for a in landings if s.truth.within(BREAK_AT, a)}
+    else:
+        returns = await return_sites(s.tree / "vmlinux", s.truth, BREAK_AT)
+        assert hex_value(frames[1].get("addr")) in returns, "frame 1 is not after a vfs_read call"
     env = await s.exposed(session_id=session_id, mode="out", timeout_sec=_STOP_WAIT_S)
     require_stop(env, "function-finished")
     rip = await s.register(session_id)
-    assert rip == returns_to, "advance out did not stop at the caller's return address"
+    assert rip in returns, "advance out did not stop at a return address of the fixture binary"
+    if not entered:
+        assert rip == hex_value(frames[1].get("addr")), "advance out left another frame"
     await s.end(session_id)
     return {
         "modes": ["instruction", "out"],

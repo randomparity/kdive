@@ -43,6 +43,8 @@ ffffffff81000000 T _stext
 ffffffff81200000 T vfs_read
 ffffffff81200400 t vfs_read.cold
 ffffffff81200800 T vfs_write
+ffffffff81300000 T ksys_read
+ffffffff81300100 T ksys_write
 ffffffff82000000 D linux_banner
 ffffffff82100000 D jiffies_64
 ffffffffc0001000 t lo_release\t[loop]
@@ -258,10 +260,17 @@ _BASE = 0xFFFFFFFF81200000
 _CODE = [Instruction(_BASE + 4 * i, "push   %rbp" if i == 4 else "nop", None) for i in range(16)]
 
 
+# ksys_read calls vfs_read at +0x1b and resumes at +0x20, the scripted frame 1 address.
+_CALLER = [
+    Instruction(0xFFFFFFFF81300000, "endbr64", None),
+    Instruction(0xFFFFFFFF8130001B, "call   ffffffff81200000 <vfs_read>", _BASE),
+    Instruction(0xFFFFFFFF81300020, "mov    %rax,%rbx", None),
+]
+
+
 def _fixture_code(monkeypatch: pytest.MonkeyPatch, code: list[Instruction] = _CODE) -> None:
     async def fixture_code(_vmlinux: Path, start: int, _stop: int) -> list[Instruction]:
-        assert start == _BASE
-        return code
+        return {_BASE: code, 0xFFFFFFFF81300000: _CALLER}[start]
 
     monkeypatch.setattr(debug_cells, "fixture_code", fixture_code)
 
@@ -297,6 +306,13 @@ def test_advance_steps_to_the_fixture_boundary_then_returns(
     wrong_out = _Debugger(_stepping(_BASE + 0x14, _BASE + 0x20))
     with pytest.raises(AssertionError, match="return address"):
         _run("debug.advance", wrong_out, monkeypatch)
+    # A frame 1 the binary does not call vfs_read from is caught before the step.
+    frames = _frames((BREAK_AT, _RIP), ("ksys_read", "0xffffffff81300024"))
+    bad_frame = _Debugger(
+        {**_stepping(_BASE + 0x14, 0xFFFFFFFF81300024), "debug.backtrace": frames}
+    )
+    with pytest.raises(AssertionError, match="not after a vfs_read call"):
+        _run("debug.advance", bad_frame, monkeypatch)
 
 
 def test_next_pcs_follows_the_fixture_instruction() -> None:
@@ -459,3 +475,15 @@ def test_read_memory_must_equal_the_guest_banner(monkeypatch: pytest.MonkeyPatch
     bad = {"debug.read_memory": _ok("read", memory_hex=(b"X" + banner[1:]).hex())}
     with pytest.raises(AssertionError, match="differs from /proc/version"):
         _run("debug.read_memory", _Debugger(bad), monkeypatch)
+
+
+def test_an_admitted_second_attach_is_still_ended(monkeypatch: pytest.MonkeyPatch) -> None:
+    def session(_args: Mapping[str, object]) -> ToolResponse:
+        data = {"transport": "gdbstub", "run_id": "run-1", "system_id": "sys-1"}
+        return ToolResponse.success("ses-1", "live", data=cast(Any, data))
+
+    debugger = _Debugger(_stop_answers(**{"debug.get_session": session}))
+    with pytest.raises(AssertionError, match="second gdbstub attach"):
+        _run("debug.start_session", debugger, monkeypatch)
+    ended = {args["session_id"] for tool, args in debugger.calls if tool == "debug.end_session"}
+    assert ended == {"ses-1", "ses-2"}
