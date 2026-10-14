@@ -64,8 +64,9 @@ two leaves the pin behind. The helper produces that state as follows:
 2. **Freeze with the pin held.** The helper calls `runs.install`, then polls
    `investigation_build_uses` for the investigation's row every 20 ms, for up to 10 minutes. The
    holder is the worker that wrote that row; its `worker_incarnations.authority_binding.unit` names
-   its systemd unit. The helper then stops that unit's main process with
-   `sudo -n systemctl kill --kill-whom=main --signal=SIGSTOP <unit>`.
+   its systemd unit. The helper then freezes the whole unit cgroup with
+   `sudo -n systemctl freeze <unit>`. The unit's main process may be a gate in front of the
+   worker, so freezing only that process would not be enough.
 3. **Prove the freeze point.** The worker must be frozen outside its release transaction, or a
    recovery call would wait on that transaction's lock. The helper proves this two ways:
    - The pin row still exists.
@@ -74,19 +75,24 @@ two leaves the pin behind. The helper produces that state as follows:
      releases it immediately.
 
    A pin that disappeared, or a lock held by the frozen worker, means the race was lost. The
-   helper then thaws the worker (`SIGCONT`), lets the install finish, cleans up, and stops the cell
+   helper then thaws the unit (`systemctl thaw`), lets the install finish, cleans up, and stops the cell
    `blocked`. A lost race never becomes evidence.
 4. **Kill and witness.** The cell kills the unit with
-   `sudo -n systemctl kill --signal=SIGKILL <unit>`. The unit has `Restart=no`, so it stays
-   `failed`. `worker-lifecycle.sh status` then publishes the incarnation's termination. The helper
+   `sudo -n systemctl kill --signal=SIGKILL <unit>`, then waits up to 30 s for the unit's
+   `ActiveState` to read `failed` or `inactive`. The unit has `Restart=no`, so it stays dead.
+   `worker-lifecycle.sh status` then publishes the incarnation's termination. The helper
    requires the holder's `worker_incarnations` row to read `state = 'terminated'` with an outcome.
 5. **Restore.** This step runs whatever the body did:
-   - A frozen worker that was never killed is thawed.
-   - A killed worker is replaced by the fleet. The helper counts the started slots in `status`
-     before the freeze and runs `worker-lifecycle.sh start <that count>`. That replaces the fleet
-     and requires every slot to come back started.
-   - The helper waits until the install job is terminal. It then requires that no pin remains for
-     the investigation, closes the investigation, and returns to the frame, which proves
+   - A frozen holder that was never killed is thawed. It finishes the install and releases its pin
+     itself. Its job is never canceled: `release_investigation_build_use` refuses a release once
+     the job is not `running`, so a cancel would strand the pin under a live holder.
+   - A killed holder's install job is canceled through `jobs.cancel` first, so no restarted worker
+     reclaims it. Then the fleet is replaced: the helper counts the started slots in `status`
+     before the freeze, runs `worker-lifecycle.sh start <that count>`, and requires every slot to
+     come back started.
+   - The helper waits up to 5 minutes for the install job to be terminal and for no pin to remain
+     for the investigation. If the install succeeded, its staged kernel joins the frame's owned
+     paths. The helper then closes the investigation and returns to the frame, which proves
      teardown, release and disk absence.
 
 All observations of the stack come from the evidence database, read through the harness login in

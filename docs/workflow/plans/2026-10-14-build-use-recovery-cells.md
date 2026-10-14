@@ -1,6 +1,15 @@
 # Build-use recovery tool cells — implementation plan (#3111)
 
 Spec: [2026-10-14-build-use-recovery-cells-design.md](../specs/2026-10-14-build-use-recovery-cells-design.md).
+Goal: bind and prove the 16 `recovery`-configuration cells of `ops.build_uses_list` and
+`ops.recover_build_use` against a real stranded pin.
+
+Expected implementation size: 550–650 changed lines (M) — the helper module and its unit tests
+(~400), the carrier bodies (~125), the contract mapping and test (~25) and the docs (~75).
+
+Global Constraints: Python 3.14 and the repository's existing dependencies only; no product,
+schema or fixture change; public text names operator decisions by date and no lab identifiers.
+
 Guardrails per task: `just lint`, `just type`, and `just test-verbose <paths>`. Before the push,
 `just records` and `just docs-check`, then the full `just ci`.
 
