@@ -891,8 +891,16 @@ uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --result
 
 A cell whose loop filesystem cannot be proven unchanged keeps it mounted and records
 `bounded_mount: retained` with its target, loop device and backing image; unmount and detach
-it by hand after checking that no job is running. The three
-`remote-libvirt` cells have no carrier yet and report `pending-implementation`.
+it by hand after checking that no job is running. The three `remote-libvirt` cells are in the
+[remote runbook](remote-live-stack.md#10-remote-resource-boundary-cells-3118).
+
+Last run: a Rocky 10.2 x86_64 KVM host (SELinux enforcing) with the longterm fixture. All three
+cells qualified. `slow-boot` measured a 6 s baseline boot; a 66 s delay reached ready, and a
+1020 s delay against the 900 s window ended all three attempts `boot_timeout`.
+`insufficient-disk` refused the 1.2 GB upload on its single attempt with about 53 MiB
+available, leaving nothing staged. Before the uploads root joined host preparation and the
+`svirt_image_t` labels, an uploaded rootfs could not be staged at all, and qemu was denied
+reading one in place.
 
 #### Core tool cells and server configurations (#2811)
 
