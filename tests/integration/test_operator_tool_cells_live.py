@@ -534,7 +534,12 @@ async def _build_uses(
     orphaned = await _listed_pins(caller, token, stranded, db_url)
     assert orphaned["holder_state"] == "terminated", orphaned
     # The frame's restore recovers the orphan as cleanup.
-    return {"active": active, "orphaned": orphaned}
+    return {
+        "use_id": str(stranded.pin["use_id"]),
+        "holder": stranded.holder,
+        "active": active,
+        "orphaned": orphaned,
+    }
 
 
 async def _recover_orphan(caller: HttpCaller, grants: Grants, stranded: Stranded) -> None:
@@ -587,6 +592,7 @@ async def _recover(
     return {
         "alive": alive.error_category,
         "recovered": use_id,
+        "holder": stranded.holder,
         "authority_kind": dead_holder["authority_kind"],
         "termination_outcome": dead_holder["outcome"],
         "other_pins": len(others),

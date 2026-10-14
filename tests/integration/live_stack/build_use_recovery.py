@@ -253,19 +253,22 @@ async def restore(
     install was enqueued.
     """
     if stranded is not None and stranded.killed:
-        if await seams.rows(db_url, PINS, ([investigation],)):
-            incarnation = await stranded.incarnation()
-            assert incarnation["state"] == "terminated", (
-                f"pin {stranded.pin['use_id']} of {stranded.holder} is orphaned and its holder "
-                f"is {incarnation['state']}; recover it with ops.recover_build_use once the "
-                "lifecycle witness publishes the termination"
-            )
-            await recover(stranded)
-        if cancel is not None:
-            await cancel()
-        for operation in ("stop", "recover"):
-            await asyncio.to_thread(seams.lifecycle, operation)
-        response = await asyncio.to_thread(seams.lifecycle, "start", str(slots))
+        try:
+            if await seams.rows(db_url, PINS, ([investigation],)):
+                incarnation = await stranded.incarnation()
+                assert incarnation["state"] == "terminated", (
+                    f"pin {stranded.pin['use_id']} of {stranded.holder} is orphaned and its "
+                    f"holder is {incarnation['state']}; recover it with ops.recover_build_use "
+                    "once the lifecycle witness publishes the termination"
+                )
+                await recover(stranded)
+        finally:
+            # The job and the fleet are restored even when the pin could not be.
+            if cancel is not None:
+                await cancel()
+            for operation in ("stop", "recover"):
+                await asyncio.to_thread(seams.lifecycle, operation)
+            response = await asyncio.to_thread(seams.lifecycle, "start", str(slots))
         assert started_slots(response) == slots, f"fleet restart: {response.model_dump_json()}"
     elif stranded is not None:
         seams.sudo("systemctl", "thaw", stranded.unit)

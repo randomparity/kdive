@@ -170,7 +170,13 @@ def test_restore_names_an_orphan_whose_holder_was_never_witnessed() -> None:
     stranded = Stranded("db", "p", _PIN, _UNIT, host.seams(), killed=True)
     with pytest.raises(AssertionError, match="orphaned and its holder is active"):
         _restore(host, stranded, [])
-    assert ("cancel",) not in host.calls
+    # The pin is left and named, but the job and the fleet are still restored.
+    assert host.calls == [
+        ("cancel",),
+        ("lifecycle", "stop"),
+        ("lifecycle", "recover"),
+        ("lifecycle", "start", "2"),
+    ]
 
 
 def test_restore_thaws_a_live_holder_and_waits_for_its_own_release(
