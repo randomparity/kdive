@@ -616,13 +616,13 @@ async def _on_remote_authority_system(
     arch = str(run.cell.guest_arch)
     await asyncio.to_thread(require_remote_lane, config, base_url)
     await require_evidence_read_access(db_url)
-    resource_id, image, digest = await remote_root(db_url, config.resource_name, arch)
     observed = await asyncio.to_thread(remote_authority_inventory, config)
     if observed.arch != arch:
         raise ScenarioStop(
             Outcome.BLOCKED,
             f"the remote authority host is {observed.arch}; {run.cell.id} needs {arch}",
         )
+    resource_id, image, digest = await remote_root(db_url, config.resource_name, arch)
     token = mint_role_token(issuer, project=project, agent_session=f"{project}-sess", role="admin")
     async with LiveStackClient.over_http(base_url, token) as op:
         await seed_metering(db_url, project)

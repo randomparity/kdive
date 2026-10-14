@@ -189,7 +189,8 @@ state and, as the same account, `/opt/kdive-provider-authority/revision` over th
 
 - the remote config variable is unset, or `KDIVE_SYSTEMS_TOML` does not name a file;
 - `resource_name` is not declared, or carries no authority route for `authority_instance`;
-- the control plane's catalog does not hold exactly one registered public `remote-libvirt` image
+- after the gates and the **before** inventory (lifecycle step 1), the control plane's catalog
+  does not hold exactly one registered public `remote-libvirt` image
   for the cell's architecture with a digest and a `root_spec`, or the database does not hold the
   resource. Admission's own root checks (authority, source kind, identity, architecture) still
   run after allocation; a row that fails them is failure class 3.4, not a stop;

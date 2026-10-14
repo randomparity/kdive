@@ -518,8 +518,8 @@ def test_remote_success_orders_effects_and_proves_cleanup(
     order = [
         "require_remote_lane",
         "require_evidence_read_access",
-        "remote_root",
         "remote_inventory",
+        "remote_root",
         "allocations.request",
         "systems.provision",
         "require_root_provenance",
