@@ -24,6 +24,12 @@ _HOLDER = "local:holder-2"
 _PIN = {"use_id": "u1", "holder_worker_id": _HOLDER, "investigation_id": "i1"}
 
 
+@pytest.fixture(autouse=True)
+def _no_restore_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A restore that would keep polling fails at once instead of after five minutes."""
+    monkeypatch.setattr(recovery, "_RESTORE_DEADLINE_S", 0.0)
+
+
 def _response(*phases: SlotPhase) -> LifecycleResponse:
     slots = tuple(
         SlotResult(slot=n, unit=f"kdive-live-worker@{n}.service", phase=phase)
@@ -167,7 +173,10 @@ def test_restore_names_an_orphan_whose_holder_was_never_witnessed() -> None:
     assert ("cancel",) not in host.calls
 
 
-def test_restore_thaws_a_live_holder_and_waits_for_its_own_release() -> None:
+def test_restore_thaws_a_live_holder_and_waits_for_its_own_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(recovery, "_RESTORE_DEADLINE_S", 60.0)
     host = _Host(pins=[[_PIN], []], job_states=["running", "succeeded"])
     stranded = Stranded("db", "p", _PIN, _UNIT, host.seams())
     cancels: list[str] = []
@@ -177,8 +186,7 @@ def test_restore_thaws_a_live_holder_and_waits_for_its_own_release() -> None:
     assert host.calls == [("sudo", "systemctl", "thaw", _UNIT)]
 
 
-def test_restore_fails_when_a_pin_outlives_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_restore_fails_when_a_pin_outlives_the_job() -> None:
     host = _Host(pins=[[_PIN]], job_states=["canceled"])
-    monkeypatch.setattr(recovery, "_RESTORE_DEADLINE_S", 0.0)
     with pytest.raises(AssertionError, match="1 pin"):
         _restore(host, None, [])
