@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
+import re
 import subprocess  # noqa: S404 - fixed argv, no shell  # nosec B404
 import time
 import xml.etree.ElementTree as ET  # noqa: S405 - the worker's own domain XML  # nosec B405
@@ -42,6 +43,7 @@ from tests.integration.live_stack.tool_cells import lane_for
 _ROOT = Path(__file__).resolve().parents[3]
 _LIFECYCLE = _ROOT / "scripts" / "live-stack" / "worker-lifecycle.sh"
 _BASELINE = "longterm"
+_WORKER_UNIT = re.compile(r"kdive-live-worker@[1-8]\.service")
 _POLL_S = 0.02
 _PIN_DEADLINE_S = 600.0
 _RESTORE_DEADLINE_S = 300.0
@@ -215,7 +217,8 @@ async def freeze_holder(
     pin = found[0]
     incarnation = await seams.rows(db_url, INCARNATION, (pin["holder_worker_id"],))
     unit = str(incarnation[0]["authority_binding"]["unit"]) if incarnation else ""
-    assert unit.startswith("kdive-live-worker@"), f"holder {pin['holder_worker_id']} has no unit"
+    # The unit name reaches `sudo systemctl`: only the eight fixed worker units qualify.
+    assert _WORKER_UNIT.fullmatch(unit), f"holder {pin['holder_worker_id']} has no worker unit"
     seams.sudo("systemctl", "freeze", unit)
     frozen = False
     try:
