@@ -13,6 +13,8 @@ import pytest
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.debug.operations.runtime import _op_failure
+from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES, Cell, build_contract
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import debug_cells
@@ -96,10 +98,11 @@ def test_gdbstub_profile_adds_only_the_stub() -> None:
     assert profile["provider"] == {"local-libvirt": {"vcpus": 2}}
 
 
-def test_a_missing_debugger_or_dependency_blocks() -> None:
-    gdb = ToolResponse.failure(
-        "s", ErrorCategory.DEBUG_ATTACH_FAILURE, detail="no gdb", data={"missing_tools": ["gdb"]}
-    )
+@pytest.mark.parametrize("cross", [False, True], ids=["native", "cross-arch"])
+def test_a_missing_debugger_or_dependency_blocks(cross: bool) -> None:
+    # The envelope the op path really answers: the engine's error through its failure mapping.
+    error = GdbMiEngine()._missing_gdb_error(is_cross_arch=cross, guest_arch="ppc64le")
+    gdb = _op_failure("s", error)
     for missing in (gdb, ToolResponse.failure("s", ErrorCategory.MISSING_DEPENDENCY, detail="x")):
         with pytest.raises(ScenarioStop) as stop:
             checked(missing, "attach")

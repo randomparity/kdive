@@ -122,6 +122,8 @@ MODULE, MODULE_SYMBOL = "loop", "loop_queue_rq"
 # The read(2) family's paths into vfs_read; any of them may take the breakpoint (spec, failure
 # model): the banner's read, or an ambient read or pread64.
 _READ_CALLERS = frozenset({"ksys_read", "__x64_sys_read", "ksys_pread64", "__x64_sys_pread64"})
+# The engine's missing-debugger details (gdbmi/core/engine.py, native and cross-arch).
+_MISSING_GDB = ("missing required gdb tool", "missing a multiarch-capable gdb")
 _STOP_WAIT_S = 30.0
 _NO_STOP_WAIT_S = 5.0
 _ANSWER_S = 5.0
@@ -362,9 +364,11 @@ async def provision_gdbstub(
 
 def checked(env: ToolResponse, phase: str) -> ToolResponse:
     """``env`` when it succeeded; ``blocked`` when the stack lacks gdb or another dependency."""
-    if env.error_category == ErrorCategory.DEBUG_ATTACH_FAILURE.value and env.data.get(
-        "missing_tools"
-    ):
+    # The engine's missing-gdb error reaches the envelope as its detail alone: the op mapping
+    # turns it into debug_attach_failure and the serializer drops its missing_tools list.
+    if env.error_category == ErrorCategory.DEBUG_ATTACH_FAILURE.value and (
+        env.detail or ""
+    ).startswith(_MISSING_GDB):
         raise ScenarioStop(Outcome.BLOCKED, f"{phase}: the server host lacks a debugger")
     return require_tool(env, phase)
 
@@ -629,7 +633,8 @@ async def interrupt_body(s: Session) -> dict[str, object]:
     reason = env.data.get("reason")
     await s.end(session_id)
     assert running, (
-        "debug.start_session's gdbstub probe had already halted the guest, and no public "
+        "debug.start_session's gdbstub probe had already halted the guest; the interrupt's own "
+        "first gdb attach would halt a running one before -exec-interrupt, and no public "
         "operation leaves a live session running, so debug.interrupt never meets a running "
         "guest (known product gap)"
     )

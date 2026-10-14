@@ -158,7 +158,9 @@ text is weakened, and the live run's result is reported:
   `line`, no arguments or locals.
 - `debug.interrupt` never meets a running guest. `debug.start_session`'s
   gdbstub reachability probe connects and closes without a detach, which
-  leaves the guest paused (ADR-0184); every resume operation waits for a stop
+  leaves the guest paused (ADR-0184); the interrupt's own first engine
+  operation attaches gdb, which halts a running guest before
+  `-exec-interrupt` is sent; every resume operation waits for a stop
   and halts again on timeout; and the per-session lock serialises a concurrent
   interrupt behind it. The cell records whether the started session's guest
   still answers, interrupts, requires a clean stop, and fails naming the gap
