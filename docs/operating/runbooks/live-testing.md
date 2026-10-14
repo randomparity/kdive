@@ -1338,6 +1338,56 @@ the staged base surviving. Remote records carry the provider host as `rocky:10.2
 artifact carried a host name or address. After the run, neither the worker's libvirt nor the
 provider defined a `kdive-` domain, and the provider pool held only its base volume.
 
+#### Authority-owned System frame (#3184)
+
+`tests/integration/live_stack/authority_lane.py` frames a System on the installed local-authority
+lane for the HTTP tool cells that need one. A carrier selects it explicitly through
+`on_authority_system`; the ordinary `on_lane_system` and `lane_target` frames do not change. The
+frame observes the System on the authority's private daemon and private roots, never over SSH.
+The remote authority frame is #3209, and a remote cell stops `blocked` naming it.
+
+`LOCAL_AUTHORITY_LANE_CONFIG` names an owner-only mode-`0400` or mode-`0600` JSON file
+with exactly `installed_revision` (the full 40-character SHA), `authority_service` (the literal
+`kdive-external-boot-authority.service`) and `system_mode`. An unset variable stops the cell
+`blocked`. `system_mode: "public"` stops `blocked` before any mutation: public authority-owned
+provisioning is blocked by #3144 and #3148, and an attempt strands its allocation.
+`system_mode: "fixture"` is the runnable path:
+
+1. The frame checks the authority unit, the installed revision, the `/readyz` revision of the
+   server and every running fixed worker slot, the installed routes and the harness DSN's read
+   access, then lists the authority daemon's domains, the two private roots' entries and the
+   worker daemon's domains.
+2. It acquires the lane image, requests an allocation and provisions a System over HTTP with the
+   fixed rootfs `/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2` pinned to that image's
+   registered digest. Stage the lane image's bytes there first, as for the installed carrier.
+   The allocated resource must carry no `authority_instance` in the lane's `systems.toml`;
+   otherwise the frame releases the allocation and stops `blocked`. Export
+   `KDIVE_SYSTEMS_TOML` naming the exact file the running server and fixed workers were started
+   with: the frame checks routing in its own process, the test session sandboxes the XDG default,
+   and the frame stops `blocked` without the variable.
+3. It moves the System onto the private daemon with `provision-authority-fixture.py`, runs the
+   confinement probes and the fixture's read-only verification, then runs the cell body.
+4. Cleanup drains every open job of the System and its Runs, closes the Investigations the body
+   recorded (a body releases every external boot it starts itself; a held activation fails the
+   cleanup), removes the five fixture names, tears the System down, releases the allocation, and
+   requires the step-1 listing and the capacity in use to be unchanged. A cleanup failure fails
+   the cell.
+
+Use the harness DSN (`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`). Run one authority
+scenario at a time on the lane; another scenario's domains change the listing and fail the frame.
+The frame's own proof runs with:
+
+```sh
+KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
+KDIVE_SYSTEMS_TOML=~/.config/kdive/systems.toml \
+LOCAL_AUTHORITY_LANE_CONFIG=/protected/authority-lane.json \
+  uv run python -m pytest tests/integration/test_authority_lane_frame_live.py -m live_stack -v
+```
+
+A killed run skips cleanup. Remove its fixture with the exact-name loop under
+[fixture cleanup](#installed-local-authority-carrier), then run `systems.teardown` for the System
+with an `admin` token for its project and wait for `torn_down`, then `allocations.release`.
+
 ### `live_vm` (native) — a real kernel on real silicon
 
 ```
