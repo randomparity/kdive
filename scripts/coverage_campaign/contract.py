@@ -36,13 +36,25 @@ _KERNEL_INPUTS = (
 _LOCAL_CONTROL_TOOLS = frozenset(
     {"control.capture_traffic", "control.diagnostic_sysrq", "control.watch_for_crash"}
 )
-# List tools that answer a denied caller with an empty page instead of a failure (ADR-0756):
-# their rejection cells prove denied visibility against a positive control.
+# List tools that answer a denied caller with an empty page instead of a failure (ADR-0756 and
+# its 2026-10-14 amendment): their rejection cells prove denied visibility against a positive
+# control.
 FILTERED_LIST_BOUNDARIES = frozenset(
     {
         ("investigations.list", "authorization"),
         ("investigations.list", "project-isolation"),
         ("artifacts.list", "project-isolation"),
+        *(
+            (tool, boundary)
+            for tool in (
+                "runs.list",
+                "systems.list",
+                "jobs.list",
+                "allocations.list",
+                "debug.list_sessions",
+            )
+            for boundary in ("authorization", "project-isolation")
+        ),
     }
 )
 # Reviewed admission refusals: the server answers these functional cells synchronously, so they

@@ -415,6 +415,35 @@ def test_filtered_list_requires_canonical_empty_envelope(tmp_path: Path, leak: s
         _filtered(tmp_path, _Filtering("direct", _LEAKS[leak]), _control())
 
 
+def test_debug_sessions_denied_page_and_unconfigured_pages(tmp_path: Path) -> None:
+    page = ToolResponse.collection(
+        "debug_sessions",
+        "ok",
+        [],
+        suggested_next_actions=["debug.get_session"],
+        data={"truncated": False, "next_cursor": None},
+    )
+    listed = page.model_copy(update={"items": [ToolResponse.success(_ITEM, "detached")]})
+    run = _list_run(tmp_path, "debug.list_sessions", "project-isolation")
+    rejection = Rejection({"request": {"run_id": "r"}}, _GRANTS, filtered=_control())
+    caller = _Filtering("direct", page, control=listed)
+    asyncio.run(prove_rejection(run, caller, "project-isolation", rejection, _snapshot(1, 1)))
+    assert "project-isolation" in run.assertions
+    # A named pair whose carrier has not configured its page fails before any call.
+    unconfigured = _Filtering("direct", page, control=listed)
+    with pytest.raises(AssertionError, match="no canonical empty page"):
+        asyncio.run(
+            prove_rejection(
+                _list_run(tmp_path, "runs.list", "authorization"),
+                unconfigured,
+                "authorization",
+                Rejection({"request": {}}, _GRANTS, filtered=_control()),
+                _snapshot(1, 1),
+            )
+        )
+    assert unconfigured.calls == []
+
+
 def test_filtered_exception_is_closed(tmp_path: Path) -> None:
     with pytest.raises(AssertionError, match="FILTERED_LIST_BOUNDARIES"):
         asyncio.run(

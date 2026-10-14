@@ -508,7 +508,18 @@ def test_remote_tool_scenarios_never_share_a_local_node(inventory: Inventory) ->
     assert _DEEP_NODE in {c.node_id for c in same if c.provider == "local-libvirt"}
 
 
-def test_filtered_list_boundaries_keep_their_twelve_rejection_cells(inventory: Inventory) -> None:
+_ADR_0756_PAIRS = {
+    ("investigations.list", "authorization"),
+    ("investigations.list", "project-isolation"),
+    ("artifacts.list", "project-isolation"),
+}
+# ADR-0756's 2026-10-14 amendment (operator decision R3, 2026-10-13).
+_R3_LISTS = ("runs.list", "systems.list", "jobs.list", "allocations.list", "debug.list_sessions")
+
+
+def test_filtered_list_boundaries_are_the_adr_named_pairs(inventory: Inventory) -> None:
+    amended = {(t, b) for t in _R3_LISTS for b in ("authorization", "project-isolation")}
+    assert _ADR_0756_PAIRS | amended == FILTERED_LIST_BOUNDARIES
     cells = build_contract(inventory=inventory).cells
     filtered = [
         c
@@ -517,19 +528,24 @@ def test_filtered_list_boundaries_keep_their_twelve_rejection_cells(inventory: I
         and c.kind == "rejection"
         and (c.operation, c.scenario_id.rsplit("/", 1)[1]) in FILTERED_LIST_BOUNDARIES
     ]
-    assert len(filtered) == 12
-    assert {(c.configuration, c.exposure) for c in filtered} == {
+    original = [c for c in filtered if (c.operation, boundary_of(c)) in _ADR_0756_PAIRS]
+    assert len(original) == 12
+    assert {(c.configuration, c.exposure) for c in original} == {
         (configuration, exposure)
         for configuration in ("default", "recovery")
         for exposure in ("direct", "gateway")
     }
+    assert all(c.owner == 3096 and c.node_id is not None for c in original)
     for cell in filtered:
-        boundary = cell.scenario_id.rsplit("/", 1)[1]
-        assert cell.owner == 3096 and cell.node_id is not None
-        assert cell.assertions == (boundary, "unchanged-state", "cleanup")
+        assert cell.assertions == (boundary_of(cell), "unchanged-state", "cleanup")
         assert "empty page to the denied caller" in cell.observation
+    assert {(c.operation, boundary_of(c)) for c in filtered} == FILTERED_LIST_BOUNDARIES
     others = [c for c in cells if c.kind == "rejection" and c not in filtered]
     assert not any("empty page" in c.observation for c in others)
+
+
+def boundary_of(cell: Cell) -> str:
+    return cell.scenario_id.rsplit("/", 1)[1]
 
 
 def test_remote_publish_functional_cells_are_server_only_admission_refusals(
