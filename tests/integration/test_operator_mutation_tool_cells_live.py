@@ -222,7 +222,7 @@ async def _state(db_url: str, project: str) -> dict[str, object]:
 # -- cell-owned runtime hosts ------------------------------------------------------------------
 
 
-def listener_uri(base_url: str) -> str:
+def _listener_uri(base_url: str) -> str:
     """A libvirt-shaped URI naming the server's own TCP listener (the register preflight)."""
     parts = urlsplit(base_url)
     port = parts.port or (443 if parts.scheme == "https" else 80)
@@ -241,14 +241,14 @@ async def _lane_cost_class(db_url: str) -> str:
     return str(row["cost_class"])
 
 
-def host_args(base_url: str, owner: str, cost_class: str) -> dict[str, object]:
+def _host_args(base_url: str, owner: str, cost_class: str) -> dict[str, object]:
     """``resources.register`` arguments for a cap-2 runtime host owned by ``owner``."""
     return {
         "kind": "local-libvirt",
         "name": _fresh(),
         "cost_class": cost_class,
         "concurrent_allocation_cap": 2,
-        "host_uri": listener_uri(base_url),
+        "host_uri": _listener_uri(base_url),
         "owner_project": owner,
         **_HOST_CAPS,
     }
@@ -262,7 +262,7 @@ _ALLOCATION: LiteralString = "SELECT * FROM allocations WHERE id = %s"
 
 
 @dataclass
-class Hosts:
+class _Hosts:
     """The cell's runtime hosts and the allocations it placed; :meth:`remove` undoes both."""
 
     caller: HttpCaller
@@ -276,7 +276,7 @@ class Hosts:
     async def add(self, owner: str, *, cost_class: str | None = None) -> dict[str, Any]:
         """Register a runtime host owned by ``owner``; return its row."""
         cost_class = cost_class or await _lane_cost_class(self.db_url)
-        args = host_args(self.caller.base_url, owner, cost_class)
+        args = _host_args(self.caller.base_url, owner, cost_class)
         env = one(await self.caller.call("resources.register", args, self._admin(owner)))
         self.ids.append(env.object_id)
         return await _one_row(self.db_url, _HOST, (env.object_id,))
@@ -352,8 +352,8 @@ class Hosts:
 
 
 @asynccontextmanager
-async def _hosts(caller: HttpCaller, db_url: str) -> AsyncIterator[Hosts]:
-    hosts = Hosts(_direct(caller), db_url)
+async def _hosts(caller: HttpCaller, db_url: str) -> AsyncIterator[_Hosts]:
+    hosts = _Hosts(_direct(caller), db_url)
     async with _cleaning(hosts.remove, "the cell's runtime hosts"):
         yield hosts
 
@@ -416,7 +416,7 @@ async def _register_body(caller: HttpCaller, grants: Grants, *, db_url: str) -> 
     project = grants.projects[0]
     async with _hosts(caller, db_url) as hosts:
         cost_class = await _lane_cost_class(db_url)
-        args = host_args(caller.base_url, project, cost_class)
+        args = _host_args(caller.base_url, project, cost_class)
         env = one(
             await caller.call("resources.register", args, caller.token(grants), discover=True)
         )
@@ -1048,7 +1048,7 @@ _ON_HOST: LiteralString = (
 async def _drain_passive(
     caller: HttpCaller,
     token: str,
-    hosts: Hosts,
+    hosts: _Hosts,
     system: AuthoritySystem,
     workload: str,
 ) -> dict[str, object]:
