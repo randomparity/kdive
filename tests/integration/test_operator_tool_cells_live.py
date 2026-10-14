@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import partial
 from typing import Any, LiteralString, cast
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -44,6 +45,11 @@ from kdive.mcp.responses import ToolResponse
 from kdive.security.audit import args_digest
 from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
+from tests.integration.live_stack.build_use_recovery import (
+    ALL_PINS,
+    Stranded,
+    on_stranded_pin,
+)
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.integration.live_stack.secret_presence import prove_secret_presence
 from tests.integration.live_stack.tool_cells import (
@@ -67,10 +73,12 @@ pytestmark = pytest.mark.live_stack
 TOOLS = (
     "audit.query",
     "inventory.list",
+    "ops.build_uses_list",
     "ops.diagnostics",
     "ops.export_cost_classes",
     "ops.export_systems_toml",
     "ops.jobs_list",
+    "ops.recover_build_use",
     "ops.tool_trail",
     "secrets.list",
 )
@@ -481,6 +489,112 @@ async def _trail(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str
     return {"calls": len(rows), "paged": len(pages)}
 
 
+_PROJECT_PINS: LiteralString = (
+    "SELECT u.use_id, u.investigation_id, u.generation, u.job_id, u.attempt, "
+    "u.holder_worker_id, u.created_at FROM investigation_build_uses u "
+    "JOIN investigations i ON i.id = u.investigation_id WHERE i.project = %s "
+    "ORDER BY u.created_at, u.use_id"
+)
+_RECOVERIES: LiteralString = "SELECT * FROM investigation_build_use_recoveries WHERE use_id = %s"
+_CONFIGURATION_ERROR = ErrorCategory.CONFIGURATION_ERROR.value
+
+
+def _pin_view(item: ToolResponse) -> dict[str, object]:
+    return {"use_id": item.object_id, **item.data, "created_at": _when(item.data["created_at"])}
+
+
+def _pin_row(row: Mapping[str, Any]) -> dict[str, object]:
+    view: dict[str, object] = {k: str(v) for k, v in row.items() if k != "holder_worker_id"}
+    return {**view, "holder": row["holder_worker_id"], "created_at": row["created_at"]}
+
+
+async def _listed_pins(
+    caller: HttpCaller, token: str, stranded: Stranded, db_url: str
+) -> dict[str, object]:
+    """The listing equals the project's pin rows and holds the stranded pin."""
+    env = one(await caller.call("ops.build_uses_list", {"limit": 100}, token, discover=True))
+    assert {i.status for i in env.items} <= {"pinned"}, env.items
+    rows = [_pin_row(r) for r in await _rows(db_url, _PROJECT_PINS, (stranded.project,))]
+    assert [_pin_view(i) for i in env.items] == rows, "listed pins differ from the database"
+    assert str(stranded.pin["use_id"]) in {i.object_id for i in env.items}, "pin not listed"
+    return {"pins": len(rows), "holder_state": (await stranded.incarnation())["state"]}
+
+
+def _recovery(stranded: Stranded, reason: str) -> dict[str, object]:
+    return {"use_id": str(stranded.pin["use_id"]), "holder": stranded.holder, "reason": reason}
+
+
+async def _build_uses(
+    caller: HttpCaller, grants: Grants, stranded: Stranded, *, db_url: str
+) -> dict[str, object]:
+    token = caller.token(grants)
+    active = await _listed_pins(caller, token, stranded, db_url)
+    assert active["holder_state"] == "active", active
+    await stranded.kill()
+    orphaned = await _listed_pins(caller, token, stranded, db_url)
+    assert orphaned["holder_state"] == "terminated", orphaned
+    # Cleanup, not this cell's effect: recover the orphan so the restore finds no pin.
+    args = _recovery(stranded, "coverage cleanup")
+    recovered = one(await caller.call("ops.recover_build_use", args, token, discover=True))
+    assert recovered.status == "recovered", recovered
+    return {"active": active, "orphaned": orphaned}
+
+
+async def _recover(
+    caller: HttpCaller, grants: Grants, stranded: Stranded, *, db_url: str
+) -> dict[str, object]:
+    token = caller.token(grants)
+    use_id, args = str(stranded.pin["use_id"]), _recovery(stranded, "coverage recovery")
+    others = [r for r in await _rows(db_url, ALL_PINS) if str(r["use_id"]) != use_id]
+    assert (await stranded.incarnation())["state"] == "active"
+    alive = one(await caller.call("ops.recover_build_use", args, token, discover=True))
+    assert (alive.status, alive.error_category) == ("error", _CONFIGURATION_ERROR), alive
+    assert [str(r["use_id"]) for r in await _rows(db_url, ALL_PINS)].count(use_id) == 1
+    assert not await _rows(db_url, _RECOVERIES, (use_id,)), "a live holder's pin was recovered"
+    dead_holder = await stranded.kill()
+    dead = one(await caller.call("ops.recover_build_use", args, token))
+    assert (dead.status, dead.object_id, dead.data.get("holder")) == (
+        "recovered",
+        use_id,
+        stranded.holder,
+    ), dead
+    after = await _rows(db_url, ALL_PINS)
+    assert use_id not in {str(r["use_id"]) for r in after}, "the recovered pin remains"
+    assert after == others, "recovery changed another pin"
+    ledger = await _rows(db_url, _RECOVERIES, (use_id,))
+    assert len(ledger) == 1, f"{len(ledger)} recovery rows for {use_id}"
+    pin = stranded.pin
+    assert {k: ledger[0][k] for k in ("investigation_id", "generation", "job_id", "attempt")} == {
+        k: pin[k] for k in ("investigation_id", "generation", "job_id", "attempt")
+    }
+    assert ledger[0]["holder_worker_id"] == stranded.holder
+    assert ledger[0]["recovered_by"] == grants.subject
+    assert (
+        ledger[0]["authority_kind"],
+        ledger[0]["authority_binding"],
+        ledger[0]["termination_outcome"],
+        ledger[0]["terminated_at"],
+    ) == (
+        dead_holder["authority_kind"],
+        dead_holder["authority_binding"],
+        dead_holder["outcome"],
+        dead_holder["terminated_at"],
+    )
+    return {
+        "alive": alive.error_category,
+        "recovered": use_id,
+        "authority_kind": dead_holder["authority_kind"],
+        "termination_outcome": dead_holder["outcome"],
+        "other_pins": len(others),
+    }
+
+
+_STRANDED: dict[str, Callable[..., Awaitable[dict[str, object]]]] = {
+    "ops.build_uses_list": _build_uses,
+    "ops.recover_build_use": _recover,
+}
+
+
 _FUNCTIONAL: dict[str, Callable[..., Awaitable[dict[str, object]]]] = {
     "audit.query": _audit,
     "inventory.list": _inventory,
@@ -496,6 +610,8 @@ def _valid(tool: str, project: str) -> dict[str, object]:
     """Arguments that change nothing for the cell's issued-token control call."""
     if tool == "audit.query":
         return {"request": {"scope": "project", "project": project}}
+    if tool == "ops.recover_build_use":
+        return {"use_id": str(uuid4()), "holder": "cov-holder", "reason": "cov"}
     return {}
 
 
@@ -505,6 +621,8 @@ def _invalid(tool: str, project: str) -> dict[str, object]:
         "audit.query": {"request": {"scope": "galaxy"}},
         "ops.diagnostics": {"with_egress": "maybe"},
         "ops.export_systems_toml": {"persist": "maybe"},
+        "ops.build_uses_list": {"limit": "many"},
+        "ops.recover_build_use": {"use_id": "not-a-uuid", "holder": "x", "reason": "x"},
     }
     return table.get(tool, {"request": {"limit": "many"}})
 
@@ -528,6 +646,11 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     snapshot = partial(project_state, db_url, project)
     if cell.kind == "functional" and cell.operation == "secrets.list":
         await prove_secret_presence(run, base_url, issuer, db_url)
+        return
+    if cell.kind == "functional" and cell.operation in _STRANDED:
+        grants = _functional_grants(cell.operation, project)
+        stranded = partial(_STRANDED[cell.operation], caller, grants, db_url=db_url)
+        await on_stranded_pin(run, base_url, issuer, db_url, project=project, body=stranded)
         return
     if cell.kind == "functional":
         body = cast(Functional, partial(_FUNCTIONAL[cell.operation], db_url=db_url))

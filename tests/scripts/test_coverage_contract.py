@@ -227,6 +227,8 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert {c.node_id for c in investigation} == {_INVESTIGATION_NODE}
     operator = [c for c in contract.cells if c.operation in _OPERATOR_TOOLS]
     assert len(operator) == 124 and {c.node_id for c in operator} == {_OPERATOR_NODE}
+    build_uses = [c for c in contract.cells if c.operation in _OPERATOR_SPLIT[3111]]
+    assert len(build_uses) == 16 and {c.node_id for c in build_uses} == {_OPERATOR_NODE}
     systems = [c for c in contract.cells if c.operation in _SYSTEM_TOOLS]
     local = [c for c in systems if c.provider == "local-libvirt"]
     assert len(local) == 240 and {c.node_id for c in local} == {_SYSTEM_NODE}
@@ -258,6 +260,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_SPLIT[3095],
         *_SPLIT[3096],
         *_OPERATOR_TOOLS,
+        *_OPERATOR_SPLIT[3111],
         *_SYSTEM_TOOLS,
         *_RUN_TOOLS,
         *_OPERATOR_SPLIT[3112],
@@ -477,6 +480,16 @@ def test_operator_tools_follow_the_approved_split(inventory: Inventory) -> None:
         "resources.drain",
     }
     assert overrides[3111] == {"ops.recover_build_use"}
+    # Operator decision R5 (2026-10-13): recovery needs no provider authority.
+    recovery = {
+        (c.operation, c.roles)
+        for c in cells
+        if c.operation in _OPERATOR_SPLIT[3111] and c.kind == "functional"
+    }
+    assert recovery == {
+        ("ops.build_uses_list", ("server",)),
+        ("ops.recover_build_use", ("server", "worker")),
+    }
     assert len([c for c in cells if c.owner == 3112]) == 136
     # Operator option A (#3112, 2026-10-07): only the resolve tools need the authority.
     base = ("server", "worker", "reconciler")

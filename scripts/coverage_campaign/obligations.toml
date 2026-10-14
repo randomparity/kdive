@@ -133,7 +133,7 @@ execution = "service"
 "ops.recover_build_use" = "Verify authorized recovery releases only the exactly fenced use after terminal evidence."
 
 [groups.role_overrides]
-"ops.recover_build_use" = ["server", "worker", "authority"]
+"ops.recover_build_use" = ["server", "worker"]
 
 [[groups]]
 owner = 3112
@@ -467,6 +467,10 @@ kernel = true
 "tool/inventory.list/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/inventory.list/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/inventory.list/default/validation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.build_uses_list/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.build_uses_list/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.build_uses_list/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.build_uses_list/default/validation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/ops.diagnostics/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/ops.diagnostics/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/ops.diagnostics/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
@@ -482,6 +486,10 @@ kernel = true
 "tool/ops.jobs_list/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/ops.jobs_list/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/ops.jobs_list/default/validation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.recover_build_use/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.recover_build_use/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.recover_build_use/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+"tool/ops.recover_build_use/default/validation" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/ops.tool_trail/default/authentication" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/ops.tool_trail/default/authorization" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
 "tool/ops.tool_trail/default/functional" = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
