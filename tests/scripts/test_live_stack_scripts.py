@@ -2273,13 +2273,78 @@ def test_demo_up_guest_image_hint_names_the_shared_catalog_entry() -> None:
     assert "build-image.sh fedora-kdive-ready-44" not in text
 
 
+_DERIVED_URLS = (
+    "KDIVE_HARNESS_DATABASE_URL",
+    "KDIVE_MIGRATION_DATABASE_URL",
+    "KDIVE_SERVER_DATABASE_URL",
+    "KDIVE_WORKER_DATABASE_URL",
+    "KDIVE_RECONCILER_DATABASE_URL",
+    "KDIVE_S3_ENDPOINT_URL",
+    "KDIVE_OIDC_ISSUER",
+    "KDIVE_OIDC_JWKS_URI",
+)
+_BACKEND_PORTS = ("KDIVE_POSTGRES_PORT", "KDIVE_SEAWEEDFS_PORT", "KDIVE_OIDC_PORT")
+
+
+def _derived_urls(**ports: str) -> subprocess.CompletedProcess[str]:
+    """Source env.sh with only `ports` set and print the URL defaults it derives from them."""
+    env = {k: v for k, v in os.environ.items() if k not in {*_DERIVED_URLS, *_BACKEND_PORTS}}
+    env |= {"KDIVE_LIBVIRT_URI": "qemu:///system", **ports}
+    printer = " ".join(f'"${name}"' for name in _DERIVED_URLS)
+    return _sourced(ROOT / "scripts/live-stack/env.sh", f'printf "%s\\n" {printer}', env)
+
+
 def test_client_urls_derive_from_the_configurable_ports() -> None:
-    # The port var must be the SINGLE source of truth: the client-facing DSN/endpoint defaults must
-    # reference the port var, not a second hardcoded literal that could silently drift from compose.
-    env = (ROOT / "scripts/live-stack/env.sh").read_text()
-    assert "localhost:${KDIVE_POSTGRES_PORT}/kdive" in env
-    assert "http://localhost:${KDIVE_SEAWEEDFS_PORT}" in env
-    assert "http://localhost:${KDIVE_OIDC_PORT}/default" in env
+    # The port var is the single source of truth for both the compose publish side and the client
+    # URL defaults, so a bare port keeps today's localhost URLs byte for byte.
+    result = _derived_urls(
+        KDIVE_POSTGRES_PORT="5434", KDIVE_SEAWEEDFS_PORT="8334", KDIVE_OIDC_PORT="8091"
+    )
+    assert result.returncode == 0, result.stderr
+    urls = dict(zip(_DERIVED_URLS, result.stdout.splitlines(), strict=True))
+    harness = "kdive-harness:kdive-harness-local"  # pragma: allowlist secret
+    assert urls["KDIVE_HARNESS_DATABASE_URL"] == f"postgresql://{harness}@localhost:5434/kdive"
+    assert all(urls[name].endswith("@localhost:5434/kdive") for name in _DERIVED_URLS[:5])
+    assert urls["KDIVE_S3_ENDPOINT_URL"] == "http://localhost:8334"
+    assert urls["KDIVE_OIDC_ISSUER"] == "http://localhost:8091/default"
+    assert urls["KDIVE_OIDC_JWKS_URI"] == "http://localhost:8091/default/jwks"
+
+
+@pytest.mark.parametrize(
+    ("port", "endpoint"),
+    [
+        ("5434", "localhost:5434"),
+        ("127.0.0.1:5434", "localhost:5434"),
+        ("0.0.0.0:5434", "localhost:5434"),
+        ("[::1]:5434", "localhost:5434"),
+        ("192.0.2.10:5434", "192.0.2.10:5434"),
+        ("db.example.test:5434", "db.example.test:5434"),
+        ("[2001:db8::1]:5434", "[2001:db8::1]:5434"),
+        ("2001:db8::1:5434", "[2001:db8::1]:5434"),
+    ],
+)
+def test_backend_endpoint_accepts_port_and_addr_port(port: str, endpoint: str) -> None:
+    """#3215: an ADDR:PORT publish value made every default DSN `localhost:ADDR:PORT`."""
+    result = _derived_urls(KDIVE_POSTGRES_PORT=port)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[0].endswith(f"@{endpoint}/kdive")
+
+
+def test_backend_endpoint_moves_the_oidc_issuer_to_a_published_address() -> None:
+    result = _derived_urls(KDIVE_OIDC_PORT="192.0.2.10:8090")
+    assert result.returncode == 0, result.stderr
+    assert "http://192.0.2.10:8090/default" in result.stdout.splitlines()
+
+
+@pytest.mark.parametrize("variable", _BACKEND_PORTS)
+@pytest.mark.parametrize(
+    "value", ["bad", "1.2.3.4:0", "1.2.3.4:70000", "a b:5434", "x/y:5434", "::1", "[]:5434"]
+)
+def test_backend_endpoint_rejects_an_unparseable_port(variable: str, value: str) -> None:
+    result = _derived_urls(**{variable: value})
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert f"{variable}={value} must be PORT or ADDR:PORT" in result.stderr
 
 
 def test_executable_live_stack_scripts_are_strict_bash() -> None:
@@ -3527,6 +3592,8 @@ def _lifecycle_start_with_inventory(
         "def request_path(path, request):\n"
         "    with open(os.environ['INVENTORY_PROBE'], 'w') as handle:\n"
         "        handle.write(repr(request.settings.systems_toml))\n"
+        "    with open(os.environ['ROUTE_PROBE'], 'w') as handle:\n"
+        "        handle.write(repr(request.settings.authority_instance))\n"
         "    return LifecycleResponse(ok=True, code='ok', message='ok', retry_action='none')\n"
         "control.request_path = request_path\n",
         encoding="utf-8",
@@ -3536,6 +3603,8 @@ def _lifecycle_start_with_inventory(
         "PYTHONPATH": str(tmp_path),
         "KDIVE_PYTHON": sys.executable,
         "INVENTORY_PROBE": str(probe),
+        "ROUTE_PROBE": str(tmp_path / "route-probe"),
+        "AUTHORITY_ROUTE_ENV": str(tmp_path / "absent-route.env"),
         "KDIVE_SYSTEMS_TOML": str(systems_toml),
         "KDIVE_ROOTFS_DIR": "/tmp/rootfs",
         "KDIVE_BUILD_WORKSPACE": "/tmp/build",
@@ -3639,6 +3708,140 @@ def test_lifecycle_start_refuses_an_inventory_a_slot_cannot_read(tmp_path: Path)
     assert not probe.exists()
 
 
+_ROUTE = {
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "lane-authority",
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": (
+        "/run/kdive/provider-authority/request/authority.sock"
+    ),
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF": "external-boot-authority/server-ca",
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": (
+        "external-boot-authority/client-certificate"
+    ),
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": (
+        "external-boot-authority/client-key"  # pragma: allowlist secret
+    ),
+}
+_ROUTE_TEXT = "".join(f"{name}={value}\n" for name, value in _ROUTE.items())
+
+
+def _stat_shim(tmp_path: Path, metadata: str = "0:0:644") -> str:
+    """A PATH prefix whose `stat` answers `metadata`: no test can own a root:root file."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "stat"
+    stub.write_text(f"#!/bin/sh\nprintf '%s\\n' '{metadata}'\n", encoding="utf-8")
+    stub.chmod(0o755)
+    return f"{bin_dir}:{os.environ['PATH']}"
+
+
+def _load_route(
+    tmp_path: Path,
+    content: str | None,
+    *,
+    metadata: str = "0:0:644",
+    preset: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Source worker-lifecycle.sh, load the route file, and print the five values from a child."""
+    route = tmp_path / "live-worker-authority.env"
+    if content is not None:
+        route.write_text(content, encoding="utf-8")
+    env = {
+        **{k: v for k, v in os.environ.items() if k not in _ROUTE},
+        "KDIVE_LIBVIRT_URI": "qemu:///system",
+        "AUTHORITY_ROUTE_ENV": str(route),
+        "PATH": _stat_shim(tmp_path, metadata),
+        **(preset or {}),
+    }
+    printer = " ".join(f'"${{{name}-unset}}"' for name in _ROUTE)
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "$1" && load_published_authority_route && '
+            f"bash -c 'printf \"%s\\n\" {printer}'",
+            "bash",
+            str(LIFECYCLE),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
+def test_authority_route_absent_file_changes_nothing(tmp_path: Path) -> None:
+    result = _load_route(tmp_path, None)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["unset"] * 5
+
+
+def test_authority_route_exports_the_published_values(tmp_path: Path) -> None:
+    result = _load_route(tmp_path, _ROUTE_TEXT)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == list(_ROUTE.values())
+
+
+def test_authority_route_refuses_untrusted_metadata(tmp_path: Path) -> None:
+    result = _load_route(tmp_path, _ROUTE_TEXT, metadata="1000:1000:644")
+    assert result.returncode == 1
+    assert "untrusted metadata" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        _ROUTE_TEXT + _ROUTE_TEXT.splitlines(keepends=True)[0],
+        _ROUTE_TEXT.replace("CLIENT_KEY_REF", "INSTANCE"),
+        _ROUTE_TEXT.replace("CLIENT_KEY_REF", "OTHER_REF"),
+        _ROUTE_TEXT.replace("=external-boot-authority/server-ca", "="),
+        _ROUTE_TEXT.replace("CLIENT_KEY_REF=", "CLIENT_KEY_REF "),
+        "".join(_ROUTE_TEXT.splitlines(keepends=True)[:4]),
+    ],
+    ids=["extra", "duplicate", "unknown", "empty", "no-equals", "short"],
+)
+def test_authority_route_requires_exactly_the_five_assignments(
+    tmp_path: Path, content: str
+) -> None:
+    result = _load_route(tmp_path, content)
+    assert result.returncode == 1
+    assert "exactly the five" in result.stderr
+
+
+def test_authority_route_refuses_a_contradicting_preset(tmp_path: Path) -> None:
+    preset = {"KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "other-authority"}
+    result = _load_route(tmp_path, _ROUTE_TEXT, preset=preset)
+    assert result.returncode == 1
+    assert "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE contradicts" in result.stderr
+
+
+def test_authority_route_accepts_an_equal_preset(tmp_path: Path) -> None:
+    preset = {"KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "lane-authority"}
+    result = _load_route(tmp_path, _ROUTE_TEXT, preset=preset)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == list(_ROUTE.values())
+
+
+def test_authority_route_values_are_literal_data(tmp_path: Path) -> None:
+    canary = tmp_path / "canary"
+    content = _ROUTE_TEXT.replace("lane-authority", f"$(touch {canary})")
+    result = _load_route(tmp_path, content)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[0] == f"$(touch {canary})"
+    assert not canary.exists()
+
+
+def test_lifecycle_start_forwards_the_published_authority_route(tmp_path: Path) -> None:
+    route = tmp_path / "live-worker-authority.env"
+    route.write_text(_ROUTE_TEXT, encoding="utf-8")
+    result, _, _ = _lifecycle_start_with_inventory(
+        tmp_path,
+        None,
+        extra_env={"AUTHORITY_ROUTE_ENV": str(route), "PATH": _stat_shim(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "route-probe").read_text() == repr("lane-authority")
+
+
 def test_lifecycle_start_rejects_mismatched_authority_geometry_before_request() -> None:
     result = subprocess.run(
         [
@@ -3678,6 +3881,7 @@ def test_lifecycle_start_rejects_mismatched_authority_geometry_before_request() 
             "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES": "4096",
             "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": "8192",
             "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "4097",
+            "AUTHORITY_ROUTE_ENV": "/nonexistent/live-worker-authority.env",
         },
     )
 
