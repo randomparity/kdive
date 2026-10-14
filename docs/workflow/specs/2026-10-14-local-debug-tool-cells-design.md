@@ -46,8 +46,9 @@ The matrix digest moves; earlier qualifications against it fail
 A dated amendment names ten more pairs: `authorization` and
 `project-isolation` of the five list tools. Each answers a denied caller with
 an empty page rather than a failure: the SQL scopes rows to the caller's
-viewer projects (`viewer_projects`, `projects_with_role`), and none rejects a
-`project` argument naming another project. The decision's four-step evidence
+viewer projects (`viewer_projects`, `projects_with_role`). Four of them filter a
+`project` argument naming another project rather than rejecting it; `jobs.list` takes no
+`project` argument. The decision's four-step evidence
 sequence applies unchanged. Two precise differences from the original pairs
 are recorded:
 
@@ -123,18 +124,19 @@ next higher text symbol's address. A stop "in `vfs_read`" means
 | `debug.get_session` | `live`, `project`, `run_id`, `system_id` and `transport` equal the started session's. |
 | `debug.list_sessions` | One session started and ended, a second left live. `request={run_id}` lists exactly those two ids, newest first; `state="live"` lists the second only, `state="detached"` the first only, each with the record's state. |
 | `debug.continue` | Breakpoint at `vfs_read` (operator); continue with the banner: `stopped`, `reason="breakpoint-hit"`, not `timed_out`; `rip` is in `vfs_read`. |
-| `debug.interrupt` | Before any attach the guest answers SSH; the interrupt (which attaches) answers `stopped`; the guest no longer answers a banner within 5 s; the stop carries a `reason`. |
-| `debug.advance` | Stopped in `vfs_read`; the backtrace's frame 1 address is the return address. `mode="out"` answers `reason="function-finished"` and `rip` equals that address. |
+| `debug.interrupt` | Before any attach the guest answers SSH; the interrupt (which attaches) answers `stopped`; the guest no longer answers a banner within 5 s; the stop carries `reason="signal-received"`. |
+| `debug.advance` | Stopped in `vfs_read`. `mode="instruction"` answers `reason="end-stepping-range"` and `rip` is where the fixture binary says one step lands: `objdump` of the fixture `vmlinux` gives the next instruction, or a jump or call's target. `mode="out"` then answers `reason="function-finished"` with `rip` at frame 1's return address, or, after a step into a callee, at the instruction after the call. |
 | `debug.set_breakpoint` | Set at `vfs_read`: `number` returned; `debug.list_breakpoints` counts one; continue with the banner stops `breakpoint-hit` in `vfs_read`; frame 0 is `vfs_read`. |
 | `debug.clear_breakpoint` | Breakpoint at `vfs_read` set, then cleared: `cleared`; the count is zero; a 5 s continue with the banner times out (`timed_out`), which a live `vfs_read` breakpoint would not. |
 | `debug.list_breakpoints` | Breakpoints at `vfs_read` and `vfs_write`: count two; after clearing one, count one. The tool returns no identifiers or locations, so the cell then fails naming that gap. |
 | `debug.set_watchpoint` | Watch `jiffies_64` (8 bytes): `watching`, a number; continue answers `reason="watchpoint-trigger"`; `jiffies_64` read before the set and after the stop increased. |
 | `debug.clear_watchpoint` | Watchpoint on `jiffies_64` set, then cleared: `cleared`; `debug.list_watchpoints` lists none; a 5 s continue times out, which a live `jiffies_64` watchpoint would not. |
-| `debug.list_watchpoints` | One watchpoint on `jiffies_64`: exactly one entry with the set call's number and expression `jiffies_64`. |
+| `debug.list_watchpoints` | One watchpoint on `jiffies_64`: exactly one entry with the set call's number and the expression the tool sets, `*(char(*)[8])` at `ksym(jiffies_64)`. |
 | `debug.read_memory` | At `ksym(linux_banner)`, the length of `/proc/version`: the bytes equal `/proc/version` and begin `Linux version <fixture release> `. |
 | `debug.read_registers` | Stopped in `vfs_read`: `rip` in `vfs_read`; `rsp` a kernel address. |
 | `debug.resolve_symbol` | `vfs_read` and `linux_banner` resolve to their `ksym` addresses. |
-| `debug.disassemble` | `symbol="vfs_read"`, 16 instructions: 16 returned, the first at `ksym(vfs_read)`, addresses strictly increasing and below `next(vfs_read)`, every `func_name` `vfs_read`. |
+| `debug.disassemble` | `symbol="vfs_read"`, 16 instructions: their addresses are the first 16 instruction boundaries `objdump` decodes from the fixture `vmlinux` at `ksym(vfs_read)`, every `func_name` `vfs_read`. Mnemonics are recorded, not required: the kernel patches some sites at boot (the ftrace call, static branches). |
+| `debug.backtrace` | Stopped in `vfs_read`: frame 0 is `vfs_read` at the stop's `rip`; frame 1 is a read(2)-family caller (`ksys_read`, `ksys_pread64` or their syscall wrappers); the walk reaches the syscall entry. |
 | `debug.read_frame` | Stopped in `vfs_read`: level 0 is `vfs_read` with the stop's `rip`. The tool returns no arguments or locals, so the cell then fails naming that gap. |
 | `debug.list_modules` | `loop` is listed with `base_address` equal to `/sys/module/loop/sections/.text`. |
 | `debug.load_module_symbols` | A `[loop]` text symbol does not resolve before the load; `loop` with that base loads (`symbols_loaded`); the symbol then resolves to its `ksym` address. |
@@ -201,6 +203,8 @@ naming the target's System or Run, and whether its domain is defined.
      clocks); the cell ends its sessions before the frame's cleanup probes.
    - An ambient `read(2)` may hit the `vfs_read` breakpoint before the
      banner's; any hit in `vfs_read` is the same stop the workload produces.
+   - A test host without `objdump` (binutils) cannot decode the fixture binary;
+     the `debug.advance` and `debug.disassemble` cells record `blocked`.
    - A missing server `gdb`, Run debuginfo or module `.ko` answers
      `debug_attach_failure`, `no_debuginfo` or `no_module_debuginfo`; the cell
      records `blocked` for a missing dependency, `failure` otherwise.

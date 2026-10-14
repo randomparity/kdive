@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -14,17 +15,21 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES, Cell, build_contract
 from scripts.coverage_campaign.evidence import Outcome
+from tests.integration.live_stack import debug_cells
 from tests.integration.live_stack.debug_cells import (
     BODIES,
     BREAK_AT,
     TOOLS,
     DebugTarget,
+    Instruction,
     Session,
     Truth,
     checked,
     gdbstub_profile,
     hex_value,
+    next_pcs,
     parse_kallsyms,
+    parse_objdump,
     rejection,
     system_map_address,
 )
@@ -204,6 +209,7 @@ def _session(tool: str, debugger: _Debugger) -> Session:
         Endpoint("127.0.0.1", 1),
         _truth(),
         "postgresql://unused",
+        Path("/fixture"),
     )
 
 
@@ -248,25 +254,124 @@ def _run(tool: str, debugger: _Debugger, monkeypatch: pytest.MonkeyPatch) -> dic
     return asyncio.run(body())
 
 
-def test_advance_out_must_land_on_the_return_address(monkeypatch: pytest.MonkeyPatch) -> None:
+_BASE = 0xFFFFFFFF81200000
+_CODE = [Instruction(_BASE + 4 * i, "push   %rbp" if i == 4 else "nop", None) for i in range(16)]
+
+
+def _fixture_code(monkeypatch: pytest.MonkeyPatch, code: list[Instruction] = _CODE) -> None:
+    async def fixture_code(_vmlinux: Path, start: int, _stop: int) -> list[Instruction]:
+        assert start == _BASE
+        return code
+
+    monkeypatch.setattr(debug_cells, "fixture_code", fixture_code)
+
+
+def _stepping(step_to: int, out_to: int) -> dict[str, _Answer]:
     landed = {"rip": _RIP}
 
     def registers(_args: Mapping[str, object]) -> ToolResponse:
-        return ToolResponse.success("ses-1", "read", data=cast(Any, landed))
+        return ToolResponse.success("ses-1", "read", data=cast(Any, dict(landed)))
 
-    def advance(_args: Mapping[str, object]) -> ToolResponse:
-        landed["rip"] = _RETURN
-        return _stopped("function-finished")(_args)
+    def advance(args: Mapping[str, object]) -> ToolResponse:
+        out = args["mode"] == "out"
+        landed["rip"] = hex(out_to if out else step_to)
+        return _stopped("function-finished" if out else "end-stepping-range")(args)
 
-    debugger = _Debugger(
-        _stop_answers(**{"debug.read_registers": registers, "debug.advance": advance})
-    )
-    assert _run("debug.advance", debugger, monkeypatch)["rip_is_return_address"] is True
+    return _stop_answers(**{"debug.read_registers": registers, "debug.advance": advance})
 
-    wrong = _Debugger(_stop_answers(**{"debug.advance": _stopped("function-finished")}))
+
+def test_advance_steps_to_the_fixture_boundary_then_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fixture_code(monkeypatch)
+    good = _Debugger(_stepping(_BASE + 0x14, int(_RETURN, 16)))
+    observed = _run("debug.advance", good, monkeypatch)
+    assert observed["step_matches_fixture"] is True and observed["entered_callee"] is False
+    modes = [args["mode"] for tool, args in good.calls if tool == "debug.advance"]
+    assert modes == ["instruction", "out"]
+
+    skipped = _Debugger(_stepping(_BASE + 0x18, int(_RETURN, 16)))
+    with pytest.raises(AssertionError, match="where the fixture binary says"):
+        _run("debug.advance", skipped, monkeypatch)
+    assert ("debug.end_session", {"session_id": "ses-1"}) in skipped.calls
+    wrong_out = _Debugger(_stepping(_BASE + 0x14, _BASE + 0x20))
     with pytest.raises(AssertionError, match="return address"):
-        _run("debug.advance", wrong, monkeypatch)
-    assert ("debug.end_session", {"session_id": "ses-1"}) in wrong.calls
+        _run("debug.advance", wrong_out, monkeypatch)
+
+
+def test_next_pcs_follows_the_fixture_instruction() -> None:
+    call = Instruction(_BASE + 0x10, "call   ffffffff81300000 <rw_verify_area>", 0xFFFFFFFF81300000)
+    code = [*_CODE[:4], call, *_CODE[5:]]
+    assert next_pcs(_CODE, _BASE + 0x10) == {_BASE + 0x14}
+    assert next_pcs(code, _BASE + 0x10) == {_BASE + 0x14, 0xFFFFFFFF81300000}
+    with pytest.raises(AssertionError, match="not an instruction boundary"):
+        next_pcs(_CODE, _BASE + 0x11)
+    ret = [*_CODE[:4], Instruction(_BASE + 0x10, "ret", None), *_CODE[5:]]
+    with pytest.raises(AssertionError, match="cannot predict"):
+        next_pcs(ret, _BASE + 0x10)
+
+
+def test_parse_objdump_reads_addresses_text_and_targets() -> None:
+    text = (
+        "ffffffff81200000 <vfs_read>:\n"
+        "ffffffff81200000:\tendbr64\n"
+        "ffffffff81200004:\tcall   ffffffff81000100 <__fentry__>\n"
+        "ffffffff81200009:\tjne    ffffffff81200040 <vfs_read+0x40>\n"
+    )
+    code = parse_objdump(text)
+    assert [i.address for i in code] == [0xFFFFFFFF81200000, 0xFFFFFFFF81200004, 0xFFFFFFFF81200009]
+    assert code[1].target == 0xFFFFFFFF81000100 and code[1].transfers()
+    assert code[2].mnemonic == "jne" and not code[0].transfers()
+
+
+def test_disassemble_needs_the_fixture_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fixture_code(monkeypatch)
+    rows = [{"address": hex(i.address), "inst": i.text, "func_name": BREAK_AT} for i in _CODE]
+    good = {"debug.disassemble": _ok("disassembled", instructions=rows, instruction_count=16)}
+    observed = _run("debug.disassemble", _Debugger(good), monkeypatch)
+    assert observed["mnemonics_agreeing"] == 16
+    shifted = [{**r, "address": hex(hex_value(r["address"]) + 1)} for r in rows]
+    bad = {"debug.disassemble": _ok("disassembled", instructions=shifted, instruction_count=16)}
+    with pytest.raises(AssertionError, match="boundaries differ"):
+        _run("debug.disassemble", _Debugger(bad), monkeypatch)
+
+
+def test_list_watchpoints_compares_the_address_expression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def listed(expr: str) -> dict[str, _Answer]:
+        rows = [{"number": "2", "type": "hw watchpoint", "expr": expr}]
+        return {
+            "debug.set_watchpoint": _ok("watching", number="2"),
+            "debug.clear_watchpoint": _ok("cleared"),
+            "debug.list_watchpoints": _ok("listed", count=1, watchpoints=rows),
+        }
+
+    good = listed("*(char(*)[8])0xffffffff82100000")
+    assert _run("debug.list_watchpoints", _Debugger(good), monkeypatch)["count"] == 1
+    with pytest.raises(AssertionError, match="listed"):
+        _run("debug.list_watchpoints", _Debugger(listed("jiffies_64")), monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("reason", "match"),
+    [(None, "no stop reason"), ("breakpoint-hit", "stopped for")],
+)
+def test_interrupt_needs_a_signal_stop(
+    reason: str | None, match: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    states = iter((True, False))
+
+    async def answers(_endpoint: Endpoint, timeout: float = 5.0) -> bool:
+        return next(states)
+
+    monkeypatch.setattr(debug_cells, "answers", answers)
+    debugger = _Debugger(_stop_answers(**{"debug.interrupt": _stopped(reason)}))
+    with pytest.raises(AssertionError, match=match):
+        _run("debug.interrupt", debugger, monkeypatch)
+    states = iter((True, False))
+    signal = _Debugger(_stop_answers(**{"debug.interrupt": _stopped("signal-received")}))
+    assert _run("debug.interrupt", signal, monkeypatch)["reason"] == "signal-received"
 
 
 def test_continue_needs_a_breakpoint_hit_in_vfs_read(monkeypatch: pytest.MonkeyPatch) -> None:

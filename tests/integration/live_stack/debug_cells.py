@@ -22,7 +22,10 @@ import asyncio
 import contextlib
 import copy
 import hashlib
+import re
 import secrets
+import shutil
+import subprocess
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
@@ -116,6 +119,9 @@ WATCH = "jiffies_64"
 BANNER = "linux_banner"
 # A [loop] text function in .text, which load_module_symbols relocates.
 MODULE, MODULE_SYMBOL = "loop", "loop_queue_rq"
+# The read(2) family's paths into vfs_read; any of them may take the breakpoint (spec, failure
+# model): the banner's read, or an ambient read or pread64.
+_READ_CALLERS = frozenset({"ksys_read", "__x64_sys_read", "ksys_pread64", "__x64_sys_pread64"})
 _STOP_WAIT_S = 30.0
 _NO_STOP_WAIT_S = 5.0
 _ANSWER_S = 5.0
@@ -196,6 +202,82 @@ def hex_value(value: object) -> int:
     """A gdb hex value such as ``0xffffffff81234567`` or ``0xffffffff81234567 <vfs_read+4>``."""
     assert isinstance(value, str) and value.startswith("0x"), f"not a hex value: {value!r}"
     return int(value.split()[0], 16)
+
+
+@dataclass(frozen=True)
+class Instruction:
+    """One instruction of the fixture ``vmlinux`` as ``objdump`` decodes it."""
+
+    address: int
+    text: str
+    target: int | None
+
+    @property
+    def mnemonic(self) -> str:
+        return self.text.split()[0]
+
+    def transfers(self) -> bool:
+        """A jump, call or return: the next instruction is not necessarily the one after it."""
+        return any(w.startswith(("j", "call", "ret")) for w in self.text.split()[:2])
+
+
+_OBJDUMP_LINE = re.compile(r"^\s*([0-9a-f]+):\s+(\S.*?)\s*$")
+_TARGET = re.compile(r"\b([0-9a-f]{8,}) <")
+
+
+def parse_objdump(text: str) -> list[Instruction]:
+    """The instructions of ``objdump -d --no-show-raw-insn`` output, in address order."""
+    listed = []
+    for line in text.splitlines():
+        found = _OBJDUMP_LINE.match(line)
+        if found is None or found.group(2).startswith("("):
+            continue
+        target = _TARGET.search(found.group(2))
+        listed.append(
+            Instruction(
+                int(found.group(1), 16),
+                found.group(2),
+                int(target.group(1), 16) if target else None,
+            )
+        )
+    return listed
+
+
+async def fixture_code(vmlinux: Path, start: int, stop: int) -> list[Instruction]:
+    """The fixture binary's instructions in ``[start, stop)``: ground truth beside the debugger.
+
+    ``blocked`` without ``objdump`` on the test host.
+    """
+    tool = shutil.which("objdump")
+    if tool is None:
+        raise ScenarioStop(Outcome.BLOCKED, "objdump (binutils) is not on the test host's PATH")
+    argv = [tool, "-d", "--no-show-raw-insn", f"--start-address={start:#x}"]
+    argv += [f"--stop-address={stop:#x}", str(vmlinux)]
+
+    def decode() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603 - fixed argv  # nosec B603
+            argv, capture_output=True, text=True, timeout=120.0, check=False
+        )
+
+    result = await asyncio.to_thread(decode)
+    assert result.returncode == 0, f"objdump exited {result.returncode}"
+    listed = parse_objdump(result.stdout)
+    assert listed and listed[0].address == start, "objdump decoded nothing at the symbol"
+    return listed
+
+
+def next_pcs(code: list[Instruction], pc: int) -> set[int]:
+    """Where one instruction step from ``pc`` may land: the next instruction, or its target."""
+    index = next((i for i, ins in enumerate(code) if ins.address == pc), None)
+    assert index is not None, f"{pc:#x} is not an instruction boundary of the fixture binary"
+    assert index + 1 < len(code), "the stop is on the function's last instruction"
+    here, following = code[index], code[index + 1].address
+    if not here.transfers():
+        return {following}
+    assert not here.mnemonic.startswith("ret") and here.target is not None, (
+        f"cannot predict the step from {here.mnemonic} at {pc:#x}"
+    )
+    return {following, here.target}
 
 
 async def _guest(endpoint: Endpoint, key: Path, command: str) -> str:
@@ -288,6 +370,7 @@ class Session:
     endpoint: Endpoint
     truth: Truth
     db_url: str
+    tree: Path
     sessions: list[str] = field(default_factory=list)
 
     @property
@@ -526,25 +609,44 @@ async def interrupt_body(s: Session) -> dict[str, object]:
     await s.end(session_id)
     assert reason, (
         "debug.interrupt halted the guest but reported no stop reason: the attach had already "
-        "stopped it, and no public operation leaves a live session running (known gap, #2813)"
+        "stopped it, and no public operation leaves a live session running (known product gap)"
     )
+    assert reason == "signal-received", f"the interrupt stopped for {reason!r}"
     return {"halted": True, "reason": reason}
 
 
 async def advance_body(s: Session) -> dict[str, object]:
-    """``out`` from ``vfs_read`` stops at the return address frame 1 names."""
+    """An instruction step lands where the fixture binary says; ``out`` then returns.
+
+    The step's expected landing comes from ``objdump`` of the fixture ``vmlinux``: the next
+    instruction, or a transfer's target. ``out`` from ``vfs_read`` stops at frame 1's return
+    address; from a callee the step entered, at the instruction after the call.
+    """
     session_id = await s.start()
-    await s.stop_in_vfs_read(session_id)
+    pc = await s.stop_in_vfs_read(session_id)
     frames = await s.frames(session_id)
     assert frames[0].get("func") == BREAK_AT, f"frame 0 is {frames[0].get('func')!r}"
     assert len(frames) > 1, "vfs_read has no caller frame"
-    returns_to = hex_value(frames[1].get("addr"))
+    code = await fixture_code(s.tree / "vmlinux", s.truth.at(BREAK_AT), s.truth.end_of(BREAK_AT))
+    landings = next_pcs(code, pc)
+    stepped = await s.exposed(session_id=session_id, mode="instruction", timeout_sec=_STOP_WAIT_S)
+    require_stop(stepped, "end-stepping-range")
+    step = await s.register(session_id)
+    assert step in landings, "the instruction step did not land where the fixture binary says"
+    entered = not s.truth.within(BREAK_AT, step)
+    inside = [a for a in landings if s.truth.within(BREAK_AT, a)]
+    returns_to = inside[0] if entered else hex_value(frames[1].get("addr"))
     env = await s.exposed(session_id=session_id, mode="out", timeout_sec=_STOP_WAIT_S)
     require_stop(env, "function-finished")
     rip = await s.register(session_id)
     assert rip == returns_to, "advance out did not stop at the caller's return address"
     await s.end(session_id)
-    return {"mode": "out", "reason": "function-finished", "rip_is_return_address": True}
+    return {
+        "modes": ["instruction", "out"],
+        "step_matches_fixture": True,
+        "entered_callee": entered,
+        "out_at_return_address": True,
+    }
 
 
 async def set_breakpoint_body(s: Session) -> dict[str, object]:
@@ -588,7 +690,7 @@ async def list_breakpoints_body(s: Session) -> dict[str, object]:
     assert counts == (2, 1), f"the listed counts are {counts}"
     assert "breakpoints" in both.data, (
         "debug.list_breakpoints returns only a count, so its identifiers and locations cannot "
-        "be compared with the installed breakpoints (known gap, #2813)"
+        "be compared with the installed breakpoints (known product gap)"
     )
     return {"counts": list(counts)}
 
@@ -631,10 +733,11 @@ async def list_watchpoints_body(s: Session) -> dict[str, object]:
     listed = env.data.get("watchpoints")
     assert isinstance(listed, list), "no watchpoints listed"
     seen = [(str(w.get("number")), w.get("expr")) for w in listed if isinstance(w, dict)]
-    assert (env.data.get("count"), seen) == (1, [(number, WATCH)]), f"listed {seen}"
+    expression = f"*(char(*)[8]){s.truth.at(WATCH):#x}"
+    assert (env.data.get("count"), seen) == (1, [(number, expression)]), f"listed {seen}"
     await s.op("debug.clear_watchpoint", session_id=session_id, number=number)
     await s.end(session_id)
-    return {"count": 1, "number_matches": True, "expr": WATCH}
+    return {"count": 1, "number_matches": True, "expr_at_kallsyms_address": True}
 
 
 async def read_memory_body(s: Session) -> dict[str, object]:
@@ -674,19 +777,27 @@ async def resolve_body(s: Session) -> dict[str, object]:
 
 
 async def disassemble_body(s: Session) -> dict[str, object]:
-    """Sixteen instructions from ``vfs_read``'s address, in order, inside the function."""
+    """Sixteen instructions from ``vfs_read`` on the fixture binary's instruction boundaries.
+
+    Mnemonics are recorded, not required: the kernel patches some sites at boot (the ftrace
+    call, static branches), so live text may differ from the binary at an unchanged boundary.
+    """
     session_id = await s.start()
     env = await s.exposed(session_id=session_id, symbol=BREAK_AT, instruction_count=16)
     await s.end(session_id)
     listed = env.data.get("instructions")
     assert isinstance(listed, list) and len(listed) == 16, "not 16 instructions"
-    addresses = [hex_value(cast(dict[str, Any], i).get("address")) for i in listed]
-    assert addresses[0] == s.truth.at(BREAK_AT), "the first instruction is not vfs_read's"
-    assert addresses == sorted(set(addresses)), "instruction addresses are not increasing"
-    assert addresses[-1] < s.truth.end_of(BREAK_AT), "an instruction lies past vfs_read"
-    names = {cast(dict[str, Any], i).get("func_name") for i in listed}
-    assert names == {BREAK_AT}, f"instructions name {names}"
-    return {"instructions": 16, "first_at_symbol": True, "within_function": True}
+    rows = [cast(dict[str, Any], i) for i in listed]
+    code = await fixture_code(s.tree / "vmlinux", s.truth.at(BREAK_AT), s.truth.end_of(BREAK_AT))
+    assert len(code) >= 16, "the fixture's vfs_read has fewer than 16 instructions"
+    addresses = [hex_value(row.get("address")) for row in rows]
+    assert addresses == [ins.address for ins in code[:16]], "boundaries differ from the binary"
+    assert {row.get("func_name") for row in rows} == {BREAK_AT}, "instructions name another func"
+    agreeing = sum(
+        str(row.get("inst", "")).split()[:1] == [ins.mnemonic]
+        for row, ins in zip(rows, code, strict=False)
+    )
+    return {"instructions": 16, "boundaries_match_fixture": True, "mnemonics_agreeing": agreeing}
 
 
 async def backtrace_body(s: Session) -> dict[str, object]:
@@ -700,9 +811,10 @@ async def backtrace_body(s: Session) -> dict[str, object]:
     funcs = [cast(dict[str, Any], f).get("func") for f in listed]
     top = cast(dict[str, Any], listed[0])
     assert funcs[0] == BREAK_AT and hex_value(top.get("addr")) == rip, "frame 0 differs"
-    assert "ksys_read" in funcs, f"no ksys_read caller in {funcs[:6]}"
+    caller = funcs[1] if len(funcs) > 1 else None
+    assert caller in _READ_CALLERS, f"vfs_read's caller is {caller!r}"
     assert any(f and "syscall" in f for f in funcs), "the walk does not reach the syscall entry"
-    return {"frames": len(funcs), "frame0": BREAK_AT, "caller": "ksys_read"}
+    return {"frames": len(funcs), "frame0": BREAK_AT, "caller": caller}
 
 
 async def read_frame_body(s: Session) -> dict[str, object]:
@@ -716,7 +828,7 @@ async def read_frame_body(s: Session) -> dict[str, object]:
     assert (frame.get("func"), hex_value(frame.get("addr"))) == (BREAK_AT, rip), "frame differs"
     assert "args" in frame or "locals" in frame, (
         "debug.read_frame returns no arguments or locals, so they cannot be compared with the "
-        "workload (known gap, #2813)"
+        "workload (known product gap)"
     )
     return {"frame0": BREAK_AT}
 
@@ -800,7 +912,7 @@ async def functional(
     run_id, endpoint = await boot(run, guest, tree, manifest)
     truth = await read_truth(endpoint, guest.key, tree)
     role = grants(guest.project, GATES[run.cell.operation])
-    session = Session(run, guest, caller, role, manifest, run_id, endpoint, truth, db_url)
+    session = Session(run, guest, caller, role, manifest, run_id, endpoint, truth, db_url, tree)
     try:
         observed = await BODIES[run.cell.operation](session)
     finally:

@@ -1354,8 +1354,9 @@ cells prove denied visibility against a viewer who sees the target session
 ([ADR-0756](../../adr/0756-filtered-list-boundary-evidence.md), amended 2026-10-14). The
 [design](../../workflow/specs/2026-10-14-local-debug-tool-cells-design.md) lists what each cell
 compares. The prerequisites are the capture cells' above (drgn for the `drgn-live` variant)
-plus `gdb` on the MCP server's PATH, which runs the debugger beside QEMU's loopback gdbstub; a
-missing debugger records the cell `blocked`. Run both configurations into one evidence root:
+plus `gdb` on the MCP server's PATH, which runs the debugger beside QEMU's loopback gdbstub,
+and `objdump` on the test host, which decodes the fixture `vmlinux` for the `debug.advance` and
+`debug.disassemble` cells; either missing records the cell `blocked`. Run both configurations into one evidence root:
 
 ```bash
 sha=$(git rev-parse HEAD)
@@ -1377,11 +1378,13 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
 - A `vfs_read` breakpoint stop is the controlled workload: an SSH client banner written while the
   guest resumes makes guest `sshd` call `read(2)`. Addresses, registers, frames, disassembly,
   the `jiffies_64` watchpoint, `linux_banner` bytes, `loop`'s base and a `loop` function's
-  relocated address are compared with the guest's own values; session cells compare the session
-  rows and prove the guest halts while attached and answers again after the detach.
-- Three cells fail by design after proving what they can, until the tool exposes the effect:
-  `debug.list_breakpoints` returns only a count, `debug.read_frame` no arguments or locals, and
-  `debug.interrupt` can only reach a guest that the attach has already halted.
+  relocated address are compared with the guest's own values, and instruction steps and
+  disassembly with the fixture binary's instruction boundaries; session cells compare the
+  session rows and prove the guest halts while attached and answers again after the detach.
+- Two cells fail after proving what they can, until the tool exposes the effect:
+  `debug.list_breakpoints` returns only a count and `debug.read_frame` no arguments or locals.
+  `debug.interrupt` fails if no stop reason is reported: it can only reach a guest that its
+  own attach has just halted.
 - Rejection cells aim at one target per stack: a torn-down fixture System, its Run and an ended
   gdbstub session. They compare the project rows (including its debug sessions), the jobs naming
   the System or Run, and whether its domain is defined.
