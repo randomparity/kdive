@@ -77,12 +77,15 @@ Rejected:
   host that never held an allocation is deleted; one that did is cordoned with its lease cleared,
   because retained allocation rows keep a foreign key to it.
 - **Placement probe.** `allocations.request` in `W` with `resource = {mode: id, resource_id}`,
-  `vcpus` 1, `memory_gb` 1, `disk_gb` 1. A denied probe must write no allocation row in `W`; a
-  granted one is released through `allocations.release` and checked `released`.
+  `vcpus` 1, `memory_gb` 1, `disk_gb` 1. A granted probe is released through
+  `allocations.release` and checked `released`. A probe on a cordoned host must find no placement
+  candidate: admission answers `configuration_error` and writes no allocation row in `W`. A
+  capacity, budget or quota denial (`allocation_denied`, `quota_exceeded`) fails that check.
 - **Platform snapshot.** `prove_functional` and `prove_rejection` take a snapshot that adds to
-  `project_state(P)` the platform rows the cell targets and must leave as found: the lane host's
-  `cordoned`/`status`, the declared config host's capabilities and override entry, the cell-owned
-  cost class's coefficient, `ops_control.queue_paused`, and `R`'s row while it exists.
+  `project_state(P)` the platform rows a cell must leave as found: every declared or discovered
+  host's scheduling, health and cap, every override entry, `ops_control.queue_paused`, every
+  coefficient except the cell-owned class (whose restore the cell checks itself), and the runtime
+  hosts and private images `P` owns.
 - **Tokens.** The tool under test is called through the cell's exposure with the functional
   grants below. Setup, placement and restore calls use separate `direct` tokens with their own
   subjects.
@@ -111,7 +114,7 @@ Grants: `platform_operator` for `ops.set_cost_class_coeff`, `ops.set_host_capaci
   `degraded`, then `offline`, then `available` each read back as the row's status while
   `cordoned` stays true. Restore: deregister, row deleted.
 - **`resources.set_scheduling`**: `R` (owner `W`). `cordoned` sets the flag and leaves status
-  `available`; the placement probe is denied. `schedulable` clears the flag with status
+  `available`; the placement probe finds no candidate. `schedulable` clears the flag with status
   unchanged; the probe is granted on `R`. Restore: release, deregister (cordoned).
 - **`ops.set_host_capacity`**: `R` (owner `W`, cap 2) holds one granted placement `A1`. Cap 1
   reads back in the row; the probe is denied `allocation_denied` with `reason = at_capacity`, cap
@@ -124,11 +127,11 @@ Grants: `platform_operator` for `ops.set_cost_class_coeff`, `ops.set_host_capaci
   read back; release both placements, deregister (cordoned). The class row itself persists (see
   Failure model).
 - **`ops.set_queue_paused`**: requires `queue_paused` false at start, else the cell stops
-  `blocked`. Pause reads back true. A setup-token `ops.diagnostics` call then reports every local
-  worker check with the worker-unavailable detail, and the `diagnostics_worker_check` job it
+  `blocked`. Pause reads back true. A setup-token `ops.diagnostics` call then reports the four
+  local worker-vantage checks with the worker-unavailable detail, and the `diagnostics_worker_check` job it
   enqueued is still `queued` with no worker after the server's 15 s wait. Resume reads back false;
   that job is then claimed (worker set) and `succeeded` within 120 s, and a second diagnostics
-  call reports no worker-unavailable check. A `finally` resumes the queue whatever failed.
+  call reports none of the four unavailable. A `finally` resumes the queue whatever failed.
 - **`inventory.clear_override`**: the declared config host `D`, the first `[[fault_inject]]` or
   `[[remote_libvirt]]` entry of the exported `KDIVE_SYSTEMS_TOML` whose row is config-owned, holds
   the file's cap and has no override entry; none stops the cell `blocked`. A setup
@@ -141,7 +144,8 @@ Grants: `platform_operator` for `ops.set_cost_class_coeff`, `ops.set_host_capaci
   answers with the departed name in `pruned_names`; its row is gone, `R` is unchanged, every
   declared `[[fault_inject]]`/`[[remote_libvirt]]` name and every declared `[[image]]` has a
   config-owned row (an image whose source cannot be realized stays `defined`), and every declared
-  cost class has its file coefficient.
+  cost class has its file coefficient. The loop enforces that end state too, so only the prune is
+  attributed to the call; the rest compares the resulting catalog with the file.
   Restore: deregister `R`, row deleted.
 - **`images.extend`**: a private image `I` owned by `P`, uploaded with a 600 s lifetime. Extending
   by 3600 s answers `extended`; the row's `expires_at` equals the returned value, is later than
@@ -149,13 +153,14 @@ Grants: `platform_operator` for `ops.set_cost_class_coeff`, `ops.set_host_capaci
   owner, visibility, state, digest and object key are unchanged, and the object's stored versions
   are the same. Restore: `images.delete`, object versions purged, both checked.
 - **`images.prune_expired`**: a live local System booted from the public lane image, framed by
-  `on_catalog_system` on an inner run. In a fresh project `Q`, three private images are uploaded:
-  `S` named like the lane image with a 1 s lifetime, `X` with a 1 s lifetime, and `B` with the
-  default lifetime. The retention guard matches a private image by provider and name against every
-  non-terminal System's catalog rootfs (`image_referenced_by_live_system`), so the live System
-  references `S`. The prune answers `pruned`; `X`'s row and object versions are gone; `S`
-  (expired, referenced) and `B` (not expired) remain. Restore: delete `S` and `B`, purge every
-  object of `Q`, check both; the frame tears the System down.
+  `on_catalog_system` on an inner run. Three private images are uploaded, each in its own fresh
+  project: `S` named like the lane image with a 1 s lifetime, `B` with the default lifetime, and
+  `X` with a 1 s lifetime. The retention guard matches a private image by provider and name
+  against every non-terminal System's catalog rootfs (`image_referenced_by_live_system`), so the
+  live System references `S`. Just before the call the expired private images are exactly `X`
+  and `S`; the prune answers `pruned` 1; `X`'s row and object versions are gone; `S` (expired,
+  referenced) and `B` (not expired) remain. Restore: delete `S` and `B`, purge their objects,
+  check both; the frame tears the System down.
 - **`ops.reconcile_now`** (authority): inside `on_authority_system` on an inner run. A fresh
   unmetered project `X` gets `R` (owner `X`) and a harness-inserted `granted` allocation `E` whose
   lease ended a minute ago. The pass answers `ok`; `E` is `expired`; the expiry audit row lies
@@ -166,7 +171,7 @@ Grants: `platform_operator` for `ops.set_cost_class_coeff`, `ops.set_host_capaci
   host carrying the authority-owned System. `passive` answers `cordoned` listing exactly the
   database's live allocations on `L`, the System's among them; `L` reads cordoned with status
   unchanged; the System stays `ready` and active on the authority daemon and its allocation keeps
-  its state; a placement probe on `L` is denied. `resources.set_scheduling` restores `L`
+  its state; a placement probe on `L` finds no candidate. `resources.set_scheduling` restores `L`
   (in a `finally`). Then `force_release` on `R` (owner `W`, one granted placement) releases that
   placement (`released` 1, `skipped` 0, `failed` 0), cordons `R`, and leaves the System's
   allocation unchanged. Restore: deregister `R` (cordoned).
@@ -181,8 +186,8 @@ installed authority records `missing:authority`, which fails the cell; neither c
 The reconciler loop runs the same expiry and image-prune repairs every 30 s, and the inventory
 prune on each pass. Each race-prone cell seeds immediately before its call and attributes the
 repair to the call: `E`'s expiry audit row and the pass's `expired_allocations` count both fall
-inside the call; the departed name appears in `pruned_names`; `X` exists at the call and the
-answer's `pruned` count includes it. When the loop got there first, the cell reseeds and tries
+inside the call; the departed name appears in `pruned_names`; `X` and the referenced `S` are the
+only expired private images just before the call, and the answer's `pruned` count is exactly 1. When the loop got there first, the cell reseeds and tries
 again, at most three times, then fails. The loop's repair is never counted.
 
 ## Rejection cells
@@ -190,7 +195,7 @@ again, at most three times, then fails. The loop's repair is never counted.
 | Boundary | Grants and arguments | Accepted outcome |
 |---|---|---|
 | authentication | a viewer of `P`, arguments naming an absent id or a fresh name | HTTP 401 for the foreign signature; the issued token's call is not 401 (it is denied by role, so nothing changes) |
-| authorization | `platform_auditor` for the operator tools, `platform_operator` for the admin tools, a viewer of `P` for neither; real targets where the tool takes one (`R` from a setup, the cell-owned class, `D`, a private image from a setup for `images.extend`) | `authorization_denied` |
+| authorization | `platform_auditor` for the operator tools, `platform_operator` for the admin tools; a real target where one exists (`R` from a setup for the host tools, a private image of `P` from a setup for `images.extend`, the cell-owned class), otherwise an absent identity the role check refuses first | `authorization_denied` |
 | validation | the functional grants, one mistyped argument per tool (a list for a string, a string for an integer or boolean, an unknown `kind`) | ADR-0722 §3 as amended |
 
 A setup's own rows go before `cleanup` is proven, per `prove_rejection`.

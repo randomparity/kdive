@@ -30,6 +30,12 @@ import psycopg
 import pytest
 
 from kdive.diagnostics.contracts import WORKER_UNAVAILABLE_DETAIL
+from kdive.diagnostics.contributions.multiarch_gdb import (
+    DEPMOD_TOOLCHAIN_ID,
+    GUEST_ARCH_ACCEL_ID,
+    MULTIARCH_GDB_ID,
+    PSERIES_FADUMP_ID,
+)
 from kdive.domain.accounting.cost import KCU_QUANTUM
 from kdive.domain.errors import ErrorCategory
 from kdive.inventory.loader import load_inventory_optional
@@ -115,6 +121,10 @@ _CLAIM_DEADLINE_S = 120.0
 _HOST_CAPS = {"vcpus": 2, "memory_mb": 2048}
 _PROBE = {"vcpus": 1, "memory_gb": 1, "disk_gb": 1}
 _LIVE = ("granted", "active", "releasing")
+# The local worker-vantage diagnostics, which run only as a claimed worker job.
+_WORKER_CHECKS = frozenset(
+    {MULTIARCH_GDB_ID, PSERIES_FADUMP_ID, GUEST_ARCH_ACCEL_ID, DEPMOD_TOOLCHAIN_ID}
+)
 _REASON = "coverage cell #3110"
 Rows = list[dict[str, Any]]
 
@@ -280,13 +290,20 @@ class Hosts:
             self.placed[result.object_id] = project
         return result
 
-    async def denied(self, project: str, host_id: str) -> str:
-        """Require the probe to be refused and to write no allocation; return the category."""
+    async def unplaceable(self, project: str, host_id: str) -> str:
+        """Require the probe to find no schedulable host and to write no allocation.
+
+        An explicit host that is cordoned (or not ``available``) yields no placement candidate,
+        which admission answers ``configuration_error``; a capacity, budget or quota denial is
+        ``allocation_denied`` or ``quota_exceeded`` and fails this check.
+        """
         before = await _rows(self.db_url, _ALLOCATIONS_OF, (project,))
         result = await self.place(project, host_id)
-        assert result.error_category is not None, f"placement on {host_id} was {result.status}"
+        assert result.error_category == ErrorCategory.CONFIGURATION_ERROR.value, (
+            f"placement on {host_id} answered {result.status} {result.error_category}"
+        )
         assert await _rows(self.db_url, _ALLOCATIONS_OF, (project,)) == before
-        return result.error_category
+        return "no-candidate"
 
     async def granted(self, project: str, host_id: str) -> str:
         """Require the probe to be granted on ``host_id``; return the allocation id."""
@@ -478,7 +495,7 @@ async def _set_scheduling_body(
         one(await caller.call("resources.set_scheduling", args, token, discover=True))
         row = await _one_row(db_url, _HOST, (host_id,))
         assert (row["cordoned"], row["status"]) == (True, "available"), "cordon changed health"
-        refused = await hosts.denied(workload, host_id)
+        refused = await hosts.unplaceable(workload, host_id)
         args = {"resource_id": host_id, "state": "schedulable"}
         one(await caller.call("resources.set_scheduling", args, token))
         row = await _one_row(db_url, _HOST, (host_id,))
@@ -596,7 +613,7 @@ async def _queue_body(caller: HttpCaller, grants: Grants, *, db_url: str) -> dic
         env = one(await caller.call("ops.set_queue_paused", {"paused": True}, token, discover=True))
         assert env.status == "paused" and await _queue_paused(db_url)
         stalled = await _unavailable(actor, operator)
-        assert stalled, "a paused queue still ran the worker checks"
+        assert _WORKER_CHECKS.issubset(stalled), f"paused, only {stalled} were held"
         job = await _one_row(db_url, _NEWEST_CHECK, (start,))
         assert (job["state"], job["worker_id"]) == ("queued", None), f"job was {job['state']}"
         env = one(await caller.call("ops.set_queue_paused", {"paused": False}, token))
@@ -611,7 +628,7 @@ async def _queue_body(caller: HttpCaller, grants: Grants, *, db_url: str) -> dic
             await asyncio.sleep(_POLL_S)
         assert row["worker_id"], "the held job finished without a worker"
         resumed = await _unavailable(actor, operator)
-        assert not resumed, f"after resume the worker did not run {resumed}"
+        assert not _WORKER_CHECKS & set(resumed), f"resumed, {resumed} still held"
     finally:
         if await _queue_paused(db_url):
             one(await actor.call("ops.set_queue_paused", {"paused": False}, operator))
@@ -809,23 +826,34 @@ async def _expired(db_url: str, image_id: str) -> None:
     raise AssertionError(f"image {image_id} did not expire")
 
 
+_EXPIRED_PRIVATE: LiteralString = (
+    "SELECT id FROM image_catalog WHERE visibility = 'private' AND state <> 'pending' "
+    "AND expires_at < now()"
+)
+
+
 async def _prune_once(
-    caller: HttpCaller, token: str, db_url: str, discover: bool
+    caller: HttpCaller, token: str, db_url: str, referenced: str, discover: bool
 ) -> dict[str, object] | None:
-    """Upload an expiring image and prune; ``None`` when the reconciler loop pruned it first."""
+    """Upload an expiring image and prune; ``None`` when the reconciler loop pruned it first.
+
+    The answer carries only a count, so the call owns the prune when, just before it, the
+    expired private images are exactly the new one and the ``referenced`` one, and it prunes one.
+    """
     project, actor = _fresh(), _direct(caller)
     async with _uploading(caller.base_url, caller.issuer, db_url, project, name="cov-prune") as up:
         image_id = await _register(actor, actor.token(_operator(project)), up, db_url, lifetime_s=1)
         key = str((await _one_row(db_url, _IMAGE, (image_id,)))["object_key"])
         await _expired(db_url, image_id)
+        expired = {str(r["id"]) for r in await _rows(db_url, _EXPIRED_PRIVATE)}
+        assert expired <= {image_id, referenced}, "other expired private images are present"
         args = {"reason": _REASON}
         env = one(await caller.call("images.prune_expired", args, token, discover=discover))
-        gone = await _maybe_row(db_url, _IMAGE, (image_id,)) is None
-        assert gone, "the expired, unreferenced image survived the prune"
-        if int(str(env.data.get("pruned", 0))) < 1:
+        assert await _maybe_row(db_url, _IMAGE, (image_id,)) is None, "the image survived"
+        if image_id not in expired or str(env.data.get("pruned")) != "1":
             return None
         assert not await asyncio.to_thread(_versions, key), "the pruned image's bytes remain"
-        return {"pruned": env.data["pruned"], "expired_pruned": image_id}
+        return {"pruned": 1, "expired_unreferenced": "pruned"}
 
 
 async def _prune_body(
@@ -846,24 +874,26 @@ async def _prune_body(
             caller.base_url, caller.issuer, db_url, live_project, name="cov-live"
         ) as live_up:
             live = await _register(actor, actor.token(_operator(live_project)), live_up, db_url)
-            seen.update(await _attributed(partial(_prune_once, caller, token, db_url)))
+            seen.update(await _attributed(partial(_prune_once, caller, token, db_url, shadow)))
             for kept, why in ((shadow, "referenced"), (live, "unexpired")):
                 assert await _maybe_row(db_url, _IMAGE, (kept,)), f"the {why} image was pruned"
             seen["kept"] = ["referenced", "unexpired"]
 
-    async with _uploading(
-        caller.base_url, caller.issuer, db_url, shadow_project, name=name
-    ) as shadowed:
-        await on_catalog_system(
-            inner,
-            caller.base_url,
-            caller.issuer,
-            db_url,
-            project=frame_project,
-            image=name,
-            body=body,
-        )
-    run.artifacts.extend([*inner.artifacts, *inner.assertions.values()])
+    try:
+        async with _uploading(
+            caller.base_url, caller.issuer, db_url, shadow_project, name=name
+        ) as shadowed:
+            await on_catalog_system(
+                inner,
+                caller.base_url,
+                caller.issuer,
+                db_url,
+                project=frame_project,
+                image=name,
+                body=body,
+            )
+    finally:
+        run.artifacts.extend([*inner.artifacts, *inner.assertions.values()])
     return {
         **seen,
         "frame_cleanup": inner.assertions["cleanup"],
@@ -1017,7 +1047,7 @@ async def _drain_body(
                 assert await _system_held(db_url, system) == held, (
                     "a passive drain touched the System"
                 )
-                refused = await hosts.denied(workload, lane_id)
+                refused = await hosts.unplaceable(workload, lane_id)
             finally:
                 args = {"resource_id": lane_id, "state": "schedulable"}
                 operator = restore.token(_platform(workload, _OPERATOR))
