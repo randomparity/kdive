@@ -76,8 +76,10 @@ amendment records for the original three pairs. It adds ten pairs:
 
 Each tool scopes its rows to the caller's viewer projects and answers a denied
 caller with an empty page, never a failure: a member with no role sees no project,
-and another project's admin sees none of the target project's rows. None rejects a
-`project` argument that names a project the caller cannot read; it filters it.
+and another project's admin sees none of the target project's rows. `runs.list`,
+`systems.list`, `allocations.list` and `debug.list_sessions` filter a `project` argument
+that names a project the caller cannot read rather than rejecting it; `jobs.list` takes no
+`project` argument.
 The four-step sequence above applies unchanged; a carrier names the protected item
 independently, for example the session it started for `debug.list_sessions`. Two
 facts qualify step 3's canonical empty page:
