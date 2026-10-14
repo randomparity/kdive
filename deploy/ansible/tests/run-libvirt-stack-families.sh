@@ -251,6 +251,19 @@ for family, changed, expected_reload in (
         all(evaluate(condition, **facts) for condition in reload["when"]) == expected_reload,
         f"network daemon reload route differs for {family} changed={changed}",
     )
+build_task = module_task(
+    "community.general.zypper", "Keep the QEMU emulator and qemu-img at the module build (Suse)"
+)
+require(build_task.get("when") == "ansible_os_family == 'Suse'", "QEMU alignment is Suse-only")
+build = build_task["community.general.zypper"]
+require(build["state"] == "latest", "the SUSE QEMU build alignment must upgrade, not just install")
+require(install["Suse"]["community.general.zypper"]["state"] == "present", "only QEMU is upgraded")
+selected = ["qemu-x86"]
+aligned = render(build["name"], libvirt_stack_qemu_packages=selected)
+require(
+    list(aligned) == ["qemu-x86", "qemu-img"],
+    f"the SUSE QEMU build alignment covers {aligned}, not the emulator and qemu-img",
+)
 print("libvirt_stack families: packages, daemon models, network reload, guard, operator passed")
 
 # libvirt_tls must name the daemon each family actually ships (Leap 16 has no libvirtd).
