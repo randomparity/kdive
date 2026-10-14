@@ -572,6 +572,34 @@ resource-limit cells remain required under #3117 and #3118; POWER evidence remai
 under #2818. This finite ordering observation does not establish those separate
 obligations or durable capture finalization.
 
+## 10. Remote resource-boundary cells (#3118)
+
+`tests/integration/test_resource_limits_live.py::test_remote_resource_boundary` has one
+parameter per `failure-resource/remote-libvirt/x86_64/*` cell. They use the enterprise remote
+base (`rocky-10-kdive-remote-base`) and the longterm fixture kernel, with the observer access
+of section 7 (`REMOTE_PROVIDER_SSH`). Each proves its resource outcome, no duplicate owned
+System, domain or volume, a held Allocation and charged capacity throughout, and cleanup.
+
+- `minimum-cpu-ram` provisions the seeded `small` shape and requires 1 vCPU, 1024 MiB and a
+  10 GiB overlay (remote overlays take the base's capacity), then boots the fixture kernel.
+- `slow-boot` arms the guest delay unit before the guest agent. A delay inside half the 300 s
+  remote boot window must succeed; one past it must end every attempt `boot_timeout`.
+- `insufficient-disk` needs the provider host's `default` pool on a test-owned filesystem.
+  The fixed workers only use that pool. Before `site.yml`, on a provider host assigned to this
+  run alone, create a loop-backed ext4 filesystem (`mkfs.ext4 -m 0`; on SELinux mount it with
+  `context=system_u:object_r:virt_image_t:s0`) and set `storage_pool_target` to its mount
+  point in the private inventory. Export `RESOURCE_LIMIT_POOL_IMAGE` as the loop's backing
+  file. The cell refuses any other pool. It fills the filesystem with one ballast file, expects
+  the overlay creation to fail `provisioning_failure`, then removes the ballast and checks the
+  pool's volumes are unchanged.
+
+```bash
+uv run python -m tests.integration.live_stack.resource_limits bindings --remote \
+  --candidate "$(git rev-parse HEAD)" --out inputs.json
+uv run python -m pytest -m live_stack tests/integration/test_resource_limits_live.py \
+  -k test_remote_resource_boundary
+```
+
 ## SUSE native image proof
 
 On untouched first boot, record the completed JeOS marker, skipped wizard units,
