@@ -1344,6 +1344,48 @@ and `introspect.script`) and 4 `unsupported`. Twenty did not qualify:
 After `demo-down.sh --wipe --yes` the worker's libvirt defined no `kdive-` domain and
 `KDIVE_INSTALL_STAGING` was empty.
 
+#### Traffic capture, SysRq and crash-watch tool cells (#3115)
+
+`tests/integration/test_control_tool_cells_live.py::test_control_tool_cell` carries the 60
+x86_64 local-libvirt cells of `control.capture_traffic`, `control.diagnostic_sysrq` and
+`control.watch_for_crash`: 12 `functional` and 48 rejection cells. local-libvirt supports all
+three, so they have no `capability` cell
+([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md), amended
+2026-10-13). The [design](../../workflow/specs/2026-10-14-local-control-tool-cells-design.md)
+lists what each cell compares. The prerequisites are the capture cells' above: the rejection
+cells share their target, which opens a drgn-live session. Run both configurations into one
+evidence root, then assemble and qualify as in the System section:
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix KDIVE_ARTIFACT_DIR=$(mktemp -d)
+export KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack tests/integration/test_control_tool_cells_live.py
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack tests/integration/test_control_tool_cells_live.py
+```
+
+- Each functional cell provisions `fedora-kdive-ready-44`, boots the fixture kernel through the
+  deep-lifecycle checks and then calls only its tool through the cell's exposure.
+- `control.capture_traffic` captures for 15 s while the guest sends UDP datagrams carrying a
+  fresh token to `10.0.2.2:9`. The pcap downloaded through `artifacts.fetch_raw` must hold at
+  least five of them, and the domain's QOM tree no `kdive-dump-` filter afterwards. The cleanup
+  proves `/var/lib/kdive/pcap/<system>` gone; the stored pcap is Run-owned and retained.
+- `control.diagnostic_sysrq` sets `kernel.sysrq=1` and console log level 8 in the guest, then
+  runs `show_memory`. The captured console must hold `sysrq: Show Memory` followed by
+  `Mem-Info:`, and the guest's `dmesg` one more header than before.
+- `control.watch_for_crash` runs a 20 s watch that must end `not_fired` within 30 s, then a
+  180 s watch that must fire on `Kernel panic - not syncing: <token>` lines the guest writes to
+  `/dev/kmsg` every 2 s. The written signature leaves the System `ready`; no watch job is left
+  queued or running.
+- Rejection cells aim at the capture cells' torn-down, Run-bound target. The System tools answer
+  a foreign target `configuration_error`, the Run-resolved `capture_traffic` `not_found`.
+
+The ppc64le local cells share the node but are owner #2818's; the remote cells are #3116's.
+
 #### Break-glass provider tool cells (#3112)
 
 `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell` carries the 136

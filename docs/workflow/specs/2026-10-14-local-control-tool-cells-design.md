@@ -20,7 +20,7 @@ uses the cell's exposure.
   then shows no `kdive-dump-` filter; `pcap_dir(system)` joins `owned`, so cleanup proves the
   spool gone. The stored pcap is Run-owned and retained, like the capture cells' cores.
 - **diagnostic_sysrq**: set `kernel.sysrq=1`, count `sysrq: Show Memory` in guest `dmesg`, run
-  `show_memory`. Its artifact (`artifacts.get` `find`) holds that header, then `Mem-Info:`, and
+  `show_memory`. Its artifact (read by `artifacts.get`) holds that header, then `Mem-Info:`, and
   `dmesg` holds one more header.
 - **watch_for_crash**: a 20 s watch ends `not_fired` with `20 <= elapsed_s <= 30`. A 180 s
   watch then fires while the guest writes `<2>Kernel panic - not syncing: kdive-cov-<token>` to
