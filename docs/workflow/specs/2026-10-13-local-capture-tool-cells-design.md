@@ -79,7 +79,10 @@ Each functional cell owns one System in a fresh project:
    `kcov<8 hex>`, so its command name is a known, unique workload fact.
 4. For `kdump`, the cell waits until `/sys/kernel/kexec_crash_loaded` reads
    `1` (the guest's kdump service rebuilds its initramfs for the new kernel)
-   before crashing, with a 600 s budget; a timeout fails the cell.
+   before crashing, with a 600 s budget; a timeout fails the cell. A guest
+   whose `kdump.service` has failed cannot build its kdump initramfs for the
+   booted kernel, so the wait stops the cell as `blocked` (missing
+   prerequisite) at once (operator decision, 2026-10-14).
 5. After a crash the cell drains the `force_crash` job to `succeeded` and waits
    for `systems.get` to read `crashed`.
 
