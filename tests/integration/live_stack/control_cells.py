@@ -61,11 +61,14 @@ _ISOLATION = {
     "control.diagnostic_sysrq": ErrorCategory.CONFIGURATION_ERROR,
     "control.watch_for_crash": ErrorCategory.CONFIGURATION_ERROR,
 }
-_ID = {"control.capture_traffic": "run_id"} | {
-    tool: "system_id" for tool in ("control.diagnostic_sysrq", "control.watch_for_crash")
+_ID = {
+    "control.capture_traffic": "run_id",
+    "control.diagnostic_sysrq": "system_id",
+    "control.watch_for_crash": "system_id",
 }
+SYSRQ_COMMAND = "show_memory"
 # Required non-id arguments, valid, so only the boundary under test can reject a call.
-_EXTRA: dict[str, dict[str, object]] = {"control.diagnostic_sysrq": {"command": "show_memory"}}
+_EXTRA: dict[str, dict[str, object]] = {"control.diagnostic_sysrq": {"command": SYSRQ_COMMAND}}
 
 FLOW_PORT = 9
 _GATEWAY = "10.0.2.2"
@@ -81,7 +84,6 @@ _PCAP_MAGICS = {
     b"\xa1\xb2\xc3\xd4": ">",
     b"\xa1\xb2\x3c\x4d": ">",
 }
-SYSRQ_COMMAND = "show_memory"
 SYSRQ_HEADER = "sysrq: Show Memory"
 SYSRQ_OUTPUT = "Mem-Info:"
 QUIET_DEADLINE_S = 20.0
