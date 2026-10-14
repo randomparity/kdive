@@ -468,7 +468,7 @@ def test_program_reads_the_installed_pool_and_the_private_socket(
 def test_program_defaults_the_pool_like_the_authority(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pools, _opened, _output = _run_program(monkeypatch, capsys, "KDIVE_OTHER=1\n")
+    pools, _opened, _output = _run_program(monkeypatch, capsys, "UNRELATED=1\n")
     assert pools == ["default"]
 
 
