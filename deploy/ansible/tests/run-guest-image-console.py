@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""RHEL-family remote images serve GRUB on the serial console (issue #3118).
+"""The x86_64 Rocky remote image serves GRUB on the serial console (issue #3118).
 
 A remote domain has no video device, so a GRUB left on gfxterm hangs the guest before the
 kernel prints anything. This reads the REAL role task and checks that it rewrites the GRUB
-terminal for exactly the RHEL-family catalog distros, regenerates the BIOS config, and runs
+terminal for exactly the proven arm (x86_64 Rocky), regenerates the BIOS config, and runs
 before the image is staged.
 """
 
@@ -35,14 +35,17 @@ script = task["ansible.builtin.command"]["argv"][-1]
 for needle in ('GRUB_TERMINAL="serial console"', "grub2-mkconfig -o /boot/grub2/grub.cfg"):
     if needle not in script:
         fail(f"the task does not carry {needle!r}")
-guard = Environment().compile_expression(task["when"][0])
-for distro, wanted in (
-    ("rocky", True),
-    ("fedora", True),
-    ("ubuntu", False),
-    ("opensuse-leap", False),
-    ("bare", False),
+env = Environment()
+guards = [env.compile_expression(cond) for cond in task["when"][:2]]
+for distro, arch, wanted in (
+    ("rocky", "x86_64", True),
+    ("rocky", "ppc64le", False),
+    ("fedora", "x86_64", False),
+    ("ubuntu", "x86_64", False),
+    ("opensuse-leap", "x86_64", False),
+    ("bare", "x86_64", False),
 ):
-    if bool(guard(image={"distro": distro})) != wanted:
-        fail(f"the task runs={not wanted} for {distro}")
-print("guest image console: RHEL-family images serve GRUB on serial before staging")
+    runs = all(guard(image={"distro": distro}, ansible_architecture=arch) for guard in guards)
+    if runs != wanted:
+        fail(f"the task runs={runs} for {distro}/{arch}")
+print("guest image console: the x86_64 Rocky image serves GRUB on serial before staging")
