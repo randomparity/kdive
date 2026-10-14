@@ -1,8 +1,9 @@
-"""The authority-owned System frame on the installed local-authority lane (#3184).
+"""The authority-owned System frame on the installed authority lanes (#3184, #3209).
 
-Gated ``live_stack`` and dormant unless ``LOCAL_AUTHORITY_LANE_CONFIG`` names the lane
-config: one body that opens an Investigation and passes, and one that raises. Each must leave the
-lane's domains, private artifacts and capacity as it found them.
+Gated ``live_stack``. Each arm is dormant unless its lane config is named:
+``LOCAL_AUTHORITY_LANE_CONFIG`` for the local authority, ``KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG``
+for the remote one. One body opens an Investigation and passes, one raises. Each must leave its
+authority's domains, private storage and capacity as it found them.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import pytest
 from scripts.coverage_campaign.contract import Cell
 from tests.integration.live_stack.authority_lane import (
     CONFIG_ENV,
+    REMOTE_CONFIG_ENV,
     AuthorityBody,
     AuthoritySystem,
     on_authority_system,
@@ -29,14 +31,22 @@ from tests.integration.live_stack.spine import ok, scalar
 from tests.live_vm.installed_local_authority_support import OwnedResource
 
 pytestmark = pytest.mark.live_stack
+# The local arm runs on the control-plane host's architecture; the remote authority lane is x86_64.
+ARMS = pytest.mark.parametrize(
+    ("provider", "config_env", "arch"),
+    [
+        ("local-libvirt", CONFIG_ENV, platform.machine()),
+        ("remote-libvirt", REMOTE_CONFIG_ENV, "x86_64"),
+    ],
+    ids=["local", "remote"],
+)
 
 
 class _BodyFailed(Exception):
     pass
 
 
-def _run(tmp_path: Path) -> CellRun:
-    arch = platform.machine()
+def _run(tmp_path: Path, provider: str, arch: str) -> CellRun:
     cell = Cell(
         "authority-frame-self-test",
         "tool/authority-frame-self-test",
@@ -44,16 +54,16 @@ def _run(tmp_path: Path) -> CellRun:
         "authority-frame",
         "frame self-test",
         ("effect", "cleanup"),
-        provider="local-libvirt",
+        provider=provider,
         host_arch=arch,
         guest_arch=arch,
     )
     return CellRun(cell, EvidenceWriter(tmp_path))
 
 
-def _frame(run: CellRun, body: AuthorityBody) -> None:
-    if os.environ.get(CONFIG_ENV) is None:
-        pytest.skip(f"{CONFIG_ENV} unset; the installed local-authority lane is not configured")
+def _frame(run: CellRun, body: AuthorityBody, config_env: str) -> None:
+    if os.environ.get(config_env) is None:
+        pytest.skip(f"{config_env} unset; that installed authority lane is not configured")
     db_url = os.environ.get("KDIVE_DATABASE_URL")
     if not db_url:
         pytest.fail('set KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"')
@@ -62,7 +72,8 @@ def _frame(run: CellRun, body: AuthorityBody) -> None:
     asyncio.run(on_authority_system(run, base_url, issuer, db_url, project=project, body=body))
 
 
-def test_authority_frame_success(tmp_path: Path) -> None:
+@ARMS
+def test_authority_frame_success(tmp_path: Path, provider: str, config_env: str, arch: str) -> None:
     async def body(system: AuthoritySystem) -> dict[str, object]:
         opened = await scalar(
             system.op,
@@ -75,18 +86,21 @@ def test_authority_frame_success(tmp_path: Path) -> None:
         system.ledger.record(OwnedResource(kind="investigation", identity=investigation))
         return {"investigation": "opened"}
 
-    run = _run(tmp_path)
-    _frame(run, body)
+    run = _run(tmp_path, provider, arch)
+    _frame(run, body, config_env)
     assert set(run.assertions) == {"effect", "cleanup"}
     assert run.observed["accelerator"] == "kvm"
 
 
-def test_authority_frame_body_failure(tmp_path: Path) -> None:
+@ARMS
+def test_authority_frame_body_failure(
+    tmp_path: Path, provider: str, config_env: str, arch: str
+) -> None:
     async def body(_system: AuthoritySystem) -> dict[str, object]:
         raise _BodyFailed
 
-    run = _run(tmp_path)
+    run = _run(tmp_path, provider, arch)
     with pytest.raises(_BodyFailed):
-        _frame(run, body)
+        _frame(run, body, config_env)
     assert "cleanup" not in run.assertions
     assert len(run.artifacts) == 1
