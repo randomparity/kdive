@@ -539,7 +539,8 @@ every worker start, including each `stack-services.sh` restart, forwards it. Do 
 (ADR-0770). A backend port variable may hold `ADDR:PORT`, for example a Postgres bound to the
 lane address; `scripts/live-stack/env.sh` then builds the default DSNs, including
 `KDIVE_HARNESS_DATABASE_URL`, from that address, so no hand-written DSN is needed. A loopback or
-wildcard address keeps `localhost`, and an unparseable value stops the bring-up.
+wildcard address keeps `localhost`. An unparseable value stops every script that sources
+`env.sh`, `stack-down.sh` and `stack-status.sh` included, until it is corrected.
 Record the candidate full SHA and clean tree, manifest and actual immutable-base byte digests,
 and actual server, **each running worker**, reconciler and selected authority revisions.
 Resolve process build identifiers to full SHAs as ADR-0715 requires; read the installed authority
@@ -1335,7 +1336,9 @@ provisioning is blocked by #3144 and #3148, and an attempt strands its allocatio
 **Fixture-mode inventory.** A lane has one local-libvirt resource: resource rows are one per
 worker libvirt endpoint, so a plain `[[local_libvirt]]` entry cannot sit beside the routed one.
 Keep the lane's routed inventory file unchanged and make a separate copy in which only the
-`[[local_libvirt]]` entry's `authority_instance` line is removed. The `[[remote_libvirt]]`
+`[[local_libvirt]]` entry's `authority_instance` line is removed. Place the copy beside the
+routed file with the same ownership and mode: the fixed workers read it, and a start refuses an
+inventory a worker slot cannot read. The `[[remote_libvirt]]`
 authority tuple stays the same in both, and the copy also declares the registered lane image.
 Bring the whole stack up on the copy (`KDIVE_SYSTEMS_TOML` naming it for `stack-services.sh`),
 and export the same path to the frame. Until #3144 and #3148 land, this copy is the lane's
