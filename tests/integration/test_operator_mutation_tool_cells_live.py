@@ -19,7 +19,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import partial
@@ -258,6 +258,7 @@ _HOST: LiteralString = "SELECT * FROM resources WHERE id = %s"
 _ALLOCATIONS_OF: LiteralString = "SELECT id FROM allocations WHERE project = %s"
 _HELD_BY: LiteralString = "SELECT id FROM allocations WHERE resource_id = %s"
 _STATE_OF: LiteralString = "SELECT state FROM allocations WHERE id = %s"
+_ALLOCATION: LiteralString = "SELECT * FROM allocations WHERE id = %s"
 
 
 @dataclass
@@ -309,9 +310,7 @@ class Hosts:
         """Require the probe to be granted on ``host_id``; return the allocation id."""
         result = await self.place(project, host_id)
         assert result.status == "granted", f"placement answered {result.status}"
-        row = await _one_row(
-            self.db_url, "SELECT * FROM allocations WHERE id = %s", (result.object_id,)
-        )
+        row = await _one_row(self.db_url, _ALLOCATION, (result.object_id,))
         assert str(row["resource_id"]) == host_id, "the grant landed on another host"
         return result.object_id
 
@@ -382,6 +381,23 @@ async def _attributed(
     raise AssertionError(f"the reconciler loop repaired the seed first {_ATTEMPTS} times")
 
 
+def _restorer(grants: Grants) -> Grants:
+    """``grants`` under a subject of its own, for restore calls beside the call under test."""
+    return replace(grants, subject=f"{grants.subject}-restore")
+
+
+def _restoring(
+    action: Callable[[], Awaitable[object]], what: str
+) -> AbstractAsyncContextManager[None]:
+    """Run ``action`` on exit, success or failure; its own failure never hides the body's."""
+
+    async def restore() -> list[str]:
+        await action()
+        return []
+
+    return _cleaning(restore, what)
+
+
 def _same_except(before: Mapping[str, Any], after: Mapping[str, Any], *keys: str) -> None:
     ignored = {"updated_at", *keys}
     changed = sorted(k for k in before if k not in ignored and before[k] != after[k])
@@ -414,7 +430,8 @@ async def _register_body(caller: HttpCaller, grants: Grants, *, db_url: str) -> 
             "capabilities": {**_HOST_CAPS, "concurrent_allocation_cap": 2},
         }
         observed = {k: row[k] for k in expected}
-        assert observed == expected, f"registered row {observed}"
+        differs = sorted(k for k in expected if observed[k] != expected[k])
+        assert not differs, f"the registered row differs in {differs}"
         assert row["lease_expires_at"] > await _db_now(db_url), "the lease is not in the future"
     return {"registered": sorted(expected), "owned": hosts.owned()}
 
@@ -556,21 +573,21 @@ async def _set_coeff_body(caller: HttpCaller, grants: Grants, *, db_url: str) ->
     token = caller.token(grants)
     prior = await _coefficient(db_url)
     charges: dict[int, Decimal] = {}
-    try:
-        async with _hosts(caller, db_url) as hosts:
-            host_id = str((await hosts.add(workload, cost_class=COST_CLASS))["id"])
-            for coeff in (1, 2):
-                args = {"cost_class": COST_CLASS, "coeff": str(coeff)}
-                env = one(
-                    await caller.call("ops.set_cost_class_coeff", args, token, discover=coeff == 1)
-                )
-                assert Decimal(str(env.data["coeff"])) == coeff == await _coefficient(db_url)
-                charges[coeff] = await _reserved(db_url, await hosts.granted(workload, host_id))
-            owned = [*hosts.owned(), *hosts.placed]
-    finally:
-        actor = _direct(caller)
-        restore = {"cost_class": COST_CLASS, "coeff": str(prior or 1)}
-        one(await actor.call("ops.set_cost_class_coeff", restore, actor.token(grants)))
+    actor = _direct(caller)
+    restore = {"cost_class": COST_CLASS, "coeff": str(prior or 1)}
+    put_back = partial(
+        actor.call, "ops.set_cost_class_coeff", restore, actor.token(_restorer(grants))
+    )
+    async with _restoring(put_back, "the coefficient"), _hosts(caller, db_url) as hosts:
+        host_id = str((await hosts.add(workload, cost_class=COST_CLASS))["id"])
+        for coeff in (1, 2):
+            args = {"cost_class": COST_CLASS, "coeff": str(coeff)}
+            env = one(
+                await caller.call("ops.set_cost_class_coeff", args, token, discover=coeff == 1)
+            )
+            assert Decimal(str(env.data["coeff"])) == coeff == await _coefficient(db_url)
+            charges[coeff] = await _reserved(db_url, await hosts.granted(workload, host_id))
+        owned = [*hosts.owned(), *hosts.placed]
     assert await _coefficient(db_url) == (prior or 1), "the coefficient was not restored"
     assert charges[1] > 0 and abs(charges[2] - 2 * charges[1]) <= KCU_QUANTUM, charges
     return {
@@ -597,18 +614,26 @@ async def _unavailable(caller: HttpCaller, token: str) -> list[str]:
     )
 
 
+# One worker-check job per provider; follow the local one.
 _NEWEST_CHECK: LiteralString = (
     "SELECT id, state, worker_id FROM jobs WHERE kind = 'diagnostics_worker_check' "
-    "AND created_at >= %s ORDER BY created_at DESC LIMIT 1"
+    "AND payload->>'provider' = 'local-libvirt' AND created_at >= %s "
+    "ORDER BY created_at DESC LIMIT 1"
 )
+_TERMINAL_JOBS = frozenset({"succeeded", "failed", "canceled"})
+
+
+async def _resume(caller: HttpCaller, token: str, db_url: str) -> None:
+    if await _queue_paused(db_url):
+        one(await caller.call("ops.set_queue_paused", {"paused": False}, token))
 
 
 async def _queue_body(caller: HttpCaller, grants: Grants, *, db_url: str) -> dict[str, object]:
     if await _queue_paused(db_url):
         raise ScenarioStop(Outcome.BLOCKED, "the queue is already paused; resume it first")
     token, actor = caller.token(grants), _direct(caller)
-    operator = actor.token(grants)
-    try:
+    operator = actor.token(_restorer(grants))
+    async with _restoring(partial(_resume, actor, operator, db_url), "the queue pause"):
         start = await _db_now(db_url)
         env = one(await caller.call("ops.set_queue_paused", {"paused": True}, token, discover=True))
         assert env.status == "paused" and await _queue_paused(db_url)
@@ -619,19 +644,13 @@ async def _queue_body(caller: HttpCaller, grants: Grants, *, db_url: str) -> dic
         env = one(await caller.call("ops.set_queue_paused", {"paused": False}, token))
         assert env.status == "running" and not await _queue_paused(db_url)
         deadline = time.monotonic() + _CLAIM_DEADLINE_S
-        while (
-            row := await _one_row(
-                db_url, "SELECT state, worker_id FROM jobs WHERE id = %s", (job["id"],)
-            )
-        )["state"] != "succeeded":
+        query: LiteralString = "SELECT state, worker_id FROM jobs WHERE id = %s"
+        while (row := await _one_row(db_url, query, (job["id"],)))["state"] not in _TERMINAL_JOBS:
             assert time.monotonic() < deadline, f"the held job stayed {row['state']}"
             await asyncio.sleep(_POLL_S)
-        assert row["worker_id"], "the held job finished without a worker"
+        assert row["state"] == "succeeded" and row["worker_id"], f"the held job {row['state']}"
         resumed = await _unavailable(actor, operator)
         assert not _WORKER_CHECKS & set(resumed), f"resumed, {resumed} still held"
-    finally:
-        if await _queue_paused(db_url):
-            one(await actor.call("ops.set_queue_paused", {"paused": False}, operator))
     return {
         "paused_checks_unavailable": stalled,
         "held_job": "claimed-after-resume",
@@ -703,7 +722,14 @@ async def _clear_override_body(
     actor = _direct(caller)
     operator = actor.token(_platform(grants.projects[0], _OPERATOR))
     identity = {"resource_kind": host.kind, "name": host.name}
-    try:
+
+    async def put_back() -> None:
+        if await _rows(db_url, _OVERRIDE, (host.kind, host.name)):
+            restore = actor.token(_restorer(grants))
+            one(await actor.call("inventory.clear_override", identity, restore))
+        await _until_cap(db_url, host.resource_id, host.cap, 3 * _INTERVAL_S)
+
+    async with _restoring(put_back, "the declared host's cap"):
         args = {"resource_id": host.resource_id, "concurrent_allocation_cap": host.cap + 1}
         one(await actor.call("ops.set_host_capacity", args, operator))
         assert await _one_row(db_url, _OVERRIDE, (host.kind, host.name)) == {
@@ -718,10 +744,6 @@ async def _clear_override_body(
             db_url, _OVERRIDE, (host.kind, host.name)
         )
         restored_s = await _until_cap(db_url, host.resource_id, host.cap, 3 * _INTERVAL_S)
-    finally:
-        if await _rows(db_url, _OVERRIDE, (host.kind, host.name)):
-            one(await actor.call("inventory.clear_override", identity, actor.token(grants)))
-            await _until_cap(db_url, host.resource_id, host.cap, 3 * _INTERVAL_S)
     return {"held_detached": held, "file_cap": host.cap, "restored_after_s": restored_s}
 
 
@@ -878,6 +900,10 @@ async def _prune_body(
             for kept, why in ((shadow, "referenced"), (live, "unexpired")):
                 assert await _maybe_row(db_url, _IMAGE, (kept,)), f"the {why} image was pruned"
             seen["kept"] = ["referenced", "unexpired"]
+        # Re-arm the shadow: once the frame tears the System down it is expired and unreferenced,
+        # and the loop's prune would race its owner's delete.
+        args = {"image_id": shadow, "seconds": 3600, "reason": _REASON}
+        one(await actor.call("images.extend", args, actor.token(_restorer(grants))))
 
     try:
         async with _uploading(
@@ -1009,50 +1035,55 @@ async def _reconcile_now_body(
     return {**await _framed(run, caller, db_url, body), "owned": owned}
 
 
+_ON_HOST: LiteralString = (
+    "SELECT id, state FROM allocations WHERE resource_id = %s AND state = ANY(%s)"
+)
+
+
+async def _drain_passive(
+    caller: HttpCaller,
+    token: str,
+    hosts: Hosts,
+    system: AuthoritySystem,
+    workload: str,
+) -> dict[str, object]:
+    """Passively drain the lane host carrying ``system``; uncordon it whatever happens."""
+    db_url = hosts.db_url
+    lane_id = str((await _one_row(db_url, _ALLOCATION, (system.allocation_id,)))["resource_id"])
+    on_lane = sorted(
+        (str(r["id"]), str(r["state"]))
+        for r in await _rows(db_url, _ON_HOST, (lane_id, list(_LIVE)))
+    )
+    before = await _one_row(db_url, _HOST, (lane_id,))
+    held = await _system_held(db_url, system)
+    args = {"resource_id": lane_id, "state": "schedulable"}
+    restore = hosts.caller.token(_platform(workload, _OPERATOR))
+    uncordon = partial(hosts.caller.call, "resources.set_scheduling", args, restore)
+    async with _restoring(uncordon, "the lane host's cordon"):
+        args = {"resource_id": lane_id, "mode": "passive"}
+        env = one(await caller.call("resources.drain", args, token, discover=True))
+        listed = sorted((i.object_id, i.status) for i in env.items)
+        assert env.status == "cordoned" and listed == on_lane, "drain listed other work"
+        assert system.allocation_id in dict(listed), "the System's allocation is not listed"
+        after = await _one_row(db_url, _HOST, (lane_id,))
+        assert after["cordoned"] and after["status"] == before["status"], "drain changed health"
+        assert await _system_held(db_url, system) == held, "a passive drain touched the System"
+        probe = await hosts.unplaceable(workload, lane_id)
+    _same_except(before, await _one_row(db_url, _HOST, (lane_id,)))
+    return {"listed": len(listed), "placement": probe, "retained": held}
+
+
 async def _drain_body(
     caller: HttpCaller, grants: Grants, *, run: CellRun, db_url: str
 ) -> dict[str, object]:
     token, owned = caller.token(grants), []
-    restore = _direct(caller)
 
     async def body(system: AuthoritySystem) -> dict[str, object]:
-        lane = await _one_row(
-            db_url, "SELECT resource_id FROM allocations WHERE id = %s", (system.allocation_id,)
-        )
-        lane_id = str(lane["resource_id"])
         workload = await _workload(db_url)
         async with _hosts(caller, db_url) as hosts:
             host_id = str((await hosts.add(workload))["id"])
             placed = await hosts.granted(workload, host_id)
-            on_lane = await _rows(
-                db_url,
-                "SELECT id, state FROM allocations WHERE resource_id = %s AND state = ANY(%s)",
-                (lane_id, list(_LIVE)),
-            )
-            before = await _one_row(db_url, _HOST, (lane_id,))
-            held = await _system_held(db_url, system)
-            try:
-                args = {"resource_id": lane_id, "mode": "passive"}
-                env = one(await caller.call("resources.drain", args, token, discover=True))
-                listed = sorted((i.object_id, i.status) for i in env.items)
-                expected = sorted((str(r["id"]), str(r["state"])) for r in on_lane)
-                assert env.status == "cordoned" and listed == expected, "drain listed other work"
-                assert system.allocation_id in {i for i, _ in listed}, (
-                    "the System's allocation is not listed"
-                )
-                after = await _one_row(db_url, _HOST, (lane_id,))
-                assert after["cordoned"] and after["status"] == before["status"], (
-                    "drain changed health"
-                )
-                assert await _system_held(db_url, system) == held, (
-                    "a passive drain touched the System"
-                )
-                refused = await hosts.unplaceable(workload, lane_id)
-            finally:
-                args = {"resource_id": lane_id, "state": "schedulable"}
-                operator = restore.token(_platform(workload, _OPERATOR))
-                one(await restore.call("resources.set_scheduling", args, operator))
-            _same_except(before, await _one_row(db_url, _HOST, (lane_id,)))
+            passive = await _drain_passive(caller, token, hosts, system, workload)
             args = {"resource_id": host_id, "mode": "force_release", "reason": _REASON}
             env = one(await caller.call("resources.drain", args, token))
             tally = {k: env.data.get(k) for k in ("released", "skipped", "failed")}
@@ -1060,16 +1091,12 @@ async def _drain_body(
             assert [(i.object_id, i.status) for i in env.items] == [(placed, "released")]
             hosts.placed.pop(placed)
             assert (await _one_row(db_url, _STATE_OF, (placed,)))["state"] == "released"
-            assert (await _one_row(db_url, _HOST, (host_id,)))["cordoned"], (
-                "force_release did not cordon"
-            )
-            assert await _system_held(db_url, system) == held, "force_release touched the System"
+            host = await _one_row(db_url, _HOST, (host_id,))
+            assert host["cordoned"], "force_release did not cordon its host"
+            held = await _system_held(db_url, system)
+            assert held == passive["retained"], "force_release touched the System"
             owned.extend([*hosts.owned(), placed])
-        return {
-            "passive": {"listed": len(listed), "placement": refused},
-            "force_release": tally,
-            "retained": held,
-        }
+        return {"passive": passive, "force_release": tally}
 
     return {**await _framed(run, caller, db_url, body), "owned": owned}
 

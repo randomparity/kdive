@@ -44,8 +44,8 @@ Chosen: one carrier on the merged tool-cell frame (`run_tool_cell`, `prove_funct
 public API or the harness login's ADR-0769 seeding writes (`INSERT`/`UPDATE` on `resources`,
 `INSERT` on `allocations`, the metering rows), observes the effect in a source the server did not
 produce, and restores what it changed, checking the restore. The private-image upload helpers of
-the catalog carrier move to `tests/integration/live_stack/private_images.py` so both carriers
-share them; the catalog carrier's behaviour does not change.
+the catalog carrier move into its existing support module `tests/integration/live_stack/catalog.py`
+so both carriers share them; the catalog carrier's behaviour does not change.
 
 Rejected:
 
@@ -149,7 +149,8 @@ Grants: `platform_operator` for `ops.set_cost_class_coeff`, `ops.set_host_capaci
   Restore: deregister `R`, row deleted.
 - **`images.extend`**: a private image `I` owned by `P`, uploaded with a 600 s lifetime. Extending
   by 3600 s answers `extended`; the row's `expires_at` equals the returned value, is later than
-  before and lies within the call's bracketed `now + 3600 s` (or the configured ceiling). Name,
+  before and lies within the call's bracketed `now + 3600 s` (the private-lifetime ceiling must
+  be at least an hour, as its 30-day default is). Name,
   owner, visibility, state, digest and object key are unchanged, and the object's stored versions
   are the same. Restore: `images.delete`, object versions purged, both checked.
 - **`images.prune_expired`**: a live local System booted from the public lane image, framed by

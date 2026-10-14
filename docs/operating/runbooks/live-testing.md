@@ -1134,18 +1134,22 @@ revision on every cell, so every role must run the candidate. Use the two bring-
 cells (`KDIVE_WORKER_DEATH_VERIFIER=docker` for `recovery`) and, beside the catalog carrier's
 environment (`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, an exported
 `KDIVE_SYSTEMS_TOML`, the staged lane image), set `LOCAL_AUTHORITY_LANE_CONFIG`.
-The lane's inventory must declare one `[[remote_libvirt]]` or `[[fault_inject]]` host:
-`inventory.clear_override` detaches its cap, clears the entry and waits for the reconciler to
-restore the file's cap. The cell changes only that row's database values; it never reaches the
-remote host or places anything on it. Run one cell at a time on the lane, as for the frame.
+`inventory.clear_override` needs one declared `[[fault_inject]]` or `[[remote_libvirt]]` host
+in that inventory: the cell detaches its cap, clears the entry and waits for the reconciler to
+restore the file's cap. The authority lane's fixture inventory already declares its
+`[[remote_libvirt]]` authority host, and the cell changes only that row's database values,
+never the remote host. On a lane without one, add a `[[fault_inject]]` entry (`name`, `vcpus`,
+`memory_mb`, `cost_class`): reconcile creates its row without composing the fault-inject
+provider. Adding a `[[remote_libvirt]]` entry instead enables the remote provider for the whole
+stack. Run one cell at a time on the lane, as for the frame.
 
 Cells change shared state while they run and restore it before they finish: the queue pause,
 the lane host's cordon (`resources.drain`), the declared host's cap, and the coefficient of the
 cell-owned class `cov-tool-cells`. A killed run can leave one of them behind. Restore them with an
 operator or admin token: `ops.set_queue_paused` with `paused=false`,
 `resources.set_scheduling` with `state=schedulable` on the lane host, `inventory.clear_override`
-for the declared host (the next reconcile restores its cap), and `ops.set_cost_class_coeff` back
-to the value recorded in the cell's evidence.
+for the declared host (the next reconcile restores its cap). The `cov-tool-cells` coefficient
+needs no restore: no host outside a running cell carries the class.
 
 What the cells leave behind is history or inert:
 
