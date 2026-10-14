@@ -852,6 +852,49 @@ installed kernel behind (#3078).
 | `enterprise/longterm`, `enterprise/stable` | `rocky:10` | success |
 | `suse/longterm`, `suse/stable` | `opensuse-leap:15.6` | success |
 
+#### Broken/fixed kernel corpus (#2817)
+
+`tests/integration/test_kernel_corpus_live.py::test_kernel_corpus` has one parameter for each
+`kernel-corpus` cell whose guest architecture is the host's: two cases times the `broken` and
+`fixed` revision. `fixtures/kernel/corpus.toml` pins the revisions; each `broken` commit is the
+first parent of its `fixed` commit, so both build from the same configuration fragment. The case
+notes in `docs/development/kernel-test-cases/` chose the cases and stay human-only.
+
+| Case | Note | Reproducer (same on both revisions) | `broken` | `fixed` |
+|---|---|---|---|---|
+| `case-1` | 05, dcache | install with `dhash_entries=1`; the Run declares the console crash `RIP: 0010:__d_lookup` | boot ends `expected_crash_observed`; console shows one hash bucket and the page-fault oops | ready boot, parameter in `/proc/cmdline`, two buckets, no crash signature |
+| `case-2` | 16, procfs | read the link, subdirectory and file counts of every directory under `/proc/bus/pci` | each link count is at least `2 + subdirectories + files` | each link count is `2 + subdirectories` |
+
+Every parameter verifies both fixtures of its case and requires the same `input.config` and
+`.config` digests (`same-reproducer-config`). It provisions `fedora-kdive-ready-44`, uploads its
+revision with `vmlinux`, installs and boots it, and checks that the domain boots the uploaded
+`bzImage`. `debug-or-crash-evidence` is the identity-bound artifact of the outcome:
+for `case-1/broken`, every reliable call-trace frame `symbol+0xOFF/0xSIZE` of the oops resolves
+in the fixture's `System.map` with that size and the console names the fixture release; for the
+other cells, the running release and GNU build ID with the case's observation. Any other
+observation, including a timeout or a crash on a `fixed` revision, fails the cell. The frame then
+releases and proves cleanup, which also covers the halted guest of `case-1/broken`.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix            # one fresh directory per revision below it
+for c in case-1-broken case-1-fixed case-2-broken case-2-fixed; do
+  python3 scripts/kernel_fixtures.py build --baseline "$c" --arch "$(uname -m)" \
+    --source "$KDIVE_FIXTURE_ROOT/src-$c" --output "$KDIVE_FIXTURE_ROOT/$c" --jobs "$(nproc)"
+done
+examples/local-libvirt/build-image.sh fedora-kdive-ready-44
+uv run python -m tests.integration.live_stack.kernel_corpus bindings --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+uv run python -m pytest -m live_stack tests/integration/test_kernel_corpus_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+A missing `KDIVE_FIXTURE_ROOT`, or either revision of the case missing or rejected by `verify`, is
+`blocked` (`missing-prerequisite`). The four ppc64le cells share the node and report
+`missing-result` until a native POWER run (#2818) builds the revisions there.
+
 #### Local resource-boundary cells (#3118)
 
 `tests/integration/test_resource_limits_live.py::test_local_resource_boundary` has one parameter
