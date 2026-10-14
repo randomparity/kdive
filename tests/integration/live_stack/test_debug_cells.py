@@ -487,3 +487,24 @@ def test_an_admitted_second_attach_is_still_ended(monkeypatch: pytest.MonkeyPatc
         _run("debug.start_session", debugger, monkeypatch)
     ended = {args["session_id"] for tool, args in debugger.calls if tool == "debug.end_session"}
     assert ended == {"ses-1", "ses-2"}
+
+
+def test_set_watchpoint_must_watch_the_kallsyms_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    ticks = iter((10, 11))
+
+    def memory(_args: Mapping[str, object]) -> ToolResponse:
+        return _ok("read", memory_hex=next(ticks).to_bytes(8, "little").hex())(_args)
+
+    def answers(expr: str) -> dict[str, _Answer]:
+        return {
+            "debug.read_memory": memory,
+            "debug.set_watchpoint": _ok("watching", number="2", expr=expr),
+            "debug.continue": _stopped("watchpoint-trigger"),
+            "debug.clear_watchpoint": _ok("cleared"),
+        }
+
+    good = answers("*(char(*)[8])0xffffffff82100000")
+    assert _run("debug.set_watchpoint", _Debugger(good), monkeypatch)["value_increased"] is True
+    ticks = iter((10, 11))
+    with pytest.raises(AssertionError, match="not on jiffies_64"):
+        _run("debug.set_watchpoint", _Debugger(answers("*(char(*)[8])0x1000")), monkeypatch)

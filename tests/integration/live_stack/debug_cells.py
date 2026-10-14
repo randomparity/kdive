@@ -725,6 +725,8 @@ async def set_watchpoint_body(s: Session) -> dict[str, object]:
     env = await s.exposed(session_id=session_id, symbol=WATCH, byte_count=8)
     number = str(env.data.get("number") or "")
     assert env.status == "watching" and number, "no watchpoint number returned"
+    expression = f"*(char(*)[8]){s.truth.at(WATCH):#x}"
+    assert env.data.get("expr") == expression, "the watchpoint is not on jiffies_64's address"
     stop = await s.op("debug.continue", session_id=session_id, timeout_sec=_STOP_WAIT_S)
     require_stop(stop, "watchpoint-trigger")
     after = await s.word(session_id, WATCH)

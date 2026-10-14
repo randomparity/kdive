@@ -191,7 +191,7 @@ naming the target's System or Run, and whether its domain is defined.
 
 1. Actors and deployments:
    - A maintainer running the carrier on a KVM x86_64 host against a stack
-     brought up by `scripts/demo-up.sh`, one configuration per run; the MCP
+     brought up by `examples/local-libvirt/demo-up.sh`, one configuration per run; the MCP
      server shares the host with QEMU and has `gdb` on its PATH.
    - CI runs only the unit tests and the contract test.
 2. Invariants and assets at stake:

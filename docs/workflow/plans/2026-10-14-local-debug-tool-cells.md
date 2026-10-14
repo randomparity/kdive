@@ -76,5 +76,5 @@ tests/integration/live_stack/test_tool_cells.py tests/scripts/test_coverage_cont
   server `gdb`, the `longterm` fixture, `--kernel-baseline longterm` bindings; run
   command; expected runtime; the three known-gap failures) and the last run's results.
 - On the lab guest: deploy the committed candidate, bring the stack up with
-  `scripts/demo-up.sh`, write bindings, run both configurations, record results, tear
+  `examples/local-libvirt/demo-up.sh`, write bindings, run both configurations, record results, tear
   down.
