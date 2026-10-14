@@ -371,7 +371,7 @@ def test_list_watchpoints_compares_the_address_expression(
 
 @pytest.mark.parametrize(
     ("reason", "match"),
-    [(None, "no stop reason"), ("breakpoint-hit", "stopped for")],
+    [(None, "stopped for None"), ("breakpoint-hit", "stopped for")],
 )
 def test_interrupt_needs_a_signal_stop(
     reason: str | None, match: str, monkeypatch: pytest.MonkeyPatch
@@ -388,6 +388,12 @@ def test_interrupt_needs_a_signal_stop(
     states = iter((True, False))
     signal = _Debugger(_stop_answers(**{"debug.interrupt": _stopped("signal-received")}))
     assert _run("debug.interrupt", signal, monkeypatch)["reason"] == "signal-received"
+    # The started session's probe already halted the guest: the gap, after a clean stop.
+    states = iter((False, False))
+    halted = _Debugger(_stop_answers(**{"debug.interrupt": _stopped("signal-received")}))
+    with pytest.raises(AssertionError, match="probe had already halted the guest"):
+        _run("debug.interrupt", halted, monkeypatch)
+    assert halted.calls[-1][0] == "debug.end_session"
 
 
 def test_continue_needs_a_breakpoint_hit_in_vfs_read(monkeypatch: pytest.MonkeyPatch) -> None:

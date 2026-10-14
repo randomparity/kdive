@@ -615,18 +615,23 @@ async def continue_body(s: Session) -> dict[str, object]:
 
 
 async def interrupt_body(s: Session) -> dict[str, object]:
-    """The interrupt halts a running guest and reports why it stopped."""
+    """The interrupt stops a running guest and reports why; fails while none can be running.
+
+    ``debug.start_session``'s gdbstub reachability probe leaves the guest paused (ADR-0184), so
+    the cell first observes whether the started session's guest still runs.
+    """
     session_id = await s.start()
-    assert await answers(s.endpoint), "the guest does not answer before the interrupt"
+    running = await answers(s.endpoint)
     env = await s.exposed(session_id=session_id)
     assert env.status == "stopped" and env.data.get("timed_out") is False, "no clean stop"
     assert not await answers(s.endpoint), "the guest still answers after the interrupt"
     await s.register(session_id)
     reason = env.data.get("reason")
     await s.end(session_id)
-    assert reason, (
-        "debug.interrupt halted the guest but reported no stop reason: the attach had already "
-        "stopped it, and no public operation leaves a live session running (known product gap)"
+    assert running, (
+        "debug.start_session's gdbstub probe had already halted the guest, and no public "
+        "operation leaves a live session running, so debug.interrupt never meets a running "
+        "guest (known product gap)"
     )
     assert reason == "signal-received", f"the interrupt stopped for {reason!r}"
     return {"halted": True, "reason": reason}
