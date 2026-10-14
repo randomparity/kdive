@@ -586,9 +586,10 @@ System, domain or volume, a held Allocation and charged capacity throughout, and
   remote boot window must succeed; one past it must end every attempt `boot_timeout`.
 - `insufficient-disk` needs the provider host's `default` pool on a test-owned filesystem.
   The fixed workers only use that pool. Before `site.yml`, on a provider host assigned to this
-  run alone, create a loop-backed ext4 filesystem (`mkfs.ext4 -m 0`; on SELinux mount it with
-  `context=system_u:object_r:virt_image_t:s0`) and set `storage_pool_target` to its mount
-  point in the private inventory. Export `RESOURCE_LIMIT_POOL_IMAGE` as the loop's backing
+  run alone, create a loop-backed ext4 filesystem (`mkfs.ext4 -m 0`) and set
+  `storage_pool_target` to its mount point in the private inventory. On SELinux, label it with
+  `semanage fcontext -a -t virt_image_t '<mount>(/.*)?'` and `restorecon -R <mount>`, not a
+  `context=` mount option: the image playbook sets per-file labels, which such a mount refuses. Export `RESOURCE_LIMIT_POOL_IMAGE` as the loop's backing
   file. The cell refuses any other pool. It fills the filesystem with one ballast file, expects
   the overlay creation to fail `provisioning_failure`, then removes the ballast and checks the
   pool's volumes are unchanged.
