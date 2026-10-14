@@ -1275,6 +1275,75 @@ reported all 100 qualified: 20 `success` and 80 `rejection`. After `demo-down.sh
 the worker's libvirt defined no domain, no overlay disk remained and `KDIVE_INSTALL_STAGING` was
 empty.
 
+#### Capture and introspection tool cells (#2814)
+
+`tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell` carries the 164
+x86_64 local-libvirt cells of `control.force_crash`, `vmcore.fetch`, `introspect.from_vmcore`,
+`introspect.run`, `introspect.script` and `postmortem.crash`: 28 `functional`, four
+`unsupported` and 132 rejection cells, four of them `capability`. `vmcore.fetch` is proven for
+`kdump` and `host_dump`; x86_64 refuses `fadump`
+([ADR-0757](../../adr/0757-system-capture-method-architecture.md)), so its `unsupported` cell
+reads the System's `supported_capture_methods` and its `capability` cell proves the
+`capability_unsupported` refusal from a crashed, Run-bound System
+([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md), amended
+2026-10-13). The [design](../../workflow/specs/2026-10-13-local-capture-tool-cells-design.md)
+lists what each cell compares. The prerequisites are the power and snapshot cells' above, plus
+crash(8) and drgn in the MCP server's environment (`postmortem.crash` and
+`introspect.from_vmcore` run there; installing them only for the worker is not enough) and the
+libguestfs Python binding for the worker's kdump harvest. A tool answering `missing_dependency`
+records the cell `blocked`. Run both configurations into one evidence
+root, then assemble and qualify as in the System section:
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix KDIVE_ARTIFACT_DIR=$(mktemp -d)
+export KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack tests/integration/test_capture_tool_cells_live.py
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack tests/integration/test_capture_tool_cells_live.py
+```
+
+- Each functional cell provisions `fedora-kdive-ready-44` with its crash options, boots the
+  fixture kernel through the deep-lifecycle checks (which load `loop`) and starts a sentinel
+  process named `kcov<hex>`. `kdump` cells add `crashkernel` and wait for
+  `/sys/kernel/kexec_crash_loaded`; `host_dump` cells set `debug.preserve_on_crash` instead, so
+  the crashed domain stays up for the memory dump.
+- `control.force_crash` (admin) drains to `succeeded`, reaches `crashed` and puts the fixture
+  kernel's panic in a new console part. `vmcore.fetch` drains the capture, checks the job, Run
+  and artifact refs, downloads the raw core twice through `artifacts.fetch_raw` (identical
+  bytes, advertised size) and requires its VMCOREINFO to name the fixture build ID and release.
+- `introspect.from_vmcore` and `postmortem.crash` run over a kdump core: the fixture release,
+  the guest's node name, `loop` and, for crash(8), the sentinel. `introspect.run` and
+  `introspect.script` use a drgn-live session, which they end: the helpers match the guest's
+  release, node name and `loop`, and the script finds exactly the sentinel by pid and name.
+- Rejection cells aim at one target per stack: a torn-down fixture System with the
+  `force_crash` opt-in, its Run and an ended drgn-live session. They compare the project rows,
+  the jobs naming the System or Run, and whether its domain is defined.
+- Captured cores are Run-owned `vmcore` artifacts that nothing reclaims: a run leaves about
+  8 GiB of `host_dump` cores per configuration (2 GiB guests) and a few hundred MiB of kdump
+  cores in the object store. `demo-down.sh --wipe --yes` removes them with the store.
+
+The ppc64le local cells share the node but are owner #2818's; the remote cells are #3114's.
+
+Last run: candidate `f9a74e45c` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing, the
+`longterm` fixture `v6.18.54` built on that host. Each configuration recorded its 82 cells in
+about 31 minutes and skipped the other's 82. `qualify` reported 144 of the 164 cells qualified:
+132 `rejection` (including the four fadump `capability` refusals), 8 `success` (`introspect.run`
+and `introspect.script`) and 4 `unsupported`. Twenty did not qualify:
+
+- 16 kdump-based functional cells (`control.force_crash`, `vmcore.fetch` `kdump`,
+  `introspect.from_vmcore`, `postmortem.crash`) are `blocked`: the fixture kernel lacks
+  `CONFIG_SQUASHFS`, so the guest's `kdump.service` cannot build its initramfs (#3219).
+- 4 `vmcore.fetch` `host_dump` functional cells are `failure`: the live libvirt daemon cannot
+  write the core into the worker's private spool directory (#3220).
+
+After `demo-down.sh --wipe --yes` the worker's libvirt defined no `kdive-` domain and
+`KDIVE_INSTALL_STAGING` was empty.
+
 #### Break-glass provider tool cells (#3112)
 
 `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell` carries the 136
