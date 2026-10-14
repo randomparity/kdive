@@ -57,6 +57,9 @@ libvirt_stack_packages_redhat:
   - elfutils-libelf-devel
   - openssl-devel
   - dwarves
+# Already-present SUSE packages that must share the QEMU module build (with the emulators).
+libvirt_stack_suse_qemu_build_packages:
+  - qemu-img
 libvirt_stack_packages_suse:
   - libvirt-daemon-qemu
   - libvirt-daemon-proxy

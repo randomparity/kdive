@@ -62,6 +62,8 @@ live_vm_host_worker_shared_directories:  # noqa: var-naming[no-role-prefix]
   - /var/lib/kdive/build/images
   - /var/lib/kdive/rootfs-cache
   - /var/lib/kdive/install
+  # Uploaded-rootfs staging root (UPLOADS_DIR): a worker stages per-investigation bases here.
+  - /var/lib/kdive/rootfs-uploads
 # Local external-boot recovery roots (ADR-0586, #2210) use one owner-only child per worker.
 # The traverse-only root remains root-owned so a worker cannot replace sibling roots.
 live_vm_host_worker_recovery_root: /var/lib/kdive/live-workers/external-boot-recovery  # noqa: var-naming[no-role-prefix]
@@ -121,6 +123,8 @@ local_worker_host_svirt_image_directories:
   - /var/lib/kdive/install
   - /var/lib/kdive/build/images
   - /var/lib/kdive/rootfs-cache
+  # An uploaded rootfs's staged base backs the overlay in place, so qemu reads it here.
+  - /var/lib/kdive/rootfs-uploads
 
 # Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
 # testcontainers gate, split into engine and compose halves because they carry different gates.

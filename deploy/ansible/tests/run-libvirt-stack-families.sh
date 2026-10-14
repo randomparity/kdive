@@ -251,5 +251,34 @@ for family, changed, expected_reload in (
         all(evaluate(condition, **facts) for condition in reload["when"]) == expected_reload,
         f"network daemon reload route differs for {family} changed={changed}",
     )
+build_task = module_task(
+    "community.general.zypper", "Keep the QEMU emulator and qemu-img at the module build (Suse)"
+)
+require(build_task.get("when") == "ansible_os_family == 'Suse'", "QEMU alignment is Suse-only")
+build = build_task["community.general.zypper"]
+require(build["state"] == "latest", "the SUSE QEMU build alignment must upgrade, not just install")
+require(install["Suse"]["community.general.zypper"]["state"] == "present", "only QEMU is upgraded")
+selected = ["qemu-x86"]
+aligned = render(build["name"], libvirt_stack_qemu_packages=selected)
+require(
+    list(aligned) == ["qemu-x86", "qemu-img"],
+    f"the SUSE QEMU build alignment covers {aligned}, not the emulator and qemu-img",
+)
 print("libvirt_stack families: packages, daemon models, network reload, guard, operator passed")
+
+# libvirt_tls must name the daemon each family actually ships (Leap 16 has no libvirtd).
+tls = yaml.safe_load((role.parent / "libvirt_tls/tasks/main.yml").read_text())[0]
+facts = tls["ansible.builtin.set_fact"]
+for family, daemon, socket, conf in (
+    ("RedHat", "virtproxyd.service", "virtproxyd-tls.socket", "/etc/libvirt/virtproxyd.conf"),
+    ("Suse", "virtproxyd.service", "virtproxyd-tls.socket", "/etc/libvirt/virtproxyd.conf"),
+    ("Debian", "libvirtd.service", "libvirtd-tls.socket", "/etc/libvirt/libvirtd.conf"),
+):
+    modular = render(tls["vars"]["libvirt_tls_modular"], ansible_os_family=family)
+    resolved = [
+        render(facts[key], libvirt_tls_modular=modular in (True, "True"))
+        for key in ("libvirt_tls_daemon", "libvirt_tls_socket", "libvirt_tls_conf_file")
+    ]
+    require(resolved == [daemon, socket, conf], f"libvirt_tls picks {resolved} for {family}")
+print("libvirt_tls families: TLS daemon, socket and config per family passed")
 PY

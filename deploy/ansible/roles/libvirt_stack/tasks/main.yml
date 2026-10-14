@@ -77,6 +77,16 @@
     - libvirt_stack_suse_install is changed
   changed_when: true
 
+# QEMU loads its device and block modules only from its own build. The install above leaves
+# an already-present emulator or qemu-img at an older build while pulling the newest module
+# packages, and the mixed build aborts every guest start ("Only modules from the same build
+# can be loaded"). Bring just those packages to the repository's current build.
+- name: Keep the QEMU emulator and qemu-img at the module build (Suse)
+  community.general.zypper:
+    name: "{{ libvirt_stack_qemu_packages + libvirt_stack_suse_qemu_build_packages }}"
+    state: latest
+  when: ansible_os_family == 'Suse'
+
 # Daemon model is PER-DISTRO. Fedora/RHEL and SUSE ship modular daemons (virtqemud,
 # virtproxyd, ...); SLES 15 SP7 enables them by default (SUSE Virtualization Guide, chapter 8).
 # Ubuntu/Debian do NOT package the
