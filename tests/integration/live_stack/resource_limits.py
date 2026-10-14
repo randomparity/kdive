@@ -1107,6 +1107,8 @@ async def local_insufficient_disk(
     await on_allocation(run, base_url, issuer, db_url, DEFAULT_SIZING, body)
 
 
+# The remote provider's overlay-create refusal (remote_libvirt/lifecycle/storage.py).
+OVERLAY_REFUSAL = "could not create the per-System overlay volume"
 # The free space a full pool keeps: less than a qcow2 overlay's header and refcount tables.
 _BALLAST_KEEP_BYTES = 64 * 1024
 # Test-only input, unprefixed so env-docs-check does not require it in the product catalog.
@@ -1143,7 +1145,10 @@ def bounded_pool(dest: str, target: Path, image: str) -> None:
 
     Only that filesystem may be filled: a pool on a shared filesystem is never a fixture.
     """
-    source = host_run(dest, "findmnt", "-n", "-o", "SOURCE,FSTYPE", "--mountpoint", str(target))
+    try:
+        source = host_run(dest, "findmnt", "-n", "-o", "SOURCE,FSTYPE", "--mountpoint", str(target))
+    except AssertionError:  # findmnt exits 1 when the directory is not a mount point
+        source = ""
     device, _, fstype = source.strip().partition(" ")
     if not device.startswith("/dev/loop") or fstype.strip() != "ext4":
         raise ScenarioStop(Outcome.BLOCKED, f"pool directory is not a loop ext4 mount: {source!r}")
@@ -1207,10 +1212,11 @@ async def remote_insufficient_disk(
         before = await asyncio.to_thread(pool_free, host.dest, target)
         ballast = target / f"q3118-ballast-{os.urandom(4).hex()}"
         size = before["f_bavail"] * before["block"] - _BALLAST_KEEP_BYTES
-        await asyncio.to_thread(
-            host_run, host.dest, "sudo", "-n", "fallocate", "-l", str(size), str(ballast)
-        )
         try:
+            # Inside the try: a fallocate that fails can still leave its file behind.
+            await asyncio.to_thread(
+                host_run, host.dest, "sudo", "-n", "fallocate", "-l", str(size), str(ballast)
+            )
             bound = await asyncio.to_thread(pool_free, host.dest, target)
             since = time.time()
             job = await held.provision(guest.profile(DEFAULT_SIZING))
@@ -1221,6 +1227,10 @@ async def remote_insufficient_disk(
                 f"provision {env.status} {env.error_category}"
             )
             assert set(terminal.per_attempt) <= {"provisioning_failure", "unknown"}, terminal
+            # A define or start failure is also provisioning_failure; only the overlay
+            # create refusal is the storage outcome this cell proves.
+            journal = await asyncio.to_thread(worker_journal, since)
+            assert OVERLAY_REFUSAL in journal, "the provision did not fail creating the overlay"
             left = await asyncio.to_thread(pool_volumes, host.dest, host.pool)
             assert left - volumes == {ballast.name}, f"pool gained {sorted(left - volumes)}"
             added = await asyncio.to_thread(held.provider.domains)
@@ -1239,7 +1249,9 @@ async def remote_insufficient_disk(
             )
             await held.prove_held({"partial_volumes": 0})
         finally:
-            await asyncio.to_thread(host_run, host.dest, "sudo", "-n", "rm", "--", str(ballast))
+            await asyncio.to_thread(
+                host_run, host.dest, "sudo", "-n", "rm", "-f", "--", str(ballast)
+            )
         released = await held.release()
         after = await asyncio.to_thread(pool_volumes, host.dest, host.pool)
         assert after == volumes, f"pool volumes changed: {sorted(after ^ volumes)}"

@@ -387,15 +387,18 @@ def test_remote_bindings_cover_only_the_bound_remote_cells() -> None:
         ("/dev/loop3 ext4\n", "/var/lib/q/pool.img\n", False),
         ("/dev/sda3 xfs\n", "", True),  # the host's own filesystem is never filled
         ("/dev/loop3 ext4\n", "/var/lib/other.img\n", True),  # someone else's loop
-        ("", "", True),  # not a mount point at all
+        (None, "", True),  # not a mount point: findmnt exits 1
     ],
     ids=["owned", "shared-fs", "foreign-loop", "unmounted"],
 )
 def test_only_the_owned_loop_pool_may_be_filled(
-    monkeypatch: pytest.MonkeyPatch, mount: str, backing: str, blocked: bool
+    monkeypatch: pytest.MonkeyPatch, mount: str | None, backing: str, blocked: bool
 ) -> None:
     def host_run(_dest: str, *argv: str, **_k: object) -> str:
-        return mount if argv[0] == "findmnt" else backing
+        if argv[0] == "findmnt":
+            assert mount is not None, "provider-host findmnt exited 1"
+            return mount
+        return backing
 
     monkeypatch.setattr(rl, "host_run", host_run)
     if blocked:
