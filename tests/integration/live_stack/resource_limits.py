@@ -35,6 +35,7 @@ import time
 import xml.etree.ElementTree as ET  # noqa: S405 - the worker's own domain XML  # nosec B405
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, LiteralString, cast
 from uuid import UUID
@@ -48,11 +49,15 @@ from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
 from kdive.jobs.queue import DEFAULT_MAX_ATTEMPTS
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
+from kdive.providers.remote_libvirt.lifecycle.install import (
+    _DEFAULT_BOOT_TIMEOUT_S as REMOTE_BOOT_WINDOW_S,
+)
 from kdive.providers.shared.runtime_paths import UPLOADS_DIR, domain_name_for
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings, Outcome
 from tests.integration.live_stack.cleanup import (
     capacity_in_use,
+    disk_absent,
     domain_disks,
     release_and_verify,
     system_failed,
@@ -61,6 +66,7 @@ from tests.integration.live_stack.deep_lifecycle import (
     FIXTURE_ROOT_ENV,
     KERNEL_PROBE,
     Fixture,
+    InstalledKernel,
     bound_kernel,
     deep_body,
     file_sha256,
@@ -68,7 +74,22 @@ from tests.integration.live_stack.deep_lifecycle import (
     load_fixture,
 )
 from tests.integration.live_stack.evidence import os_identity
-from tests.integration.live_stack.image_smoke import Endpoint, ssh, staged_image
+from tests.integration.live_stack.image_smoke import Endpoint, GuestIdentity, ssh, staged_image
+from tests.integration.live_stack.remote_lifecycle import (
+    REMOTE_REPRESENTATIVES,
+    RemoteHost,
+    guest_boot_kernel,
+    observe_host,
+    observer,
+    remote_host,
+    remote_kdive_domains,
+    remote_profile,
+    remote_volume_absent,
+    remote_xml,
+    staged_base_volume,
+    staged_volume,
+    volume_sha256,
+)
 from tests.integration.live_stack.scenario import (
     ACCELERATORS,
     DEFAULT_SIZING,
@@ -99,6 +120,7 @@ OWNER = 3118
 PROJECT = "resource-limits"
 # The enterprise-family representative, the same image the deep-lifecycle cells boot.
 IMAGE = "rocky-kdive-ready-10"
+REMOTE_FAMILY = "enterprise"
 SMALL = Sizing(vcpu=1, memory_mb=1024, disk_gb=10, shape="small")
 # The bounded filesystem: far below any real rootfs plus the 1 GiB staging floor.
 BOUND_MIB = 64
@@ -278,11 +300,6 @@ def kdive_domains() -> set[str]:
         return {d.name() for d in conn.listAllDomains(0) if d.name().startswith("kdive-")}
     finally:
         conn.close()
-
-
-def new_domains(before: set[str]) -> Callable[[], set[str]]:
-    """Every ``kdive-`` domain defined since ``before`` (at most one when nothing duplicated)."""
-    return lambda: kdive_domains() - before
 
 
 # --- minimum sizing ------------------------------------------------------------------------
@@ -598,9 +615,12 @@ def delay_ordering(journal_json: str) -> dict[str, float]:
     return marks
 
 
-def delay_held(marks: dict[str, float], delay_s: int) -> list[str]:
-    """Why the journal does not show the delay running in full before both dependents."""
-    missing = [k for k in ("delay_start", "delay_end", "ready_start") if k not in marks]
+def delay_held(marks: dict[str, float], delay_s: int, readiness: str = "ready_start") -> list[str]:
+    """Why the journal does not show the delay running in full before both dependents.
+
+    ``readiness`` is the dependent the provider's readiness waits on, which must be present.
+    """
+    missing = [k for k in ("delay_start", "delay_end", readiness) if k not in marks]
     if missing:
         return [f"journal lacks {missing}"]
     problems = []
@@ -636,7 +656,61 @@ async def timed_boot(op: LiveStackClient, run_id: str, *, force: bool) -> tuple[
     return env.object_id, started
 
 
-# --- the local frame -----------------------------------------------------------------------
+# --- providers ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Provider:
+    """Where a cell's domains and volumes live: the worker's libvirt or a remote provider host."""
+
+    resource: dict[str, object]
+    domains: Callable[[], set[str]]
+    xml: Callable[[str], str]
+    size: Callable[[str], int]
+    connect: Callable[[], Any]
+    absent: Callable[[str], bool]
+
+
+LOCAL = Provider(
+    {"mode": "kind"},
+    kdive_domains,
+    domain_xml,
+    virtual_size,
+    lambda: libvirt.open(worker_libvirt_uri()),
+    disk_absent,
+)
+
+
+def remote_provider(host: RemoteHost) -> Provider:
+    """The provider host, observed through the operator's own SSH libvirt connection."""
+    return Provider(
+        {"mode": "kind", "kind": "remote-libvirt"},
+        partial(remote_kdive_domains_of, host.dest),
+        partial(remote_xml, host.dest),
+        partial(remote_capacity, host.dest),
+        partial(observer, host.dest),
+        partial(remote_volume_absent, host.dest),
+    )
+
+
+def remote_kdive_domains_of(dest: str) -> set[str]:
+    conn = observer(dest)
+    try:
+        return remote_kdive_domains(conn)
+    finally:
+        conn.close()
+
+
+def remote_capacity(dest: str, path: str) -> int:
+    """A provider-host volume's capacity in bytes."""
+    conn = observer(dest)
+    try:
+        return int(conn.storageVolLookupByPath(path).info()[1])
+    finally:
+        conn.close()
+
+
+# --- the frame -----------------------------------------------------------------------
 
 
 @dataclass
@@ -645,6 +719,7 @@ class Held:
 
     run: CellRun
     op: LiveStackClient
+    provider: Provider
     allocation: str
     in_use_before: int
     domains_before: set[str]
@@ -662,8 +737,9 @@ class Held:
             "provision",
         )
         self.system_id = str(env.data["system_id"])
+        before = self.domains_before
         self.sampler = Sampler(
-            self.allocation, self.in_use_before, new_domains(self.domains_before)
+            self.allocation, self.in_use_before, lambda: self.provider.domains() - before
         )
         return env.object_id
 
@@ -672,7 +748,7 @@ class Held:
         await self.provision(profile)
         assert self.system_id is not None
         await await_system_state(self.op, "provision", self.system_id, "ready")
-        xml = await asyncio.to_thread(domain_xml, self.system_id)
+        xml = await asyncio.to_thread(self.provider.xml, self.system_id)
         accelerator = ET.fromstring(xml).get("type", "")  # noqa: S314  # nosec B314
         self.run.observed["accelerator"] = ACCELERATORS.get(accelerator, "none")
         self.overlays = domain_disks(xml)
@@ -690,11 +766,13 @@ class Held:
             "systems",
         )
         systems = sorted(item.object_id for item in listing.items)
-        added = await asyncio.to_thread(kdive_domains) - self.domains_before
+        added = await asyncio.to_thread(self.provider.domains) - self.domains_before
         assert systems == [self.system_id], f"Systems under the allocation: {systems}"
         assert added <= {domain_name_for(UUID(self.system_id))}, f"domains added: {sorted(added)}"
         overlays = (
-            domain_disks(await asyncio.to_thread(domain_xml, self.system_id)) if added else []
+            domain_disks(await asyncio.to_thread(self.provider.xml, self.system_id))
+            if added
+            else []
         )
         assert overlays == self.overlays and len(overlays) <= 1, f"owned overlays: {overlays}"
         self.run.prove(
@@ -729,16 +807,24 @@ class Held:
             in_use_before=self.in_use_before,
             # Only a System already failed before the release may pass through `failed`.
             from_failed=system_failed(state),
+            connect=self.provider.connect,
+            absent=self.provider.absent,
         )
 
 
 Body = Callable[[Held], Awaitable[None]]
 
 
-async def on_local_allocation(
-    run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, sizing: Sizing, body: Body
+async def on_allocation(
+    run: CellRun,
+    base_url: str,
+    issuer: OidcIssuer,
+    db_url: str,
+    sizing: Sizing,
+    body: Body,
+    provider: Provider = LOCAL,
 ) -> None:
-    """Hold one local Allocation of ``sizing`` for ``body``; record a cleanup attempt on failure.
+    """Hold one Allocation of ``sizing`` for ``body``; record a cleanup attempt on failure.
 
     ``body`` proves ``cleanup`` itself, because its owned fixtures are removed after release.
     """
@@ -748,18 +834,18 @@ async def on_local_allocation(
     async with LiveStackClient.over_http(base_url, token) as op:
         await seed_metering(db_url, PROJECT)
         in_use = await capacity_in_use(op)
-        domains = await asyncio.to_thread(kdive_domains)
+        domains = await asyncio.to_thread(provider.domains)
         allocation = ok(
             await scalar(
                 op,
                 "allocations.request",
                 project=PROJECT,
-                resource={"mode": "kind"},
+                resource=provider.resource,
                 **sizing.request(),
             ),
             "allocate",
         ).object_id
-        held = Held(run, op, allocation, in_use, domains)
+        held = Held(run, op, provider, allocation, in_use, domains)
         try:
             await body(held)
         finally:
@@ -769,7 +855,10 @@ async def on_local_allocation(
                 )
 
 
-def fixture() -> tuple[Path, dict[str, Any]]:
+Kernel = tuple[Path, dict[str, Any]]
+
+
+def fixture() -> Kernel:
     """The verified longterm fixture kernel; absent or changed is a blocked cell."""
     root = os.environ.get(FIXTURE_ROOT_ENV)
     if not root:
@@ -817,37 +906,117 @@ def demote_substeps(run: CellRun) -> None:
 # --- local scenarios -----------------------------------------------------------------------
 
 
-async def local_minimum(
-    run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, *, tmp: Path
+@dataclass(frozen=True)
+class Guest:
+    """The guest a boot cell runs: its image, profile, installed-kernel probe and boot window.
+
+    ``readiness`` is the journal mark that shows the delay held what the provider waits on:
+    ``kdive-ready`` for local-libvirt, the guest agent for remote-libvirt.
+    """
+
+    profile: Callable[[Sizing], dict[str, object]]
+    entry: GuestIdentity
+    installed_kernel: InstalledKernel
+    window_s: float
+    readiness: str
+
+
+async def local_guest(op: LiveStackClient, run: CellRun, kernel: Kernel) -> Guest:
+    entry = await registered(op, run, kernel)
+    return Guest(
+        lambda sizing: catalog_profile(entry, IMAGE, f"{PROJECT}-unread", sizing),
+        entry,
+        domain_kernel,
+        local_window_s(),
+        "ready_start",
+    )
+
+
+def remote_guest(run: CellRun, host: RemoteHost, kernel: Kernel) -> Guest:
+    """The enterprise remote representative on its staged base volume."""
+    image = REMOTE_REPRESENTATIVES[REMOTE_FAMILY]
+    volume = staged_base_volume(image)
+    run.observed |= {
+        "image_sha256": volume_sha256(host.dest, host.pool, volume),
+        "guest_os": f"{image.distro}:{image.version}",
+        "guest_arch": image.arch,
+        **kernel_inputs(*kernel),
+    }
+
+    def profile(sizing: Sizing) -> dict[str, object]:
+        base = remote_profile(image.arch, volume)
+        return {
+            **base,
+            "vcpu": sizing.vcpu,
+            "memory_mb": sizing.memory_mb,
+            "disk_gb": sizing.disk_gb,
+        }
+
+    return Guest(
+        profile,
+        image,
+        partial(guest_boot_kernel, family=REMOTE_FAMILY),
+        REMOTE_BOOT_WINDOW_S,
+        "agent_start",
+    )
+
+
+async def boot_cell(
+    run: CellRun,
+    base_url: str,
+    issuer: OidcIssuer,
+    db_url: str,
+    *,
+    sizing: Sizing,
+    remote: bool,
+    body: Callable[[Held, Guest, Kernel], Awaitable[None]],
+) -> None:
+    """Set up the provider and guest for a boot cell and hold one Allocation for ``body``."""
+    kernel = fixture()
+    if not remote:
+
+        async def local(held: Held) -> None:
+            await body(held, await local_guest(held.op, run, kernel), kernel)
+
+        await on_allocation(run, base_url, issuer, db_url, sizing, local)
+        return
+    host = remote_host()
+    observe_host(run, host)
+    guest = await asyncio.to_thread(remote_guest, run, host, kernel)
+
+    async def on_remote(held: Held) -> None:
+        await body(held, guest, kernel)
+
+    await on_allocation(run, base_url, issuer, db_url, sizing, on_remote, remote_provider(host))
+
+
+async def minimum(
+    run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, *, tmp: Path, remote: bool
 ) -> None:
     """``small`` provisions, boots the fixture kernel, answers SSH and is cleaned up."""
-    tree, manifest = fixture()
 
-    async def body(held: Held) -> None:
-        entry = await registered(held.op, run, (tree, manifest))
+    async def body(held: Held, guest: Guest, kernel: Kernel) -> None:
         shape = await small_shape(held.op)
-        system_id = await held.provision_ready(
-            catalog_profile(entry, IMAGE, f"{PROJECT}-unread", SMALL)
-        )
-        xml = await asyncio.to_thread(domain_xml, system_id)
-        await asyncio.to_thread(prove_minimum, run, shape, xml, held.disks)
+        system_id = await held.provision_ready(guest.profile(SMALL))
+        xml = await asyncio.to_thread(held.provider.xml, system_id)
+        await asyncio.to_thread(prove_minimum, run, shape, xml, held.overlays, held.provider.size)
         await deep_body(
             run,
             held.op,
             system_id,
             held.disks,
             project=PROJECT,
-            entry=entry,
-            tree=tree,
-            manifest=manifest,
+            entry=guest.entry,
+            tree=kernel[0],
+            manifest=kernel[1],
             tmp=tmp,
-            installed_kernel=domain_kernel,
+            installed_kernel=guest.installed_kernel,
         )
         demote_substeps(run)
         await held.prove_held()
         run.prove("cleanup", await held.release())
 
-    await on_local_allocation(run, base_url, issuer, db_url, SMALL, body)
+    await boot_cell(run, base_url, issuer, db_url, sizing=SMALL, remote=remote, body=body)
 
 
 async def local_insufficient_disk(
@@ -898,7 +1067,8 @@ async def local_insufficient_disk(
             )
             left = await asyncio.to_thread(entries, mount.target)
             assert not left, f"staging left {left}"
-            assert not await asyncio.to_thread(new_domains(held.domains_before)), "domain defined"
+            added = await asyncio.to_thread(held.provider.domains)
+            assert not added - held.domains_before, "a domain was defined"
             run.prove(
                 "insufficient-disk",
                 {
@@ -932,20 +1102,18 @@ async def local_insufficient_disk(
                     )
                 )
 
-    await on_local_allocation(run, base_url, issuer, db_url, DEFAULT_SIZING, body)
+    await on_allocation(run, base_url, issuer, db_url, DEFAULT_SIZING, body)
 
 
-async def local_slow_boot(
-    run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, *, tmp: Path
+async def slow_boot(
+    run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str, *, tmp: Path, remote: bool
 ) -> None:
     """A delayed boot inside the window is ready; past it, every attempt is ``boot_timeout``."""
-    tree, manifest = fixture()
-    release = str(manifest["release"])
-    window = local_window_s()
 
-    async def body(held: Held) -> None:
-        entry = await registered(held.op, run, (tree, manifest))
-        system_id = await held.provision_ready(catalog_profile(entry, IMAGE, f"{PROJECT}-unread"))
+    async def body(held: Held, guest: Guest, kernel: Kernel) -> None:
+        tree, manifest = kernel
+        release, window, entry = str(manifest["release"]), guest.window_s, guest.entry
+        system_id = await held.provision_ready(guest.profile(DEFAULT_SIZING))
         endpoint, key = await authorize_ssh(held.op, system_id, tmp, "slow-boot")
         investigation = ok(
             await scalar(held.op, "investigations.open", project=PROJECT, title="slow boot"), "open"
@@ -976,9 +1144,12 @@ async def local_slow_boot(
                 "install",
                 ok(await scalar(held.op, "runs.install", run_id=run_id), "install").object_id,
             )
-            installed = await asyncio.to_thread(domain_kernel, system_id, endpoint, key, release)
-            held.disks.append(installed[1])
-            assert installed[0] == run.observed["kernel_sha256"], "installed kernel differs"
+            digest, path = await asyncio.to_thread(
+                guest.installed_kernel, system_id, endpoint, key, release
+            )
+            if path is not None:  # a host-staged kernel the release must remove
+                held.disks.append(path)
+            assert digest == run.observed["kernel_sha256"], "installed kernel differs"
             job, started = await timed_boot(held.op, run_id, force=False)
             await drain_job(held.op, "baseline-boot", job)
             baseline = time.monotonic() - started
@@ -989,12 +1160,12 @@ async def local_slow_boot(
                     f"baseline boot {baseline:.0f} s leaves no margin in {window:.0f} s",
                 )
             delays = {"baseline_s": round(baseline, 1), "window_s": window, "inside_s": inside}
-            proof = await delayed_boot(held, run_id, endpoint, key, release, inside, window)
+            proof = await delayed_boot(held, run_id, endpoint, key, release, inside, window, guest)
             assert proof["status"] == "succeeded", f"inside-window boot {proof}"
             beyond = beyond_delay(window)
             delays["beyond_s"] = beyond
             since = time.time()
-            late = await delayed_boot(held, run_id, endpoint, key, release, beyond, window)
+            late = await delayed_boot(held, run_id, endpoint, key, release, beyond, window, guest)
             per = await attempts(db_url, str(late["job"]), since)
             assert (late["status"], late["category"]) == ("failed", "boot_timeout"), late
             assert per.count == per.budget, per
@@ -1014,11 +1185,18 @@ async def local_slow_boot(
         assert closed.status == "closed", f"investigation {closed.status}"
         run.prove("cleanup", await held.release())
 
-    await on_local_allocation(run, base_url, issuer, db_url, DEFAULT_SIZING, body)
+    await boot_cell(run, base_url, issuer, db_url, sizing=DEFAULT_SIZING, remote=remote, body=body)
 
 
 async def delayed_boot(
-    held: Held, run_id: str, endpoint: Endpoint, key: Path, release: str, delay: int, window: float
+    held: Held,
+    run_id: str,
+    endpoint: Endpoint,
+    key: Path,
+    release: str,
+    delay: int,
+    window: float,
+    guest: Guest,
 ) -> dict[str, object]:
     """Arm ``delay`` and force a boot; return its outcome and the guest journal's proof.
 
@@ -1034,8 +1212,8 @@ async def delayed_boot(
     elapsed = time.monotonic() - started
     after = await asyncio.to_thread(probe_new_boot, endpoint, key, before["boot_id"], KERNEL_PROBE)
     assert after.get("release") == release, f"booted {after.get('release')!r}, not {release!r}"
-    marks = await held_journal(endpoint, key, deadline_s=delay + 600.0)
-    problems = delay_held(marks, delay)
+    marks = await held_journal(endpoint, key, guest.readiness, deadline_s=delay + 600.0)
+    problems = delay_held(marks, delay, guest.readiness)
     assert not problems, f"the delay did not hold the boot: {problems}"
     return {
         "job": job,
@@ -1046,7 +1224,9 @@ async def delayed_boot(
     }
 
 
-async def held_journal(endpoint: Endpoint, key: Path, *, deadline_s: float) -> dict[str, float]:
+async def held_journal(
+    endpoint: Endpoint, key: Path, readiness: str, *, deadline_s: float
+) -> dict[str, float]:
     """The current boot's delay marks, once the delay has ended and ``kdive-ready`` started.
 
     SSH is not behind the delay, so a guest can answer while the delay still runs.
@@ -1056,7 +1236,7 @@ async def held_journal(endpoint: Endpoint, key: Path, *, deadline_s: float) -> d
         result = await asyncio.to_thread(ssh, endpoint, key, JOURNAL_PROBE)
         assert result.returncode == 0, f"guest journal read exited {result.returncode}"
         marks = delay_ordering(result.stdout)
-        if {"delay_end", "ready_start"} <= marks.keys() or time.monotonic() >= deadline:
+        if {"delay_end", readiness} <= marks.keys() or time.monotonic() >= deadline:
             return marks
         await asyncio.sleep(_SAMPLE_S)
 
@@ -1092,21 +1272,63 @@ def bindings(
     return InputBindings(version=1, candidate_sha=candidate, matrix_sha256=matrix, cells=contexts)
 
 
+def remote_bindings(
+    candidate: str,
+    *,
+    root: Path | None,
+    matrix: str,
+    host: RemoteHost,
+    digest: Callable[[str, str, str], str] = volume_sha256,
+    staged: Callable[[str], str | None] = staged_volume,
+    fixture_at: Fixture = load_fixture,
+) -> InputBindings:
+    """The expected ``Context`` of every bound remote #3118 cell, on ``host``."""
+    image = REMOTE_REPRESENTATIVES[REMOTE_FAMILY]
+    volume = staged(image.name)
+    kernel = bound_kernel(root, "longterm", host.host_arch, fixture_at)
+    contexts = {
+        cell.id: Context.model_validate(
+            {
+                "host_os": host.host_os,
+                "host_arch": host.host_arch,
+                "guest_os": f"{image.distro}:{image.version}",
+                "guest_arch": image.arch,
+                "accelerator": cell.accelerator,
+                "image_sha256": digest(host.dest, host.pool, volume) if volume else None,
+                **kernel,
+            }
+        )
+        for cell in cells("remote-libvirt")
+        if cell.node_id is not None
+    }
+    return InputBindings(version=1, candidate_sha=candidate, matrix_sha256=matrix, cells=contexts)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Write local resource-boundary input bindings.")
     commands = parser.add_subparsers(dest="command", required=True)
     write = commands.add_parser("bindings")
     write.add_argument("--candidate", required=True)
     write.add_argument("--out", type=Path, required=True)
+    write.add_argument("--remote", action="store_true", help="bind the remote-libvirt cells")
     args = parser.parse_args(argv)
-    root = os.environ.get(FIXTURE_ROOT_ENV)
-    inputs = bindings(
-        args.candidate,
-        root=Path(root) if root else None,
-        host_os=os_identity(Path("/etc/os-release").read_text(encoding="utf-8")),
-        host_arch=platform.machine(),
-        matrix=build_contract().matrix_sha256,
-    )
+    root = Path(os.environ[FIXTURE_ROOT_ENV]) if os.environ.get(FIXTURE_ROOT_ENV) else None
+    matrix = build_contract().matrix_sha256
+    if args.remote:
+        try:
+            host = remote_host()
+        except ScenarioStop as stop:
+            print(f"cannot bind the remote cells: {stop}")
+            return 2
+        inputs = remote_bindings(args.candidate, root=root, matrix=matrix, host=host)
+    else:
+        inputs = bindings(
+            args.candidate,
+            root=root,
+            host_os=os_identity(Path("/etc/os-release").read_text(encoding="utf-8")),
+            host_arch=platform.machine(),
+            matrix=matrix,
+        )
     args.out.write_text(inputs.model_dump_json(indent=1) + "\n", encoding="utf-8")
     print(f"wrote {len(inputs.cells)} binding(s)")
     return 0

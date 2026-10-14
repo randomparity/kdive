@@ -359,3 +359,23 @@ def test_each_local_cell_qualifies_only_with_its_exact_assertions(tmp_path: Path
             "required-assertions-mismatch"
             in next(v for v in results if v.cell.id == cell.id).reasons
         )
+
+
+def test_remote_bindings_cover_only_the_bound_remote_cells() -> None:
+    host = rl.RemoteHost("op@host", "default", "rocky:10.2", "x86_64", "kvm")
+    inputs = rl.remote_bindings(
+        "a" * 40,
+        root=None,
+        matrix="b" * 64,
+        host=host,
+        digest=lambda *_a: "c" * 64,
+        staged=lambda _name: "rocky-10-kdive-remote-base.qcow2",
+    )
+    bound = {c.id for c in rl.cells("remote-libvirt") if c.node_id is not None}
+    assert set(inputs.cells) == bound and len(bound) == 2
+    for context in inputs.cells.values():
+        assert (context.host_os, context.guest_os, context.image_sha256) == (
+            "rocky:10.2",
+            "rocky:10",
+            "c" * 64,
+        )
