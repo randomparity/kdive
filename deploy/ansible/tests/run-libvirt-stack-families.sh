@@ -252,4 +252,20 @@ for family, changed, expected_reload in (
         f"network daemon reload route differs for {family} changed={changed}",
     )
 print("libvirt_stack families: packages, daemon models, network reload, guard, operator passed")
+
+# libvirt_tls must name the daemon each family actually ships (Leap 16 has no libvirtd).
+tls = yaml.safe_load((role.parent / "libvirt_tls/tasks/main.yml").read_text())[0]
+facts = tls["ansible.builtin.set_fact"]
+for family, daemon, socket, conf in (
+    ("RedHat", "virtproxyd.service", "virtproxyd-tls.socket", "/etc/libvirt/virtproxyd.conf"),
+    ("Suse", "virtproxyd.service", "virtproxyd-tls.socket", "/etc/libvirt/virtproxyd.conf"),
+    ("Debian", "libvirtd.service", "libvirtd-tls.socket", "/etc/libvirt/libvirtd.conf"),
+):
+    modular = render(tls["vars"]["libvirt_tls_modular"], ansible_os_family=family)
+    resolved = [
+        render(facts[key], libvirt_tls_modular=modular in (True, "True"))
+        for key in ("libvirt_tls_daemon", "libvirt_tls_socket", "libvirt_tls_conf_file")
+    ]
+    require(resolved == [daemon, socket, conf], f"libvirt_tls picks {resolved} for {family}")
+print("libvirt_tls families: TLS daemon, socket and config per family passed")
 PY
