@@ -1439,6 +1439,76 @@ capture spool directory, which inherits the build workspace's setgid bit, and th
 stays `running` until the cell's drain deadline (#3225). After `demo-down.sh --wipe --yes` the
 worker's libvirt defined no `kdive-` domain and `KDIVE_INSTALL_STAGING` was empty.
 
+#### GDB debug tool cells (#2813)
+
+`tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell` carries the 440 x86_64
+local-libvirt cells of the 21 `debug.*` tools: 88 `functional` (`debug.start_session` as both
+`gdbstub` and `drgn-live`) and 352 rejection cells. Local-libvirt supports both transports, so
+no `capability` cell exists. The `debug.list_sessions` `authorization` and `project-isolation`
+cells prove denied visibility against a viewer who sees the target session
+([ADR-0756](../../adr/0756-filtered-list-boundary-evidence.md), amended 2026-10-14). The
+[design](../../workflow/specs/2026-10-14-local-debug-tool-cells-design.md) lists what each cell
+compares. The prerequisites are the capture cells' above (drgn for the `drgn-live` variant)
+plus `gdb` on the MCP server's PATH, which runs the debugger beside QEMU's loopback gdbstub,
+and `objdump` on the test host, which decodes the fixture `vmlinux` for the `debug.advance` and
+`debug.disassemble` cells; either missing records the cell `blocked`. Each attach stages a copy
+of the Run's `vmlinux` (about 437 MB for `longterm`) in the server's temp directory and nothing
+removes it yet (#3229), so give the server an on-disk `TMPDIR` when `/tmp` is a small or
+quota-limited tmpfs. Run both configurations into one evidence root:
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix KDIVE_ARTIFACT_DIR=$(mktemp -d)
+export KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_live.py
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_live.py
+```
+
+- Each functional cell provisions `fedora-kdive-ready-44` with `debug.gdbstub` (no
+  `crashkernel`, so the boot carries `nokaslr`) and boots the fixture kernel through the
+  deep-lifecycle checks, which upload its `vmlinux` and load `loop`. Before any attach halts the
+  guest, it reads `/proc/version`, `/proc/kallsyms` and `loop`'s `.text` base over SSH, and
+  requires `vfs_read` at its fixture `System.map` address.
+- A `vfs_read` breakpoint stop is the controlled workload: an SSH client banner written while the
+  guest resumes makes guest `sshd` call `read(2)`. Addresses, registers, frames, disassembly,
+  the `jiffies_64` watchpoint, `linux_banner` bytes, `loop`'s base and a `loop` function's
+  relocated address are compared with the guest's own values, and instruction steps and
+  disassembly with the fixture binary's instruction boundaries; session cells compare the
+  session rows and prove the guest halts while attached and answers again after the detach.
+- Two cells fail after proving what they can, until the tool exposes the effect:
+  `debug.list_breakpoints` returns only a count and `debug.read_frame` no arguments or locals.
+  `debug.interrupt` fails while no running guest reaches it: `debug.start_session`'s gdbstub
+  reachability probe leaves the guest paused (ADR-0184), and every resume halts it again.
+- Rejection cells aim at one target per stack: a torn-down fixture System, its Run and an ended
+  gdbstub session. They compare the project rows (including its debug sessions), the jobs naming
+  the System or Run, and whether its domain is defined.
+
+The ppc64le local cells share the node but are owner #2818's; the remote cells are #3113's.
+
+Last run: candidate `e5215fc6d` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing, the
+`longterm` fixture `v6.18.54` built on that host. Each configuration ran on a freshly wiped stack
+and recorded its 220 cells in about 80 minutes, skipping the other's 220. A first default run
+filled the guest's 16 GB quota-limited `/tmp` with leaked debuginfo staging (#3229) and failed 16
+cells with `Disk quota exceeded`. Both reported configurations therefore ran with the server's
+`TMPDIR` on disk (operator decision, 2026-10-15), and the leaked directories were deleted
+before each run. `qualify` reported 420 of the 440 cells qualified: all 352 `rejection` and 68
+`success`. Twenty are `failure`:
+
+- 12 known gaps, each after its observable proof: `debug.list_breakpoints` (count only),
+  `debug.read_frame` (no arguments or locals) and `debug.interrupt` (the started session's
+  guest was already halted), four each.
+- 8 `debug.clear_breakpoint` and `debug.clear_watchpoint` cells: their 5 s continue timed out
+  and the engine's interrupt dropped the stop reported in its own reply, answering
+  `transport_stall` (#3230).
+
+After `demo-down.sh --wipe --yes` neither libvirt defined a `kdive-` domain,
+`KDIVE_INSTALL_STAGING` was empty, and no staging directory remained in either temp directory.
+
 #### Break-glass provider tool cells (#3112)
 
 `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell` carries the 136

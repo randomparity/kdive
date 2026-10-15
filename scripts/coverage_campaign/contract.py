@@ -36,13 +36,25 @@ _KERNEL_INPUTS = (
 _LOCAL_CONTROL_TOOLS = frozenset(
     {"control.capture_traffic", "control.diagnostic_sysrq", "control.watch_for_crash"}
 )
-# List tools that answer a denied caller with an empty page instead of a failure (ADR-0756):
-# their rejection cells prove denied visibility against a positive control.
+# List tools that answer a denied caller with an empty page instead of a failure (ADR-0756 and
+# its 2026-10-14 amendment): their rejection cells prove denied visibility against a positive
+# control.
 FILTERED_LIST_BOUNDARIES = frozenset(
     {
         ("investigations.list", "authorization"),
         ("investigations.list", "project-isolation"),
         ("artifacts.list", "project-isolation"),
+        *(
+            (tool, boundary)
+            for tool in (
+                "runs.list",
+                "systems.list",
+                "jobs.list",
+                "allocations.list",
+                "debug.list_sessions",
+            )
+            for boundary in ("authorization", "project-isolation")
+        ),
     }
 )
 # Reviewed admission refusals: the server answers these functional cells synchronously, so they
@@ -229,12 +241,14 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                     if group.authority:
                         roles = (*roles, "authority")
                     owner = group.owner
-                    # Lifecycle, break-glass, capture and power/snapshot ppc64le cells wait for
-                    # the POWER lane (#2818); x86_64 remote System cells are #3080's, remote
-                    # run/image cells #3120's, remote capture cells #3114's, remote
-                    # power/snapshot/control cells #3116's.
-                    if group.owner in (2814, 2815, 3062, 3112, 3119) and arch == "ppc64le":
+                    # Lifecycle, break-glass, debug, capture and power/snapshot ppc64le cells
+                    # wait for the POWER lane (#2818); x86_64 remote System cells are #3080's,
+                    # remote run/image cells #3120's, remote debug cells #3113's, remote capture
+                    # cells #3114's, remote power/snapshot/control cells #3116's.
+                    if group.owner in (2813, 2814, 2815, 3062, 3112, 3119) and arch == "ppc64le":
                         owner = 2818
+                    elif group.owner == 2813 and provider == "remote-libvirt":
+                        owner = 3113
                     elif group.owner == 2814 and provider == "remote-libvirt":
                         owner = 3114
                     elif group.owner == 3062 and provider == "remote-libvirt":
