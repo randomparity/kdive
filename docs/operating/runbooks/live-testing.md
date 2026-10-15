@@ -1169,6 +1169,19 @@ pin. The cell fails naming the use id and holder: run `worker-lifecycle.sh statu
 `ops.recover_build_use` with that holder. Recovery rows, audit rows and the terminated
 incarnation stay as history.
 
+Last run: candidate `21250f083` (server, worker and reconciler at that SHA) on a disposable
+Fedora 44 x86_64 lab guest with one worker slot. The server's `TMPDIR` pointed at an on-disk
+directory, because Fedora's `/tmp` is a small tmpfs. `qualify` reported all 16 cells qualified:
+4 `success` and 12 `rejection`.
+
+- Both recover cells were refused while the holder was alive. After the kill, each recovered
+  exactly its pin, with recovery rows recording `authority_kind = 'local'` and outcome `killed`.
+- After the run no pin was left, no unit was frozen, the slot was started again, and every
+  System was torn down.
+- An earlier run at `c7302a912` qualified 14. Its recover cells read the expected alive refusal
+  through a helper that rejects error envelopes; that is fixed, and the restore still left the
+  lane clean on that path.
+
 #### System lifecycle tool cells (#3062)
 
 `tests/integration/test_system_tool_cells_live.py::test_system_tool_cell` carries the 120 x86_64
