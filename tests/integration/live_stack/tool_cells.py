@@ -385,11 +385,19 @@ async def _attempt(
 
 
 def _empty_page(tool: str, args: Mapping[str, object]) -> ToolResponse:
-    """The page a filtering list tool answers a caller who may see nothing (ADR-0756)."""
+    """The page a filtering list tool answers a caller who may see nothing (ADR-0756).
+
+    A named tool whose carrier has not yet added its page fails here rather than borrowing
+    another tool's.
+    """
     if tool == "investigations.list":
         object_id, actions = "investigations", ["investigations.get", "investigations.open"]
-    else:
+    elif tool == "artifacts.list":
         object_id, actions = str(args["system_id"]), ["artifacts.get"]
+    elif tool == "debug.list_sessions":
+        object_id, actions = "debug_sessions", ["debug.get_session"]
+    else:
+        raise AssertionError(f"no canonical empty page is configured for {tool}")
     return ToolResponse.collection(
         object_id,
         "ok",
@@ -403,6 +411,7 @@ async def _observe_filtered(
     caller: Caller, tool: str, rejection: Rejection, control: FilteredListControl
 ) -> dict[str, object]:
     """A viewer sees the known item, then the denied caller gets exactly the empty page."""
+    empty = _empty_page(tool, rejection.args).model_dump()
     expected = await control.expected_item()
     assert expected, f"{tool} has no independently known protected item"
     seen = await _attempt(caller, tool, replace(rejection, grants=control.grants))
@@ -415,7 +424,6 @@ async def _observe_filtered(
     listed = [i.object_id for i in seen.items if i.error_category is None]
     assert expected in listed, f"{tool} did not list the known item to a viewer ({len(listed)})"
     result = await _attempt(caller, tool, rejection)
-    empty = _empty_page(tool, rejection.args).model_dump()
     answer = result.model_dump() if isinstance(result, ToolResponse) else _shape(result)
     differs = sorted(k for k in empty.keys() | answer.keys() if answer.get(k) != empty.get(k))
     assert not differs, f"{tool} denied answer is not the empty page; differs in {differs}"

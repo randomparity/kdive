@@ -110,6 +110,17 @@ Cell identities and the other boundaries are unchanged. A provider that gains or
 capability changes the cell set, which moves the contract digest, so a qualification against
 the old set fails `matrix-mismatch` rather than passing stale evidence.
 
+### Amendment (2026-10-14): ten more filtering list boundaries prove denied visibility (#2813)
+
+This amends the 2026-10-12 amendment above, which names three cells and keeps the
+failure-envelope rule for every other `authorization` and `project-isolation` cell. By
+operator decision R3 (2026-10-13), [ADR-0756](0756-filtered-list-boundary-evidence.md)'s
+2026-10-14 amendment adds the `authorization` and `project-isolation` pairs of `runs.list`,
+`systems.list`, `jobs.list`, `allocations.list` and `debug.list_sessions`. Their cells prove
+denial with ADR-0756's positive control and canonical empty page. The contract's
+`FILTERED_LIST_BOUNDARIES` owns the named set; every pair outside it keeps the
+failure-envelope rule.
+
 ## Consequences
 
 - Recovery-configuration evidence exists only from a run whose catalog proved it. A carrier of
