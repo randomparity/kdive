@@ -121,6 +121,9 @@ _INVESTIGATION_NODE = (
     "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
 )
 _OPERATOR_NODE = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+_MUTATION_NODE = (
+    "tests/integration/test_operator_mutation_tool_cells_live.py::test_operator_mutation_tool_cell"
+)
 _SYSTEM_NODE = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
 _RUN_NODE = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
 _BREAKGLASS_NODE = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
@@ -227,6 +230,8 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert {c.node_id for c in investigation} == {_INVESTIGATION_NODE}
     operator = [c for c in contract.cells if c.operation in _OPERATOR_TOOLS]
     assert len(operator) == 124 and {c.node_id for c in operator} == {_OPERATOR_NODE}
+    mutation = [c for c in contract.cells if c.operation in _OPERATOR_SPLIT[3110]]
+    assert len(mutation) == 216 and {c.node_id for c in mutation} == {_MUTATION_NODE}
     systems = [c for c in contract.cells if c.operation in _SYSTEM_TOOLS]
     local = [c for c in systems if c.provider == "local-libvirt"]
     assert len(local) == 240 and {c.node_id for c in local} == {_SYSTEM_NODE}
@@ -258,6 +263,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_SPLIT[3095],
         *_SPLIT[3096],
         *_OPERATOR_TOOLS,
+        *_OPERATOR_SPLIT[3110],
         *_SYSTEM_TOOLS,
         *_RUN_TOOLS,
         *_OPERATOR_SPLIT[3112],
