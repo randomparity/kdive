@@ -131,6 +131,7 @@ _POWER_NODE = (
     "tests/integration/test_power_snapshot_tool_cells_live.py::test_power_snapshot_tool_cell"
 )
 _CAPTURE_NODE = "tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell"
+_CONTROL_NODE = "tests/integration/test_control_tool_cells_live.py::test_control_tool_cell"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _LIMITS_NODE = "tests/integration/test_resource_limits_live.py::test_local_resource_boundary"
 _LIMIT_NODES = {
@@ -254,6 +255,11 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     # As for power: the local ppc64le cells (#2818's) share the arch-free scenario ids.
     assert len(local_capture) == 324 and {c.node_id for c in local_capture} == {_CAPTURE_NODE}
     assert {c.node_id for c in capture if c.provider == "remote-libvirt"} == {None}
+    control = [c for c in contract.cells if c.operation in _LOCAL_CONTROL_TOOLS]
+    local_control = [c for c in control if c.provider == "local-libvirt"]
+    # As for power: the local ppc64le cells (#2818's) share the arch-free scenario ids.
+    assert len(local_control) == 120 and {c.node_id for c in local_control} == {_CONTROL_NODE}
+    assert {c.node_id for c in control if c.provider == "remote-libvirt"} == {None}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -270,6 +276,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_POWER_SNAPSHOT_TOOLS,
         *_CAPTURE_TOOLS,
         *(c.operation for c in contract.cells if c.operation.startswith("debug.")),
+        *_LOCAL_CONTROL_TOOLS,
     }
     limits = [c for c in contract.cells if c.owner == 3118]
     local_limits = [c for c in limits if c.provider == "local-libvirt"]
