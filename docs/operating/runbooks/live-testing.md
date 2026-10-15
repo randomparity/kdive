@@ -1386,6 +1386,16 @@ uv run python -m pytest -m live_stack tests/integration/test_control_tool_cells_
 
 The ppc64le local cells share the node but are owner #2818's; the remote cells are #3116's.
 
+Last run: candidate `cf8275e80` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing, the
+`longterm` fixture `v6.18.54` built on that host. Each configuration recorded its 30 cells in
+about 33 minutes and skipped the other's 30. `qualify` reported 56 of the 60 cells qualified:
+48 `rejection` and 8 `success` (`control.diagnostic_sysrq` and `control.watch_for_crash`). The
+4 `control.capture_traffic` functional cells are `failure`: the worker rejects its own
+capture spool directory, which inherits the build workspace's setgid bit, and the failed job
+stays `running` until the cell's drain deadline (#3225). After `demo-down.sh --wipe --yes` the
+worker's libvirt defined no `kdive-` domain and `KDIVE_INSTALL_STAGING` was empty.
+
 #### Break-glass provider tool cells (#3112)
 
 `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell` carries the 136
