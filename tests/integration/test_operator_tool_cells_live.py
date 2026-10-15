@@ -556,7 +556,9 @@ async def _recover(
     use_id, args = str(stranded.pin["use_id"]), _recovery(stranded, "coverage recovery")
     others = [r for r in await _rows(db_url, ALL_PINS) if str(r["use_id"]) != use_id]
     assert (await stranded.incarnation())["state"] == "active"
-    alive = one(await caller.call("ops.recover_build_use", args, token, discover=True))
+    # `one` refuses an error envelope, and the refusal is this call's expected answer.
+    alive = await caller.call("ops.recover_build_use", args, token, discover=True)
+    assert isinstance(alive, ToolResponse), alive
     assert (alive.status, alive.error_category) == ("error", _CONFIGURATION_ERROR), alive
     assert [str(r["use_id"]) for r in await _rows(db_url, ALL_PINS)].count(use_id) == 1
     assert not await _rows(db_url, _RECOVERIES, (use_id,)), "a live holder's pin was recovered"
