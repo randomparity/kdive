@@ -200,6 +200,61 @@ def test_output_tampering_fails(built: Path, name: str) -> None:
         fixture.verify(built, baseline="longterm", arch="x86_64")
 
 
+def test_selections_cover_the_baselines_and_the_corpus() -> None:
+    selected = fixture.selections()
+    assert set(selected) == {
+        "longterm",
+        "stable",
+        "case-1-broken",
+        "case-1-fixed",
+        "case-2-broken",
+        "case-2-fixed",
+    }
+    assert selected["stable"]["repository"].endswith("/stable/linux.git")
+    assert selected["case-1-fixed"]["repository"].endswith("/torvalds/linux.git")
+    assert fixture.baseline_selection("case-2-broken") == selected["case-2-broken"]
+    with pytest.raises(ValueError, match="longterm, stable, case-1-broken"):
+        fixture.baseline_selection("mainline")
+
+
+def test_cli_accepts_a_corpus_selection(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            "python3",
+            str(fixture.ROOT / "scripts/kernel_fixtures.py"),
+            "verify",
+            "--baseline",
+            "case-1-broken",
+            "--arch",
+            "x86_64",
+            "--output",
+            str(tmp_path / "absent"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "missing fixture artifact: manifest.json" in result.stderr
+
+
+def test_corpus_selection_round_trips(built: Path, repository) -> None:
+    fixture.record(
+        built,
+        baseline="case-1-fixed",
+        arch="x86_64",
+        config_digest=fixture.digest(fixture.CONFIG),
+        toolchain={"gcc": "test gcc", "packages": "gcc=1"},
+        builder="a" * 40,
+        source_epoch=1,
+    )
+    assert fixture.verify(built, baseline="case-1-fixed", arch="x86_64")["baseline"] == (
+        "case-1-fixed"
+    )
+    with pytest.raises(ValueError, match="selection mismatch"):
+        fixture.verify(built, baseline="case-1-broken", arch="x86_64")
+
+
 def test_missing_manifest_and_wrong_selection_fail(built: Path) -> None:
     with pytest.raises(ValueError):
         fixture.verify(built, baseline="stable", arch="x86_64")
