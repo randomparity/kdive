@@ -899,6 +899,18 @@ they report `missing-result`; a run on a ppc64le host today records them `blocke
 case table and representative image are x86_64 only until #2818 supplies POWER fixtures and
 cases.
 
+Last run (2026-10-15): candidate `3b35b4c82` (server, worker and reconciler at that SHA), a
+Fedora 44 x86_64 KVM lab host, the four revisions built on that host. All four x86_64 cells
+proved their outcome, `same-reproducer-config`, `debug-or-crash-evidence` and `cleanup`, and
+`qualify` reported each one qualified; no `kdive-*` domain remained afterwards.
+
+| Cell (`kernel-corpus/local-libvirt/x86_64/…`) | Observation | Outcome |
+|---|---|---|
+| `case-1/broken` | `expected_crash_observed`; 14 reliable oops frames resolved in `System.map`, first `__d_lookup+0x3c/0xf0`; banner `6.19.0-g970296997869` | success |
+| `case-1/fixed` | ready boot with `dhash_entries=1`, two hash buckets, no crash signature, build ID matched | success |
+| `case-2/broken` | `/proc/bus/pci/00` link count 12 with 10 files and no subdirectories | success |
+| `case-2/fixed` | every `/proc/bus/pci` link count equal to 2 plus its subdirectories | success |
+
 #### Local resource-boundary cells (#3118)
 
 `tests/integration/test_resource_limits_live.py::test_local_resource_boundary` has one parameter
