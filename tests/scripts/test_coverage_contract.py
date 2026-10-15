@@ -121,6 +121,9 @@ _INVESTIGATION_NODE = (
     "tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell"
 )
 _OPERATOR_NODE = "tests/integration/test_operator_tool_cells_live.py::test_operator_tool_cell"
+_MUTATION_NODE = (
+    "tests/integration/test_operator_mutation_tool_cells_live.py::test_operator_mutation_tool_cell"
+)
 _SYSTEM_NODE = "tests/integration/test_system_tool_cells_live.py::test_system_tool_cell"
 _RUN_NODE = "tests/integration/test_run_tool_cells_live.py::test_run_tool_cell"
 _BREAKGLASS_NODE = "tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell"
@@ -128,6 +131,7 @@ _POWER_NODE = (
     "tests/integration/test_power_snapshot_tool_cells_live.py::test_power_snapshot_tool_cell"
 )
 _CAPTURE_NODE = "tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell"
+_CONTROL_NODE = "tests/integration/test_control_tool_cells_live.py::test_control_tool_cell"
 _DEEP_NODE = "tests/integration/test_deep_lifecycle_live.py::test_deep_lifecycle"
 _CORPUS_NODE = "tests/integration/test_kernel_corpus_live.py::test_kernel_corpus"
 _LIMITS_NODE = "tests/integration/test_resource_limits_live.py::test_local_resource_boundary"
@@ -228,6 +232,8 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert {c.node_id for c in investigation} == {_INVESTIGATION_NODE}
     operator = [c for c in contract.cells if c.operation in _OPERATOR_TOOLS]
     assert len(operator) == 124 and {c.node_id for c in operator} == {_OPERATOR_NODE}
+    mutation = [c for c in contract.cells if c.operation in _OPERATOR_SPLIT[3110]]
+    assert len(mutation) == 216 and {c.node_id for c in mutation} == {_MUTATION_NODE}
     systems = [c for c in contract.cells if c.operation in _SYSTEM_TOOLS]
     local = [c for c in systems if c.provider == "local-libvirt"]
     assert len(local) == 240 and {c.node_id for c in local} == {_SYSTEM_NODE}
@@ -253,6 +259,11 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     corpus = [c for c in contract.cells if c.operation == "kernel-corpus"]
     # As for power: the ppc64le corpus cells share the arch-free scenario ids.
     assert len(corpus) == 8 and {c.node_id for c in corpus} == {_CORPUS_NODE}
+    control = [c for c in contract.cells if c.operation in _LOCAL_CONTROL_TOOLS]
+    local_control = [c for c in control if c.provider == "local-libvirt"]
+    # As for power: the local ppc64le cells (#2818's) share the arch-free scenario ids.
+    assert len(local_control) == 120 and {c.node_id for c in local_control} == {_CONTROL_NODE}
+    assert {c.node_id for c in control if c.provider == "remote-libvirt"} == {None}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -263,11 +274,13 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_SPLIT[3095],
         *_SPLIT[3096],
         *_OPERATOR_TOOLS,
+        *_OPERATOR_SPLIT[3110],
         *_SYSTEM_TOOLS,
         *_RUN_TOOLS,
         *_OPERATOR_SPLIT[3112],
         *_POWER_SNAPSHOT_TOOLS,
         *_CAPTURE_TOOLS,
+        *_LOCAL_CONTROL_TOOLS,
     }
     limits = [c for c in contract.cells if c.owner == 3118]
     local_limits = [c for c in limits if c.provider == "local-libvirt"]
