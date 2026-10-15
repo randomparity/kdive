@@ -1451,7 +1451,10 @@ cells prove denied visibility against a viewer who sees the target session
 compares. The prerequisites are the capture cells' above (drgn for the `drgn-live` variant)
 plus `gdb` on the MCP server's PATH, which runs the debugger beside QEMU's loopback gdbstub,
 and `objdump` on the test host, which decodes the fixture `vmlinux` for the `debug.advance` and
-`debug.disassemble` cells; either missing records the cell `blocked`. Run both configurations into one evidence root:
+`debug.disassemble` cells; either missing records the cell `blocked`. Each attach stages a copy
+of the Run's `vmlinux` (about 437 MB for `longterm`) in the server's temp directory and nothing
+removes it yet (#3229), so give the server an on-disk `TMPDIR` when `/tmp` is a small or
+quota-limited tmpfs. Run both configurations into one evidence root:
 
 ```bash
 sha=$(git rev-parse HEAD)
@@ -1485,6 +1488,26 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
   the System or Run, and whether its domain is defined.
 
 The ppc64le local cells share the node but are owner #2818's; the remote cells are #3113's.
+
+Last run: candidate `e5215fc6d` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing, the
+`longterm` fixture `v6.18.54` built on that host. Each configuration ran on a freshly wiped stack
+and recorded its 220 cells in about 80 minutes, skipping the other's 220. A first default run
+filled the guest's 16 GB quota-limited `/tmp` with leaked debuginfo staging (#3229) and failed 16
+cells with `Disk quota exceeded`. Both reported configurations therefore ran with the server's
+`TMPDIR` on disk (operator decision, 2026-10-15), and the leaked directories were deleted
+before each run. `qualify` reported 420 of the 440 cells qualified: all 352 `rejection` and 68
+`success`. Twenty are `failure`:
+
+- 12 known gaps, each after its observable proof: `debug.list_breakpoints` (count only),
+  `debug.read_frame` (no arguments or locals) and `debug.interrupt` (the started session's
+  guest was already halted), four each.
+- 8 `debug.clear_breakpoint` and `debug.clear_watchpoint` cells: their 5 s continue timed out
+  and the engine's interrupt dropped the stop reported in its own reply, answering
+  `transport_stall` (#3230).
+
+After `demo-down.sh --wipe --yes` neither libvirt defined a `kdive-` domain,
+`KDIVE_INSTALL_STAGING` was empty, and no staging directory remained in either temp directory.
 
 #### Break-glass provider tool cells (#3112)
 
