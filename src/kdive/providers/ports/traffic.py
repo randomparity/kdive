@@ -81,8 +81,13 @@ class LocalCaptureConfiguration(BaseModel):
     @field_validator("uri")
     @classmethod
     def _local_uri(cls, uri: str) -> str:
-        if uri not in {"qemu:///system", "qemu:///session"}:
-            raise ValueError("local libvirt URI must be qemu:///system or qemu:///session")
+        if uri not in {
+            "qemu:///system",
+            "qemu:///session",
+            "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+            "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock",
+        }:
+            raise ValueError("local libvirt URI must use an allowlisted local endpoint")
         return uri
 
     def to_canonical_json(self) -> bytes:

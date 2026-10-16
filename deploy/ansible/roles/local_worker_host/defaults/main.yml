@@ -119,6 +119,7 @@ local_worker_host_guestfs_packages_el10:
 # and must not be added here: local fcontext rules match last-wins in file_contexts.local, so a
 # second writer would change which rule wins.
 local_worker_host_svirt_image_directories:
+  - /var/lib/kdive/host-dump
   - /var/lib/kdive/rootfs
   - /var/lib/kdive/install
   - /var/lib/kdive/build/images
