@@ -23,6 +23,12 @@ idempotence, unrelated defaults, regeneration order and error propagation. Other
 hosts explicitly report this Linux script proof as **NOT RUN**; Linux CI runs it.
 Use `uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-guest-image-console.py`.
 
+The existing prerequisite role adds Fedora's `guestfs-tools` package for
+`virt-builder`, `virt-customize` and `virt-inspector`; the console harness also
+checks the actual prerequisite selection and preserves other distribution routes.
+These package-expression checks do not prove installation or command availability;
+record the installed package and all three commands during authorized live proof.
+
 The image role applies the same GRUB serial policy to Fedora and Rocky x86_64.
 Existing staged images are unchanged until `force_image_rebuild=true` (or per-image
 `force=true`) rebuilds them. Fedora POWER catalog images instead pass through

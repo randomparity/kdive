@@ -78,6 +78,39 @@ if names.index(NAME) > names.index(STAGE):
     fail("the GRUB console must be set before the image is staged")
 env = Environment()
 env.filters["bool"] = bool  # The matrix supplies native bools, as the role's facts do.
+prereqs = yaml.safe_load(
+    (ROLE.parent.parent.parent / "guest_image_prereqs/tasks/main.yml").read_text()
+)
+for distribution, family in (
+    ("Fedora", "RedHat"),
+    ("Rocky", "RedHat"),
+    ("RedHat", "RedHat"),
+    ("CentOS", "RedHat"),
+    ("Debian", "Debian"),
+    ("Ubuntu", "Debian"),
+    ("Archlinux", "Archlinux"),
+):
+    facts = {"ansible_distribution": distribution, "ansible_os_family": family}
+    packages = []
+    for prerequisite in prereqs:
+        if "ansible.builtin.dnf" not in prerequisite:
+            continue
+        conditions = prerequisite.get("when", [])
+        if isinstance(conditions, str):
+            conditions = [conditions]
+        if not all(env.compile_expression(condition)(**facts) for condition in conditions):
+            continue
+        selected = prerequisite["ansible.builtin.dnf"]["name"]
+        if isinstance(selected, str):
+            selected = env.compile_expression(selected.strip()[2:-2].strip())(**facts)
+        assert isinstance(selected, list), "prerequisite packages must render as a list"
+        packages.extend(selected)
+    expected_packages = ["dnf", "libguestfs-tools"] if family == "RedHat" else []
+    if distribution == "Fedora":
+        expected_packages.append("guestfs-tools")
+    if packages != expected_packages:
+        fail(f"prerequisite packages changed for {distribution}: {packages}")
+print("guest image console: Fedora tool prerequisites and other package routes passed")
 guards = [env.compile_expression(cond) for cond in task["when"]]
 force_expression = tasks[0]["ansible.builtin.set_fact"]["guest_base_image_force"]
 effective_force = env.compile_expression(force_expression.strip()[2:-2].strip())
