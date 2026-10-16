@@ -90,7 +90,7 @@ def _installed_protocol_python(tmp_path: Path, identity: str) -> Path:
 def _copied_lifecycle(tmp_path: Path, installed_python: Path) -> Path:
     script_dir = tmp_path / "scripts/live-stack"
     script_dir.mkdir(parents=True)
-    for name in ("lib.sh", "env.sh", "libvirt-uri.sh"):
+    for name in ("lib.sh", "env.sh", "libvirt-uri.sh", "backend-endpoint.sh"):
         (script_dir / name).write_text(
             (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
         )
@@ -2021,7 +2021,7 @@ def _stack_status_libvirt_slice(tmp_path: Path) -> Path:
     libvirt = source[source.index('if [[ -n "${LIBVIRT_UNRESOLVED}" ]]') :]
     status = tmp_path / "stack-status.sh"
     status.write_text(setup + libvirt, encoding="utf-8")
-    for name in ("lib.sh", "env.sh", "libvirt-uri.sh"):
+    for name in ("lib.sh", "env.sh", "libvirt-uri.sh", "backend-endpoint.sh"):
         (tmp_path / name).write_text(
             (ROOT / "scripts/live-stack" / name).read_text(encoding="utf-8"), encoding="utf-8"
         )
@@ -2292,6 +2292,29 @@ def _derived_urls(**ports: str) -> subprocess.CompletedProcess[str]:
     env |= {"KDIVE_LIBVIRT_URI": "qemu:///system", **ports}
     printer = " ".join(f'"${name}"' for name in _DERIVED_URLS)
     return _sourced(ROOT / "scripts/live-stack/env.sh", f'printf "%s\\n" {printer}', env)
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["unset", "empty"])
+def test_backend_publish_defaults_bind_loopback(empty: bool) -> None:
+    env = {k: v for k, v in os.environ.items() if k not in _BACKEND_PORTS}
+    env["KDIVE_LIBVIRT_URI"] = "qemu:///system"
+    if empty:
+        env.update(dict.fromkeys(_BACKEND_PORTS, ""))
+    printer = " ".join(f'"${name}"' for name in _BACKEND_PORTS)
+    result = _sourced(ROOT / "scripts/live-stack/env.sh", f'printf "%s\\n" {printer}', env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["127.0.0.1:5432", "127.0.0.1:8333", "127.0.0.1:8090"]
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["unset", "empty"])
+def test_backend_default_urls_keep_localhost_ports(empty: bool) -> None:
+    result = _derived_urls(**dict.fromkeys(_BACKEND_PORTS, "") if empty else {})
+    assert result.returncode == 0, result.stderr
+    urls = dict(zip(_DERIVED_URLS, result.stdout.splitlines(), strict=True))
+    assert all(urls[name].endswith("@localhost:5432/kdive") for name in _DERIVED_URLS[:5])
+    assert urls["KDIVE_S3_ENDPOINT_URL"] == "http://localhost:8333"
+    assert urls["KDIVE_OIDC_ISSUER"] == "http://localhost:8090/default"
+    assert urls["KDIVE_OIDC_JWKS_URI"] == "http://localhost:8090/default/jwks"
 
 
 def test_client_urls_derive_from_the_configurable_ports() -> None:
@@ -3913,6 +3936,9 @@ def test_lifecycle_uri_is_parsed_as_literal_data(
     )
     wrapper.write_text(LIFECYCLE.read_text(), encoding="utf-8")
     (tmp_path / "libvirt-uri.sh").write_text(LIBVIRT_URI.read_text(), encoding="utf-8")
+    (tmp_path / "backend-endpoint.sh").write_text(
+        (ROOT / "scripts/live-stack/backend-endpoint.sh").read_text(), encoding="utf-8"
+    )
     uri_file = tmp_path / "libvirt.env"
     canary = tmp_path / "unsafe"
     uri_file.write_text(content.replace("TMP_CANARY", str(canary)), encoding="utf-8")
@@ -4046,7 +4072,7 @@ def test_status_database_probe_scrubs_unrelated_role_dsns(tmp_path: Path) -> Non
         source.index('echo "=== database') : source.index('if [[ -n "${LIBVIRT_UNRESOLVED}" ]]')
     ]
     status.write_text(setup + database + "exit 0\n", encoding="utf-8")
-    for name in ("lib.sh", "env.sh", "libvirt-uri.sh"):
+    for name in ("lib.sh", "env.sh", "libvirt-uri.sh", "backend-endpoint.sh"):
         (tmp_path / name).write_text(
             (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
         )
@@ -4095,7 +4121,7 @@ def test_onboard_aliases_each_cli_invocation_to_its_own_authority(tmp_path: Path
     """
     onboard_dir = tmp_path / "scripts/live-stack"
     onboard_dir.mkdir(parents=True)
-    for name in ("env.sh", "libvirt-uri.sh"):
+    for name in ("env.sh", "libvirt-uri.sh", "backend-endpoint.sh"):
         (onboard_dir / name).write_text(
             (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
         )
