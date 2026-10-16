@@ -519,7 +519,7 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
             for revision in ("broken", "fixed"):
                 cell = _native_cell(
                     "kernel-corpus",
-                    2817,
+                    2818 if guest == "ppc64le" else 2817,
                     guest,
                     "local-libvirt",
                     "Run the same qualified reproducer/config; verify the specific broken or fixed "
