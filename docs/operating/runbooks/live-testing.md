@@ -988,8 +988,8 @@ gateway's core tools also fails it, which happens when the server's `KDIVE_CLI_C
 from the test process's, and so does a missing mock-OIDC issuer. Cells of the other configuration
 skip and write no record. The server runs the `recovery` configuration only when it starts with a
 durable worker-death verifier, `docker` or `kubernetes`; `local` leaves the recovery tools out.
-On this lane `docker` has no reachable Docker death endpoint, so a recovery-tool call fails
-closed, which these cells never make. The two lanes are two bring-ups that share one evidence
+The verifier only gates registration. These cells never call a recovery tool; the
+[build-use recovery cells](#build-use-recovery-tool-cells-3111) do. The two lanes are two bring-ups that share one evidence
 root:
 
 ```bash
@@ -1174,6 +1174,72 @@ result. Each lane recorded its 62 cells and skipped the other
 lane's 62; the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`. `qualify` reported
 120 of the 124 qualified, 28 `success` and 92 `rejection`, and the four `secrets.list`
 functional cells `blocked` with an empty listing and no secret served.
+
+#### Build-use recovery tool cells (#3111)
+
+The same carrier also holds the 16 cells of `ops.build_uses_list` and `ops.recover_build_use`.
+They exist only in the `recovery` configuration, so start that lane with
+`KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh`. The verifier only decides
+whether the server registers the two tools. A recovery succeeds on the durable `terminated`
+incarnation row that the systemd lifecycle witness publishes, not on any Docker endpoint
+(ADR-0722, 2026-10-14 amendment). The
+[design](../../workflow/specs/2026-10-14-build-use-recovery-cells-design.md) gives the details.
+
+The 12 rejection cells (`authentication`, `authorization`, `validation`) need nothing beyond the
+operator cells' environment. Each of the four functional cells strands a real pin:
+
+1. It provisions the lane image in a fresh project and uploads the verified `longterm` fixture
+   (`KDIVE_FIXTURE_ROOT/longterm`) with its `vmlinux`.
+2. It calls `runs.install`.
+3. It freezes the holder's `kdive-live-worker@N` unit with `sudo -n systemctl freeze` once the pin
+   row appears.
+4. Later it kills that unit with `sudo -n systemctl kill --signal=SIGKILL`, and has
+   `scripts/live-stack/worker-lifecycle.sh status` publish the termination.
+
+So the operator needs non-interactive `sudo -n` for `systemctl` (`freeze`, `thaw`, `kill`); the
+cell checks it first, and a refused `sudo` stops the cell `blocked`. What each cell proves:
+
+- The `ops.build_uses_list` cell compares the listing with the project's pin rows twice, once
+  while the holder is alive and once after it is killed. It then recovers the orphan as cleanup.
+- The `ops.recover_build_use` cell is refused while the holder is alive and the pin is retained.
+  After the kill it recovers exactly that pin, with one matching recovery row, and every other
+  pin is unchanged.
+
+A pin released before the freeze, or a holder frozen inside its release transaction, thaws the
+holder and stops the cell `blocked`; rerun it.
+
+Every cell restores the lane before its System teardown:
+
+- A live holder is thawed and finishes its install.
+- For a killed holder, any pin the cell left is recovered through the tool. The install job is
+  then canceled, and the fleet is replaced with `worker-lifecycle.sh stop`, `recover` and
+  `start <the started slot count>`.
+- The cell then requires that no pin is left.
+
+Run these cells serially on an otherwise idle stack: the restart replaces every worker slot.
+
+```sh
+uv run python -m pytest -m live_stack tests/integration/test_operator_tool_cells_live.py \
+  -k 'build_use' -vv --tb=short
+```
+
+If the witness never published the killed holder's termination, the restore cannot recover its
+pin. The cell fails naming the use id and holder: run `worker-lifecycle.sh status`, then
+`ops.recover_build_use` with that holder. Recovery rows, audit rows and the terminated
+incarnation stay as history.
+
+Last run: candidate `21250f083` (server, worker and reconciler at that SHA) on a disposable
+Fedora 44 x86_64 lab guest with one worker slot. The server's `TMPDIR` pointed at an on-disk
+directory, because Fedora's `/tmp` is a small tmpfs. `qualify` reported all 16 cells qualified:
+4 `success` and 12 `rejection`.
+
+- Both recover cells were refused while the holder was alive. After the kill, each recovered
+  exactly its pin, with recovery rows recording `authority_kind = 'local'` and outcome `killed`.
+- After the run no pin was left, no unit was frozen, the slot was started again, and every
+  System was torn down.
+- An earlier run at `c7302a912` qualified 14. Its recover cells read the expected alive refusal
+  through a helper that rejects error envelopes; that is fixed, and the restore still left the
+  lane clean on that path.
 
 #### Mutating operator tool cells (#3110)
 

@@ -121,6 +121,29 @@ denial with ADR-0756's positive control and canonical empty page. The contract's
 `FILTERED_LIST_BOUNDARIES` owns the named set; every pair outside it keeps the
 failure-envelope rule.
 
+### Amendment (2026-10-14): recovery evidence is the witness's termination row (#3111)
+
+This corrects decision 2 and the first Consequence. Decision 2 says a recovery-tool call on the
+host-process lane "cannot prove a worker dead". The Consequence says a carrier of the recovery
+tools needs a lane whose death verifier can reach its authority. Both assume that
+`ops.recover_build_use` asks the configured verifier. It does not:
+
+- `KDIVE_WORKER_DEATH_VERIFIER` only decides whether the two tools are registered. No caller
+  invokes `verify_dead`.
+- `recover_investigation_build_use` (`src/kdive/db/schema/0108_worker_fence_runtime_paths.sql`)
+  accepts only one fact as death evidence: a durable `worker_incarnations` row in state
+  `terminated` for the exact holder on the pin.
+- The systemd lifecycle witness writes that row on the demo-up lane when a worker unit's
+  invocation dies (`worker-lifecycle.sh status`).
+
+The functional cells of both recovery tools therefore run on the demo-up `recovery` lane
+(`KDIVE_WORKER_DEATH_VERIFIER=docker`). They strand a real pin under a frozen worker unit,
+observe the tool while that holder lives, kill the unit, and let the witness publish the
+termination. The worker there has a `local` incarnation, and the recovery row records
+`authority_kind = 'local'`. Docker and Kubernetes incarnations write the same row through their
+own witnesses, so the same evidence rule covers them. The configuration proof and the other
+decisions are unchanged.
+
 ## Consequences
 
 - Recovery-configuration evidence exists only from a run whose catalog proved it. A carrier of
