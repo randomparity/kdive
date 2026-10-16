@@ -2,7 +2,7 @@
 
 The engine surface ported for issue #21 (breakpoints, read_registers, read_memory cap +
 bytes-verbatim, continue/interrupt) is exercised directly; the real `PygdbmiController` and
-the `attach()` subprocess path are `live_vm`-gated and not unit-tested here.
+the real `attach()` subprocess remains live-only; its orchestration uses a fake controller.
 """
 
 from __future__ import annotations
@@ -2691,3 +2691,44 @@ def test_load_module_symbols_idempotent_reload(tmp_path: Path) -> None:
     out = _load(engine, attachment, "ext4")
     assert out.symbols_loaded is True
     assert not any("add-symbol-file" in c for c in controller.written)
+
+
+@pytest.mark.parametrize("connect_error", [False, True])
+def test_actual_attach_validates_target_and_cleans_up_failure(
+    tmp_path: Path, connect_error: bool
+) -> None:
+    target = "-target-select remote 127.0.0.1:4242"
+    response: dict[str, object] = {
+        "type": "result",
+        "message": "error" if connect_error else "connected",
+        "payload": {"msg": "target connection refused"} if connect_error else {},
+    }
+    controller = _FakeMiController(responses={target: [response]})
+    engine = GdbMiEngine(
+        controller_factory=lambda command: controller,
+        gdb_path_finder=lambda name: "/test/gdb",
+        host_arch_finder=lambda: "x86_64",
+        sleep=lambda seconds: None,
+    )
+    symbols = tmp_path / "vmlinux"
+    symbols.write_bytes(b"test symbols")
+    if connect_error:
+        with pytest.raises(CategorizedError, match="target-select remote") as error:
+            engine.attach(
+                host="127.0.0.1",
+                port=4242,
+                vmlinux_path=symbols,
+                transcript_path=tmp_path / "transcript.jsonl",
+            )
+        assert error.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+        assert controller.exited
+    else:
+        attachment = engine.attach(
+            host="127.0.0.1",
+            port=4242,
+            vmlinux_path=symbols,
+            transcript_path=tmp_path / "transcript.jsonl",
+        )
+        assert attachment.controller is controller
+        assert not controller.exited
+    assert target in controller.written

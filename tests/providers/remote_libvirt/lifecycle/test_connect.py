@@ -1,7 +1,7 @@
 """Unit tests for the remote-libvirt Connect plane (issue #205, ADR-0083).
 
 Drive the gdbstub direct-TCP transport orchestration + the full error contract with injected
-fakes (config, domain-XML port reader, RSP probe); no libvirt host, no real socket.
+fakes (config and domain-XML port reader); no libvirt host, no real socket.
 """
 
 from __future__ import annotations
@@ -45,42 +45,30 @@ def _config(
     )
 
 
-def _connect(*, resolve_port, probe, config: RemoteLibvirtConfig | None = None):
+def _connect(*, resolve_port, config: RemoteLibvirtConfig | None = None):
     return RemoteLibvirtConnect(
         config_factory=lambda: config if config is not None else _config(),
         resolve_port=resolve_port,
-        probe=probe,
     )
 
 
-def test_open_gdbstub_returns_handle_for_reachable_stub():
-    c = _connect(resolve_port=lambda system: 47002, probe=lambda host, port: True)
+def test_open_gdbstub_returns_handle_for_resolved_endpoint():
+    c = _connect(resolve_port=lambda system: 47002)
     handle = c.open_transport(SystemHandle("kdive-sys"), "gdbstub")
     decoded = TransportHandleData.decode(handle)
     assert (decoded.kind, decoded.host, decoded.port) == ("gdbstub", "10.0.0.5", 47002)
 
 
-def test_open_gdbstub_resolves_port_and_probes_with_composed_endpoint():
+def test_open_gdbstub_resolves_port_for_requested_system():
     seen: dict[str, object] = {}
 
     def resolve_port(system: SystemHandle) -> int:
         seen["resolved_system"] = str(system)
         return 47002
 
-    def probe(host: str, port: int) -> bool:
-        seen["probe_host"] = host
-        seen["probe_port"] = port
-        return True
-
-    c = _connect(resolve_port=resolve_port, probe=probe)
+    c = _connect(resolve_port=resolve_port)
     c.open_transport(SystemHandle("kdive-sys"), "gdbstub")
-    # The port is resolved from the requested system; the probe targets the ACL'd host
-    # (gdb_addr) and the resolved port.
-    assert seen == {
-        "resolved_system": "kdive-sys",
-        "probe_host": "10.0.0.5",
-        "probe_port": 47002,
-    }
+    assert seen == {"resolved_system": "kdive-sys"}
 
 
 def test_from_env_threads_passed_config_factory():
@@ -164,7 +152,6 @@ def test_recorded_ssh_endpoint_none_for_absent_domain() -> None:
 def test_open_gdbstub_unset_gdb_addr_is_configuration_error():
     c = _connect(
         resolve_port=lambda system: 47002,
-        probe=lambda host, port: True,
         config=_config(gdb_addr=None),
     )
     with pytest.raises(CategorizedError) as exc:
@@ -173,29 +160,8 @@ def test_open_gdbstub_unset_gdb_addr_is_configuration_error():
     assert str(exc.value) == ("remote gdbstub host (instance gdb_addr in systems.toml) is unset")
 
 
-def test_open_gdbstub_unreachable_is_debug_attach_failure():
-    c = _connect(resolve_port=lambda system: 47002, probe=lambda host, port: False)
-    with pytest.raises(CategorizedError) as exc:
-        c.open_transport(SystemHandle("kdive-sys"), "gdbstub")
-    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
-    assert str(exc.value) == "remote gdbstub did not answer RSP framing"
-    assert exc.value.details == {"host": "10.0.0.5", "port": 47002}
-
-
-def test_open_gdbstub_socket_fault_is_transport_failure():
-    def boom(host: str, port: int) -> bool:
-        raise OSError("connection refused")
-
-    c = _connect(resolve_port=lambda system: 47002, probe=boom)
-    with pytest.raises(CategorizedError) as exc:
-        c.open_transport(SystemHandle("kdive-sys"), "gdbstub")
-    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
-    assert str(exc.value) == "gdbstub transport socket fault"
-    assert exc.value.details == {"port": 47002}
-
-
 def test_unknown_kind_is_configuration_error():
-    c = _connect(resolve_port=lambda system: 47002, probe=lambda host, port: True)
+    c = _connect(resolve_port=lambda system: 47002)
     with pytest.raises(CategorizedError) as exc:
         c.open_transport(SystemHandle("kdive-sys"), "ssh")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -207,7 +173,6 @@ def test_open_transport_drgn_live_returns_bare_domain_handle():
     # bare domain name core derived. No gdb_addr needed, no port resolution, no probe.
     c = _connect(
         resolve_port=lambda system: pytest.fail("must not resolve a port for drgn-live"),
-        probe=lambda host, port: pytest.fail("must not probe for drgn-live"),
         config=_config(gdb_addr=None),
     )
     handle = c.open_transport(SystemHandle("kdive-remote-1"), "drgn-live")
@@ -215,12 +180,12 @@ def test_open_transport_drgn_live_returns_bare_domain_handle():
 
 
 def test_close_transport_no_ops_on_bare_domain_handle():
-    c = _connect(resolve_port=lambda system: 47002, probe=lambda host, port: True)
+    c = _connect(resolve_port=lambda system: 47002)
     c.close_transport(TransportHandle("kdive-remote-1"))  # bare domain, connectionless: no raise
 
 
 def test_close_transport_still_validates_schemed_gdbstub_handle():
-    c = _connect(resolve_port=lambda system: 47002, probe=lambda host, port: True)
+    c = _connect(resolve_port=lambda system: 47002)
     c.close_transport(TransportHandleData(kind="gdbstub", host="10.0.0.5", port=47002).encode())
     with pytest.raises(CategorizedError):
         c.close_transport(TransportHandle("gdbstub://"))  # schemed but malformed → rejected
@@ -248,7 +213,6 @@ def _gdb_connect(xml_by_name: dict[str, str], config: RemoteLibvirtConfig) -> Re
     """A connect plane with the REAL resolve_port (no injected stub) over a canned connection."""
     return RemoteLibvirtConnect(
         config_factory=lambda: config,
-        probe=lambda host, port: True,
         open_connection=lambda uri: _SshReadConn(xml_by_name),
         secret_backend_factory=lambda: cast(SecretBackend, RecordingBackend()),
     )
@@ -312,7 +276,6 @@ def test_open_transport_libvirt_fault_reading_the_port_is_infrastructure_failure
     """
     connect = RemoteLibvirtConnect(
         config_factory=lambda: _config(gdb_addr="10.0.0.5"),
-        probe=lambda host, port: True,
         open_connection=lambda uri: _FailingLookupConn(libvirt.VIR_ERR_INTERNAL_ERROR),
         secret_backend_factory=lambda: cast(SecretBackend, RecordingBackend()),
     )
@@ -321,3 +284,32 @@ def test_open_transport_libvirt_fault_reading_the_port_is_infrastructure_failure
         connect.open_transport(SystemHandle(_DOMAIN), "gdbstub")
 
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+@pytest.mark.parametrize("initial_state", ["running", "paused"])
+@pytest.mark.parametrize("boundary", ["create_connection", "connect"])
+def test_gdbstub_reservation_never_dials(
+    monkeypatch: pytest.MonkeyPatch, initial_state: str, boundary: str
+) -> None:
+    import socket
+
+    state = [initial_state]
+    calls: list[object] = []
+
+    def intrusive_dial(*args: object, **kwargs: object) -> None:
+        calls.append(args)
+        state[0] = "paused"
+        pytest.fail("session reservation attempted a standalone debugger connection")
+
+    target = socket if boundary == "create_connection" else socket.socket
+    monkeypatch.setattr(target, boundary, intrusive_dial)
+    connector = RemoteLibvirtConnect(
+        config_factory=lambda: _config(),
+        open_connection=lambda uri: _SshReadConn({_DOMAIN: _gdb_domain_xml(47001)}),
+        secret_backend_factory=lambda: cast(SecretBackend, RecordingBackend()),
+    )
+    handle = connector.open_transport(SystemHandle(_DOMAIN), "gdbstub")
+    connector.close_transport(handle)
+    assert TransportHandleData.decode(handle).port == 47001
+    assert calls == []
+    assert state == [initial_state]
