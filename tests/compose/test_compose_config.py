@@ -432,6 +432,52 @@ def test_fixed_credential_backend_addr_port_override_works(
     assert container_port in targets
 
 
+@pytest.mark.parametrize(
+    ("override", "host_ip", "published"),
+    [
+        (None, "127.0.0.1", None),
+        ("", "127.0.0.1", None),
+        ("17779", None, "17779"),
+        ("127.0.0.1:17779", "127.0.0.1", "17779"),
+        ("0.0.0.0:17779", "0.0.0.0", "17779"),
+    ],
+    ids=["unset", "empty", "bare-port", "loopback", "wildcard"],
+)
+def test_sourced_live_environment_preserves_backend_bindings(
+    override: str | None, host_ip: str | None, published: str | None
+) -> None:
+    backends = {
+        "postgres": ("KDIVE_POSTGRES_PORT", "5432", 5432),
+        "seaweedfs": ("KDIVE_SEAWEEDFS_PORT", "8333", 8333),
+        "oidc": ("KDIVE_OIDC_PORT", "8090", 8080),
+    }
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("KDIVE_", "AWS_"))}
+    env["KDIVE_LIBVIRT_URI"] = "qemu:///system"
+    if override is not None:
+        env.update({variable: override for variable, _, _ in backends.values()})
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1/scripts/live-stack/env.sh" || exit $?\n'
+            'docker compose -f "$1/docker-compose.yml" config --format json',
+            "bash",
+            str(_COMPOSE_FILE.parent),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    services = json.loads(result.stdout)["services"]
+    for service, (_, default_port, target) in backends.items():
+        assert _host_ips(services[service]) == {host_ip}
+        assert _published_ports(services[service]) == {published or default_port}
+        assert {port["target"] for port in services[service]["ports"]} == {target}
+
+
 # Per-process aux health/metrics ports (ADR-0090 §5): the loopback default ports the
 # bind decision keeps, but bound to 0.0.0.0 inside each container so the compose
 # healthcheck (and an in-network scrape) can reach a side port that is never published.
