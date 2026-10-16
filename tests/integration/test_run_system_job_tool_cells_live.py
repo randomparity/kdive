@@ -338,6 +338,7 @@ async def _list_body(
             filters = (
                 {},
                 {"project": project},
+                {"project": project + "-absent"},
                 {"allocation_id": str(current["allocation_id"])},
                 {"state": "ready"},
                 {"state": "torn_down"},
