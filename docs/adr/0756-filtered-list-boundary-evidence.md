@@ -62,6 +62,41 @@ or boundary. Missing positive-control configuration fails closed. Replace the
 obsolete `filtered_by` blocker and migrate its sole carrier; retain absent-owner
 twin behavior for the unrelated ordinary rejection cells.
 
+### Amendment (2026-10-14): five more list tools prove denied visibility (#2813)
+
+This is an amendment because operator decision R3 (2026-10-13) widens the named set
+above, and with it the ADR-0722 decision-3 exception that ADR-0722's 2026-10-12
+amendment records for the original three pairs. It adds ten pairs:
+
+- `runs.list` / `authorization` and `project-isolation`;
+- `systems.list` / `authorization` and `project-isolation`;
+- `jobs.list` / `authorization` and `project-isolation`;
+- `allocations.list` / `authorization` and `project-isolation`;
+- `debug.list_sessions` / `authorization` and `project-isolation`.
+
+Each tool scopes its rows to the caller's viewer projects and answers a denied
+caller with an empty page, never a failure: a member with no role sees no project,
+and another project's admin sees none of the target project's rows. `runs.list`,
+`systems.list`, `allocations.list` and `debug.list_sessions` filter a `project` argument
+that names a project the caller cannot read rather than rejecting it; `jobs.list` takes no
+`project` argument.
+The four-step sequence above applies unchanged; a carrier names the protected item
+independently, for example the session it started for `debug.list_sessions`. Two
+facts qualify step 3's canonical empty page:
+
+- The page is per tool. Its collection ID is `runs`, `systems`, `jobs`, `allocations`
+  or `debug_sessions`, with the tool's own fixed next actions and
+  `data` `{truncated: false, next_cursor: null, count: 0}`.
+- `allocations.list` filters its next actions by the caller's roles, and echoes a
+  `project` argument in `data.project`. Its canonical page is the one the denied
+  caller's grants produce, which its carrier states exactly; any other difference
+  still fails.
+
+The contract's named set grows to these thirteen pairs and remains the single owner of
+the exception. A carrier adds a tool's page to the harness when it binds that tool's
+cells, so a named pair without a configured page or positive control still fails
+closed. No API, outcome or evidence schema changes.
+
 ## Consequences
 
 Existing evidence remains bound to its original candidate. Rerun all twelve cells
