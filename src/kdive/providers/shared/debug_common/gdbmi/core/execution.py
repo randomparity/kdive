@@ -70,7 +70,9 @@ class ExecutionControl:
         records = self._engine.records_from(raw)
         attachment.records.extend(records)
         self._engine.append_transcript(attachment.transcript_path, "-exec-interrupt", records)
-        stop = self.wait_for_stop(attachment, timeout_sec=INTERRUPT_STOP_TIMEOUT_SEC)
+        stop = self._stop_from_records(records)
+        if stop is None:
+            stop = self.wait_for_stop(attachment, timeout_sec=INTERRUPT_STOP_TIMEOUT_SEC)
         return self._engine.redact_stop(stop) if stop is not None else None
 
     def resume(
