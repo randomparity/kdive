@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -3873,11 +3874,18 @@ def test_host_dump_preparation_refuses_unsafe_acl_or_link(
 def test_host_dump_installer_prepares_selinux(
     tmp_path: Path, mode: str, existing: bool, restore_failure: bool
 ) -> None:
-    log = tmp_path / "calls"
+    log = tmp_path / "calls log"
+    quoted_log = shlex.quote(str(log))
     functions = f"""
 getenforce() {{ echo {mode}; }}
-semanage() {{ echo "semanage $*" >> {log}; [[ $2 != -a || {str(not existing).lower()} == true ]]; }}
-restorecon() {{ echo "restorecon $*" >> {log}; return {int(restore_failure)}; }}
+semanage() {{
+  echo "semanage $*" >> {quoted_log}
+  [[ $2 != -a || {str(not existing).lower()} == true ]]
+}}
+restorecon() {{
+  echo "restorecon $*" >> {quoted_log}
+  return {int(restore_failure)}
+}}
 """
     result = subprocess.run(
         [
