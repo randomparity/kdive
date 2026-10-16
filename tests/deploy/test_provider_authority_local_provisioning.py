@@ -274,12 +274,12 @@ def test_selected_appliances_are_checked_as_authority_before_start_and_handlers(
     assert probe["loop"] == "{{ provider_authority_host_remote_module_architectures }}"
     assert (
         tasks.index(probe)
+        < tasks.index(_named(tasks, "Apply deployed-input restarts before proving readiness"))
         < tasks.index(
             _named(
                 tasks, "Start the configured authority after firewall and protected inputs converge"
             )
         )
-        < tasks.index(_named(tasks, "Apply deployed-input restarts before proving readiness"))
     )
 
 
