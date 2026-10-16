@@ -77,6 +77,22 @@ def test_failure_binding_is_provider_and_arch_specific(inventory: Inventory, pro
     assert all(cell.node_id == unmapped[cell.id] for cell in failures if cell.id != selected.id)
 
 
+def test_kernel_corpus_ownership_preserves_required_cells(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+    corpus = [c for c in cells if c.operation == "kernel-corpus"]
+    expected = {
+        f"kernel-corpus/local-libvirt/{arch}/{case}/{revision}": (
+            2818 if arch == "ppc64le" else 2817,
+            f"kernel-corpus/{case}/{revision}",
+        )
+        for arch in ("x86_64", "ppc64le")
+        for case in ("case-1", "case-2")
+        for revision in ("broken", "fixed")
+    }
+    assert len(corpus) == len(expected)
+    assert {c.id: (c.owner, c.scenario_id) for c in corpus} == expected
+
+
 def test_registered_addition_requires_mapping(inventory: Inventory) -> None:
     added = replace(inventory.tools[0], tool="new.operation")
     with pytest.raises(ValueError, match="unmapped"):
