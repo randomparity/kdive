@@ -899,7 +899,10 @@ WORKER_DEATH_VERIFIER = Setting(
     default="disabled",
     group="worker-death",
     processes=_SERVER,
-    help="Authoritative worker-death verifier; disabled omits build-use recovery tools.",
+    help=(
+        "Recovery-tool registration mode; docker/kubernetes include the tools, "
+        "disabled/local omit them. Death evidence comes from witness termination rows."
+    ),
 )
 DOCKER_DEATH_API = Setting(
     name="KDIVE_DOCKER_DEATH_API",
@@ -907,7 +910,10 @@ DOCKER_DEATH_API = Setting(
     default="http://worker-death-api:2375",
     group="worker-death",
     processes=_SERVER,
-    help="Private inspect-only Docker authority endpoint used by the Docker death verifier.",
+    help=(
+        "Legacy Docker registration-marker endpoint; validated but not contacted. "
+        "Recovery uses witness termination rows."
+    ),
 )
 
 

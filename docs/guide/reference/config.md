@@ -254,7 +254,7 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_DOCKER_DEATH_API` | server | `http://worker-death-api:2375` | no | Private inspect-only Docker authority endpoint used by the Docker death verifier. |
+| `KDIVE_DOCKER_DEATH_API` | server | `http://worker-death-api:2375` | no | Legacy Docker registration-marker endpoint; validated but not contacted. Recovery uses witness termination rows. |
 | `KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA` | lifecycle-witness | — | conditional | Certificate-authority file reference trusted by the broker and init client. |
 | `KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST` | lifecycle-witness | — | conditional | Private lifecycle-witness bind host for the Kubernetes worker credential broker. |
 | `KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT` | lifecycle-witness | — | conditional | Private TLS port for the Kubernetes worker credential broker. |
@@ -267,7 +267,7 @@
 | `KDIVE_POD_NAME` | worker | — | conditional | Kubernetes worker Pod name supplied by the downward API. |
 | `KDIVE_POD_NAMESPACE` | worker | — | conditional | Kubernetes worker Pod namespace supplied by the downward API. |
 | `KDIVE_POD_UID` | worker | — | conditional | Immutable Kubernetes worker Pod UID supplied by the downward API. |
-| `KDIVE_WORKER_DEATH_VERIFIER` | server | `disabled` | no | Authoritative worker-death verifier; disabled omits build-use recovery tools. |
+| `KDIVE_WORKER_DEATH_VERIFIER` | server | `disabled` | no | Recovery-tool registration mode; docker/kubernetes include the tools, disabled/local omit them. Death evidence comes from witness termination rows. |
 | `KDIVE_WORKER_INCARNATION_ID` | worker | — | conditional | Lifecycle-gate-injected immutable Docker worker incarnation nonce. |
 | `KDIVE_WORKER_INCARNATION_KIND` | worker | `local` | no | Immutable worker identity source: local process, Docker container, or Kubernetes Pod. |
 
