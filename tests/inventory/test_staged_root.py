@@ -173,3 +173,48 @@ def test_changing_source_kind_cannot_retain_staged_authority(
     asyncio.run(run())
     row = _check(migrated_url)
     assert row["digest"] != _DIGEST and "root_spec" not in row["provenance"]
+
+
+@pytest.mark.parametrize("mode", ["absent", "unreachable", "no-digest", "present"])
+def test_repoint_to_s3_requires_fresh_digest_and_head(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    _seed(migrated_url)
+    monkeypatch.setattr(wiring.config, "require", lambda _setting: migrated_url)
+    wiring._persist_root(
+        "remote-libvirt",
+        "base",
+        "x86_64",
+        wiring._find_staged_row("remote-libvirt", "base", "x86_64"),
+        _DIGEST,
+        _ROOT,
+    )
+    document = _doc().model_dump(mode="json")
+    source = {"kind": "s3", "object_key": "images/new.qcow2"}
+    if mode != "no-digest":
+        source["digest"] = "sha256:" + "b" * 64
+    document["image"][0]["source"] = source
+    store = null_image_store()
+    heads: list[str] = []
+
+    def head(key: str) -> bool:
+        heads.append(key)
+        if mode == "unreachable":
+            from kdive.domain.errors import ErrorCategory
+
+            raise CategorizedError("offline", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+        return mode == "present"
+
+    monkeypatch.setattr(store, "head_present", head)
+
+    async def run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            await images.reconcile_images(conn, InventoryDoc.parse(document), store)
+
+    asyncio.run(run())
+    row = _check(migrated_url)
+    assert row["state"] == ("registered" if mode == "present" else "defined")
+    assert row["object_key"] == ("images/new.qcow2" if mode == "present" else None)
+    assert row["digest"] == ("sha256:" + "b" * 64 if mode == "present" else None)
+    assert heads == ([] if mode == "no-digest" else ["images/new.qcow2"])
+    assert "root_spec" not in row["provenance"]

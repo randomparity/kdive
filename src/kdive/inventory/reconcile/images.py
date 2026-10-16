@@ -95,7 +95,7 @@ async def _resolve_s3_head(
     source = entry.source
     if not isinstance(source, S3Source):
         return "not_s3"
-    if row is not None and row.get("state") == _REGISTERED:
+    if row is not None and row.get("state") == _REGISTERED and row.get("volume") is None:
         return "not_s3"  # realized row is preserved; no HEAD needed
     if source.digest is None:
         return "no_digest"
