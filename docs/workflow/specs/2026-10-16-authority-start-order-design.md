@@ -34,6 +34,8 @@ unchanged running behavior and failure stopping readiness. This proves ordering,
 ## Validation and rollback
 
 Extend existing check_authority_install.py; retain its real package-upgrade proof.
+Align the existing deployment structural assertion to appliance verification before
+handler convergence before explicit start; retain its appliance identity/access checks.
 Run its ordering proof red before the move, then the entire existing command green;
 run lint, whole-tree type and Ansible lint. Managed pre-push owns the final full gate.
 Reverting the task move and its test restores the former ordering; no persisted migration.
