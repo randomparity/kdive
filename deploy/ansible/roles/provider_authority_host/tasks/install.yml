@@ -566,15 +566,15 @@
   loop: "{{ provider_authority_host_remote_module_architectures }}"
   when: provider_authority_host_remote_module_enabled | bool
 
+- name: Apply deployed-input restarts before proving readiness
+  ansible.builtin.meta: flush_handlers
+
 - name: Start the configured authority after firewall and protected inputs converge
   ansible.builtin.systemd_service:
     name: kdive-external-boot-authority.service
     enabled: true
     daemon_reload: true
     state: started
-
-- name: Apply deployed-input restarts before proving readiness
-  ansible.builtin.meta: flush_handlers
 
 - name: Verify the restarted authority session libvirtd limits
   ansible.builtin.import_tasks: libvirt_verify.yml

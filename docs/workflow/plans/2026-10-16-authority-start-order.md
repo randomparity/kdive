@@ -59,16 +59,20 @@ def check_start_order(root):
         ("failed-libvirt", True, False, True),
     ):
         state = root / (case + ".json")
-        state.write_text(json.dumps({
-            "converged": not changed, "running": running, "fail": fail, "events": []
-        }))
+        state.write_text(
+            json.dumps({"converged": not changed, "running": running, "fail": fail, "events": []})
+        )
 
-        def command(action):
-            return {"argv": [sys.executable, str(boundary), str(state), action]}
+        def command(action, state_path=state):
+            return {"argv": [sys.executable, str(boundary), str(state_path), action]}
 
         tasks = [
-            {"name": "Deploy changed inputs", "ansible.builtin.debug": {"msg": case},
-             "changed_when": changed, "notify": [libvirt, authority]}
+            {
+                "name": "Deploy changed inputs",
+                "ansible.builtin.debug": {"msg": case},
+                "changed_when": changed,
+                "notify": [libvirt, authority],
+            }
         ]
         for task in source:
             name = task.get("name")
@@ -80,18 +84,36 @@ def check_start_order(root):
                     assert task["ansible.builtin.systemd_service"]["state"] == "started"
                 tasks.append({"name": name, "ansible.builtin.command": command(action)})
         selected = [
-            {"name": task["name"], "ansible.builtin.command": command(
-                "libvirt" if task["name"] == libvirt else "restarted")}
-            for task in handlers if task["name"] in (libvirt, authority)
+            {
+                "name": task["name"],
+                "ansible.builtin.command": command(
+                    "libvirt" if task["name"] == libvirt else "restarted"
+                ),
+            }
+            for task in handlers
+            if task["name"] in (libvirt, authority)
         ]
         play = root / (case + ".yml")
-        play.write_text(yaml.safe_dump([{
-            "hosts": "localhost", "connection": "local", "gather_facts": False,
-            "tasks": tasks, "handlers": selected
-        }]))
+        play.write_text(
+            yaml.safe_dump(
+                [
+                    {
+                        "hosts": "localhost",
+                        "connection": "local",
+                        "gather_facts": False,
+                        "vars": {"ansible_python_interpreter": sys.executable},
+                        "tasks": tasks,
+                        "handlers": selected,
+                    }
+                ]
+            )
+        )
         result = subprocess.run(
             ["ansible-playbook", "-i", "localhost,", str(play)],
-            text=True, capture_output=True, check=False, timeout=90,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=90,
         )
         output = result.stdout + result.stderr
         assert (result.returncode == 0) == (not fail), output
