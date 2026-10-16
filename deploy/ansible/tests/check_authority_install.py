@@ -232,9 +232,113 @@ def check_appliance_consumer(root):
     check(True)
 
 
+def check_start_order(root):
+    role = HERE.parent / "roles/provider_authority_host"
+    source = yaml.safe_load((role / "tasks/install.yml").read_text())
+    handlers = yaml.safe_load((role / "handlers/main.yml").read_text())
+    start = "Start the configured authority after firewall and protected inputs converge"
+    libvirt = "Restart provider authority libvirt after deployed changes"
+    authority = "Restart provider authority after deployed changes"
+    verify = "Verify the restarted authority session libvirtd limits"
+    readiness = "Run the configured authority one-shot readiness probe"
+    notified = {task.get("notify") for task in source if isinstance(task.get("notify"), str)}
+    assert {libvirt, authority} <= notified
+    boundary = root / "service-boundary.py"
+    boundary.write_text(
+        "import json, pathlib, sys\n"
+        "path = pathlib.Path(sys.argv[1])\n"
+        "state = json.loads(path.read_text())\n"
+        "action = sys.argv[2]\n"
+        "if action == 'libvirt':\n"
+        "    assert not state['fail'], 'libvirt convergence failed'\n"
+        "    state['converged'] = True\n"
+        "else:\n"
+        "    assert state['converged'], 'unsafe-acl: authority before libvirt'\n"
+        "    if action in ('started', 'restarted'):\n"
+        "        state['running'] = True\n"
+        "    else:\n"
+        "        assert state['running'], 'readiness before service start'\n"
+        "state['events'].append(action)\n"
+        "path.write_text(json.dumps(state))\n"
+    )
+    for case, changed, running, fail in (
+        ("fresh", True, False, False),
+        ("changed", True, True, False),
+        ("unchanged-stopped", False, False, False),
+        ("unchanged-running", False, True, False),
+        ("failed-libvirt", True, False, True),
+    ):
+        state = root / (case + ".json")
+        state.write_text(
+            json.dumps({"converged": not changed, "running": running, "fail": fail, "events": []})
+        )
+
+        def command(action, state_path=state):
+            return {"argv": [sys.executable, str(boundary), str(state_path), action]}
+
+        tasks = [
+            {
+                "name": "Deploy changed inputs",
+                "ansible.builtin.debug": {"msg": case},
+                "changed_when": changed,
+                "notify": [libvirt, authority],
+            }
+        ]
+        for task in source:
+            name = task.get("name")
+            if task.get("ansible.builtin.meta") == "flush_handlers":
+                tasks.append(task)
+            elif name in (start, verify, readiness):
+                action = "started" if name == start else "verify" if name == verify else "ready"
+                if name == start:
+                    assert task["ansible.builtin.systemd_service"]["state"] == "started"
+                tasks.append({"name": name, "ansible.builtin.command": command(action)})
+        selected = [
+            {
+                "name": task["name"],
+                "ansible.builtin.command": command(
+                    "libvirt" if task["name"] == libvirt else "restarted"
+                ),
+            }
+            for task in handlers
+            if task["name"] in (libvirt, authority)
+        ]
+        play = root / (case + ".yml")
+        play.write_text(
+            yaml.safe_dump(
+                [
+                    {
+                        "hosts": "localhost",
+                        "connection": "local",
+                        "gather_facts": False,
+                        "vars": {"ansible_python_interpreter": sys.executable},
+                        "tasks": tasks,
+                        "handlers": selected,
+                    }
+                ]
+            )
+        )
+        result = subprocess.run(
+            ["ansible-playbook", "-i", "localhost,", str(play)],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=90,
+        )
+        output = result.stdout + result.stderr
+        assert (result.returncode == 0) == (not fail), output
+        events = json.loads(state.read_text())["events"]
+        expected = ["libvirt", "restarted"] if changed else []
+        assert events == ([] if fail else expected + ["started", "verify", "ready"]), output
+        if fail:
+            assert "libvirt convergence failed" in output, output
+    print("authority_start_order: fresh, changed, unchanged/stopped, readiness and failure passed")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kdive-authority-install-") as scratch:
         root = Path(scratch)
+        check_start_order(root)
         check_base_destination_guards(root)
         check_appliance_consumer(root)
         source = root / "source"
