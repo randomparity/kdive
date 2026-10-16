@@ -105,6 +105,52 @@ _require_real_directory() {
   chmod "$mode" -- "$path"
 }
 
+_check_host_dump_acl() {
+  python3 - <<'PYTHON'
+import os
+from pathlib import Path
+
+root = Path('/var/lib/kdive/host-dump')
+try:
+    for path, forbidden in (
+        (root.parent, {'system.posix_acl_default'}),
+        (root, {'system.posix_acl_access', 'system.posix_acl_default'}),
+    ):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            if path == root:
+                continue
+            raise
+        try:
+            if forbidden.intersection(os.listxattr(fd)):
+                raise SystemExit('host_dump preparation refuses ACLs; inspect and remove '
+                                 'the incompatible ACLs before rerunning host preparation')
+        finally:
+            os.close(fd)
+except OSError as exc:
+    raise SystemExit('host_dump ACL safety cannot be established; inspect the real spool '
+                     'path and ACL access before rerunning host preparation') from exc
+PYTHON
+}
+
+_label_host_dump_spool() {
+  local mode
+  if ! command -v getenforce >/dev/null; then
+    return 0
+  fi
+  mode="$(getenforce)"
+  [[ $mode == Enforcing ]] || return 0
+  if ! command -v semanage >/dev/null || ! command -v restorecon >/dev/null; then
+    echo "host_dump SELinux preparation requires semanage and restorecon; install policycoreutils-python-utils" >&2
+    return 1
+  fi
+  if ! semanage fcontext -a -t svirt_image_t '/var/lib/kdive/host-dump(/.*)?'; then
+    semanage fcontext -m -t svirt_image_t '/var/lib/kdive/host-dump(/.*)?' || return
+  fi
+  restorecon -R /var/lib/kdive/host-dump
+}
+
 _fixture_inventory_is_exact() {
   local catalog="$1" entry relative
   [[ -d $catalog && ! -L $catalog ]] || return 1
@@ -820,6 +866,10 @@ install -d -o "$operator" -g "$libvirt_group" -m 2770 \
   /var/lib/kdive/rootfs /var/lib/kdive/console \
   /var/lib/kdive/pcap /var/lib/kdive/build /var/lib/kdive/install
 _require_real_directory /var/lib/kdive 0 0 0755
+_check_host_dump_acl
+_require_real_directory /var/lib/kdive/host-dump 0 "$libvirt_group_gid" 3770
+_check_host_dump_acl
+_label_host_dump_spool
 _require_real_directory /var/lib/kdive/fixtures 0 "$libvirt_group_gid" 0750
 install_fixed_fixture_catalog "$source_root/fixtures/local-libvirt" \
   /var/lib/kdive/fixtures/local-libvirt 0 "$libvirt_group_gid"
