@@ -706,6 +706,7 @@ async def clear_breakpoint_body(s: Session) -> dict[str, object]:
     assert env.status == "cleared", f"the clear answered {env.status}"
     assert await s.breakpoints(session_id) == 0, "the breakpoint is still listed"
     require_no_stop(await s.proceed(session_id, _NO_STOP_WAIT_S))
+    assert await s.register(session_id) > 0, "the session is unusable after timeout"
     await s.end(session_id)
     return {"listed": 0, "stopped_by_workload": False}
 
@@ -756,6 +757,7 @@ async def clear_watchpoint_body(s: Session) -> dict[str, object]:
     assert listed.data.get("count") == 0, "the watchpoint is still listed"
     stop = await s.op("debug.continue", session_id=session_id, timeout_sec=_NO_STOP_WAIT_S)
     require_no_stop(stop)
+    assert await s.register(session_id) > 0, "the session is unusable after timeout"
     await s.end(session_id)
     return {"listed": 0, "stopped_by_tick": False}
 
