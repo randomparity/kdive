@@ -1,4 +1,4 @@
-"""Canonical Run/System/Job filtering-page controls (#3097)."""
+"""Behavioral checks for #3097's independent assertions; no live stack required."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from kdive.mcp.responses import ToolResponse
+from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES, build_contract
+from tests.integration import test_run_system_job_tool_cells_live as carrier
 from tests.integration.live_stack import tool_cells
 from tests.integration.live_stack.test_tool_cells import (
     _GRANTS,
@@ -59,3 +61,305 @@ def test_canonical_pages_and_controls(tool: str, actions: list[str], tmp_path: P
             _list_run(tmp_path, tool), caller, "authorization", rejection, _snapshot(1, 1)
         )
     )
+
+
+def test_digest_assertion_rejects_wrong_equal_length_bytes() -> None:
+    carrier._assert_digest(b"build", b"build")
+    for bad in (b"BUILD", b"buildx", b""):
+        with pytest.raises(AssertionError, match="digest"):
+            carrier._assert_digest(bad, b"build")
+
+
+def test_notes_preserve_lifecycle_and_clear() -> None:
+    original = {
+        "outcome_note": None,
+        "state": "succeeded",
+        "build_ref": "build-a",
+        "label": "label-a",
+        "updated_at": 1,
+    }
+    good = {**original, "outcome_note": "note", "updated_at": 2}
+    carrier._assert_note(original, good, "note")
+    carrier._assert_note(original, {**good, "outcome_note": None}, None)
+    for name, value in (
+        ("state", "canceled"),
+        ("build_ref", "build-b"),
+        ("label", "label-b"),
+        ("outcome_note", "wrong"),
+    ):
+        with pytest.raises(AssertionError):
+            carrier._assert_note(original, {**good, name: value}, "note")
+
+
+@pytest.mark.parametrize("actual", [["b", "a"], ["a"], ["a", "a"], ["a", "b", "c"]])
+def test_page_assertion_detects_wrong_order_missing_duplicate_extra(actual: list[str]) -> None:
+    carrier._assert_page(["a", "b"], ["a", "b"])
+    with pytest.raises(AssertionError):
+        carrier._assert_page(actual, ["a", "b"])
+
+
+def test_filter_oracle_composes_and_excludes_controls() -> None:
+    rows = [
+        {"id": "a", "project": "p", "state": "created", "system_id": "s", "investigation_id": "i"},
+        {
+            "id": "b",
+            "project": "p",
+            "state": "canceled",
+            "system_id": None,
+            "investigation_id": "j",
+        },
+    ]
+    for request in (
+        {"system_id": "s"},
+        {"investigation_id": "i"},
+        {"state": "created"},
+        {"project": "p", "state": "created"},
+    ):
+        assert carrier._selected("runs.list", rows, request) == ["a"]
+    assert carrier._selected("runs.list", rows, {"project": "other"}) == []
+    jobs = [
+        {
+            "id": "a",
+            "state": "canceled",
+            "kind": "install",
+            "inv": "i",
+            "payload": {"system_id": "s"},
+        },
+        {
+            "id": "b",
+            "state": "succeeded",
+            "kind": "provision",
+            "inv": None,
+            "payload": {"system_id": "s"},
+        },
+    ]
+    assert carrier._selected("jobs.list", jobs, {"investigation_id": "i"}) == ["a"]
+    assert carrier._selected("jobs.list", jobs, {"system_id": "s"}) == ["a", "b"]
+
+
+def test_canceled_envelope_does_not_hide_a_claim_or_provider_effect() -> None:
+    job = {
+        "state": "canceled",
+        "attempt": 0,
+        "worker_id": None,
+        "lease_expires_at": None,
+        "heartbeat_at": None,
+    }
+    carrier._assert_unclaimed(job, "canceled")
+    for name, value in (
+        ("state", "running"),
+        ("attempt", 1),
+        ("worker_id", "worker"),
+        ("lease_expires_at", "lease"),
+        ("heartbeat_at", "heartbeat"),
+    ):
+        with pytest.raises(AssertionError):
+            carrier._assert_unclaimed({**job, name: value}, "canceled")
+    retained = {
+        "domain": "running",
+        "disk_identity": 1,
+        "steps": ["build"],
+        "uses": [],
+        "authority": [],
+    }
+    carrier._assert_retained(retained, dict(retained))
+    for name, value in (
+        ("domain", "stopped"),
+        ("disk_identity", 2),
+        ("steps", ["build", "install"]),
+        ("uses", ["pin"]),
+        ("authority", ["operation"]),
+    ):
+        with pytest.raises(AssertionError, match="changed"):
+            carrier._assert_retained(retained, {**retained, name: value})
+
+
+def test_complete_owner_binding_set() -> None:
+    cells = [c for c in build_contract().cells if c.owner == 3097]
+    assert len(cells) == 220
+    assert len({c.scenario_id for c in cells}) == 55
+    assert {c.operation for c in cells} == set(carrier.TOOLS)
+    assert all(
+        c.node_id
+        == "tests/integration/test_run_system_job_tool_cells_live.py::test_run_system_job_tool_cell"
+        for c in cells
+    )
+    assert sum(c.kind == "functional" for c in cells) == 44
+    assert sum(c.roles == ("server",) for c in cells) == 212
+    assert (
+        sum(
+            (c.operation, tool_cells.boundary_of(c)) in FILTERED_LIST_BOUNDARIES
+            for c in cells
+            if c.kind == "rejection"
+        )
+        == 24
+    )
+    assert {c.configuration for c in cells} == {"default", "recovery"}
+    assert {c.exposure for c in cells} == {"direct", "gateway"}
+    assert all(
+        c.roles == ("server", "worker")
+        for c in cells
+        if c.operation == "jobs.wait" and c.kind == "functional"
+    )
+    assert all(
+        c.roles == ("server", "worker", "reconciler", "authority")
+        for c in cells
+        if c.operation == "jobs.cancel" and c.kind == "functional"
+    )
+
+
+def test_version_cleanup_preserves_exact_adopted_version() -> None:
+    old = {"Key": "owned/kernel", "VersionId": "adopted"}
+    extra = {"Key": "owned/kernel", "VersionId": "unadopted"}
+    loose = {"Key": "owned/other", "VersionId": "loose"}
+    retained, purge = carrier._partition_versions(
+        [old, extra, loose], {"owned/kernel": {"adopted"}}
+    )
+    assert retained == [old] and purge == [extra, loose]
+    assert carrier._partition_versions([], {}) == ([], [])
+
+
+@pytest.mark.parametrize("changed", ["jobs", "runs", "steps", "builds", "uses"])
+def test_protected_snapshot_covers_selected_terminal_owner(
+    monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    facts: dict[str, list[dict[str, object]]] = {
+        name: [{"id": name, "state": "succeeded", "protected": "before"}]
+        for name in ("jobs", "runs", "steps", "builds", "uses")
+    }
+    tables = {
+        "run_steps": "steps",
+        "investigation_build_uses": "uses",
+        "investigation_builds": "builds",
+        "jobs": "jobs",
+        "runs": "runs",
+    }
+
+    async def rows(_db: str, query: str, _params: object = ()) -> list[dict[str, object]]:
+        import copy
+
+        for table, name in tables.items():
+            if f"FROM {table} " in query:
+                return copy.deepcopy(facts[name])
+        raise AssertionError("unexpected evidence query")
+
+    async def live(_db: str, _project: str) -> dict[str, object]:
+        return {"stable": []}
+
+    monkeypatch.setattr(carrier, "_rows", rows)
+    monkeypatch.setattr(carrier, "_own_versions", lambda _prefix: [])
+    monkeypatch.setattr(carrier, "_live_state", live)
+    before = asyncio.run(carrier._protected("db", "project"))
+    facts[changed][0]["protected"] = "changed"
+    after = asyncio.run(carrier._protected("db", "project"))
+    assert after != before
+
+
+class _QueueHttp:
+    def __init__(self, state: dict[str, object]) -> None:
+        self.state = state
+        self.calls: list[str] = []
+
+    def token(self, grants: object) -> str:
+        return "issued"
+
+    async def call(
+        self, tool: str, args: object, token: str, *, discover: bool = False
+    ) -> ToolResponse:
+        self.calls.append(tool)
+        if tool == "jobs.cancel":
+            self.state["job_state"] = "canceled"
+            return ToolResponse.success("job", "canceled")
+        assert tool == "ops.set_queue_paused" and self.state["job_state"] == "canceled"
+        self.state["paused"] = False
+        return ToolResponse.success("queue", "running")
+
+
+def test_lost_enqueue_response_settles_owned_job_before_queue_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typing import cast
+
+    from tests.integration.live_stack.tool_cells import Grants, HttpCaller
+
+    state: dict[str, object] = {"job_state": "queued", "paused": True}
+    http = _QueueHttp(state)
+
+    async def rows(_db: str, query: str, _params: object = ()) -> list[dict[str, object]]:
+        if "FROM idempotency_keys" in query:
+            return [{"result": {"envelope": {"object_id": "job"}}}]
+        if "FROM jobs" in query:
+            return [
+                {
+                    "id": "job",
+                    "state": state["job_state"],
+                    "attempt": 0,
+                    "worker_id": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "payload": {"run_id": "run"},
+                    "authorizing": {"project": "project"},
+                }
+            ]
+        return [{"queue_paused": state["paused"]}]
+
+    monkeypatch.setattr(carrier, "_rows", rows)
+    asyncio.run(
+        carrier._finish_queue(
+            cast(HttpCaller, http),
+            Grants("operator", ("project",), {}),
+            "db",
+            "project",
+            "run",
+            "key",
+            True,
+        )
+    )
+    assert http.calls == ["jobs.cancel", "ops.set_queue_paused"]
+    assert state == {"job_state": "canceled", "paused": False}
+
+
+def test_unknown_admission_outcome_keeps_queue_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    from typing import cast
+
+    from tests.integration.live_stack.tool_cells import Grants, HttpCaller
+
+    state: dict[str, object] = {"job_state": "queued", "paused": True}
+    http = _QueueHttp(state)
+
+    async def rows(_db: str, _query: str, _params: object = ()) -> list[dict[str, object]]:
+        return []
+
+    monkeypatch.setattr(carrier, "_rows", rows)
+    with pytest.raises(AssertionError, match="outcome unresolved"):
+        asyncio.run(
+            carrier._finish_queue(
+                cast(HttpCaller, http),
+                Grants("operator", ("project",), {}),
+                "db",
+                "project",
+                "run",
+                "key",
+                True,
+                deadline_s=0,
+            )
+        )
+    assert state["paused"] is True and http.calls == []
+
+
+def test_terminal_runs_are_not_canceled_during_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    from typing import cast
+
+    from tests.integration.live_stack.tool_cells import HttpCaller
+
+    state: dict[str, object] = {"job_state": "queued", "paused": True}
+    http = _QueueHttp(state)
+
+    async def rows(_db: str, query: str, _params: object = ()) -> list[dict[str, object]]:
+        if "FROM investigations" in query:
+            return [{"state": "closed"}]
+        return [{"id": "run", "state": "succeeded"}]
+
+    monkeypatch.setattr(carrier, "_rows", rows)
+    asyncio.run(carrier._end_runs(cast(HttpCaller, http), "project", "db", "investigation"))
+    assert http.calls == []
