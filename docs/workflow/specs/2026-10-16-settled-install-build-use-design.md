@@ -29,18 +29,38 @@ place; no migration of callers or obsolete path is needed.
 
 ## Failure model
 
-- Prevent premature artifact reclamation during in-process cooperative cancellation
-  by waiting for provider settlement, including repeated cancellation and provider fault.
-- Prevent stale attempt, replaced holder, different credential and terminated incarnation
-  release through the unchanged database fences. Failed/succeeded states remain denied.
-- Release database errors retain the pin; existing cancellation/error precedence can mask
-  a release error. False denial also retains bytes; use existing operator death recovery.
-- Accept process-local provider-thread settlement as the cooperative evidence boundary.
-  External descendants and general durable/cross-replica finalization belong to #2681;
+- **Actors and deployments:** existing Linux worker/server/Postgres roles. A disposable
+  real-LOGIN-role integration test proves this seam without a live guest; x86_64 host
+  proof does not qualify ppc64le deployment.
+- **Invariants and assets:** retain artifact bytes until the provider thread settles,
+  including repeated cancellation and provider fault. Preserve credential, active
+  incarnation, exact holder/current attempt, locks and deletion fences. Denial retains
+  the pin; failed/succeeded states remain denied.
+- **Accepted failure classes:** trust process-local provider-thread settlement for
+  cooperative release. External-descendant termination is an unprovided guarantee;
+  no deferred descendant defect is claimed. Release database failures retain the pin,
+  and existing cancellation/error precedence can mask the release error.
+- **Covered elsewhere:** existing operator-confirmed worker-death recovery handles
+  stranded pins. #2681 owns external-build finalization across replicas/restarts;
   unrelated job-kind cancellation redesign belongs to existing lifecycle owners.
-- Deployment scope is the existing Linux worker/server/Postgres roles. A disposable
-  real-LOGIN-role integration test proves this bounded seam without a live guest.
-  x86_64 host proof does not qualify ppc64le runtime deployment.
+  General durable-finalization/cross-replica guarantees remain excluded here.
+
+## Threat model
+
+- **Boundary inventory:** no new entry point. The existing worker-to-SECURITY-DEFINER
+  release boundary admits canceled jobs as well as running jobs; the server cancel
+  boundary and provider-thread-to-install-cleanup settlement boundary remain unchanged.
+- **Actors:** authenticated tenants request cancellation through the server; server,
+  worker and lifecycle-witness LOGIN roles remain distinct. Trust the credential-owning
+  worker to invoke release only after its provider thread settles.
+- **Controls:** the existing server authorizes project/role before cancellation. The
+  release function requires worker membership, non-null UUID and 32-byte credential
+  hash, active incarnation, exact holder/current attempt, advisory/row locks and exact
+  deletion. Inputs remain SQL parameters; empty search_path and existing worker-only
+  EXECUTE remain. False denial retains the pin; no credential is added to responses.
+- **Out of scope:** external-descendant termination and general durable/cross-replica
+  finalization are unprovided guarantees under the existing process-local boundary.
+  No new role grant, bulk pin release or unrelated cancellation redesign is proposed.
 
 ## Success and validation
 
