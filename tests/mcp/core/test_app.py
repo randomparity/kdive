@@ -35,7 +35,7 @@ from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
-from kdive.worker_lifecycle.worker_incarnation import KubernetesWorkerDeathVerifier
+from kdive.worker_lifecycle.contracts import WorkerDeathVerifier
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
 _WORKER_CREDENTIAL = SecretStr("worker-test-incarnation-credential")
@@ -46,9 +46,8 @@ def _verifier() -> JWTVerifier:
     return JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
 
 
-class _CatalogDeathVerifier:
-    def verify_dead(self, worker_incarnation: str) -> str | None:
-        raise RuntimeError("catalog verifier must not execute")
+class _CatalogDeathVerifier(WorkerDeathVerifier):
+    """Registration-only test marker."""
 
 
 def test_build_app_registers_jobs_tools() -> None:
@@ -161,12 +160,13 @@ def test_build_use_recovery_is_not_advertised_for_legacy_local_verifier(monkeypa
     assert "ops.recover_build_use" not in names
 
 
-def test_build_use_recovery_is_advertised_in_durable_witness_mode(monkeypatch) -> None:
-    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "kubernetes")
+@pytest.mark.parametrize("kind", ["docker", "kubernetes"])
+def test_build_use_recovery_is_advertised_in_durable_witness_mode(monkeypatch, kind: str) -> None:
+    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", kind)
     stores = ObjectStoreAssembly(cast(Any, object()))
     monkeypatch.setattr(process_assembly_module, "build_object_store_assembly", lambda: stores)
     process = process_assembly_module.build_process_assembly(SecretRegistry())
-    assert isinstance(process.worker_death_verifier, KubernetesWorkerDeathVerifier)
+    assert isinstance(process.worker_death_verifier, WorkerDeathVerifier)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app_from_assembly(
         pool,
