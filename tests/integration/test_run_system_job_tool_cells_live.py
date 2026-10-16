@@ -794,13 +794,20 @@ async def _scenario_body(run: CellRun, base_url: str, issuer: OidcIssuer, db: st
         if functional and tool in {"jobs.cancel", "jobs.list"}
         else on_lane_system
     )
-    if functional and tool == "systems.list":
+    try:
+        if functional and tool == "systems.list":
 
-        async def history(_system: Any) -> dict[str, object]:
-            return {"historical_control": True}
+            async def history(_system: Any) -> dict[str, object]:
+                return {"historical_control": True}
 
-        await on_lane_system(fixture, base_url, issuer, db, project=project, body=history)
-    await frame(fixture, base_url, issuer, db, project=project, body=body)
+            await on_lane_system(fixture, base_url, issuer, db, project=project, body=history)
+            run.artifacts.extend(fixture.assertions.values())
+            run.artifacts.append(run.writer.artifact({"fixture_observed": fixture.observed}))
+        await frame(fixture, base_url, issuer, db, project=project, body=body)
+    finally:
+        run.artifacts.extend(fixture.artifacts)
+        run.artifacts.extend(fixture.assertions.values())
+        run.artifacts.append(run.writer.artifact({"fixture_observed": fixture.observed}))
     if functional:
         run.assertions["effect"] = fixture.assertions["effect"]
     run.assertions["cleanup"] = fixture.assertions["cleanup"]

@@ -420,3 +420,48 @@ def test_build_step_matches_exact_adopted_versions() -> None:
     ):
         with pytest.raises(AssertionError, match="adopted generation"):
             carrier._assert_build_versions(bad, build)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("tool", ["jobs.cancel", "systems.list"])
+def test_frame_evidence_survives_without_changing_service_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fails: bool, tool: str
+) -> None:
+    import json
+    from typing import Any, cast
+
+    from tests.integration.live_stack.evidence import EvidenceWriter
+
+    cell = next(c for c in build_contract().cells if c.operation == tool and c.kind == "functional")
+    run = carrier.CellRun(cell, EvidenceWriter(tmp_path))
+    cleanup_refs: list[str] = []
+    proof_refs: list[str] = []
+    observed = {"accelerator": "kvm", "guest_arch": "x86_64", "guest_os": "fedora:44"}
+
+    async def frame(fixture: carrier.CellRun, *args: Any, **kwargs: Any) -> None:
+        fixture.observed.update(observed)
+        cleanup_ref = fixture.writer.artifact(
+            {"cleanup-attempt": {"restored": True, "frame": len(cleanup_refs)}}
+        )
+        cleanup_refs.append(cleanup_ref)
+        fixture.artifacts.append(cleanup_ref)
+        if fails and (tool == "jobs.cancel" or len(cleanup_refs) == 2):
+            raise AssertionError("scenario failed")
+        fixture.prove("effect", {"effect": True})
+        fixture.prove("cleanup", {"restored": True, "frame": len(cleanup_refs)})
+        proof_refs.extend(fixture.assertions.values())
+
+    monkeypatch.setattr(carrier, "on_authority_system", frame)
+    monkeypatch.setattr(tool_cells, "on_lane_system", frame)
+    issuer = cast(carrier.OidcIssuer, None)
+    if fails:
+        with pytest.raises(AssertionError, match="scenario failed"):
+            asyncio.run(carrier._scenario_body(run, "http://localhost", issuer, "db"))
+        assert not {"effect", "cleanup"}.intersection(run.assertions)
+    else:
+        asyncio.run(carrier._scenario_body(run, "http://localhost", issuer, "db"))
+        assert {"effect", "cleanup"} <= run.assertions.keys()
+    assert run.observed == {"accelerator": "none"}
+    assert set(cleanup_refs + proof_refs) <= set(run.artifacts)
+    retained = [json.loads((tmp_path / "artifacts" / ref).read_text()) for ref in run.artifacts]
+    assert any(item.get("fixture_observed") == observed for item in retained)
