@@ -33,8 +33,8 @@ def check_script(script: str) -> None:
         stub = root / "grub2-mkconfig"
         stub.write_text(
             '#!/bin/sh\nset -eu\n[ "$#" = 2 ] && [ "$1" = -o ]\n'
-            '[ "$2" = "$KDIVE_TEST_CONFIG" ]\n'
-            'cp "$KDIVE_TEST_DEFAULTS" "$2"\nexit "${KDIVE_TEST_EXIT:-0}"\n'
+            '[ "$2" = "$CONSOLE_TEST_CONFIG" ]\n'
+            'cp "$CONSOLE_TEST_DEFAULTS" "$2"\nexit "${CONSOLE_TEST_EXIT:-0}"\n'
         )
         stub.chmod(0o755)
         script = script.replace("/etc/default/grub", str(defaults)).replace(
@@ -43,8 +43,8 @@ def check_script(script: str) -> None:
         environment = dict(
             os.environ,
             PATH=f"{root}:{os.environ['PATH']}",
-            KDIVE_TEST_DEFAULTS=str(defaults),
-            KDIVE_TEST_CONFIG=str(config),
+            CONSOLE_TEST_DEFAULTS=str(defaults),
+            CONSOLE_TEST_CONFIG=str(config),
         )
         preserved = '# keep comment\nGRUB_TIMEOUT=5\nGRUB_CMDLINE_LINUX="console=ttyS0"\n'
         expected = preserved + (
@@ -63,7 +63,7 @@ def check_script(script: str) -> None:
                 if defaults.read_text() != expected or config.read_text() != expected:
                     fail("rewrite, unrelated content, idempotence or regeneration order changed")
         failed = subprocess.run(
-            ["/bin/sh", "-c", script], env=dict(environment, KDIVE_TEST_EXIT="23"), check=False
+            ["/bin/sh", "-c", script], env=dict(environment, CONSOLE_TEST_EXIT="23"), check=False
         )
         if failed.returncode != 23:
             fail("grub2-mkconfig failure must propagate before staging")
