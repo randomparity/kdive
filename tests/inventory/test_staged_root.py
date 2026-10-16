@@ -14,10 +14,10 @@ from psycopg.types.json import Jsonb
 from kdive.domain.errors import CategorizedError
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.reconcile import images
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.remote_libvirt import stage_volume as wiring
 from kdive.services.systems.root_provenance import resolve_root_provenance
 from tests.reconcile_helpers import null_image_store
-from tests.services.systems.test_root_provenance import _profile
 
 _DIGEST = "sha256:" + "a" * 64
 _ROOT: dict[str, object] = {
@@ -84,8 +84,27 @@ def test_persist_reconcile_and_admission_share_root_identity(
     assert row["digest"] == _DIGEST and row["provenance"]["root_spec"] == _ROOT
 
     async def resolve() -> None:
+        profile = ProvisioningProfile.parse(
+            {
+                "schema_version": 1,
+                "arch": "x86_64",
+                "vcpu": 2,
+                "memory_mb": 2048,
+                "disk_gb": 20,
+                "boot_method": "disk-image",
+                "provider": {
+                    "remote-libvirt": {
+                        "base_image_source": {
+                            "kind": "local",
+                            "path": "/images/base.qcow2",
+                            "sha256": _DIGEST,
+                        }
+                    }
+                },
+            }
+        )
         async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
-            snapshot = await resolve_root_provenance(conn, _profile(), "project-a")
+            snapshot = await resolve_root_provenance(conn, profile, "project-a")
             assert snapshot is not None and snapshot.image_digest == _DIGEST
 
     asyncio.run(resolve())
