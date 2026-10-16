@@ -1,0 +1,20 @@
+# Broken/fixed kernel corpus revisions (#2817). Each broken revision is its fix's first parent.
+repository = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
+selected = "2026-10-14"
+selection_source = "docs/development/kernel-test-cases/"
+
+[case-1-broken]
+note = "05-dcache-dhash-entries-oob-read.md"
+commit = "9702969978695d9a699a1f34771580cdbb153b33" # pragma: allowlist secret - public Linux commit
+
+[case-1-fixed]
+note = "05-dcache-dhash-entries-oob-read.md"
+commit = "f08fe8891c3eeb63b73f9f1f6d97aa629c821579" # pragma: allowlist secret - public Linux commit
+
+[case-2-broken]
+note = "16-proc-parent-nlink-leak.md"
+commit = "681e452683b69a8e1a571cba0f238f8ceacf55d2" # pragma: allowlist secret - public Linux commit
+
+[case-2-fixed]
+note = "16-proc-parent-nlink-leak.md"
+commit = "16b02eb4b9b272c221255c20d34ccd5db53a3ed3" # pragma: allowlist secret - public Linux commit
