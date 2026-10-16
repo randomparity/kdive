@@ -896,6 +896,54 @@ def test_continue_raises_transport_stall_on_silent_link(tmp_path: Path) -> None:
     assert exc.value.details["code"] == "transport_stall"
 
 
+@pytest.mark.parametrize("operation", ["interrupt", "continue", "step"])
+def test_interrupt_consumes_stop_from_own_reply(operation: str, tmp_path: Path) -> None:
+    secret = "synthetic-secret-function"  # pragma: allowlist secret — redaction test value
+    controller = _FakeMiController(
+        responses={
+            "-exec-continue": [{"type": "result", "message": "running"}],
+            "-exec-step": [{"type": "result", "message": "running"}],
+            "-exec-interrupt": [
+                {"type": "result", "message": "done"},
+                {
+                    "type": "notify",
+                    "message": "stopped",
+                    "payload": {
+                        "reason": "signal-received",
+                        "signal-name": "SIGINT",
+                        "frame": {"func": secret, "addr": "0x1000"},
+                    },
+                },
+            ],
+        },
+        reads=[[], [], []],
+    )
+    attachment = _attachment(controller, tmp_path)
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
+
+    if operation == "interrupt":
+        stop = engine.interrupt(attachment)
+    elif operation == "continue":
+        stop = engine.continue_(attachment, timeout_sec=1)
+    else:
+        stop = engine.step(attachment, timeout_sec=1)
+
+    assert stop is not None
+    assert stop.reason == "signal-received"
+    assert stop.timed_out is (operation != "interrupt")
+    assert stop.frame is not None and stop.frame.addr == "0x1000"
+    assert stop.frame.func is not None and secret not in stop.frame.func
+    assert len(controller.read_timeouts) == (0 if operation == "interrupt" else 3)
+    assert controller.written[-1] == "-exec-interrupt"
+    assert any(
+        isinstance(record, MiRecord) and record.message == "stopped"
+        for record in attachment.records
+    )
+    transcript = attachment.transcript_path.read_text()
+    assert "-exec-interrupt" in transcript and "stopped" in transcript
+    assert secret not in transcript
+
+
 def test_interrupt_returns_stop(tmp_path: Path) -> None:
     controller = _FakeMiController(
         responses={"-exec-interrupt": [{"type": "result", "message": "done", "payload": None}]},
