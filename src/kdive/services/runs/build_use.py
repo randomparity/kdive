@@ -103,7 +103,7 @@ async def release_build_use(
     *,
     incarnation_credential: SecretStr,
 ) -> bool:
-    """Release only this executing attempt's fence; a failure remains a safe pin."""
+    """Release a settled running/canceled exact-owner attempt; denial retains its pin."""
     if use_id is None:
         return True
     require_top_level_transaction(conn, "release_build_use")
