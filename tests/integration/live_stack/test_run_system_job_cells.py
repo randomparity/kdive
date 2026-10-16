@@ -401,3 +401,22 @@ def test_system_list_detects_a_server_ignoring_project_filter(
                 system=SimpleNamespace(system_id="current"),
             )
         )
+
+
+def test_build_step_matches_exact_adopted_versions() -> None:
+    build = {
+        "build_ref": "build-ref",
+        "artifacts": {"kernel": {"version_id": "kernel-v"}, "vmlinux": {"version_id": "debug-v"}},
+    }
+    versions = {"kernel": "kernel-v", "vmlinux": "debug-v"}
+    correct = {"build_ref": "build-ref", "artifact_versions": versions}
+    carrier._assert_build_versions(correct, build)
+    for bad in (
+        {"build_ref": "build-ref"},
+        {**correct, "artifact_versions": {"kernel": "kernel-v"}},
+        {**correct, "artifact_versions": {"kernel": "other", "vmlinux": "debug-v"}},
+        {**correct, "artifact_versions": {**versions, "extra": "version"}},
+        {**correct, "build_ref": "other-generation"},
+    ):
+        with pytest.raises(AssertionError, match="adopted generation"):
+            carrier._assert_build_versions(bad, build)

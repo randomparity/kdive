@@ -219,6 +219,13 @@ async def _complete(inv: _Investigation, c: HttpCaller, g: Grants, db: str) -> s
     assert env.data["build_ref"] == result["build_ref"]
     assert env.refs["kernel"] == row["kernel_ref"] and env.refs["debuginfo"] == row["debuginfo_ref"]
     assert row["build_ref"] == result["build_ref"]
+    generation = await _rows(
+        db,
+        "SELECT * FROM investigation_builds WHERE investigation_id = %s AND build_ref = %s",
+        (inv.id, result["build_ref"]),
+    )
+    assert len(generation) == 1, "the exact adopted generation is absent or duplicated"
+    _assert_build_versions(result, generation[0])
     assert row["kernel_ref"] in keys and row["debuginfo_ref"] in keys
     artifacts = await _rows(
         db,
@@ -823,6 +830,16 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db: str) ->
 @pytest.mark.parametrize("cell", tool_cells(TOOLS), ids=lambda cell: cell.id)
 def test_run_system_job_tool_cell(cell: Cell) -> None:
     run_tool_cell(cell, _scenario)
+
+
+def _assert_build_versions(result: Mapping[str, Any], build: Mapping[str, Any]) -> None:
+    versions = {name: artifact["version_id"] for name, artifact in build["artifacts"].items()}
+    assert versions and result.get("artifact_versions") == versions, (
+        "build step versions disagree with the adopted generation"
+    )
+    assert result["build_ref"] == build["build_ref"], (
+        "build step reference disagrees with the adopted generation"
+    )
 
 
 def _assert_digest(stored: bytes, expected: bytes) -> None:
