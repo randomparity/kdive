@@ -1,6 +1,11 @@
 """The convenience recipes provide the host-side gate's database contract."""
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 _LIFECYCLE_MODULE = "python -m kdive.processes.lifecycle.compose.compose_worker_lifecycle"
 
@@ -12,10 +17,14 @@ def _recipe(justfile: str, name: str) -> str:
 def test_lifecycle_recipes_require_role_specific_database_authorities() -> None:
     justfile = (Path(__file__).resolve().parents[2] / "justfile").read_text()
     witness_default = (
-        "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="
-        '"${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:'
-        'kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}"'
+        'export KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="postgresql://kdive-witness-member:'
+        'kdive-witness-local@${endpoint}/kdive"'
     )
+    for name in ("compose-up", "compose-stop", "compose-recreate-worker", "compose-down"):
+        recipe = _recipe(justfile, name)
+        assert 'if [[ -z "${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-}" ]]' in recipe
+        assert "backend-endpoint.sh KDIVE_POSTGRES_PORT" in recipe
+        assert recipe.index("endpoint=") < recipe.index(witness_default)
     worker_default = (
         'KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-postgresql://'
         'kdive-worker-member:kdive-worker-local@postgres:5432/kdive}"'
@@ -114,3 +123,76 @@ def test_examples_scripts_are_covered_by_the_shell_gate() -> None:
     lint_shell = justfile.split("lint-shell:", 1)[1].split("\n\n", 1)[0]
 
     assert "examples" in lint_shell
+
+
+@pytest.mark.skipif(shutil.which("just") is None, reason="just is required to run the recipes")
+@pytest.mark.parametrize(
+    "recipe", ["compose-up", "compose-stop", "compose-recreate-worker", "compose-down"]
+)
+@pytest.mark.parametrize(
+    ("publish", "endpoint", "witness_override"),
+    [
+        (None, "localhost:5432", None),
+        ("17779", "localhost:17779", None),
+        ("17779", "localhost:17779", ""),
+        ("127.0.0.1:17779", "localhost:17779", None),
+        ("0.0.0.0:17779", "localhost:17779", None),
+        ("192.0.2.10:17779", "192.0.2.10:17779", None),
+        ("[::1]:17779", "localhost:17779", None),
+        ("[2001:db8::1]:17779", "[2001:db8::1]:17779", None),
+        ("bad", None, None),
+        ("bad", None, "postgresql://operator.example.test/kdive"),
+    ],
+)
+def test_lifecycle_recipe_derives_witness_endpoint_from_publish_value(
+    tmp_path: Path,
+    recipe: str,
+    publish: str | None,
+    endpoint: str | None,
+    witness_override: str | None,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    uv = tmp_path / "uv"
+    uv.write_text(
+        '#!/bin/sh\nprintf "%s\n" "$KDIVE_LIFECYCLE_WITNESS_DATABASE_URL" '
+        '"${KDIVE_WORKER_DATABASE_URL:-}"\n',
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("KDIVE_", "AWS_"))}
+    env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+    env["KDIVE_LIBVIRT_URI"] = "qemu:///system"
+    if witness_override is not None:
+        env["KDIVE_LIFECYCLE_WITNESS_DATABASE_URL"] = witness_override
+        env["KDIVE_WORKER_DATABASE_URL"] = "postgresql://worker.example.test/kdive"
+    if publish is None:
+        command = 'source scripts/live-stack/env.sh && just "$1"'
+    else:
+        env["KDIVE_POSTGRES_PORT"] = publish
+        command = 'just "$1"'
+    result = subprocess.run(
+        ["bash", "-c", command, "bash", recipe],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if endpoint is None and witness_override is None:
+        assert result.returncode != 0
+        assert result.stdout == ""
+        assert "must be PORT or ADDR:PORT" in result.stderr
+        return
+    assert result.returncode == 0, result.stderr
+    witness, worker = result.stdout.splitlines()
+    if witness_override:
+        assert witness == witness_override
+    else:
+        assert witness.endswith(f"@{endpoint}/kdive")
+    if recipe in {"compose-up", "compose-recreate-worker"}:
+        if witness_override is not None:
+            assert worker == "postgresql://worker.example.test/kdive"
+        else:
+            worker_endpoint = "localhost:5432" if publish is None else "postgres:5432"
+            assert worker.endswith(f"@{worker_endpoint}/kdive")

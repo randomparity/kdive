@@ -54,7 +54,8 @@ def build_app_from_assembly(
             process-global meter, on the same terms as ``tracer``.
         worker_death_verifier: Optional override for
             ``process_assembly.worker_death_verifier``. When configured, build-use recovery tools
-            are registered with this verifier.
+            are registered. This is only a registration marker; recovery requires the
+            witness's durable exact-holder termination row (ADR-0722).
 
     Returns:
         The assembled FastMCP app.

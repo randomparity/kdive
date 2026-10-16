@@ -20,32 +20,15 @@ resolve_libvirt_uri || return $?
 # container-INTERNAL ports never move (a service always binds its canonical port inside its netns);
 # only the host mapping does — so an operator whose host already runs e.g. Postgres on 5432 or a
 # vLLM on 8000 can relocate kdive's mapping without touching any container.
-export KDIVE_POSTGRES_PORT="${KDIVE_POSTGRES_PORT:-5432}"
-export KDIVE_SEAWEEDFS_PORT="${KDIVE_SEAWEEDFS_PORT:-8333}"
-export KDIVE_OIDC_PORT="${KDIVE_OIDC_PORT:-8090}"
+export KDIVE_POSTGRES_PORT="${KDIVE_POSTGRES_PORT:-127.0.0.1:5432}"
+export KDIVE_SEAWEEDFS_PORT="${KDIVE_SEAWEEDFS_PORT:-127.0.0.1:8333}"
+export KDIVE_OIDC_PORT="${KDIVE_OIDC_PORT:-127.0.0.1:8090}"
 export KDIVE_PROMETHEUS_PORT="${KDIVE_PROMETHEUS_PORT:-9090}"
 export KDIVE_GRAFANA_PORT="${KDIVE_GRAFANA_PORT:-3000}"
 
-# Client-facing host:port for a published backend port (#3215). The port variables also take
-# compose's ADDR:PORT publish form. A loopback or wildcard address keeps the localhost every default
-# URL used before (the OIDC issuer string is an identity), any other address becomes the URL host,
-# and anything else stops the sourcing caller instead of producing a malformed URL.
-backend_endpoint() {
-  local name="$1" value="${!1}" addr="" port
-  port="${value##*:}"
-  [[ $value == *:* ]] && addr="${value%:*}"
-  if [[ ! $port =~ ^[0-9]{1,5}$ ]] || ((10#$port < 1 || 10#$port > 65535)) ||
-    [[ -n $addr && (! $addr =~ ^[][A-Za-z0-9.:-]+$ || ! $addr =~ [A-Za-z0-9]) ]]; then
-    echo "${name}=${value} must be PORT or ADDR:PORT with a port from 1 to 65535" >&2
-    return 1
-  fi
-  case "$addr" in
-  "" | 127.0.0.1 | 0.0.0.0 | ::1 | :: | "[::1]" | "[::]") addr=localhost ;;
-  \[*\]) ;;
-  *:*) addr="[${addr}]" ;;
-  esac
-  printf '%s:%s' "$addr" "$port"
-}
+# shellcheck source=scripts/live-stack/backend-endpoint.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/backend-endpoint.sh" || return $?
+
 postgres_endpoint="$(backend_endpoint KDIVE_POSTGRES_PORT)" || return $?
 seaweedfs_endpoint="$(backend_endpoint KDIVE_SEAWEEDFS_PORT)" || return $?
 oidc_endpoint="$(backend_endpoint KDIVE_OIDC_PORT)" || return $?
