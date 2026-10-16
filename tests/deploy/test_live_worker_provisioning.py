@@ -3806,3 +3806,137 @@ def test_worker_authority_route_file_is_published_verified_and_withdrawn() -> No
         "Inspect removed authority endpoint artifacts",
     ):
         assert _ROUTE_FILE in cast(list[str], _task(plays, name)["loop"])
+
+
+def _host_dump_installer_function(name: str) -> str:
+    source = _text(INSTALLER)
+    start = source.index(name + "() {")
+    return source[start : source.index("\n}\n", start) + 3]
+
+
+@pytest.mark.parametrize("source", ["installer", "ansible"])
+@pytest.mark.parametrize("unsafe", [None, "acl", "default_acl", "symlink"])
+def test_host_dump_preparation_refuses_unsafe_acl_or_link(
+    tmp_path: Path, source: str, unsafe: str | None
+) -> None:
+    import struct
+
+    parent = tmp_path / "kdive"
+    parent.mkdir()
+    root = parent / "host-dump"
+    root.mkdir(mode=0o3770)
+    root.chmod(0o3770)
+    if unsafe in {"acl", "default_acl"}:
+        entries = [
+            (1, 7, 0xFFFFFFFF),
+            (2, 7, os.getuid() + 100000),
+            (4, 7, 0xFFFFFFFF),
+            (16, 7, 0xFFFFFFFF),
+            (32, 0, 0xFFFFFFFF),
+        ]
+        acl = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *entry) for entry in entries)
+        acl_path = root if unsafe == "acl" else parent
+        attribute = "system.posix_acl_access" if unsafe == "acl" else "system.posix_acl_default"
+        os.setxattr(acl_path, attribute, acl)
+    elif unsafe == "symlink":
+        root.rmdir()
+        target = tmp_path / "private"
+        target.mkdir(mode=0o700)
+        root.symlink_to(target, target_is_directory=True)
+    before = root.stat().st_mode
+    if source == "installer":
+        code = _host_dump_installer_function("_check_host_dump_acl")
+        argv = [
+            "/bin/bash",
+            "-c",
+            code.replace("/var/lib/kdive", str(parent)) + "\n_check_host_dump_acl",
+        ]
+    else:
+        tasks = yaml.safe_load((LOCAL_WORKER / "tasks/shared_directories.yml").read_text())
+        task = next(task for task in tasks if task["name"] == "Validate host-dump ACL safety")
+        code = task["ansible.builtin.command"]["argv"][2]
+        argv = ["python3", "-c", code.replace("/var/lib/kdive", str(parent))]
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    assert (result.returncode == 0) == (unsafe is None), result.stderr
+    assert root.stat().st_mode == before
+
+
+@pytest.mark.parametrize(
+    "mode,existing,restore_failure",
+    [
+        ("Disabled", False, False),
+        ("Enforcing", False, False),
+        ("Enforcing", True, False),
+        ("Enforcing", False, True),
+    ],
+)
+def test_host_dump_installer_prepares_selinux(
+    tmp_path: Path, mode: str, existing: bool, restore_failure: bool
+) -> None:
+    log = tmp_path / "calls"
+    functions = f"""
+getenforce() {{ echo {mode}; }}
+semanage() {{ echo "semanage $*" >> {log}; [[ $2 != -a || {str(not existing).lower()} == true ]]; }}
+restorecon() {{ echo "restorecon $*" >> {log}; return {int(restore_failure)}; }}
+"""
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            functions
+            + _host_dump_installer_function("_label_host_dump_spool")
+            + "\n_label_host_dump_spool",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) == (not restore_failure), result.stderr
+    calls = log.read_text() if log.exists() else ""
+    assert ("svirt_image_t" in calls) == (mode == "Enforcing")
+    assert ("fcontext -m" in calls) == existing
+    assert ("restorecon -R /var/lib/kdive/host-dump" in calls) == (mode == "Enforcing")
+
+
+def test_host_dump_preparation_contract_is_fixed_and_ordered() -> None:
+    tasks = yaml.safe_load((LOCAL_WORKER / "tasks/shared_directories.yml").read_text())
+    task = next(
+        task for task in tasks if task["name"] == "Prepare the trusted host-dump spool root"
+    )
+    assert task["ansible.builtin.file"] == {
+        "path": "/var/lib/kdive/host-dump",
+        "state": "directory",
+        "follow": False,
+        "owner": "root",
+        "group": "{{ live_vm_host_worker_libvirt_group }}",
+        "mode": "3770",
+    }
+    names = [task["name"] for task in tasks]
+    assert (
+        names.index("Validate host-dump ACL safety")
+        < names.index(task["name"])
+        < names.index("Recheck host-dump ACL safety")
+    )
+    installer = _text(INSTALLER)
+    call = '_require_real_directory /var/lib/kdive/host-dump 0 "$libvirt_group_gid" 3770'
+    assert (
+        "_check_host_dump_acl\n" + call + "\n_check_host_dump_acl\n_label_host_dump_spool"
+        in installer
+    )
+    defaults = yaml.safe_load((LOCAL_WORKER / "defaults/main.yml").read_text())
+    assert "/var/lib/kdive/host-dump" in defaults["local_worker_host_svirt_image_directories"]
+
+
+def test_host_dump_selinux_preparation_requires_utilities() -> None:
+    code = "getenforce() { echo Enforcing; }\n" + _host_dump_installer_function(
+        "_label_host_dump_spool"
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", code + "\n_label_host_dump_spool"],
+        env={"PATH": "/nonexistent"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "requires semanage and restorecon" in result.stderr
