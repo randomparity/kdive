@@ -6,6 +6,7 @@ import asyncio
 import os
 import signal
 import site
+import stat
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -34,7 +35,6 @@ from kdive.jobs.capture_operations.storage.spool import (
     _dispose_operation_spool,
     _read_capture,
     _read_result,
-    _validate_private_directory,
     _write_configuration,
     _write_request,
 )
@@ -295,11 +295,22 @@ class GatedCaptureLauncher:
 
     def _attempt_directory(self, operation: CaptureOperation, request: CaptureRequest) -> Path:
         self._runtime_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _validate_private_directory(self._runtime_root)
         root_fd = os.open(
             self._runtime_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
         )
         try:
+            metadata = os.fstat(root_fd)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) not in {0o700, 0o2700}
+            ):
+                raise PermissionError("capture spool root must be owner-owned mode 0700 or 02700")
+            if stat.S_IMODE(metadata.st_mode) == 0o2700:
+                os.fchmod(root_fd, 0o700)
+            metadata = os.fstat(root_fd)
+            if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise PermissionError("capture spool root must be owner-owned mode 0700")
             name = str(operation.id)
             os.mkdir(name, 0o700, dir_fd=root_fd)
             attempt_dir = self._runtime_root / name
