@@ -426,8 +426,8 @@ async def _delete_unless_fenced(
             return None
         if await owner_key_is_fenced(conn, owner_kind, owner_id, key):
             _log.info(
-                "reconciler: upload reap spared %s; an artifacts row, a re-minted upload window or "
-                "a live write lease landed on it after the claim (ADR-0509)",
+                "reconciler: upload reap spared %s; an artifact, capture publication, upload "
+                "window or live write lease protects it (ADR-0509, ADR-0559)",
                 key,
             )
             return None
