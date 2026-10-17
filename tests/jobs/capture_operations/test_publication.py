@@ -552,3 +552,23 @@ def test_pending_publication_recovery_derives_key_and_commits_tombstone(
             await _close(subject)
 
     asyncio.run(_run())
+
+
+async def _cleanup_publication(
+    subject: _Subject, state: str, key: str, version: str = "v1"
+) -> None:
+    if state not in {"publishing", "canceling", "discarded"}:
+        raise ValueError(f"unsupported cleanup fixture state: {state}")
+    await subject.admin.execute(
+        "UPDATE capture_operations SET publication_state = %s, "
+        "publication_object_key = %s, publication_started_at = now(), "
+        "publication_tombstone_version = CASE WHEN %s = 'discarded' THEN %s END, "
+        "publication_closed_at = CASE WHEN %s = 'discarded' THEN now() END "
+        "WHERE id = %s",
+        (state, key, state, version, state, subject.operation.id),
+    )
+    await subject.admin.execute(
+        "UPDATE jobs SET state = 'canceled', lease_expires_at = now() - interval '1 hour' "
+        "WHERE id = %s",
+        (subject.job.id,),
+    )

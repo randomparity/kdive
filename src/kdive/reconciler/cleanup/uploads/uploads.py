@@ -160,7 +160,8 @@ async def reap_one_owner(
         (``deferred`` false — the manifest was gone, or its deadline had been renewed since the
         candidate select), or the owner's lock was held and phase 1 *deferred* it to the next pass
         (``deferred`` true). ``reaped`` is ``True`` however many batches failed or were declined,
-        because the row is durably gone and the orphan sweep owns every survivor.
+        because the manifest is durably gone; orphan repair rechecks each survivor
+        against the shared fences, including retained capture publication ownership.
         ``attempted``, ``declined`` and ``undeleted`` carry the sweep's fate up to
         :func:`repair_abandoned_uploads`, which reports it once the pass is over and stops claiming
         candidates if a whole owner's sweep was refused.
@@ -202,8 +203,8 @@ async def reap_one_owner(
     if sweep.declined:
         _log.info(
             "reconciler: upload reap spared %d of %d key(s) for owner %s/%s; a row, a live "
-            "write lease or a held owner lock protects them, so they are the orphan sweep's to "
-            "collect (ADR-0509)",
+            "write lease, capture publication or held owner lock protects them; orphan repair "
+            "will recheck ownership (ADR-0509, ADR-0559)",
             sweep.declined,
             len(doomed),
             owner_kind,
