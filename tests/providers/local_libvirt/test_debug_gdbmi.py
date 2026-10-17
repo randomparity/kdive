@@ -2569,7 +2569,7 @@ def _srcversion_cmd(ptr: str) -> str:
 
 
 def _engine_with_resolver(info: ModuleDebuginfo | CategorizedError) -> GdbMiEngine:
-    def resolver(run_id: str, module: str) -> ModuleDebuginfo:
+    def resolver(attachment: GdbMiAttachment, module: str) -> ModuleDebuginfo:
         if isinstance(info, CategorizedError):
             raise info
         return info

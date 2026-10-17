@@ -23,7 +23,6 @@ attachment and the next op gets ``no_live_session``.
 
 from __future__ import annotations
 
-import contextlib
 import platform
 import shutil
 import time
@@ -33,6 +32,7 @@ from pathlib import Path
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import (
     GdbController,
+    GdbMiAttachFailure,
     GdbMiAttachment,
     GdbStopRecord,
 )
@@ -210,10 +210,9 @@ class GdbMiEngine(
                     self.execute_mi_command(attachment, f"-gdb-set architecture {gdb_arch}")
             self.execute_mi_command(attachment, f"-gdb-set remotetimeout {RSP_REMOTE_TIMEOUT_SEC}")
             self._connect_with_retry(attachment, host, port)
-        except CategorizedError as exc:
-            with contextlib.suppress(Exception):
-                controller.exit()
-            raise self._as_attach_failure(exc) from exc
+        except BaseException as exc:
+            cause = self._as_attach_failure(exc) if isinstance(exc, CategorizedError) else exc
+            raise GdbMiAttachFailure(attachment, cause) from exc
         return attachment
 
     def _connect_with_retry(
@@ -398,7 +397,7 @@ class GdbMiEngine(
         )
 
 
-def _missing_module_resolver(run_id: str, module: str) -> ModuleDebuginfo:
+def _missing_module_resolver(attachment: GdbMiAttachment, module: str) -> ModuleDebuginfo:
     """Default ``module_debuginfo_resolver``: none wired (mirrors the attach-seam default)."""
     raise CategorizedError(
         "no module-debuginfo resolver is configured for this engine",

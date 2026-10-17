@@ -80,3 +80,29 @@ def test_attach_records_guest_arch(tmp_path: Path, e_machine: int, arch: str | N
         transcript_path=tmp_path / "transcript.log",
     )
     assert attachment.guest_arch == arch
+
+
+def test_setup_exception_retains_partial_controller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    from kdive.providers.ports.debug import GdbMiAttachFailure
+
+    controller = _DoneController()
+    engine = GdbMiEngine(
+        controller_factory=lambda _: controller,
+        gdb_path_finder=lambda _: "gdb",
+        host_arch_finder=lambda: "x86_64",
+    )
+    monkeypatch.setattr(engine, "execute_mi_command", Mock(side_effect=ValueError("synthetic")))
+    with pytest.raises(GdbMiAttachFailure) as failure:
+        engine.attach(
+            host="127.0.0.1",
+            port=1,
+            vmlinux_path=_elf(tmp_path, _EM_X86_64),
+            transcript_path=tmp_path / "transcript",
+        )
+    assert failure.value.attachment is not None
+    assert failure.value.attachment.controller is controller
+    assert isinstance(failure.value.cause, ValueError)

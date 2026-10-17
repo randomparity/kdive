@@ -17,6 +17,8 @@ class _FakeGdbController:
         self.writes: list[tuple[str, float, bool]] = []
         self.reads: list[tuple[float, bool]] = []
         self.exited = False
+        self.gdb_process: _FakeGdbController | None = self
+        self.stdin = self.stdout = self.stderr = None
 
     def write(
         self,
@@ -42,8 +44,14 @@ class _FakeGdbController:
             raise GdbTimeoutError("timed out")
         return [{"type": "notify", "message": "stopped"}]
 
-    def exit(self) -> None:
+    def poll(self) -> int | None:
+        return None
+
+    def terminate(self) -> None:
         self.exited = True
+
+    def wait(self, timeout: float) -> int:
+        return 0
 
 
 def _controller(fake: _FakeGdbController) -> PygdbmiController:
@@ -112,3 +120,29 @@ def test_exit_delegates_to_underlying_controller() -> None:
     controller.exit()
 
     assert fake.exited is True
+
+
+@pytest.mark.parametrize("last_wait_fails", [False, True])
+def test_exit_escalates_and_requires_confirmed_wait(last_wait_fails: bool) -> None:
+    import subprocess
+    from unittest.mock import Mock, call
+
+    process = Mock()
+    process.poll.return_value = None
+    process.stdin = process.stdout = process.stderr = None
+    process.wait.side_effect = [
+        subprocess.TimeoutExpired("gdb", 2),
+        subprocess.TimeoutExpired("gdb", 2) if last_wait_fails else 0,
+    ]
+    controller = object.__new__(PygdbmiController)
+    controller._controller = Mock(gdb_process=process)
+    if last_wait_fails:
+        with pytest.raises(CategorizedError):
+            controller.exit()
+        assert controller._controller.gdb_process is process
+    else:
+        controller.exit()
+        assert controller._controller.gdb_process is None
+    process.terminate.assert_called_once()
+    process.kill.assert_called_once()
+    assert process.wait.call_args_list == [call(timeout=2.0), call(timeout=2.0)]

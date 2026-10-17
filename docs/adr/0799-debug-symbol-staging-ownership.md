@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed
+Accepted (2026-10-16)
 
-Operator approved D1–D4 for design/review only; implementation remains gated.
+Operator approved bounded D1–D4 implementation; required live proof remains separately gated.
 Issue #3229; approved proposal SHA256
 7e4a8f84ab8c30eb77601a97f310d6be5e2236bfc3680662940da634b728563b.
 
@@ -29,7 +29,7 @@ Same-Run attachments duplicate module staging, trading deduplication for indepen
 Canonical session identity keys operations and cleanup; shutdown tracks first attaches before
 ownership publication. Cancellation drains the dispatched thread before releasing the cleanup lock. Exit failure
 retains files and owner state for retry. Internal resolver/attachment contracts migrate together.
-New public failure wording and abrupt-death limitation have explicit D1–D4 design approval; implementation remains unapproved.
+New public failure wording and abrupt-death limitation have explicit D1–D4 implementation approval; live proof remains gated.
 
 ## Considered & rejected
 

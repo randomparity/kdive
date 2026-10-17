@@ -581,9 +581,21 @@ async def _end_debug_session(
             envelope = await _detach_locked(
                 conn, ctx, uid, resolved_session.system_id, resources.connector
             )
-        if resources.runtime is not None:
-            async with resources.runtime.lock_for(session_id):
-                resources.runtime.reap(session_id)
+        from kdive.mcp.tools.debug.operations.runtime import _finish_thread
+
+        key = str(uid)
+        if resources.runtime is not None and envelope.error_category is None:
+            async with resources.runtime.lock_for(key):
+                try:
+                    await _finish_thread(resources.runtime.reap, key)
+                except Exception:
+                    envelope = ToolResponse.failure(
+                        session_id,
+                        ErrorCategory.INFRASTRUCTURE_FAILURE,
+                        detail="debug session detached; local GDB cleanup is pending",
+                        data={"reason": "debug_cleanup_pending"},
+                        suggested_next_actions=["debug.end_session", "debug.get_session"],
+                    )
         seconds = (datetime.now(UTC) - resolved_session.session.created_at).total_seconds()
         outcome: DebugSessionOutcome = "ok" if envelope.status != "error" else "error"
         telemetry.record(resolved_session.session.transport, outcome, seconds)

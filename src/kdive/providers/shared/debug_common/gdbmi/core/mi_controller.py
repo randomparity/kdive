@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 from pygdbmi.constants import GdbTimeoutError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -48,4 +50,23 @@ class PygdbmiController:  # pragma: no cover - live_vm
             return []
 
     def exit(self) -> None:
-        self._controller.exit()
+        process = self._controller.gdb_process
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2.0)
+            self._controller.gdb_process = None
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+        except Exception as exc:
+            raise CategorizedError(
+                "could not confirm GDB controller cleanup",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ) from exc

@@ -240,7 +240,7 @@ class GdbMiModuleCommands:
             return self._redact_module(
                 GdbModule(name=module, base_address=f"0x{base:x}", symbols_loaded=True)
             )
-        info = self._module_resolver(attachment.run_id, module)
+        info = self._module_resolver(attachment, module)
         verified = self._verify_identity(attachment, module, module_ptr, info)
         self._add_symbol_file(attachment, module, info.path, base)
         attachment.loaded_modules.add(module)

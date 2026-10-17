@@ -1,7 +1,7 @@
 # #3229 — proposed debug symbol staging ownership
 
-Status: approved D1–D4 design refinement; implementation and live operations are not approved.
-Authority: exact WORK:SCOPE comment 6227568733, token q3229-dcd8db32; operator-approved
+Status: D1–D4 implementation approved under WORK:SCOPE6227985604; live proof remains gated.
+Authority: exact WORK:SCOPE comment 6227985604, token q3229-dcd8db32; operator-approved
 campaign review-plan SHA256 5ce7042937eaa47a8e1cfb10ba07265e720dac9be3d037e655b927ac17b29b50.
 Base: main 0b177a335435d404191ecab13b3374f6c01ca136. Branch: fix/debug-staging-lifetime-3229.
 Design denominator: M = 250 changed lines, live assessment in WORK:SCOPE; full-spec / iterating.
@@ -15,13 +15,6 @@ session reap. C2: ordinary temp usage depends on current attachments rather than
 C3: module staging has the same lifetime or another explicitly bounded schedule.
 C4 (necessary preservation): failed attach retains existing private-path and cleanup protection.
 The issue's proposed last-session-of-Run hook is a hypothesis, not a required interface.
-
-At base0b177a335, policy/debuginfo.py:287-322 loses successful root ownership;
-ModuleDebuginfoResolver._stage caches run roots indefinitely and leaks failed fetch/extraction.
-operations/runtime.py:182-190 pops ownership before suppressed controller.exit failure.
-sessions/lifecycle.py:580-586 reaps after any detach envelope. Separate reconciler repair changes
-rows/resets transport without MCP registry access. Private fake-boundary repro exited1 with the
-reported ended-session leak, retained module tree and failed-fetch root; no live quota proof ran.
 
 ## Approved choices
 
@@ -144,7 +137,7 @@ No migration, dependency, toolchain-floor change or deployed-state cleanup comma
 signatures migrate in one PR. New root ownership applies to new attachments only; existing leaked
 roots are not claimed. Roll back code by revert; operator may end sessions before restarting,
 but this preparation authorizes no restart or live cleanup. No legacy branch is retained.
-D1–D4 approval permits independent design review and scope audit only. Implementation requires
-a separate operator decision after the reviewed contract is presented.
+D1–D4 implementation follows the explicit operator decision recorded in WORK:SCOPE6227985604.
+Required live proof remains separately gated; no deployment or historical root cleanup is authorized.
 
 Decision record: [ADR-0799](../../adr/0799-debug-symbol-staging-ownership.md).
