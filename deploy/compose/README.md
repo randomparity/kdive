@@ -256,9 +256,10 @@ tier active against a given database; do not mix it with this container app tier
 The store and all app roles consume the same `COMPOSE_S3_ACCESS_KEY` and
 `COMPOSE_S3_SECRET_KEY` deployment variables. Compose maps them to the backend's supported
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` names and boto3's credential chain.
-The checked-in fallback values are only for a fresh local demo. Export both variables from the
-operator's secret source before recreating services; do not write credentials into this document
-or commit them. The store healthcheck uses `/healthz`; an anonymous S3 root request is denied
+The checked-in fallback values are only for a fresh local demo with both variables absent.
+Compose refuses an explicitly empty value or a pair with only one variable set.
+Export both variables from the operator's secret source before recreating services; do not write
+credentials into this document or commit them. The store healthcheck uses `/healthz`; an anonymous S3 root request is denied
 when authentication is enabled.
 
 Earlier Compose files set `S3_ACCESS_KEY` / `S3_SECRET_KEY` on the store. The pinned backend

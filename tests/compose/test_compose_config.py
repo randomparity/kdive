@@ -668,3 +668,56 @@ def test_vmcore_retention_setting_reaches_every_app_role(monkeypatch: pytest.Mon
     for name in _APP_SERVICES:
         assert disabled[name]["environment"].get("KDIVE_VMCORE_RETENTION_DAYS") is None
         assert enabled[name]["environment"]["KDIVE_VMCORE_RETENTION_DAYS"] == "30"
+
+
+@pytest.mark.parametrize(
+    ("access", "secret", "valid"),
+    [
+        (None, None, True),
+        ("fixture-key", "fixture-value", True),
+        ("", "", False),
+        ("fixture-key", None, False),
+        (None, "fixture-value", False),
+        ("", None, False),
+        (None, "", False),
+        ("fixture-key", "", False),
+        ("", "fixture-value", False),
+    ],
+)
+def test_store_credentials_require_absent_or_complete_nonempty_pair(
+    access: str | None, secret: str | None, valid: bool
+) -> None:
+    env = os.environ.copy()
+    for key, value in (("COMPOSE_S3_ACCESS_KEY", access), ("COMPOSE_S3_SECRET_KEY", secret)):
+        env.pop(key, None)
+        if value is not None:
+            env[key] = value
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            "/dev/null",
+            "-f",
+            str(_COMPOSE_FILE),
+            "--profile",
+            "managed-worker",
+            "config",
+            "--format",
+            "json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    exit_code = result.returncode
+    assert (exit_code == 0) is valid
+    if not valid:
+        assert "Set both COMPOSE_S3 credentials to nonempty values" in result.stderr
+        return
+    services = json.loads(result.stdout)["services"]
+    expected = (access or "kdive", secret or "kdive-demo-secret")
+    for name in (*_APP_SERVICES, "seaweedfs"):
+        credentials = services[name]["environment"]
+        assert (credentials["AWS_ACCESS_KEY_ID"], credentials["AWS_SECRET_ACCESS_KEY"]) == expected
