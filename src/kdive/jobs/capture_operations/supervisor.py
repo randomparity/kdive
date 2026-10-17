@@ -303,9 +303,18 @@ class CaptureOperationSupervisor:
                     _repository_snapshot(snapshot, request),
                 )
                 state = _PreLaunch(operation)
-                launched = await self._launcher.launch(
-                    request, operation, on_abort=record_launch_abort
-                )
+                try:
+                    launched = await self._launcher.launch(
+                        request, operation, on_abort=record_launch_abort
+                    )
+                except BaseException:
+                    if isinstance(state, _LaunchAborted):
+                        await _finish_owned_cleanup(
+                            asyncio.create_task(
+                                self._cleanup_launch_abort(conn, state, publication_recoverer)
+                            )
+                        )
+                    raise
                 state = _Launched(operation, launched)
                 await record_identity(conn, self._credential, operation.id, _identity(launched))
                 configuration = snapshot.configuration()
@@ -373,8 +382,6 @@ class CaptureOperationSupervisor:
             )
         elif isinstance(state, _Launched):
             cleanup = self._cleanup_launched(conn, state, snapshot)
-        elif isinstance(state, _LaunchAborted):
-            cleanup = self._cleanup_launch_abort(conn, state)
         else:
             return
         await _finish_owned_cleanup(asyncio.create_task(cleanup))
@@ -404,27 +411,54 @@ class CaptureOperationSupervisor:
         self,
         conn: AsyncConnection,
         state: _LaunchAborted,
+        recoverer: CapturePublicationRecoverer,
     ) -> None:
         try:
-            evidence = state.evidence
-            async with self._transition_connection(conn) as transition:
-                await acknowledge_exit(
-                    transition,
-                    self._credential,
-                    state.operation.id,
-                    RecoveryEvidence(
-                        process_absent=evidence.process_absent,
-                        provider_quiescence=dict(evidence.provider_quiescence),
-                        exit_outcome=evidence.exit_outcome,
-                        exit_code=evidence.exit_code,
-                    ),
-                )
+            await _wait_with_capture_authority(
+                conn, self._close_launch_abort(conn, state, recoverer)
+            )
         except Exception as error:
             _log.warning(
                 "capture operation %s cleanup did not complete (%s)",
                 state.operation.id,
                 type(error).__name__,
             )
+
+    async def _close_launch_abort(
+        self,
+        conn: AsyncConnection,
+        state: _LaunchAborted,
+        recoverer: CapturePublicationRecoverer,
+    ) -> None:
+        await require_capture_authority()
+        await _probe_lock_session(conn)
+        evidence = state.evidence
+        async with self._transition_connection(conn) as transition:
+            exited = await acknowledge_exit(
+                transition,
+                self._credential,
+                state.operation.id,
+                RecoveryEvidence(
+                    process_absent=evidence.process_absent,
+                    provider_quiescence=dict(evidence.provider_quiescence),
+                    exit_outcome=evidence.exit_outcome,
+                    exit_code=evidence.exit_code,
+                ),
+            )
+            recovered = await recoverer(transition, exited)
+            await require_capture_authority()
+            disposed = await asyncio.to_thread(self._launcher.dispose_operation_spool, recovered.id)
+            if not disposed:
+                raise CategorizedError(
+                    "capture launch recovery could not dispose its private spool",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={
+                        "reason": "capture_spool_disposal_unverified",
+                        "operation_id": str(recovered.id),
+                    },
+                )
+            await require_capture_authority()
+            await record_spool_disposed(transition, self._credential, recovered.id)
 
     async def _cleanup_launched(
         self,
