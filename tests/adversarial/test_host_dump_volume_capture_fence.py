@@ -83,16 +83,16 @@ def test_the_double_conforms_to_the_dump_volume_reaper_port() -> None:
     assert isinstance(_PausingDumpVolumeReaper(_StoragePool()), DumpVolumeReaper)
 
 
-def _core(run_id: str) -> CaptureOutput:
+def _core(run_id: str, execution_id: UUID, method: CaptureMethod) -> CaptureOutput:
     raw = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{CaptureMethod.HOST_DUMP.value}",
+        f"local/runs/{run_id}/vmcore-{method.value}-{execution_id}",
         "e1",
         Sensitivity.SENSITIVE,
         "vmcore",
         version_id="test-version",
     )
     redacted = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{CaptureMethod.HOST_DUMP.value}-redacted",
+        f"local/runs/{run_id}/vmcore-{method.value}-{execution_id}-redacted",
         "e2",
         Sensitivity.REDACTED,
         "vmcore",
@@ -191,8 +191,10 @@ class _SuspendedCapture:
         self.resume = threading.Event()
         self.raised: BaseException | None = None
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        del system_id, run_id, method
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
+        del system_id, run_id
         # host_dump_capture's own order: delete the stale volume of this name, then dump into a
         # fresh one. Set `entered` only after that, so the flag means "a live volume exists".
         self._pool.recreate(self._volume_name, _FRESH_MTIME)
@@ -200,7 +202,9 @@ class _SuspendedCapture:
         assert self.resume.wait(timeout=30), "the probe never released the capture"
         if self.raised is not None:
             raise self.raised
-        return self._objects.record(_core(self._run_id))
+        return self._objects.record(
+            _core(self._run_id, execution_id, method), execution_id=execution_id
+        )
 
     def head(self, key: str) -> HeadResult | None:
         return self._objects.head(key)
@@ -501,7 +505,8 @@ def test_the_same_pass_reclaims_the_volume_once_no_holder_remains(migrated_url: 
                     assert (await reap_orphaned_dump_volumes(conn, reaper, _GRACE)).reaped == 1
             finally:
                 retriever.resume.set()
-            await handler
+            with pytest.raises(CategorizedError, match="no longer owns publication"):
+                await handler
 
         assert reaper.deleted == [(volume, aged)]
         assert reaper.expected_mtimes == [aged], (
@@ -518,16 +523,18 @@ def test_a_failed_capture_leaves_its_lease_for_the_reap(migrated_url: str) -> No
     observed: a worker killed mid-capture releases nothing, so the reap has to exist regardless.
     What this pins is that the row survives the failure *and* that the reap then collects it.
 
-    The job is left ``queued`` — never claimed — on purpose, which is what makes the reap's own
-    predicate the thing under test: a queued row has a NULL job lease, so it is not a live holder
-    its lease is collectable the moment it exists. A claimed job with a five-minute lease is a live
-    holder and its row is correctly *kept*, which would prove nothing here.
+    The job is claimed before capture and its lease is expired after the provider failure.
+    This exercises the real publication prerequisite and the reaper liveness boundary.
     """
 
     async def _run() -> None:
         boom = CategorizedError("the capture failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
         async with _pool(migrated_url) as pool:
             system_id, run_id, job = await _seeded_capture_job(pool)
+            async with pool.connection() as conn:
+                claimed = await dequeue_as_current_worker(conn, "w-failed-capture")
+                assert claimed is not None and claimed.id == job.id
+                job = claimed
             volume = host_dump_volume_name(UUID(system_id))
             storage = _StoragePool()
             retriever = _SuspendedCapture(run_id, volume, storage)
@@ -544,6 +551,9 @@ def test_a_failed_capture_leaves_its_lease_for_the_reap(migrated_url: str) -> No
 
         assert await _lease_holders(migrated_url, system_id) == [job.id]
         async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            await conn.execute(
+                "UPDATE jobs SET lease_expires_at=now()-interval '1 second' WHERE id=%s", (job.id,)
+            )
             assert await reap_stale_host_dump_volume_leases(conn) == 1
         assert await _lease_holders(migrated_url, system_id) == []
 

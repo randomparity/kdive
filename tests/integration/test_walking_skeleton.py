@@ -55,6 +55,7 @@ from tests.integration._seed import (
 from tests.integration.conftest import open_pool, request_context
 from tests.mcp.json_data import data_str
 from tests.mcp.systems_support import provider_resolver
+from tests.support.worker_fence import dequeue_as_current_worker
 
 _AUTH = Authorizing(principal="user-1", agent_session="sess-1", project="proj")
 
@@ -78,27 +79,30 @@ class _SecretBearingRetriever:
         """The bucket side of this double: what ``finalize_capture`` verifies (ADR-0497)."""
         return self._objects.head(key)
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
         from kdive.artifacts.storage import StoredArtifact
         from kdive.domain.catalog.artifacts import Sensitivity
 
         self.calls += 1
         raw = StoredArtifact(
-            f"local/runs/{self._run_id}/vmcore-host_dump",
+            f"local/runs/{self._run_id}/vmcore-host_dump-{execution_id}",
             "e1",
             Sensitivity.SENSITIVE,
             "vmcore",
             version_id="test-version",
         )
         red = StoredArtifact(
-            f"local/runs/{self._run_id}/vmcore-host_dump-redacted",
+            f"local/runs/{self._run_id}/vmcore-host_dump-{execution_id}-redacted",
             "e2",
             Sensitivity.REDACTED,
             "vmcore",
             version_id="test-version",
         )
         return self._objects.record(
-            CaptureOutput(raw=raw, redacted=red, vmcore_build_id="deadbeef", raw_size_bytes=512)
+            CaptureOutput(raw=raw, redacted=red, vmcore_build_id="deadbeef", raw_size_bytes=512),
+            execution_id=execution_id,
         )
 
 
@@ -202,13 +206,18 @@ async def _enqueue_capture(
     pool: AsyncConnectionPool, run_id: str, method: str = "host_dump"
 ) -> Job:
     async with pool.connection() as conn:
-        return await queue.enqueue(
+        job = await queue.enqueue(
             conn,
             JobKind.CAPTURE_VMCORE,
             CaptureVmcorePayload(run_id=run_id, method=CaptureMethod(method)),
             _AUTH,
             f"{run_id}:capture_vmcore:{method}",
         )
+        if job.attempt:
+            return job
+        claimed = await dequeue_as_current_worker(conn, "consumer-capture-worker")
+        assert claimed is not None and claimed.id == job.id
+        return claimed
 
 
 def test_planted_secret_is_redacted(migrated_url: str) -> None:

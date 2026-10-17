@@ -23,6 +23,15 @@ A declared early-boot console_crash with no core instead reports expected_consol
 and directs you to runs.get for console evidence. For drgn analysis of the same Run,
 use introspect.from_vmcore.
 
+Vmcore reads return data.vmcore_retention with server_time, policy_enabled, eligible_at,
+protected_until, retired_at and protection_reason. Timestamps are absolute UTC on the
+PostgreSQL reference clock, per Run raw/redacted pair. eligible_at is earliest possible
+reclamation, not a cleanup completion deadline; open Investigations remain protected.
+A retired authorized Run returns not_found with reason vmcore_retired; use runs.get.
+Original retired bytes cannot be restored by recapture. Reads remain protected while
+their database session holds the Run lock; session loss returns infrastructure_failure
+and requires retrying the read.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `commands` | array<string> (nullable) | no | crash(8) commands to run over the captured core. Omit to run the standard first-pass batch (log, bt). Each command's first token must be one of the read-only allowlisted verbs: bt, dev, dis, files, foreach, help, irq, kmem, list, log, mach, mod, mount, net, p, ps, rd, runq, search, struct, swap, sym, sys, task, timer, tree, union, vm, vtop. Shell metacharacters (\| > < ` $( ; &), a leading '!' shell escape, and control characters are rejected; a rejected command returns a configuration_error whose detail names the offending command. |

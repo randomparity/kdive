@@ -1966,12 +1966,13 @@ def test_the_delete_is_addressed_to_the_identity_the_sweep_sampled(migrated_url:
     asyncio.run(_run())
 
 
-def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
+def test_all_repair_kinds_matches_a_fully_populated_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     """ALL_REPAIR_KINDS must equal the names a plan with every optional port emits.
 
     The repairs counter labels ``repair_kind`` with the ``_RepairSpec.name`` strings, so the
     declared bound must stay in lock-step with the plan or the cardinality guard drifts.
     """
+    monkeypatch.setenv("KDIVE_VMCORE_RETENTION_DAYS", "30")
     config = make_reconcile_config(
         upload_store=cast(loop.ReconcileUploadStore, object()),
         image_store=cast(loop.ImageSweepStore, object()),
@@ -2026,3 +2027,16 @@ def test_build_artifact_repairs_are_in_all_repair_kinds() -> None:
     """The two build-artifact GC sweeps emit their own repair kinds (#768)."""
     assert "investigation_artifacts_gc_count" in loop.ALL_REPAIR_KINDS
     assert "expired_build_artifacts_gc_count" in loop.ALL_REPAIR_KINDS
+
+
+def test_vmcore_retention_is_disabled_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_VMCORE_RETENTION_DAYS", raising=False)
+    names = [
+        spec.name
+        for spec in loop._repair_plan(
+            reaper=NullReaper(),
+            config=make_reconcile_config(),
+            image_publish_grace=timedelta(seconds=1),
+        )
+    ]
+    assert "vmcore_executions_retired_count" not in names

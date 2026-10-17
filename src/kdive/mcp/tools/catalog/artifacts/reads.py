@@ -8,20 +8,32 @@ import logging
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import LiteralString, NamedTuple, Protocol
+from uuid import UUID
 
+import psycopg
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 import kdive.config as config
 from kdive.artifacts.storage import FetchedArtifact, HeadResult
+from kdive.artifacts.vmcore_retention import (
+    await_vmcore_io,
+    protect_vmcore_url,
+    require_vmcore_available,
+    vmcore_retention_view,
+)
 from kdive.config.core_settings import (
     ARTIFACT_DOWNLOAD_TTL_SECONDS,
     ARTIFACT_INLINE_MAX_BYTES,
 )
+from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.repositories import RUNS
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.responses import InvalidEnvelopeError, ToolResponse
 from kdive.mcp.schema.tool_payloads import ToolPayload
@@ -71,7 +83,7 @@ ARTIFACT_GET_WINDOW_DEFAULT_BYTES = 16 * 1024
 # `max_bytes` or the configured inline cap (which can only lower the window further).
 ARTIFACT_GET_WINDOW_MAX_BYTES = 24 * 1024
 _GET_SQL: LiteralString = (
-    "SELECT id, object_key, owner_kind, owner_id FROM artifacts "
+    "SELECT id, object_key, owner_kind, owner_id, retention_class FROM artifacts "
     "WHERE id = %s AND owner_kind IN ('systems', 'runs') AND sensitivity = %s"
 )
 # The owning row's project, keyed by the artifact's owner_kind. A System-owned artifact (console,
@@ -139,6 +151,7 @@ class _SearchStore(Protocol):
 
 class _AuthorizedArtifact(NamedTuple):
     key: str
+    vmcore_run_id: UUID | None = None
 
 
 async def _authorized_redacted_artifact(
@@ -161,7 +174,14 @@ async def _authorized_redacted_artifact(
         if owner is None or owner["project"] not in ctx.projects:
             return _not_found(artifact_id)
         require_role(ctx, owner["project"], Role.VIEWER)
-        return _AuthorizedArtifact(key=str(row["object_key"]))
+        return _AuthorizedArtifact(
+            key=str(row["object_key"]),
+            vmcore_run_id=(
+                row["owner_id"]
+                if row["owner_kind"] == "runs" and row["retention_class"] == "vmcore"
+                else None
+            ),
+        )
 
 
 _ARTIFACTS_LIST_TAG = "artifacts.list"
@@ -271,6 +291,55 @@ async def artifacts_get(
     authorized = await _authorized_redacted_artifact(pool, ctx, artifact_id=request.artifact_id)
     if isinstance(authorized, ToolResponse):
         return authorized
+    if authorized.vmcore_run_id is None:
+        return await _render_artifact_get(authorized, request, store_factory, conn=None)
+    try:
+        async with (
+            pool.connection() as conn,
+            conn.transaction(),
+            advisory_xact_lock(conn, LockScope.RUN, authorized.vmcore_run_id),
+        ):
+            run = await RUNS.get(conn, authorized.vmcore_run_id)
+            if run is None or run.project not in ctx.projects:
+                return _not_found(request.artifact_id)
+            require_role(ctx, run.project, Role.VIEWER)
+            await require_vmcore_available(conn, run.id)
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT object_key FROM artifacts WHERE id=%s AND owner_kind='runs' "
+                    "AND owner_id=%s AND sensitivity='redacted' AND retention_class='vmcore'",
+                    (UUID(request.artifact_id), run.id),
+                )
+                row = await cur.fetchone()
+            if row is None or row[0] != authorized.key:
+                return _not_found(request.artifact_id)
+            response = await _render_artifact_get(authorized, request, store_factory, conn=conn)
+        return response
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(
+            request.artifact_id,
+            exc,
+            suggested_next_actions=["runs.get"]
+            if exc.details.get("reason") == "vmcore_retired"
+            else None,
+        )
+    except psycopg.Error:
+        return ToolResponse.failure_from_error(
+            request.artifact_id,
+            CategorizedError(
+                "vmcore read lost database authority; retry the read",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ),
+        )
+
+
+async def _render_artifact_get(
+    authorized: _AuthorizedArtifact,
+    request: ArtifactsGetRequest,
+    store_factory: Callable[[], _SearchStore],
+    *,
+    conn: AsyncConnection | None,
+) -> ToolResponse:
     terms: tuple[str, ...] | None = None
     if request.find is not None:
         try:
@@ -278,8 +347,8 @@ async def artifacts_get(
         except ArtifactSearchInputError:
             return _config_error(request.artifact_id, data={"reason": "bad_search_input"})
     refs: dict[str, str] = {"object": authorized.key}
-    loaded = await _load_redacted_plaintext(authorized.key, store_factory, refs)
-    if loaded.drift:  # head/fetched object's sensitivity is not REDACTED (the redaction gate)
+    loaded = await _load_redacted_plaintext(authorized.key, store_factory, refs, conn=conn)
+    if loaded.drift:
         return _config_error(request.artifact_id)
     data = (
         _window_response_data(
@@ -300,6 +369,16 @@ async def artifacts_get(
     )
     if isinstance(data, ToolResponse):
         return data
+    if conn is not None and authorized.vmcore_run_id is not None:
+        if "download_uri" in refs:
+            server_time, expires_at = await protect_vmcore_url(
+                conn,
+                authorized.vmcore_run_id,
+                refs["download_uri"],
+            )
+            data["server_time"] = server_time.isoformat()
+            data["download_expires_at"] = expires_at.isoformat()
+        data["vmcore_retention"] = await vmcore_retention_view(conn, authorized.vmcore_run_id)
     return ToolResponse.success(
         request.artifact_id,
         "available",
@@ -326,7 +405,11 @@ def _effective_max(max_bytes: int) -> int:
 
 
 async def _load_redacted_plaintext(
-    key: str, store_factory: Callable[[], _SearchStore], refs: dict[str, str]
+    key: str,
+    store_factory: Callable[[], _SearchStore],
+    refs: dict[str, str],
+    *,
+    conn: AsyncConnection | None = None,
 ) -> _LoadedBody:
     """Fetch the redacted object, enrich ``refs`` with a download URI, return its plaintext.
 
@@ -339,19 +422,25 @@ async def _load_redacted_plaintext(
     construction (only the console-part path writes gzip, at <= 64 KiB plaintext per part), so a
     decompression bomb is out of the threat model.
     """
+
+    async def read_io[T](operation: Callable[[], T]) -> T:
+        if conn is None:
+            return await asyncio.to_thread(operation)
+        return await await_vmcore_io(conn, operation)
+
     try:
         store = store_factory()
     except CategorizedError:
         return _LoadedBody(None, None, {"content_unavailable": "store_error"}, False)
     ttl = config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS)
     try:
-        head = await asyncio.to_thread(store.head, key)
+        head = await read_io(partial(store.head, key))
         if head is None:
             return _LoadedBody(None, None, {"content_unavailable": "store_error"}, False)
         # The redaction gate, enforced before the URI is minted so it covers every size.
         if head.sensitivity is not Sensitivity.REDACTED:
             return _LoadedBody(None, None, None, True)
-        refs["download_uri"] = await asyncio.to_thread(store.presign_get, key, expires_in=ttl)
+        refs["download_uri"] = await read_io(partial(store.presign_get, key, expires_in=ttl))
         if head.size_bytes > _MAX_WINDOWED_FETCH_BYTES:
             return _LoadedBody(
                 None,
@@ -359,7 +448,7 @@ async def _load_redacted_plaintext(
                 {"size_bytes": head.size_bytes, "content_omitted": "artifact_too_large"},
                 False,
             )
-        fetched = await asyncio.to_thread(store.get_artifact, key, head.etag)
+        fetched = await read_io(partial(store.get_artifact, key, head.etag))
     except CategorizedError:
         refs.pop("download_uri", None)
         return _LoadedBody(None, None, {"content_unavailable": "store_error"}, False)

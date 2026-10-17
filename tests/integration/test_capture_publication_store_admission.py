@@ -67,6 +67,7 @@ def test_minio_allows_exactly_one_overlapping_capture_publication(
         assert head is not None
         assert head.version_id == winner.version_id
         assert head.etag == winner.etag
+        assert isinstance(winning_request.data, bytes)
         assert head.size_bytes == len(winning_request.data)
         assert head.metadata == {
             **winning_request.metadata,

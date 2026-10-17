@@ -8,22 +8,28 @@ the audited egress (ADR-0243).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.catalog.read_model import fetch_context_for_run, system_project
 from kdive.artifacts.storage import HeadResult
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools.catalog.artifacts import raw_fetch as raw_fetch_module
 from kdive.mcp.tools.catalog.artifacts.raw_fetch import RawAsset, fetch_raw
 from kdive.security.authz.rbac import Role, RoleDenied
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.capture_store import journal_existing_test_pair
 from tests.clock import STORE_MTIME
 from tests.integration._seed import seed_unbound_running_run
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
@@ -38,6 +44,11 @@ class _FakeStore:
     url = "https://signed.example/download?token=stub"
 
     def __init__(self, *, missing_head: bool = False, size: int = 4096) -> None:
+        self.url = (
+            "https://signed.example/download?X-Amz-Date="
+            + datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            + "&X-Amz-Expires=3600"
+        )
         self.missing_head = missing_head
         self.size = size
         self.presigned_keys: list[str] = []
@@ -107,6 +118,7 @@ async def _seed_raw_vmcore_row(pool: AsyncConnectionPool, run_id: str) -> str:
             "retention_class) VALUES ('runs', %s, %s, 'e', 'sensitive', 'vmcore')",
             (run_id, key),
         )
+        await journal_existing_test_pair(conn, run_id, key, method=CaptureMethod.HOST_DUMP)
     return key
 
 
@@ -498,3 +510,107 @@ def test_fetch_raw_tool_registered() -> None:
     assert set(props) == {"run_id", "asset", "artifact_id"}
     assert props["asset"]["$ref"] == "#/$defs/RawAsset"
     assert set(tool.parameters["$defs"]["RawAsset"]["enum"]) == {"vmcore", "vmlinux", "pcap"}
+
+
+@pytest.mark.parametrize("io_error", [False, True])
+def test_vmcore_url_is_not_returned_after_protection_session_loss(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    io_error: bool,
+) -> None:
+    original = raw_fetch_module.protect_vmcore_url
+
+    async def lose_session(
+        conn: AsyncConnection,
+        run_id: UUID,
+        url: str,
+    ) -> tuple[datetime, datetime]:
+        await conn.close()
+        return await original(conn, run_id, url)
+
+    monkeypatch.setattr(raw_fetch_module, "protect_vmcore_url", lose_session)
+    original_io = raw_fetch_module.await_vmcore_io
+
+    async def fail_io[T](conn: AsyncConnection, operation: Callable[[], T]) -> T:
+        await conn.close()
+
+        def missing() -> T:
+            raise CategorizedError("source retired", category=ErrorCategory.STALE_HANDLE)
+
+        return await original_io(conn, missing)
+
+    if io_error:
+        monkeypatch.setattr(raw_fetch_module, "await_vmcore_io", fail_io)
+
+    async def check() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run_with_vmlinux(pool)
+            await _seed_raw_vmcore_row(pool, run_id)
+            store = _FakeStore()
+            date = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            store.url = f"https://signed.example/object?X-Amz-Date={date}&X-Amz-Expires=900"
+            response = await fetch_raw(
+                pool, _ctx(), run_id=run_id, asset=RawAsset.VMCORE, store_factory=lambda: store
+            )
+            assert response.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
+            assert "download_uri" not in response.refs
+            assert bool(store.presigned_keys) is (not io_error)
+            async with pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT vmcore_download_protected_until FROM runs WHERE id=%s",
+                        (run_id,),
+                    )
+                ).fetchone()
+                assert row == (None,)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("name", ["artifacts.fetch_raw", "artifacts.get", "introspect.from_vmcore"])
+def test_reader_retention_contract_is_advertised(name: str) -> None:
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    kp = make_keypair()
+    verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
+    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    tool = asyncio.run(app.get_tool(name))
+    assert tool is not None
+    description = tool.description or ""
+    for field in (
+        "vmcore_retention",
+        "server_time",
+        "eligible_at",
+        "protected_until",
+        "retired_at",
+    ):
+        assert field in description
+    assert "vmcore_retired" in description and "runs.get" in description
+    assert "infrastructure_failure" in description
+    if name.startswith("artifacts."):
+        assert "download_expires_at" in description
+
+
+@pytest.mark.parametrize("visible", [False, True])
+def test_retired_raw_read_has_no_url_or_cross_project_detail(
+    migrated_url: str, visible: bool
+) -> None:
+    async def check() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run_with_vmlinux(pool)
+            await _seed_raw_vmcore_row(pool, run_id)
+            async with pool.connection() as conn:
+                await conn.execute("UPDATE runs SET vmcore_retired_at=now() WHERE id=%s", (run_id,))
+            store = _FakeStore()
+            response = await fetch_raw(
+                pool,
+                _ctx(projects=("proj",) if visible else ("other",)),
+                run_id=run_id,
+                asset=RawAsset.VMCORE,
+                store_factory=lambda: store,
+            )
+            assert response.error_category == "not_found"
+            assert response.refs == {} and store.presigned_keys == []
+            assert response.data.get("reason") == ("vmcore_retired" if visible else None)
+            assert response.suggested_next_actions == (["runs.get"] if visible else [])
+
+    asyncio.run(check())

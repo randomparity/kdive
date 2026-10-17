@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
+from functools import partial
 from typing import cast
 
+import psycopg
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import CategorizedError
+from kdive.artifacts.vmcore_retention import await_vmcore_io, vmcore_retention_view
+from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.responses import ResponseData, ToolResponse
+from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools.lifecycle.vmcore._vmcore_targets import (
     resolve_run_vmcore_target,
     vmcore_target_failure,
@@ -25,38 +30,50 @@ async def introspect_from_vmcore(
     run_id: str,
     introspector: VmcoreIntrospector,
 ) -> ToolResponse:
-    """Run offline drgn introspection over the Run's captured core; return the redacted report.
-
-    Requires the viewer role. A malformed `run_id` is a `configuration_error`; a Run that is
-    absent, in an ungranted project (no-leak), or missing its target artifact (no captured core,
-    null `debuginfo_ref`, or no recorded `build` step - checked in that order, ADR-0165) is
-    `not_found` (ADR-0097). A provenance mismatch or a drgn open/decode fault surfaces as the
-    port's typed `CategorizedError` category, never a 500. Off a prepared live host, the provider
-    seam reports ``missing_dependency`` instead of importing drgn.
-    """
     with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn:
-            try:
-                resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
-            except CategorizedError as exc:
-                return vmcore_target_failure(run_id, exc)
+        uid = _as_uuid(run_id)
+        if uid is None:
+            return _config_error(run_id)
         try:
-            output = await asyncio.to_thread(
-                introspector.from_vmcore,
-                vmcore_ref=resolved.vmcore_ref,
-                debuginfo_ref=resolved.debuginfo_ref,
-                debuginfo_version_id=resolved.debuginfo_version_id,
-                expected_build_id=resolved.build_id,
-            )
+            async with pool.connection() as conn, conn.transaction():
+                await resolve_run_vmcore_target(conn, ctx, run_id)
+                async with advisory_xact_lock(conn, LockScope.RUN, uid):
+                    resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
+                    output = await await_vmcore_io(
+                        conn,
+                        partial(
+                            introspector.from_vmcore,
+                            vmcore_ref=resolved.vmcore_ref,
+                            debuginfo_ref=resolved.debuginfo_ref,
+                            debuginfo_version_id=resolved.debuginfo_version_id,
+                            expected_build_id=resolved.build_id,
+                        ),
+                    )
+                    response = ToolResponse.success(
+                        run_id,
+                        "succeeded",
+                        suggested_next_actions=["introspect.from_vmcore", "artifacts.list"],
+                        data=cast(
+                            ResponseData,
+                            {
+                                "report": {
+                                    "tasks": output.tasks,
+                                    "modules": output.modules,
+                                    "sysinfo": output.sysinfo,
+                                },
+                                "truncated": output.truncated,
+                                "vmcore_retention": await vmcore_retention_view(conn, uid),
+                            },
+                        ),
+                    )
+            return response
         except CategorizedError as exc:
-            return ToolResponse.failure_from_error(run_id, exc)
-        report = {"tasks": output.tasks, "modules": output.modules, "sysinfo": output.sysinfo}
-        return ToolResponse.success(
-            run_id,
-            "succeeded",
-            suggested_next_actions=["introspect.from_vmcore", "artifacts.list"],
-            data=cast(
-                ResponseData,
-                {"report": report, "truncated": output.truncated},
-            ),
-        )
+            return vmcore_target_failure(run_id, exc)
+        except psycopg.Error:
+            return ToolResponse.failure_from_error(
+                run_id,
+                CategorizedError(
+                    "vmcore analysis lost database authority; retry the read",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                ),
+            )

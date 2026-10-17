@@ -2281,3 +2281,54 @@ def test_get_range_maps_client_error_to_infrastructure() -> None:
         store.get_range("k", start=0, length=4)
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(excinfo.value) == "object-store get_range for 'k' failed: boom"
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_conditional_path_stream_checksums_and_closes(tmp_path: Path, conflict: bool) -> None:
+    from io import BufferedReader
+
+    class Client(_RecordingPutClient):
+        body: BufferedReader | None = None
+
+        def put_object(self, **kwargs: object) -> dict[str, object]:
+            assert isinstance(kwargs["Body"], BufferedReader)
+            self.body = kwargs["Body"]
+            reply = super().put_object(**kwargs)
+            if conflict:
+                raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
+            return reply
+
+    spool = tmp_path / "vmcore"
+    spool.write_bytes(b"core")
+    client = Client()
+    result = ObjectStore(client, "bucket").create_if_absent(
+        ConditionalArtifactWriteRequest(
+            key="local/runs/test/vmcore-host_dump-execution",
+            data=spool,
+            sha256_b64=_sha256_b64(spool),
+            metadata={"vmcore-kind": "capture"},
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class="vmcore",
+        )
+    )
+    assert isinstance(result, ConditionalCreateConflict if conflict else StoredArtifact)
+    assert client.body is not None and client.body.closed
+    assert client.last_kwargs is not None
+    assert client.last_kwargs["IfNoneMatch"] == "*"
+    assert client.last_kwargs["ChecksumSHA256"] == _sha256_b64(spool)
+    assert client.last_kwargs["Body"] == b"core"
+    assert spool.read_bytes() == b"core"
+
+
+def test_conditional_missing_spool_is_typed(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        ObjectStore(object(), "bucket").create_if_absent(
+            ConditionalArtifactWriteRequest(
+                key="local/runs/test/vmcore-host_dump-execution",
+                data=tmp_path / "missing",
+                metadata={},
+                sensitivity=Sensitivity.SENSITIVE,
+                retention_class="vmcore",
+            )
+        )
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE

@@ -1040,7 +1040,24 @@ KUBERNETES_CREDENTIAL_ENVELOPE_KEY = Setting(
     suggest="a readable Fernet envelope-key file path",
 )
 
+VMCORE_RETENTION_DAYS = Setting(
+    name="KDIVE_VMCORE_RETENTION_DAYS",
+    parse=_positive_int,
+    default=None,
+    group="artifacts",
+    processes=_STORE_USERS,
+    help=(
+        "Optional positive days before Run-owned raw/redacted vmcore evidence is eligible for "
+        "retirement; unset disables deletion. Both Run and Investigation must be terminal. "
+        "Uses PostgreSQL time and the later sibling capture timestamp. Eligibility is not a "
+        "cleanup completion deadline. Disabling cannot restore retired evidence."
+    ),
+    suggest="a positive integer number of days; leave unset to retain evidence",
+)
+
+
 SETTINGS = [
+    VMCORE_RETENTION_DAYS,
     DATABASE_URL,
     MIGRATION_DATABASE_URL,
     WORKER_DATABASE_URL,

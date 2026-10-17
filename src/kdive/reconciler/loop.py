@@ -34,6 +34,7 @@ from kdive.config.core_settings import (
     IMAGE_PUBLISH_GRACE,
     UPLOAD_ORPHAN_GRACE,
     UPLOAD_TTL_SECONDS,
+    VMCORE_RETENTION_DAYS,
 )
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
@@ -47,6 +48,10 @@ from kdive.providers.infra.reaping import (
 )
 from kdive.reconciler.cleanup import idempotency
 from kdive.reconciler.cleanup.artifacts import artifact_retention, investigation_rootfs
+from kdive.reconciler.cleanup.artifacts.vmcore_retention import (
+    VmcoreRetentionStore,
+    sweep_vmcore_retention,
+)
 from kdive.reconciler.cleanup.images import (
     repair_dangling_images as _repair_dangling_images,
 )
@@ -195,6 +200,7 @@ class ReconcileUploadStore(
     UploadStore,
     SystemObjectVersionStore,
     artifact_retention.ArtifactObjectDeleter,
+    VmcoreRetentionStore,
     Protocol,
 ):
     """Object-store surface required by upload and artifact-retention reconciler lanes.
@@ -553,6 +559,15 @@ def _external_boot_repair(
     return factory
 
 
+def _vmcore_retention_repair(
+    _reaper: InfraReaper, reconcile_config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    days = config.get(VMCORE_RETENTION_DAYS)
+    if days is None:
+        return None
+    return lambda conn: sweep_vmcore_retention(conn, reconcile_config.upload_store, days)
+
+
 _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     _RepairCatalogEntry(
         "expired_allocations",
@@ -683,6 +698,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         lambda r, _c, _g: lambda conn: _repair_leaked_probe_guests(conn, r),
         report_field="leaked_probe_guests",
     ),
+    _RepairCatalogEntry("vmcore_executions_retired_count", _vmcore_retention_repair),
     _RepairCatalogEntry(
         "idempotency_keys_gc_count",
         lambda _r, c, _g: lambda conn: _gc_idempotency_keys(conn, c.idempotency_retention),

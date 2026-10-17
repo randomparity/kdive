@@ -1,29 +1,14 @@
-"""The store side of a fake vmcore capture (ADR-0497).
-
-``finalize_capture`` heads every object it is about to reference and refuses to commit a row unless
-the store still holds it at the etag the capture observed. A fake retriever that returns a
-``CaptureOutput`` naming objects no store holds is therefore no longer a complete double: the
-handler needs a store that agrees with it.
-
-:class:`WrittenObjects` is that agreement, composed into the capture fakes so one object plays both
-the provider and the bucket it wrote to — which is what the real pair does, and which means the
-double cannot drift from the keys and etags the test itself put under test. Tests that are *about*
-the verify (``tests/adversarial/test_vmcore_finalize_object_verify.py``) build their own store
-instead, because they need to disagree with the capture on purpose.
-
-One consequence is worth naming, because a shared double is easy to over-read. When two
-concurrent handlers drive the *same* fake for the same Run, both record the same etag for the same
-key, so both finalizes agree with the store and both commit. In production that is the
-byte-identical-cores case. When the bytes differ, the later write to each of the two keys wins, and
-one or both finalizes refuse — both when the raw and redacted writes interleave in opposite orders
-(ADR-0497 Consequences). The refusal arm is pinned directly by
-``test_an_object_replaced_since_the_capture_commits_no_row`` rather than by forcing that
-interleaving through a barrier.
-"""
+"""Store identities written by fake vmcore captures (ADR-0786)."""
 
 from __future__ import annotations
 
-from kdive.artifacts.storage import HeadResult
+from uuid import UUID, uuid4
+
+from psycopg import AsyncConnection
+
+from kdive.artifacts.storage import HeadResult, StoredArtifact
+from kdive.artifacts.vmcore_retention import capture_metadata
+from kdive.domain.capture import CaptureMethod
 from kdive.providers.ports.retrieve import CaptureOutput
 from tests.clock import STORE_MTIME
 
@@ -32,25 +17,47 @@ class WrittenObjects:
     """The keys and etags a capture double claims to have written, answerable through ``head``."""
 
     def __init__(self) -> None:
-        self._written: dict[str, str] = {}
+        self._written: dict[str, tuple[StoredArtifact, UUID]] = {}
         self.headed_keys: list[str] = []
 
-    def record(self, output: CaptureOutput) -> CaptureOutput:
+    def record(self, output: CaptureOutput, *, execution_id: UUID) -> CaptureOutput:
         """Remember both of ``output``'s objects as written, and return it unchanged."""
         for stored in (output.raw, output.redacted):
-            self._written[stored.key] = stored.etag
+            self._written[stored.key] = (stored, execution_id)
         return output
 
     def head(self, key: str) -> HeadResult | None:
         """Stat a recorded object; ``last_modified`` is fixed — no capture test is about it."""
         self.headed_keys.append(key)
-        etag = self._written.get(key)
-        if etag is None:
+        recorded = self._written.get(key)
+        if recorded is None:
             return None
+        stored, execution_id = recorded
         return HeadResult(
             size_bytes=1,
             checksum_sha256=None,
-            etag=etag,
+            etag=stored.etag,
             last_modified=STORE_MTIME,
-            version_id="test-version",
+            version_id=stored.version_id,
+            sensitivity=stored.sensitivity,
+            metadata=capture_metadata(execution_id),
         )
+
+
+async def journal_existing_test_pair(
+    conn: AsyncConnection, run_id: str, raw_key: str, *, method: CaptureMethod
+) -> None:
+    """Model an offline-imported historical pair; caller supplies its known capture method."""
+    await conn.execute(
+        "INSERT INTO artifacts(owner_kind,owner_id,object_key,etag,sensitivity,retention_class) "
+        "SELECT 'runs',%s,%s,'e','redacted','vmcore' WHERE NOT EXISTS "
+        "(SELECT 1 FROM artifacts WHERE object_key=%s)",
+        (run_id, raw_key + "-redacted", raw_key + "-redacted"),
+    )
+    await conn.execute(
+        "INSERT INTO vmcore_capture_executions "
+        "(id,run_id,method,raw_key,redacted_key,state,legacy,raw_version_id,"
+        "redacted_version_id,captured_at,published_at) "
+        "VALUES (%s,%s,%s,%s,%s,'published',true,'test-version','test-version',now(),now())",
+        (uuid4(), run_id, method.value, raw_key, raw_key + "-redacted"),
+    )

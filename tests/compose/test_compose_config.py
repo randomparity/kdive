@@ -643,3 +643,28 @@ def test_prometheus_tsdb_is_tmpfs_rather_than_a_named_volume() -> None:
     # unreferenced volumes from the rendered model, so that check cannot fail.
     prometheus = _services_with_obs_profile()["prometheus"]
     assert prometheus["tmpfs"] == ["/prometheus:mode=0700,uid=65534,gid=65534,size=256m"]
+
+
+def test_vmcore_store_signer_is_delivered_to_backend_and_health_is_public() -> None:
+    services = _config(
+        # Synthetic configuration values, never a deployed identity.
+        # pragma: allowlist nextline secret
+        {"COMPOSE_S3_ACCESS_KEY": "fixture-key", "COMPOSE_S3_SECRET_KEY": "fixture-value"}
+    )["services"]
+    environment = services["seaweedfs"]["environment"]
+    assert environment["AWS_ACCESS_KEY_ID"] == "fixture-key"
+    # Same synthetic configuration value checked above.
+    # pragma: allowlist nextline secret
+    assert environment["AWS_SECRET_ACCESS_KEY"] == "fixture-value"
+    assert "S3_ACCESS_KEY" not in environment
+    assert "S3_SECRET_KEY" not in environment
+    assert services["seaweedfs"]["healthcheck"]["test"][-1] == "http://localhost:8333/healthz"
+
+
+def test_vmcore_retention_setting_reaches_every_app_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_VMCORE_RETENTION_DAYS", raising=False)
+    disabled = _config()["services"]
+    enabled = _config({"KDIVE_VMCORE_RETENTION_DAYS": "30"})["services"]
+    for name in _APP_SERVICES:
+        assert disabled[name]["environment"].get("KDIVE_VMCORE_RETENTION_DAYS") is None
+        assert enabled[name]["environment"]["KDIVE_VMCORE_RETENTION_DAYS"] == "30"

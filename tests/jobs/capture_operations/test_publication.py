@@ -304,6 +304,7 @@ def test_pending_publication_recovery_derives_key_and_commits_tombstone(
             self, request: ConditionalArtifactWriteRequest
         ) -> ConditionalCreateResult:
             self.requests.append(request)
+            assert isinstance(request.data, bytes)
             stored = StoredArtifact(
                 request.key,
                 hashlib.sha256(request.data).hexdigest(),

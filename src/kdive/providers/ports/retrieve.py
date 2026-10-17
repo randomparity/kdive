@@ -45,7 +45,9 @@ class LiveScriptOutput(NamedTuple):
 class Retriever(Protocol):
     """Capture port: ``system_id`` finds the live resource, ``run_id`` owns the core (ADR-0244)."""
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
         """Capture, store, and redact a vmcore.
 
         ``system_id`` locates the live domain/overlay/volume; ``run_id`` sets the artifact owner
