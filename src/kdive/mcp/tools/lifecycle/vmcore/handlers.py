@@ -242,6 +242,10 @@ async def _fetch_vmcore(
             if run is None or run.project not in ctx.projects:
                 return _config_error(run_id)
             require_role(ctx, run.project, Role.CONTRIBUTOR)
+            try:
+                await require_vmcore_available(conn, uid)
+            except CategorizedError as exc:
+                return vmcore_target_failure(run_id, exc)
             if run.system_id is None:
                 return _config_error(
                     run_id,

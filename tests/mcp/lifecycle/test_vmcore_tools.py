@@ -1823,10 +1823,11 @@ def test_vmcore_fetch_is_denied_for_a_run_that_does_not_own_the_activation(
     asyncio.run(_run())
 
 
-def test_retired_run_rejects_old_idempotency_key(migrated_url: str) -> None:
+@pytest.mark.parametrize("system_state", ["crashed", "torn_down"])
+def test_retired_run_rejects_old_idempotency_key(migrated_url: str, system_state: str) -> None:
     async def check() -> None:
         async with _pool(migrated_url) as pool:
-            _, run_id = await _crashed_run(pool)
+            system_id, run_id = await _crashed_run(pool)
             first = await _fetch_vmcore(
                 pool,
                 _ctx(),
@@ -1837,6 +1838,9 @@ def test_retired_run_rejects_old_idempotency_key(migrated_url: str) -> None:
             assert first.status == "queued"
             async with pool.connection() as conn:
                 await conn.execute("UPDATE runs SET vmcore_retired_at=now() WHERE id=%s", (run_id,))
+                await conn.execute(
+                    "UPDATE systems SET state=%s WHERE id=%s", (system_state, system_id)
+                )
             replay = await _fetch_vmcore(
                 pool,
                 _ctx(),
@@ -1847,6 +1851,11 @@ def test_retired_run_rejects_old_idempotency_key(migrated_url: str) -> None:
             assert replay.error_category == "not_found"
             assert replay.data["reason"] == "vmcore_retired"
             assert replay.suggested_next_actions == ["runs.get"]
+            with pytest.raises(AuthorizationError):
+                await _fetch_vmcore(pool, _ctx(Role.VIEWER), run_id=run_id)
+            denied = await _fetch_vmcore(pool, _ctx(projects=("other",)), run_id=run_id)
+            assert denied.error_category == "not_found"
+            assert denied.data.get("reason") != "vmcore_retired"
             assert await _job_count(pool) == 1
 
     asyncio.run(check())
