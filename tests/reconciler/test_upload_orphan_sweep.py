@@ -61,7 +61,7 @@ from kdive.reconciler.cleanup.uploads.uploads import (
 )
 from kdive.store.objectstore import ObjectStore
 from tests.conftest import _RoleDsns
-from tests.jobs.capture_operations.test_publication import (
+from tests.jobs.capture_operations.conftest import (
     _cleanup_publication,
     _close,
     _Store,
@@ -1992,3 +1992,43 @@ def test_capture_cleanup_column_grant_is_narrow(
                     "SELECT has_column_privilege(%s, 'capture_operations', %s, 'SELECT')",
                     (role, column),
                 ).fetchone() == (False,)
+
+
+def test_orphan_capture_owner_committed_after_version_capture_is_rechecked(
+    migrated_url: str, authority_role_dsns: _RoleDsns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        subject = await _subject(migrated_url)
+        try:
+            run_id = UUID(subject.job.payload["run_id"])
+            prefix = f"local/runs/{run_id}/"
+            key, other = f"{prefix}pcap-{subject.operation.id}", prefix + "unrelated"
+            store = _FakeUploadStore({key: timedelta(days=2), other: timedelta(days=2)})
+            original = store.capture_exact_versions
+            captured: list[str] = []
+
+            def capture(captured_key: str, limit: int) -> VersionBatch:
+                batch = original(captured_key, limit)
+                if captured_key == key:
+                    captured.extend(target.version_id for target in batch.targets)
+                    with psycopg.connect(migrated_url, autocommit=True) as writer:
+                        writer.execute(
+                            "UPDATE capture_operations SET publication_state = 'publishing', "
+                            "publication_object_key = %s, publication_started_at = now() "
+                            "WHERE id = %s",
+                            (key, subject.operation.id),
+                        )
+                return batch
+
+            monkeypatch.setattr(store, "capture_exact_versions", capture)
+            async with await psycopg.AsyncConnection.connect(
+                authority_role_dsns("kdive_reconciler")
+            ) as conn:
+                await _repair_leaked_upload_objects(conn, store, timedelta(0), timedelta(0))
+            assert captured
+            assert not any(deleted_key == key for deleted_key, _ in store.deleted_versions)
+            assert any(deleted_key == other for deleted_key, _ in store.deleted_versions)
+        finally:
+            await _close(subject)
+
+    asyncio.run(run())

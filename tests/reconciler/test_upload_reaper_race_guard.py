@@ -40,14 +40,13 @@ from kdive.artifacts.uploads.upload_manifest import (
 )
 from kdive.db.locks import advisory_xact_lock
 from kdive.domain.capacity.state import RunState
-from kdive.reconciler.cleanup.uploads.upload_orphans import repair_leaked_upload_objects
 from kdive.reconciler.cleanup.uploads.uploads import (
     ReapOutcome,
     _sweep_uncommitted_objects,
     repair_abandoned_uploads,
 )
 from tests.conftest import _RoleDsns
-from tests.jobs.capture_operations.test_publication import _cleanup_publication, _close, _subject
+from tests.jobs.capture_operations.conftest import _cleanup_publication, _close, _subject
 from tests.reconciler.conftest import (
     connect,
     run_repair,
@@ -55,7 +54,6 @@ from tests.reconciler.conftest import (
     seed_running_job,
     seed_system,
 )
-from tests.reconciler.test_upload_orphan_sweep import _FakeUploadStore
 
 _SACRIFICE = "sacrificial-chunk"
 _CONTESTED = "kernel"
@@ -497,12 +495,10 @@ def test_manifest_reap_preserves_capture_owner(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("route", ["orphan", "manifest"])
-def test_capture_owner_committed_after_version_capture_is_rechecked(
+def test_manifest_capture_owner_committed_after_version_capture_is_rechecked(
     migrated_url: str,
     authority_role_dsns: _RoleDsns,
     monkeypatch: pytest.MonkeyPatch,
-    route: str,
 ) -> None:
     async def run() -> None:
         subject = await _subject(migrated_url)
@@ -511,11 +507,8 @@ def test_capture_owner_committed_after_version_capture_is_rechecked(
             prefix = f"local/runs/{run_id}/"
             key = f"{prefix}pcap-{subject.operation.id}"
             other = prefix + "unrelated"
-            if route == "manifest":
-                await _insert_manifest(subject.admin, "runs", run_id, prefix, timedelta(days=-1))
-                store = _HookedStore(prefix, [other, key], _noop)
-            else:
-                store = _FakeUploadStore({key: timedelta(days=2), other: timedelta(days=2)})
+            await _insert_manifest(subject.admin, "runs", run_id, prefix, timedelta(days=-1))
+            store = _HookedStore(prefix, [other, key], _noop)
             original = store.capture_exact_versions
             captured: list[str] = []
 
@@ -536,11 +529,7 @@ def test_capture_owner_committed_after_version_capture_is_rechecked(
             async with await psycopg.AsyncConnection.connect(
                 authority_role_dsns("kdive_reconciler")
             ) as conn:
-                if route == "manifest":
-                    assert await repair_abandoned_uploads(conn, store) == 1
-                else:
-                    assert isinstance(store, _FakeUploadStore)
-                    await repair_leaked_upload_objects(conn, store, timedelta(0), timedelta(0))
+                assert await repair_abandoned_uploads(conn, store) == 1
             assert captured
             assert not any(deleted_key == key for deleted_key, _ in store.deleted_versions)
             assert any(deleted_key == other for deleted_key, _ in store.deleted_versions)

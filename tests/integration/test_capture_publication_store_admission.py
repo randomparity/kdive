@@ -23,7 +23,7 @@ from kdive.reconciler.cleanup.uploads.upload_orphans import repair_leaked_upload
 from kdive.reconciler.cleanup.uploads.uploads import repair_abandoned_uploads
 from kdive.store.objectstore import ObjectStore
 from tests.conftest import _RoleDsns
-from tests.jobs.capture_operations.test_publication import _cleanup_publication, _close, _subject
+from tests.jobs.capture_operations.conftest import _cleanup_publication, _close, _subject
 
 
 def test_minio_allows_exactly_one_overlapping_capture_publication(
