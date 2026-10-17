@@ -570,22 +570,31 @@ def test_primary_failure_survives_owned_cleanup(image_proof_boundary, monkeypatc
         assert "cleanup" in error.value.__notes__[0]
 
 
-@pytest.mark.parametrize("phase", ["work", "cleanup"])
+@pytest.mark.parametrize("phase", ["work", "cleanup", "both"])
 def test_deadline_stops_phase_and_restores_timer(image_proof_boundary, monkeypatch, phase):
     images, calls, timer = image_proof_boundary
-    if phase == "cleanup":
+    primary = ValueError("proof")
+    if phase != "work":
 
         def stop(*args):
             raise _ProofDeadline("cleanup")
 
         monkeypatch.setattr(sys.modules[__name__], "_teardown", stop)
     with (
-        pytest.raises(_ProofDeadline, match="phase" if phase == "work" else phase),
+        pytest.raises(
+            ValueError if phase == "both" else _ProofDeadline,
+            match="proof" if phase == "both" else "phase" if phase == "work" else phase,
+        ) as error,
         _isolated_stack(),
     ):
+        if phase == "both":
+            raise primary
         if phase == "work":
             handler = next(call[2] for call in calls if call[0] == "signal")
             handler(signal.SIGALRM, None)
+    if phase == "both":
+        assert error.value is primary
+        assert "cleanup" in primary.__notes__[0]
     assert timer == [0, 0]
     assert calls[-1] == ("signal", signal.SIGALRM, signal.SIG_DFL)
     if phase == "work":
