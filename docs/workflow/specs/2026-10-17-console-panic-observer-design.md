@@ -36,6 +36,12 @@ authorized by this design phase.
 
 ## Observation contract
 
+The requirements below govern the explicit force-crash opt-in. The generic marker-only
+call keeps its existing loop/content eligibility in the same entry point, including marker
+success beyond 128 inspected parts and replacement-decoded content. It creates no retained
+diagnostic state and consumes none of the force-crash diagnostic budget. Its outside caller
+and existing timeout/tuple contract remain unchanged; no second observer is introduced.
+
 1. Before crash, drain `artifacts.list(system_id, cursor, limit)` to a terminal page.
    Record the console part IDs and parse `console-part-<generation>-<index>` at the end
    of each returned object key, using numeric components. A missing/invalid continuation,
@@ -127,7 +133,8 @@ cover gaps, duplicates, malformed/repeated/missing continuation, stale precrash 
 generation reset, wrong release/no marker, degraded content, non-progressing windows,
 deadline expiry during a call, and both diagnostic bounds. Controlled faults must make
 new contract tests fail before their corrections are retained. Existing generic marker
-caller expectations remain covered without broadening its qualification contract.
+caller expectations remain covered without broadening its qualification contract, including
+marker part 129 after 128 nonmatches and marker text accompanied by U+FFFD.
 
 Use the existing focused test modules, `just lint`, whole-tree `just type`, doc links/path
 gates and `just records`. The mandatory pre-push hook owns the later full `just ci` run.
