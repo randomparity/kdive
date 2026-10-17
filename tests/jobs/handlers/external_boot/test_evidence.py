@@ -20,6 +20,7 @@ from kdive.jobs.handlers.external_boot.evidence import (
     terminal_evidence,
 )
 from kdive.jobs.handlers.external_boot.runner import OperationContext
+from kdive.providers.ports.external_boot import OpaqueProviderRef
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
 
 DIGEST = "sha256:" + "c" * 64
@@ -54,6 +55,30 @@ def test_known_object_refs_names_every_persisted_artifact_and_the_recovery_ref()
     if materialization.artifacts.initrd is not None:
         expected.add(materialization.artifacts.initrd.ref)
     assert set(refs) == expected
+
+
+def test_known_object_refs_names_the_debuginfo_payload() -> None:
+    # #3130: a local materialization carrying the staged vmlinux names it as a provider object.
+    activation = _activation()
+    materialization = activation.materialization
+    assert materialization is not None
+    debuginfo = OpaqueProviderRef(ref=materialization.artifacts.kernel.ref + "-debuginfo")
+    staged = cast(
+        ExternalBootActivation,
+        SimpleNamespace(
+            materialization=materialization.model_copy(
+                update={
+                    "verified_debuginfo_sha256": DIGEST,
+                    "artifacts": materialization.artifacts.model_copy(
+                        update={"debuginfo": debuginfo}
+                    ),
+                }
+            ),
+            recovery_point=activation.recovery_point,
+        ),
+    )
+
+    assert debuginfo.ref in known_object_refs(staged)
 
 
 def test_known_object_refs_are_sorted_by_canonical_bytes_and_duplicate_free() -> None:

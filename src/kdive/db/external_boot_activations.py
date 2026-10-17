@@ -1136,7 +1136,12 @@ class ExternalBootActivationRepository:
             artifacts = materialization["artifacts"]
             known.update(
                 value["ref"]
-                for value in (artifacts["kernel"], artifacts["modules"], artifacts.get("initrd"))
+                for value in (
+                    artifacts["kernel"],
+                    artifacts["modules"],
+                    artifacts.get("initrd"),
+                    artifacts.get("debuginfo"),
+                )
                 if value is not None
             )
         recovery_point = activation_row.get("recovery_point")

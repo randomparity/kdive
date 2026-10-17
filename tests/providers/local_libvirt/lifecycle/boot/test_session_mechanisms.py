@@ -902,6 +902,17 @@ class TestPayloadCleanup:
 
         assert sorted(os.listdir(artifacts)) == ["keep-me"]
 
+    def test_cleanup_removes_a_staged_debuginfo_payload(
+        self, recovery_root: Path, tmp_path: Path
+    ) -> None:
+        # #3130: the materialized vmlinux is a projection payload like the kernel.
+        artifacts = _private_dir(tmp_path / "artifacts")
+        _stage(artifacts, ("kernel", "modules", "debuginfo"))
+
+        _cleanup(recovery_root, artifacts)
+
+        assert os.listdir(artifacts) == []
+
     def test_cleanup_is_idempotent(self, recovery_root: Path, tmp_path: Path) -> None:
         """Both removals converge on a second run, not just the descriptor-scoped one.
 

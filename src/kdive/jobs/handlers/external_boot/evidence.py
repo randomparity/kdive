@@ -48,8 +48,9 @@ def known_object_refs(activation: ExternalBootActivation) -> tuple[str, ...]:
         artifacts = activation.materialization.artifacts
         refs.add(artifacts.kernel.ref)
         refs.add(artifacts.modules.ref)
-        if artifacts.initrd is not None:
-            refs.add(artifacts.initrd.ref)
+        for optional in (artifacts.initrd, artifacts.debuginfo):
+            if optional is not None:
+                refs.add(optional.ref)
     if activation.recovery_point is not None:
         refs.add(activation.recovery_point.recovery_ref.ref)
     return tuple(
