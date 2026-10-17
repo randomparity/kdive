@@ -375,6 +375,7 @@ async def _list_body(
                 {"state": "canceled"},
                 {"kind": "install"},
                 {"system_id": system.system_id},
+                {"system_id": _ABSENT_ID},
                 {"investigation_id": inv.id},
                 {"investigation_id": _ABSENT_ID},
                 {

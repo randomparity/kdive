@@ -365,8 +365,11 @@ def test_terminal_runs_are_not_canceled_during_cleanup(monkeypatch: pytest.Monke
     assert http.calls == []
 
 
-def test_system_list_detects_a_server_ignoring_project_filter(
+@pytest.mark.parametrize("tool, ignored", [("systems.list", "project"), ("jobs.list", "system_id")])
+def test_list_detects_a_server_ignoring_filter(
     monkeypatch: pytest.MonkeyPatch,
+    tool: str,
+    ignored: str,
 ) -> None:
     from contextlib import asynccontextmanager
     from types import SimpleNamespace
@@ -377,26 +380,48 @@ def test_system_list_detects_a_server_ignoring_project_filter(
         {"id": "old", "project": "p", "state": "torn_down", "allocation_id": "b", "shape": None},
     ]
 
+    if tool == "jobs.list":
+        facts = [
+            {
+                "id": "install",
+                "state": "canceled",
+                "kind": "install",
+                "inv": "investigation",
+                "payload": {"system_id": "current"},
+            },
+            {
+                "id": "provision",
+                "state": "succeeded",
+                "kind": "provision",
+                "inv": None,
+                "payload": {"system_id": "current"},
+            },
+        ]
+
     @asynccontextmanager
     async def owned(*args: Any):
-        yield SimpleNamespace(id="investigation")
+        yield SimpleNamespace(id="investigation", caller=None)
+
+    async def queued(*args: Any, **kwargs: Any):
+        return {}
 
     async def rows(*args: Any):
         return facts
 
     async def pages(_c: Any, _g: Any, tool: str, request: dict[str, object]):
-        # The HTTP boundary violates only project narrowing, retaining all other filters.
-        return carrier._selected(tool, facts, {k: v for k, v in request.items() if k != "project"})
+        # The HTTP boundary violates only the named narrowing, retaining all other filters.
+        return carrier._selected(tool, facts, {k: v for k, v in request.items() if k != ignored})
 
     monkeypatch.setattr(carrier, "_owned", owned)
     monkeypatch.setattr(carrier, "_rows", rows)
     monkeypatch.setattr(carrier, "_pages", pages)
+    monkeypatch.setattr(carrier, "_queued_install", queued)
     with pytest.raises(AssertionError, match="filtered page"):
         asyncio.run(
             carrier._list_body(
                 cast(carrier.HttpCaller, None),
                 carrier._viewer("p"),
-                tool="systems.list",
+                tool=tool,
                 db="db",
                 system=SimpleNamespace(system_id="current"),
             )
