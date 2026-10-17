@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import json
 import struct
 from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -320,3 +323,99 @@ def test_kdump_service_failure_blocks_instead_of_waiting() -> None:
     with pytest.raises(ScenarioStop) as stop:
         kdump_armed({"loaded": "0", "kdump": "failed"})
     assert stop.value.outcome is Outcome.BLOCKED
+
+
+@pytest.mark.parametrize("failure_stage", [None, "crash", "read"])
+@pytest.mark.parametrize("writer_fails", [False, True])
+def test_force_crash_preserves_evidence_and_original_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str | None,
+    writer_fails: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    import tests.integration.live_stack.capture_cells as capture
+    from tests.integration.live_stack.evidence import EvidenceWriter
+    from tests.integration.live_stack.spine import SpinePhaseError
+
+    events: list[str] = []
+    original = SpinePhaseError("crash-proof", "original failure")
+    part = ToolResponse.success(
+        "old", "ready", refs={"object": "local/systems/system-1/console-part-1-000008"}
+    )
+    new = ToolResponse.success(
+        "new", "ready", refs={"object": "local/systems/system-1/console-part-1-000009"}
+    )
+    text = PANIC + "\nCPU: 0 PID: 1 6.18.54-kdive #1\n"
+    responses: list[object] = [ToolResponse.collection("system-1", "ready", [part])]
+    if failure_stage != "crash":
+        responses += [ToolResponse.collection("system-1", "ready", [new])]
+        responses += [
+            original
+            if failure_stage == "read"
+            else ToolResponse.success(
+                "new",
+                "ready",
+                data={
+                    "content": text,
+                    "content_truncated": False,
+                    "size_bytes": len(text.encode()),
+                },
+                refs={
+                    "object": new.refs["object"],
+                    "download_uri": "https://example.invalid/private",
+                },
+            )
+        ]
+    writer = EvidenceWriter(tmp_path)
+    real_artifact = writer.artifact
+
+    def artifact(payload: object) -> str:
+        events.append("persist")
+        if writer_fails:
+            raise OSError("private path omitted from note")
+        return real_artifact(payload)
+
+    monkeypatch.setattr(writer, "artifact", artifact)
+    run = SimpleNamespace(writer=writer, artifacts=[], cell=SimpleNamespace(id="force-crash"))
+    session = SimpleNamespace(
+        armed=AsyncMock(),
+        crash=AsyncMock(side_effect=original if failure_stage == "crash" else None),
+        guest=SimpleNamespace(
+            op=SimpleNamespace(call_tool=AsyncMock(side_effect=responses)),
+            system_id="system-1",
+            key="do-not-copy-private-key",
+        ),
+        run=run,
+        manifest=_MANIFEST,
+    )
+
+    async def invoke() -> dict[str, object]:
+        try:
+            return await capture.force_crash_body(cast(Session, session))
+        finally:
+            events.append("cleanup")
+
+    if failure_stage is not None:
+        with pytest.raises(SpinePhaseError) as failure:
+            asyncio.run(invoke())
+        assert failure.value is original
+        if writer_fails:
+            assert original.__notes__ == ["console diagnostic persistence failed: OSError"]
+    elif writer_fails:
+        with pytest.raises(OSError):
+            asyncio.run(invoke())
+    else:
+        assert asyncio.run(invoke())["console_panic"] is True
+    assert events == ["persist", "cleanup"]
+    if not writer_fails:
+        payload = json.loads((tmp_path / "artifacts" / run.artifacts[0]).read_text())
+        assert payload["complete"] is (failure_stage is None)
+        assert payload["console_observation"][0]["tool"] == "artifacts.list"
+        if failure_stage is None:
+            content = payload["console_observation"][-1]
+            assert content["data"]["content"] == text
+            assert content["content_sha256"] == hashlib.sha256(text.encode()).hexdigest()
+        assert "do-not-copy-private-key" not in json.dumps(payload)
+        assert "download_uri" not in json.dumps(payload)

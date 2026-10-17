@@ -54,11 +54,11 @@ from tests.integration.live_stack.scenario import (
     ssh_endpoint,
 )
 from tests.integration.live_stack.spine import (
+    ConsoleObservation,
     SpinePhaseError,
     await_system_state,
     build_profile,
     captured_vmcore_refs,
-    console_part_ids,
     drain_job,
     mint_role_token,
     ok,
@@ -445,18 +445,51 @@ class Session:
 async def force_crash_body(s: Session) -> dict[str, object]:
     """The exposed crash: job success, durable ``crashed``, and the panic on the console."""
     await s.armed()
-    listing = ok(await scalar(s.guest.op, "artifacts.list", system_id=s.guest.system_id), "parts")
-    before = set(console_part_ids(listing))
-    await s.crash(exposed=True)
-    part, text = await poll_for_new_console_part(
-        s.guest.op, s.guest.system_id, before, PANIC, deadline_s=_CONSOLE_DEADLINE_S, interval_s=10
-    )
-    assert panic_seen(text, s.manifest["release"]), "the console panic is not the fixture kernel's"
-    return {
-        "system": "crashed",
-        "console_panic": True,
-        "console_part_sha256": hashlib.sha256(part.encode()).hexdigest(),
-    }
+    observation = ConsoleObservation()
+    failure: BaseException | None = None
+    try:
+        before = await observation.snapshot(s.guest.op, s.guest.system_id)
+        await s.crash(exposed=True)
+        part, text = await poll_for_new_console_part(
+            s.guest.op,
+            s.guest.system_id,
+            before,
+            PANIC,
+            deadline_s=_CONSOLE_DEADLINE_S,
+            interval_s=10,
+            predicate=lambda value: panic_seen(value, s.manifest["release"]),
+            observation=observation,
+        )
+        assert panic_seen(text, s.manifest["release"]), (
+            "the console panic is not the fixture kernel's"
+        )
+        return {
+            "system": "crashed",
+            "console_panic": True,
+            "console_part_sha256": hashlib.sha256(part.encode()).hexdigest(),
+        }
+    except BaseException as exc:
+        failure = exc
+        raise
+    finally:
+        try:
+            s.run.artifacts.append(
+                s.run.writer.artifact(
+                    {
+                        "cell": s.run.cell.id,
+                        "console_observation": observation.records,
+                        "complete": failure is None,
+                        "incomplete": observation.incomplete,
+                        "failure_class": type(failure).__name__ if failure is not None else None,
+                    }
+                )
+            )
+        except Exception as diagnostic_error:
+            if failure is None:
+                raise
+            failure.add_note(
+                f"console diagnostic persistence failed: {type(diagnostic_error).__name__}"
+            )
 
 
 async def vmcore_body(s: Session) -> dict[str, object]:
