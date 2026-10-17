@@ -1348,3 +1348,53 @@ def test_console_deadline_covers_pending_call_and_cancellation() -> None:
 
     asyncio.run(run(False))
     asyncio.run(run(True))
+
+
+@pytest.mark.parametrize("expiry_stage", ["response", "predicate"])
+def test_console_rejects_qualified_result_after_deadline(
+    monkeypatch: pytest.MonkeyPatch, expiry_stage: str
+) -> None:
+    from tests.integration.live_stack.capture_cells import panic_seen
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(spine, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    text = "Kernel panic - not syncing\nCPU: 0 PID: 1 6.18.54-kdive #1\n"
+    assert panic_seen(text, "6.18.54-kdive")
+    client = _client(
+        [
+            _artifact_listing(_console_part("new", 9)),
+            _artifact_content("new", text),
+        ]
+    )
+    original_call = client.call_tool
+    predicate_calls: list[str] = []
+
+    async def call(name: str, **args: object) -> ToolResponse:
+        response = await original_call(name, **args)
+        if name == "artifacts.get" and expiry_stage == "response":
+            clock.now = 2.0
+        return response
+
+    def qualified(value: str) -> bool:
+        predicate_calls.append(value)
+        clock.now = 2.0
+        return panic_seen(value, "6.18.54-kdive")
+
+    monkeypatch.setattr(client, "call_tool", call)
+    observation = spine.ConsoleObservation(baseline={(1, 8): _console_part("old", 8)})
+    with pytest.raises(SpinePhaseError, match="deadline"):
+        asyncio.run(
+            spine.poll_for_new_console_part(
+                _live_client(client),
+                "system-1",
+                {"old"},
+                "Kernel panic - not syncing",
+                deadline_s=1,
+                interval_s=0,
+                predicate=qualified,
+                observation=observation,
+            )
+        )
+    assert observation.incomplete == "deadline"
+    assert observation.records[-1]["data"] == _artifact_content("new", text).data
+    assert predicate_calls == ([] if expiry_stage == "response" else [text])
