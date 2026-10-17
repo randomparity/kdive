@@ -345,16 +345,16 @@ def _isolated_stack() -> Iterator[tuple[dict[str, str], str, str, str]]:
             )
         raise
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        env["_KDIVE_PROOF_DEADLINE"] = str(time.monotonic() + 600)
         try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            env["_KDIVE_PROOF_DEADLINE"] = str(time.monotonic() + 600)
             signal.setitimer(signal.ITIMER_REAL, 600)
             if owned:
                 _teardown(env, project)
         except BaseException as cleanup:
             if primary is None:
                 raise
-            primary.add_note(f"cleanup incomplete: {cleanup}")
+            primary.add_note(f"cleanup incomplete for {tag}: {cleanup}")
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous_handler)
@@ -570,29 +570,44 @@ def test_primary_failure_survives_owned_cleanup(image_proof_boundary, monkeypatc
         assert "cleanup" in error.value.__notes__[0]
 
 
-@pytest.mark.parametrize("phase", ["work", "cleanup", "both"])
-def test_deadline_stops_phase_and_restores_timer(image_proof_boundary, monkeypatch, phase):
+@pytest.mark.parametrize(
+    ("phase", "expected", "message"),
+    [
+        ("work", _ProofDeadline, "phase"),
+        ("cleanup", _ProofDeadline, "cleanup"),
+        ("both", ValueError, "proof"),
+        ("transition", ValueError, "proof"),
+    ],
+)
+def test_deadline_stops_phase_and_restores_timer(
+    image_proof_boundary, monkeypatch, phase, expected, message
+):
     images, calls, timer = image_proof_boundary
     primary = ValueError("proof")
-    if phase != "work":
+    if phase in {"cleanup", "both"}:
 
         def stop(*args):
             raise _ProofDeadline("cleanup")
 
         monkeypatch.setattr(sys.modules[__name__], "_teardown", stop)
-    with (
-        pytest.raises(
-            ValueError if phase == "both" else _ProofDeadline,
-            match="proof" if phase == "both" else "phase" if phase == "work" else phase,
-        ) as error,
-        _isolated_stack(),
-    ):
-        if phase == "both":
+    if phase == "transition":
+        original_set = signal.setitimer
+
+        def expire_on_cancel(which, seconds, interval=0):
+            if seconds == 0 and timer[0] == 2400:
+                original_set(which, 0)
+                handler = next(call[2] for call in calls if call[0] == "signal")
+                handler(signal.SIGALRM, None)
+            return original_set(which, seconds, interval)
+
+        monkeypatch.setattr(signal, "setitimer", expire_on_cancel)
+    with pytest.raises(expected, match=message) as error, _isolated_stack():
+        if phase in {"both", "transition"}:
             raise primary
         if phase == "work":
             handler = next(call[2] for call in calls if call[0] == "signal")
             handler(signal.SIGALRM, None)
-    if phase == "both":
+    if phase in {"both", "transition"}:
         assert error.value is primary
         assert "cleanup" in primary.__notes__[0]
     assert timer == [0, 0]
