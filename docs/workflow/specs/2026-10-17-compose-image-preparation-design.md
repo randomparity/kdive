@@ -2,12 +2,13 @@
 
 ## Authority and status
 
-Conditional design only; implementation awaits the operator's exact aggregate-budget amendment.
+Operator explicitly approved implementation and the exact aggregate-budget amendment after review.
+Amended WORK:SCOPE is issue #3263 comment 6234379164; the original scope/history remains.
 The frozen charter is issue #3263, WORK:SCOPE q3263-a2732980, comment 6234142177.
 Campaign 2d21598e2016-b01982d7-4e2e-4af3-82b2-4b8aec96dc18 approved the outcome,
-criteria and exclusion owners. M250 is fixed; expected implementation is 140–220 changed lines
-including focused tests, above the initial 80–160 estimate because aggregate stop ownership
-needs executable coverage. This estimate does not resize the denominator.
+criteria and exclusion owners. M250 is fixed; expected implementation is 280–320 changed lines
+including focused tests. The original 140–220 forecast undercounted the meaningful failure,
+timer-ownership and subprocess-boundary tests. This estimate does not resize the denominator.
 ADR-0647 remains accepted and unchanged. No new decision record or dependency is warranted.
 
 ## Problem and evidence
@@ -22,7 +23,7 @@ The existing context manager owns project cleanup; extending that owner avoids a
 ## Scope and selected approach
 
 Modify tests/compose/test_compose_volume_persistence_live.py, focused tests in that module,
-and .github/workflows/ci.yml comments plus only the budget amendment below if approved.
+and .github/workflows/ci.yml comments plus only the budget amendment below.
 No justfile or lifecycle recipe change is needed: the entry point and environment stay intact.
 Retain the production Dockerfile/build context and use KDIVE_SEAWEEDFS_IMAGE with a unique
 kdive-volume-proof:<full UUID> tag. Never inherit the caller's image override.
@@ -34,7 +35,7 @@ Inspect its exact tag to capture an immutable image ID; each _up uses --no-build
 SeaweedFS container .Image against that ID. Other services retain normal pull behavior.
 Only this tag is removed, without force, image-ID removal or prune. Sibling tags/caches stay.
 
-## Aggregate budget amendment proposed for approval
+## Approved aggregate budget amendment
 
 Keep per-call preparation600, startup360, readiness180 and down180 seconds.
 Add a test-local 2400-second work stop covering absence probe, build, identity checks and
@@ -60,7 +61,7 @@ Build timeout kills/waits for the CLI through subprocess.run; it does not prove 
 ended. On build timeout explicitly report daemon completion unknown, cleanup observations and
 exact retained tag if any. No success is claimed from an absence snapshot while build work may
 still complete. Do not retry preparation in this invocation.
-Propose job timeout-minutes20→70 only for compose-volumes: setup allowance15 + work40 +
+Approved job timeout-minutes20→70 only for compose-volumes: setup allowance15 + work40 +
 cleanup10 + runner/reporting5. Setup15 is a policy allowance, not an observed or enforced
 setup bound; a setup overrun reduces later reserve. This amendment does not guarantee cleanup
 on hosted hard cancellation. The first actual run must report setup and phase elapsed times.
