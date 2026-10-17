@@ -465,3 +465,74 @@ def test_frame_evidence_survives_without_changing_service_context(
     assert set(cleanup_refs + proof_refs) <= set(run.artifacts)
     retained = [json.loads((tmp_path / "artifacts" / ref).read_text()) for ref in run.artifacts]
     assert any(item.get("fixture_observed") == observed for item in retained)
+
+
+@pytest.mark.parametrize("damage", ["valid", "kernel", "vmlinux", "missing-vmlinux"])
+def test_complete_observation_uses_production_response(
+    monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    from types import SimpleNamespace
+    from typing import Any, cast
+    from uuid import UUID
+
+    from kdive.mcp.tools.lifecycle.runs.complete_build import _complete_envelope
+    from kdive.services.runs.steps import BuildStepResult
+
+    run_id = "00000000-0000-4000-8000-000000000001"
+    versions = {"kernel": "kernel-version", "vmlinux": "debug-version"}
+    result = BuildStepResult(
+        "kernel-key", "debug-key", carrier._BUILD_ID, build_ref="build", artifact_versions=versions
+    )
+    envelope = _complete_envelope(UUID(run_id), result, server_time="2026-10-16T00:00:00Z")
+    if damage != "valid":
+        refs = dict(envelope.refs)
+        if damage == "missing-vmlinux":
+            del refs["vmlinux"]
+        else:
+            refs[damage] = "wrong-key"
+        envelope = envelope.model_copy(update={"refs": refs})
+    run = {
+        "state": "succeeded",
+        "build_ref": "build",
+        "kernel_ref": "kernel-key",
+        "debuginfo_ref": "debug-key",
+    }
+
+    async def stage(*args: Any):
+        return run_id, {"kernel-key", "debug-key"}
+
+    async def call(*args: Any, **kwargs: Any):
+        return envelope
+
+    async def rows(_db: str, query: str, _params: object = ()):
+        if query == carrier._RUN:
+            return [run]
+        if query == carrier._STEPS:
+            return [{"step": "build", "state": "succeeded", "result": result.dump()}]
+        if "FROM investigation_builds" in query:
+            return [
+                {
+                    "build_ref": "build",
+                    "artifacts": {
+                        name: {"version_id": version} for name, version in versions.items()
+                    },
+                }
+            ]
+        assert "FROM artifacts" in query
+        return [
+            {"object_key": key, "owner_kind": "investigations", "owner_id": "inv"}
+            for key in ("kernel-key", "debug-key")
+        ]
+
+    monkeypatch.setattr(carrier, "_stage", stage)
+    monkeypatch.setattr(carrier, "_call", call)
+    monkeypatch.setattr(carrier, "_rows", rows)
+    inv = cast(carrier._Investigation, SimpleNamespace(id="inv", runs=[run_id]))
+    pending = carrier._complete(
+        inv, cast(carrier.HttpCaller, None), carrier._contributor("p"), "db"
+    )
+    if damage == "valid":
+        assert asyncio.run(pending) == run_id
+    else:
+        with pytest.raises((AssertionError, KeyError)):
+            asyncio.run(pending)

@@ -217,7 +217,7 @@ async def _complete(inv: _Investigation, c: HttpCaller, g: Grants, db: str) -> s
     result = steps[0]["result"]
     assert result["build_id"] == _BUILD_ID
     assert env.data["build_ref"] == result["build_ref"]
-    assert env.refs["kernel"] == row["kernel_ref"] and env.refs["debuginfo"] == row["debuginfo_ref"]
+    assert env.refs["kernel"] == row["kernel_ref"] and env.refs["vmlinux"] == row["debuginfo_ref"]
     assert row["build_ref"] == result["build_ref"]
     generation = await _rows(
         db,
