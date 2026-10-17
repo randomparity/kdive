@@ -25,6 +25,7 @@ from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
 
 from psycopg import AsyncConnection
+from psycopg.errors import InsufficientPrivilege
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
@@ -250,6 +251,15 @@ async def _sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class ReconcileFailure:
+    """Safe per-repair failure classification, without exception or resource details."""
+
+    repair_kind: str
+    reason_code: Literal["database_permission_denied", "repair_failed"]
+    recovery: Literal["periodic_reconciler", "operator_inspection"]
+
+
+@dataclass(frozen=True, slots=True)
 class ReconcileReport:
     """Per-category counts of one pass, plus the names of repairs that raised."""
 
@@ -297,6 +307,7 @@ class ReconcileReport:
     #: from equality (``compare=False``): it is a derived mirror of the scalar counts, so
     #: existing report-equality assertions stay meaningful without enumerating it.
     repair_counts: Mapping[str, int] = field(default_factory=dict, compare=False)
+    repair_failures: tuple[ReconcileFailure, ...] = ()
 
     @classmethod
     def from_counts(
@@ -304,6 +315,8 @@ class ReconcileReport:
         counts: Mapping[str, int],
         failures: Sequence[str],
         lane_outcomes: Mapping[str, ReapLaneOutcome] | None = None,
+        *,
+        repair_failures: Sequence[ReconcileFailure] = (),
     ) -> ReconcileReport:
         """Build a report from repair counts keyed by ``_RepairSpec.name``.
 
@@ -324,6 +337,7 @@ class ReconcileReport:
                 volume_outcome.budget_unattempted if volume_outcome else 0
             ),
             failures=tuple(failures),
+            repair_failures=tuple(repair_failures),
             repair_counts=full_counts,
             **report_counts,
         )
@@ -839,7 +853,7 @@ async def reconcile_once(
     per-domain ``destroy`` in :func:`_repair_leaked_domains` is caught individually, so
     the irreversible case (a domain destroyed, then a later failure) keeps its count.
     """
-    counts, failures, lane_outcomes = await _run_repair_plan(
+    counts, failures, lane_outcomes, repair_failures = await _run_repair_plan(
         pool,
         _repair_plan(
             reaper=reaper,
@@ -848,7 +862,9 @@ async def reconcile_once(
         ),
     )
 
-    return ReconcileReport.from_counts(counts, failures, lane_outcomes)
+    return ReconcileReport.from_counts(
+        counts, failures, lane_outcomes, repair_failures=repair_failures
+    )
 
 
 def _image_publish_grace() -> timedelta:
@@ -885,30 +901,41 @@ def _upload_window_ttl() -> timedelta:
 
 async def _run_repair_plan(
     pool: AsyncConnectionPool, repairs: tuple[_RepairSpec, ...]
-) -> tuple[dict[str, int], list[str], dict[str, ReapLaneOutcome]]:
+) -> tuple[dict[str, int], list[str], dict[str, ReapLaneOutcome], list[ReconcileFailure]]:
     """Run each repair on a fresh pooled connection, isolating failures.
 
-    Returns the per-kind counts, the names of repairs that raised, and the
+    Returns the per-kind counts, the names of repairs that raised, the
     :class:`ReapLaneOutcome` of the budgeted reaping lanes (the two repairs whose repair
-    function returns an outcome rather than a bare int; #1982).
+    function returns an outcome rather than a bare int; #1982), and safe failure classifications.
     """
     counts = _repair_count_defaults({})
     failures: list[str] = []
+    repair_failures: list[ReconcileFailure] = []
     lane_outcomes: dict[str, ReapLaneOutcome] = {}
     for spec in repairs:
         try:
             async with pool.connection() as conn:
                 result = await spec.repair(conn)
-        except Exception:  # noqa: BLE001 - isolate each repair; one failure must not starve the rest
+        except Exception as exc:  # noqa: BLE001 - isolate repairs so later repairs still run
             _log.warning("reconciler: repair %s failed this pass", spec.name, exc_info=True)
             failures.append(spec.name)
+            permission_denied = isinstance(exc, InsufficientPrivilege)
+            repair_failures.append(
+                ReconcileFailure(
+                    repair_kind=spec.name,
+                    reason_code="database_permission_denied"
+                    if permission_denied
+                    else "repair_failed",
+                    recovery="periodic_reconciler" if permission_denied else "operator_inspection",
+                )
+            )
             continue
         if isinstance(result, ReapLaneOutcome):
             counts[spec.name] = result.reaped
             lane_outcomes[spec.name] = result
         else:
             counts[spec.name] = result
-    return counts, failures, lane_outcomes
+    return counts, failures, lane_outcomes, repair_failures
 
 
 class Reconciler:
