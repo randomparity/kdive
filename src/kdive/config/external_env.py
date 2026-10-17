@@ -861,6 +861,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "or wildcard address keeps `localhost` in the derived URL.",
     ),
     ExternalEnvVar(
+        "KDIVE_SEAWEEDFS_IMAGE",
+        "script",
+        "kdive-seaweedfs:dev",
+        "Image tag for the Compose seaweedfs service built from the bundled source. The isolated "
+        "volume-persistence proof ignores inherited overrides and uses its own invocation tag.",
+    ),
+    ExternalEnvVar(
         "KDIVE_SEAWEEDFS_PORT",
         "script",
         "8333",
