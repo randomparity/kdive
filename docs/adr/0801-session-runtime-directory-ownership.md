@@ -29,8 +29,9 @@ No guest execution, domain or disk ownership semantics change.
 
 ## Considered & rejected
 
-- Keep exist_ok adoption/post-hoc receipt. verified: the prior live_vm.py uses exist_ok=True
-  and unconditional suppressed rmdir; the private proof consumer records only after prepare
-  returns. Neither establishes creation ownership.
+- Keep exist_ok adoption/post-hoc receipt. verified:
+  `git show f30fc1967ac9b0cec9f1b3a30ebaf4e016a5232b:src/kdive/testing/live_vm.py`
+  shows exist_ok=True and unconditional suppressed rmdir. The private proof consumer records
+  only after prepare returns. Neither establishes creation ownership.
 - Add a separate runtime manager or nested-session protocol. judgment: unnecessary machinery
   for the existing one-session-boot-per-process contract.
