@@ -103,3 +103,6 @@ live_vm_host_authority_denied_paths:
   - /run/kdive/provider-authority
   - /run/kdive/provider-authority/request
   - /run/kdive/provider-authority/libvirt
+
+# Local proof-only inventory mediator (ADR-0800).
+live_vm_host_authority_inventory_observer_enabled: false

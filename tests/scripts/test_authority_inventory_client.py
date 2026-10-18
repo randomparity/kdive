@@ -99,3 +99,34 @@ def test_transport_failures(client, monkeypatch, failure):
         sock.shutdown.assert_called_once_with(socket.SHUT_WR)
         sock.recv.side_effect = [b"x" * client.MAX_BYTES, b""]
         assert len(client.request_inventory(None)) == client.MAX_BYTES
+
+
+def test_stream_framing(client, monkeypatch):
+    from threading import Thread
+
+    left, right = socket.socketpair()
+    stream = Mock(wraps=left)
+    stream.__enter__ = Mock(return_value=stream)
+    stream.__exit__ = Mock(side_effect=lambda *_: left.close())
+    stream.connect = Mock()
+    stream.getsockopt = Mock(return_value=struct.pack("3i", 1, 0, 0))
+    monkeypatch.setattr(client.socket, "socket", Mock(return_value=stream))
+    received = []
+
+    def server():
+        with right:
+            right.settimeout(2)
+            received.append(right.recv(38))
+            received.append(right.recv(38))
+            right.sendall(b'{"domains":')
+            right.sendall(b'[], "roots": {}, "system": null}')
+
+    thread = Thread(target=server)
+    thread.start()
+    try:
+        assert client.request_inventory(None) == b'{"domains":[], "roots": {}, "system": null}'
+    finally:
+        left.close()
+        thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert received == [b"\n", b""]
