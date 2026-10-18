@@ -165,7 +165,8 @@
 
 - name: Verify ownership before changing or withdrawing collector files
   ansible.builtin.command:
-    argv: [/usr/bin/python3, -I, -S, -c, "{{ provider_authority_host_inventory_verifier }}", withdraw]
+    argv: ["{{ ansible_python_interpreter | default('/usr/bin/python3') }}", -I, -S, -c,
+           "{{ provider_authority_host_inventory_verifier }}", withdraw]
   changed_when: false
 
 - name: Remove disabled inventory boundary files

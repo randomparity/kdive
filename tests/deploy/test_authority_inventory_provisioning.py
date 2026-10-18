@@ -152,10 +152,16 @@ def test_fixed_system_python_prerequisite(monkeypatch, version):
         for t in flatten(tasks())
         if t["name"] == "Validate the fixed system interpreter prerequisite and existing identity"
     )
+    enabled = next(t for t in tasks() if t["name"] == "Converge the enabled inventory boundary")
+    assert prerequisite in enabled["block"]
+    assert enabled["when"] == "inventory_observer_enabled | bool"
     argv = prerequisite["ansible.builtin.command"]["argv"]
     env = Environment(undefined=StrictUndefined)
     assert (
-        env.from_string(argv[0]).render(provider_authority_host_python="/verified/python3.14")
+        env.from_string(argv[0]).render(
+            provider_authority_host_python="/verified/python3.14",
+            ansible_python_interpreter="/immutable/control/bin/python3",
+        )
         == "/usr/bin/python3"
     )
     ns = verifier()
@@ -287,3 +293,21 @@ def test_existing_privileged_group_refused_before_account_creation(monkeypatch):
     with pytest.raises(ValueError, match="identity collides"):
         ns["identity"](False)
     account_lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("control_python", [None, "/immutable/control/bin/python3"])
+def test_disabled_withdrawal_uses_control_interpreter(control_python):
+    withdrawal = next(
+        t
+        for t in tasks()
+        if t["name"] == "Verify ownership before changing or withdrawing collector files"
+    )
+    assert "when" not in withdrawal
+    values = {"inventory_observer_enabled": False}
+    if control_python is not None:
+        values["ansible_python_interpreter"] = control_python
+    argv = withdrawal["ansible.builtin.command"]["argv"]
+    rendered = Environment(undefined=StrictUndefined).from_string(argv[0]).render(values)
+    assert rendered == (control_python or "/usr/bin/python3")
+    assert argv[1:4] == ["-I", "-S", "-c"] and argv[-1] == "withdraw"
+    assert argv[4] == "{{ provider_authority_host_inventory_verifier }}"
