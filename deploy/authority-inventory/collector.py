@@ -71,6 +71,9 @@ def collect(system_id: str | None) -> dict[str, object]:
     """Read the complete existing facts, never child contents or mutable operations."""
     uid = pwd.getpwnam(AUTHORITY).pw_uid
     _provider_socket(uid)
+    # Native diagnostics otherwise reach stderr before Python exceptions are caught.
+    if libvirt.registerErrorHandler(lambda _context, _error: None, None) != 1:
+        raise ValueError("error-handler-unavailable")
     conn = libvirt.openReadOnly("qemu+unix:///session?socket=" + SOCKET)
     if conn is None:
         raise ValueError("provider-unavailable")

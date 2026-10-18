@@ -14,13 +14,14 @@ SYSTEM = "11111111-2222-4333-8444-555555555555"
 
 
 @pytest.fixture
-def collector():
+def collector(monkeypatch):
     spec = importlib.util.spec_from_file_location(
         "inventory_collector", Path("deploy/authority-inventory/collector.py")
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module.libvirt, "registerErrorHandler", Mock(return_value=1))
     return module
 
 
@@ -211,3 +212,71 @@ def test_startup_failure_has_fixed_diagnostics(monkeypatch, capsys):
     assert caught.value.code == 1
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err == "inventory-prerequisite-failed\n"
+
+
+@pytest.mark.parametrize("failure", ["open", "lookup", "close"])
+def test_native_diagnostics_are_suppressed(collector, monkeypatch, capsys, failure):
+    import sys
+
+    events = []
+    handler = None
+
+    def register(callback, context):
+        nonlocal handler
+        events.append("register")
+        assert context is None
+        handler = callback
+        return 1
+
+    def backend(operation):
+        events.append(operation)
+        if operation == failure:
+            if handler is None:
+                print("private native diagnostic", file=sys.stderr)
+            else:
+                handler(None, ["private native diagnostic"])
+            raise RuntimeError("backend failure")
+        return conn
+
+    domain = Mock()
+    domain.name.return_value = "kdive-" + SYSTEM
+    domain.XMLDesc.return_value = '<domain type="kvm"/>'
+    conn = Mock()
+    conn.listAllDomains.return_value = [domain]
+
+    def lookup(_):
+        backend("lookup")
+        return domain
+
+    conn.lookupByName.side_effect = lookup
+    conn.close.side_effect = lambda: backend("close")
+    monkeypatch.setattr(
+        collector,
+        "libvirt",
+        SimpleNamespace(registerErrorHandler=register, openReadOnly=lambda _: backend("open")),
+    )
+    monkeypatch.setattr(collector.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=102))
+    monkeypatch.setattr(collector, "_provider_socket", Mock())
+    monkeypatch.setattr(collector, "_root_names", Mock(return_value=[]))
+    with pytest.raises(RuntimeError, match="backend failure"):
+        collector.collect(SYSTEM)
+    assert capsys.readouterr().err == ""
+    assert events == (
+        ["register", "open"] if failure == "open" else ["register", "open", "lookup", "close"]
+    )
+
+
+@pytest.mark.parametrize("result", [0, None, RuntimeError("registration failed")])
+def test_error_handler_registration_fails_closed(collector, monkeypatch, result):
+    register = Mock(return_value=result)
+    if isinstance(result, Exception):
+        register.side_effect = result
+    opened = Mock(side_effect=AssertionError("backend reached"))
+    monkeypatch.setattr(
+        collector, "libvirt", SimpleNamespace(registerErrorHandler=register, openReadOnly=opened)
+    )
+    monkeypatch.setattr(collector.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=102))
+    monkeypatch.setattr(collector, "_provider_socket", Mock())
+    with pytest.raises((ValueError, RuntimeError)):
+        collector.collect(None)
+    opened.assert_not_called()
