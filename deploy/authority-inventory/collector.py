@@ -9,8 +9,12 @@ import struct
 import sys
 from uuid import UUID
 
-import libvirt
-from defusedxml.ElementTree import fromstring
+try:
+    import libvirt
+    from defusedxml.ElementTree import fromstring
+except Exception:
+    print("inventory-prerequisite-failed", file=sys.stderr)
+    raise SystemExit(1) from None
 
 OBSERVER = "kdive-authority-observer"
 AUTHORITY = "kdive-provider-authority"

@@ -74,10 +74,11 @@ def test_peer_identity(collector, peer, monkeypatch, uid):
 
 
 @pytest.mark.parametrize("failure", [None, "xml", "type", "lookup", "none", "root", "socket"])
-def test_inventory_facts_and_failures(collector, monkeypatch, failure):
+@pytest.mark.parametrize("active", [0, 1])
+def test_inventory_facts_and_failures(collector, monkeypatch, failure, active):
     domain = Mock()
     domain.name.return_value = "kdive-" + SYSTEM
-    domain.isActive.return_value = 0
+    domain.isActive.return_value = active
     domain.XMLDesc.return_value = '<domain type="kvm"/>'
     other = Mock()
     other.name.return_value = "unrelated"
@@ -108,7 +109,7 @@ def test_inventory_facts_and_failures(collector, monkeypatch, failure):
         assert result == {
             "domains": ["kdive-" + SYSTEM, "unrelated"],
             "roots": dict.fromkeys(collector.ROOTS, ["a", "\udcff", "é"]),
-            "system": {"active": False, "type": "kvm"},
+            "system": {"active": bool(active), "type": "kvm"},
         }
         assert collector.collect(None)["system"] is None
         assert collector.collect("22222222-2222-4333-8444-555555555555")["system"] is None
@@ -158,3 +159,55 @@ def test_root_fd_closure(collector, monkeypatch, tmp_path, failure):
     link.symlink_to(root)
     with pytest.raises(OSError):
         collector._root_names(str(link), uid)
+
+
+@pytest.mark.parametrize("fault", [None, "owner", "mode", "directory-link", "socket-link"])
+def test_provider_socket_metadata(collector, monkeypatch, fault):
+    import stat
+
+    directory = SimpleNamespace(st_uid=102, st_mode=stat.S_IFDIR | 0o700)
+    endpoint = SimpleNamespace(st_uid=102, st_mode=stat.S_IFSOCK | 0o600)
+    if fault == "owner":
+        endpoint.st_uid = 0
+    elif fault == "mode":
+        directory.st_mode = stat.S_IFDIR | 0o755
+    elif fault == "directory-link":
+        directory.st_mode = stat.S_IFLNK | 0o777
+    elif fault == "socket-link":
+        endpoint.st_mode = stat.S_IFLNK | 0o777
+    monkeypatch.setattr(
+        collector.os, "lstat", lambda path: endpoint if path == collector.SOCKET else directory
+    )
+    if fault:
+        with pytest.raises(ValueError):
+            collector._provider_socket(102)
+    else:
+        collector._provider_socket(102)
+
+
+def test_request_requires_eof(collector, peer, monkeypatch):
+    backend = Mock(side_effect=AssertionError("backend reached"))
+    monkeypatch.setattr(collector, "collect", backend)
+    peer.recv.side_effect = [b"\n", TimeoutError()]
+    with pytest.raises(TimeoutError):
+        collector.serve(peer)
+    backend.assert_not_called()
+
+
+def test_startup_failure_has_fixed_diagnostics(monkeypatch, capsys):
+    import builtins
+    import runpy
+
+    original = builtins.__import__
+
+    def importing(name, *args, **kwargs):
+        if name == "libvirt":
+            raise ImportError("private runtime path")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", importing)
+    with pytest.raises(SystemExit) as caught:
+        runpy.run_path("deploy/authority-inventory/collector.py", run_name="__main__")
+    assert caught.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == "inventory-prerequisite-failed\n"
