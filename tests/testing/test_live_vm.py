@@ -57,7 +57,7 @@ class _FakeDomain:
         self.destroyed = True
         self.active = False
 
-    def undefineFlags(self, _flags: int) -> None:  # noqa: N802 - libvirt name
+    def undefineFlags(self, flags: int) -> None:  # noqa: N802 - libvirt name
         self.undefined = True
 
 
@@ -67,7 +67,7 @@ class _FakeConn:
         self.define_calls = 0
         self.closed = False
 
-    def defineXML(self, _xml: str) -> _FakeDomain:  # noqa: N802 - libvirt name
+    def defineXML(self, xml: str) -> _FakeDomain:  # noqa: N802 - libvirt name
         self.define_calls += 1
         return self.domain
 
@@ -520,3 +520,184 @@ def test_prepare_session_runtime_sets_short_xdg_and_restores(
     runtime.restore()
     assert os.environ["XDG_CONFIG_HOME"] == "/original"
     assert not Path(short).exists()
+
+
+@pytest.fixture
+def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    short = tmp_path / "runtime"
+    monkeypatch.setattr(live_vm_harness, "Path", lambda _path: short)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/original")
+    return short
+
+
+def test_session_runtime_refuses_collision(session_dir: Path) -> None:
+    import os
+
+    session_dir.mkdir()
+    original = session_dir.stat()
+    with pytest.raises(RuntimeError, match="session runtime"):
+        prepare_session_runtime("qemu:///session")
+    assert session_dir.stat().st_ino == original.st_ino
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"
+
+
+@pytest.mark.parametrize("fault", ["stat", "owner", "type"])
+def test_session_runtime_uncertain_capture_retains_directory(
+    session_dir: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    import os
+    import stat
+
+    real_lstat = Path.lstat
+
+    def uncertain(path: Path) -> os.stat_result:
+        st = real_lstat(path)
+        if path != session_dir:
+            return st
+        if fault == "stat":
+            raise OSError("capture unavailable")
+        fields = list(st)
+        fields[4 if fault == "owner" else 0] = st.st_uid + 1 if fault == "owner" else stat.S_IFLNK
+        return os.stat_result(fields)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "lstat", uncertain)
+        with pytest.raises(RuntimeError, match="ownership"):
+            prepare_session_runtime("qemu:///session")
+    assert session_dir.is_dir()
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"
+
+
+@pytest.mark.parametrize("fault", ["directory", "symlink", "file", "owner", "nonempty", "inspect"])
+def test_session_runtime_restoration_preserves_uncertain_resources(
+    session_dir: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    import os
+
+    runtime = prepare_session_runtime("qemu:///session")
+    assert runtime is not None
+    original = session_dir.with_name("original")
+    if fault in ("directory", "symlink", "file"):
+        session_dir.rename(original)
+        if fault == "directory":
+            session_dir.mkdir()
+        elif fault == "symlink":
+            session_dir.symlink_to(original, target_is_directory=True)
+        else:
+            session_dir.write_text("foreign")
+    elif fault == "nonempty":
+        (session_dir / "daemon-state").write_text("retain")
+    real_lstat = Path.lstat
+
+    def wrong_owner(path: Path) -> os.stat_result:
+        st = real_lstat(path)
+        fields = list(st)
+        if path == session_dir and fault == "inspect":
+            raise PermissionError("cannot inspect runtime")
+        if path == session_dir and fault == "owner":
+            fields[4] += 1
+        return os.stat_result(fields)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "lstat", wrong_owner)
+        with pytest.raises(RuntimeError, match="session runtime"):
+            runtime.restore()
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"
+    assert session_dir.exists() or session_dir.is_symlink()
+    if original.exists():
+        assert original.is_dir()
+
+
+@pytest.mark.parametrize("already_missing", [False, True])
+def test_session_runtime_restores_absence_once(
+    session_dir: Path, monkeypatch: pytest.MonkeyPatch, already_missing: bool
+) -> None:
+    import os
+    import stat
+
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    runtime = prepare_session_runtime("qemu:///session")
+    assert runtime is not None
+    created = session_dir.lstat()
+    assert stat.S_IMODE(created.st_mode) == 0o700
+    if already_missing:
+        session_dir.rmdir()
+    runtime.restore()
+    assert "XDG_CONFIG_HOME" not in os.environ
+    assert not session_dir.exists()
+    session_dir.mkdir()
+    runtime.restore()
+    assert session_dir.is_dir()
+
+
+@pytest.mark.parametrize("transient", [False, True])
+def test_session_boot_preparation_failure_has_no_boot_effect(
+    session_dir: Path, transient: bool
+) -> None:
+    import os
+
+    session_dir.mkdir()
+
+    def no_connect(_uri: str):
+        pytest.fail("connection attempted after failed runtime preparation")
+
+    context = (
+        live_vm_harness.boot_gdbstub_domain(
+            _GDBSTUB_XML, uri="qemu:///session", wait_for="active", _connect=no_connect
+        )
+        if transient
+        else boot_throwaway_domain(
+            session_dir / "base",
+            arch="x86_64",
+            name="k",
+            mode="qemu:///session",
+            _connect=no_connect,
+            _overlay=lambda _base, _dest: pytest.fail("overlay attempted"),
+        )
+    )
+    with pytest.raises(RuntimeError, match="session runtime"), context:
+        pytest.fail("yielded despite failed preparation")
+    assert session_dir.is_dir()
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"
+
+
+@pytest.mark.parametrize("transient", [False, True])
+def test_session_boot_body_and_restore_errors_remain_diagnosable(
+    session_dir: Path, monkeypatch: pytest.MonkeyPatch, transient: bool
+) -> None:
+    import os
+
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    conn, transient_conn = _FakeConn(), _FakeTransientConn()
+    context = (
+        live_vm_harness.boot_gdbstub_domain(
+            _GDBSTUB_XML,
+            uri="qemu:///session",
+            wait_for="active",
+            _connect=lambda _: transient_conn,
+        )
+        if transient
+        else boot_throwaway_domain(
+            session_dir.with_name("base"),
+            arch="x86_64",
+            name="k",
+            mode="qemu:///session",
+            _connect=lambda _: conn,
+            _overlay=_write_overlay,
+        )
+    )
+    body_error = ValueError("sentinel body failure")
+    with pytest.raises(RuntimeError, match="session runtime") as raised, context:
+        (session_dir / "daemon-state").write_text("retain")
+        raise body_error
+    errors = []
+    error: BaseException | None = raised.value
+    while error is not None:
+        errors.append(error)
+        error = error.__cause__ or error.__context__
+    assert body_error in errors
+    assert any(isinstance(e, OSError) for e in errors)
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"
+    used = transient_conn if transient else conn
+    assert used.closed and used.domain.destroyed
+    assert (session_dir / "daemon-state").read_text() == "retain"

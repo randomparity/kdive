@@ -78,3 +78,18 @@ Execution of the changed live test and a candidate-bound running/halted Linux/pr
 proof require separate operator resource admission.
 No firmware diagnostic or mock test substitutes for that qualification. Do not emit
 build-complete or MERGE-READY while required real proof is unrun.
+
+## Session-runtime ownership amendment
+
+The operator-approved #3245 amendment adds creation-time ownership to the shared session
+helper and its private receipt consumer ([ADR-0801](../../adr/0801-session-runtime-directory-ownership.md)).
+Create the short directory exclusively with mode0700 and capture no-follow UID/device/inode
+before redirecting XDG. Collisions and uncertain capture leave the environment unchanged.
+Restore XDG first; delete only the still-owned empty directory, retain uncertain residue,
+and report cleanup failures with primary exception context. Repeated restoration must not
+delete a new occupant. The consumer persists the creation receipt and restores ownership
+if writing that receipt fails. Preserve non-session None, short socket paths and existing
+caller-owned domain/disk behavior. This adds no atomic arbitrary same-UID rename guarantee.
+Focused tests cover collision, capture failure, replacement, nonempty residue, repetition,
+both boot callers and combined primary/cleanup errors. Actual provider proof remains unrun
+until separately admitted; no existing baseline-preservation obligation is relaxed.
