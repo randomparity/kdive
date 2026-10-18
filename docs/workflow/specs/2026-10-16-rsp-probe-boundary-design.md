@@ -93,3 +93,36 @@ caller-owned domain/disk behavior. This adds no atomic arbitrary same-UID rename
 Focused tests cover collision, capture failure, replacement, nonempty residue, repetition,
 both boot callers and combined primary/cleanup errors. Actual provider proof remains unrun
 until separately admitted; no existing baseline-preservation obligation is relaxed.
+
+## Native completion and revised causal qualification
+
+The adopted helper contract in [ADR-0802](../../adr/0802-session-native-completion-and-retained-runtime.md)
+adds optional create/destroy submission and return observations. Positive native completion
+remains separate from client reap. Native or lifecycle-receipt uncertainty retains the
+child runtime; the private parent retains its backing resources until both the native
+chain and actual/logical successful child completion with verified descendants are proven.
+A failed destruction-submitting observer must not prevent otherwise possible teardown.
+Primary and cleanup errors remain visible, including default callers with no observer.
+Other callers retain their existing storage ownership and cleanup policies.
+
+The operator revised the local Linux qualification criterion to complete observation of
+the actual reservation invocation and its threads, descendants, inherited descriptors and
+alternate routes, demonstrating no attempted debugger-endpoint connection. The proposed
+proof uses a bounded reservation child and a finite native syscall-trace consumer. It
+retains real running/paused state samples, running progress and paused counter stability.
+Those samples expressly do not exclude a transient STOP/RESUME pair between observations.
+No second monitor transport, state-mutating sentinel or automatic resume is introduced.
+
+This causal evidence trusts admitted Python, kernel, tracer and libvirt implementations
+and the exact local libvirt resolver API/socket boundary. It does not trace an already
+running daemon or assert universal daemon noninterference. Unknown trace forms, missing
+lineage or descriptor provenance, observer loss and late completion fail qualification.
+Saved monotonic acceptance deadlines are not extended for tracing overhead; they do not
+cancel blocking calls or promise physical publication by the deadline. Product local and
+remote reservation contracts remain unchanged; this x86_64 proof grammar does not qualify
+remote deployments or replace the separate native POWER owner.
+
+Offline contract tests establish only the implemented rejection and ownership behavior.
+Installed tracer readiness and all real running, paused, actual-GDB and panic proof arms
+remain unrun. Separate operator admission is still required before any native operation;
+offline green is not Linux/provider qualification or merge readiness.

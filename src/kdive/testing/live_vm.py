@@ -315,6 +315,7 @@ class _SessionRuntime:
     short_dir: Path
     identity: tuple[int, int, int]
     _removed: bool = False
+    retain_directory: bool = False
 
     def restore(self) -> None:
         if self._removed:
@@ -323,6 +324,8 @@ class _SessionRuntime:
             os.environ.pop("XDG_CONFIG_HOME", None)
         else:
             os.environ["XDG_CONFIG_HOME"] = self.prior
+        if self.retain_directory:
+            return
         try:
             current = self.short_dir.lstat()
         except FileNotFoundError:
@@ -572,6 +575,7 @@ def boot_gdbstub_domain(
     ssh_port: int | None = None,
     wait_timeout_s: float = 30.0,
     _connect: Callable[[str], _TransientConn] = connect_libvirt,
+    _lifecycle: Callable[[str], None] | None = None,
 ) -> Iterator[LiveDomain]:
     """Boot a transient gdbstub domain from caller-rendered production XML (ADR-0392).
 
@@ -585,7 +589,12 @@ def boot_gdbstub_domain(
     ``XDG_CONFIG_HOME`` redirect prevents the 108-byte QMP-socket overflow under
     ``qemu:///session`` (#1323). The caller chooses readiness: ``panic`` reads ``console_log``,
     ``ssh`` probes the production XML's forwarded ``ssh_port``, and ``active`` checks libvirt
-    state. The harness yields after readiness and guarantees domain + connection teardown.
+    state. The harness yields after readiness and attempts owned domain + connection teardown.
+    ADR-0802 requires positive destroy completion; uncertain native work or receipt failure
+    retains the runtime directory after restoring XDG. Callers still own their disks.
+    The optional lifecycle observer receives create/destroy submitting/returned phases.
+    Failed destroy-submitting observation never suppresses an otherwise possible teardown.
+    Cleanup failures are raised; multiple primary/cleanup errors form a BaseExceptionGroup.
 
     Raises ``LiveVmBootTimeout`` if the selected condition is not reached before the deadline.
     """
@@ -594,9 +603,24 @@ def boot_gdbstub_domain(
     runtime = prepare_session_runtime(uri)
     conn: _TransientConn | None = None
     domain: _TransientDomain | None = None
+    errors: list[BaseException] = []
+    submitted = pending = receipt_failed = False
+
+    def notify(phase: str) -> None:
+        nonlocal receipt_failed
+        if _lifecycle is not None:
+            try:
+                _lifecycle(phase)
+            except BaseException:
+                receipt_failed = True
+                raise
+
     try:
         conn = _connect(uri)
+        notify("create-submitting")
+        submitted = pending = True
         domain = conn.createXML(xml, 0)
+        notify("create-returned")
         if not _await_condition(
             wait_for,
             domain,
@@ -616,15 +640,37 @@ def boot_gdbstub_domain(
             ssh_port=ssh_port,
             console_log=console_log,
         )
+    except BaseException as error:
+        errors.append(error)
     finally:
+        cleanup_failed = False
         if domain is not None:
-            import libvirt  # noqa: PLC0415  # operator-provided; only reached once a domain exists
-
-            with contextlib.suppress(libvirt.libvirtError):
-                if domain.isActive():
-                    domain.destroy()
+            try:
+                if not domain.isActive():
+                    raise RuntimeError("native domain cleanup unproven: no destroy completion")
+                try:
+                    notify("destroy-submitting")
+                except BaseException as error:
+                    errors.append(error)
+                domain.destroy()
+                pending = False
+                notify("destroy-returned")
+            except BaseException as error:
+                errors.append(error)
+                cleanup_failed = True
         if conn is not None:
-            with contextlib.suppress(Exception):
+            try:
                 conn.close()
+            except BaseException as error:
+                errors.append(error)
+                cleanup_failed = True
         if runtime is not None:
-            runtime.restore()
+            runtime.retain_directory |= pending or (submitted and receipt_failed) or cleanup_failed
+            try:
+                runtime.restore()
+            except BaseException as error:
+                errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("transient domain operation and cleanup failed", errors)

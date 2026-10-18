@@ -687,17 +687,171 @@ def test_session_boot_body_and_restore_errors_remain_diagnosable(
         )
     )
     body_error = ValueError("sentinel body failure")
-    with pytest.raises(RuntimeError, match="session runtime") as raised, context:
+    expected = ExceptionGroup if transient else RuntimeError
+    with pytest.raises(expected) as raised, context:
         (session_dir / "daemon-state").write_text("retain")
         raise body_error
-    errors = []
+    errors = list(raised.value.exceptions) if isinstance(raised.value, BaseExceptionGroup) else []
     error: BaseException | None = raised.value
     while error is not None:
         errors.append(error)
         error = error.__cause__ or error.__context__
     assert body_error in errors
-    assert any(isinstance(e, OSError) for e in errors)
+    assert any(isinstance(e, OSError) or isinstance(e.__cause__, OSError) for e in errors)
     assert os.environ["XDG_CONFIG_HOME"] == "/original"
     used = transient_conn if transient else conn
     assert used.closed and used.domain.destroyed
     assert (session_dir / "daemon-state").read_text() == "retain"
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "create-submitting",
+        "create-returned",
+        "destroy-submitting",
+        "destroy-returned",
+        None,
+    ],
+)
+def test_transient_lifecycle_receipts_and_retention(
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str | None,
+) -> None:
+    import os
+
+    conn = _FakeTransientConn()
+    error = ValueError("receipt failed")
+    seen: list[str] = []
+
+    def receipt(value: str) -> None:
+        seen.append(value)
+        if value == phase:
+            raise error
+
+    context = live_vm_harness.boot_gdbstub_domain(
+        _GDBSTUB_XML,
+        uri="qemu:///session",
+        wait_for="active",
+        _connect=lambda _: conn,
+        _lifecycle=receipt,
+    )
+    if phase:
+        with pytest.raises(ValueError) as raised, context:
+            pass
+        assert raised.value is error
+    else:
+        with context:
+            pass
+    submitted = phase != "create-submitting"
+    assert bool(conn.create_calls) == submitted
+    assert conn.domain.destroyed == submitted
+    assert conn.closed
+    assert session_dir.exists() == (phase is not None and submitted)
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"
+    if phase is None:
+        assert seen == [
+            "create-submitting",
+            "create-returned",
+            "destroy-submitting",
+            "destroy-returned",
+        ]
+
+
+@pytest.mark.parametrize("boundary", ["create", "inactive", "isActive", "destroy", "close"])
+def test_transient_default_failure_retains_uncertainty(
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    import os
+
+    conn = _FakeTransientConn()
+    error = KeyboardInterrupt("native completion uncertain")
+
+    def fail(*args: object) -> None:
+        raise error
+
+    monkeypatch.setattr(live_vm_harness, "_await_condition", lambda *a, **kw: True)
+    if boundary == "inactive":
+        conn.domain.active = False
+    elif boundary in {"isActive", "destroy"}:
+        monkeypatch.setattr(conn.domain, boundary, fail)
+    else:
+        monkeypatch.setattr(conn, "createXML" if boundary == "create" else "close", fail)
+    expected = RuntimeError if boundary == "inactive" else KeyboardInterrupt
+    with (
+        pytest.raises(expected) as raised,
+        live_vm_harness.boot_gdbstub_domain(
+            _GDBSTUB_XML,
+            uri="qemu:///session",
+            wait_for="active",
+            _connect=lambda _: conn,
+        ),
+    ):
+        pass
+    if boundary != "inactive":
+        assert raised.value is error
+    assert session_dir.exists()
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"
+
+
+def test_transient_errors_preserve_primary_and_cleanup_order(
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _FakeTransientConn()
+    body, hook, destroy, close, restore = [
+        ValueError(name)
+        for name in (
+            "body",
+            "hook",
+            "destroy",
+            "close",
+            "restore",
+        )
+    ]
+
+    def fail_destroy() -> None:
+        raise destroy
+
+    def fail_close() -> None:
+        raise close
+
+    def fail_restore(self: object) -> None:
+        raise restore
+
+    def receipt(phase: str) -> None:
+        if phase == "destroy-submitting":
+            raise hook
+
+    monkeypatch.setattr(conn.domain, "destroy", fail_destroy)
+    monkeypatch.setattr(conn, "close", fail_close)
+    monkeypatch.setattr(live_vm_harness._SessionRuntime, "restore", fail_restore)
+    with (
+        pytest.raises(ExceptionGroup) as raised,
+        live_vm_harness.boot_gdbstub_domain(
+            _GDBSTUB_XML,
+            uri="qemu:///session",
+            wait_for="active",
+            _connect=lambda _: conn,
+            _lifecycle=receipt,
+        ),
+    ):
+        raise body
+    assert raised.value.exceptions == (body, hook, destroy, close, restore)
+    assert session_dir.exists()
+
+
+def test_retained_runtime_restore_is_sticky(session_dir: Path) -> None:
+    import os
+
+    runtime = prepare_session_runtime("qemu:///session")
+    assert runtime is not None
+    runtime.retain_directory = True
+    runtime.restore()
+    runtime.restore()
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"
+    assert session_dir.is_dir()
+    assert not runtime._removed
