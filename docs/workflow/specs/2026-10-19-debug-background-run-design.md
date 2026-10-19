@@ -78,8 +78,11 @@ model*). The transitions are:
   `stop: GdbStopRecord | None`.
   - In `running`, it writes `-exec-interrupt`, then takes the stop from the reply (#3230) or
     waits the existing `INTERRUPT_STOP_TIMEOUT_SEC`. `halted_by` comes from that stop, not from
-    which read found it: reason `signal-received` → `interrupt`; any other or absent reason →
-    `stop_event`. A breakpoint that fires during the run, even between the write and the reply,
+    which read found it: reason `signal-received` with `signal-name` `SIGINT` → `interrupt`;
+    any other or absent reason or signal → `stop_event`. `GdbStopRecord` gains
+    `signal_name: str | None`, parsed by `stop_record_from` from gdb's `signal-name`, so a stray
+    signal stop (for example a `SIGTRAP` on another vCPU) is never reported as the agent's own
+    interrupt. A breakpoint that fires during the run, even between the write and the reply,
     is therefore reported as `stop_event` with `breakpoint-hit`. If no stop arrives, it raises
     `INFRASTRUCTURE_FAILURE` / `transport_stall` and the state stays `running`.
   - In `attach_halted`, it returns `attach` with `stop=None`, sends no command and sets the state
@@ -104,6 +107,10 @@ model*). The transitions are:
 the command path would surface as `module_decode_failed` or silence. At dispatch, every tool
 refuses the same way and sends no gdb/MI command. Those tools are `debug.advance`, breakpoints,
 watchpoints, memory, registers, symbols, stack, disassembly and modules.
+
+The guard and the interrupt stall raise `CategorizedError` with their next actions in
+`details["suggested_next_actions"]`. `_op_failure`, which passes none today, forwards that list
+to `ToolResponse.failure_from_error`; errors without it keep today's empty list.
 
 ### Tool contract
 
@@ -138,10 +145,14 @@ watchpoints, memory, registers, symbols, stack, disassembly and modules.
 The per-session `asyncio.Lock` remains the only serialization, and no new lock is added. Two
 existing gaps are closed because the execution state depends on them:
 
-- **Cancellation.** The locked `asyncio.to_thread` call runs as a task awaited through
-  `asyncio.shield`. A cancelled MCP request (client timeout or cancel notification) then no longer
-  releases the lock while the engine thread is still driving gdb. The lock is held until the
-  thread finishes, so one gdb/MI stream never has two writers.
+- **Cancellation.** Inside the lock, the `asyncio.to_thread` engine call runs as a task. The
+  lock holder awaits it through `asyncio.shield`; on `CancelledError` it keeps awaiting the
+  same task, in a loop so a repeated cancel cannot escape, until the task is done, and only then
+  re-raises the cancellation. A plain `shield` is not enough: the cancelled coroutine would still
+  leave the `async with` block and free the lock while the thread drives gdb. With the loop, a
+  cancelled MCP request (client timeout or cancel notification) keeps the lock until the thread
+  finishes, so one gdb/MI stream never has two writers. `end_session`'s `to_thread(reap)` runs
+  under the same helper.
 - **Ended session.** After taking the lock, `_run_engine_op` re-reads the session's `live` state
   before `attach_or_reuse`. An op queued behind `end_session`'s reap returns the existing
   not-live refusal instead of attaching a new gdb to a detached session.
@@ -154,7 +165,9 @@ process-scoped (ADR-0034 decision 1).
 `DebugEngineRuntime.reap` halts a `running` attachment with the engine `interrupt` before
 `controller.exit()`. That is best-effort and bounded by about 20 seconds, so gdb exits from a
 halted target. Exiting from a halted target is the path the existing `debug.end_session` cell
-proves resumes the guest. `reap` returns whether the guest is known to be halted at exit.
+proves resumes the guest. `reap` returns `False` only when it had to halt a `running`
+attachment and that halt stalled; a never-attached session, a halted attachment and a drgn-live
+session return `True`.
 `end_session` runs `reap` through `asyncio.to_thread` under the session lock. When the halt
 stalled, it adds `data.guest_execution="unknown"` to the detached reply.
 
@@ -234,7 +247,8 @@ Engine tests use the existing fake MI controller
   - A resume `^error` returns to `halted`.
   - All of this holds for `continue_` and for each advance verb.
 - `interrupt`:
-  - The reply or the poll carries `signal-received` → `interrupt`.
+  - The reply or the poll carries `signal-received` with `SIGINT` → `interrupt`; a
+    `signal-received` with `SIGTRAP` → `stop_event`.
   - The reply carries `breakpoint-hit` → `stop_event`.
   - No stop → `transport_stall`, and the state stays `running`.
   - `attach_halted` → `attach`, and `halted` → `already_halted`. Both send zero writes and
@@ -251,15 +265,17 @@ Runtime and tool tests (`tests/mcp/debug/test_debug_ops.py`):
 - Covered for the tools: the `wait` schema field and the ignored `timeout_sec`, the `running`
   envelope, the interrupt `halted_by`/`reason` data and its stall next actions, and the
   continue audit row's `wait`.
-- Cancelling a request whose engine call blocks keeps the lock until the call returns; a second
-  op waits for it.
+- A real cancellation test: cancel a request whose engine call blocks on an event; assert
+  `lock.locked()` stays `True` until the thread finishes, and a second op starts only after it.
+  Controlled fault: a plain `shield` without the await loop must turn it red.
 - An op queued behind a reap sees the session as not live and does not attach.
 
 Session-end tests (under `tests/mcp/debug/`):
 
 - A running attachment gets `-exec-interrupt` before `exit()`, off the event loop.
 - A stalled halt adds `guest_execution="unknown"`.
-- A halted attachment gets no interrupt and an unchanged reply.
+- A halted attachment, a never-attached session and a drgn-live session get no interrupt and an
+  unchanged reply (no `guest_execution` key).
 
 The fault-inject engine's new answers are covered by its existing debug tests.
 
@@ -278,11 +294,16 @@ The rewritten `debug.interrupt` cell:
    - Otherwise write the SSH banner, then `debug.continue(wait=true)` must report `breakpoint-hit`
      without resuming again.
    - Either path is recorded, and neither is retried to get the other.
-4. Clear the breakpoint, end the session, and check the guest answers again.
+4. Clear the breakpoint, then `debug.continue(wait=false)` and check the guest answers.
+5. End the session while the guest runs: the reply is `detached` with no `guest_execution` key,
+   and the guest answers again.
 
-Regenerate `docs/guide/reference/debug.md` and `src/kdive/cli/commands/_generated_verbs.py`
-with their existing recipes. Gates: `just lint`, `just type`, focused tests, then the managed
-pre-push `just ci`.
+Add one run-control line to the served toolset guide `docs/guide/toolsets/debug.md` and its
+resource copy `src/kdive/mcp/resources/_content/toolsets-debug.md`: `debug.continue` with
+`wait=false` leaves the guest running, other tools refuse with `inferior_running` until
+`debug.interrupt` or `debug.continue`. Regenerate `docs/guide/reference/debug.md` and
+`src/kdive/cli/commands/_generated_verbs.py` with their existing recipes. Gates: `just lint`, `just type`,
+focused tests, then the managed pre-push `just ci`.
 
 Live proof needs separate operator admission:
 
