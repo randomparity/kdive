@@ -66,8 +66,9 @@ require_days_and_key() {
 require_private_dir() {
   local out status=0
   [[ -n $dir ]] || usage
-  # A trailing slash would make the symlink test resolve through the link.
+  # A trailing slash or a . or .. component would make the symlink test resolve through a link.
   while [[ $dir == */ && $dir != / ]]; do dir=${dir%/}; done
+  [[ /$dir/ != */./* && /$dir/ != */../* ]] || die "$dir must not contain . or .. components"
   [[ -d $dir && ! -L $dir ]] || die "$dir must be an existing directory, not a symlink"
   [[ $(stat -c %u -- "$dir") == "$(id -u)" ]] || die "$dir must be owned by the invoking user"
   [[ $(stat -c %a -- "$dir") == 700 ]] || die "$dir must have mode 0700"

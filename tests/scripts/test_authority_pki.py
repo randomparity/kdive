@@ -247,6 +247,8 @@ def test_refuses_shared_or_linked_directories(tmp_path: Path) -> None:
     link.symlink_to(real)
     assert "not a symlink" in _ca_result(link).stderr
     assert "not a symlink" in _run(*_CA_NEW, "--dir", f"{link}/").stderr
+    for dotted in (f"{link}/.", f"{link}/../real/../link"):
+        assert ". or .. components" in _run(*_CA_NEW, "--dir", dotted).stderr
     assert "not a symlink" in _ca_result(tmp_path / "absent").stderr
     assert list(real.iterdir()) == [] and list(shared.iterdir()) == []
 
@@ -294,6 +296,12 @@ def test_git_failure_fails_closed(tmp_path: Path) -> None:
 
 
 def test_git_check_is_locale_independent(pki: Path) -> None:
+    german = {**_env(), "LC_ALL": "de_DE.UTF-8", "LANGUAGE": "de"}
+    probe = subprocess.run(
+        ["git", "-C", str(pki), "rev-parse"], env=german, capture_output=True, text=True
+    )
+    if "not a git repository" in probe.stderr:
+        pytest.skip("this host has no translated git messages to exercise the locale pin")
     assert BASH is not None
     result = subprocess.run(
         [BASH, str(SCRIPT), *_CA_NEW, "--dir", str(pki)],
