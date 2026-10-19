@@ -276,7 +276,12 @@ shows as a debug.continue timeout. Requires contributor.
 
 `implemented`
 
-Open a single-attach transport and insert a live DebugSession. Requires contributor.
+Reserve a single-attach transport and insert a live DebugSession. Requires contributor.
+
+For local/remote libvirt `gdbstub`, this resolves and validates the endpoint without
+connecting to the debugger. A live session does not guarantee current reachability.
+The first actual GDB operation attaches, validates the protocol, and may halt the guest;
+an unreachable or invalid target is reported then as a categorized attach failure.
 
 A `gdbstub` session on a System whose guest architecture differs from the worker host's
 (e.g. a ppc64le guest on an x86_64 host) needs a multiarch-capable gdb on the worker; a
