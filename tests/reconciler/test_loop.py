@@ -110,6 +110,7 @@ def test_reconcile_report_fields_are_catalog_backed() -> None:
         not in {
             "failures",
             "repair_counts",
+            "repair_failures",
             "captures_budget_unattempted",
             "dump_volumes_budget_unattempted",
         }

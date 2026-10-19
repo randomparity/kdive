@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import cast
 from uuid import uuid4
 
@@ -19,21 +20,52 @@ from kdive.providers.ports.traffic import (
 )
 
 
-def test_local_child_configuration_is_resource_bound_and_uri_allowlisted() -> None:
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "qemu:///system",
+        "qemu:///session",
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock",
+    ],
+)
+def test_local_child_configuration_is_resource_bound_and_uri_allowlisted(uri: str) -> None:
     resource_id = uuid4()
     configuration = LocalCaptureConfiguration(
         resource_id=resource_id,
-        uri="qemu:///session",
+        uri=uri,
     )
 
-    assert (
-        LocalCaptureConfiguration.from_canonical_json(configuration.to_canonical_json())
-        == configuration
-    )
-    assert configuration.resource_id == resource_id
+    encoded = configuration.to_canonical_json()
+    restored = LocalCaptureConfiguration.from_canonical_json(encoded)
+    assert restored == configuration
+    assert restored.resource_id == resource_id
+    assert restored.uri == uri
+    assert restored.to_canonical_json() == encoded
 
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "qemu+tcp://host/system",
+        "qemu+tls://host/session",
+        "qemu+unix:///session?socket=/tmp/libvirt-sock",
+        "qemu+unix:///system?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock/",
+        "qemu+unix:///session?socket=%2Frun%2Fkdive%2Flive-libvirt%2Flibvirt%2Flibvirt-sock",
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock&mode=auto",
+        "qemu:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+        " qemu:///session",
+        "qemu:///session ",
+    ],
+)
+def test_local_child_configuration_rejects_non_allowlisted_uris(uri: str) -> None:
+    resource_id = uuid4()
     with pytest.raises(ValidationError, match="local libvirt URI"):
-        LocalCaptureConfiguration(resource_id=resource_id, uri="qemu+tcp://host/system")
+        LocalCaptureConfiguration(resource_id=resource_id, uri=uri)
+    encoded = json.dumps({"resource_id": str(resource_id), "uri": uri}).encode()
+    with pytest.raises(ValidationError, match="local libvirt URI"):
+        LocalCaptureConfiguration.from_canonical_json(encoded)
 
 
 def test_remote_child_configuration_carries_only_exact_resource_bound_references() -> None:

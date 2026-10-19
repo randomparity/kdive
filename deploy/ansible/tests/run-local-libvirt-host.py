@@ -138,6 +138,7 @@ require(
 require(
     uv_defaults["local_worker_host_svirt_image_directories"]
     == [
+        "/var/lib/kdive/host-dump",
         "/var/lib/kdive/rootfs",
         "/var/lib/kdive/install",
         "/var/lib/kdive/build/images",
