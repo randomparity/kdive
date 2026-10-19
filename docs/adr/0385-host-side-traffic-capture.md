@@ -173,20 +173,26 @@ rows, so the pcap is never inline-served.
 
 This corrects the attach premise in the Decision: "`qemuMonitorCommand` surfaces QMP failures as
 a generic `libvirtError`" is wrong. libvirt v12.0.0 `qemuMonitorJSONArbitraryCommand` returns
-QEMU's reply text whatever it contains. Measured on Fedora 44 with QEMU 10.2.2 and libvirt 12.0.0,
-`virsh qemu-monitor-command` exits 0 for both cases:
+QEMU's reply text whatever it contains, without inspecting its `error` member. Two measurements
+on Fedora 44 with QEMU 10.2.2 show the effect:
 
-- a refused `filter-dump` `object-add`, whose reply is
-  `{"error":{"class":"GenericError","desc":"net dump: can't open …"}}`;
-- an `object-del` of an absent id, whose reply carries the error `object '…' not found`.
+- through libvirt 12.0.0, `virsh qemu-monitor-command` exited 0 for a refused `filter-dump`
+  `object-add`, whose reply was
+  `{"error":{"class":"GenericError","desc":"net dump: can't open …: Permission denied"}}`;
+- a bare QEMU answered an `object-del` of an absent id with the error reply
+  `object '…' not found`. libvirt forwards that reply unchanged, as its source shows.
 
-The local attach and detach therefore parse every reply:
+The local provider therefore parses every passthrough reply in one place
+(`local_libvirt/lifecycle/qmp_reply.py`). The rules:
 
 - An absent filter on `object-del` is tolerated.
-- `net dump: can't open` on `object-add` is `CONFIGURATION_ERROR` (`reason=pcap_open_failed`),
-  carrying the pcap remediation.
-- Any other error reply is `CONTROL_FAILURE` (`reason=capture_filter_rejected`).
+- An EACCES `net dump: can't open` refusal on `object-add` is `CONFIGURATION_ERROR`
+  (`reason=pcap_open_denied`), carrying the pcap remediation.
+- Any other error reply is `CONTROL_FAILURE` (`reason=capture_filter_rejected`), which is
+  retryable.
 - A malformed reply is `CONTROL_FAILURE` (`reason=qmp_reply_malformed`).
+- In the capture reaper, a refused `object-del` raises `CONTROL_FAILURE`, so the row is
+  deferred rather than counted as reclaimed.
 
 Only the QMP class token reaches failure details, because the description names a host path. A
 raised `libvirtError` stays the transport-failure path.
