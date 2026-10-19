@@ -434,7 +434,7 @@ async def _system_body(c: HttpCaller, g: Grants, *, db: str, system: Any) -> dic
         assert env.data["allocation_id"] == str(row["allocation_id"])
         assert env.data["resource_id"] == str(allocation["resource_id"])
         assert env.data["resource_kind"] == "local-libvirt"
-        assert allocation["project"] == system.project and allocation["state"] == "granted"
+        assert allocation["project"] == system.project and allocation["state"] == "active"
         assert env.data["active_run"] == {"id": run_id, "state": "created"}
         assert env.data["run_investigation_ids"] == [inv.id]
         assert (
@@ -687,7 +687,7 @@ def _rejection(tool: str, boundary: Boundary, project: str) -> Rejection:
     if boundary == "authentication":
         return Rejection(args, _viewer(project))
     if boundary == "project-isolation":
-        hidden = tool in {"runs.create", "runs.complete_build", "runs.bind"}
+        hidden = tool in {"runs.create", "runs.bind"}
         category = (
             ErrorCategory.CONFIGURATION_ERROR.value if hidden else ErrorCategory.NOT_FOUND.value
         )
