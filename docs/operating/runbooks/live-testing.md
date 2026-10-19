@@ -1794,11 +1794,12 @@ path: the frame uses public provisioning on the remote resource that routes to t
   the cell stops `blocked` before any mutation.
 - Obtain these catalog facts by declaring/reconciling a public `remote-libvirt` image with
   `source.kind = "staged"` and a **fresh** volume name, then running
-  `kdive stage-volume --image IMAGE --arch ARCH --from /path/to/base.qcow2` against the lane's
-  configured database and single remote instance. Install `virt-inspector` for mandatory root
-  inspection; optional config capture uses `guestfish`. Staging copies one qcow2 into a private
-  temporary directory, rejects backing/external-data images, hashes and inspects that snapshot,
-  uploads those exact bytes, then commits its digest and `root_spec` (ADR-0776).
+  `python -m kdive stage-volume --image IMAGE --arch ARCH --from /path/to/base.qcow2`
+  against the lane's configured database and single remote instance. Install `virt-inspector`
+  for mandatory root inspection; optional config capture uses `guestfish`. Staging copies one
+  qcow2 into a private temporary directory, rejects backing/external-data images, hashes and
+  inspects that snapshot, uploads those exact bytes, then commits its digest and `root_spec`
+  (ADR-0776).
   Inspection or root-metadata persistence failure fails the command. Existing remote volumes
   are refused; no overwrite/delete is implied. If metadata fails after upload, inspect and
   manually clean up the unverified residue or declare a fresh target before retrying.
