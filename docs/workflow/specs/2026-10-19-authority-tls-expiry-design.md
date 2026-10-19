@@ -65,7 +65,8 @@ window; a deterministic failure reaches `failed` after five starts; and
 still trips the limit. The existing `active/running` assertion in `verify.yml` then fails.
 Within ten minutes of tripping, systemd also refuses a manual or Ansible restart until
 `systemctl reset-failed`; the runbook paragraph says so. No reset task is added to the
-provisioning path. The budget is shared with Ansible-driven starts: the proof-only drift block
+provisioning path. The budget is shared with Ansible-driven starts and with the installed-authority live proofs
+(`tests/live_vm/installed_*_authority_support.py` restart the unit, about three starts a pass): the proof-only drift block
 in `verify.yml` (run when `live_vm_host_authority_proof_enabled`, which the carrier sets)
 deliberately drives the unit through a TLS-drift restart loop, which now reaches
 start-limit-hit, and then restarts it in its `always` block. That block therefore runs
