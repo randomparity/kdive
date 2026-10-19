@@ -10,17 +10,20 @@ import os
 import pwd
 import re
 import socket
+import ssl
 import stat
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote
 from uuid import UUID
 
+from cryptography import x509
 from psycopg import AsyncConnection
 from pydantic import SecretStr
 
@@ -105,6 +108,8 @@ _AUTHORITY_STATE_DIR = Path("/var/lib/kdive/provider-authority")
 _REMOTE_MODULE_APPLIANCE_ROOT = Path("/var/lib/kdive/remote-module-appliance/v1")
 _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 _UNPINNED_SYSTEM_INSTALLATION = object()
+# OpenSSL X509_V_ERR_CERT_NOT_YET_VALID and X509_V_ERR_CERT_HAS_EXPIRED.
+_CERTIFICATE_VERIFY_REASONS = {9: "certificate-not-yet-valid", 10: "certificate-expired"}
 
 
 class HostReadinessError(CategorizedError):
@@ -1424,15 +1429,31 @@ async def _check_tls_connection(
             result = None
         if result is not None:
             raise HostReadinessError("tls-health", "handshake-failed")
-    except Exception:
-        raise HostReadinessError("tls-health", "handshake-failed") from None
+    except Exception as error:
+        raise HostReadinessError("tls-health", _tls_failure_reason(config, error)) from None
     finally:
         if writer is not None:
             writer.close()
             try:
                 await asyncio.wait_for(writer.wait_closed(), timeout=5)
-            except Exception:
-                raise HostReadinessError("tls-health", "handshake-failed") from None
+            except Exception as error:
+                raise HostReadinessError("tls-health", _tls_failure_reason(config, error)) from None
+
+
+def _tls_failure_reason(config: AuthorityHostConfig, error: Exception) -> str:
+    """Name certificate expiry; a peer rejecting our client certificate shows only an EOF."""
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return _CERTIFICATE_VERIFY_REASONS.get(error.verify_code, "handshake-failed")
+    try:
+        leaf = x509.load_pem_x509_certificate(config.health_client_certificate.read_bytes())
+    except OSError, ValueError:
+        return "handshake-failed"
+    now = datetime.now(UTC)
+    if now > leaf.not_valid_after_utc:
+        return "certificate-expired"
+    if now < leaf.not_valid_before_utc:
+        return "certificate-not-yet-valid"
+    return "handshake-failed"
 
 
 def _notify_systemd(message: str) -> None:
