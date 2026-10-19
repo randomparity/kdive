@@ -434,7 +434,7 @@ def test_debug_sessions_denied_page_and_unconfigured_pages(tmp_path: Path) -> No
     with pytest.raises(AssertionError, match="no canonical empty page"):
         asyncio.run(
             prove_rejection(
-                _list_run(tmp_path, "runs.list", "authorization"),
+                _list_run(tmp_path, "allocations.list", "authorization"),
                 unconfigured,
                 "authorization",
                 Rejection({"request": {}}, _GRANTS, filtered=_control()),
