@@ -8,7 +8,7 @@ three renderings of the authority unit gain a `[Unit]` start limit.
 Tech: Ansible (ansible-core 2.21.1), systemd, Python 3.14 tests (pytest, `cryptography`).
 Spec: `docs/workflow/specs/2026-10-19-authority-tls-expiry-design.md`.
 
-Expected implementation size: 230–290 changed lines (M) — two tasks: ~45 YAML task lines,
+Expected implementation size: 240–300 changed lines (M) — two tasks: ~50 YAML task lines,
 ~15 unit lines, ~110 harness lines, ~60 unit-test lines, ~10 doc/recipe lines and the
 regenerated fixture.
 
@@ -52,7 +52,7 @@ Verification:
   `deploy/ansible/tests/run-authority-tls-expiry.py`; red: fails because
   `tls_expiry.yml` does not exist; green:
   `uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-authority-tls-expiry.py`
-  prints `ok authority-tls-expiry: 6 cases`.
+  prints `ok authority-tls-expiry: 7 cases`.
 - Contract: call-site wiring (exact certificate lists, preflight delegation, no key paths,
   margin below carrier lifetime). Mode: focused-test.
   `tests/deploy/test_provider_authority_local_provisioning.py::test_tls_expiry_checks_cover_authority_and_worker_certificates`;
@@ -75,7 +75,9 @@ Steps:
    and `notAfter=`; `expired` (−1 d) fails with `notAfter=`; `mixed` (server-ca +2 d,
    health-client-certificate −1 d) fails naming only `health-client-certificate`;
    `not-a-certificate` fails with `is not a readable PEM certificate`; `bad-margin`
-   (`"-1"`) fails with `must be a non-negative whole number`. Run it: red.
+   (`"-1"`) fails with `must be a non-negative whole number`; `openssl-absent` (play
+   `environment: {PATH: <empty temporary directory>}`) fails with `could not be checked with
+   openssl`. Run it: red.
 2. Create `tls_expiry.yml`:
 
    ```yaml
@@ -108,13 +110,14 @@ Steps:
          - item.rc == 0
          - "'Certificate will not expire' in item.stdout_lines"
        fail_msg: >-
-         {% set end = item.stdout_lines | select('match', '^notAfter=') | first | default('') %}
+         {% set end = item.stdout_lines | select('match', '^notAfter=') | first | default('') -%}
          TLS credential {{ item.item.name }} ({{ item.item.path }})
          {% if end %}is expired or expires within the
          {{ live_vm_host_authority_tls_expiry_margin_seconds }}-second margin ({{ end }}).
          Renew it before use; see docs/operating/runbooks/live-testing.md, Candidate evidence
-         and cleanup.{% else %}is not a readable PEM certificate:
-         {{ item.stderr | default(item.msg | default('')) | trim }}.{% endif %}
+         and cleanup.{% elif item.rc == 1 %}is not a readable PEM certificate:
+         {{ item.stderr | trim }}.{% else %}could not be checked with openssl:
+         {{ (item.stderr or item.msg | default('')) | trim }}.{% endif %}
        quiet: true
      loop: "{{ live_vm_host_tls_expiry_results.results }}"
      loop_control:
@@ -133,29 +136,33 @@ Steps:
    add `Require external-boot authority certificates to outlive the expiry margin` with the
    same `apply` and certificates `server-certificate`, `server-ca`, `worker-client-ca`,
    `health-client-certificate` from their `_source` vars.
-5. In `verify.yml`, after `Assert the authority credential boundary`, add `Require installed
-   authority certificates to outlive the expiry margin` (the four names under
-   `live_vm_host_authority_credentials_dir`, `when: live_vm_host_authority_enabled | bool`)
-   and `Require installed fixed-worker authority certificates to outlive the expiry margin`
-   (`server-ca`, `client-certificate` under `live_vm_host_worker_authority_secrets_root`,
-   `when: live_vm_host_worker_authority_enabled | bool`). No delegation.
+5. In `verify.yml`, immediately before `Assert the authority service is ready`, add
+   `Require installed authority certificates to outlive the expiry margin` (the four names
+   under `live_vm_host_authority_credentials_dir`, `when: live_vm_host_authority_enabled |
+   bool`) and `Require installed fixed-worker authority certificates to outlive the expiry
+   margin` (`server-ca`, `client-certificate` under
+   `live_vm_host_worker_authority_secrets_root`, `when: live_vm_host_worker_authority_enabled
+   | bool`). No delegation. Placing them first keeps the named message ahead of the generic
+   readiness failure an expired certificate causes.
 6. Write the wiring test: load both YAML files, collect tasks whose
    `ansible.builtin.include_tasks.file` is `tls_expiry.yml` (descending into `block`),
    compare each `vars.live_vm_host_tls_expiry_certificates` name list exactly, require both
    preflight includes to carry `apply == {delegate_to: localhost, become: false}` and verify
-   includes none, require no path expression to contain `key`, and require the default
+   includes none, require each verify include to precede `Assert the authority service is
+   ready`, require no path expression to contain `key`, and require the default
    margin to be an int below 86400 while `prove-external-boot-authority-host.sh` still signs
    with `-days 1`.
 7. Regenerate the runner fixture and count per the harness's own filter; wire the harness
    into `test-ansible` after `run-remote-egress-preflight.py` and add its README row; add
-   the runbook sentence (check, knob, default, `systemctl reset-failed` within the start
-   limit window) to the paragraph ending "including credential expiry and database grants".
+   the runbook sentence (check, knob, default, controller `openssl` prerequisite,
+   `systemctl reset-failed` within the start limit window) to the paragraph ending "including credential expiry and database grants".
 8. Run all three focused commands green, `just lint`, `just type`, `just lint-ansible`;
    commit `feat(deploy): refuse authority TLS certificates inside the expiry margin`.
 
 ## Task 2 — bounded authority restart
 
-Interfaces: none consumed; changes only unit text.
+Interfaces: none consumed; changes unit text and the drift proof's `always` block in
+`deploy/ansible/roles/live_vm_host/tasks/verify.yml`.
 
 Verification:
 
@@ -164,6 +171,12 @@ Verification:
   `tests/deploy/test_provider_authority_local_provisioning.py::test_authority_units_bound_their_restart_loop`
   (parametrized over the three paths); red: `StartLimitBurst` missing from `[Unit]`; green:
   `uv run python -m pytest <that id> -q`.
+- Contract: the carrier's drift proof can restart a unit it drove into start-limit-hit.
+  Mode: focused-test.
+  `tests/deploy/test_provider_authority_local_provisioning.py::test_drift_proof_resets_the_start_limit_before_restoring`;
+  red: the task before `Restore authority readiness after drift proofs` is not a
+  `systemctl reset-failed kdive-external-boot-authority.service` command; green: same
+  pytest id. Live behaviour is not run (no lab grant).
 
 Steps:
 
@@ -183,7 +196,13 @@ Steps:
    StartLimitBurst=5
    ```
 
-3. Run the test green and `uv run python -m pytest tests/deploy/test_systemd_units.py -q`;
+3. Write the drift-proof test: load `verify.yml`, find the block named `Prove authority
+   readiness retracts on credential and ACL drift`, and require the `always` task directly
+   before `Restore authority readiness after drift proofs` to be an `ansible.builtin.command`
+   with argv `[systemctl, reset-failed, kdive-external-boot-authority.service]` and
+   `changed_when: false`. Run: red. Add that task, named `Clear the start limit the drift proof
+   tripped`, in that position.
+4. Run both tests green and `uv run python -m pytest tests/deploy/test_systemd_units.py -q`;
    commit `fix(deploy): bound the external-boot authority restart loop`.
 
 ## Rollback

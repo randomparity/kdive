@@ -22,10 +22,12 @@ expiry naming in the authority's readiness error is #3271; renewal and CA custod
    (`changed_when: false`, `failed_when: false`, `check_mode: false`);
 3. asserts each result has `rc == 0` and the line `Certificate will not expire`.
 
-The failure message names the credential and path, then either the `notAfter=` line and
+The failure message names the credential and path, then one of: the `notAfter=` line and
 the margin with the pointer "renew it before use; see
-docs/operating/runbooks/live-testing.md, Candidate evidence and cleanup", or, when no
-`notAfter=` line exists, that the file is not a readable PEM certificate. Only certificate
+docs/operating/runbooks/live-testing.md, Candidate evidence and cleanup"; when `openssl`
+exits 1 without a `notAfter=` line, that the file is not a readable PEM certificate; for
+any other exit (for example `openssl` absent), that it could not be checked, with
+`openssl`'s stderr or the module message. Only certificate
 files are passed; no key path is read, so these tasks carry no `no_log` (it would hide the
 message, and dates are not secret).
 
@@ -36,7 +38,9 @@ Call sites:
   `server_ca`, `worker_client_ca` and `health_client_certificate` sources when the
   authority is enabled; the worker `server_ca` and `client_certificate` sources when fixed
   worker authority is enabled. Nothing on the runner host has been changed yet.
-- `verify.yml`, after the credential-boundary assert, checks the installed
+- `verify.yml`, before `Assert the authority service is ready` (an expired installed
+  certificate keeps the service from becoming ready, so the named message must come first),
+  checks the installed
   `server-certificate`, `server-ca`, `worker-client-ca`, `health-client-certificate` under
   `live_vm_host_authority_credentials_dir`, and `server-ca`, `client-certificate` under
   `live_vm_host_worker_authority_secrets_root` when worker authority is enabled.
@@ -45,8 +49,9 @@ Role default `live_vm_host_authority_tls_expiry_margin_seconds: 43200` (12 h, op
 decision 2026-10-19 via the campaign root: the longest planned live run is 7 h). The
 disposable carrier provisions through this role with one-day certificates whose lifetime is
 excluded from change, so the margin stays below 24 h: 12 h leaves the carrier about 12 h and
-refuses a retained lane due to expire during the longest planned run. `openssl` is already an authority package on the runner host and is the tool the
-carrier's PKI preparation uses on the controller.
+refuses a retained lane due to expire during the longest planned run. `openssl` is already
+an authority package on the runner host; on the controller it is a prerequisite (the carrier's
+PKI preparation already uses it), named in the runbook sentence.
 
 **Start limit.** All three renderings of `kdive-external-boot-authority.service` gain, in
 `[Unit]`, `StartLimitIntervalSec=600` and `StartLimitBurst=5` (operator-approved 2026-10-19):
@@ -58,7 +63,13 @@ deterministic failure reaches `failed` after five starts; and
 5 × (`TimeoutStartSec=90s` + 5 s) = 475 s < 600 s, so a start that hangs to its timeout
 still trips the limit. The existing `active/running` assertion in `verify.yml` then fails.
 Within ten minutes of tripping, systemd also refuses a manual or Ansible restart until
-`systemctl reset-failed`; the runbook paragraph says so. No reset task is added.
+`systemctl reset-failed`; the runbook paragraph says so. No reset task is added to the
+provisioning path. The budget is shared with Ansible-driven starts: the proof-only drift block
+in `verify.yml` (run when `live_vm_host_authority_proof_enabled`, which the carrier sets)
+deliberately drives the unit through a TLS-drift restart loop, which now reaches
+start-limit-hit, and then restarts it in its `always` block. That block therefore runs
+`systemctl reset-failed kdive-external-boot-authority.service` immediately before
+`Restore authority readiness after drift proofs`; the reset exists only inside the proof.
 
 **Considered and rejected.**
 
@@ -96,7 +107,8 @@ Within ten minutes of tripping, systemd also refuses a manual or Ansible restart
   no untrusted party supplies a path or certificate.
 - Controls: paths come from existing role variables already required to be protected
   regular files (preflight) or asserted `0400`/root-owned (verify); argv form prevents
-  injection; output echoed on failure is the `notAfter=` line or `openssl`'s own error, never
+  injection; output echoed on failure is the `notAfter=` line, `openssl`'s own error or the module's
+  execution error, never
   file content or key material.
 - Out of scope: a malicious operator; certificate chain, revocation and hostname
   validation, which remain the authority's mTLS handshake.
@@ -110,6 +122,9 @@ Within ten minutes of tripping, systemd also refuses a manual or Ansible restart
 - `tests/deploy/` unit tests: the start limit sits in `[Unit]` of all three renderings with
   `burst × (TimeoutStartSec + RestartSec) < interval`; preflight and verify include the
   expiry file with exactly the certificate lists above, preflight delegated to localhost,
-  and no `-key` path passed.
+  verify's includes before the service-ready assert, and no key path passed; the drift
+  proof's `always` block resets the failed unit immediately before its restore restart.
+- Not run: the carrier and live systemd start-limit behaviour need a lab host, which this
+  change has no grant for; the drift-proof interaction is held by the structural test.
 - Regenerate `runner-tasks-2391.txt` and its count. Rollback is reverting the commit; no
   persisted state changes.
