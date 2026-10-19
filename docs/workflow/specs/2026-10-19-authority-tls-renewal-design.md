@@ -5,8 +5,9 @@
 The frozen charter is issue #3273, `WORK:SCOPE` token `q3273-bbefbb02`. Campaign
 `2d21598e2016-b01982d7-4e2e-4af3-82b2-4b8aec96dc18` supplied the operator-approved
 exclusions: changing the authority's mTLS model, adding a certificate service, and changing
-the disposable proof carrier's one-day lifetime (all dropped, no owner). The operator has not
-yet approved this design or its operator-facing interface. Nothing here is implemented.
+the disposable proof carrier's one-day lifetime (all dropped, no owner). The operator approved
+this design and its operator-facing interface on 2026-10-19; see the operator decisions
+section. Nothing here is implemented yet.
 The decision record is [ADR-0803](../../adr/0803-retained-authority-tls-custody-and-renewal.md).
 
 **Blocked by #3272.** The implementation starts only after PR #3278 merges. It is rebased onto
@@ -55,7 +56,7 @@ In:
    PKI block moves into it unchanged in key type, extensions and server-name derivation.
 2. A durable custody rule for the CA key and leaf keys, and operator-chosen lifetimes.
 3. A narrow renewal playbook. It installs through the existing `live_vm_host` credential tasks
-   (same task names, file names, owners and modes) and restarts only the authority (Q5).
+   (same task names, file names, owners and modes) and restarts only the authority (operator decision Q5).
 4. A runbook procedure replacing the PKI half of the "review separately" sentence.
 5. An ADR on custody, lifetime policy, and renewal versus CA rotation.
 
@@ -63,7 +64,7 @@ Out (operator-approved exclusions): the mTLS model, any certificate service, and
 carrier's one-day lifetime. Also out because nothing in the charter asks for them: certificate
 revocation, automatic renewal scheduling, and the dedicated remote composition
 (`provider_authority_host` plus the worker's `remote-authority` client files). The last of
-these is open question Q1.
+these is out of scope by operator decision Q1.
 
 ## Design
 
@@ -143,7 +144,7 @@ files no longer appear in `$secrets`. Nothing reads them there today.
 - The operator chooses the lifetimes at each issuance. ADR policy: a leaf never outlives the
   CA; a routine renewal re-issues leaves only, while the CA certificate still covers the new
   leaf lifetime; the CA certificate is re-issued from the same key when it does not. The
-  runbook example uses 30-day leaves and a 365-day CA (Q2). Every lifetime is at least one day,
+  runbook example uses 30-day leaves and a 365-day CA (operator decision Q2). Every lifetime is at least one day,
   which keeps every leaf above #3272's 12-hour margin at issuance.
 
 ### Renewal versus CA rotation
@@ -197,7 +198,7 @@ protected inventory and vars file, unchanged. Every role entry it uses is a stat
      certificate after the client's handshake completes. These are tasks in the renewal
      playbook itself. They print only names and OpenSSL verdicts, never key material.
    - `/opt/kdive-provider-authority/revision` exists and equals `live_vm_repo_version`, and
-     the controller checkout is clean with `HEAD` equal to that revision (Q3). Tasks from one
+     the controller checkout is clean with `HEAD` equal to that revision (operator decision Q3). Tasks from one
      revision are not run against an authority installed from another.
 2. **Authority files:** `live_vm_host` `tasks_from: authority_credentials.yml`. This is the
    existing "Install external-boot authority credentials" task, moved verbatim into its own
@@ -257,7 +258,7 @@ overrides still win. A test proves that an inventory override of
   A failed restart can spend at most #3272's five automatic starts before the unit stays
   `failed`. The runbook says to correct the source before rerunning, so a broken renewal is
   never looped.
-- **Fixed workers:** they are not restarted (see Q5). They pick up the new files on their next
+- **Fixed workers:** they are not restarted (operator decision Q5). They pick up the new files on their next
   request.
 
 ### Runbook
@@ -330,7 +331,8 @@ operator. The new subsection, "Renewing retained-lane TLS credentials", follows.
 4. **Covered elsewhere**
    - The expiry margin in preflight and verify, and the start limit: #3272 / PR #3278.
    - The readiness error naming expiry: #3271.
-   - Remote-composition renewal: Q1.
+   - Remote-composition renewal: out of scope (operator decision Q1); an unfiled follow-up
+     candidate.
    - DSN and database-grant reuse: the unchanged runbook sentence.
 
 ### Threat model
@@ -420,7 +422,7 @@ Focused tests (no live host):
     static test must go red;
   - make the Git check fail open.
 
-Live proof (needs a separate operator grant; see Q4):
+Live proof (needs a separate operator grant after hosted CI is green; operator decision Q4):
 
 - On the retained local lane, after this change is installed at that exact revision:
   1. Issue renewal certificates with operator-chosen lifetimes.
@@ -439,28 +441,24 @@ Live proof (needs a separate operator grant; see Q4):
 - Carrier arm: one `prove-external-boot-authority-host.sh` run on a disposable carrier host
   proves the refactored issuance end to end.
 
-## Open questions for the operator
+## Operator decisions (2026-10-19)
 
-- **Q1.** Is renewal of the dedicated remote composition (`provider_authority_host` and the
-  worker `remote-authority` files) out of scope here? Recommendation: yes. The script is
-  lane-agnostic, but installing through `provider_authority_host` is a separate follow-up.
-- **Q2.** Should the runbook use 30-day leaves with a 365-day CA as the example lifetimes, or
-  match the manual renewal (30-day leaves with a 31-day CA, re-issued each time)?
-- **Q3.** Should the playbook require a clean controller checkout whose `HEAD` equals the
-  installed revision? This is recommended, for exact deployed identity. The cost: the current
-  lane must first be reprovisioned at a revision that contains this playbook. The alternative
-  records both revisions and proceeds when the installed revision is an ancestor.
-- **Q4.** Which live arms are approved, on which host, and when? The candidates are the
-  retained-lane renewal, the negative preflight arm, and the carrier run.
-- **Q5.** Completion criteria 4 and 5 say "restart the authority and worker in a documented
-  order". Source shows that the fixed worker re-reads its TLS files on every request:
-  - `providers/assembly/authority.py:48-50` builds the transport per call;
-  - `network_client.py:38-65` resolves the certificate, key and CA refs;
-  - `security/secrets/secrets.py:87` reads the file uncached.
+The campaign root relayed these decisions from the design gate. They are recorded in the
+issue's latest `WORK:SCOPE` annotation.
 
-  An out-of-band worker restart is also a known way to wedge a slot. This design therefore
-  restarts only the authority and documents that the worker needs no restart. Does the
-  operator amend the criterion to "authority restarts; the fixed worker needs no restart and
-  is not restarted"? If not, the alternative is a documented worker restart through the
-  supported `scripts/live-stack/stack-services.sh` path after the authority is ready, never
-  through `systemctl`.
+- The design and the operator-facing interface are approved as presented. That covers the
+  `authority-pki.sh` commands and flags, `renew-local-authority-tls.yml`, the playbook-level
+  chain check, and ADR-0803.
+- **Q1.** Renewal of the dedicated remote composition (`provider_authority_host` and the
+  worker's `remote-authority` client files) is out of scope. It is an unfiled follow-up
+  candidate.
+- **Q2.** The runbook example uses 30-day leaves under a 365-day CA.
+- **Q3.** The playbook requires a clean controller checkout whose `HEAD` equals the installed
+  revision. A lane installed before this change must be reprovisioned once, at a revision that
+  contains the playbook, before it can be renewed this way.
+- **Q4.** The live arms are decided once the PR's hosted CI is green. No host access until then.
+- **Q5.** Completion criteria 4 and 5 are amended to "the authority restarts; the fixed worker
+  needs no restart". The fixed worker is not restarted. Source shows that it re-reads its TLS
+  files on every request: `providers/assembly/authority.py:48-50`,
+  `network_client.py:38-65`, and `security/secrets/secrets.py:87`. An out-of-band worker
+  restart is also a known way to wedge a slot.

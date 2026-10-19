@@ -31,8 +31,8 @@ control host. Both the disposable carrier and retained lanes use it. Its rules:
   explicit `--key new`, and the script refuses to overwrite one.
 - **Lifetime.** The operator states every lifetime in whole days, at least one, at each
   issuance. The script has no default and no maximum. At each issuance it refuses any
-  certificate in the lane directory that would outlive its CA certificate. The carrier keeps
-  its one-day lifetime.
+  certificate in the lane directory that would outlive its CA certificate. The runbook's
+  example uses 30-day leaves under a 365-day CA. The carrier keeps its one-day lifetime.
 - **Renewal.** Renewal issues new certificates for the existing CA key and leaf keys. It
   re-issues the CA certificate from the same key only when that certificate no longer covers
   the new leaf. A narrow playbook installs the files through the existing `live_vm_host`
@@ -46,8 +46,7 @@ control host. Both the disposable carrier and retained lanes use it. Its rules:
   5. It verifies expiry and the installed chains, then makes a handshake with the worker's own
      files, which must see the installed server certificate being served.
 
-  The fixed workers are not restarted. That point is pending the operator's decision on the
-  issue's restart criterion.
+  The fixed workers are not restarted.
 - **CA rotation.** Rotation uses a new CA key and new leaf keys at the same lane path. The
   old directory is retired, and destroyed if a key was exposed. Rotation is the only remedy
   for a lost or exposed key, because there is no revocation. It uses the same playbook and
@@ -68,10 +67,9 @@ control host. Both the disposable carrier and retained lanes use it. Its rules:
   so recent provisioning starts cannot make that restart fail.
 - Renewal requires the lane's full provisioning inputs on the controller, because it reuses
   the provisioning preflight.
-- If the operator adopts the exact-revision requirement (open at design time), the playbook
-  refuses to run tasks from one revision against an authority installed from another. A lane
-  installed before this change then has to be reprovisioned once before it can use the
-  playbook.
+- The playbook requires a clean controller checkout at exactly the installed revision, so it
+  never runs tasks from one revision against an authority installed from another. A lane
+  installed before this change has to be reprovisioned once before it can use the playbook.
 - Rotation has a short window in which worker requests fail closed. The quiet-lane
   precondition bounds it.
 
@@ -103,7 +101,6 @@ control host. Both the disposable carrier and retained lanes use it. Its rules:
   so the notification does not survive an interrupted or failed run. A rerun would then leave the
   authority serving the certificate it loaded earlier, and a same-CA handshake would still
   pass.
-- **Restart the fixed workers after renewal** (pending the operator's decision on the
-  issue's restart criterion). verified: the worker reads its TLS files per
+- **Restart the fixed workers after renewal.** verified: the worker reads its TLS files per
   request (above), so a restart gains nothing. An out-of-band worker restart is a known way
   to wedge a slot.
