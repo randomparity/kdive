@@ -9,9 +9,9 @@ import pytest
 
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES, build_contract
-from tests.integration import test_run_system_job_tool_cells_live as carrier
+from tests.integration.live_stack import run_system_job_cells as carrier
 from tests.integration.live_stack import tool_cells
-from tests.integration.live_stack.test_tool_cells import (
+from tests.integration.live_stack.tool_cell_fakes import (
     _GRANTS,
     _ITEM,
     _control,
