@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import os
+import re
 import stat
 from collections.abc import Mapping
 from contextlib import suppress
@@ -21,9 +21,12 @@ _RESULT_NAME = "result.json"
 _MAX_REQUEST_BYTES = 16_384
 _MAX_CONFIGURATION_BYTES = 16_384
 # Provider detail keys that name a failure cause without host paths, identifiers, or secrets.
-_FORWARDED_DETAIL_KEYS = ("reason", "operation", "error", "bytes", "remediation")
-_MAX_DETAIL_VALUE_CHARS = 512
-_MAX_RESULT_DETAILS_CHARS = 4096
+# Token keys must look like identifiers so exception text cannot ride along under them; the
+# shapes below keep the forwarded details far inside CaptureResult's 4096-byte bound.
+_TOKEN_DETAIL_KEYS = ("reason", "operation", "error")
+_DETAIL_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+_MAX_DETAIL_BYTES_VALUE = 2**63 - 1
+_MAX_REMEDIATION_CHARS = 512
 
 
 def _read_bounded(fd: int, maximum: int) -> bytes:
@@ -104,19 +107,18 @@ def read_capture_inputs(directory_fd: int) -> tuple[CaptureRequest, bytes | None
 def _forwarded_details(
     phase: str, details: Mapping[str, object]
 ) -> dict[str, str | int | bool | None]:
-    """Keep allow-listed scalar provider details, truncated, inside the result bound."""
+    """Keep the allow-listed, shape-checked provider details that name a failure cause."""
     forwarded: dict[str, str | int | bool | None] = {"phase": phase}
-    for key in _FORWARDED_DETAIL_KEYS:
+    for key in _TOKEN_DETAIL_KEYS:
         value = details.get(key)
-        if isinstance(value, str):
-            value = value[:_MAX_DETAIL_VALUE_CHARS]
-        elif not isinstance(value, int):
-            continue
-        candidate = {**forwarded, key: value}
-        if len(json.dumps(candidate, sort_keys=True, separators=(",", ":"))) <= (
-            _MAX_RESULT_DETAILS_CHARS
-        ):
-            forwarded = candidate
+        if isinstance(value, str) and _DETAIL_TOKEN.fullmatch(value):
+            forwarded[key] = value
+    size = details.get("bytes")
+    if type(size) is int and 0 <= size <= _MAX_DETAIL_BYTES_VALUE:
+        forwarded["bytes"] = size
+    remediation = details.get("remediation")
+    if isinstance(remediation, str) and remediation.isascii() and remediation.isprintable():
+        forwarded["remediation"] = remediation[:_MAX_REMEDIATION_CHARS]
     return forwarded
 
 

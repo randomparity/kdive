@@ -488,34 +488,80 @@ def test_child_forwards_distinct_provider_causes_for_readback_and_missing_pcap(
     assert readback_result.details != missing_result.details
 
 
-def test_child_truncates_long_detail_values_and_drops_non_scalar_ones(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ({"remediation": "r" * 5000}, {"remediation": "r" * 512}),
+        ({"reason": "failed reading /var/lib/kdive/pcap"}, {}),
+        ({"operation": "x" * 65, "error": "1abc"}, {}),
+        ({"error": ["PermissionError"], "reason": None}, {}),
+        ({"bytes": 1.5}, {}),
+        ({"bytes": True}, {}),
+        ({"bytes": -1}, {}),
+        ({"bytes": 10**5000}, {}),
+        ({"remediation": "\ud800" * 600}, {}),
+        ({"remediation": "line\nbreak"}, {}),
+        ({"path": "/srv/kdive/system/capture.pcap", "domain": "kdive-x"}, {}),
+    ],
+    ids=[
+        "long-remediation-truncated",
+        "free-text-reason",
+        "oversized-or-malformed-token",
+        "non-string-token",
+        "float-bytes",
+        "bool-bytes",
+        "negative-bytes",
+        "huge-bytes",
+        "surrogate-remediation",
+        "control-character-remediation",
+        "non-allow-listed-keys",
+    ],
+)
+def test_child_drops_or_truncates_detail_values_outside_their_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
+    details: dict[str, object],
+    expected: dict[str, object],
 ) -> None:
     failure = CategorizedError(
-        "provider failure",
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        details={"remediation": "r" * 5000, "bytes": 1.5, "error": ["PermissionError"]},
+        "provider failure", category=ErrorCategory.CONFIGURATION_ERROR, details=details
     )
 
     result, _ = _run_child_with_failure(tmp_path, monkeypatch, launch_token, failure)
 
-    assert result.details == {"phase": "provider_execution", "remediation": "r" * 512}
+    assert result.details == {"phase": "provider_execution", **expected}
 
 
-def test_child_keeps_forwarded_details_inside_the_result_bound(
+def test_child_keeps_the_largest_forwarded_details_inside_the_result_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
-    escaped = "\u00e9" * 512
+    token = "t" * 64
+    remediation = '"\\' * 256
     failure = CategorizedError(
         "provider failure",
         category=ErrorCategory.CONFIGURATION_ERROR,
-        details={key: escaped for key in ("reason", "operation", "error", "remediation")},
+        details={
+            "reason": token,
+            "operation": token,
+            "error": token,
+            "bytes": 2**63 - 1,
+            "remediation": remediation,
+        },
     )
 
-    result, _ = _run_child_with_failure(tmp_path, monkeypatch, launch_token, failure)
+    result, result_bytes = _run_child_with_failure(tmp_path, monkeypatch, launch_token, failure)
 
+    assert result.details == {
+        "phase": "provider_execution",
+        "reason": token,
+        "operation": token,
+        "error": token,
+        "bytes": 2**63 - 1,
+        "remediation": remediation,
+    }
     assert len(json.dumps(result.details, sort_keys=True, separators=(",", ":"))) <= 4096
-    assert result.details == {"phase": "provider_execution", "reason": escaped}
+    assert CaptureResult.from_canonical_json(result_bytes) == result
 
 
 @pytest.mark.parametrize(
