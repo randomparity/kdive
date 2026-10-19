@@ -3948,3 +3948,26 @@ def test_host_dump_selinux_preparation_requires_utilities() -> None:
     )
     assert result.returncode != 0
     assert "requires semanage and restorecon" in result.stderr
+
+
+def test_authority_proof_issues_its_one_day_pki_through_authority_pki() -> None:
+    """#3273: the carrier delegates issuance to authority-pki.sh and keeps its one-day PKI."""
+    proof = _text(AUTHORITY_PROOF)
+    pki = '"$pki" '
+    assert 'pki="$source_root/scripts/operations/authority-pki.sh"' in proof
+    assert f'{pki}ca --dir "$secrets" --subject kdive-2150-proof-ca --days 1 --key new' in proof
+    assert (
+        f'{pki}leaf --dir "$secrets" --name server --usage server --days 1 --key new \\\n'
+        '  --authority-instance "$authority_instance"'
+    ) in proof
+    for client in ("health-client", "proof-client"):
+        assert (
+            f'{pki}leaf --dir "$secrets" --name {client} --usage client --days 1 --key new'
+        ) in proof
+    assert "openssl req" not in proof
+    assert "openssl x509 -req" not in proof
+    assert "issue_certificate" not in proof
+    assert proof.index('install -d -m 0700 "$secrets"') < proof.index(f"{pki}ca ")
+    assert proof.index(f'{pki}leaf --dir "$secrets" --name proof-client') < proof.index(
+        "live_vm_host_authority_server_certificate_source: $secrets/server.pem"
+    )

@@ -230,40 +230,12 @@ printf '%s\n' "$worker_credential" >"$secrets/worker-credential"
 chmod 0600 "$secrets/database-dsn" "$secrets/worker-credential"
 unset database_dsn database_password worker_credential
 
-server_name=$(python3 - "$authority_instance" <<'PY'
-import base64
-import hashlib
-import sys
-
-digest = hashlib.sha256(sys.argv[1].encode()).digest()
-print(base64.b32encode(digest).decode().rstrip("=").lower() + ".authority.kdive.invalid")
-PY
-)
-openssl ecparam -name prime256v1 -genkey -noout -out "$secrets/ca.key"
-openssl req -x509 -new -sha256 -key "$secrets/ca.key" -days 1 \
-  -subj /CN=kdive-2150-proof-ca -out "$secrets/ca.pem" \
-  -addext basicConstraints=critical,CA:TRUE,pathlen:0 \
-  -addext keyUsage=critical,keyCertSign,cRLSign
-
-issue_certificate() {
-  local name=$1 eku=$2 san=${3:-}
-  openssl ecparam -name prime256v1 -genkey -noout -out "$secrets/$name.key"
-  openssl req -new -sha256 -key "$secrets/$name.key" -subj "/CN=$name" \
-    -out "$secrets/$name.csr"
-  {
-    echo '[proof]'
-    echo 'basicConstraints=critical,CA:FALSE'
-    echo 'keyUsage=critical,digitalSignature'
-    echo "extendedKeyUsage=$eku"
-    [[ -z $san ]] || echo "subjectAltName=DNS:$san"
-  } >"$secrets/$name.ext"
-  openssl x509 -req -sha256 -in "$secrets/$name.csr" -CA "$secrets/ca.pem" \
-    -CAkey "$secrets/ca.key" -CAcreateserial -days 1 -extfile "$secrets/$name.ext" \
-    -extensions proof -out "$secrets/$name.pem" >/dev/null 2>&1
-}
-issue_certificate server serverAuth "$server_name"
-issue_certificate health-client clientAuth
-issue_certificate proof-client clientAuth
+pki="$source_root/scripts/operations/authority-pki.sh"
+"$pki" ca --dir "$secrets" --subject kdive-2150-proof-ca --days 1 --key new
+"$pki" leaf --dir "$secrets" --name server --usage server --days 1 --key new \
+  --authority-instance "$authority_instance"
+"$pki" leaf --dir "$secrets" --name health-client --usage client --days 1 --key new
+"$pki" leaf --dir "$secrets" --name proof-client --usage client --days 1 --key new
 chmod 0600 "$secrets"/*
 
 python3 - "$authority_instance" >"$secrets/request.json" <<'PY'
