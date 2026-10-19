@@ -558,6 +558,18 @@ Do not run the whole `prove-external-boot-authority-host.sh` carrier over a reta
 installs a predecessor and tears down its authority. Review any reuse of its disposable PKI/DSN
 preparation separately, including credential expiry and database grants.
 
+Provisioning preflight (on the controller sources) and verification (on the installed copies)
+refuse any authority or fixed-worker TLS certificate that is expired or expires within
+`live_vm_host_authority_tls_expiry_margin_seconds` (default 43200, twelve hours), naming the
+credential and its `notAfter`; the controller needs `openssl` for that check. Renew before
+provisioning. The authority unit allows five starts of any kind (automatic, manual or
+provisioning) within ten minutes; a sixth is refused and leaves the unit `failed`, stopping it if
+it was running. A provisioning run spends one or two of those starts and one pass of the
+installed-authority live proofs about three, so do not re-provision or rerun those proofs
+repeatedly within that window without first running the reset below; after replacing credentials
+on a failed unit run
+`sudo systemctl reset-failed kdive-external-boot-authority.service` before restarting it.
+
 Retire only explicitly owned proof objects after confirming terminal provider effects. Do not
 remove shared backends, bases or journals to make a failure disappear. The existing local
 `authority_host_teardown.yml` is an authority retirement operation requiring its own reviewed
