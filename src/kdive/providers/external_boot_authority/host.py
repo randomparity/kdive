@@ -1441,27 +1441,18 @@ async def _check_tls_connection(
 
 
 def _tls_failure_reason(config: AuthorityHostConfig, error: Exception) -> str:
-    """Name certificate expiry; a peer rejecting our certificate shows only an alert."""
+    """Name certificate expiry; a peer rejecting our client certificate shows only an EOF."""
     if isinstance(error, ssl.SSLCertVerificationError):
-        reason = _CERTIFICATE_VERIFY_REASONS.get(error.verify_code)
-        if reason is not None:
-            return reason
+        return _CERTIFICATE_VERIFY_REASONS.get(error.verify_code, "handshake-failed")
+    try:
+        leaf = x509.load_pem_x509_certificate(config.health_client_certificate.read_bytes())
+    except OSError, ValueError:
+        return "handshake-failed"
     now = datetime.now(UTC)
-    for path in (
-        config.server_certificate,
-        config.server_ca,
-        config.worker_client_ca,
-        config.health_client_certificate,
-    ):
-        try:
-            certificates = x509.load_pem_x509_certificates(path.read_bytes())
-        except OSError, ValueError:
-            continue
-        for certificate in certificates:
-            if now > certificate.not_valid_after_utc:
-                return "certificate-expired"
-            if now < certificate.not_valid_before_utc:
-                return "certificate-not-yet-valid"
+    if now > leaf.not_valid_after_utc:
+        return "certificate-expired"
+    if now < leaf.not_valid_before_utc:
+        return "certificate-not-yet-valid"
     return "handshake-failed"
 
 
