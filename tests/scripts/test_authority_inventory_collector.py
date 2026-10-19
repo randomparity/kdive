@@ -74,6 +74,27 @@ def test_peer_identity(collector, peer, monkeypatch, uid):
     peer.recv.assert_not_called()
 
 
+@pytest.mark.parametrize("observer_uid", [0, 102])
+def test_observer_account_colliding_with_root_or_authority(
+    collector, peer, monkeypatch, observer_uid
+):
+    """A passwd collision is refused even when the peer matches the resolved observer."""
+    monkeypatch.setattr(
+        collector.pwd,
+        "getpwnam",
+        lambda name: SimpleNamespace(
+            pw_uid=observer_uid if name == "kdive-authority-observer" else 102
+        ),
+    )
+    peer.getsockopt.return_value = struct.pack("3i", 42, observer_uid, observer_uid)
+    backend = Mock(side_effect=AssertionError("backend reached"))
+    monkeypatch.setattr(collector, "collect", backend)
+    with pytest.raises(ValueError, match="peer-rejected"):
+        collector.serve(peer)
+    backend.assert_not_called()
+    peer.recv.assert_not_called()
+
+
 @pytest.mark.parametrize("failure", [None, "xml", "type", "lookup", "none", "root", "socket"])
 @pytest.mark.parametrize("active", [0, 1])
 def test_inventory_facts_and_failures(collector, monkeypatch, failure, active):
