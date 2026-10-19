@@ -14,7 +14,7 @@ regenerated fixture.
 
 ## Global constraints
 
-- Role default `live_vm_host_authority_tls_expiry_margin_seconds: 21600`; it must stay
+- Role default `live_vm_host_authority_tls_expiry_margin_seconds: 43200`; it must stay
   below the carrier's 86400 s certificate lifetime.
 - `StartLimitIntervalSec=600`, `StartLimitBurst=5` in `[Unit]`; `RestartSec=5s` and
   `TimeoutStartSec=90s` unchanged.
@@ -70,8 +70,8 @@ Steps:
    margin and certificate list, tasks: `import_tasks: <role>/tasks/tls_expiry.yml` then a
    `debug` marker `tls-expiry-completed`), runs `ansible-playbook -i localhost,` with
    `ANSIBLE_CONFIG=deploy/ansible/ansible.cfg` and stdin `/dev/null`, and asserts exit
-   status, marker presence and expected text. Cases (margin 21600 unless stated):
-   `valid` (+2 d) passes; `inside-margin` (+1 h) fails with `TLS credential server-certificate`
+   status, marker presence and expected text. Cases (margin 43200 unless stated):
+   `valid` (+2 d) passes; `inside-margin` (+6 h) fails with `TLS credential server-certificate`
    and `notAfter=`; `expired` (−1 d) fails with `notAfter=`; `mixed` (server-ca +2 d,
    health-client-certificate −1 d) fails naming only `health-client-certificate`;
    `not-a-certificate` fails with `is not a readable PEM certificate`; `bad-margin`
@@ -121,7 +121,7 @@ Steps:
        label: "{{ item.item.name }}"
    ```
 
-3. Add `live_vm_host_authority_tls_expiry_margin_seconds: 21600` to defaults after
+3. Add `live_vm_host_authority_tls_expiry_margin_seconds: 43200` to defaults after
    `live_vm_host_authority_credentials_dir`, with a comment that it stays below the
    carrier's one-day certificates.
 4. In `authority_preflight.yml`, after `Require protected regular fixed-worker authority

@@ -41,15 +41,15 @@ Call sites:
   `live_vm_host_authority_credentials_dir`, and `server-ca`, `client-certificate` under
   `live_vm_host_worker_authority_secrets_root` when worker authority is enabled.
 
-Role default `live_vm_host_authority_tls_expiry_margin_seconds: 21600` (6 h, approved
-value pending operator answer). The disposable carrier provisions through this role with
-one-day certificates whose lifetime is excluded from change, so the margin stays well below
-24 h: 6 h leaves the carrier about 18 h and refuses a retained lane due to expire during a
-long run. `openssl` is already an authority package on the runner host and is the tool the
+Role default `live_vm_host_authority_tls_expiry_margin_seconds: 43200` (12 h, operator
+decision 2026-10-19 via the campaign root: the longest planned live run is 7 h). The
+disposable carrier provisions through this role with one-day certificates whose lifetime is
+excluded from change, so the margin stays below 24 h: 12 h leaves the carrier about 12 h and
+refuses a retained lane due to expire during the longest planned run. `openssl` is already an authority package on the runner host and is the tool the
 carrier's PKI preparation uses on the controller.
 
 **Start limit.** All three renderings of `kdive-external-boot-authority.service` gain, in
-`[Unit]`, `StartLimitIntervalSec=600` and `StartLimitBurst=5`:
+`[Unit]`, `StartLimitIntervalSec=600` and `StartLimitBurst=5` (operator-approved 2026-10-19):
 `provider_authority_host/templates/authority.service.j2`,
 `live_vm_host/templates/external-boot-authority.service.j2` (what the observed retained lane
 runs) and `deploy/systemd/system/kdive-external-boot-authority.service`. With
