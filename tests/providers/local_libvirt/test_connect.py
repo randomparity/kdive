@@ -1,8 +1,6 @@
-"""Connect-plane provider tests — RSP framing + the seam-injected Connector (no live_vm).
+"""Connect-plane endpoint, access-policy and SSH tests (no live_vm).
 
-The RSP-framing codec and the `Connector` orchestration (loopback check, prober dispatch,
-error mapping, handle codec) are covered with fakes; the real socket / libvirt-domain
-endpoint paths are `live_vm`-gated seams exercised only under the gate.
+Gdbstub reservation is metadata-only; real libvirt/SSH seams are injected.
 """
 
 from __future__ import annotations
@@ -20,150 +18,7 @@ from kdive.providers.ports.lifecycle import (
     DebugTransportKind,
     TransportHandleData,
 )
-from kdive.providers.shared.debug_common import rsp as rsp_mod
-from kdive.providers.shared.debug_common.rsp import rsp_frame, valid_rsp_frame
 from tests.providers.local_libvirt.fakes import libvirt_error
-
-# --- RSP framing codec ---------------------------------------------------------------------
-
-
-def test_rsp_frame_wraps_with_mod256_checksum() -> None:
-    # '?' is 0x3f; checksum of a single 0x3f payload is 0x3f.
-    assert rsp_frame("?") == b"$?#3f"
-
-
-def test_rsp_frame_checksum_wraps_at_256() -> None:
-    # "~~~" sums to 378; mod-256 is 0x7a (122), which a mod-257 mutant would not produce.
-    assert rsp_frame("~~~") == b"$~~~#7a"
-
-
-def test_valid_rsp_frame_accepts_complete_checksum_valid_frame() -> None:
-    assert valid_rsp_frame(b"$?#3f") is True
-
-
-def test_valid_rsp_frame_accepts_wrapped_checksum() -> None:
-    # Mirrors rsp_frame's mod-256 wrap so the validator's modulus is pinned too.
-    assert valid_rsp_frame(b"$~~~#7a") is True
-
-
-def test_valid_rsp_frame_ignores_leading_ack() -> None:
-    assert valid_rsp_frame(b"+$?#3f") is True
-
-
-def test_valid_rsp_frame_ignores_leading_nack() -> None:
-    # A leading '-' (nack) is an ack byte and is skipped just like '+'.
-    assert valid_rsp_frame(b"-$?#3f") is True
-
-
-def test_valid_rsp_frame_uses_first_hash_as_terminator() -> None:
-    # The first '#' terminates the frame. `$a##84` would only validate if the *last* '#'
-    # were used (payload "a#" sums to 0x84); using the first '#' it must be rejected.
-    assert valid_rsp_frame(b"$a##84") is False
-
-
-def test_valid_rsp_frame_accepts_trailing_coalesced_bytes() -> None:
-    assert valid_rsp_frame(b"$?#3fJUNK") is True
-
-
-def test_valid_rsp_frame_accepts_trailing_bytes_after_leading_ack() -> None:
-    assert valid_rsp_frame(b"+$?#3fJUNK") is True
-
-
-def test_valid_rsp_frame_rejects_bare_ack() -> None:
-    assert valid_rsp_frame(b"+") is False
-
-
-def test_valid_rsp_frame_rejects_unterminated_frame() -> None:
-    assert valid_rsp_frame(b"$hello") is False
-
-
-def test_valid_rsp_frame_rejects_non_hex_checksum() -> None:
-    assert valid_rsp_frame(b"$?#zz") is False
-
-
-def test_valid_rsp_frame_rejects_checksum_mismatch() -> None:
-    assert valid_rsp_frame(b"$?#00") is False
-
-
-def test_rsp_reachable_raises_when_connection_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_connect(address: tuple[str, int], *, timeout: float) -> object:
-        assert address == ("127.0.0.1", 1234)
-        assert timeout > 0
-        raise OSError("connection refused")
-
-    monkeypatch.setattr(rsp_mod.socket, "create_connection", fail_connect)
-
-    with pytest.raises(OSError, match="connection refused"):
-        rsp_mod.rsp_reachable("127.0.0.1", 1234)
-
-
-class _FakeSocket:
-    """A connected socket that answers one valid RSP frame, then EOF."""
-
-    def __init__(self) -> None:
-        self._chunks = [b"+" + rsp_frame("?"), b""]
-
-    def sendall(self, _data: bytes) -> None:
-        return None
-
-    def settimeout(self, _timeout: float) -> None:
-        return None
-
-    def recv(self, _size: int) -> bytes:
-        return self._chunks.pop(0)
-
-    def close(self) -> None:
-        return None
-
-
-class _FailingRspSocket:
-    def __init__(self, *, fail_send: bool = False) -> None:
-        self._fail_send = fail_send
-
-    def sendall(self, _data: bytes) -> None:
-        if self._fail_send:
-            raise OSError("send failed")
-
-    def settimeout(self, _timeout: float) -> None:
-        return None
-
-    def recv(self, _size: int) -> bytes:
-        raise OSError("recv failed")
-
-    def close(self) -> None:
-        return None
-
-
-def test_rsp_reachable_true_when_peer_answers_valid_frame(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A reachable stub that answers a valid frame within the deadline returns True; this also
-    # pins the deadline computation (a None/already-elapsed deadline would never read the reply).
-    monkeypatch.setattr(
-        rsp_mod.socket, "create_connection", lambda _addr, *, timeout: _FakeSocket()
-    )
-    assert rsp_mod.rsp_reachable("127.0.0.1", 1234) is True
-
-
-def test_rsp_reachable_raises_when_send_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        rsp_mod.socket,
-        "create_connection",
-        lambda _addr, *, timeout: _FailingRspSocket(fail_send=True),
-    )
-    with pytest.raises(OSError, match="send failed"):
-        rsp_mod.rsp_reachable("127.0.0.1", 1234)
-
-
-def test_rsp_reachable_raises_when_recv_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        rsp_mod.socket, "create_connection", lambda _addr, *, timeout: _FailingRspSocket()
-    )
-    with pytest.raises(OSError, match="recv failed"):
-        rsp_mod.rsp_reachable("127.0.0.1", 1234)
-
 
 # --- TransportHandleData codec -------------------------------------------------------------
 
@@ -204,38 +59,19 @@ def test_drgn_live_transport_handle_roundtrips() -> None:
 # --- Connector orchestration ---------------------------------------------------------------
 
 
-class _FakeProbe:
-    """Records (host, port) calls; returns a canned result or raises a canned error."""
-
-    def __init__(self, *, result: bool = True, raises: Exception | None = None) -> None:
-        self._result = result
-        self._raises = raises
-        self.calls: list[tuple[str, int]] = []
-
-    def __call__(self, host: str, port: int) -> bool:
-        self.calls.append((host, port))
-        if self._raises is not None:
-            raise self._raises
-        return self._result
-
-
-def _connector(
-    probe: _FakeProbe, *, host: str = "127.0.0.1", port: int = 1234
-) -> LocalLibvirtConnect:
-    return LocalLibvirtConnect(resolve_endpoint=lambda _system: (host, port), probe=probe)
+def _connector(*, host: str = "127.0.0.1", port: int = 1234) -> LocalLibvirtConnect:
+    return LocalLibvirtConnect(resolve_endpoint=lambda _system: (host, port))
 
 
 _SYSTEM = SystemHandle("kdive-x")
 
 
 def test_open_transport_non_gdbstub_kind_is_configuration_error_without_probing() -> None:
-    probe = _FakeProbe()
     with pytest.raises(CategorizedError) as exc:
-        _connector(probe).open_transport(_SYSTEM, cast(DebugTransportKind, "tcp"))
+        _connector().open_transport(_SYSTEM, cast(DebugTransportKind, "tcp"))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     # The message names the offending kind so the operator sees what was rejected.
     assert str(exc.value) == "unsupported transport kind: 'tcp'"
-    assert probe.calls == []  # rejected before any IO
 
 
 def test_open_gdbstub_resolves_endpoint_for_the_requested_system() -> None:
@@ -245,73 +81,26 @@ def test_open_gdbstub_resolves_endpoint_for_the_requested_system() -> None:
         seen.append(system)
         return ("127.0.0.1", 1234)
 
-    probe = _FakeProbe(result=True)
-    connector = LocalLibvirtConnect(resolve_endpoint=resolver, probe=probe)
+    connector = LocalLibvirtConnect(resolve_endpoint=resolver)
     connector.open_transport(_SYSTEM, "gdbstub")
     assert seen == [_SYSTEM]
 
 
 def test_open_transport_non_loopback_host_is_configuration_error_without_probing() -> None:
-    probe = _FakeProbe()
     with pytest.raises(CategorizedError) as exc:
-        _connector(probe, host="10.0.0.1").open_transport(_SYSTEM, "gdbstub")
+        _connector(host="10.0.0.1").open_transport(_SYSTEM, "gdbstub")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert str(exc.value) == "gdbstub host must be a loopback IP literal"
-    assert probe.calls == []  # F2: no outbound connect to a non-loopback host
 
 
 def test_open_transport_hostname_host_is_configuration_error_without_probing() -> None:
-    probe = _FakeProbe()
     with pytest.raises(CategorizedError) as exc:
-        _connector(probe, host="evil.example").open_transport(_SYSTEM, "gdbstub")
+        _connector(host="evil.example").open_transport(_SYSTEM, "gdbstub")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert probe.calls == []  # a hostname is not a loopback IP literal — reject without DNS
 
 
-def test_open_transport_unreachable_stub_is_debug_attach_failure() -> None:
-    probe = _FakeProbe(result=False)
-    with pytest.raises(CategorizedError) as exc:
-        _connector(probe, port=4242).open_transport(_SYSTEM, "gdbstub")
-    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
-    assert str(exc.value) == "gdbstub did not answer RSP framing"
-    assert exc.value.details == {"port": 4242}
-    assert probe.calls == [("127.0.0.1", 4242)]
-
-
-def test_open_transport_socket_fault_is_transport_failure() -> None:
-    probe = _FakeProbe(raises=OSError("connection reset"))
-    with pytest.raises(CategorizedError) as exc:
-        _connector(probe, port=4242).open_transport(_SYSTEM, "gdbstub")
-    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
-    assert str(exc.value) == "gdbstub transport socket fault"
-    assert exc.value.details == {"port": 4242}
-
-
-def test_open_transport_real_probe_connection_refused_is_transport_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_connect(address: tuple[str, int], *, timeout: float) -> object:
-        assert address == ("127.0.0.1", 4242)
-        assert timeout > 0
-        raise OSError("connection refused")
-
-    monkeypatch.setattr(rsp_mod.socket, "create_connection", fail_connect)
-    connector = LocalLibvirtConnect(
-        resolve_endpoint=lambda _system: ("127.0.0.1", 4242),
-        probe=connect_mod._real_probe,
-    )
-
-    with pytest.raises(CategorizedError) as exc:
-        connector.open_transport(_SYSTEM, "gdbstub")
-
-    assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
-    assert str(exc.value) == "gdbstub transport socket fault"
-    assert exc.value.details == {"port": 4242}
-
-
-def test_open_transport_reachable_stub_returns_decodable_handle() -> None:
-    probe = _FakeProbe(result=True)
-    handle = _connector(probe).open_transport(_SYSTEM, "gdbstub")
+def test_open_transport_resolved_endpoint_returns_decodable_handle() -> None:
+    handle = _connector().open_transport(_SYSTEM, "gdbstub")
     decoded = TransportHandleData.decode(str(handle))
     assert decoded == TransportHandleData(kind="gdbstub", host="127.0.0.1", port=1234)
 
@@ -400,17 +189,13 @@ def test_resolve_endpoint_other_libvirt_error_is_infrastructure_failure() -> Non
 
 
 def test_close_transport_is_noop_and_never_raises() -> None:
-    probe = _FakeProbe()
-    connector = _connector(probe)
+    connector = _connector()
     handle = connector.open_transport(_SYSTEM, "gdbstub")
     connector.close_transport(handle)  # no raise
 
 
 def test_close_transport_rejects_malformed_handle() -> None:
-    probe = _FakeProbe()
-    connector = connect_mod.LocalLibvirtConnect(
-        resolve_endpoint=lambda _s: ("127.0.0.1", 1), probe=probe
-    )
+    connector = connect_mod.LocalLibvirtConnect(resolve_endpoint=lambda _s: ("127.0.0.1", 1))
     with pytest.raises(CategorizedError) as exc:
         connector.close_transport(connect_mod.TransportHandle("garbage"))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -439,7 +224,6 @@ def _ssh_connector(
 ) -> LocalLibvirtConnect:
     return LocalLibvirtConnect(
         resolve_endpoint=lambda _system: ("127.0.0.1", 1234),
-        probe=_FakeProbe(),
         resolve_ssh_endpoint=lambda _system: (host, port),
         ssh_connect=ssh_connect,
     )
@@ -497,7 +281,6 @@ def test_open_ssh_resolves_endpoint_for_the_requested_system() -> None:
 
     connector = LocalLibvirtConnect(
         resolve_endpoint=lambda _s: ("127.0.0.1", 1234),
-        probe=_FakeProbe(),
         resolve_ssh_endpoint=ssh_resolver,
         ssh_connect=_FakeSshConnect(result=True),
     )
@@ -598,7 +381,6 @@ def test_open_ssh_transport_real_probe_connection_refused_is_transport_failure(
     monkeypatch.setattr(connect_mod.socket, "create_connection", fail_connect)
     connector = LocalLibvirtConnect(
         resolve_endpoint=lambda _system: ("127.0.0.1", 1234),
-        probe=_FakeProbe(),
         resolve_ssh_endpoint=lambda _system: ("127.0.0.1", 2222),
         ssh_connect=connect_mod._real_ssh_connect,
     )
@@ -738,7 +520,6 @@ def test_open_transport_accepts_drgn_live_kind_and_emits_ssh_scheme_handle() -> 
 def _recorded_endpoint_connector(resolve_ssh_endpoint):
     return LocalLibvirtConnect(
         resolve_endpoint=lambda _s: ("127.0.0.1", 1),
-        probe=lambda _h, _p: True,
         resolve_ssh_endpoint=resolve_ssh_endpoint,
         ssh_connect=lambda _h, _p: True,
     )
@@ -822,3 +603,31 @@ def test_recorded_ssh_endpoint_reraises_infrastructure_failure() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         connector.recorded_ssh_endpoint(SystemHandle("sys-1"))
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+@pytest.mark.parametrize("initial_state", ["running", "paused"])
+@pytest.mark.parametrize("boundary", ["create_connection", "connect"])
+def test_gdbstub_reservation_never_dials(
+    monkeypatch: pytest.MonkeyPatch, initial_state: str, boundary: str
+) -> None:
+    import socket
+
+    state = [initial_state]
+    calls: list[object] = []
+
+    def intrusive_dial(*args: object, **kwargs: object) -> None:
+        calls.append(args)
+        state[0] = "paused"
+        pytest.fail("session reservation attempted a standalone debugger connection")
+
+    target = socket if boundary == "create_connection" else socket.socket
+    monkeypatch.setattr(target, boundary, intrusive_dial)
+    conn = _FakeGdbConn(domain=_FakeGdbDomain(_gdb_xml(4444)))
+    monkeypatch.setattr(connect_mod, "_default_connect", lambda: conn)
+    connector = LocalLibvirtConnect.from_env()
+    handle = connector.open_transport(_SYSTEM, "gdbstub")
+    connector.close_transport(handle)
+    assert TransportHandleData.decode(handle).port == 4444
+    assert calls == []
+    assert state == [initial_state]
+    assert conn.closed == 1
