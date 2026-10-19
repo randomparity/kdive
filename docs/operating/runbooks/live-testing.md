@@ -562,10 +562,11 @@ Provisioning preflight (on the controller sources) and verification (on the inst
 refuse any authority or fixed-worker TLS certificate that is expired or expires within
 `live_vm_host_authority_tls_expiry_margin_seconds` (default 43200, twelve hours), naming the
 credential and its `notAfter`; the controller needs `openssl` for that check. Renew before
-provisioning. After five failed starts within ten minutes the authority unit stops restarting and
-stays `failed`; within that window systemd also refuses a manual or provisioning restart, so after
-replacing credentials run `sudo systemctl reset-failed kdive-external-boot-authority.service`
-before restarting it.
+provisioning. The authority unit allows five starts of any kind (automatic, manual or
+provisioning) within ten minutes; a sixth is refused and leaves the unit `failed`, stopping it if
+it was running. A provisioning run spends one or two of those starts, so do not re-provision
+repeatedly within that window, and after replacing credentials on a failed unit run
+`sudo systemctl reset-failed kdive-external-boot-authority.service` before restarting it.
 
 Retire only explicitly owned proof objects after confirming terminal provider effects. Do not
 remove shared backends, bases or journals to make a failure disappear. The existing local

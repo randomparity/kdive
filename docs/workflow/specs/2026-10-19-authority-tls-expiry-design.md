@@ -58,8 +58,9 @@ PKI preparation already uses it), named in the runbook sentence.
 `provider_authority_host/templates/authority.service.j2`,
 `live_vm_host/templates/external-boot-authority.service.j2` (what the observed retained lane
 runs) and `deploy/systemd/system/kdive-external-boot-authority.service`. With
-`RestartSec=5s`, up to four consecutive failed starts in ten minutes still recover; a
-deterministic failure reaches `failed` after five starts; and
+`RestartSec=5s`, the budget is five starts of any kind (automatic, manual or Ansible) in ten
+minutes, so transient failures recover while fewer than five starts have been spent in the
+window; a deterministic failure reaches `failed` after five starts; and
 5 × (`TimeoutStartSec=90s` + 5 s) = 475 s < 600 s, so a start that hangs to its timeout
 still trips the limit. The existing `active/running` assertion in `verify.yml` then fails.
 Within ten minutes of tripping, systemd also refuses a manual or Ansible restart until
