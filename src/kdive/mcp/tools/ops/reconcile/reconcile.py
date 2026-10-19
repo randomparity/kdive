@@ -21,6 +21,7 @@ from types import MappingProxyType
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.errors import ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
@@ -170,6 +171,25 @@ def _reconcile_response(report: ReconcileReport) -> ToolResponse:
         "dump_volumes_budget_unattempted": report.dump_volumes_budget_unattempted,
         "failures": ",".join(report.failures),
     }
+    by_kind = {failure.repair_kind: failure for failure in report.repair_failures}
+    repair_failures: list[JsonValue] = []
+    for kind in report.failures:
+        failure = by_kind.get(kind)
+        repair_failures.append(
+            {
+                "repair_kind": kind,
+                "reason_code": failure.reason_code if failure else "repair_failed",
+                "recovery": failure.recovery if failure else "operator_inspection",
+            }
+        )
+    data["repair_failures"] = repair_failures
+    if report.failures:
+        return ToolResponse.failure(
+            _RECONCILE_OBJECT_ID,
+            ErrorCategory.INFRASTRUCTURE_FAILURE,
+            detail="Some repairs failed; inspect repair_failures before further cleanup.",
+            data=data,
+        )
     return ToolResponse.success(
         _RECONCILE_OBJECT_ID,
         "ok",
@@ -200,14 +220,26 @@ def register(
         local System object version identities per call and at most {max_targets_per_key} per exact
         key. It first takes the System lock and confirms a present gone System and that no artifact
         row names the exact key, then releases the database transaction before the object-store
-        deletion. If eligible versions remain, call `ops.reconcile_now` again. Confirmed deletions
+        deletion. After a successful pass, if eligible versions remain, call `ops.reconcile_now`
+        again. Confirmed deletions
         appear in
         `data.repair_counts.local_system_object_versions_deleted`.
 
         The remote System-object version lane is skipped because this on-demand configuration has
         no console-hosting gate; that lane runs only in the periodic reconciler. Returns
         `data.repair_counts`, keyed by every cataloged repair kind, plus the human-readable scalar
-        summary fields and comma-joined `data.failures`. `data.captures_budget_unattempted` and
+        summary fields and comma-joined `data.failures`. Any isolated repair exception returns
+        `error` / `infrastructure_failure` with partial counts and `data.repair_failures`: a list
+        of `repair_kind`, `reason_code`, and `recovery` objects. Permission denial uses
+        `database_permission_denied` / `periodic_reconciler`: the periodic reconciler owns the
+        required database authority; server authority is unchanged, and this does not guarantee
+        a future periodic pass succeeds. Other exceptions use `repair_failed` /
+        `operator_inspection`. No raw exception details are returned in these fields.
+        Counts can undercount work committed before a repair raises. Inspect the failed kinds
+        and recovery before further cleanup; do not blindly repeat a failed destructive pass.
+        Success includes an empty `data.repair_failures` list.
+
+        `data.captures_budget_unattempted` and
         `data.dump_volumes_budget_unattempted` report, per reaping lane, the candidates the lane's
         per-pass time budget stopped it from starting this pass; 0 means the lane drained its
         worklist. These are signal, not failures — an unattempted candidate is never counted in

@@ -8,7 +8,9 @@ prefix-driven orphan scan covers ``images/``. This module is that missing reclai
 
 It is modelled on :func:`kdive.reconciler.cleanup.images.repair_leaked_images`: list a prefix, keep
 only what no row can reach, and hold every candidate behind a store-mtime grace evaluated in
-Postgres ``now()`` so a just-written object is never raced.
+Postgres ``now()`` so a just-written object is never raced. Durable capture publications
+retain their exact key even after job expiry: publishing, canceling, and discarded journals
+protect the late-PUT barrier (ADR-0559); their unrelated prefix siblings remain reclaimable.
 """
 
 from __future__ import annotations
@@ -364,7 +366,7 @@ async def _delete_if_still_reclaimable(
         kind = "delete marker" if target.is_delete_marker else "data version"
         _log.info(
             "reconciler: leaked upload object %s version %s (%s) deleted (no artifacts row, no "
-            "upload window, no live write lease, past grace)",
+            "upload window, no live write lease, no capture-publication owner, past grace)",
             target.key,
             target.version_id,
             kind,
