@@ -914,6 +914,11 @@ def test_authority_discovers_native_guestfs_and_verifies_installed_import(
 
 LIVE_TASKS = ROLE.parent / "live_vm_host" / "tasks"
 CARRIER = ROOT / "scripts" / "operations" / "prove-external-boot-authority-host.sh"
+AUTHORITY_UNITS = (
+    UNIT,
+    ROLE.parent / "live_vm_host" / "templates" / "external-boot-authority.service.j2",
+    ROOT / "deploy" / "systemd" / "system" / "kdive-external-boot-authority.service",
+)
 
 
 def _flattened(tasks: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -996,3 +1001,45 @@ def test_tls_expiry_checks_cover_authority_and_worker_certificates() -> None:
     # The disposable carrier issues one-day certificates and provisions through this role.
     assert CARRIER.read_text(encoding="utf-8").count("-days 1") == 2
     assert cast(int, margin) < 86400
+
+
+def _directives(text: str) -> dict[str, str]:
+    return dict(
+        line.split("=", 1)
+        for line in text.splitlines()
+        if "=" in line and not line.startswith(("#", "{"))
+    )
+
+
+def _seconds(value: str) -> int:
+    return int(value.removesuffix("s"))
+
+
+@pytest.mark.parametrize("path", AUTHORITY_UNITS, ids=lambda path: path.name)
+def test_authority_units_bound_their_restart_loop(path: Path) -> None:
+    unit_text, service_text = path.read_text(encoding="utf-8").split("[Service]", 1)
+    unit, service = _directives(unit_text), _directives(service_text)
+    assert unit["StartLimitIntervalSec"] == "600"
+    assert unit["StartLimitBurst"] == "5"
+    assert "StartLimitIntervalSec" not in service
+    assert "StartLimitBurst" not in service
+    interval, burst = int(unit["StartLimitIntervalSec"]), int(unit["StartLimitBurst"])
+    restart, timeout = _seconds(service["RestartSec"]), _seconds(service["TimeoutStartSec"])
+    # Even starts that hang until their timeout must reach the limit inside one interval.
+    assert burst * (timeout + restart) < interval
+
+
+def test_drift_proof_resets_the_start_limit_before_restoring() -> None:
+    proof = _named(
+        _tasks(LIVE_TASKS / "verify.yml"),
+        "Prove authority readiness retracts on credential and ACL drift",
+    )
+    always = cast(list[dict[str, object]], proof["always"])
+    restore = always.index(_named(always, "Restore authority readiness after drift proofs"))
+    reset = always[restore - 1]
+    assert cast(dict[str, object], reset["ansible.builtin.command"])["argv"] == [
+        "systemctl",
+        "reset-failed",
+        "kdive-external-boot-authority.service",
+    ]
+    assert reset["changed_when"] is False
