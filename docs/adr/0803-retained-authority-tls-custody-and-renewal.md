@@ -89,7 +89,8 @@ control host. Both the disposable carrier and retained lanes use it. Its rules:
   is the reinstall #3273 rules out.
 - **New leaf keys on every renewal.** verified: the worker reads its certificate and key as
   separate files per request (`network_client.py:41-65`). The install loop copies them one at
-  a time (`live_vm_host/tasks/main.yml:432-445`), so a new key opens a window with a
+  a time (`live_vm_host/tasks/main.yml:432-445` at `bb85e0eba`, now
+  `worker_authority_tls.yml`), so a new key opens a window with a
   mismatched pair.
 - **An overlapping old-plus-new CA bundle during rotation.** judgment: it needs a second
   installation pass and a bundle lifecycle to remove a seconds-long window on a lane that can

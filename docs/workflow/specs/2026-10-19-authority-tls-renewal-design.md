@@ -10,11 +10,11 @@ this design and its operator-facing interface on 2026-10-19; see the operator de
 section. Nothing here is implemented yet.
 The decision record is [ADR-0803](../../adr/0803-retained-authority-tls-custody-and-renewal.md).
 
-**Blocked by #3272.** The implementation starts only after PR #3278 merges. It is rebased onto
-that merge, because it calls `tls_expiry.yml` and edits the runbook paragraph #3278 extends.
+**Built on #3272.** PR #3278 merged at `b2d93172e`. The implementation is based on that merge,
+because it calls `tls_expiry.yml` and edits the runbook paragraph #3278 extends.
 
 Siblings under #3267: #3271 (merged) names expiry in the authority's readiness error; #3272
-(PR #3278, open) adds the `live_vm_host_authority_tls_expiry_margin_seconds` check (default
+(PR #3278, merged) adds the `live_vm_host_authority_tls_expiry_margin_seconds` check (default
 43200) to preflight and verify, and `StartLimitIntervalSec=600`/`StartLimitBurst=5` to the
 authority unit. This design reuses that check and counts against that start budget. It does
 not duplicate either.
@@ -42,7 +42,7 @@ Facts the design relies on, checked against source at the base:
   `security/secrets/secrets.py:87` reads the file with no cache. A worker needs no restart to
   use renewed files.
 - The three worker files are installed by one looped `copy` task
-  (`live_vm_host/tasks/main.yml:432-445`). Each copy is atomic, but the loop is not a
+  (`live_vm_host/tasks/main.yml:432-445` at `bb85e0eba`). Each copy is atomic, but the loop is not a
   transaction. ADR-0762 records the same property.
 - An out-of-band systemd restart of a fixed worker wedges its slot. The worker-slot wedge
   recovery note records this, and the operator's 2026-10-19 manual renewal left the worker
