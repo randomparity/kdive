@@ -197,11 +197,11 @@ class LocalLibvirtCaptureReaper:
             return
         if reply.error_class is not None:
             _log.warning(
-                "reconciler: QEMU refused removing capture filter %s on %s: %s %s",
+                "reconciler: QEMU refused removing capture filter %s on %s: %s %r",
                 qom_id,
                 capture.domain_name,
                 reply.error_class,
-                reply.description,
+                reply.description[:256],
             )
             raise self._control_failure("removing capture filter on", capture.domain_name)
 

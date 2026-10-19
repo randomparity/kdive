@@ -92,11 +92,17 @@ absence arrives only as a reply. A raised `libvirtError` stays the transport-fai
   - An absent filter is tolerated.
   - Any other error reply, or a malformed one, raises `CONTROL_FAILURE`, so the sweep defers the
     row. A refused delete no longer reads as reclaimed.
-- **Quiescence** (`capture_operation.py`) keeps its messages, its id-correlation check and its
-  `allow_not_found` rule. Only the parsing moves into the shared module.
+- **Quiescence** (`capture_operation.py`) keeps its `CONTROL_FAILURE` category, its
+  id-correlation check and its `allow_not_found` rule, and the parsing moves into the shared
+  module. Some reply shapes now get a different message:
+  - a non-object reply now reads `malformed`, where it used to read "did not correlate";
+  - a reply with neither member now reads `malformed`, where it used to read "inconclusive";
+  - a reply carrying both `return` and `error`, which used to succeed, is now `malformed`;
+  - an error without a class is now `malformed` and no longer counts as absent.
 
 The QMP `desc` holds a host path, so the provider logs it at WARNING and never places it in
-`details`. The detail values fit #3269's forwarding shapes: token-shaped reason, operation and
+`details`. The log carries it repr-quoted and cut to 256 characters, because QEMU controls that
+text. The detail values fit #3269's forwarding shapes: token-shaped reason, operation and
 error, and printable ASCII remediation of at most 512 characters.
 
 A refused attach fails after two monitor round trips: the leading `object-del`, then the

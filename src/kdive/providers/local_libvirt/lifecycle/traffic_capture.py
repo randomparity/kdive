@@ -60,6 +60,8 @@ def _close(conn: _LibvirtConn) -> None:
 
 _PCAP_OPEN_REFUSAL = "net dump: can't open "
 _EACCES_SUFFIX = ": Permission denied"
+# QEMU-controlled text reaches operator logs only, bounded and repr-quoted.
+_LOGGED_DESCRIPTION_CHARS = 256
 
 
 class LocalLibvirtTrafficCapture:
@@ -176,10 +178,10 @@ class LocalLibvirtTrafficCapture:
         if reply.error_class is None:
             return
         _log.warning(
-            "QEMU refused capture filter on %s: %s %s",
+            "QEMU refused capture filter on %s: %s %r",
             domain_name,
             reply.error_class,
-            reply.description,
+            reply.description[:_LOGGED_DESCRIPTION_CHARS],
         )
         if reply.description.startswith(_PCAP_OPEN_REFUSAL) and reply.description.endswith(
             _EACCES_SUFFIX
@@ -208,10 +210,10 @@ class LocalLibvirtTrafficCapture:
             return
         if reply.error_class is not None:
             _log.warning(
-                "QEMU refused capture filter removal on %s: %s %s",
+                "QEMU refused capture filter removal on %s: %s %r",
                 domain_name,
                 reply.error_class,
-                reply.description,
+                reply.description[:_LOGGED_DESCRIPTION_CHARS],
             )
             raise self._refused(reply, "object_del", domain_name)
 
