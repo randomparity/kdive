@@ -4038,3 +4038,79 @@ def test_credential_installation_is_shared_with_the_renewal_playbook() -> None:
     authority_import = main.index("Import the external-boot authority credential installation")
     assert main[authority_import - 1] == "Record the installed external-boot authority revision"
     assert main[authority_import + 1] == "Install protected authority S3 credentials"
+
+
+def test_renewal_playbook_installs_credentials_in_the_reviewed_order() -> None:
+    """#3273: preconditions, authority files, one restart, then worker files and verification."""
+    playbook = ROOT / "deploy" / "ansible" / "playbooks" / "renew-local-authority-tls.yml"
+    play = cast(list[dict[str, Any]], yaml.safe_load(playbook.read_text()))[0]
+    assert play["hosts"] == "live_vm_runners"
+    tasks = cast(list[dict[str, Any]], play["tasks"])
+    names = [task["name"] for task in tasks]
+
+    def module(task: dict[str, Any]) -> str:
+        known = {"name", "when", "loop", "loop_control", "register", "delegate_to", "become"}
+        known |= {"changed_when", "check_mode", "vars"}
+        (key,) = [k for k in task if k not in known]
+        return key
+
+    allowed = {
+        "ansible.builtin.assert",
+        "ansible.builtin.command",
+        "ansible.builtin.import_role",
+        "ansible.builtin.meta",
+        "ansible.builtin.slurp",
+        "ansible.builtin.systemd_service",
+    }
+    assert {module(task) for task in tasks} <= allowed
+    imports = [
+        (
+            task["ansible.builtin.import_role"]["name"],
+            task["ansible.builtin.import_role"]["tasks_from"],
+        )
+        for task in tasks
+        if module(task) == "ansible.builtin.import_role"
+    ]
+    assert imports == [
+        ("local_worker_host", "worker_install_dirs.yml"),
+        ("live_vm_host", "authority_preflight.yml"),
+        ("live_vm_host", "authority_credentials.yml"),
+        ("live_vm_host", "worker_authority_tls.yml"),
+        ("live_vm_host", "tls_expiry.yml"),
+    ]
+    assert tasks[0]["when"] is False
+
+    order = [
+        "Validate protected authority inputs before host mutation",
+        "Verify the source certificate chains each side checks at runtime",
+        "Require each source certificate to match its key",
+        "Require a clean controller checkout at exactly the installed revision",
+        "Install the authority credentials",
+        "Reset the authority unit's failed state before its planned restart",
+        "Restart the authority after changed credentials",
+        "Restart the authority when no credential changed",
+        "Install the fixed-worker authority TLS files",
+        "Require installed authority certificates to outlive the expiry margin",
+        "Require the authority to be active",
+        "Verify the installed certificate chains each side checks at runtime",
+        "Require each worker to verify the authority serving the installed certificate",
+    ]
+    assert [names.index(name) for name in order] == sorted(names.index(name) for name in order)
+    by_name = {task["name"]: task for task in tasks}
+    reset = by_name["Reset the authority unit's failed state before its planned restart"]
+    assert reset["ansible.builtin.command"]["argv"][:2] == ["systemctl", "reset-failed"]
+    assert by_name["Restart the authority after changed credentials"]["ansible.builtin.meta"] == (
+        "flush_handlers"
+    )
+    restart = by_name["Restart the authority when no credential changed"]
+    assert restart["when"] == "not live_vm_host_authority_credentials.changed"
+    assert restart["ansible.builtin.systemd_service"]["state"] == "restarted"
+    for task in tasks[: names.index("Install the authority credentials")]:
+        if module(task) == "ansible.builtin.command":
+            assert task["delegate_to"] == "localhost" and task["become"] is False, task["name"]
+    expiry = by_name["Require installed authority certificates to outlive the expiry margin"]
+    checked = [item["name"] for item in expiry["vars"]["live_vm_host_tls_expiry_certificates"]]
+    assert len(checked) == 6
+    assert all(
+        "key" not in item["path"] for item in expiry["vars"]["live_vm_host_tls_expiry_certificates"]
+    )
