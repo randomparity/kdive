@@ -69,7 +69,7 @@ out-of-band file. The root worker's existing chown to the QEMU user is unchanged
 **D2 — one checked QMP reply (C2).** A new module,
 `src/kdive/providers/local_libvirt/lifecycle/qmp_reply.py`, owns QMP passthrough reply parsing
 for the local provider. `parse_qmp_reply(raw)` returns the reply's `return` value, its `id`, and,
-for an error reply, the error class and description. It raises `MalformedQmpReply` for any of:
+for an error reply, the error class and description. It raises `MalformedQmpReplyError` for any of:
 
 - invalid JSON or a reply that is not an object;
 - a reply with neither `return` nor `error`, or with both;
