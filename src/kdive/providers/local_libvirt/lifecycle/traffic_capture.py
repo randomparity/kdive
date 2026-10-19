@@ -84,7 +84,7 @@ class LocalLibvirtTrafficCapture:
 
     @property
     def write_remediation(self) -> str:
-        """Operator guidance when the qemu:///system hypervisor could not write the pcap dir."""
+        """Operator guidance when the hypervisor could not create the pcap (either daemon)."""
         return PCAP_HYPERVISOR_WRITE_REMEDIATION
 
     def prepare(self, system_id: UUID, job_id: UUID) -> str:
