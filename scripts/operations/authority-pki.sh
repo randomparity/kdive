@@ -66,11 +66,13 @@ require_days_and_key() {
 require_private_dir() {
   local out status=0
   [[ -n $dir ]] || usage
+  # A trailing slash would make the symlink test resolve through the link.
+  while [[ $dir == */ && $dir != / ]]; do dir=${dir%/}; done
   [[ -d $dir && ! -L $dir ]] || die "$dir must be an existing directory, not a symlink"
   [[ $(stat -c %u -- "$dir") == "$(id -u)" ]] || die "$dir must be owned by the invoking user"
   [[ $(stat -c %a -- "$dir") == 700 ]] || die "$dir must have mode 0700"
   command -v git >/dev/null || die "git is needed to prove $dir is outside every Git work tree"
-  out=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_CEILING_DIRECTORIES \
+  out=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_CEILING_DIRECTORIES LC_ALL=C LANGUAGE= \
     git -C "$dir" rev-parse --is-inside-work-tree --is-inside-git-dir 2>&1) || status=$?
   if [[ $status -eq 0 ]]; then
     [[ $out == $'false\nfalse' ]] ||

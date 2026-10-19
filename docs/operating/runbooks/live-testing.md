@@ -616,7 +616,9 @@ certificates. When the CA certificate no longer covers a new 30-day leaf, first 
 the same key with `ca --key existing` and the same `--subject`. Keep the printed lines (file name,
 `notAfter`, public-key hash) in the private lane result; they contain no secret.
 
-Then, from a clean checkout at exactly the installed authority revision (the value of
+A lane installed from a revision that predates this playbook must first be reprovisioned once
+with `installed-local-authority.yml` at a revision that contains it. Then, from a clean checkout
+at exactly the installed authority revision (the value of
 `/opt/kdive-provider-authority/revision`, which must equal `live_vm_repo_version` in the vars):
 
 ```bash

@@ -246,6 +246,7 @@ def test_refuses_shared_or_linked_directories(tmp_path: Path) -> None:
     link = tmp_path / "link"
     link.symlink_to(real)
     assert "not a symlink" in _ca_result(link).stderr
+    assert "not a symlink" in _run(*_CA_NEW, "--dir", f"{link}/").stderr
     assert "not a symlink" in _ca_result(tmp_path / "absent").stderr
     assert list(real.iterdir()) == [] and list(shared.iterdir()) == []
 
@@ -290,6 +291,18 @@ def test_git_failure_fails_closed(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "dubious ownership" in result.stderr
     assert list(pki.iterdir()) == []
+
+
+def test_git_check_is_locale_independent(pki: Path) -> None:
+    assert BASH is not None
+    result = subprocess.run(
+        [BASH, str(SCRIPT), *_CA_NEW, "--dir", str(pki)],
+        env={**_env(), "LC_ALL": "de_DE.UTF-8", "LANGUAGE": "de"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_ignores_exported_git_directory(tmp_path: Path, pki: Path) -> None:

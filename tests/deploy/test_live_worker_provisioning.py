@@ -4079,6 +4079,8 @@ def test_renewal_playbook_installs_credentials_in_the_reviewed_order() -> None:
         ("live_vm_host", "tls_expiry.yml"),
     ]
     assert tasks[0]["when"] is False
+    lane = cast(list[str], tasks[1]["ansible.builtin.assert"]["that"])
+    assert "live_vm_host_worker_authority_instance == live_vm_host_authority_instance" in lane
 
     order = [
         "Validate protected authority inputs before host mutation",

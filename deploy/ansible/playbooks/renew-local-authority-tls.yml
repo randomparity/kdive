@@ -26,9 +26,11 @@
           - live_vm_host_authority_enabled | bool
           - live_vm_host_worker_authority_enabled | bool
           - live_vm_repo_version is match('^[0-9a-f]{40}$')
+          - live_vm_host_worker_authority_instance == live_vm_host_authority_instance
         fail_msg: >-
           Run this playbook with the lane's protected vars file: it must enable the authority
-          and fixed worker clients and name the installed revision in live_vm_repo_version.
+          and fixed worker clients, name the installed revision in live_vm_repo_version, and
+          give the workers the authority's own instance, whose server name they verify.
 
     - name: Validate protected authority inputs before host mutation
       ansible.builtin.import_role:
