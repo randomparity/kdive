@@ -33,6 +33,7 @@ from pathlib import Path
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import (
     GdbController,
+    GdbHalt,
     GdbMiAttachment,
     GdbStopRecord,
 )
@@ -214,6 +215,8 @@ class GdbMiEngine(
             with contextlib.suppress(Exception):
                 controller.exit()
             raise self._as_attach_failure(exc) from exc
+        # The RSP connect halts a running guest (ADR-0798), so debug.interrupt reports `attach`.
+        attachment.execution = "attach_halted"
         return attachment
 
     def _connect_with_retry(
@@ -321,8 +324,12 @@ class GdbMiEngine(
         """Resume until the current (innermost) frame returns (ADR-0379)."""
         return self._execution.resume(attachment, "-exec-finish", timeout_sec=timeout_sec)
 
-    def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
-        """Idempotent 'ensure HALTED': -exec-interrupt then wait the short fixed bound."""
+    def continue_background(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
+        """Resume without waiting; None leaves the guest running (#3244)."""
+        return self._execution.resume_background(attachment)
+
+    def interrupt(self, attachment: GdbMiAttachment) -> GdbHalt:
+        """Halt a running guest and attribute the halt; a halted guest gets no command."""
         return self._execution.interrupt(attachment)
 
     def wait_for_stop(
@@ -345,8 +352,10 @@ class GdbMiEngine(
         frame_payload = payload_dict(frame_payload)
         frame = self._frame_from(frame_payload) if frame_payload else None
         thread = payload.get("stopped-threads")
+        signal_name = payload.get("signal-name")
         return GdbStopRecord(
             reason=reason if isinstance(reason, str) else None,
+            signal_name=signal_name if isinstance(signal_name, str) else None,
             bkptno=payload.get("bkptno") if isinstance(payload.get("bkptno"), str) else None,
             stopped_thread=thread if isinstance(thread, str) else None,
             frame=frame,
@@ -359,6 +368,8 @@ class GdbMiEngine(
 
     def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
         """Write one MI command, accumulate + transcribe its records, raise on ``^error``."""
+        if attachment.execution == "attach_halted":
+            attachment.execution = "halted"
         records = self.records_from(
             attachment.controller.write(command, timeout_sec=_MI_COMMAND_TIMEOUT_SEC)
         )

@@ -113,7 +113,10 @@ def register(
     async def debug_end_session(
         session_id: Annotated[str, Field(description="The DebugSession to detach and close.")],
     ) -> ToolResponse:
-        """Drive a live DebugSession to detached; close its transport. Requires contributor."""
+        """Drive a live DebugSession to detached; close its transport. Requires contributor.
+        A guest left running by debug.continue with wait=False is halted first so the detach
+        resumes it as usual, which can add about 20 seconds; if that halt fails the reply still
+        reports 'detached' and adds data.guest_execution='unknown'."""
         return await handlers.end_session(pool, current_context(), session_id)
 
     @app.tool(

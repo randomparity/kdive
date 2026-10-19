@@ -10,6 +10,7 @@ from kdive.providers.ports.debug import (
     GdbBreakpointRef,
     GdbDisassembly,
     GdbFrame,
+    GdbHalt,
     GdbInstruction,
     GdbMiAttachment,
     GdbModule,
@@ -110,8 +111,12 @@ class FaultInjectDebugEngine:
     def finish(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
         return GdbStopRecord(reason="function-finished", stopped_thread="1")
 
-    def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
-        return GdbStopRecord(reason="signal-received", stopped_thread="1")
+    def continue_background(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
+        # The fake never leaves a guest running, so it reports the run's stop at once (#3244).
+        return GdbStopRecord(reason="breakpoint-hit", stopped_thread="1")
+
+    def interrupt(self, attachment: GdbMiAttachment) -> GdbHalt:
+        return GdbHalt(halted_by="already_halted")
 
     def backtrace(self, attachment: GdbMiAttachment, *, max_frames: int = 64) -> GdbBacktrace:
         del attachment, max_frames
