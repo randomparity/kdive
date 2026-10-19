@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-10-19)
+Proposed
 
 Proposed for issue #3244. Qualifies ADR-0034 decision 5: the tools stay synchronous and
 jobless, but a call may now return with the guest still running. Other ADR-0034, ADR-0216,
