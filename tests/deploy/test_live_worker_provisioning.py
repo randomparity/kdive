@@ -11,7 +11,7 @@ import stat
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -50,6 +50,17 @@ def _text(path: Path) -> str:
         text = re.sub(
             r"(?m)^- name: Import reusable [^\n]+\n(?:^(?!- name:).+\n)*",
             expand_worker_import,
+            text,
+        )
+
+        # Inline the credential installation files at the call sites main.yml imports them.
+        def expand_task_import(match: re.Match[str]) -> str:
+            imported = ROLE / "tasks" / match.group(1)
+            return imported.read_text(encoding="utf-8").removeprefix("---\n")
+
+        text = re.sub(
+            r"(?m)^- name: Import the [^\n]+\n  ansible\.builtin\.import_tasks: (\S+)\n",
+            expand_task_import,
             text,
         )
         # Follow the shared endpoint task at the same call site the runner executes it.
@@ -3971,3 +3982,59 @@ def test_authority_proof_issues_its_one_day_pki_through_authority_pki() -> None:
     assert proof.index(f'{pki}leaf --dir "$secrets" --name proof-client') < proof.index(
         "live_vm_host_authority_server_certificate_source: $secrets/server.pem"
     )
+
+
+def test_credential_installation_is_shared_with_the_renewal_playbook() -> None:
+    """#3273: the credential tasks moved verbatim into files main.yml imports in place."""
+    tasks_dir = ROLE / "tasks"
+
+    def task_list(name: str) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], yaml.safe_load((tasks_dir / name).read_text()))
+
+    authority = task_list("authority_credentials.yml")
+    worker = task_list("worker_authority_tls.yml")
+    assert [task["name"] for task in authority] == ["Install external-boot authority credentials"]
+    assert [task["name"] for task in worker] == [
+        "Inspect the fixed-worker authority secrets root without following links",
+        "Refuse a substituted fixed-worker authority secrets root",
+        "Create the protected fixed-worker authority secrets root",
+        "Install protected fixed-worker authority TLS files",
+    ]
+    install = authority[0]
+    assert install["ansible.builtin.copy"] == {
+        "src": "{{ item.source }}",
+        "dest": "{{ live_vm_host_authority_credentials_dir }}/{{ item.name }}",
+        "owner": "{{ live_vm_host_authority_account }}",
+        "group": "{{ live_vm_host_authority_account }}",
+        "mode": "0400",
+    }
+    assert [item["name"] for item in install["loop"]] == [
+        "database-dsn",
+        "service-credential",
+        "server-certificate",
+        "server-ca",
+        "worker-client-ca",
+        "health-client-certificate",
+        "health-client-key",
+    ]
+    assert install["no_log"] is True
+    assert install["register"] == "live_vm_host_authority_credentials"
+    assert install["notify"] == "Restart the external-boot authority service after deployed changes"
+    files = worker[3]
+    assert files["ansible.builtin.copy"]["mode"] == "0440"
+    assert files["ansible.builtin.copy"]["owner"] == "root"
+    assert files["ansible.builtin.copy"]["group"] == "{{ live_vm_host_authority_client_group }}"
+    assert [item["name"] for item in files["loop"]] == [
+        "server-ca",
+        "client-certificate",
+        "client-key",
+    ]
+    assert files["no_log"] is True
+    assert worker[2]["ansible.builtin.file"]["mode"] == "0750"
+
+    main = [task.get("name") for task in task_list("main.yml")]
+    worker_import = main.index("Import the fixed-worker authority TLS installation")
+    assert main[worker_import + 1] == "Import reusable worker slots and runtime paths"
+    authority_import = main.index("Import the external-boot authority credential installation")
+    assert main[authority_import - 1] == "Record the installed external-boot authority revision"
+    assert main[authority_import + 1] == "Install protected authority S3 credentials"
