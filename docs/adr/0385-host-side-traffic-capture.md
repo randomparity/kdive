@@ -169,6 +169,28 @@ rows, so the pcap is never inline-served.
   whose `filter-dump` QOM schema changes could break the object-add. The op fails as
   `CONTROL_FAILURE`, observable via per-kind job telemetry.
 
+### Amendment (2026-10-19): QMP failures arrive as replies (#3270)
+
+This corrects the attach premise in the Decision: "`qemuMonitorCommand` surfaces QMP failures as
+a generic `libvirtError`" is wrong. libvirt v12.0.0 `qemuMonitorJSONArbitraryCommand` returns
+QEMU's reply text whatever it contains. Measured on Fedora 44 with QEMU 10.2.2 and libvirt 12.0.0,
+`virsh qemu-monitor-command` exits 0 for both cases:
+
+- a refused `filter-dump` `object-add`, whose reply is
+  `{"error":{"class":"GenericError","desc":"net dump: can't open …"}}`;
+- an `object-del` of an absent id, whose reply carries the error `object '…' not found`.
+
+The local attach and detach therefore parse every reply:
+
+- An absent filter on `object-del` is tolerated.
+- `net dump: can't open` on `object-add` is `CONFIGURATION_ERROR` (`reason=pcap_open_failed`),
+  carrying the pcap remediation.
+- Any other error reply is `CONTROL_FAILURE` (`reason=capture_filter_rejected`).
+- A malformed reply is `CONTROL_FAILURE` (`reason=qmp_reply_malformed`).
+
+Only the QMP class token reaches failure details, because the description names a host path. A
+raised `libvirtError` stays the transport-failure path.
+
 ## Considered & rejected
 
 - **Real `tcpdump -i <tap>` on local-libvirt** — rejected: SLIRP user-mode networking exposes
