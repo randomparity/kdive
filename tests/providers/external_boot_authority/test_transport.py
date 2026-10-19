@@ -232,8 +232,9 @@ def _certificate(
     dns_name: str | None = None,
     valid: bool = True,
     valid_seconds: float = 300,
+    not_yet_valid: bool = False,
 ) -> x509.Certificate:
-    now = datetime.now(UTC)
+    now = datetime.now(UTC) + timedelta(minutes=5 if not_yet_valid else 0)
     builder = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject)]))
@@ -285,6 +286,7 @@ def _tls_material(
     client_valid: bool = True,
     ca_valid: bool = True,
     client_valid_seconds: float = 300,
+    server_not_yet_valid: bool = False,
 ) -> dict[str, Path]:
     ca_key = ec.generate_private_key(ec.SECP256R1())
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "authority test CA")])
@@ -356,6 +358,7 @@ def _tls_material(
         eku=server_eku,
         dns_name=server_name or authority_server_name(instance),
         valid=server_valid,
+        not_yet_valid=server_not_yet_valid,
     )
     client_key = ec.generate_private_key(ec.SECP256R1())
     client_ca_name = ca_name if trusted_client else foreign_name
@@ -885,7 +888,7 @@ def test_tls_health_rechecks_unchanged_client_certificate_expiry(tmp_path: Path)
             await check_tls_health(listener, config)
             fingerprint = hashlib.sha256(config.health_client_certificate.read_bytes()).digest()
             await asyncio.sleep(2.25)
-            with pytest.raises(HostReadinessError, match="tls-health: handshake-failed"):
+            with pytest.raises(HostReadinessError, match="tls-health: certificate-expired"):
                 await check_tls_health(listener, config)
             current = hashlib.sha256(config.health_client_certificate.read_bytes()).digest()
             assert current == fingerprint
@@ -1134,6 +1137,73 @@ def test_tls_health_redacts_unreadable_material(tmp_path: Path, network: bool) -
             await listener.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("network", [False, True])
+@pytest.mark.parametrize(
+    ("material_options", "reason"),
+    [
+        ({"server_valid": False}, "certificate-expired"),
+        ({"server_not_yet_valid": True}, "certificate-not-yet-valid"),
+        ({"client_valid": False}, "certificate-expired"),
+        ({"ca_valid": False}, "certificate-expired"),
+        ({"trusted_client": False}, "handshake-failed"),
+    ],
+)
+def test_tls_health_names_certificate_validity_failure(
+    tmp_path: Path, network: bool, material_options: dict[str, Any], reason: str
+) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a", **material_options)
+        config = _config(tmp_path, material)
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            pytest.fail("TLS health never authenticates a worker")
+
+        listener = (
+            await _network_listener(config, authenticate)
+            if network
+            else await serve_authority_transport(config, authenticate)
+        )
+        await listener.start_serving()
+        try:
+            with pytest.raises(HostReadinessError) as raised:
+                await check_tls_health(listener, config)
+        finally:
+            await listener.close()
+        assert str(raised.value) == f"tls-health: {reason}"
+        assert raised.value.details == {"component": "tls-health", "reason": reason}
+        assert raised.value.__cause__ is None
+        assert raised.value.__suppress_context__ is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("verify_code", "reason"),
+    [
+        (9, "certificate-not-yet-valid"),
+        (10, "certificate-expired"),
+        (20, "handshake-failed"),
+    ],
+)
+def test_tls_failure_reason_maps_peer_verification_codes(
+    tmp_path: Path, verify_code: int, reason: str
+) -> None:
+    config = _config(tmp_path, _tls_material(tmp_path, "authority-a"))
+    error = ssl.SSLCertVerificationError()
+    error.verify_code = verify_code
+
+    assert host._tls_failure_reason(config, error) == reason
+
+
+def test_tls_failure_reason_ignores_unreadable_local_certificate(tmp_path: Path) -> None:
+    config = _config(tmp_path, _tls_material(tmp_path, "authority-a", client_valid=False))
+    config.health_client_certificate.unlink()
+    config.server_ca.unlink()
+    config.server_ca.write_bytes(b"not a certificate")
+
+    assert host._tls_failure_reason(config, OSError()) == "handshake-failed"
 
 
 @pytest.mark.parametrize("operation", ["acknowledge-takeover", "execute-mutation"])
