@@ -126,6 +126,8 @@ local_worker_host_svirt_image_directories:
   - /var/lib/kdive/rootfs-cache
   # An uploaded rootfs's staged base backs the overlay in place, so qemu reads it here.
   - /var/lib/kdive/rootfs-uploads
+  # The confined domain creates its traffic-capture pcap here via filter-dump (ADR-0385, #3270).
+  - /var/lib/kdive/pcap
 
 # Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
 # testcontainers gate, split into engine and compose halves because they carry different gates.

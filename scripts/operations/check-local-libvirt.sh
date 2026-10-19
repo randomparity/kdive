@@ -43,6 +43,9 @@ readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
 # The worker's image root; with INSTALL_STAGING it must carry svirt_image_t on an
 # SELinux-enforcing host, or a confined domain cannot write or map its disks (ADR-0640).
 readonly ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
+# The traffic-capture pcap root the confined domain writes into (ADR-0640 amendment, #3270). The
+# provider hardcodes it, so this is a test seam, not an operator knob.
+readonly PCAP_DIR="${CHECK_PCAP_DIR:-/var/lib/kdive/pcap}"
 # libguestfs builds its supermin appliance from a host kernel under this dir; Debian/Ubuntu ship
 # /boot/vmlinuz-* root:0600, unreadable by a non-root worker, so build-fs fails (ADR-0222, #694).
 # ppc64le names the kernel /boot/vmlinux-* (ELF, no 'z') instead — probe both patterns so a POWER
@@ -324,13 +327,13 @@ else
 fi
 
 if _selinux_enforcing; then
-  for dir in "${ROOTFS_DIR}" "${INSTALL_STAGING}"; do
+  for dir in "${ROOTFS_DIR}" "${INSTALL_STAGING}" "${PCAP_DIR}"; do
     label="$(_selinux_type "${dir}")"
     if [[ "${label}" == svirt_image_t ]]; then
       note_ok "${dir} is labeled svirt_image_t"
     else
       note_fail "${dir} is labeled ${label}, not svirt_image_t (SELinux enforcing; a confined domain cannot write or map its images, ADR-0640)" \
-        "on Fedora/Enterprise Linux run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which labels the default /var/lib/kdive/rootfs and /var/lib/kdive/install; for another path or distribution family run: source examples/local-libvirt/selinux-label.sh && kdive_label_svirt_image $(printf %q "${dir}")"
+        "on Fedora/Enterprise Linux run 'KDIVE_LIFECYCLE_WITNESS_DATABASE_URL=... just prepare-local-libvirt-host', which labels the default /var/lib/kdive/rootfs, /var/lib/kdive/install and /var/lib/kdive/pcap; for another path or distribution family run: source examples/local-libvirt/selinux-label.sh && kdive_label_svirt_image $(printf %q "${dir}")"
     fi
   done
 fi

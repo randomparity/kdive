@@ -280,7 +280,9 @@ def test_local_fresh_probe_waits_for_prior_accepted_monitor_mutation() -> None:
         command = json.loads(raw)
         assert "id" not in command
         if command["execute"] == "object-del":
-            raise libvirt.libvirtError("DeviceNotFound")
+            return json.dumps(
+                {"error": {"class": "DeviceNotFound", "desc": "absent"}, "id": "libvirt-15"}
+            )
         with monitor_lock:
             return json.dumps({"return": [], "id": "libvirt-16"})
 
@@ -344,3 +346,21 @@ def test_local_composition_snapshots_allowlisted_uri_for_post_release_spool(
     assert configuration.resource_id == resource_id
     assert configuration.uri == "qemu:///session"
     assert b"KDIVE_DATABASE_URL" not in encoded
+
+
+def test_local_quiescence_treats_a_raised_monitor_error_as_a_transport_failure() -> None:
+    """Absence arrives only as a QMP reply; a raised "not found" is not proof of absence (#3270)."""
+    resource_id = uuid4()
+
+    def monitor(domain: object, raw: str, flags: int) -> str:
+        raise libvirt.libvirtError("Device 'kdive-dump-job' not found")
+
+    probe = LocalLibvirtCaptureQuiescence(
+        resource_id=resource_id,
+        connect=lambda: _ProbeConnection([]),
+        monitor=monitor,
+    )
+
+    with pytest.raises(CategorizedError, match="detach failed") as excinfo:
+        probe.prove_absent(resource_id, "kdive-local", "kdive-dump-job")
+    assert excinfo.value.category is ErrorCategory.CONTROL_FAILURE
