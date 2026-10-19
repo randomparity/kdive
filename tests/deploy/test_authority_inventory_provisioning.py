@@ -89,6 +89,9 @@ def test_units_and_identity():
     assert service["Service"]["RuntimeMaxSec"] == "120s"
     assert service["Service"]["TimeoutStopSec"] == "1s"
     assert service["Unit"]["PartOf"] == "kdive-authority-inventory.socket"
+    # A connection must never start a stopped or failed authority.
+    assert service["Unit"]["Requisite"] == "kdive-external-boot-authority.service"
+    assert "Requires" not in service["Unit"]
     assert sock["Socket"]["SocketUser"] == "root"
     assert sock["Socket"]["SocketMode"] == "0660"
     assert sock["Socket"]["SocketGroup"] == "kdive-authority-observer"
@@ -97,6 +100,59 @@ def test_units_and_identity():
     assert "After" not in sock["Unit"]
     assert not {"environmentfile", "loadcredential", "passenvironment"} & set(service["Service"])
     assert service["Service"]["ExecStart"].startswith("/usr/bin/env -i PATH=/usr/bin:/bin ")
+
+
+def test_collector_unit_carries_the_authority_hardening():
+    """Every authority-unit protection the collector does not need relaxed is applied."""
+    units = Path("deploy/systemd/system")
+    service = configparser.ConfigParser(interpolation=None, strict=False)
+    service.read_string((units / "kdive-authority-inventory@.service").read_text())
+    for key in (
+        "ProtectControlGroups",
+        "ProtectKernelModules",
+        "ProtectKernelTunables",
+        "ProtectKernelLogs",
+        "RestrictSUIDSGID",
+        "RestrictRealtime",
+        "LockPersonality",
+        "MemoryDenyWriteExecute",
+        "NoNewPrivileges",
+        "PrivateDevices",
+        "ProtectHome",
+        "PrivateTmp",
+    ):
+        assert service["Service"][key] == "yes", key
+    assert service["Service"]["ProtectSystem"] == "strict"
+    assert service["Service"]["SystemCallArchitectures"] == "native"
+    assert service["Service"]["CapabilityBoundingSet"] == ""
+
+
+def test_teardown_withdraws_the_inventory_boundary_first():
+    play = yaml.safe_load(Path("deploy/ansible/playbooks/authority_host_teardown.yml").read_text())
+    names = [task["name"] for task in play[0]["tasks"]]
+    withdraw = names.index(
+        "Withdraw the proof-only inventory boundary before retiring the authority"
+    )
+    assert withdraw < names.index("Stop and disable the external-boot authority service")
+    task = play[0]["tasks"][withdraw]
+    assert (Path("deploy/ansible/playbooks") / task["ansible.builtin.include_tasks"]).resolve() == (
+        SHARED.resolve()
+    )
+    assert task["vars"] == {
+        "inventory_observer_enabled": False,
+        "inventory_observer_authority_enabled": False,
+    }
+    inspected = next(
+        t for t in play[0]["tasks"] if t["name"] == "Inspect removed authority endpoint artifacts"
+    )
+    assert {
+        "/etc/systemd/system/kdive-authority-inventory.socket",
+        "/etc/systemd/system/kdive-authority-inventory@.service",
+        "/etc/tmpfiles.d/kdive-authority-inventory.conf",
+        "/usr/libexec/kdive-authority-inventory-client.py",
+        "/opt/kdive-authority-inventory",
+        "/run/kdive-authority-inventory",
+    } <= set(inspected["loop"])
 
 
 def verifier():

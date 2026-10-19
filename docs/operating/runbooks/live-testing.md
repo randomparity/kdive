@@ -1812,7 +1812,11 @@ Before changing collector bytes the roles withdraw its socket and wait for all i
 Readiness failures leave it disabled. Disabling its opt-in withdraws its listener, units and
 root-owned runtime/client, preserving the locked account and all authority/guest state. Disable
 before rolling back to source without the collector. Re-running unchanged provisioning must
-retain the same grants. Offline tests and unit-file inspection do not prove these permissions.
+retain the same grants. `authority_host_teardown.yml` withdraws the boundary the same way before it retires the authority.
+A connection never starts the authority: while the authority is stopped or failed, each
+accepted instance fails instead. The listener stops with the authority, so after an
+out-of-band authority stop and start, re-run the role to restore it.
+Offline tests and unit-file inspection do not prove these permissions.
 
 **Native proof remains a separately approved operation.** Review an execution packet naming the
 exact candidate, one existing idle local lane, native architecture, runtime/install budget and

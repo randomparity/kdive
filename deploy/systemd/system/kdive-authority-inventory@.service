@@ -1,7 +1,8 @@
 [Unit]
 Description=KDIVE one-shot proof inventory
 PartOf=kdive-authority-inventory.socket
-Requires=kdive-external-boot-authority.service
+# Requisite, not Requires: a connection fails rather than starting a stopped or failed authority.
+Requisite=kdive-external-boot-authority.service
 After=kdive-external-boot-authority.service
 
 [Service]
@@ -23,5 +24,14 @@ ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 RestrictAddressFamilies=AF_UNIX
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
 UMask=0077
 InaccessiblePaths=-/etc/kdive/credentials/provider-authority -/var/lib/kdive/provider-authority/journal -/run/kdive/provider-authority/proof-control
