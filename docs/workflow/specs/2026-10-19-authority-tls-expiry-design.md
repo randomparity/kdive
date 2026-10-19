@@ -70,6 +70,9 @@ deliberately drives the unit through a TLS-drift restart loop, which now reaches
 start-limit-hit, and then restarts it in its `always` block. That block therefore runs
 `systemctl reset-failed kdive-external-boot-authority.service` immediately before
 `Restore authority readiness after drift proofs`; the reset exists only inside the proof.
+Earlier role starts and the ACL-drift restarts may exhaust the budget before the TLS-drift
+restart; that restart is already `failed_when: false` and its assertion only requires the unit
+not to be active, so the proof holds either way and the reset still precedes the restore.
 
 **Considered and rejected.**
 
