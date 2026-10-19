@@ -302,8 +302,8 @@ Add one run-control line to the served toolset guide `docs/guide/toolsets/debug.
 resource copy `src/kdive/mcp/resources/_content/toolsets-debug.md`: `debug.continue` with
 `wait=false` leaves the guest running, other tools refuse with `inferior_running` until
 `debug.interrupt` or `debug.continue`. Regenerate `docs/guide/reference/debug.md` and
-`src/kdive/cli/commands/_generated_verbs.py` with their existing recipes. Gates: `just lint`, `just type`,
-focused tests, then the managed pre-push `just ci`.
+`src/kdive/cli/commands/_generated_verbs.py` with their existing recipes.
+Gates: `just lint`, `just type`, focused tests, then the managed pre-push `just ci`.
 
 Live proof needs separate operator admission:
 
