@@ -23,26 +23,31 @@ next blocking resume.
 `debug.continue` gains `wait` (default `true`, today's behavior). `wait=false` resumes and
 returns `running` without waiting; the guest keeps running after the call and the per-session
 lock is released. The engine owns one execution state per attachment — `attach_halted`,
-`halted` or `running` — changed only by engine calls made under the existing per-session lock.
+`halted` or `running` — written only inside engine calls under the per-session lock. A resume
+sets `running` before it is written; only an observed stop sets `halted`, and a resume gdb
+refuses restores it. So `running` means "not known to be halted".
 
-While `running`, every gdb/MI command other than the stop-reading paths is refused before it
-is sent, with `debug_attach_failure` / `inferior_running`. `debug.interrupt` reports how the
-guest became halted in a `halted_by` field: `interrupt` (it halted a running guest), `stop_event`
-(a stop that arrived during the run, such as a breakpoint, is reported now), `attach` (the first
-gdb attachment halted it) or `already_halted` (nothing ran; no command is sent). A running
-interrupt that yields no stop fails with `infrastructure_failure` / `transport_stall` and the state
-stays `running`. `debug.continue` with `wait=true` on a running guest waits for its stop without
-resuming again. Ending a running session halts it before the engine exits, so detach keeps
-today's proven path.
+While `running`, the runtime refuses every operation except `debug.continue` and
+`debug.interrupt` before any gdb/MI command, with `debug_attach_failure` / `inferior_running`.
+`debug.interrupt` reports `halted_by`, derived from the stop itself: `interrupt` for its own
+`signal-received` stop, `stop_event` for any other stop (a breakpoint during the run), `attach`
+when the first gdb attachment halted the guest, and `already_halted` when nothing ran (no
+command sent). A running interrupt with no stop fails `infrastructure_failure` /
+`transport_stall` and the state stays `running`. `debug.continue(wait=true)` on a running guest
+waits for its stop without resuming again. Ending a running session halts it before gdb exits,
+keeping the detach path the session cells prove, and reports `guest_execution="unknown"` when
+that halt stalls. The locked engine call is shielded from request cancellation, and an op
+re-checks that its session is live after taking the lock.
 
 ## Consequences
 
 An agent can let the kernel run for as long as it likes, drive a workload with other tools,
 then break in. A stop that ends a run is reported by the next `debug.interrupt` or
 `debug.continue`, never by other operations, which refuse until then. A waiting
-`debug.continue` still holds the lock, so an interrupt queues behind it for the wait it asked
-for (60 seconds at most). The state is process-local like the attachment it sits on: a
-server restart loses it and the next attachment halts the guest again. No schema, migration or
+`debug.continue` still holds the lock, so an interrupt queues behind it for its wait plus the
+interrupt-back (about 80 seconds at most). A cancelled request now keeps the session busy until
+its engine call returns. The state is process-local like the attachment it sits on: a server
+restart loses it and the next attachment halts the guest again. No schema, migration or
 lifecycle protocol changes.
 
 ## Considered & rejected
@@ -57,3 +62,7 @@ lifecycle protocol changes.
   non-waiting continue already covers.
 - **Let other operations collect a stop that arrived during a run and proceed.** judgment:
   the stop's reason would reach no caller, and every operation would pay a stream read.
+- **Guard inside `execute_mi_command`.** verified: `commands/modules.py` at `bb85e0eba` maps a
+  command error without gdb's own "running" text to `module_decode_failed`
+  (`_module_walk_error`) or swallows it (`_raise_unless_decode_failure`), so the module tools
+  would misreport the refusal; the guard sits at op dispatch instead.
