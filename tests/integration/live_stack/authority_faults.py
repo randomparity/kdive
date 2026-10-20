@@ -85,7 +85,8 @@ _POLL_S = 0.5
 _REASON = "authority recovery fault proof (#3185)"
 _AUTHORITY_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
 _MAX_RECEIPT_REPORT_BYTES = 4096
-# Read-only, root via the lane's existing observer seam; it takes UUIDs only.
+# Read-only, root through the sudo seam the proof barrier already requires (the ADR-0800
+# inventory collector returns fixed facts only); it takes UUIDs only.
 _RECEIPT = """
 import hashlib
 import json

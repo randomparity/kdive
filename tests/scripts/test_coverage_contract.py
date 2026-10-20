@@ -176,6 +176,22 @@ _RUN_TOOLS = {
     "runs.release_external_boot",
 }
 _LIFECYCLE_TOOLS = _SYSTEM_TOOLS | _RUN_TOOLS
+_RUN_SYSTEM_JOB_TOOLS = {
+    "jobs.cancel",
+    "jobs.list",
+    "jobs.wait",
+    "runs.bind",
+    "runs.complete_build",
+    "runs.create",
+    "runs.get",
+    "runs.list",
+    "runs.set",
+    "systems.get",
+    "systems.list",
+}
+_RUN_SYSTEM_JOB_NODE = (
+    "tests/integration/test_run_system_job_tool_cells_live.py::test_run_system_job_tool_cell"
+)
 
 
 def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> None:
@@ -282,6 +298,8 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     # As for power: the local ppc64le cells (#2818's) share the arch-free scenario ids.
     assert len(local_control) == 120 and {c.node_id for c in local_control} == {_CONTROL_NODE}
     assert {c.node_id for c in control if c.provider == "remote-libvirt"} == {None}
+    service = [c for c in contract.cells if c.operation in _RUN_SYSTEM_JOB_TOOLS]
+    assert len(service) == 220 and {c.node_id for c in service} == {_RUN_SYSTEM_JOB_NODE}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -301,6 +319,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_CAPTURE_TOOLS,
         *(c.operation for c in contract.cells if c.operation.startswith("debug.")),
         *_LOCAL_CONTROL_TOOLS,
+        *_RUN_SYSTEM_JOB_TOOLS,
     }
     limits = [c for c in contract.cells if c.owner == 3118]
     local_limits = [c for c in limits if c.provider == "local-libvirt"]

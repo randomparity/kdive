@@ -70,3 +70,6 @@ provider_authority_host_qemu_packages:
   RedHat:
     x86_64: qemu-kvm
     ppc64le: qemu-kvm
+
+# Local proof-only inventory mediator (ADR-0800).
+provider_authority_host_inventory_observer_enabled: false
