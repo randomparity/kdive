@@ -443,16 +443,22 @@ async def _resolve_published(
     """
     before, activation_id = owner
     identities: list[str] = []
+    deadline = time.monotonic() + ROW_DEADLINE_S
     try:
-        identities = [
-            str(row["object_identity"])
-            for key, row in (await quarantine_rows(db_url)).items()
-            if key not in before
-            and (row["system_id"], row["activation_id"], row["status"])
-            == (system.system_id, activation_id, "quarantined")
-        ]
-        if identities:
-            await _resolve(system, resolve, identities)
+        while not identities and time.monotonic() < deadline:
+            identities = [
+                str(row["object_identity"])
+                for key, row in (await quarantine_rows(db_url)).items()
+                if key not in before
+                and (row["system_id"], row["activation_id"], row["status"])
+                == (system.system_id, activation_id, "quarantined")
+            ]
+            if not identities:
+                await asyncio.sleep(_POLL_S)
+        if not identities:
+            failure.add_note("no owned quarantine row observed after the abort")
+            return
+        await _resolve(system, resolve, identities)
     except Exception as cleanup:  # noqa: BLE001 - recorded on the primary failure below
         failure.add_note(f"owned quarantine residue {identities}: {type(cleanup).__name__}")
 
@@ -483,8 +489,9 @@ async def quarantined_orphan(
             assert receipt.present, "the private cleanup receipt is absent before the abort"
             assert await quarantine_rows(db_url) == before, "a quarantine row preceded the abort"
             await require_hold_budget(db_url, job, attempt)
-            await hold.abort()
+            # Set first: a lost abort reply must still clean up a row the abort published.
             aborted = True
+            await hold.abort()
             row_id, row = await _published_row(db_url, before)
         assert (
             row["system_id"],
