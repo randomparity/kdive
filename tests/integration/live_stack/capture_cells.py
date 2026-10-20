@@ -44,7 +44,7 @@ from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.deep_lifecycle import deep_body
 from tests.integration.live_stack.image_smoke import Endpoint, parse_probe, ssh
-from tests.integration.live_stack.power_snapshots import domain_defined, domain_kernel, grants
+from tests.integration.live_stack.power_snapshots import domain_defined, grants
 from tests.integration.live_stack.scenario import (
     CellRun,
     Provision,
@@ -637,7 +637,7 @@ async def boot(
         tree=tree,
         manifest=dict(manifest),
         tmp=tmp,
-        installed_kernel=domain_kernel,
+        installed_kernel=guest.lane.installed_kernel,
     )
     run.artifacts.extend(deep.assertions.values())
     return run_id, await ssh_endpoint(guest.op, guest.system_id)
