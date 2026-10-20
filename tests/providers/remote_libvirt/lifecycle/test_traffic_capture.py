@@ -28,6 +28,8 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
 
 _DOMAIN = "kdive-sys-remote"
+
+pytestmark = pytest.mark.usefixtures("fake_domain_monitor")
 _POOL = "kdivepool"
 _POOL_XML = "<pool type='dir'><target><path>/var/lib/libvirt/images</path></target></pool>"
 _IFACE_XML = (
@@ -111,7 +113,7 @@ class _FakeDomain:
     def XMLDesc(self, flags: int) -> str:  # noqa: N802 - libvirt binding name
         return self._xml
 
-    def qemuMonitorCommand(self, cmd: str, flags: int) -> str:  # noqa: N802
+    def monitor(self, cmd: str, flags: int) -> str:
         parsed = json.loads(cmd)
         self.commands.append(parsed)
         exc = self.raise_on.get(parsed["execute"])

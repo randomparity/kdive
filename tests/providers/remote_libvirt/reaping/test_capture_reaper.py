@@ -36,6 +36,8 @@ from tests.providers.remote_libvirt.conftest import libvirt_error
 _SID = UUID("00000000-0000-0000-0000-0000000000cc")
 _JID = UUID("00000000-0000-0000-0000-0000000000dd")
 
+pytestmark = pytest.mark.usefixtures("fake_domain_monitor")
+
 _CERT_REFS = TlsCertRefs(
     client_cert_ref="secret://client-cert",
     client_key_ref="secret://client-key",  # pragma: allowlist secret
@@ -60,7 +62,7 @@ class _FakeDomain:
         self._monitor_error = monitor_error
         self.del_commands: list[str] = []
 
-    def qemuMonitorCommand(self, cmd: str, flags: int) -> str:  # noqa: N802
+    def monitor(self, cmd: str, flags: int) -> str:
         del flags
         self._calls.append("object-del")
         self.del_commands.append(cmd)

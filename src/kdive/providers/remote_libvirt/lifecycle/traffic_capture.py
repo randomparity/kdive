@@ -42,6 +42,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.traffic import TrafficCapturer as TrafficCapturer
 from kdive.providers.ports.traffic import pcap_volume_name
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
+from kdive.providers.remote_libvirt.connection.monitor import qemu_monitor_command
 from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
     remote_connection,
@@ -82,7 +83,6 @@ class _CapturePool(Protocol):
 
 class _CaptureDomain(Protocol):
     def XMLDesc(self, flags: int) -> str: ...  # noqa: N802 - libvirt binding name
-    def qemuMonitorCommand(self, cmd: str, flags: int) -> str: ...  # noqa: N802
 
 
 class _CaptureConn(Protocol):
@@ -381,7 +381,7 @@ class RemoteLibvirtTrafficCapture:
     ) -> None:
         cmd = {"execute": "object-add", "arguments": arguments}
         try:
-            domain.qemuMonitorCommand(json.dumps(cmd), 0)
+            qemu_monitor_command(domain, json.dumps(cmd), 0)
         except libvirt.libvirtError as exc:
             raise self._control_failure("adding capture filter on", domain_name) from exc
 
@@ -390,7 +390,7 @@ class RemoteLibvirtTrafficCapture:
     ) -> None:
         cmd = {"execute": "object-del", "arguments": {"id": qom_id}}
         try:
-            domain.qemuMonitorCommand(json.dumps(cmd), 0)
+            qemu_monitor_command(domain, json.dumps(cmd), 0)
         except libvirt.libvirtError as exc:
             if tolerate_missing and _is_not_found(exc):
                 _log.info("capture filter %s already absent on %s; continuing", qom_id, domain_name)

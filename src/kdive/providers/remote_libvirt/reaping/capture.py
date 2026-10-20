@@ -39,16 +39,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import OrphanedCapture
 from kdive.providers.ports.traffic import capture_qom_id, pcap_volume_name
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_for_resource
+from kdive.providers.remote_libvirt.connection.monitor import qemu_monitor_command
 from kdive.providers.remote_libvirt.connection.transport import remote_connection
 from kdive.providers.remote_libvirt.reaping.connections import open_libvirt_reaper
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
 _log = logging.getLogger(__name__)
-
-
-class _ReaperDomain(Protocol):
-    def qemuMonitorCommand(self, cmd: str, flags: int) -> str: ...  # noqa: N802
 
 
 class _ReaperVolume(Protocol):
@@ -61,7 +58,7 @@ class _ReaperPool(Protocol):
 
 
 class _ReaperConn(Protocol):
-    def lookupByName(self, name: str) -> _ReaperDomain: ...  # noqa: N802
+    def lookupByName(self, name: str) -> object: ...  # noqa: N802
     def storagePoolLookupByName(self, name: str) -> _ReaperPool: ...  # noqa: N802
     def close(self) -> object: ...
 
@@ -133,7 +130,7 @@ class RemoteLibvirtCaptureReaper:
             raise _control("looking up", capture.domain_name) from exc
         cmd = {"execute": "object-del", "arguments": {"id": qom_id}}
         try:
-            domain.qemuMonitorCommand(json.dumps(cmd), 0)
+            qemu_monitor_command(domain, json.dumps(cmd), 0)
         except libvirt.libvirtError as exc:
             if _is_not_found(exc):
                 _log.info(
