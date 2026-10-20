@@ -57,7 +57,8 @@ seam's "is not positively classified" refusal → `CliTierRefusal`. Exit 1 with 
 verb paths and option names, never argument values.
 
 Rejections: ADR-0795 decision 3. `validation` accepts `CliUsageError` (a declared option's value
-refused, or a required option missing; the evidence records the refused option names), a `configuration_error` envelope, or a tool error naming validation. `authorization` and
+refused, a required option missing, or a token no option takes, as for a non-boolean value of
+a boolean flag; the evidence records that class and the refused option names), a `configuration_error` envelope, or a tool error naming validation. `authorization` and
 `project-isolation` read a `CliTierRefusal` as `authorization_denied`: the server hid the tool
 from the caller's catalog, and no call was made. An ADR-0756 filtered list still needs the empty
 page, so a tier refusal there fails the cell. `authentication` runs the same command line with

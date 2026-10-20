@@ -302,7 +302,16 @@ _VERBS = {verb.tool: verb for verb in GENERATED_VERBS}
 
 
 class CliUsageError(LiveStackToolError):
-    """kdivectl refused the command line itself (exit 2, no envelope): no call was made."""
+    """kdivectl refused the command line itself (exit 2, no envelope): no call was made.
+
+    ``kind`` classes argparse's diagnostic (``invalid-value``, ``required``, ``unrecognized``)
+    or is ``handler`` for a verb handler's own refusal; ``refused`` names options, never values.
+    """
+
+    def __init__(self, tool: str, kind: str, refused: str) -> None:
+        self.kind = kind
+        self.refused = refused
+        super().__init__(tool, f"kdivectl refused the command line ({kind}): {refused}")
 
 
 class CliTierRefusal(LiveStackToolError):
@@ -351,6 +360,18 @@ def _refused_flags(done: CliRun) -> str:
     """The option names argparse's last diagnostic line cites; never their values."""
     last = done.stderr.strip().splitlines()[-1:] or [""]
     return " ".join(re.findall(r"--[a-z0-9-]+", last[0])) or "no option named"
+
+
+def _refusal_kind(done: CliRun) -> str:
+    """The class of a usage refusal, from the last diagnostic line argparse or a handler wrote."""
+    last = (done.stderr.strip().splitlines()[-1:] or [""])[0]
+    if "arguments are required" in last:
+        return "required"
+    if "unrecognized arguments" in last:
+        return "unrecognized"
+    if last.startswith("kdivectl") and ": error: argument " in last:
+        return "invalid-value"
+    return "handler"
 
 
 def _text(value: object) -> str:
@@ -452,7 +473,7 @@ def _result(tool: str, argv: list[str], done: CliRun) -> ToolResponse | list[Too
             return [ToolResponse.model_validate(item) for item in inner]
         return ToolResponse.model_validate(payload)
     if done.code == 2:
-        raise CliUsageError(tool, f"{verb} refused the command line: {_refused_flags(done)}")
+        raise CliUsageError(tool, _refusal_kind(done), _refused_flags(done))
     if done.code == 3 and _TIER_REFUSED in done.stdout:
         raise CliTierRefusal(tool, f"{verb}: the caller's catalog hides {tool}")
     errors = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
@@ -618,7 +639,7 @@ def _shape(result: Result) -> dict[str, object]:
     """A message-free description of ``result`` for evidence."""
     if isinstance(result, CliUsageError):
         # Option names only: which declared option kdivectl refused, never its value.
-        return {"usage_error": True, "refused": result.message.rsplit(": ", 1)[-1]}
+        return {"usage_error": result.kind, "refused": result.refused}
     if isinstance(result, CliTierRefusal):
         return {"catalog_hidden": True, "error_category": ErrorCategory.AUTHORIZATION_DENIED.value}
     if isinstance(result, LiveStackToolError):

@@ -1244,7 +1244,7 @@ def test_cli_call_requires_the_category_exit_code(monkeypatch: pytest.MonkeyPatc
                 2, "", "usage: kdivectl\nkdivectl: error: unrecognized arguments: --kind x\n"
             ),
             tool_cells.CliUsageError,
-            "refused the command line: --kind",
+            "refused the command line (unrecognized): --kind",
         ),
         (
             tool_cells.CliRun(1, "", "error: boom\n"),
@@ -1316,13 +1316,13 @@ def test_cli_tier_refusal_is_an_authorization_denial(
 
 
 def test_cli_validation_accepts_a_usage_refusal_only_on_cli() -> None:
-    usage = tool_cells.CliUsageError("t", "kdivectl t refused the command line: --limit")
+    usage = tool_cells.CliUsageError("t", "invalid-value", "--limit")
     assert rejected_by_validation("cli", usage)
     assert not rejected_by_validation("direct", usage)
     assert not rejected_by_validation("gateway", usage)
     assert rejected_by_validation("cli", _invoke_error(None))
     assert rejected_by_validation("cli", LiveStackToolError("t", "1 validation error for call"))
-    assert tool_cells._shape(usage) == {"usage_error": True, "refused": "--limit"}
+    assert tool_cells._shape(usage) == {"usage_error": "invalid-value", "refused": "--limit"}
 
 
 _AUTH = tool_cells.CliRun(1, "", "error: authentication failed; verify KDIVE_TOKEN\n")
@@ -1382,3 +1382,22 @@ def test_run_kdivectl_drives_the_entry_point() -> None:
     )
     assert done.code == 1
     assert "error: connection failed" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("stderr", "kind"),
+    [
+        ("kdivectl resources availability: error: unrecognized arguments: maybe\n", "unrecognized"),
+        (
+            "kdivectl images describe: error: the following arguments are required: image_id\n",
+            "required",
+        ),
+        (
+            "kdivectl jobs wait: error: argument --timeout-s: must be a finite number, not 'inf'\n",
+            "invalid-value",
+        ),
+        ("error: give exactly one of --project or --investigation-id\n", "handler"),
+    ],
+)
+def test_cli_usage_refusal_records_its_class(stderr: str, kind: str) -> None:
+    assert tool_cells._refusal_kind(tool_cells.CliRun(2, "", stderr)) == kind

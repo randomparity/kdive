@@ -32,7 +32,8 @@ handler override (`HANDLER_OVERRIDES`).
    caller instead, so a translation gap cannot strand owned state.
 3. **Rejections.** `authentication`: a forged token must exit 1 with the fixed
    `error: authentication failed` diagnostic, and the issued token must not. `validation`:
-   exit 2 with no envelope (a declared option's value refused before any call), a
+   exit 2 with no envelope (kdivectl refused the command line before any call: an option's
+   value, a missing required option, or a token no option takes; the evidence records which), a
    `configuration_error` envelope, or a tool error naming a validation error, as on `direct`.
    `authorization` and `project-isolation` keep ADR-0722's envelope rules, read from the printed
    envelope; the generic seam's exit-3 refusal of a tool the caller's catalog hides counts as
