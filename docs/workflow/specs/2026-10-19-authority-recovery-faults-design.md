@@ -4,9 +4,10 @@ Design proposal for issue #3185 (parent #3152, epic #2803), on source baseline `
 
 - Frozen scope: [WORK:SCOPE](https://github.com/randomparity/kdive/issues/3185#issuecomment-6280583516),
   token `q3185-93a16704`. The operator approved the scope and exclusions on 2026-10-16.
-- This design, and in particular the proof-control change in
-  [ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md), needs a separate operator
-  decision before implementation.
+- The operator approved this design on 2026-10-19, including the proof-control change in
+  [ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md). The approval covers Arm B's
+  scope as stated below, the blockers below as narrower blockers, and a live plan to be decided
+  after PR CI is green.
 - The implementation plan is transient and not committed.
 
 ## Problem
