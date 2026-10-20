@@ -478,6 +478,11 @@ class Session:
             if writer is not None:
                 writer.close()
 
+    async def run_free(self, session_id: str) -> None:
+        """Resume without waiting; the guest must be left running."""
+        env = await self.op("debug.continue", session_id=session_id, wait=False)
+        assert env.status == "running", f"the non-waiting continue answered {env.status}"
+
     async def proceed(self, session_id: str, wait: float = _STOP_WAIT_S) -> ToolResponse:
         """An operator ``debug.continue`` with the read workload."""
         return await self.resumed(
@@ -619,27 +624,47 @@ async def continue_body(s: Session) -> dict[str, object]:
 
 
 async def interrupt_body(s: Session) -> dict[str, object]:
-    """The interrupt stops a running guest and reports why; fails while none can be running.
+    """The interrupt halts a guest left running between calls and says what halted it (#3244).
 
-    ``debug.start_session``'s gdbstub reachability probe leaves the guest paused (ADR-0184), so
-    the cell first observes whether the started session's guest still runs.
+    ``debug.continue`` with ``wait=false`` leaves the guest running, so it answers SSH while
+    attached. The breakpoint arm records whichever path the ``vfs_read`` stop takes: the
+    non-waiting resume's own reply, or a waiting continue that collects it without resuming
+    again. Ending a session while its guest runs must leave the guest answering.
     """
     session_id = await s.start()
-    running = await answers(s.endpoint)
+    await s.run_free(session_id)
+    assert await answers(s.endpoint), "the guest does not run between calls"
     env = await s.exposed(session_id=session_id)
     assert env.status == "stopped" and env.data.get("timed_out") is False, "no clean stop"
-    assert not await answers(s.endpoint), "the guest still answers after the interrupt"
-    await s.register(session_id)
-    reason = env.data.get("reason")
-    await s.end(session_id)
-    assert running, (
-        "debug.start_session's gdbstub probe had already halted the guest; the interrupt's own "
-        "first gdb attach would halt a running one before -exec-interrupt, and no public "
-        "operation leaves a live session running, so debug.interrupt never meets a running "
-        "guest (known product gap)"
+    halted_by, reason = env.data.get("halted_by"), env.data.get("reason")
+    assert (halted_by, reason) == ("interrupt", "signal-received"), (
+        f"the interrupt reported {halted_by!r} for {reason!r}"
     )
-    assert reason == "signal-received", f"the interrupt stopped for {reason!r}"
-    return {"halted": True, "reason": reason}
+    assert not await answers(s.endpoint), "the guest still answers after the interrupt"
+    assert await s.register(session_id) >= KERNEL_BASE, "rip is not a kernel address"
+    number = await s.breakpoint(session_id)
+    started = await s.op("debug.continue", session_id=session_id, wait=False)
+    path = "resume_reply" if started.status == "stopped" else "waiting_continue"
+    if path == "waiting_continue":
+        assert started.status == "running", f"the resume answered {started.status}"
+        started = await s.resumed(
+            s.op("debug.continue", session_id=session_id, timeout_sec=_STOP_WAIT_S)
+        )
+    require_stop(started, "breakpoint-hit")
+    await s.op("debug.clear_breakpoint", session_id=session_id, number=number)
+    await s.run_free(session_id)
+    assert await answers(s.endpoint), "the guest does not run after the breakpoint arm"
+    ended = await s.op("debug.end_session", session_id=session_id)
+    s.sessions.remove(session_id)
+    assert ended.status == "detached", f"the session ended {ended.status}"
+    assert "guest_execution" not in ended.data, "the halt before detach failed"
+    assert await answers_again(s.endpoint), "the guest did not answer after a running end"
+    return {
+        "halted_by": halted_by,
+        "reason": reason,
+        "breakpoint_path": path,
+        "ended_running": True,
+    }
 
 
 async def advance_body(s: Session) -> dict[str, object]:
