@@ -330,8 +330,13 @@ takes a fence callback that is checked before it tears anything down. The exact 
 designed against the observed failure and recorded in ADR 0794 if it has viable alternatives.
 
 The fix needs a red-green unit test that drives a reclaimed attempt's late failure against a
-`ready` System, plus the gauntlet code review. The failing cell is then rerun. Changing the
-attempt fence itself, or adding a migration, is a new scope checkpoint.
+`ready` System, plus the gauntlet code review. The failing cell is then rerun. Try a
+handler-only fence first. Any of these is a new scope checkpoint:
+
+- changing the attempt fence itself;
+- adding a migration;
+- changing the provider port's `provision` signature (`src/kdive/providers/ports/lifecycle.py`);
+- changing any non-libvirt provider.
 
 ## Operator decisions (settled 2026-10-20: option (a) for each)
 
