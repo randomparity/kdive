@@ -324,7 +324,8 @@ class GdbMiEngine(Protocol):
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` / ``transport_stall`` when a running
-                guest reports no stop after the interrupt.
+                guest reports no stop after the interrupt; ``DEBUG_ATTACH_FAILURE`` /
+                ``interrupt_refused`` when gdb answers the interrupt with ``^error``.
         """
         ...
 

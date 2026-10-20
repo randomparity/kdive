@@ -1768,6 +1768,31 @@ def test_a_stalled_interrupt_names_its_recovery(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_a_refused_interrupt_names_ending_the_session(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            refused = {
+                "-exec-interrupt": [
+                    {"type": "result", "message": "error", "payload": {"msg": "closed"}}
+                ]
+            }
+            runtime = _runtime(_RunningAttach(_FakeMiController(cast(Any, refused))))
+            resp = await run_engine_op_with_runtime(
+                pool,
+                request_context(),
+                session_id,
+                runtime,
+                _op_for("interrupt", runtime, session_id),
+                while_running=True,
+            )
+        assert resp.error_category == "debug_attach_failure"
+        assert resp.data["code"] == "interrupt_refused"
+        assert resp.suggested_next_actions == ["debug.end_session"]
+
+    asyncio.run(_run())
+
+
 def test_a_cancelled_op_keeps_the_session_lock_until_its_engine_call_ends(
     migrated_url: str,
 ) -> None:

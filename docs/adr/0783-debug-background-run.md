@@ -33,13 +33,14 @@ While `running`, the runtime refuses every operation except `debug.continue` and
 `signal-received` stop with signal `SIGINT`, `stop_event` for any other stop (a breakpoint
 during the run), `attach` when the first gdb attachment halted the guest, and `already_halted`
 when nothing ran (no command sent). A running interrupt with no stop fails
-`infrastructure_failure` / `transport_stall` and the state stays `running`.
+`infrastructure_failure` / `transport_stall`, one gdb refuses fails `debug_attach_failure` /
+`interrupt_refused` at once, and in both cases the state stays `running`.
 `debug.continue(wait=true)` on a running guest waits for its stop without resuming again. Ending
 a running session halts it before gdb exits, keeping the detach path the session cells prove,
-and reports `guest_execution="unknown"` when that halt stalls. On request cancellation the lock
-holder keeps awaiting the shielded engine call until it finishes before re-raising, so the lock
-is never freed under a running thread; an op re-checks that its session is live after taking the
-lock.
+and reports `guest_execution="unknown"` when that halt stalls or gdb refuses it. On request
+cancellation the lock holder keeps awaiting the shielded engine call until it finishes before
+re-raising, so the lock is never freed under a running thread; an op re-checks that its session
+is live after taking the lock.
 
 ## Consequences
 

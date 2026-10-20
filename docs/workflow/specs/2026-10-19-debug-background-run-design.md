@@ -110,7 +110,10 @@ watchpoints, memory, registers, symbols, stack, disassembly and modules.
 
 `_op_failure`, which passes no next actions today, maps the error's `details["code"]` to them:
 `inferior_running` → `["debug.interrupt", "debug.continue"]`, `transport_stall` →
-`["debug.interrupt", "debug.end_session"]`; every other code keeps today's empty list.
+`["debug.interrupt", "debug.end_session"]`, `interrupt_refused` → `["debug.end_session"]`; every
+other code keeps today's empty list. `interrupt_refused` is an interrupt (the tool's or a resume's
+interrupt-back) that gdb answers with `^error` and no stop: it fails at once as
+`debug_attach_failure` instead of waiting out the stop bound, and the state stays `running`.
 
 ### Tool contract
 
@@ -127,7 +130,7 @@ watchpoints, memory, registers, symbols, stack, disassembly and modules.
 - Every other gdb/MI tool returns the runtime guard's `inferior_running` refusal while the guest
   runs.
 - `debug.end_session` returns `data.guest_execution="unknown"` only when the session's guest
-  was running and the halt before detach stalled (see *Ending a session*). Otherwise its reply is
+  was running and the halt before detach stalled or was refused (see *Ending a session*). Otherwise its reply is
   unchanged.
 - Wrapper docstrings carry the agent-facing contract:
   - `debug.continue` and `debug.interrupt` state all of the above.
@@ -166,7 +169,7 @@ process-scoped (ADR-0034 decision 1).
 `controller.exit()`. That is best-effort and bounded by about 20 seconds, so gdb exits from a
 halted target. Exiting from a halted target is the path the existing `debug.end_session` cell
 proves resumes the guest. `reap` returns `False` only when it had to halt a `running`
-attachment and that halt stalled; a never-attached session, a halted attachment and a drgn-live
+attachment and that halt stalled or was refused; a never-attached session, a halted attachment and a drgn-live
 session return `True`.
 `end_session` runs `reap` through `asyncio.to_thread` under the session lock. When the halt
 stalled, it adds `data.guest_execution="unknown"` to the detached reply.

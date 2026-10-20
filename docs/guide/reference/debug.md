@@ -78,7 +78,9 @@ wait=True, which waits for that stop without resuming again; debug.continue with
 wait=False on a running guest returns 'running' again. Another call on the same session,
 debug.interrupt included, waits while a wait=True continue is in progress; use
 wait=False when you need to break in. A transport_stall failure leaves the guest's state
-unknown: call debug.interrupt again or debug.end_session.
+unknown: call debug.interrupt again or debug.end_session. If gdb refuses the
+interrupt-back the call fails with debug_attach_failure code interrupt_refused; end the
+session.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
