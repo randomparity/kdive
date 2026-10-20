@@ -825,23 +825,24 @@ async def on_allocation(
     sizing: Sizing,
     body: Body,
     provider: Provider = LOCAL,
+    project: str = PROJECT,
 ) -> None:
-    """Hold one Allocation of ``sizing`` for ``body``; record a cleanup attempt on failure.
+    """Hold one Allocation of ``sizing`` in ``project`` for ``body``; record a cleanup attempt.
 
     ``body`` proves ``cleanup`` itself, because its owned fixtures are removed after release.
     """
     token = mint_role_token(
-        issuer, project=PROJECT, agent_session=f"{PROJECT}-sess", role="operator"
+        issuer, project=project, agent_session=f"{project}-sess", role="operator"
     )
     async with LiveStackClient.over_http(base_url, token) as op:
-        await seed_metering(db_url, PROJECT)
+        await seed_metering(db_url, project)
         in_use = await capacity_in_use(op)
         domains = await asyncio.to_thread(provider.domains)
         allocation = ok(
             await scalar(
                 op,
                 "allocations.request",
-                project=PROJECT,
+                project=project,
                 resource=provider.resource,
                 **sizing.request(),
             ),

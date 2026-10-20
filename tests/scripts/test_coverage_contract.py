@@ -40,7 +40,7 @@ def test_failure_ownership_and_remote_quiescence_binding(inventory: Inventory) -
         )
         assert cell.scenario_id == cell.id
         assert cell.assertions == (failure, "no-duplicates", "protected-state", "cleanup")
-        bound = _LIMIT_NODES.get(cell.provider) if cell.owner == 3118 else None
+        bound = {3118: _LIMIT_NODES, 3117: _FAULT_NODES}.get(cell.owner, {}).get(cell.provider)
         assert cell.node_id == bound
     proofs = [cell for cell in cells if cell.operation == "remote-quiescence"]
     assert {cell.guest_arch for cell in proofs} == set(inventory.arches)
@@ -156,6 +156,11 @@ _LIMIT_NODES = {
     "remote-libvirt": (
         "tests/integration/test_resource_limits_live.py::test_remote_resource_boundary"
     ),
+}
+_FAULTS_LIVE = "tests/integration/test_orchestration_faults_live.py"
+_FAULT_NODES = {
+    "local-libvirt": f"{_FAULTS_LIVE}::test_local_orchestration_fault",
+    "remote-libvirt": f"{_FAULTS_LIVE}::test_remote_orchestration_fault",
 }
 _REMOTE_DEEP_NODE = (
     "tests/integration/test_remote_deep_lifecycle_live.py::test_remote_deep_lifecycle"
@@ -326,7 +331,14 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert len(local_limits) == 3 and {c.node_id for c in local_limits} == {_LIMITS_NODE}
     bound_limits = [c for c in limits if c.node_id is not None]
     assert len(bound_limits) == 6
-    unbound = [c for c in contract.cells if c.operation not in bound and c not in bound_limits]
+    faults = [c for c in contract.cells if c.owner == 3117]
+    assert len(faults) == 6
+    assert {(c.provider, c.node_id) for c in faults} == set(_FAULT_NODES.items())
+    unbound = [
+        c
+        for c in contract.cells
+        if c.operation not in bound and c not in bound_limits and c not in faults
+    ]
     assert all(c.node_id is None for c in unbound)
     assert len({c.id for c in contract.cells}) == len(contract.cells)
     recovery = [c for c in contract.cells if c.operation == "ops.recover_build_use"]
