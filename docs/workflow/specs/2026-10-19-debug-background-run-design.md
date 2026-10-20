@@ -108,9 +108,9 @@ the command path would surface as `module_decode_failed` or silence. At dispatch
 refuses the same way and sends no gdb/MI command. Those tools are `debug.advance`, breakpoints,
 watchpoints, memory, registers, symbols, stack, disassembly and modules.
 
-The guard and the interrupt stall raise `CategorizedError` with their next actions in
-`details["suggested_next_actions"]`. `_op_failure`, which passes none today, forwards that list
-to `ToolResponse.failure_from_error`; errors without it keep today's empty list.
+`_op_failure`, which passes no next actions today, maps the error's `details["code"]` to them:
+`inferior_running` → `["debug.interrupt", "debug.continue"]`, `transport_stall` →
+`["debug.interrupt", "debug.end_session"]`; every other code keeps today's empty list.
 
 ### Tool contract
 
@@ -146,9 +146,9 @@ The per-session `asyncio.Lock` remains the only serialization, and no new lock i
 existing gaps are closed because the execution state depends on them:
 
 - **Cancellation.** Inside the lock, the `asyncio.to_thread` engine call runs as a task. The
-  lock holder awaits it through `asyncio.shield`; on `CancelledError` it keeps awaiting the
-  same task, in a loop so a repeated cancel cannot escape, until the task is done, and only then
-  re-raises the cancellation. A plain `shield` is not enough: the cancelled coroutine would still
+  lock holder awaits it through `asyncio.wait`, which shields the task from the caller's
+  cancellation; on `CancelledError` it keeps awaiting the same task, in a loop so a repeated
+  cancel cannot escape, until the task is done, and only then re-raises the cancellation. A plain `shield` is not enough: the cancelled coroutine would still
   leave the `async with` block and free the lock while the thread drives gdb. With the loop, a
   cancelled MCP request (client timeout or cancel notification) keeps the lock until the thread
   finishes, so one gdb/MI stream never has two writers. `end_session`'s `to_thread(reap)` runs
@@ -228,8 +228,8 @@ redaction of stop records are unchanged, so no threat model is required.
 ## Global Constraints
 
 Python 3.14; existing dependencies only; preserve the x86_64 and ppc64le targets. No migration,
-schema, lifecycle protocol, ADR index or persisted-data change. ADR-0783 stays Proposed until the
-implementing PR merges; cite #3244, not the ADR, from `src/` and `tests/` until then.
+schema, lifecycle protocol, ADR index or persisted-data change. The implementing PR moves ADR-0783
+to Accepted, per the ADR README's ratification rule.
 
 ## Validation
 
