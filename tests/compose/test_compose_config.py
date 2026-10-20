@@ -685,14 +685,14 @@ def test_vmcore_retention_setting_reaches_every_app_role(monkeypatch: pytest.Mon
     ],
 )
 def test_store_credentials_require_absent_or_complete_nonempty_pair(
-    access: str | None, secret: str | None, valid: bool
+    access: str | None, secret: str | None, valid: bool, tmp_path: Path
 ) -> None:
     env = os.environ.copy()
     for key, value in (("COMPOSE_S3_ACCESS_KEY", access), ("COMPOSE_S3_SECRET_KEY", secret)):
         env.pop(key, None)
         if value is not None:
             env[key] = value
-    result = subprocess.run(
+    rendered = subprocess.run(
         [
             "docker",
             "compose",
@@ -711,12 +711,28 @@ def test_store_credentials_require_absent_or_complete_nonempty_pair(
         text=True,
         timeout=60,
     )
-    exit_code = result.returncode
-    assert (exit_code == 0) is valid
+    # Every input renders: Compose v2 cannot express the pair rule, so the store enforces it.
+    assert rendered.returncode == 0, rendered.stderr
+    services = json.loads(rendered.stdout)["services"]
+    store = services["seaweedfs"]
+    fake_weed = tmp_path / "weed"
+    fake_weed.write_text('#!/bin/sh\necho "weed $*"\n')
+    fake_weed.chmod(0o755)
+    # Rendered config keeps `$$` escaped; the container runtime receives a single `$`.
+    entrypoint = [part.replace("$$", "$") for part in store["entrypoint"]]
+    started = subprocess.run(
+        [*entrypoint, *store["command"]],
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin", **store["environment"]},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (started.returncode == 0) is valid
     if not valid:
-        assert "Set both COMPOSE_S3 credentials to nonempty values" in result.stderr
+        assert "Set both COMPOSE_S3 credentials to nonempty values" in started.stderr
+        assert started.stdout == ""
         return
-    services = json.loads(result.stdout)["services"]
+    assert started.stdout == "weed mini -dir=/data\n"
     expected = (access or "kdive", secret or "kdive-demo-secret")
     for name in (*_APP_SERVICES, "seaweedfs"):
         credentials = services[name]["environment"]

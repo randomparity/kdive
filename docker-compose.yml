@@ -37,12 +37,6 @@ x-readyz-cadence: &readyz_cadence
   retries: 5
   start_period: 30s
 
-# Defaults apply only when both signer variables are absent. Presence of either
-# requires a complete nonempty pair before Compose can render any service.
-x-s3-credential-pair: >-
-  ${COMPOSE_S3_ACCESS_KEY+${COMPOSE_S3_SECRET_KEY:?Set both COMPOSE_S3 credentials to nonempty values}}
-  ${COMPOSE_S3_SECRET_KEY+${COMPOSE_S3_ACCESS_KEY:?Set both COMPOSE_S3 credentials to nonempty values}}
-
 # Shared non-database backend wiring. Each process supplies its own database authority below.
 x-backends: &backends
   KDIVE_OIDC_ISSUER: http://oidc:8080/default
@@ -104,14 +98,27 @@ services:
     # rather than `unless-stopped` — it matches the units' `Restart=on-failure` (ADR-0114
     # section 4) and does not make this dev-credential backend boot-persistent.
     restart: on-failure
+    # Demo defaults apply only when both signer variables are absent; presence of either
+    # requires a complete nonempty pair. The store refuses to start otherwise, so no app
+    # role can become ready. Checked here because Compose v2 evaluates a nested `:?` eagerly.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        case "$$S3_CREDENTIAL_PAIR" in ""|as) ;; *) false ;; esac \
+          && [ -n "$$AWS_ACCESS_KEY_ID" ] && [ -n "$$AWS_SECRET_ACCESS_KEY" ] \
+          || { echo "Set both COMPOSE_S3 credentials to nonempty values" >&2; exit 1; }
+        exec weed "$$@"
+      - weed
     command: ["mini", "-dir=/data"]
     # The image declares VOLUME /data; naming it keeps the artifacts bucket across a plain
     # `down` instead of orphaning an anonymous volume per `up` (ADR-0552).
     volumes:
       - kdive-seaweedfs-data:/data
     environment:
-      AWS_ACCESS_KEY_ID: ${COMPOSE_S3_ACCESS_KEY:-kdive}  # pragma: allowlist secret — local dev only
-      AWS_SECRET_ACCESS_KEY: ${COMPOSE_S3_SECRET_KEY:-kdive-demo-secret} # pragma: allowlist secret — local dev only
+      S3_CREDENTIAL_PAIR: "${COMPOSE_S3_ACCESS_KEY+a}${COMPOSE_S3_SECRET_KEY+s}"
+      AWS_ACCESS_KEY_ID: ${COMPOSE_S3_ACCESS_KEY-kdive}  # pragma: allowlist secret — local dev only
+      AWS_SECRET_ACCESS_KEY: ${COMPOSE_S3_SECRET_KEY-kdive-demo-secret} # pragma: allowlist secret — local dev only
     ports:
       - "${KDIVE_SEAWEEDFS_PORT:-127.0.0.1:8333}:8333"
     healthcheck:
