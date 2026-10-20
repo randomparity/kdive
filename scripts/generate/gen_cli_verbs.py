@@ -10,7 +10,8 @@ generator only emits the descriptor data.
 Per parameter (after resolving any ``#/$defs`` reference and unwrapping the Pydantic
 ``[T, null]`` optional wrapper): JSON-Schema
 ``type`` -> argparse type (``string``/``integer``/``number`` -> ``str``/``int``/``float``,
-``boolean`` -> ``store_true``); ``enum`` -> ``choices``; array-of-string -> ``append``;
+``boolean`` -> ``store_true``, or the ``--flag``/``--no-flag`` pair when the boolean is
+required or defaults to true); ``enum`` -> ``choices``; array-of-string -> ``append``;
 ``required`` -> ``required=True``; ``description`` -> flag help. Flag names come from
 :func:`kdive.cli.reserved_flags.derive_cli_flag`; a parameter that would derive to a
 :data:`RESERVED_CLI_FLAGS` name is a generation error.
