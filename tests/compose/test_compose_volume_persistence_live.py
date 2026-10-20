@@ -1,8 +1,8 @@
 """Executable proof that the reference Compose data volumes survive a plain `down` (ADR-0552).
 
 Drives the committed ``docker-compose.yml`` under a unique project name and free host ports,
-starting only the three services whose images declare a ``VOLUME``. None of them has a
-``build:`` or a ``depends_on``, so nothing is built and no other service starts.
+starting only three services. SeaweedFS is built once from the production Compose source
+before timed starts; each start disables rebuilding. No other service starts.
 
 The proof never invokes ``just compose-down`` or ``scripts/live-stack/stack-down.sh``: both act on
 the *default* project, which is the operator's own stack, and ``stack-down.sh --wipe`` additionally
@@ -20,8 +20,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
+import sys
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -31,6 +34,7 @@ from pathlib import Path
 import boto3
 import psycopg
 import pytest
+from botocore import UNSIGNED
 from botocore.client import Config as BotoConfig
 from botocore.exceptions import ClientError
 
@@ -52,7 +56,7 @@ _DATA_MOUNTS = {
 _TMPFS_SERVICE = "prometheus"
 _TMPFS_PATH = "/prometheus"
 
-#: Every service the proof starts. None has a `build:` or a `depends_on`.
+#: Explicit service selection excludes the app graph; SeaweedFS has its own preparation.
 _SERVICES = (*sorted(_DATA_MOUNTS), _TMPFS_SERVICE)
 
 _MARKER_TABLE = "kdive_volume_proof"
@@ -101,14 +105,25 @@ def _free_ports(count: int) -> list[int]:
             listener.close()
 
 
+class _ProofDeadline(BaseException):
+    """A phase stop must escape the readiness loops that retry Exception."""
+
+
 def _run(argv: tuple[str, ...], env: dict[str, str], *, timeout: int = 180) -> str:
+    remaining = float(env.get("_KDIVE_PROOF_DEADLINE", "inf")) - time.monotonic()
+    if remaining <= 0:
+        raise _ProofDeadline("Compose proof phase deadline expired")
     result = subprocess.run(
         argv,
         capture_output=True,
         text=True,
-        timeout=timeout,
+        timeout=min(timeout, remaining),
         check=True,
-        env={**os.environ, **env},
+        env={
+            key: value
+            for key, value in {**os.environ, **env}.items()
+            if key not in {"_KDIVE_PROOF_DEADLINE", "_KDIVE_PROOF_IMAGE_ID"}
+        },
     )
     return result.stdout
 
@@ -116,14 +131,22 @@ def _run(argv: tuple[str, ...], env: dict[str, str], *, timeout: int = 180) -> s
 def _compose(env: dict[str, str], *args: str, timeout: int = 180) -> str:
     # `--profile obs` renders prometheus; without it compose drops the service silently.
     started = time.monotonic()
+    progress = ("--progress", "plain") if args and args[0] == "build" else ()
     try:
         return _run(
-            ("docker", "compose", "-f", str(_COMPOSE_FILE), "--profile", "obs", *args),
+            ("docker", "compose", "-f", str(_COMPOSE_FILE), "--profile", "obs", *progress, *args),
             env,
             timeout=timeout,
         )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(
+            f"compose {args[0]} failed: {exc}; stdout={getattr(exc, 'stdout', None)!r}; "
+            f"stderr={getattr(exc, 'stderr', None)!r}",
+            flush=True,
+        )
+        raise
     finally:
-        if args and args[0] in {"up", "down"}:
+        if args and args[0] in {"build", "up", "down"}:
             # Visible on successful CI runs through --capture=tee-sys, including cleanup.
             print(f"compose {' '.join(args)}: {time.monotonic() - started:.3f} seconds", flush=True)
 
@@ -214,6 +237,15 @@ def _s3_when_ready(endpoint: str, *, deadline_s: float = 60.0):  # noqa: ANN202 
     while True:
         try:
             client.list_buckets()
+            anonymous = boto3.client(
+                "s3",
+                endpoint_url=endpoint,
+                region_name="us-east-1",
+                config=BotoConfig(signature_version=UNSIGNED),
+            )
+            with pytest.raises(ClientError) as denied:
+                anonymous.list_buckets()
+            assert denied.value.response["ResponseMetadata"]["HTTPStatusCode"] == 403
             return client
         except Exception:  # noqa: BLE001 - any startup error is retried until the deadline
             if time.monotonic() >= deadline:
@@ -270,11 +302,18 @@ def test_bucket_visibility_fails_at_its_deadline() -> None:
 
 @contextmanager
 def _isolated_stack() -> Iterator[tuple[dict[str, str], str, str, str]]:
-    token = uuid.uuid4().hex[:12]
+    if sys.platform != "linux" or threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("Compose proof requires the Linux main thread for phase deadlines")
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    if previous_timer != (0, 0):
+        raise RuntimeError("Compose proof requires an idle SIGALRM timer")
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    token = uuid.uuid4().hex
     project = f"kdive-volume-proof-{token}"
     postgres_port, seaweedfs_port, prometheus_port = _free_ports(3)
     env = {
         "COMPOSE_PROJECT_NAME": project,
+        "KDIVE_SEAWEEDFS_IMAGE": f"kdive-volume-proof:{token}",
         # Every published host port is overridden to an isolated loopback address and port:
         # the defaults (5432/8333/9090 on 127.0.0.1, ADR-0554) would still collide with
         # an operator's running stack on the same host.
@@ -284,10 +323,52 @@ def _isolated_stack() -> Iterator[tuple[dict[str, str], str, str, str]]:
     }
     dsn = f"postgresql://{_PG_CREDENTIALS}@127.0.0.1:{postgres_port}/kdive"
     endpoint = f"http://127.0.0.1:{seaweedfs_port}"
+
+    def expire(_signum, _frame):
+        raise _ProofDeadline("isolated Compose proof phase deadline expired")
+
+    owned = False
+    primary = None
+    tag = env["KDIVE_SEAWEEDFS_IMAGE"]
+    signal.signal(signal.SIGALRM, expire)
     try:
+        env["_KDIVE_PROOF_DEADLINE"] = str(time.monotonic() + 2400)
+        signal.setitimer(signal.ITIMER_REAL, 2400)
+        assert not _run(
+            ("docker", "image", "ls", "--quiet", "--no-trunc", tag), env, timeout=60
+        ).strip(), f"invocation image tag already exists: {tag}"
+        owned = True
+        print(f"preparing production SeaweedFS source as {tag}", flush=True)
+        _compose(env, "build", "seaweedfs", timeout=600)
+        image_id = _run(
+            ("docker", "image", "inspect", "--format", "{{.Id}}", tag), env, timeout=60
+        ).strip()
+        assert image_id, f"prepared image missing: {tag}"
+        env["_KDIVE_PROOF_IMAGE_ID"] = image_id
+        print(f"prepared {tag}: {image_id}", flush=True)
         yield env, project, dsn, endpoint
+    except BaseException as exc:
+        primary = exc
+        if isinstance(exc, (subprocess.TimeoutExpired, _ProofDeadline)):
+            exc.add_note(
+                f"Docker CLI/phase stopped; daemon completion/cleanup uncertain; tag={tag}"
+            )
+        raise
     finally:
-        _teardown(env, project)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            env["_KDIVE_PROOF_DEADLINE"] = str(time.monotonic() + 600)
+            signal.setitimer(signal.ITIMER_REAL, 600)
+            if owned:
+                _teardown(env, project)
+        except BaseException as cleanup:
+            if primary is None:
+                raise
+            primary.add_note(f"cleanup incomplete for {tag}: {cleanup}")
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
 def _teardown(env: dict[str, str], project: str) -> None:
@@ -296,17 +377,31 @@ def _teardown(env: dict[str, str], project: str) -> None:
         _compose(env, "down", "--volumes", "--remove-orphans", timeout=180)
     except Exception as exc:  # noqa: BLE001 - every absence probe must still run
         errors.append(f"down: {exc}")
-    remaining = _existing_volumes(env)
-    stranded = sorted(name for name in remaining if name.startswith(f"{project}_"))
-    if stranded:
-        errors.append(f"volumes remain: {stranded}")
     for kind, argv in (
+        ("volumes", ("docker", "volume", "ls", "--quiet")),
         ("containers", ("docker", "ps", "--all", "--quiet", "--filter", f"name={project}")),
         ("networks", ("docker", "network", "ls", "--quiet", "--filter", f"name={project}")),
     ):
-        left = _run(argv, env, timeout=60).strip()
-        if left:
-            errors.append(f"{kind} remain: {left}")
+        try:
+            left = _run(argv, env, timeout=60).strip()
+            if kind == "volumes":
+                left = " ".join(name for name in left.split() if name.startswith(f"{project}_"))
+            if left:
+                errors.append(f"{kind} remain: {left}")
+        except Exception as exc:  # noqa: BLE001 - remaining cleanup probes must run
+            errors.append(f"{kind}: {exc}")
+    tag = env["KDIVE_SEAWEEDFS_IMAGE"]
+    for action in ("remove", "verify"):
+        try:
+            present = _run(
+                ("docker", "image", "ls", "--quiet", "--no-trunc", tag), env, timeout=60
+            ).strip()
+            if present and action == "remove":
+                _run(("docker", "image", "rm", tag), env, timeout=60)
+            elif present:
+                errors.append(f"image tag remains: {tag}")
+        except Exception as exc:  # noqa: BLE001 - verification follows removal failure
+            errors.append(f"image {action} {tag}: {exc}")
     if errors:
         raise AssertionError(f"isolated Compose volume proof cleanup failed: {'; '.join(errors)}")
 
@@ -314,7 +409,15 @@ def _teardown(env: dict[str, str], project: str) -> None:
 def _up(env: dict[str, str]) -> None:
     # Always the explicit service list: a bare `up -d` would start the whole default graph
     # and build the app image via `migrate`, which defeats the isolation this proof relies on.
-    _compose(env, "up", "-d", "--wait", "--wait-timeout", "180", *_SERVICES, timeout=360)
+    _compose(
+        env, "up", "-d", "--no-build", "--wait", "--wait-timeout", "180", *_SERVICES, timeout=360
+    )
+    actual = _run(
+        ("docker", "inspect", "--format", "{{.Image}}", _container_id(env, "seaweedfs")),
+        env,
+        timeout=60,
+    ).strip()
+    assert actual == env["_KDIVE_PROOF_IMAGE_ID"], (actual, env["_KDIVE_PROOF_IMAGE_ID"])
 
 
 def test_plain_down_preserves_backend_state_and_down_volumes_resets_it() -> None:
@@ -386,3 +489,185 @@ def test_plain_down_preserves_backend_state_and_down_volumes_resets_it() -> None
         assert missing_bucket.value.response["Error"]["Code"] in {"NoSuchBucket", "NoSuchKey"}
         s3.create_bucket(Bucket=bucket)
         assert _s3_bucket_when_visible(s3, bucket) == 200
+
+
+@pytest.fixture
+def image_proof_boundary(monkeypatch):
+    """A shared image ID has two tags; only the proof's name may be removed."""
+    images = {"sibling:cache": "sha256:prepared"}
+    calls = []
+    timer = [0.0, 0.0]
+    monkeypatch.setattr(sys.modules[__name__], "_free_ports", lambda _: [1, 2, 3])
+    monkeypatch.setattr(signal, "getitimer", lambda _: tuple(timer))
+    monkeypatch.setattr(
+        signal,
+        "setitimer",
+        lambda _, seconds, interval=0: timer.__setitem__(slice(None), [seconds, interval]),
+    )
+    monkeypatch.setattr(signal, "getsignal", lambda _: signal.SIG_DFL)
+    monkeypatch.setattr(signal, "signal", lambda *args: calls.append(("signal", *args)))
+
+    def run(argv, env, *, timeout=180):
+        calls.append(argv)
+        tag = env.get("KDIVE_SEAWEEDFS_IMAGE", "unused")
+        if argv[1:3] == ("image", "ls"):
+            return images.get(argv[-1], "")
+        if argv[1:3] == ("image", "rm"):
+            images.pop(argv[-1])
+        if argv[1:3] == ("image", "inspect"):
+            return images[tag]
+        if argv[1] == "inspect":
+            return "sha256:prepared"
+        return ""
+
+    def compose(env, *args, timeout=180):
+        calls.append(args)
+        calls.append(("timeout", args[0], timeout))
+        if args[0] == "build":
+            images[env["KDIVE_SEAWEEDFS_IMAGE"]] = "sha256:prepared"
+        return "container"
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_run", run)
+    monkeypatch.setattr(module, "_compose", compose)
+    return images, calls, timer
+
+
+def test_prepares_once_before_yield_and_cleans_exact_tag(image_proof_boundary, monkeypatch):
+    images, calls, timer = image_proof_boundary
+    monkeypatch.setenv("KDIVE_SEAWEEDFS_IMAGE", "sibling:cache")
+    with _isolated_stack() as (env, *_):
+        tag = env["KDIVE_SEAWEEDFS_IMAGE"]
+        assert tag != "sibling:cache"
+        assert env["_KDIVE_PROOF_IMAGE_ID"] == "sha256:prepared"
+        assert sum(call[0] == "build" for call in calls) == 1
+        assert ("timeout", "build", 600) in calls
+        _up(env)
+        assert any("--no-build" in call and "180" in call for call in calls)
+        assert ("timeout", "up", 360) in calls
+    assert images == {"sibling:cache": "sha256:prepared"}
+    assert timer == [0, 0]
+    assert ("docker", "image", "rm", tag) in calls
+
+
+@pytest.mark.parametrize("failure", ["proof", "build", "cleanup", "cleanup_only"])
+def test_primary_failure_survives_owned_cleanup(image_proof_boundary, monkeypatch, failure):
+    images, calls, timer = image_proof_boundary
+    module = sys.modules[__name__]
+    original = module._compose
+
+    def compose(env, *args, timeout=180):
+        result = original(env, *args, timeout=timeout)
+        if args[0] == failure:
+            raise ValueError(failure)
+        if failure.startswith("cleanup") and args[0] == "down":
+            raise ValueError("cleanup")
+        return result
+
+    monkeypatch.setattr(module, "_compose", compose)
+    with (
+        pytest.raises(
+            AssertionError if failure == "cleanup_only" else ValueError,
+            match="proof" if failure == "cleanup" else failure.replace("_only", ""),
+        ) as error,
+        _isolated_stack(),
+    ):
+        if failure != "cleanup_only":
+            raise ValueError("proof")
+    assert images == {"sibling:cache": "sha256:prepared"}
+    assert timer == [0, 0]
+    if failure == "cleanup":
+        assert "cleanup" in error.value.__notes__[0]
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected", "message"),
+    [
+        ("work", _ProofDeadline, "phase"),
+        ("cleanup", _ProofDeadline, "cleanup"),
+        ("both", ValueError, "proof"),
+        ("transition", ValueError, "proof"),
+    ],
+)
+def test_deadline_stops_phase_and_restores_timer(
+    image_proof_boundary, monkeypatch, phase, expected, message
+):
+    images, calls, timer = image_proof_boundary
+    primary = ValueError("proof")
+    if phase in {"cleanup", "both"}:
+
+        def stop(*args):
+            raise _ProofDeadline("cleanup")
+
+        monkeypatch.setattr(sys.modules[__name__], "_teardown", stop)
+    if phase == "transition":
+        original_set = signal.setitimer
+
+        def expire_on_cancel(which, seconds, interval=0):
+            if seconds == 0 and timer[0] == 2400:
+                original_set(which, 0)
+                handler = next(call[2] for call in calls if call[0] == "signal")
+                handler(signal.SIGALRM, None)
+            return original_set(which, seconds, interval)
+
+        monkeypatch.setattr(signal, "setitimer", expire_on_cancel)
+    with pytest.raises(expected, match=message) as error, _isolated_stack():
+        if phase in {"both", "transition"}:
+            raise primary
+        if phase == "work":
+            handler = next(call[2] for call in calls if call[0] == "signal")
+            handler(signal.SIGALRM, None)
+    if phase in {"both", "transition"}:
+        assert error.value is primary
+        assert "cleanup" in primary.__notes__[0]
+    assert timer == [0, 0]
+    assert calls[-1] == ("signal", signal.SIGALRM, signal.SIG_DFL)
+    if phase == "work":
+        assert images == {"sibling:cache": "sha256:prepared"}
+
+
+@pytest.mark.parametrize("refusal", ["collision", "probe", "timer", "thread"])
+def test_refuses_before_mutating_owned_resources(image_proof_boundary, monkeypatch, refusal):
+    images, calls, timer = image_proof_boundary
+    module = sys.modules[__name__]
+    if refusal in {"collision", "probe"}:
+
+        def run(*args, **kwargs):
+            if refusal == "probe":
+                raise OSError("probe failed")
+            return "sha256:foreign"
+
+        monkeypatch.setattr(module, "_run", run)
+    elif refusal == "timer":
+        timer[:] = [12, 0]
+    else:
+        monkeypatch.setattr(threading, "current_thread", lambda: object())
+    with pytest.raises((AssertionError, OSError, RuntimeError)), _isolated_stack():
+        pytest.fail("refused context yielded")
+    assert not any(call[0] in {"build", "down", "docker"} for call in calls)
+    assert images == {"sibling:cache": "sha256:prepared"}
+
+
+def test_started_image_must_match_preparation(image_proof_boundary, monkeypatch):
+    with _isolated_stack() as (env, *_):
+        env["_KDIVE_PROOF_IMAGE_ID"] = "sha256:different"
+        with pytest.raises(AssertionError):
+            _up(env)
+
+
+def test_subprocess_deadline_clips_timeout_and_hides_private_fields(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(time, "monotonic", lambda: 10)
+
+    def run(argv, **kwargs):
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="ok")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    env = {"_KDIVE_PROOF_DEADLINE": "15", "_KDIVE_PROOF_IMAGE_ID": "private"}
+    assert _run(("unused",), env, timeout=600) == "ok"
+    assert observed["timeout"] == 5
+    assert not set(env) & observed["env"].keys()
+    env["_KDIVE_PROOF_DEADLINE"] = "10"
+    with pytest.raises(_ProofDeadline):
+        _run(("unused",), env)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
@@ -27,8 +28,8 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops.reconcile import reconcile as ops_reconcile
-from kdive.providers.infra.reaping import NullReaper
-from kdive.reconciler.loop import ALL_REPAIR_KINDS, reconcile_once
+from kdive.providers.infra.reaping import CaptureReaper, NullReaper, OwnedDomain
+from kdive.reconciler.loop import ALL_REPAIR_KINDS, ReconcileReport, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from tests.db_waits import wait_until_any_backend_waiting
@@ -109,6 +110,7 @@ def test_reconcile_now_resolves_orphaned_system_and_returns_summary(migrated_url
         assert isinstance(repair_counts, dict)
         assert repair_counts["orphaned_systems"] == 1
         assert resp.data["failures"] == ""
+        assert resp.data["repair_failures"] == []
         # The pending repair was actually performed, not just counted.
         assert await _teardown_job_count(migrated_url) == 1
         # The action was audited to platform_audit_log with the caller's held roles.
@@ -172,6 +174,7 @@ def test_reconcile_now_clean_state_returns_zero_summary(migrated_url: str) -> No
         assert isinstance(repeated_counts, dict)
         assert repeated_counts["module_volume_reap_jobs_enqueued"] == 0
         assert resp.data["failures"] == ""
+        assert resp.data["repair_failures"] == []
         # A pass with nothing to repair is still audited (it ran a control action).
         assert await _platform_audit_count(migrated_url) == 2
 
@@ -376,3 +379,113 @@ def test_register_forwards_repair_ports_to_handler(monkeypatch: pytest.MonkeyPat
         assert captured == {"pool": pool, "ctx": ctx, "ports": ports}
 
     asyncio.run(_run())
+
+
+_NINE_PERMISSION_FAILURES = {
+    "abandoned_jobs",
+    "terminal_authority_system_attempts",
+    "reaped_dump_volumes",
+    "reaped_captures",
+    "stale_write_leases",
+    "investigation_artifacts_gc_count",
+    "expired_build_artifacts_gc_count",
+    "system_artifact_rows_gc_count",
+    "local_system_object_versions_deleted",
+}
+
+
+def test_actual_server_role_reports_nine_permission_failures(
+    authority_role_dsns: Callable[[str], str],
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        # A registered external boundary activates the capture selection query. Empty state
+        # must never call the boundary itself; its permission failure is in Postgres.
+        ports = replace(_ports(), capture_reapers={"remote-libvirt": cast(CaptureReaper, object())})
+        async with _pool(authority_role_dsns("kdive_server")) as pool:
+            response = await ops_reconcile.reconcile_now(
+                pool,
+                _ctx(platform_roles=_OPERATOR),
+                ports=ports,
+            )
+        assert response.status == "error"
+        assert response.error_category == "infrastructure_failure"
+        assert response.suggested_next_actions == []
+        assert set(str(response.data["failures"]).split(",")) == _NINE_PERMISSION_FAILURES
+        details = response.data["repair_failures"]
+        assert isinstance(details, list)
+        assert {entry["repair_kind"] for entry in details if isinstance(entry, dict)} == (
+            _NINE_PERMISSION_FAILURES
+        )
+        assert all(
+            isinstance(entry, dict)
+            and entry
+            == {
+                "repair_kind": entry["repair_kind"],
+                "reason_code": "database_permission_denied",
+                "recovery": "periodic_reconciler",
+            }
+            for entry in details
+        )
+        assert await _platform_audit_count(migrated_url) == 1
+        async with _pool(authority_role_dsns("kdive_reconciler")) as pool:
+            report = await reconcile_once(
+                pool,
+                NullReaper(),
+                config=make_reconcile_config(capture_reapers=ports.capture_reapers),
+            )
+        assert report.failures == ()
+        assert report.repair_failures == ()
+
+    asyncio.run(_run())
+
+
+def test_unknown_external_failure_is_safe_and_preserves_sibling_counts(migrated_url: str) -> None:
+    sensitive = "synthetic-secret-login SQL SELECT /private/synthetic-path"
+
+    class FailingReaper(NullReaper):
+        async def list_owned(self) -> list[OwnedDomain]:
+            raise RuntimeError(sensitive)
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await seed_system(
+                seed, system_state=SystemState.READY, alloc_state=AllocationState.RELEASED
+            )
+        async with _pool(migrated_url) as pool:
+            response = await ops_reconcile.reconcile_now(
+                pool,
+                _ctx(platform_roles=_OPERATOR),
+                ports=replace(_ports(), reaper=FailingReaper()),
+            )
+        assert response.status == "error"
+        assert response.error_category == "infrastructure_failure"
+        counts = response.data["repair_counts"]
+        assert isinstance(counts, dict)
+        assert counts["orphaned_systems"] == 1
+        assert response.data["failures"] == "leaked_domains"
+        assert response.data["repair_failures"] == [
+            {
+                "repair_kind": "leaked_domains",
+                "reason_code": "repair_failed",
+                "recovery": "operator_inspection",
+            }
+        ]
+        assert sensitive not in response.model_dump_json()
+        assert response.suggested_next_actions == []
+
+    asyncio.run(_run())
+
+
+def test_legacy_failure_report_keeps_a_safe_explanation() -> None:
+    response = ops_reconcile._reconcile_response(
+        ReconcileReport.from_counts({}, ["abandoned_jobs"])
+    )
+    assert response.status == "error"
+    assert response.data["repair_failures"] == [
+        {
+            "repair_kind": "abandoned_jobs",
+            "reason_code": "repair_failed",
+            "recovery": "operator_inspection",
+        }
+    ]

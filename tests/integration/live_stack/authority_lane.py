@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import secrets
+import stat
 import subprocess  # noqa: S404 - fixed argv, no shell  # nosec B404
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -103,7 +104,7 @@ CONFIG_ENV = "LOCAL_AUTHORITY_LANE_CONFIG"
 SYSTEMS_TOML_ENV = "KDIVE_SYSTEMS_TOML"
 # The fixed worker input the fixture script copies onto the private daemon.
 FIXTURE_ROOTFS = "/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2"
-_AUTHORITY_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
+_COLLECTOR_REVISION = Path("/opt/kdive-authority-inventory/revision")
 _REVISION = "/opt/kdive-provider-authority/revision"
 _MAX_INVENTORY_BYTES = 1_048_576
 _TERMINAL = frozenset({"succeeded", "failed", "canceled"})
@@ -139,36 +140,6 @@ _REMOTE_ROOTS = (
     "AND state = 'registered' AND visibility = 'public' AND digest IS NOT NULL "
     "AND provenance->'root_spec' IS NOT NULL ORDER BY name"
 )
-
-# Root runs this with the authority's interpreter in isolated mode; its only argument is a UUID.
-_INVENTORY = """
-import json
-import os
-import sys
-from uuid import UUID
-
-import libvirt
-from defusedxml.ElementTree import fromstring
-
-if len(sys.argv) > 2:
-    raise SystemExit("inventory takes at most one System UUID")
-name = "kdive-" + str(UUID(sys.argv[1])) if len(sys.argv) == 2 else None
-roots = ("/var/lib/kdive/provider-authority/rootfs", "/var/lib/kdive/provider-authority/console")
-conn = libvirt.open("qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock")
-if conn is None:
-    raise SystemExit("authority daemon connection returned no handle")
-try:
-    domains = sorted(domain.name() for domain in conn.listAllDomains(0))
-    system = None
-    if name in domains:
-        domain = conn.lookupByName(name)
-        kind = fromstring(domain.XMLDesc(0)).get("type", "")
-        system = {"active": domain.isActive() == 1, "type": kind}
-finally:
-    conn.close()
-listing = {root: sorted(os.listdir(root)) for root in roots}
-print(json.dumps({"domains": domains, "roots": listing, "system": system}))
-"""
 
 
 class AuthorityLaneConfig(BaseModel):
@@ -216,36 +187,64 @@ class AuthorityInventory:
 def _domain_facts(value: object) -> DomainFacts | None:
     if value is None:
         return None
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or set(value) != {"active", "type"}:
         raise AssertionError("authority inventory System facts are malformed")
     active, kind = value.get("active"), value.get("type")
-    if not isinstance(active, bool) or not isinstance(kind, str):
+    if not isinstance(active, bool) or not isinstance(kind, str) or not kind:
         raise AssertionError("authority inventory System facts are malformed")
     return DomainFacts(active, kind)
 
 
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate inventory key")
+        result[key] = value
+    return result
+
+
 def authority_inventory(system_id: str | None = None) -> AuthorityInventory:
     """The authority daemon's domains, the private roots' entries and the System's domain facts."""
-    argv = ["sudo", "-n", _AUTHORITY_PYTHON, "-I", "-c", _INVENTORY]
+    argv = [
+        "sudo",
+        "-n",
+        "-u",
+        "kdive-authority-observer",
+        "--",
+        "/usr/bin/python3",
+        "-I",
+        "-S",
+        "/usr/libexec/kdive-authority-inventory-client.py",
+    ]
     if system_id is not None:
-        argv.append(str(UUID(system_id)))
+        system_id = str(UUID(system_id))
+        argv.append(system_id)
     result = subprocess.run(  # noqa: S603 - fixed argv  # nosec B603
         argv, capture_output=True, text=True, timeout=120.0, check=False
     )
     if result.returncode != 0:
         raise AssertionError(f"authority inventory exited {result.returncode}")
-    if len(result.stdout) > _MAX_INVENTORY_BYTES:
+    if len(result.stdout.encode("utf-8")) > _MAX_INVENTORY_BYTES:
         raise AssertionError("authority inventory output exceeds its bound")
-    data = json.loads(result.stdout)
+    try:
+        data = json.loads(result.stdout, object_pairs_hook=_unique_keys)
+    except ValueError as exc:
+        raise AssertionError("authority inventory is malformed") from exc
     if not isinstance(data, dict) or set(data) != {"domains", "roots", "system"}:
         raise AssertionError("authority inventory is malformed")
     roots = data["roots"]
-    if not isinstance(roots, dict):
+    if not isinstance(roots, dict) or set(roots) != {_AUTHORITY_ROOTFS, _AUTHORITY_CONSOLE}:
         raise AssertionError("authority inventory roots are malformed")
+    domains = _names(data["domains"], "domains")
+    facts = _domain_facts(data["system"])
+    selected_exists = system_id is not None and "kdive-" + system_id in domains
+    if selected_exists != (facts is not None):
+        raise AssertionError("authority inventory System selection is malformed")
     return AuthorityInventory(
-        _names(data["domains"], "domains"),
+        domains,
         {str(root): _names(names, "root") for root, names in roots.items()},
-        _domain_facts(data["system"]),
+        facts,
     )
 
 
@@ -288,6 +287,14 @@ def require_lane(config: AuthorityLaneConfig, base_url: str) -> str:
     assert installed.returncode == 0, "cannot read the installed authority revision with sudo -n"
     assert installed.stdout.strip() == config.installed_revision, (
         "the installed authority revision does not match the lane config"
+    )
+    metadata = _COLLECTOR_REVISION.lstat()
+    assert stat.S_ISREG(metadata.st_mode) and metadata.st_uid == 0, (
+        "collector revision must be a root-owned regular file"
+    )
+    assert stat.S_IMODE(metadata.st_mode) == 0o444, "collector revision must be read-only"
+    assert _COLLECTOR_REVISION.read_text().strip() == config.installed_revision, (
+        "the installed collector revision does not match the lane config"
     )
     running = _running_workers()
     require_deployed_revision(config, base_url, running)

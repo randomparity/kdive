@@ -95,7 +95,7 @@ async def _resolve_s3_head(
     source = entry.source
     if not isinstance(source, S3Source):
         return "not_s3"
-    if row is not None and row.get("state") == _REGISTERED:
+    if row is not None and row.get("state") == _REGISTERED and row.get("volume") is None:
         return "not_s3"  # realized row is preserved; no HEAD needed
     if source.digest is None:
         return "no_digest"
@@ -330,7 +330,9 @@ async def _persist_runtime_fields(
     cur = await conn.execute(
         "UPDATE image_catalog SET object_key = %s, volume = %s, path = %s, digest = %s, "
         "provenance = %s, provenance_attested = %s, state = %s, kernel_config_key = %s "
-        "WHERE id = %s AND state = %s AND publication_attempt_id IS NOT DISTINCT FROM %s",
+        "WHERE id = %s AND state = %s AND publication_attempt_id IS NOT DISTINCT FROM %s "
+        "AND volume IS NOT DISTINCT FROM %s AND digest IS NOT DISTINCT FROM %s "
+        "AND provenance = %s",
         (
             realized.object_key,
             realized.volume,
@@ -343,6 +345,9 @@ async def _persist_runtime_fields(
             row["id"],
             row["state"],
             row.get("publication_attempt_id"),
+            row.get("volume"),
+            row.get("digest"),
+            Jsonb(_row_provenance(row)),
         ),
     )
     return cur.rowcount == 1
@@ -390,15 +395,23 @@ async def _resolve_provenance(
     * a ``staged-path`` source reads its ``<path>.provenance.json`` sidecar off the event loop
       (#977, ADR-0296), adopted as build-verified (``False``); its absence preserves the row's
       existing provenance and attested flag (so an absent sidecar never wipes a populated row);
-    * every other case keeps the row's existing provenance and attested flag unchanged. This
+    * changing a staged volume declaration removes its old root specification (ADR-0776);
+    * other cases keep the row's existing provenance and attested flag unchanged. This
       preserves ``build``/published ``s3`` provenance owned by ``publish_image`` **and** a prior
       operator attestation whose ``[image.attested]`` table was removed — like an absent sidecar, an
       absent table never wipes a populated row (and ``ops.export_systems_toml`` does not re-emit the
       table, so a clear-on-absence would strip an attestation on an export round-trip). To change an
       attestation, edit its operands; ``staged`` (volume) has no sidecar location.
     """
-    existing = (_row_provenance(row), _row_attested(row))
     source = entry.source
+    provenance = _row_provenance(row)
+    if (
+        row is not None
+        and row.get("volume") is not None
+        and (not isinstance(source, StagedSource) or source.volume != row.get("volume"))
+    ):
+        provenance = {key: value for key, value in provenance.items() if key != "root_spec"}
+    existing = (provenance, _row_attested(row))
     if isinstance(source, S3Source) and entry.attested is not None:
         return entry.attested.as_provenance(), True
     if isinstance(source, StagedPathSource):
@@ -485,12 +498,20 @@ def _realize(
         digest, warning = _staged_path_digest(entry, provenance)
         return _built(_REGISTERED, None, None, source.path, digest), warning
     if isinstance(source, StagedSource):
-        return _built(_REGISTERED, None, source.volume, None, None), None
+        digest = None
+        if row is not None and row.get("volume") == source.volume:
+            inspected_digest, _ = _staged_path_digest(entry, provenance)
+            if inspected_digest == row.get("digest"):
+                digest = inspected_digest
+        return _built(_REGISTERED, None, source.volume, None, digest), None
     if isinstance(source, BuildSource):
-        state, object_key, volume, digest, warning = _realize_build(entry, row)
+        prior = None if row is not None and row.get("volume") is not None else row
+        state, object_key, volume, digest, warning = _realize_build(entry, prior)
         return _built(state, object_key, volume, None, digest), warning
     if isinstance(source, S3Source):
-        state, object_key, volume, digest, warning = _realize_s3(entry, row, source, head)
+        state, object_key, volume, digest, warning = _realize_s3(
+            entry, None if row is not None and row.get("volume") is not None else row, source, head
+        )
         return _built(state, object_key, volume, None, digest), warning
     raise AssertionError(f"unhandled image source kind: {source!r}")  # pragma: no cover
 

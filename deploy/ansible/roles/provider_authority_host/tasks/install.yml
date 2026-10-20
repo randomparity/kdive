@@ -1,4 +1,15 @@
 ---
+- name: Require fixed local inventory authority paths
+  ansible.builtin.assert:
+    that:
+      - provider_authority_host_account == 'kdive-provider-authority'
+      - provider_authority_host_rootfs_root == '/var/lib/kdive/provider-authority/rootfs'
+      - provider_authority_host_console_root == '/var/lib/kdive/provider-authority/console'
+    fail_msg: Inventory observer opt-in requires the fixed authority identity and private roots.
+  when:
+    - provider_authority_host_inventory_observer_enabled | bool
+    - provider_authority_host_enabled | bool
+
 - name: Install native authority build prerequisites for the selected distribution
   ansible.builtin.package:
     name: "{{ provider_authority_host_packages[ansible_facts['os_family']] }}"

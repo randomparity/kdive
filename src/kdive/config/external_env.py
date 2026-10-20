@@ -247,6 +247,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "System id of a pre-provisioned live VM for the gated local-libvirt install test.",
     ),
     ExternalEnvVar(
+        "KDIVE_3097_EXCLUSIVE_QUEUE",
+        "test",
+        None,
+        "Set to `approved` to let the run/system/job service-cell proof (#3097) pause and own an "
+        "idle job queue for its queued-install cells; any other value records them as blocked.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_VM_BZIMAGE",
         "test",
         None,
@@ -859,6 +866,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it "
         "into the default role database DSNs (#1929). Accepts `PORT` or `ADDR:PORT`; a loopback "
         "or wildcard address keeps `localhost` in the derived URL.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_SEAWEEDFS_IMAGE",
+        "script",
+        "kdive-seaweedfs:dev",
+        "Image tag for the Compose seaweedfs service built from the bundled source. The isolated "
+        "volume-persistence proof ignores inherited overrides and uses its own invocation tag.",
     ),
     ExternalEnvVar(
         "KDIVE_SEAWEEDFS_PORT",

@@ -65,12 +65,28 @@ Clear a watchpoint by number on a live DebugSession. Requires contributor.
 
 `implemented`
 
-Resume a live DebugSession and wait for a stop event. Requires contributor.
+Resume a live DebugSession. Requires contributor. With wait=True (default) it waits
+for a stop event and returns status 'stopped' with the stop's reason; a wait that ends
+without one interrupts the guest back and returns timed_out=True, so the call can hold
+the session for up to 90 seconds. With wait=False it resumes and returns
+status 'running' at once, leaving the guest running after the call, or 'stopped' if the
+resume already reported a stop. While the guest runs, every other debug tool except
+debug.interrupt and debug.continue refuses with debug_attach_failure code
+inferior_running and sends nothing to the guest. A stop that ends the run (for example a
+breakpoint) is reported only by the next debug.interrupt or debug.continue with
+wait=True, which waits for that stop without resuming again; debug.continue with
+wait=False on a running guest returns 'running' again. Another call on the same session,
+debug.interrupt included, waits while a wait=True continue is in progress; use
+wait=False when you need to break in. A transport_stall failure leaves the guest's state
+unknown: call debug.interrupt again or debug.end_session. If gdb refuses the
+interrupt-back the call fails with debug_attach_failure code interrupt_refused; end the
+session.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `session_id` | string | yes | The live DebugSession to continue execution on. |
 | `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
+| `wait` | boolean | no | True (default) waits for a stop event. False resumes and returns status 'running' at once, leaving the guest running after the call; timeout_sec is then ignored. |
 
 ## `debug.disassemble`
 
@@ -92,7 +108,18 @@ Requires contributor.
 
 `implemented`
 
-Drive a live DebugSession to detached; close its transport. Requires contributor.
+Detach the session and clean up its local GDB process/symbol files. Contributor.
+
+A guest left running by debug.continue with wait=False is halted first so the detach
+resumes it as usual, which can add up to 20 seconds; if that halt fails the reply
+still reports 'detached' and adds data.guest_execution='unknown'.
+
+infrastructure_failure with reason=debug_cleanup_pending means the durable session may
+already be detached but local cleanup is incomplete. Retry debug.end_session after the
+host failure clears; debug.get_session reports durable state. Background cleanup retries
+every 30 monotonic seconds after a completed owner sweep; DB failures/active operations
+can defer cleanup, so this is not a completion deadline. Abrupt owner death has no
+automatic orphan-recovery guarantee.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -112,7 +139,18 @@ Return one visible debug session for recovery. Requires viewer.
 
 `implemented`
 
-Send an interrupt to halt a running live DebugSession. Requires contributor.
+Halt the guest of a live DebugSession and report what halted it. Requires
+contributor. Returns status 'stopped' with data.halted_by: 'interrupt' when this call's
+interrupt halted a running guest (data.reason 'signal-received'); 'stop_event' when the
+run had already stopped, or stopped for another cause, such as a breakpoint (data.reason
+names it); 'attach' when the guest was halted by gdb attaching to it on this session's
+first debug call; 'already_halted' when nothing was running. 'attach' and
+'already_halted' send nothing to the guest and return at once. The guest runs between
+calls only after debug.continue with wait=False. If a running guest reports no stop the
+call fails with infrastructure_failure code transport_stall after up to 20 seconds
+and the guest's state is unknown; call debug.interrupt again or debug.end_session. If
+gdb refuses the interrupt the call fails with debug_attach_failure code
+interrupt_refused; end the session.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -276,7 +314,12 @@ shows as a debug.continue timeout. Requires contributor.
 
 `implemented`
 
-Open a single-attach transport and insert a live DebugSession. Requires contributor.
+Reserve a single-attach transport and insert a live DebugSession. Requires contributor.
+
+For local/remote libvirt `gdbstub`, this resolves and validates the endpoint without
+connecting to the debugger. A live session does not guarantee current reachability.
+The first actual GDB operation attaches, validates the protocol, and may halt the guest;
+an unreachable or invalid target is reported then as a categorized attach failure.
 
 A `gdbstub` session on a System whose guest architecture differs from the worker host's
 (e.g. a ppc64le guest on an x86_64 host) needs a multiarch-capable gdb on the worker; a

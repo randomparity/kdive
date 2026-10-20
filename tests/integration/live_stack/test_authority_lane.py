@@ -402,28 +402,111 @@ def test_lane_config_rejects_unknown_fields_and_unsafe_files(tmp_path: Path) -> 
         authority_lane.load_lane_config({authority_lane.CONFIG_ENV: str(good)})
 
 
-def test_authority_inventory_is_fixed_and_validated(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[list[str]] = []
-    outputs = iter(
-        [
-            json.dumps({"domains": ["kdive-x"], "roots": {"/r": ["a"]}, "system": None}),
-            json.dumps({"domains": "kdive-x", "roots": {}, "system": None}),
-        ]
-    )
+def test_observer_invocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    roots = {authority_lane._AUTHORITY_ROOTFS: ["residue"], authority_lane._AUTHORITY_CONSOLE: []}
+    seen = []
 
-    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        seen.append(argv)
-        return subprocess.CompletedProcess(argv, 0, next(outputs), "")
+    def run(argv, **kwargs):
+        seen.append((argv, kwargs))
+        return subprocess.CompletedProcess(
+            argv, 0, json.dumps({"domains": ["unrelated"], "roots": roots, "system": None}), ""
+        )
 
     monkeypatch.setattr(authority_lane.subprocess, "run", run)
-    facts = authority_lane.authority_inventory(_SYSTEM)
-    assert facts == authority_lane.AuthorityInventory(["kdive-x"], {"/r": ["a"]}, None)
-    assert seen[0][:5] == ["sudo", "-n", authority_lane._AUTHORITY_PYTHON, "-I", "-c"]
-    assert seen[0][-1] == _SYSTEM
-    with pytest.raises(AssertionError, match="malformed"):
-        authority_lane.authority_inventory()
+    assert authority_lane.authority_inventory(_SYSTEM).roots == roots
+    assert seen[0][0] == [
+        "sudo",
+        "-n",
+        "-u",
+        "kdive-authority-observer",
+        "--",
+        "/usr/bin/python3",
+        "-I",
+        "-S",
+        "/usr/libexec/kdive-authority-inventory-client.py",
+        _SYSTEM,
+    ]
+    assert seen[0][1]["timeout"] == 120.0
     with pytest.raises(ValueError):
         authority_lane.authority_inventory("not-a-uuid")
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing-root",
+        "extra-root",
+        "duplicate",
+        "nested-extra",
+        "active-int",
+        "empty-type",
+        "missing-system",
+        "unexpected-system",
+        "root-type",
+    ],
+)
+def test_observer_schema(monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
+    data: Any = {
+        "domains": ["kdive-" + _SYSTEM],
+        "roots": {authority_lane._AUTHORITY_ROOTFS: [], authority_lane._AUTHORITY_CONSOLE: []},
+        "system": {"active": False, "type": "kvm"},
+    }
+    if fault == "missing-root":
+        del data["roots"][authority_lane._AUTHORITY_ROOTFS]
+    elif fault == "extra-root":
+        data["roots"]["/other"] = []
+    elif fault == "nested-extra":
+        data["system"]["other"] = False
+    elif fault == "active-int":
+        cast(Any, data["system"])["active"] = 1
+    elif fault == "empty-type":
+        data["system"]["type"] = ""
+    elif fault == "missing-system":
+        data["system"] = None
+    elif fault == "unexpected-system":
+        data["domains"] = []
+    elif fault == "root-type":
+        data["roots"][authority_lane._AUTHORITY_ROOTFS] = [1]
+    raw = json.dumps(data)
+    if fault == "duplicate":
+        raw = raw.replace('"active": false', '"active": true, "active": false')
+    monkeypatch.setattr(
+        authority_lane.subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess([], 0, raw, ""),
+    )
+    with pytest.raises(AssertionError):
+        authority_lane.authority_inventory(_SYSTEM)
+
+
+def test_observer_cleanup_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = _fake_lane(monkeypatch, tmp_path)
+    cleanup = OSError("private observer failure")
+    observations = iter([dict(_INVENTORY), cleanup])
+
+    def inventory():
+        result = next(observations)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(authority_lane, "lane_inventory", inventory)
+    primary = RuntimeError("primary")
+
+    async def body(_system):
+        raise primary
+
+    run = _run(tmp_path)
+    with pytest.raises(ExceptionGroup) as caught:
+        asyncio.run(
+            authority_lane.on_authority_system(
+                run, "http://lane", cast(Any, None), "db", project="project", body=body
+            )
+        )
+    assert caught.value.exceptions == (primary, cleanup)
+    assert "allocations.request" in calls
+    assert "private observer failure" not in str(run.artifacts)
 
 
 def test_open_jobs_names_the_system_and_its_runs(migrated_url: str) -> None:
@@ -780,3 +863,60 @@ def test_remote_root_selects_the_one_verified_catalog_image(migrated_url: str) -
     assert isinstance(selected, tuple) and selected[1:] == ("verified", _DIGEST)
     assert "no remote-libvirt resource" in str(missing) and "remote-b" not in str(missing)
     assert "found 2" in str(ambiguous)
+
+
+@pytest.mark.parametrize("fault", ["missing", "stale", "owner", "mode"])
+def test_collector_revision_gate(monkeypatch, fault):
+    import stat
+    from unittest.mock import Mock
+
+    revision = Mock()
+    revision.lstat.return_value = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o444)
+    revision.read_text.return_value = _REVISION
+    if fault == "missing":
+        revision.lstat.side_effect = FileNotFoundError()
+    elif fault == "stale":
+        revision.read_text.return_value = "b" * 40
+    elif fault == "owner":
+        revision.lstat.return_value.st_uid = 123
+    else:
+        revision.lstat.return_value.st_mode = stat.S_IFREG | 0o644
+    monkeypatch.setattr(authority_lane, "_COLLECTOR_REVISION", revision)
+    monkeypatch.setattr(
+        authority_lane,
+        "_output",
+        lambda *args: subprocess.CompletedProcess(
+            [], 0, "active" if args[0] == "systemctl" else _REVISION, ""
+        ),
+    )
+    deployed = Mock(side_effect=AssertionError("must stop before stack probe"))
+    monkeypatch.setattr(authority_lane, "require_deployed_revision", deployed)
+    config = authority_lane.AuthorityLaneConfig(
+        installed_revision=_REVISION,
+        authority_service="kdive-external-boot-authority.service",
+        system_mode="fixture",
+    )
+    with pytest.raises((AssertionError, FileNotFoundError)):
+        authority_lane.require_lane(config, "http://lane")
+    deployed.assert_not_called()
+
+
+def test_observer_failure_prevents_allocation(monkeypatch, tmp_path):
+    calls = _fake_lane(monkeypatch, tmp_path)
+
+    def fail():
+        raise OSError("observer unavailable")
+
+    monkeypatch.setattr(authority_lane, "lane_inventory", fail)
+    with pytest.raises(OSError):
+        asyncio.run(
+            authority_lane.on_authority_system(
+                _run(tmp_path),
+                "http://lane",
+                cast(Any, None),
+                "db",
+                project="project",
+                body=cast(Any, None),
+            )
+        )
+    assert "allocations.request" not in calls

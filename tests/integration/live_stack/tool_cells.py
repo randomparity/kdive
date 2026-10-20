@@ -396,6 +396,12 @@ def _empty_page(tool: str, args: Mapping[str, object]) -> ToolResponse:
         object_id, actions = str(args["system_id"]), ["artifacts.get"]
     elif tool == "debug.list_sessions":
         object_id, actions = "debug_sessions", ["debug.get_session"]
+    elif tool == "runs.list":
+        object_id, actions = "runs", ["runs.get", "runs.create"]
+    elif tool == "systems.list":
+        object_id, actions = "systems", ["systems.get", "runs.create"]
+    elif tool == "jobs.list":
+        object_id, actions = "jobs", ["jobs.wait", "jobs.cancel"]
     else:
         raise AssertionError(f"no canonical empty page is configured for {tool}")
     return ToolResponse.collection(

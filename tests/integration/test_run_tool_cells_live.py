@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import platform
 import secrets
 import tempfile
@@ -49,11 +48,9 @@ from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from scripts.kernel_fixtures import identity
 from tests.integration.live_stack.deep_lifecycle import (
-    FIXTURE_ROOT_ENV,
     boot_kernel_sha256,
     deep_body,
     file_sha256,
-    load_fixture,
 )
 from tests.integration.live_stack.image_smoke import Endpoint, provenance_matches, ssh
 from tests.integration.live_stack.remote_lifecycle import (
@@ -63,6 +60,9 @@ from tests.integration.live_stack.remote_lifecycle import (
     remote_host,
 )
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop, on_catalog_system
+from tests.integration.live_stack.service_cells import (
+    _fixture,
+)
 from tests.integration.live_stack.spine import (
     build_and_upload_kernel,
     build_profile,
@@ -104,9 +104,6 @@ TOOLS = (
     "runs.install",
     "runs.release_external_boot",
 )
-# The kernel fixture every runs.* cell uploads; write the bindings with
-# ``--kernel-baseline longterm``.
-BASELINE = "longterm"
 _LOCAL = "local-libvirt"
 _REMOTE = "remote-libvirt"
 _BUILD_DEADLINE_S = 3600.0
@@ -142,19 +139,6 @@ async def _call(
     caller: HttpCaller, tool: str, args: Mapping[str, object], token: str
 ) -> ToolResponse:
     return one(await caller.call(tool, args, token, discover=True))
-
-
-def _fixture() -> tuple[Path, dict[str, Any]]:
-    """The verified ``longterm`` fixture; ``blocked`` before any stack mutation when absent."""
-    root = os.environ.get(FIXTURE_ROOT_ENV)
-    if not root:
-        raise ScenarioStop(
-            Outcome.BLOCKED, f"{FIXTURE_ROOT_ENV} unset; build the {BASELINE} fixture"
-        )
-    try:
-        return load_fixture(Path(root), BASELINE, platform.machine())
-    except ValueError as exc:
-        raise ScenarioStop(Outcome.BLOCKED, f"{BASELINE} fixture: {exc}") from None
 
 
 async def _create_run(

@@ -5,6 +5,9 @@ After=network-online.target
 After=systemd-tmpfiles-setup.service
 Wants=network-online.target
 Wants=systemd-tmpfiles-setup.service
+# Five failed starts in ten minutes leave the unit failed instead of restarting forever.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=notify

@@ -45,7 +45,7 @@ def test_live_vm_start_session_attaches_to_halted_early_boot_crash(  # pragma: n
     migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Real Postgres + the real start_session handler + the real LocalLibvirtConnect connector
-    (resolves the gdb port from the live domain XML, runs the real rsp_reachable probe) open a
+    (resolves the gdb port from live domain XML without a standalone debugger attach) open a
     live gdbstub session against a real KVM domain that VFS-panics on an empty disk. Only the
     boot-step row is seeded directly (its recording is unit-tested separately)."""
     arch = require_live_gdbstub_arch()

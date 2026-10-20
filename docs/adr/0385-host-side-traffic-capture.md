@@ -169,6 +169,34 @@ rows, so the pcap is never inline-served.
   whose `filter-dump` QOM schema changes could break the object-add. The op fails as
   `CONTROL_FAILURE`, observable via per-kind job telemetry.
 
+### Amendment (2026-10-19): QMP failures arrive as replies (#3270)
+
+This corrects the attach premise in the Decision: "`qemuMonitorCommand` surfaces QMP failures as
+a generic `libvirtError`" is wrong. libvirt v12.0.0 `qemuMonitorJSONArbitraryCommand` returns
+QEMU's reply text whatever it contains, without inspecting its `error` member. Two measurements
+on Fedora 44 with QEMU 10.2.2 show the effect:
+
+- through libvirt 12.0.0, `virsh qemu-monitor-command` exited 0 for a refused `filter-dump`
+  `object-add`, whose reply was
+  `{"error":{"class":"GenericError","desc":"net dump: can't open …: Permission denied"}}`;
+- a bare QEMU answered an `object-del` of an absent id with the error reply
+  `object '…' not found`. libvirt forwards that reply unchanged, as its source shows.
+
+The local provider therefore parses every passthrough reply in one place
+(`local_libvirt/lifecycle/qmp_reply.py`). The rules:
+
+- An absent filter on `object-del` is tolerated.
+- An EACCES `net dump: can't open` refusal on `object-add` is `CONFIGURATION_ERROR`
+  (`reason=pcap_open_denied`), carrying the pcap remediation.
+- Any other error reply is `CONTROL_FAILURE` (`reason=capture_filter_rejected`), which is
+  retryable.
+- A malformed reply is `CONTROL_FAILURE` (`reason=qmp_reply_malformed`).
+- In the capture reaper, a refused `object-del` raises `CONTROL_FAILURE`, so the row is
+  deferred rather than counted as reclaimed.
+
+Only the QMP class token reaches failure details, because the description names a host path. A
+raised `libvirtError` stays the transport-failure path.
+
 ## Considered & rejected
 
 - **Real `tcpdump -i <tap>` on local-libvirt** — rejected: SLIRP user-mode networking exposes

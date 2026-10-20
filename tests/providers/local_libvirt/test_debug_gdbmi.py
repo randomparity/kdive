@@ -2,7 +2,7 @@
 
 The engine surface ported for issue #21 (breakpoints, read_registers, read_memory cap +
 bytes-verbatim, continue/interrupt) is exercised directly; the real `PygdbmiController` and
-the `attach()` subprocess path are `live_vm`-gated and not unit-tested here.
+the real `attach()` subprocess remains live-only; its orchestration uses a fake controller.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import json
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Literal, cast
 
 import pytest
 
@@ -19,6 +20,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.tools.debug.sessions.registry import GdbMiSessionRegistry
 from kdive.providers.ports.debug import (
     GdbFrame,
+    GdbMiAttachFailure,
     GdbMiAttachment,
     GdbModule,
     GdbStopRecord,
@@ -922,7 +924,10 @@ def test_interrupt_consumes_stop_from_own_reply(operation: str, tmp_path: Path) 
     engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
 
     if operation == "interrupt":
-        stop = engine.interrupt(attachment)
+        attachment.execution = "running"
+        halt = engine.interrupt(attachment)
+        assert halt.halted_by == "interrupt"
+        stop = halt.stop
     elif operation == "continue":
         stop = engine.continue_(attachment, timeout_sec=1)
     else:
@@ -944,27 +949,227 @@ def test_interrupt_consumes_stop_from_own_reply(operation: str, tmp_path: Path) 
     assert secret not in transcript
 
 
+def _stopped(reason: str, **extra: object) -> dict[str, object]:
+    return {"type": "notify", "message": "stopped", "payload": {"reason": reason, **extra}}
+
+
+def _running_attachment(controller: _FakeMiController, tmp_path: Path) -> GdbMiAttachment:
+    attachment = _attachment(controller, tmp_path)
+    attachment.execution = "running"
+    return attachment
+
+
+_INTERRUPT_DONE: dict[str, list[dict[str, object]]] = {
+    "-exec-interrupt": [{"type": "result", "message": "done", "payload": None}]
+}
+_CONTINUE_RUNNING: dict[str, list[dict[str, object]]] = {
+    "-exec-continue": [{"type": "result", "message": "running"}]
+}
+
+
 def test_interrupt_returns_stop(tmp_path: Path) -> None:
     controller = _FakeMiController(
-        responses={"-exec-interrupt": [{"type": "result", "message": "done", "payload": None}]},
-        reads=[
-            [{"type": "notify", "message": "stopped", "payload": {"reason": "signal-received"}}]
-        ],
+        responses=_INTERRUPT_DONE,
+        reads=[[_stopped("signal-received", **{"signal-name": "SIGINT"})]],
     )
-    controller_attachment = _attachment(controller, tmp_path)
-    stop = _engine().interrupt(controller_attachment)
-    assert stop is not None
-    assert stop.reason == "signal-received"
+    attachment = _running_attachment(controller, tmp_path)
+    halt = _engine().interrupt(attachment)
+    assert halt.halted_by == "interrupt"
+    assert halt.stop is not None and halt.stop.reason == "signal-received"
+    assert halt.stop.signal_name == "SIGINT"
+    assert attachment.execution == "halted"
     # interrupt drives its write through ExecutionControl at the engine's command timeout.
     assert controller.write_timeouts == [10.0]
 
 
-def test_interrupt_returns_none_when_no_stop(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "stop",
+    [
+        _stopped("breakpoint-hit", bkptno="1"),
+        _stopped("signal-received", **{"signal-name": "SIGTRAP"}),
+        _stopped("signal-received"),
+    ],
+)
+def test_interrupt_attributes_any_other_stop_to_a_stop_event(
+    stop: dict[str, object], tmp_path: Path
+) -> None:
+    # A stop that races the interrupt is not the interrupt's own halt (#3244).
     controller = _FakeMiController(
-        responses={"-exec-interrupt": [{"type": "result", "message": "done", "payload": None}]},
-        reads=[],
+        responses={"-exec-interrupt": [{"type": "result", "message": "done"}, stop]}
     )
-    assert _engine().interrupt(_attachment(controller, tmp_path)) is None
+    halt = _engine().interrupt(_running_attachment(controller, tmp_path))
+    assert halt.halted_by == "stop_event"
+    assert halt.stop is not None and halt.stop.reason == cast(dict, stop["payload"])["reason"]
+
+
+def test_interrupt_without_a_stop_is_a_transport_stall_and_stays_running(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_INTERRUPT_DONE, reads=[])
+    attachment = _running_attachment(controller, tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        _engine().interrupt(attachment)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"code": "transport_stall", "verb": "-exec-interrupt"}
+    assert attachment.execution == "running"
+
+
+def test_a_refused_interrupt_fails_at_once_and_stays_running(tmp_path: Path) -> None:
+    error: dict[str, object] = {
+        "type": "result",
+        "message": "error",
+        "payload": {"msg": "Remote connection closed"},
+    }
+    controller = _FakeMiController(responses={"-exec-interrupt": [error]})
+    attachment = _running_attachment(controller, tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        _engine().interrupt(attachment)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "interrupt_refused"
+    assert controller.read_timeouts == []  # no stop wait after a refusal
+    assert attachment.execution == "running"
+
+
+@pytest.mark.parametrize(
+    ("execution", "halted_by"), [("attach_halted", "attach"), ("halted", "already_halted")]
+)
+def test_interrupt_on_a_halted_guest_sends_nothing(
+    execution: Literal["attach_halted", "halted"], halted_by: str, tmp_path: Path
+) -> None:
+    controller = _FakeMiController()
+    attachment = _attachment(controller, tmp_path)
+    attachment.execution = execution
+    halt = _engine().interrupt(attachment)
+    assert (halt.halted_by, halt.stop) == (halted_by, None)
+    assert attachment.execution == "halted"
+    assert controller.written == [] and controller.read_timeouts == []
+
+
+def test_a_command_ends_the_attach_halt(tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    attachment = _attachment(controller, tmp_path)
+    attachment.execution = "attach_halted"
+    _engine().execute_mi_command(attachment, "-break-list")
+    assert attachment.execution == "halted"
+
+
+def test_continue_background_leaves_the_guest_running(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses=_CONTINUE_RUNNING)
+    attachment = _attachment(controller, tmp_path)
+    assert _engine().continue_background(attachment) is None
+    assert attachment.execution == "running"
+    assert controller.written == ["-exec-continue"] and controller.read_timeouts == []
+
+
+def test_continue_background_reports_a_stop_its_reply_carried(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-exec-continue": [
+                {"type": "result", "message": "running"},
+                _stopped("breakpoint-hit", bkptno="1"),
+            ]
+        }
+    )
+    attachment = _attachment(controller, tmp_path)
+    stop = _engine().continue_background(attachment)
+    assert stop is not None and stop.reason == "breakpoint-hit"
+    assert attachment.execution == "halted"
+
+
+def test_continue_background_on_a_running_guest_sends_nothing(tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    attachment = _running_attachment(controller, tmp_path)
+    assert _engine().continue_background(attachment) is None
+    assert controller.written == [] and controller.read_timeouts == []
+    assert attachment.execution == "running"
+
+
+def test_continue_on_a_running_guest_waits_without_resuming_again(tmp_path: Path) -> None:
+    controller = _FakeMiController(reads=[[], [_stopped("breakpoint-hit", bkptno="1")]])
+    attachment = _running_attachment(controller, tmp_path)
+    stop = _engine().continue_(attachment, timeout_sec=1)
+    assert stop.reason == "breakpoint-hit" and not stop.timed_out
+    assert controller.written == []
+    assert attachment.execution == "halted"
+
+
+def test_continue_on_a_running_guest_interrupts_back_on_timeout(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses=_INTERRUPT_DONE,
+        reads=[[], [], [], [_stopped("signal-received", **{"signal-name": "SIGINT"})]],
+    )
+    attachment = _running_attachment(controller, tmp_path)
+    stop = _engine().continue_(attachment, timeout_sec=1)
+    assert stop.timed_out
+    assert controller.written == ["-exec-interrupt"]
+    assert attachment.execution == "halted"
+
+
+@pytest.mark.parametrize("method", ["step", "next", "step_instruction", "finish"])
+def test_a_step_on_a_running_guest_is_refused_before_any_write(method: str, tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    attachment = _running_attachment(controller, tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        getattr(_engine(), method)(attachment, timeout_sec=1)
+    assert exc.value.details["code"] == "inferior_running"
+    assert controller.written == []
+    assert attachment.execution == "running"
+
+
+_RESUME_VERBS = [
+    ("continue_", "-exec-continue"),
+    ("step", "-exec-step"),
+    ("next", "-exec-next"),
+    ("step_instruction", "-exec-step-instruction"),
+    ("finish", "-exec-finish"),
+]
+
+
+@pytest.mark.parametrize(("method", "verb"), _RESUME_VERBS)
+def test_a_stalled_resume_leaves_the_guest_running(method: str, verb: str, tmp_path: Path) -> None:
+    # The resume ran, its wait and the interrupt-back saw no stop: the guest may still run, so
+    # the next interrupt must write -exec-interrupt rather than report a halt (#3244).
+    controller = _FakeMiController(
+        responses={verb: [{"type": "result", "message": "running"}], **_INTERRUPT_DONE}
+    )
+    attachment = _attachment(controller, tmp_path)
+    engine = _engine()
+    with pytest.raises(CategorizedError) as exc:
+        getattr(engine, method)(attachment, timeout_sec=1)
+    assert exc.value.details["code"] == "transport_stall"
+    assert attachment.execution == "running"
+    with pytest.raises(CategorizedError):
+        engine.interrupt(attachment)
+    assert controller.written == [verb, "-exec-interrupt", "-exec-interrupt"]
+
+
+class _WriteTimeoutController(_FakeMiController):
+    def write(self, command: str, *, timeout_sec: float) -> list[dict[str, object]]:
+        super().write(command, timeout_sec=timeout_sec)
+        raise gdbmi._timeout_error(command, timeout_sec)
+
+
+@pytest.mark.parametrize(("method", "verb"), _RESUME_VERBS)
+def test_a_resume_write_timeout_leaves_the_guest_running(
+    method: str, verb: str, tmp_path: Path
+) -> None:
+    attachment = _attachment(_WriteTimeoutController(), tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        getattr(_engine(), method)(attachment, timeout_sec=1)
+    assert exc.value.details["code"] == "transport_stall"
+    assert attachment.execution == "running"
+
+
+@pytest.mark.parametrize(("method", "verb"), _RESUME_VERBS)
+def test_a_refused_resume_keeps_the_guest_halted(method: str, verb: str, tmp_path: Path) -> None:
+    error: dict[str, object] = {
+        "type": "result",
+        "message": "error",
+        "payload": {"msg": "Cannot find bounds"},
+    }
+    attachment = _attachment(_FakeMiController(responses={verb: [error]}), tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        getattr(_engine(), method)(attachment, timeout_sec=1)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert attachment.execution == "halted"
 
 
 # --- stepping (#1255): step / next / step_instruction / finish over the resume family --------
@@ -2569,7 +2774,7 @@ def _srcversion_cmd(ptr: str) -> str:
 
 
 def _engine_with_resolver(info: ModuleDebuginfo | CategorizedError) -> GdbMiEngine:
-    def resolver(run_id: str, module: str) -> ModuleDebuginfo:
+    def resolver(attachment: GdbMiAttachment, module: str) -> ModuleDebuginfo:
         if isinstance(info, CategorizedError):
             raise info
         return info
@@ -2691,3 +2896,49 @@ def test_load_module_symbols_idempotent_reload(tmp_path: Path) -> None:
     out = _load(engine, attachment, "ext4")
     assert out.symbols_loaded is True
     assert not any("add-symbol-file" in c for c in controller.written)
+
+
+@pytest.mark.parametrize("connect_error", [False, True])
+def test_actual_attach_validates_target_and_cleans_up_failure(
+    tmp_path: Path, connect_error: bool
+) -> None:
+    target = "-target-select remote 127.0.0.1:4242"
+    response: dict[str, object] = {
+        "type": "result",
+        "message": "error" if connect_error else "connected",
+        "payload": {"msg": "target connection refused"} if connect_error else {},
+    }
+    controller = _FakeMiController(responses={target: [response]})
+    engine = GdbMiEngine(
+        controller_factory=lambda command: controller,
+        gdb_path_finder=lambda name: "/test/gdb",
+        host_arch_finder=lambda: "x86_64",
+        sleep=lambda seconds: None,
+    )
+    symbols = tmp_path / "vmlinux"
+    symbols.write_bytes(b"test symbols")
+    if connect_error:
+        with pytest.raises(GdbMiAttachFailure) as failure:
+            engine.attach(
+                host="127.0.0.1",
+                port=4242,
+                vmlinux_path=symbols,
+                transcript_path=tmp_path / "transcript.jsonl",
+            )
+        cause = failure.value.cause
+        assert isinstance(cause, CategorizedError) and "target-select remote" in str(cause)
+        assert cause.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+        # The attachment's owner, not the engine, exits gdb before removing its symbols (ADR-0799).
+        assert failure.value.attachment is not None
+        assert failure.value.attachment.controller is controller
+        assert not controller.exited
+    else:
+        attachment = engine.attach(
+            host="127.0.0.1",
+            port=4242,
+            vmlinux_path=symbols,
+            transcript_path=tmp_path / "transcript.jsonl",
+        )
+        assert attachment.controller is controller
+        assert not controller.exited
+    assert target in controller.written

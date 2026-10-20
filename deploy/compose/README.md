@@ -6,7 +6,7 @@ existing dev backends (Postgres, SeaweedFS, mock OIDC). Everything is wired pure
 `KDIVE_*` (see the [config reference](../../docs/guide/reference/config.md)); the shared
 backend env is declared once as the `x-backends` anchor and merged into each service.
 
-This is a dev/demo deployment with fixed local credentials. The default app image is built
+This is a dev/demo deployment with local sample credentials by default. The default app image is built
 from the repo [Dockerfile](../../Dockerfile) (`kdive:dev`). Before first use, complete the
 [source setup](../../docs/operating/install.md#from-source); the lifecycle recipes need the
 checkout's Python environment as well as Docker Compose.
@@ -250,3 +250,34 @@ For host processes against Compose backends, use the
 [live-stack runbook](../../docs/operating/runbooks/live-stack.md). It owns the lifecycle scripts,
 worker accounts, migrations, diagnostics, and reset behavior for that deployment. Keep one app
 tier active against a given database; do not mix it with this container app tier.
+
+## Vmcore retention and S3 authentication
+
+The store and all app roles consume the same `COMPOSE_S3_ACCESS_KEY` and
+`COMPOSE_S3_SECRET_KEY` deployment variables. Compose maps them to the backend's supported
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` names and boto3's credential chain.
+The checked-in fallback values are only for a fresh local demo with both variables absent.
+The store container refuses to start, printing `Set both COMPOSE_S3 credentials to nonempty
+values` (see `docker compose logs seaweedfs`), when either variable is set but empty or only one
+of them is set; no app role can then become ready. The check runs only when the store container
+starts, so recreate the store whenever these variables change.
+Export both variables from the operator's secret source before recreating services; do not write
+credentials into this document or commit them. The store healthcheck uses `/healthz`; an anonymous S3 root request is denied
+when authentication is enabled.
+
+Earlier Compose files set `S3_ACCESS_KEY` / `S3_SECRET_KEY` on the store. The pinned backend
+ignored those names, so those deployments may have accepted anonymous writes. A successful
+old capture is not evidence of enforced authentication. Unknown or empty effective IAM inventory
+blocks the legacy transition; do not turn that absence into a quiescence receipt.
+
+`KDIVE_VMCORE_RETENTION_DAYS` is optional and has no numeric default. Compose forwards an
+exported value to server, worker and reconciler together. Leave it unset to disable retention;
+an empty string, zero or negative value is invalid. Before enabling a positive number of days,
+complete the [vmcore retention rollout](../../docs/operating/runbooks/vmcore-retention.md),
+including its offline baseline and conditional-publication proof. Migration 0176 alone does not
+establish that baseline. Old evidence may become eligible immediately after activation.
+
+The rollout preserves supported legacy vmcores; it does not override protocol 4's separate
+fresh-resource requirement for pre-protocol-4 deployments, nor convert old MinIO volumes.
+Actual shutdown, credential changes, baseline import and deletion require the operator's
+separate maintenance/activation authorization. This change does not perform those operations.

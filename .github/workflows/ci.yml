@@ -425,8 +425,9 @@ jobs:
   compose-volumes:
     name: Compose volume persistence
     runs-on: ubuntu-latest
-    # Includes the bounded apt retry budget (ADR-0566) plus work and setup margin.
-    timeout-minutes: 20
+    # Policy allowances: setup 15m, proof work 40m, cleanup attempt 10m, reporting 5m.
+    # Setup overrun consumes reserve; hard cancellation can still prevent cleanup.
+    timeout-minutes: 70
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -466,7 +467,8 @@ jobs:
         # unavailable Docker daemon a failure rather than a reported skip.
         #
         # It starts only postgres, seaweedfs, and prometheus under a unique project name on free
-        # loopback ports; none has a `build:`, so nothing is built here.
+        # loopback ports. Build the production SeaweedFS source once under an invocation-owned
+        # tag before three --no-build starts; preserve separate preparation/startup bounds.
         env:
           PYTEST_ADDOPTS: --capture=tee-sys --durations=10
         run: just test-compose-volumes

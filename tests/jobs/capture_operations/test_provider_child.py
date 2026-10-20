@@ -21,10 +21,16 @@ from kdive.jobs.capture_operations import launcher as launcher_module
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher, LaunchedCapture
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
 from kdive.jobs.capture_operations.storage.repository import CaptureOperation
+from kdive.providers.local_libvirt.lifecycle.traffic_capture import LocalLibvirtTrafficCapture
 from kdive.providers.ports.traffic import (
     CaptureExecutionResult,
     LocalCaptureConfiguration,
     RemoteCaptureConfiguration,
+)
+from kdive.providers.shared.runtime_paths import (
+    PCAP_HYPERVISOR_WRITE_REMEDIATION,
+    WORKER_READABILITY_REMEDIATION,
+    read_pcap_bytes,
 )
 
 _PCAP_HEADER = b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00" + b"\x00" * 16
@@ -188,7 +194,7 @@ def _carrier_source(class_name: str, *, remote: bool) -> str:
 
             @property
             def write_remediation(self) -> str:
-                return _PRIVATE
+                return "fake provider pcap remediation"
 
             def _call(self, name: str) -> None:
                 with _CALLS.open("a", encoding="utf-8") as stream:
@@ -426,6 +432,181 @@ def test_child_serializes_categorized_failure_without_arbitrary_details(
     assert result.details == {"phase": "provider_execution"}
 
 
+class _UnreadablePcapPath(Path):
+    def read_bytes(self) -> bytes:
+        raise PermissionError(13, "Permission denied")
+
+
+def _run_child_with_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str, failure: BaseException
+) -> tuple[CaptureResult, bytes]:
+    tmp_path.mkdir(exist_ok=True)
+    monkeypatch.chdir(tmp_path)
+    request = _request()
+    executor = _Executor(failure=failure)
+    written: list[bytes] = []
+    directory_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    monkeypatch.setattr(child, "_open_attempt_directory", lambda: directory_fd)
+    monkeypatch.setattr(child, "read_capture_inputs", lambda _fd: (request, b"{}\n"))
+    monkeypatch.setattr(child, "build_capture_executor", lambda req, cfg: executor)
+    monkeypatch.setattr(child, "_write_private_result", lambda _fd, data: written.append(data))
+
+    assert child.run_capture_child(launch_token, -1) == 0
+
+    return CaptureResult.from_canonical_json(written[0]), written[0]
+
+
+def test_child_forwards_distinct_provider_causes_for_readback_and_missing_pcap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
+) -> None:
+    pcap_path = _UnreadablePcapPath(tmp_path / f"{uuid4()}" / "capture.pcap")
+    with pytest.raises(CategorizedError) as readback:
+        read_pcap_bytes(pcap_path)
+    not_written = CategorizedError(
+        "traffic capture produced no readable pcap",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"reason": "pcap_not_written", "bytes": 0, "remediation": "fix the pcap dir"},
+    )
+
+    readback_result, readback_bytes = _run_child_with_failure(
+        tmp_path / "readback", monkeypatch, launch_token, readback.value
+    )
+    missing_result, _ = _run_child_with_failure(
+        tmp_path / "missing", monkeypatch, launch_token, not_written
+    )
+
+    assert readback_result.details == {
+        "phase": "provider_execution",
+        "operation": "read_pcap",
+        "error": "PermissionError",
+        "remediation": WORKER_READABILITY_REMEDIATION,
+    }
+    assert str(pcap_path.parent).encode() not in readback_bytes
+    assert b"failed to read captured pcap" not in readback_bytes
+    assert missing_result.details == {
+        "phase": "provider_execution",
+        "reason": "pcap_not_written",
+        "bytes": 0,
+        "remediation": "fix the pcap dir",
+    }
+    assert readback_result.error_category is missing_result.error_category
+    assert readback_result.details != missing_result.details
+
+
+def test_child_forwards_a_refused_pcap_open_without_the_qemu_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
+) -> None:
+    """The attach-time EACCES refusal reaches the job record whole, path-free (#3270)."""
+    path = "/var/lib/kdive/pcap/S/J.pcap"
+
+    def monitor(domain: object, raw: str, flags: int) -> str:
+        del domain, flags
+        if json.loads(raw)["execute"] == "object-del":
+            return json.dumps({"error": {"class": "GenericError", "desc": "x not found"}})
+        desc = f"net dump: can't open {path}: Permission denied"
+        return json.dumps({"error": {"class": "GenericError", "desc": desc}})
+
+    capturer = LocalLibvirtTrafficCapture(connect=_FakeLibvirtConnection, monitor=monitor)
+    with pytest.raises(CategorizedError) as refused:
+        capturer.attach("kdive-x", qom_id="kdive-dump-J", dest_path=path, snaplen=128)
+
+    result, raw_result = _run_child_with_failure(tmp_path, monkeypatch, launch_token, refused.value)
+
+    assert result.error_category is ErrorCategory.CONFIGURATION_ERROR
+    assert result.details == {
+        "phase": "provider_execution",
+        "reason": "pcap_open_denied",
+        "operation": "object_add",
+        "error": "GenericError",
+        "remediation": PCAP_HYPERVISOR_WRITE_REMEDIATION,
+    }
+    assert path.encode() not in raw_result
+
+
+class _FakeLibvirtConnection:
+    def lookupByName(self, name: str) -> object:  # noqa: N802 - libvirt binding name
+        return object()
+
+    def close(self) -> int:
+        return 0
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ({"remediation": "r" * 5000}, {"remediation": "r" * 512}),
+        ({"reason": "failed reading /var/lib/kdive/pcap"}, {}),
+        ({"operation": "x" * 65, "error": "1abc"}, {}),
+        ({"error": ["PermissionError"], "reason": None}, {}),
+        ({"bytes": 1.5}, {}),
+        ({"bytes": True}, {}),
+        ({"bytes": -1}, {}),
+        ({"bytes": 10**5000}, {}),
+        ({"remediation": "\ud800" * 600}, {}),
+        ({"remediation": "line\nbreak"}, {}),
+        ({"path": "/srv/kdive/system/capture.pcap", "domain": "kdive-x"}, {}),
+    ],
+    ids=[
+        "long-remediation-truncated",
+        "free-text-reason",
+        "oversized-or-malformed-token",
+        "non-string-token",
+        "float-bytes",
+        "bool-bytes",
+        "negative-bytes",
+        "huge-bytes",
+        "surrogate-remediation",
+        "control-character-remediation",
+        "non-allow-listed-keys",
+    ],
+)
+def test_child_drops_or_truncates_detail_values_outside_their_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
+    details: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    failure = CategorizedError(
+        "provider failure", category=ErrorCategory.CONFIGURATION_ERROR, details=details
+    )
+
+    result, _ = _run_child_with_failure(tmp_path, monkeypatch, launch_token, failure)
+
+    assert result.details == {"phase": "provider_execution", **expected}
+
+
+def test_child_keeps_the_largest_forwarded_details_inside_the_result_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
+) -> None:
+    token = "t" * 64
+    remediation = '"\\' * 256
+    failure = CategorizedError(
+        "provider failure",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "reason": token,
+            "operation": token,
+            "error": token,
+            "bytes": 2**63 - 1,
+            "remediation": remediation,
+        },
+    )
+
+    result, result_bytes = _run_child_with_failure(tmp_path, monkeypatch, launch_token, failure)
+
+    assert result.details == {
+        "phase": "provider_execution",
+        "reason": token,
+        "operation": token,
+        "error": token,
+        "bytes": 2**63 - 1,
+        "remediation": remediation,
+    }
+    assert len(json.dumps(result.details, sort_keys=True, separators=(",", ":"))) <= 4096
+    assert CaptureResult.from_canonical_json(result_bytes) == result
+
+
 @pytest.mark.parametrize(
     ("failure_stage", "expected_phase"),
     [
@@ -512,10 +693,23 @@ def test_child_runs_each_real_provider_dispatch_failure_after_release(
 
 @pytest.mark.parametrize("provider_kind", ["local-libvirt", "remote-libvirt"])
 @pytest.mark.parametrize(
-    ("size", "category"),
+    ("size", "category", "expected_details"),
     [
-        (5, ErrorCategory.CONFIGURATION_ERROR),
-        (1_048_576 + 1, ErrorCategory.INFRASTRUCTURE_FAILURE),
+        (
+            5,
+            ErrorCategory.CONFIGURATION_ERROR,
+            {
+                "phase": "provider_execution",
+                "reason": "pcap_not_written",
+                "bytes": 5,
+                "remediation": "fake provider pcap remediation",
+            },
+        ),
+        (
+            1_048_576 + 1,
+            ErrorCategory.INFRASTRUCTURE_FAILURE,
+            {"phase": "provider_execution"},
+        ),
     ],
     ids=["short", "oversized"],
 )
@@ -527,6 +721,7 @@ def test_child_real_provider_dispatch_rejects_invalid_capture_results(
     provider_kind: str,
     size: int,
     category: ErrorCategory,
+    expected_details: dict[str, object],
     launch_token: str,
 ) -> None:
     result, result_bytes, attempt_dir, calls, samples = asyncio.run(
@@ -543,7 +738,7 @@ def test_child_real_provider_dispatch_rejects_invalid_capture_results(
 
     assert result.outcome == "failure"
     assert result.error_category is category
-    assert result.details == {"phase": "provider_execution"}
+    assert result.details == expected_details
     assert len(result_bytes) <= 65_536
     assert _PRIVATE_PROVIDER_VALUE not in result_bytes
     assert samples >= 5

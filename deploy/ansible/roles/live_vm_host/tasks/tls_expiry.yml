@@ -1,0 +1,49 @@
+---
+# Refuse authority and fixed-worker TLS certificates that are expired or expire within the
+# margin. Callers pass live_vm_host_tls_expiry_certificates ({name, path}); never a key path.
+- name: Require a whole-second TLS expiry margin
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_authority_tls_expiry_margin_seconds | string is match('^[0-9]+$')
+    fail_msg: >-
+      live_vm_host_authority_tls_expiry_margin_seconds must be a non-negative whole number
+      of seconds, not {{ live_vm_host_authority_tls_expiry_margin_seconds }}.
+    quiet: true
+
+- name: Read each TLS certificate's notAfter against the expiry margin
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -noout
+      - -enddate
+      - -checkend
+      - "{{ live_vm_host_authority_tls_expiry_margin_seconds | string }}"
+      - -in
+      - "{{ item.path }}"
+  loop: "{{ live_vm_host_tls_expiry_certificates }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: live_vm_host_tls_expiry_results
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Require each TLS certificate to outlive the expiry margin
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - "'Certificate will not expire' in item.stdout_lines"
+    fail_msg: >-
+      {% set end = item.stdout_lines | select('match', '^notAfter=') | first | default('') -%}
+      TLS credential {{ item.item.name }} ({{ item.item.path }})
+      {% if end %}is expired or expires within the
+      {{ live_vm_host_authority_tls_expiry_margin_seconds }}-second margin ({{ end }}).
+      Renew it before use; see docs/operating/runbooks/live-testing.md, Candidate evidence
+      and cleanup.{% elif item.rc == 1 %}is not a readable PEM certificate:
+      {{ item.stderr | trim }}.{% else %}could not be checked with openssl:
+      {{ (item.stderr or item.msg | default('')) | trim }}.{% endif %}
+    quiet: true
+  loop: "{{ live_vm_host_tls_expiry_results.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"

@@ -1,0 +1,16 @@
+[Unit]
+Description=KDIVE proof-only inventory listener
+PartOf=kdive-external-boot-authority.service
+
+[Socket]
+ListenStream=/run/kdive-authority-inventory/inventory.sock
+Accept=yes
+SocketUser=root
+SocketGroup=kdive-authority-observer
+SocketMode=0660
+RemoveOnStop=yes
+Backlog=16
+MaxConnections=4
+
+[Install]
+WantedBy=multi-user.target

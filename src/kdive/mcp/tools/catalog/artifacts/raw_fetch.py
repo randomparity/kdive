@@ -13,9 +13,11 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import partial
 from typing import Protocol, cast
 from uuid import UUID
 
+import psycopg
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
@@ -24,10 +26,17 @@ from kdive.artifacts.catalog.read_model import (
     RunFetchContext,
     fetch_context_for_run,
     raw_pcap_key,
-    raw_vmcore_key,
 )
 from kdive.artifacts.storage import HeadResult
+from kdive.artifacts.vmcore_retention import (
+    await_vmcore_io,
+    protect_vmcore_url,
+    published_vmcore,
+    require_vmcore_available,
+    vmcore_retention_view,
+)
 from kdive.config.core_settings import ARTIFACT_DOWNLOAD_TTL_SECONDS
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
@@ -103,10 +112,7 @@ async def _resolve_key(
         if pcap_key is None:
             return _config_error(run_id, data={"reason": "pcap_unavailable"})
         return _ResolvedRaw(pcap_key)
-    key = await raw_vmcore_key(conn, run_uid)
-    if key is None:
-        return _config_error(run_id, data={"reason": "vmcore_unavailable"})
-    return _ResolvedRaw(key)
+    raise ValueError("vmcore reads require the protected Run transaction")
 
 
 async def fetch_raw(
@@ -127,6 +133,9 @@ async def fetch_raw(
     ADR-0385) and is ignored for ``vmcore``/``vmlinux``. Requires ``contributor`` on the asset's
     owning project.
     """
+    if asset is RawAsset.VMCORE:
+        with bind_context(principal=ctx.principal):
+            return await _fetch_vmcore_raw(pool, ctx, run_id=run_id, store_factory=store_factory)
     uid = _as_uuid(run_id)
     if uid is None:
         return _config_error(run_id)
@@ -184,3 +193,95 @@ async def fetch_raw(
                 refs={"download_uri": url},
                 data={"asset": asset.value, "size_bytes": head.size_bytes, "ttl": ttl},
             )
+
+
+async def _fetch_vmcore_raw(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    run_id: str,
+    store_factory: Callable[[], _RawStore],
+) -> ToolResponse:
+    uid = _as_uuid(run_id)
+    if uid is None:
+        return _config_error(run_id)
+    try:
+        async with pool.connection() as conn, conn.transaction():
+            run = await fetch_context_for_run(conn, uid)
+            if run is None or run.project not in ctx.projects:
+                return _not_found(run_id)
+            require_role(ctx, run.project, Role.CONTRIBUTOR)
+            async with advisory_xact_lock(conn, LockScope.RUN, uid):
+                await require_vmcore_available(conn, uid)
+                execution = await published_vmcore(conn, uid)
+                if execution is None:
+                    return _config_error(run_id, data={"reason": "vmcore_unavailable"})
+                store = store_factory()
+                head = await await_vmcore_io(
+                    conn,
+                    partial(
+                        store.head,
+                        execution.raw_key,
+                        version_id=execution.raw_version_id,
+                    ),
+                )
+                if head is None:
+                    raise CategorizedError(
+                        "published vmcore version is missing",
+                        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    )
+                ttl = config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS)
+                url = await await_vmcore_io(
+                    conn,
+                    partial(
+                        store.presign_get,
+                        execution.raw_key,
+                        expires_in=ttl,
+                        version_id=execution.raw_version_id,
+                    ),
+                )
+                server_time, expires_at = await protect_vmcore_url(conn, uid, url)
+                retention = await vmcore_retention_view(conn, uid)
+                await audit.record(
+                    conn,
+                    ctx,
+                    audit.AuditEvent(
+                        tool="artifacts.fetch_raw",
+                        object_kind="runs",
+                        object_id=uid,
+                        transition="fetch_raw",
+                        args={"run_id": run_id, "asset": "vmcore"},
+                        project=run.project,
+                    ),
+                )
+                response = ToolResponse.success(
+                    run_id,
+                    "available",
+                    suggested_next_actions=["artifacts.fetch_raw"],
+                    refs={"download_uri": url},
+                    data={
+                        "asset": "vmcore",
+                        "size_bytes": head.size_bytes,
+                        "ttl": ttl,
+                        "server_time": server_time.isoformat(),
+                        "download_expires_at": expires_at.isoformat(),
+                        "vmcore_retention": retention,
+                    },
+                )
+        return response
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(
+            run_id,
+            exc,
+            suggested_next_actions=["runs.get"]
+            if exc.details.get("reason") == "vmcore_retired"
+            else None,
+        )
+    except psycopg.Error:
+        return ToolResponse.failure_from_error(
+            run_id,
+            CategorizedError(
+                "vmcore read lost database authority; retry the read",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ),
+        )

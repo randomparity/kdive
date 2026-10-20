@@ -189,3 +189,16 @@ def test_upload_stream_failure_cleans_up_partial_volume(tmp_path: Path) -> None:
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert stream.aborted
     assert volume.deleted
+
+
+@pytest.mark.parametrize("existing,create_fails", [(True, False), (False, True)])
+def test_fresh_target_never_reuses_or_deletes_existing_volume(
+    tmp_path: Path, existing: bool, create_fails: bool
+) -> None:
+    volume, stream = _FakeVolume(), _FakeStream()
+    pool = _FakePool(volume, volume_exists=existing, create_fails=create_fails)
+    with pytest.raises(CategorizedError):
+        upload_qcow2_volume(
+            _FakeConn(pool, stream), "images", "base", _qcow2(tmp_path), require_new=True
+        )
+    assert not stream.sent and not stream.finished and not volume.deleted

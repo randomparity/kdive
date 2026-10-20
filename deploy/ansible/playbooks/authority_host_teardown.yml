@@ -60,6 +60,12 @@
       changed_when: false
       when: ansible_facts.getent_passwd[authority_account] | default(none) is not none
 
+    - name: Withdraw the proof-only inventory boundary before retiring the authority
+      ansible.builtin.include_tasks: ../roles/provider_authority_host/tasks/inventory_observer.yml
+      vars:
+        inventory_observer_enabled: false
+        inventory_observer_authority_enabled: false
+
     - name: Stop and disable the external-boot authority service
       ansible.builtin.systemd_service:
         name: kdive-external-boot-authority.service
@@ -372,6 +378,12 @@
         - /etc/kdive/libvirtd-external-boot-authority.conf
         - "{{ authority_runtime }}"
         - "{{ authority_install }}"
+        - /etc/systemd/system/kdive-authority-inventory.socket
+        - /etc/systemd/system/kdive-authority-inventory@.service
+        - /etc/tmpfiles.d/kdive-authority-inventory.conf
+        - /usr/libexec/kdive-authority-inventory-client.py
+        - /opt/kdive-authority-inventory
+        - /run/kdive-authority-inventory
       register: removed_authority_artifacts
 
     - name: Assert authority units and endpoint artifacts are absent

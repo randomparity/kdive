@@ -86,8 +86,8 @@ def _start_seaweedfs(labels: Mapping[str, str]) -> tuple[str, str]:
     container = (
         DockerContainer(_SEAWEEDFS_IMAGE)
         .with_command("mini -dir=/data")
-        .with_env("S3_ACCESS_KEY", _ROOT_USER)
-        .with_env("S3_SECRET_KEY", _ROOT_PASSWORD)
+        .with_env("AWS_ACCESS_KEY_ID", _ROOT_USER)
+        .with_env("AWS_SECRET_ACCESS_KEY", _ROOT_PASSWORD)
         .with_exposed_ports(_SEAWEEDFS_PORT)
         .with_kwargs(labels=dict(labels))
     )
