@@ -2089,14 +2089,28 @@ def test_record_console_boot_failure_is_provisioning_failure_without_temp_files(
     assert [p.name for p in tmp_path.iterdir()] == [f"{_SYS}.log"]
 
 
-def test_record_console_boot_replaces_a_stale_temp_file(tmp_path: Path) -> None:
-    # A start that died between create and rename leaves the temp name; the next start reuses it.
+def test_concurrent_console_boot_markers_both_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Starts of one System are not serialized (a Run's boot holds no System fence while control
+    # power does), so a second start can write its marker between the first's create and
+    # rename. Both must succeed; the marker is last-writer-wins and no temp file is left.
     path = tmp_path / f"{_SYS}.log"
     path.touch()
-    (tmp_path / f"{_SYS}.boot.tmp").write_text("stale")
+    real_replace = os.replace
+    interleaved: list[bool] = []
+
+    def _replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if not interleaved:
+            interleaved.append(True)
+            storage_module.record_console_boot(path)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(storage_module.os, "replace", _replace)
 
     storage_module.record_console_boot(path)
 
+    assert interleaved == [True]
     assert sorted(p.name for p in tmp_path.iterdir()) == [f"{_SYS}.boot", f"{_SYS}.log"]
     assert len((tmp_path / f"{_SYS}.boot").read_text()) == 32
 

@@ -394,15 +394,20 @@ def record_console_boot(log_path: Path) -> None:
     empty log under the old nonce resets on the shrink check with no prior-boot bytes. The
     write is atomic (exclusive temp file, then rename) so a reader never sees a partial nonce.
 
+    Starts of one System are not serialized: a Run's boot power-cycles the domain without a
+    System fence (``jobs/handlers/runs/boot.py`` ``boot_handler``) while control power holds
+    the SYSTEM session lock (``jobs/handlers/control/control.py`` ``_run_fenced_power``), so
+    two starts can reach this together. Each call therefore writes its own uniquely named temp
+    file and both succeed; the marker is last-writer-wins. A worker that dies between create
+    and rename leaves one ``<id>.boot.<hex>.tmp`` behind, which nothing reads.
+
     Raises:
         CategorizedError: ``PROVISIONING_FAILURE`` naming the marker when it cannot be written.
     """
     marker = console_boot_marker_path(log_path)
-    temp = marker.with_name(f"{marker.name}.tmp")
+    temp = marker.with_name(f"{marker.name}.{secrets.token_hex(4)}.tmp")
     nonce = secrets.token_hex(16).encode("ascii")
     try:
-        # A start that died mid-write leaves the fixed temp name behind; the next start reuses it.
-        temp.unlink(missing_ok=True)
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, _BOOT_MARKER_MODE)
         try:
             os.fchmod(fd, _BOOT_MARKER_MODE)
