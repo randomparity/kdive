@@ -53,9 +53,10 @@ an equivalent backend-owner procedure before rollout. No reset or live maintenan
 
 - No new dependency, proxy, authority API or general ownership framework is required.
 - Old guest URLs and in-flight conditional requests cannot overwrite a retained tombstone on a
-  conforming backend. The pinned bundled implementation checks at serialized publication, but the
-  slow signed-body/tombstone proof passes on the pinned image. The isolated backend
-  publication-guard fault proof remains required and unrun; activation cannot rely on it yet.
+  conforming backend. The pinned bundled implementation checks at serialized publication, and the
+  slow signed-body/tombstone proof passes on the pinned image. An isolated build of the pinned
+  source with only that publication-time check disabled lets the slow PUT return 200 and fails
+  the proof, so the test depends on the backend guard rather than client headers.
 - Partial failures retain rows and retry; availability failures have no cleanup completion SLA.
 - Migration and deployment require a maintenance window and permanent S3 credential change for
   legacy data. Rollback cannot restore old producers or old credentials.
