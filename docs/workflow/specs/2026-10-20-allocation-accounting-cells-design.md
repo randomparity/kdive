@@ -28,7 +28,7 @@ ADR-0212 report retention, ADR-0715 evidence). Reserved ADR 0790 is unused.
 - `tests/integration/live_stack/tool_cells.py` — `_empty_page` gains `allocations.list`.
 - `tests/integration/live_stack/cleanup.py` — `release_and_verify` accepts an allocation
   the body already released (release cell only; see Release). This replaces the
-  `authority_lane.py` frame change the scope named, and is an operator decision (D1).
+  `authority_lane.py` frame change first scoped (scope amendment, D1).
 
 Reused seams: `HttpCaller`, `Grants`, `prove_functional`, `prove_rejection`,
 `FilteredListControl`, `project_state`, `on_lane_system`, `seed_metering`,
@@ -184,16 +184,13 @@ ledger history of throwaway projects are retained.
 - Covered elsewhere: production utilization reports (#2720/#2725); authority recovery
   orphans (#3185); remote-authority teardown and POWER lanes (#3152, #2818); CLI (#3099).
 
-## Operator decisions
+## Operator decisions (approved 2026-10-20)
 
-- D1 release System: a local lane System with the `cleanup.py` branch (recommended; real
-  worker-side teardown) versus the fixture-mode authority System (its worker teardown is a
-  no-op while the harness keeps the domain on the authority daemon). Either needs the
-  `cleanup.py` branch, which is outside the frozen surface's wording.
-- D2 usage and reports.generate on a lane System (recommended; investigation attribution
-  and non-empty inventory/activity sections) versus server-only with an empty investigation.
-- D3 report artifacts retained under ADR-0212 (recommended) versus direct object deletion,
-  which would leave artifact rows naming deleted objects.
+- D1: a local lane System with the `cleanup.py` branch, added to the scope by amendment.
+  The authority-role gap of a local release (no local release reaches the authority
+  daemon) is owned by #3152.
+- D2: `accounting.usage` and `reports.generate` run on a lane System.
+- D3: report artifacts are retained for the ADR-0212 retention sweep.
 
 ## Validation and operation gate
 
