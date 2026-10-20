@@ -4,9 +4,9 @@ Attaches/removes a ``filter-dump`` netfilter object via the libvirt QMP passthro
 (``libvirt_qemu.qemuMonitorCommand``) keyed on the domain name. DB-free — the worker handler owns
 the bounded size-poll and cancellation. The leading ``object-del`` tolerates not-found so the
 first-ever capture (no stale filter) succeeds and an at-least-once retry re-attaches idempotently.
-QMP passthrough errors surface as a generic ``libvirt.libvirtError`` string with no distinct
-``VIR_ERR_*`` code, so the not-found tolerance matches on the QMP error message/class text (unlike
-the typed ``control._idempotent`` / ``snapshot._delete_if_exists`` code-based swallows).
+QMP refusals arrive as error *replies* on a successful passthrough call (ADR-0385 amendment,
+#3270), so every reply is parsed: an absent filter is tolerated, an EACCES pcap open is the
+operator-fixable ``CONFIGURATION_ERROR``, and any other refusal is a retryable ``CONTROL_FAILURE``.
 """
 
 from __future__ import annotations
@@ -23,6 +23,11 @@ import libvirt
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.qmp_reply import (
+    MalformedQmpReplyError,
+    QmpReply,
+    parse_qmp_reply,
+)
 from kdive.providers.local_libvirt.lifecycle.xml import SYSTEM_SSH_NETDEV_ID
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.traffic import TrafficCapturer as TrafficCapturer
@@ -53,10 +58,10 @@ def _close(conn: _LibvirtConn) -> None:
         _log.warning("libvirt connection close failed; continuing", exc_info=True)
 
 
-def _is_not_found(exc: libvirt.libvirtError) -> bool:
-    """A QMP ``object-del`` on a missing id yields "object 'X' not found" / ``DeviceNotFound``."""
-    message = str(exc).lower()
-    return "not found" in message or "devicenotfound" in message
+_PCAP_OPEN_REFUSAL = "net dump: can't open "
+_EACCES_SUFFIX = ": Permission denied"
+# QEMU-controlled text reaches operator logs only, bounded and repr-quoted.
+_LOGGED_DESCRIPTION_CHARS = 256
 
 
 class LocalLibvirtTrafficCapture:
@@ -81,7 +86,7 @@ class LocalLibvirtTrafficCapture:
 
     @property
     def write_remediation(self) -> str:
-        """Operator guidance when the qemu:///system hypervisor could not write the pcap dir."""
+        """Operator guidance when the hypervisor could not create the pcap (either daemon)."""
         return PCAP_HYPERVISOR_WRITE_REMEDIATION
 
     def prepare(self, system_id: UUID, job_id: UUID) -> str:
@@ -120,7 +125,7 @@ class LocalLibvirtTrafficCapture:
         conn = self._open()
         try:
             domain = self._lookup(conn, domain_name)
-            self._object_del(domain, domain_name, qom_id, tolerate_missing=True)
+            self._object_del(domain, domain_name, qom_id)
             self._object_add(
                 domain,
                 domain_name,
@@ -140,7 +145,7 @@ class LocalLibvirtTrafficCapture:
         conn = self._open()
         try:
             domain = self._lookup(conn, domain_name)
-            self._object_del(domain, domain_name, qom_id, tolerate_missing=True)
+            self._object_del(domain, domain_name, qom_id)
         finally:
             _close(conn)
 
@@ -166,21 +171,79 @@ class LocalLibvirtTrafficCapture:
     def _object_add(self, domain: object, domain_name: str, arguments: dict[str, object]) -> None:
         cmd = {"execute": "object-add", "arguments": arguments}
         try:
-            self._monitor(domain, json.dumps(cmd), 0)
+            raw = self._monitor(domain, json.dumps(cmd), 0)
         except libvirt.libvirtError as exc:
             raise self._control_failure("adding capture filter on", domain_name) from exc
+        reply = self._parse(raw, "object_add", domain_name)
+        if reply.error_class is None:
+            return
+        _log.warning(
+            "QEMU refused capture filter on %s: %s %r",
+            domain_name,
+            reply.error_class,
+            reply.description[:_LOGGED_DESCRIPTION_CHARS],
+        )
+        if reply.description.startswith(_PCAP_OPEN_REFUSAL) and reply.description.endswith(
+            _EACCES_SUFFIX
+        ):
+            raise CategorizedError(
+                "the hypervisor was denied creating the capture pcap",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "reason": "pcap_open_denied",
+                    "operation": "object_add",
+                    "error": reply.error_class,
+                    "remediation": PCAP_HYPERVISOR_WRITE_REMEDIATION,
+                },
+            )
+        raise self._refused(reply, "object_add", domain_name)
 
-    def _object_del(
-        self, domain: object, domain_name: str, qom_id: str, *, tolerate_missing: bool
-    ) -> None:
+    def _object_del(self, domain: object, domain_name: str, qom_id: str) -> None:
         cmd = {"execute": "object-del", "arguments": {"id": qom_id}}
         try:
-            self._monitor(domain, json.dumps(cmd), 0)
+            raw = self._monitor(domain, json.dumps(cmd), 0)
         except libvirt.libvirtError as exc:
-            if tolerate_missing and _is_not_found(exc):
-                _log.info("capture filter %s already absent on %s; continuing", qom_id, domain_name)
-                return
             raise self._control_failure("removing capture filter on", domain_name) from exc
+        reply = self._parse(raw, "object_del", domain_name)
+        if reply.absent:
+            _log.info("capture filter %s already absent on %s; continuing", qom_id, domain_name)
+            return
+        if reply.error_class is not None:
+            _log.warning(
+                "QEMU refused capture filter removal on %s: %s %r",
+                domain_name,
+                reply.error_class,
+                reply.description[:_LOGGED_DESCRIPTION_CHARS],
+            )
+            raise self._refused(reply, "object_del", domain_name)
+
+    @staticmethod
+    def _parse(raw: str, operation: str, domain_name: str) -> QmpReply:
+        try:
+            return parse_qmp_reply(raw)
+        except MalformedQmpReplyError as exc:
+            raise CategorizedError(
+                "QEMU returned a malformed capture filter reply",
+                category=ErrorCategory.CONTROL_FAILURE,
+                details={
+                    "domain": domain_name,
+                    "reason": "qmp_reply_malformed",
+                    "operation": operation,
+                },
+            ) from exc
+
+    @staticmethod
+    def _refused(reply: QmpReply, operation: str, domain_name: str) -> CategorizedError:
+        return CategorizedError(
+            "QEMU refused the capture filter command",
+            category=ErrorCategory.CONTROL_FAILURE,
+            details={
+                "domain": domain_name,
+                "reason": "capture_filter_rejected",
+                "operation": operation,
+                "error": reply.error_class,
+            },
+        )
 
     def _open(self) -> _LibvirtConn:
         try:

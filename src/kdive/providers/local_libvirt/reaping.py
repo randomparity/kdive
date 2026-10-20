@@ -30,6 +30,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import OrphanedCapture, OwnedDomain
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
+from kdive.providers.local_libvirt.lifecycle.qmp_reply import (
+    MalformedQmpReplyError,
+    parse_qmp_reply,
+)
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.handles import OwnedInfra
 from kdive.providers.ports.traffic import capture_qom_id
@@ -102,16 +106,6 @@ class _CaptureConn(Protocol):
 
 type CaptureConnect = Callable[[], _CaptureConn]
 type CaptureMonitor = Callable[[object, str, int], str]
-
-
-def _capture_is_not_found(exc: libvirt.libvirtError) -> bool:
-    """A QMP ``object-del`` on a missing id yields "object 'X' not found" / DeviceNotFound.
-
-    Deliberate duplicate of the live capturer's matcher: QMP passthrough errors carry no
-    distinct ``VIR_ERR_*`` code, so absence is matched on lowercased message text.
-    """
-    message = str(exc).lower()
-    return "not found" in message or "devicenotfound" in message
 
 
 def _close_capture_conn(conn: _CaptureConn) -> None:
@@ -190,16 +184,26 @@ class LocalLibvirtCaptureReaper:
             raise self._control_failure("looking up", capture.domain_name) from exc
         cmd = {"execute": "object-del", "arguments": {"id": qom_id}}
         try:
-            self._monitor(domain, json.dumps(cmd), 0)
-        except libvirt.libvirtError as exc:
-            if _capture_is_not_found(exc):
-                _log.info(
-                    "reconciler: capture filter %s already absent on %s; continuing",
-                    qom_id,
-                    capture.domain_name,
-                )
-                return
+            raw = self._monitor(domain, json.dumps(cmd), 0)
+            reply = parse_qmp_reply(raw)
+        except (libvirt.libvirtError, MalformedQmpReplyError) as exc:
             raise self._control_failure("removing capture filter on", capture.domain_name) from exc
+        if reply.absent:
+            _log.info(
+                "reconciler: capture filter %s already absent on %s; continuing",
+                qom_id,
+                capture.domain_name,
+            )
+            return
+        if reply.error_class is not None:
+            _log.warning(
+                "reconciler: QEMU refused removing capture filter %s on %s: %s %r",
+                qom_id,
+                capture.domain_name,
+                reply.error_class,
+                reply.description[:256],
+            )
+            raise self._control_failure("removing capture filter on", capture.domain_name)
 
     def _unlink_pcap(self, capture: OrphanedCapture) -> None:
         """Remove the job's pcap file, tolerating absence; any other OSError raises."""
