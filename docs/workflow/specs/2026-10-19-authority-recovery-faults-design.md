@@ -229,6 +229,10 @@ The only actor is root on a disposable proof host. Workers and tenants cannot re
 - `abort` is accepted only at a reached `before-finalize`, and it consumes the arm;
 - publication still passes the authority's head, lease and fence checks.
 
+The receipt observer also crosses into the authority's private store, as root through the lane's
+existing `sudo -n` seam. It takes UUID arguments only, opens with `O_NOFOLLOW`, bounds its read and
+output, and returns only presence, a digest and the two proof identifiers.
+
 A malicious root is out of scope.
 
 ## Success
