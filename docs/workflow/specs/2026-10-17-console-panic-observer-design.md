@@ -143,3 +143,79 @@ original cause evidence and a genuine successful cell or an explicitly reviewed 
 of an invalid proof contract. That later proof needs a separately approved exact candidate,
 host, existing genuine #3219 fixtures, bounded crash/evidence/export/restore plan and cleanup;
 no live result is asserted by this design or its focused tests.
+
+## Amendment 1 (2026-10-20): per-start console boot identity
+
+### Evidence
+
+One genuine candidate-bound force-crash cell on a disposable Fedora 44 x86_64 host passed
+install, boot identity, modules, reconnect and the crash job, then this observer failed closed
+with `generation_change`. The baseline held `console-part-0-000000`; the post-crash listing
+held `console-part-1-000000` and `console-part-1-000001`. The two `console_rotate` payloads'
+`boot_id` values differed only in the mtime component, with the same device and inode.
+
+`reconciler/repairs/console_rotation.py::_boot_id` returns `dev:ino:mtime`.
+`artifacts/console/rotation.py::_detect_new_boot` treats any change as a new boot: it bumps the
+generation and re-cuts the whole log from offset 0. Under ADR-0576 the worker truncates one
+surviving inode before every start, so device and inode never change across boots. mtime was
+the only per-boot component, and it also advances on every append. ADR-0273 decision 4 already
+requires "a per-boot signal independent of file size". The observer's same-generation rule is
+correct; the production identity is not.
+
+### Design
+
+1. **Record a per-start nonce wherever the log is truncated.** Two functions truncate the
+   console before a start: `storage._prepare_console_log` (provisioning, booter power-cycle,
+   install and customization boots, control power-on, snapshot revert) and
+   `readiness.prepare_console_readiness_window` (the external boot session and the system
+   authority lane, which replace the seam). After its `ftruncate`, each calls one helper,
+   `storage.record_console_boot(log_path)`. The helper writes a fresh 128-bit hex nonce to a
+   sibling marker, `<system_id>.boot`, beside `<system_id>.log`.
+   `runtime_paths.console_boot_marker_path(log_path)` is the single path derivation. The write
+   is atomic: a uniquely named temp file opened `O_CREAT|O_EXCL|O_NOFOLLOW`, `fchmod 0644`,
+   then `os.replace`. A failed write removes the temp file and fails the start with the seam's
+   existing `PROVISIONING_FAILURE` identity error naming the marker. Truncate comes first: a
+   rotation that reads the truncated log with the old nonce resets through the existing shrink
+   check, with no bytes to misattribute. The new nonce then resets once more. That can leave
+   one generation with no parts, but prior-boot bytes never enter the new boot's generation.
+2. **Identity is `dev:ino:<nonce>`.** The reconciler's `_boot_id` keeps its `os.stat` of the
+   log; a stat failure (not co-located, unreadable or absent) still degrades to the existing
+   reset-forcing `""`. The nonce is opened `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`. It must be a
+   regular file owned by the log's owner (so a planted FIFO cannot stall the serial sweep),
+   is capped at 64 bytes, and is accepted only as exactly 32 lowercase hex characters. A missing, unreadable or malformed
+   marker contributes an empty nonce, `dev:ino:`, which stays stable rather than resetting on
+   every pass. Validation keeps arbitrary file content out of the persisted job payload.
+3. **Unchanged contracts.** `ConsoleRotatePayload.boot_id` stays a string from the same producer.
+   The sidecar, `rotate`, `_detect_new_boot`, the database and MCP surfaces are unchanged. No
+   migration. The value format changes, but every consumer compares it as an opaque string
+   (`rotation._detect_new_boot`); nothing parses it. The marker is non-contract host runtime
+   state in the existing `KDIVE_LIBVIRT_CONSOLE_ROOT`, which the units' `ReadWritePaths` already
+   cover. It needs no setting, env knob or provisioning change. It follows the log's lifecycle;
+   nothing in `src/` reclaims console logs, so no new reclaim is added. The authority-fixture
+   script that removes `<id>.log` also removes `<id>.boot`.
+
+### Behavior
+
+- Ordinary growth, including crash output, changes only mtime. Before this change, any rotation
+  pass that observed new output bumped the generation. Now growth keeps the generation.
+- A power-cycle writes a new nonce, so a new boot that regrows past the prior offset before
+  the next rotation still starts a new generation. A shrink below the offset still resets
+  through the existing check.
+- Systems started before this change have no marker. Their first rotation after upgrade sees
+  `dev:ino:` instead of `dev:ino:mtime` and bumps the generation once, then stays stable. A
+  console observer that brackets the upgrade sees one `generation_change`. Mixed old/new
+  workers are unsupported: an old worker's start keeps a stale nonce and only the shrink check
+  remains.
+- Accepted residuals: the identity is read when the job is enqueued and the log is read when it
+  is handled, and that skew predates this change. A marker that becomes readable between two
+  passes causes one extra reset. Neither duplicates evidence beyond one re-cut generation.
+
+### Validation
+
+Red-green focused tests: identity stability across appends with an advanced mtime; identity
+change across a second prepare with regrowth past the prior size; rotation keeping the
+generation on growth and bumping it on prepare+regrow; a nonce from both truncating entry points
+(the seam and the readiness window); marker atomic write, mode and failure category; the
+symlinked, FIFO, foreign-owned, oversized and malformed marker degrading to an empty nonce; and
+the unchanged stat-failure degradation. ADR-0576 gains an amendment. The genuine force-crash cell is
+the end-to-end proof.
