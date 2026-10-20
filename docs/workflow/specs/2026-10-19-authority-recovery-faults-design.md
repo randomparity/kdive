@@ -149,7 +149,7 @@ capacity unchanged.
    `runs.release_external_boot` and wait for the barrier to report reached.
 2. Pre-abort evidence:
    - the head is `terminal` for the release's cleanup operation;
-   - a fixed, read-only observer run as the authority account reports
+   - a fixed, read-only observer reports (run as root through the lane's existing observer seam, which #3276 moves off root)
      `<recovery_root>/<system_id>.<activation_id>/cleanup-quarantine.json` present, with its
      SHA-256. It takes UUID arguments only;
    - no quarantine row exists for the System.
