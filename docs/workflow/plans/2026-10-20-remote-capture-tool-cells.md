@@ -20,7 +20,7 @@ Tech stack: Python 3.14, pytest, libvirt-python, `uv`, `just`.
 
 Expected implementation size: 480–680 changed lines (L). Derived from the file map below: the
 contract rule and handler rename (~25), the lane field (~30), the capture-cell changes (~140), the
-carrier (~30), 45 binding rows, three unit-test files (~200) and one runbook section (~50).
+carrier (~30), 45 binding rows, three unit-test files (~260) and one runbook section (~50).
 
 ## Global Constraints
 
@@ -32,7 +32,7 @@ carrier (~30), 45 binding rows, three unit-test files (~200) and one runbook sec
   Task 0 proves that base.
 - Product source changes are limited to renaming `_VMCORE_METHODS` to `VMCORE_METHODS` in
   `src/kdive/mcp/tools/lifecycle/vmcore/handlers.py`, with no behaviour change. No migration. The
-  ADR change is the 2026-10-20 amendment in ADR-0722. ADR slot `docs/adr/0792` stays unused.
+  ADR change is the 2026-10-20 amendment in ADR-0722. ADR slot 0792 stays unused.
 - Local-libvirt cells keep their values: 164 owned by #2814 (28 functional, 4 unsupported). The
   local profile edits and the local rejection target are unchanged.
 - Test-only env inputs stay unprefixed (`REMOTE_PROVIDER_SSH`); never add a `KDIVE_` variable.
