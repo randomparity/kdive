@@ -20,7 +20,7 @@ from kdive.services.systems.admission import ProvisionJobAdmitted, stored_admiss
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import orchestration_faults as of
 from tests.integration.live_stack.evidence import EvidenceWriter
-from tests.integration.live_stack.resource_limits import Held, Provider, cells, failure
+from tests.integration.live_stack.resource_limits import Held, Provider, Sampler, cells, failure
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.live_vm.installed_local_authority_support import RunningJobClaim
 
@@ -386,3 +386,49 @@ def test_in_flight_refuses_a_missed_window(
         lambda: asyncio.run(of.in_flight(held, "db", _JOB, 60.0))
     )
     assert held.overlays == []
+
+
+# --- scenario bodies up to the fault boundary --------------------------------------------
+
+
+class _Boundary(Exception):
+    """Raised where a scenario would first touch the live fault."""
+
+
+class _ProvisioningHeld(Held):
+    async def provision(self, profile: dict[str, object], **args: object) -> str:
+        self.system_id = _UUID
+        self.sampler = Sampler(self.allocation, self.in_use_before, set)
+        return _JOB
+
+
+async def _no_op(*_a: object, **_k: object) -> None:
+    return None
+
+
+async def _boundary(*_a: object, **_k: object) -> Any:
+    raise _Boundary
+
+
+@pytest.mark.parametrize("scenario", ["worker_interruption", "lost_response", "backing_service"])
+def test_scenario_bodies_provision_before_reaching_the_fault(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario: str
+) -> None:
+    held = _held(tmp_path)
+    fake = _ProvisioningHeld(held.run, held.op, held.provider, "alloc", 0, set())
+
+    async def frame(*_a: object, body: of.Body, **_k: object) -> None:
+        await body(fake, {}, 60.0)
+
+    monkeypatch.setattr(of, "preconditions", lambda *_a, **_k: "c0ffee")
+    monkeypatch.setattr(of, "unit_identity", dict)
+    monkeypatch.setattr(of, "frame", frame)
+    monkeypatch.setattr(of, "require_direct", _no_op)
+    monkeypatch.setattr(of, "in_flight", _boundary)
+    monkeypatch.setattr(of, "stored_result", _boundary)
+    run = getattr(of, scenario)
+    with pytest.raises(_Boundary):
+        asyncio.run(
+            run(held.run, "http://127.0.0.1:8000/mcp", None, "db", tmp=tmp_path, remote=False)
+        )
+    assert fake.system_id == _UUID
