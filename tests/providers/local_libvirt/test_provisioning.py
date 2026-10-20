@@ -2049,6 +2049,72 @@ def test_prepare_console_log_truncates_in_place_and_keeps_worker_identity(tmp_pa
     assert st.st_mode & 0o777 == 0o664
 
 
+def test_prepare_console_log_records_a_fresh_boot_marker_per_start(tmp_path: Path) -> None:
+    # #3254: the inode survives every start (ADR-0576), so each prepare writes a fresh nonce
+    # beside the log; console rotation keys its boot identity on it instead of mtime.
+    path = tmp_path / f"{_SYS}.log"
+    marker = tmp_path / f"{_SYS}.boot"
+
+    storage_module._prepare_console_log(path)
+    first = marker.read_text()
+    storage_module._prepare_console_log(path)
+    second = marker.read_text()
+
+    assert len(first) == 32 and int(first, 16) >= 0
+    assert second != first
+    assert marker.stat().st_mode & 0o777 == 0o644
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{_SYS}.boot", f"{_SYS}.log"]
+
+
+def test_record_console_boot_failure_is_provisioning_failure_without_temp_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / f"{_SYS}.log"
+    path.touch()
+
+    def _replace_failed(src: object, dst: object) -> None:
+        del src, dst
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(storage_module.os, "replace", _replace_failed)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module.record_console_boot(path)
+
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert caught.value.details == {
+        "path": str(tmp_path / f"{_SYS}.boot"),
+        "reason": "PermissionError",
+    }
+    assert [p.name for p in tmp_path.iterdir()] == [f"{_SYS}.log"]
+
+
+def test_concurrent_console_boot_markers_both_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Starts of one System are not serialized (a Run's boot holds no System fence while control
+    # power does), so a second start can write its marker between the first's create and
+    # rename. Both must succeed; the marker is last-writer-wins and no temp file is left.
+    path = tmp_path / f"{_SYS}.log"
+    path.touch()
+    real_replace = os.replace
+    interleaved: list[bool] = []
+
+    def _replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if not interleaved:
+            interleaved.append(True)
+            storage_module.record_console_boot(path)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(storage_module.os, "replace", _replace)
+
+    storage_module.record_console_boot(path)
+
+    assert interleaved == [True]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{_SYS}.boot", f"{_SYS}.log"]
+    assert len((tmp_path / f"{_SYS}.boot").read_text()) == 32
+
+
 def test_prepare_console_log_creates_missing_parents_and_file(tmp_path: Path) -> None:
     # A never-provisioned build host has no /var/lib/kdive/console yet; the customization
     # boot's prepare is what guarantees the directory exists before createXML.

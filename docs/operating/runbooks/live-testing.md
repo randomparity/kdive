@@ -1065,6 +1065,68 @@ available, leaving nothing staged. Before the uploads root joined host preparati
 `svirt_image_t` labels, an uploaded rootfs could not be staged at all, and qemu was denied
 reading one in place.
 
+#### Local orchestration-fault cells (#3117)
+
+`tests/integration/test_orchestration_faults_live.py::test_local_orchestration_fault` has one
+parameter for each `failure-resource/local-libvirt/x86_64/{worker-interruption,lost-response,backing-service}`
+cell. Each cell provisions the `rocky-kdive-ready-10` image at the default shape on the direct
+provision path (a stack with no installed authority) and binds the longterm fixture kernel's
+inputs without booting it. The worker pause and the Postgres outage land in the provision's
+first boot, while the domain is running and attempt 1 still holds the job; the lost-response
+replay runs while the provision job is running. Each cell proves its recovery
+outcome plus `no-duplicates`, `protected-state` and `cleanup`.
+
+- `worker-interruption` pauses the worker holding the job with `SIGSTOP`. It never restarts
+  the unit, because an out-of-band restart wedges the slot. After the 5-minute lease lapses,
+  another worker must take the job at a higher attempt and finish it. The paused worker is then
+  resumed, and its late result must leave the job row, the `ready` System, the domain and the
+  overlay unchanged.
+- `lost-response` provisions with a fresh idempotency key. It reads the committed
+  `idempotency_keys` row and drops the reply. It replays the key from a new session twice, once
+  while the job runs and once after it finishes. Both replays must return the stored job and
+  System, with exactly one provision job and one System on the Allocation.
+- `backing-service` runs `docker compose stop postgres` mid-provision. After 75 s it runs
+  `docker compose start postgres`, which must bring back the same container. Every role's
+  `/readyz` must return to ready. The job must then succeed at an attempt above 1, and the
+  worker journal labels whether it was requeued or reclaimed after its lease lapsed. No worker
+  unit's `InvocationID` or `MainPID` may change.
+
+Preconditions, checked before anything is allocated (each one missing blocks the cell):
+
+- `KDIVE_WORKER_COUNT=2` or more running fixed worker slots;
+- passwordless `sudo -n /usr/bin/python3` for the worker hold;
+- journal access (the `systemd-journal` group);
+- for `backing-service`, the docker group and the compose `postgres` service of this checkout's
+  stack.
+
+Run it against an exclusively assigned host: `backing-service` stops the stack's shared
+database.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix
+uv run python -m tests.integration.live_stack.resource_limits bindings --owner 3117 \
+  --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+uv run python -m pytest -m live_stack tests/integration/test_orchestration_faults_live.py \
+  -k test_local_orchestration_fault
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+After the run, check all of the following:
+
+- `scripts/live-stack/worker-lifecycle.sh status` shows every slot running;
+- every `/readyz` answers 200;
+- no `kdive-` domain the run added is still defined.
+
+A cell that stops mid-fault resumes the paused worker and restarts Postgres in its own
+`finally`. If the run itself is killed, send `SIGCONT` to the paused unit's main PID and run
+`docker compose start postgres` by hand before anything else. A wedged slot is recovered with
+`worker-lifecycle.sh recover` (see the live-stack runbook). The three `remote-libvirt` cells are
+in the [remote runbook](remote-live-stack.md#11-remote-orchestration-fault-cells-3117).
+
 #### Core tool cells and server configurations (#2811)
 
 `tests/integration/test_core_tool_cells_live.py::test_core_tool_cell` has one parameter for each
@@ -1573,10 +1635,18 @@ uv run python -m pytest -m live_stack tests/integration/test_capture_tool_cells_
   process named `kcov<hex>`. `kdump` cells add `crashkernel` and wait for
   `/sys/kernel/kexec_crash_loaded`; `host_dump` cells set `debug.preserve_on_crash` instead, so
   the crashed domain stays up for the memory dump.
-- `control.force_crash` (admin) drains to `succeeded`, reaches `crashed` and puts the fixture
-  kernel's panic in a new console part. `vmcore.fetch` drains the capture, checks the job, Run
-  and artifact refs, downloads the raw core twice through `artifacts.fetch_raw` (identical
-  bytes, advertised size) and requires its VMCOREINFO to name the fixture build ID and release.
+- `control.force_crash` (admin) drains to `succeeded`, reaches `crashed`, and shows the crash in
+  new console parts of the same generation. Those parts hold either the fixture kernel's panic
+  with its release on the `CPU:` record (`crash_evidence: console_panic`), or the kdump crash
+  kernel's `Linux version <release>` banner whose `Command line:` carries `elfcorehdr=`
+  (`crash_evidence: crash_kernel`). A kdump-armed guest normally shows only the second form,
+  because the crashing kernel enters the crash kernel before its panic reaches the serial
+  console (#3254). The panic text is then only in the dump. That applies outside the harness
+  too: console panic matching cannot see a crash on a kdump-armed guest. Check the System's
+  `crashed` state or the captured core instead. `vmcore.fetch` drains the capture, checks the
+  job, Run and artifact refs, downloads the raw core twice through `artifacts.fetch_raw`
+  (identical bytes, advertised size) and requires its VMCOREINFO to name the fixture build ID
+  and release.
 - `introspect.from_vmcore` and `postmortem.crash` run over a kdump core: the fixture release,
   the guest's node name, `loop` and, for crash(8), the sentinel. `introspect.run` and
   `introspect.script` use a drgn-live session, which they end: the helpers match the guest's

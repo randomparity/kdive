@@ -218,8 +218,9 @@ class CheckSshReachablePayload(SystemPayload):
 class ConsoleRotatePayload(SystemPayload):
     """A request to rotate a live System's growing console into redacted parts (#892).
 
-    ``boot_id`` is a per-boot identity (the console log's ``os.stat`` ``dev:ino:mtime``) the
-    worker handler uses to detect a power-cycle even when the new boot has already grown past the
+    ``boot_id`` is a per-boot identity (the console log's ``os.stat`` ``dev:ino`` plus the
+    worker's per-start boot nonce, #3254), compared only as an opaque string. The worker handler
+    uses it to detect a power-cycle even when the new boot has already grown past the
     prior cursor offset (the local serial ``<log>`` truncates per power-cycle, ADR-0258). An empty
     string is a reset-forcing identity: the reconciler that enqueues this may not be co-located
     with the worker that owns the console file, so a stat it cannot take degrades to ``""``.

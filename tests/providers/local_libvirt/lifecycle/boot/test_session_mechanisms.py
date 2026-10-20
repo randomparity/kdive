@@ -177,6 +177,54 @@ def test_prepared_window_discards_prior_marker_before_new_crash(
     assert result == ReadinessResult(True, False, None, "Kernel panic")
 
 
+def test_prepared_window_records_a_fresh_boot_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #3254: the external boot and authority lanes truncate through this window instead of the
+    # storage seam, so it must record the per-start boot nonce too.
+    path = tmp_path / "console.log"
+    path.write_bytes(b"prior boot")
+    marker = tmp_path / "console.boot"
+    marker.write_text("0" * 32)
+    monkeypatch.setattr(readiness_module, "console_log_path", lambda _system_id: path)
+    monkeypatch.setattr(readiness_module.config, "require", lambda _setting: 10)
+
+    window = prepare_console_readiness_window(SYSTEM_ID)
+    window.close()
+
+    assert path.read_bytes() == b""
+    assert marker.read_text() != "0" * 32
+    assert len(marker.read_text()) == 32
+
+
+def test_prepared_window_closes_its_descriptor_when_the_marker_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "console.log"
+    path.touch()
+    monkeypatch.setattr(readiness_module, "console_log_path", lambda _system_id: path)
+    failure = CategorizedError("marker", category=ErrorCategory.PROVISIONING_FAILURE)
+
+    def _marker_failed(_path: Path) -> None:
+        raise failure
+
+    closed: list[int] = []
+    real_close = os.close
+
+    def _close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(readiness_module, "record_console_boot", _marker_failed)
+    monkeypatch.setattr(readiness_module.os, "close", _close)
+
+    with pytest.raises(CategorizedError) as caught:
+        prepare_console_readiness_window(SYSTEM_ID)
+
+    assert caught.value is failure
+    assert len(closed) == 1
+
+
 @pytest.mark.parametrize(("multiplier", "expected"), [(1.0, 10.0), (7.0, 70.0)])
 def test_prepared_window_uses_multiplier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, multiplier: float, expected: float

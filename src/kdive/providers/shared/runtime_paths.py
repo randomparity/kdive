@@ -137,6 +137,11 @@ def console_log_path(system_id: UUID) -> Path:
     return Path(_CONSOLE_DIR) / f"{system_id}.log"
 
 
+def console_boot_marker_path(log_path: Path) -> Path:
+    """The per-start boot marker beside a console log: ``<id>.log`` -> ``<id>.boot`` (#3254)."""
+    return log_path.with_suffix(".boot")
+
+
 def pcap_dir(system_id: UUID) -> Path:
     """The per-System host directory QEMU writes traffic captures into (ADR-0385)."""
     return Path(_PCAP_DIR) / str(system_id)
