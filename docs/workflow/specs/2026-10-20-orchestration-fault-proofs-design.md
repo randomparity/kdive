@@ -10,13 +10,12 @@ cell's assertions are `(<failure>, no-duplicates, protected-state, cleanup)`, it
 WORK:SCOPE `q3117-029cd8e8`. Exclusions approved for this campaign (2026-10-16): low-resource
 cells #3118, native POWER #2818, durable finalization and cross-replica guarantees #2681,
 inspected-image registration #3218 (merged). This change adds test carriers, coverage bindings
-and runbook text only. It changes no product source. A product defect a cell exposes is
-recorded as that cell's failure and routed to the campaign root. It is never worked around
-in the carrier.
+and runbook text. It changes product source only under the conditional fence fix below. Any
+other product defect a cell exposes is recorded as that cell's failure and routed to the
+campaign root. It is never worked around in the carrier.
 
-Operator decisions D1–D4 (end of this spec) are pending at the design gate. The body below is
-written for the recommended option of each. A different answer changes only the section it
-names.
+The operator settled D1–D4 on 2026-10-20 (WORK:SCOPE re-freeze #2), choosing option (a) for
+each. The decisions are listed at the end of this spec.
 
 ## Source findings
 
@@ -307,17 +306,44 @@ controlled fault.
   `build_contract()`.
 - First real run: the bounded live plan in the design-gate report, after an operator grant.
 
-## Operator decisions pending
+## Conditional stale-attempt fence fix
 
-- **D1 execution path.** Recommended: the direct path on the managed host stack. Alternative:
+Operator decision, 2026-10-20: this fix is in scope only if a live worker-interruption cell
+confirms that a stale, reclaimed provision attempt changes the System or its provider
+resources. "Changes" means one of these:
+
+- the System leaves `ready`;
+- the domain is torn down;
+- the overlay is reclaimed after the replacement attempt has committed.
+
+If no cell confirms it, the code is left unchanged.
+
+When it is confirmed, the fix guards each stale write with the job's attempt fence, under the
+SYSTEM advisory lock. Before any of those writes, the handler re-reads `jobs.attempt` and
+`worker_id`. The guarded writes are:
+
+- `_record_system_failure` (`src/kdive/jobs/handlers/systems.py:321-334`);
+- the post-commit teardown in `_execute_system_lifecycle_call`.
+
+The provider's own reclaim on failure (`provisioning.py:383-391`, plus the remote equivalent)
+takes a fence callback that is checked before it tears anything down. The exact seam is
+designed against the observed failure and recorded in ADR 0794 if it has viable alternatives.
+
+The fix needs a red-green unit test that drives a reclaimed attempt's late failure against a
+`ready` System, plus the gauntlet code review. The failing cell is then rerun. Changing the
+attempt fence itself, or adding a migration, is a new scope checkpoint.
+
+## Operator decisions (settled 2026-10-20: option (a) for each)
+
+- **D1 execution path.** Chosen: the direct path on the managed host stack. Rejected:
   the authority lane, which waits on #3152 and #3185.
-- **D2 lost-response transport.** Recommended: discard the received envelope after the commit
+- **D2 lost-response transport.** Chosen: discard the received envelope after the commit
   is visible, then retry with the same key from a new session. Once the commit is visible, the
   server cannot tell this apart from a dropped connection (`provision.py:130-146`).
-  Alternative: a raw streamable-HTTP client that abandons the connection without reading the
+  Rejected: a raw streamable-HTTP client that abandons the connection without reading the
   response. That adds about 100 lines and observes nothing more at the server.
-- **D3 backing service.** Recommended: stop Postgres during the first-boot wait. Alternative:
+- **D3 backing service.** Chosen: stop Postgres during the first-boot wait. Rejected:
   stop the object store around `runs.install`. That alternative only shows a paused dequeue,
   not an in-flight loss.
-- **D4 kernel.** Recommended: bind the kernel inputs only (#3118 precedent). Alternative: install
+- **D4 kernel.** Chosen: bind the kernel inputs only (#3118 precedent). Rejected: install
   and boot the fixture after recovery, which adds about 5 minutes per cell.
