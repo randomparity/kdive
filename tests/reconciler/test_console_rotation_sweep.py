@@ -234,7 +234,10 @@ def test_boot_id_degrades_to_empty_when_the_log_cannot_be_stat(
 
 @pytest.mark.parametrize("marker_kind", ["missing", "symlink", "fifo", "oversized", "malformed"])
 def test_untrusted_boot_marker_contributes_an_empty_nonce(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker_kind: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    marker_kind: str,
 ) -> None:
     # The marker is read across a trust boundary into a persisted payload: anything but a
     # worker-owned regular file holding exactly one nonce yields a stable empty nonce, and a
@@ -247,7 +250,11 @@ def test_untrusted_boot_marker_contributes_an_empty_nonce(
         target.write_text("a" * 32)
         marker.symlink_to(target)
     elif marker_kind == "fifo":
+        # A FIFO whose writer offers a well-formed nonce: only a regular file is trusted.
         os.mkfifo(marker)
+        writer = os.open(marker, os.O_RDWR | os.O_NONBLOCK)
+        os.write(writer, b"a" * 32)
+        request.addfinalizer(lambda: os.close(writer))
     elif marker_kind == "oversized":
         marker.write_text("a" * 100)
     elif marker_kind == "malformed":
