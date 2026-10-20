@@ -455,7 +455,8 @@ def _target_devices(
 
 def _cpu_mode(cpu: ET.Element, *, live: bool) -> str | None:
     mode = cpu.get("mode")
-    return "host-model" if live and mode == "custom" else mode
+    expanded = mode == "custom" and cpu.get("match") == "exact" and cpu.get("check") == "full"
+    return "host-model" if live and expanded else mode
 
 
 def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, object]:
@@ -463,9 +464,10 @@ def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, obje
 
     libvirt stores the architecture's default serial target type the intent omits, so that
     default projects as omitted. A ``live`` document also reports runtime state in place of
-    configuration: a started ``host-model`` CPU reads back expanded to ``custom``, and a
-    ``network`` interface reads back its network's bridge. The inactive document is always
-    compared without those two allowances.
+    configuration: a started ``host-model`` CPU reads back expanded to ``custom`` with
+    ``match='exact' check='full'``, and a ``network`` interface reads back its network's bridge.
+    The live CPU model itself is not compared, so the inactive document, always compared without
+    those two allowances, is what anchors the CPU definition.
     """
     root = parse_domain_xml(domain_xml)
     os_element = _one(root, "./os", "operating system")

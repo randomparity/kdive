@@ -837,6 +837,19 @@ async def test_libvirt_defaults_do_not_mask_device_tampering(
 
 
 @pytest.mark.anyio
+async def test_live_custom_cpu_without_host_model_expansion_fails_closed(tmp_path: Path) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        connection.xml_transforms[_LIVE] = _set_attribute("./cpu", "check", "partial")
+        with pytest.raises(CategorizedError, match="differs from private intent"):
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("mode", ("custom", "host-passthrough"))
 async def test_inactive_cpu_mode_change_fails_closed(tmp_path: Path, mode: str) -> None:
     connection = _Connection()
