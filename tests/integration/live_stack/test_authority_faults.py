@@ -84,7 +84,10 @@ async def _held_body(fake: _FakeBarrier, failure: BaseException | None) -> None:
 
 
 @pytest.mark.parametrize("failure", [None, AssertionError("body"), KeyboardInterrupt()])
-def test_held_releases_and_requires_idle(failure: BaseException | None) -> None:
+def test_held_releases_and_requires_idle(
+    monkeypatch: pytest.MonkeyPatch, failure: BaseException | None
+) -> None:
+    monkeypatch.setattr(authority_faults, "HOLD_TIMEOUT_S", 1.0)
     fake = _FakeBarrier()
     if failure is None:
         asyncio.run(_held_body(fake, failure))
