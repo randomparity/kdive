@@ -248,6 +248,8 @@
       failed_when: >-
         provider_authority_host_inventory_sudo.rc not in [0, 1] or
         'is not allowed to run sudo' not in
+        (provider_authority_host_inventory_sudo.stdout + provider_authority_host_inventory_sudo.stderr) or
+        'may run the following commands' in
         (provider_authority_host_inventory_sudo.stdout + provider_authority_host_inventory_sudo.stderr)
       no_log: true
 

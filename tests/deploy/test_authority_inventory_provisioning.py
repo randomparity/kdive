@@ -382,8 +382,14 @@ def test_disabled_withdrawal_uses_control_interpreter(control_python):
             True,
         ),
         (2, "User kdive-authority-observer is not allowed to run sudo on h.\n", "", True),
+        (
+            0,
+            "User kdive-authority-observer may run the following commands on h:\n",
+            "User kdive-authority-observer is not allowed to run sudo on h.\n",
+            True,
+        ),
     ],
-    ids=["classic-denial", "sudo-rs-denial", "granted", "unexpected-rc"],
+    ids=["classic-denial", "sudo-rs-denial", "granted", "unexpected-rc", "denial-beside-grant"],
 )
 def test_observer_sudo_refusal_accepts_only_a_denial(rc, stdout, stderr, fails):
     refusal = next(t for t in flatten(tasks()) if t["name"] == "Refuse observer sudo privileges")
