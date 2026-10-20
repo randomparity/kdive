@@ -674,6 +674,33 @@ failing cell, not a skipped one. After the run, `demo-down.sh --wipe --yes` clea
 Then check the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no
 `kdive-` overlay, snapshot overlay or `kdive-pcap-` volume.
 
+Last run: candidate `88b339b16` (server, worker and reconciler at that SHA in both configurations;
+later commits change only this record). The control plane was a disposable Fedora 44 x86_64 lab
+guest with the verified `longterm` fixture (6.18.54). The provider was a separate disposable Rocky
+Linux 10.2 x86_64 host, itself a KVM guest whose domains ran with the `kvm` accelerator (nested),
+prepared with `site.yml` (a fresh PKI from `playbooks/pki.yml`), firewalld enabled (#3083) and §7's
+`DOCKER-USER` rule. Its staged `fedora-kdive-remote-base-43` predated the ADR-0721 return route, so
+`site.yml` kept it: every System then refused SSH through its forward and every functional cell
+failed `authorize_ssh_key`. A first attempt of the default configuration stopped there after 22
+failing cells and is not coverage. `image.yml -e force_image_rebuild=true` rebuilt the base, and
+the image then carried the return route. One attempt per configuration followed, on one deployment:
+the default configuration, a plain `demo-down.sh`, then `KDIVE_WORKER_DEATH_VERIFIER=docker`
+(`recovery`). Each recorded its 80 cells in about 40 minutes and skipped the other 80.
+
+`qualify` qualified 152 of the 160 cells: 24 `success` and all 128 `rejection`, each record
+carrying the provider host as `rocky:10.2` and the guest as `fedora:43`. All 20 power and snapshot
+functional cells passed (power, snapshot, running, paused and disk-only restore, list, delete), and
+so did the 4 crash-watch functional cells. The 8 others recorded `failure` and are not coverage:
+
+- the 4 `control.capture_traffic` functional cells (both configurations, both exposures): the
+  capture job fails `infrastructure_failure` with `provider_execution_failed`, exception type
+  `AttributeError`, and produces no pcap (#3294);
+- the 4 `control.diagnostic_sysrq` functional cells: the job fails `configuration_error`,
+  "no console output after SysRq injection" (#3295).
+
+No record or artifact carried a host name or address. After the run, `demo-down.sh --wipe --yes`
+cleared the stack, the provider defined no `kdive-` domain and its pool held only the base volumes.
+
 ## SUSE native image proof
 
 On untouched first boot, record the completed JeOS marker, skipped wizard units,
