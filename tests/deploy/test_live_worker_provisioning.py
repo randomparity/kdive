@@ -11,7 +11,7 @@ import stat
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -50,6 +50,17 @@ def _text(path: Path) -> str:
         text = re.sub(
             r"(?m)^- name: Import reusable [^\n]+\n(?:^(?!- name:).+\n)*",
             expand_worker_import,
+            text,
+        )
+
+        # Inline the credential installation files at the call sites main.yml imports them.
+        def expand_task_import(match: re.Match[str]) -> str:
+            imported = ROLE / "tasks" / match.group(1)
+            return imported.read_text(encoding="utf-8").removeprefix("---\n")
+
+        text = re.sub(
+            r"(?m)^- name: Import the [^\n]+\n  ansible\.builtin\.import_tasks: (\S+)\n",
+            expand_task_import,
             text,
         )
         # Follow the shared endpoint task at the same call site the runner executes it.
@@ -3948,3 +3959,193 @@ def test_host_dump_selinux_preparation_requires_utilities() -> None:
     )
     assert result.returncode != 0
     assert "requires semanage and restorecon" in result.stderr
+
+
+def test_authority_proof_issues_its_one_day_pki_through_authority_pki() -> None:
+    """#3273: the carrier delegates issuance to authority-pki.sh and keeps its one-day PKI."""
+    proof = _text(AUTHORITY_PROOF)
+    pki = '"$pki" '
+    assert 'pki="$source_root/scripts/operations/authority-pki.sh"' in proof
+    assert f'{pki}ca --dir "$secrets" --subject kdive-2150-proof-ca --days 1 --key new' in proof
+    assert (
+        f'{pki}leaf --dir "$secrets" --name server --usage server --days 1 --key new \\\n'
+        '  --authority-instance "$authority_instance"'
+    ) in proof
+    for client in ("health-client", "proof-client"):
+        assert (
+            f'{pki}leaf --dir "$secrets" --name {client} --usage client --days 1 --key new'
+        ) in proof
+    assert "openssl req" not in proof
+    assert "openssl x509 -req" not in proof
+    assert "issue_certificate" not in proof
+    assert proof.index('install -d -m 0700 "$secrets"') < proof.index(f"{pki}ca ")
+    assert proof.index(f'{pki}leaf --dir "$secrets" --name proof-client') < proof.index(
+        "live_vm_host_authority_server_certificate_source: $secrets/server.pem"
+    )
+
+
+def test_credential_installation_is_shared_with_the_renewal_playbook() -> None:
+    """ADR-0803: the credential tasks moved verbatim into files main.yml imports in place."""
+    tasks_dir = ROLE / "tasks"
+
+    def task_list(name: str) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], yaml.safe_load((tasks_dir / name).read_text()))
+
+    authority = task_list("authority_credentials.yml")
+    worker = task_list("worker_authority_tls.yml")
+    assert [task["name"] for task in authority] == ["Install external-boot authority credentials"]
+    assert [task["name"] for task in worker] == [
+        "Inspect the fixed-worker authority secrets root without following links",
+        "Refuse a substituted fixed-worker authority secrets root",
+        "Create the protected fixed-worker authority secrets root",
+        "Install protected fixed-worker authority TLS files",
+    ]
+    install = authority[0]
+    assert install["ansible.builtin.copy"] == {
+        "src": "{{ item.source }}",
+        "dest": "{{ live_vm_host_authority_credentials_dir }}/{{ item.name }}",
+        "owner": "{{ live_vm_host_authority_account }}",
+        "group": "{{ live_vm_host_authority_account }}",
+        "mode": "0400",
+    }
+    assert [item["name"] for item in install["loop"]] == [
+        "database-dsn",
+        "service-credential",
+        "server-certificate",
+        "server-ca",
+        "worker-client-ca",
+        "health-client-certificate",
+        "health-client-key",
+    ]
+    assert install["no_log"] is True
+    assert install["register"] == "live_vm_host_authority_credentials"
+    assert install["notify"] == "Restart the external-boot authority service after deployed changes"
+    files = worker[3]
+    assert files["ansible.builtin.copy"]["mode"] == "0440"
+    assert files["ansible.builtin.copy"]["owner"] == "root"
+    assert files["ansible.builtin.copy"]["group"] == "{{ live_vm_host_authority_client_group }}"
+    assert [item["name"] for item in files["loop"]] == [
+        "server-ca",
+        "client-certificate",
+        "client-key",
+    ]
+    assert files["no_log"] is True
+    assert worker[2]["ansible.builtin.file"]["mode"] == "0750"
+
+    main = [task.get("name") for task in task_list("main.yml")]
+    worker_import = main.index("Import the fixed-worker authority TLS installation")
+    assert main[worker_import + 1] == "Import reusable worker slots and runtime paths"
+    authority_import = main.index("Import the external-boot authority credential installation")
+    assert main[authority_import - 1] == "Record the installed external-boot authority revision"
+    assert main[authority_import + 1] == "Install protected authority S3 credentials"
+
+
+def test_renewal_playbook_installs_credentials_in_the_reviewed_order() -> None:
+    """ADR-0803: preconditions, authority files, one restart, then worker files and verification."""
+    playbook = ROOT / "deploy" / "ansible" / "playbooks" / "renew-local-authority-tls.yml"
+    play = cast(list[dict[str, Any]], yaml.safe_load(playbook.read_text()))[0]
+    assert play["hosts"] == "live_vm_runners"
+    tasks = cast(list[dict[str, Any]], play["tasks"])
+    names = [task["name"] for task in tasks]
+
+    def module(task: dict[str, Any]) -> str:
+        known = {"name", "when", "loop", "loop_control", "register", "delegate_to", "become"}
+        known |= {"changed_when", "check_mode", "vars"}
+        (key,) = [k for k in task if k not in known]
+        return key
+
+    allowed = {
+        "ansible.builtin.assert",
+        "ansible.builtin.command",
+        "ansible.builtin.import_role",
+        "ansible.builtin.meta",
+        "ansible.builtin.slurp",
+        "ansible.builtin.systemd_service",
+    }
+    assert {module(task) for task in tasks} <= allowed
+    imports = [
+        (
+            task["ansible.builtin.import_role"]["name"],
+            task["ansible.builtin.import_role"]["tasks_from"],
+        )
+        for task in tasks
+        if module(task) == "ansible.builtin.import_role"
+    ]
+    assert imports == [
+        ("local_worker_host", "worker_install_dirs.yml"),
+        ("live_vm_host", "authority_preflight.yml"),
+        ("live_vm_host", "authority_credentials.yml"),
+        ("live_vm_host", "worker_authority_tls.yml"),
+        ("live_vm_host", "tls_expiry.yml"),
+    ]
+    assert tasks[0]["when"] is False
+    lane = cast(list[str], tasks[1]["ansible.builtin.assert"]["that"])
+    assert "live_vm_host_worker_authority_instance == live_vm_host_authority_instance" in lane
+
+    order = [
+        "Validate protected authority inputs before host mutation",
+        "Verify the source certificate chains each side checks at runtime",
+        "Require each source certificate to match its key",
+        "Require a clean controller checkout at exactly the installed revision",
+        "Install the authority credentials",
+        "Reset the authority unit's failed state before its planned restart",
+        "Restart the authority after changed credentials",
+        "Restart the authority when no credential changed",
+        "Install the fixed-worker authority TLS files",
+        "Require installed authority certificates to outlive the expiry margin",
+        "Require the authority to be active",
+        "Verify the installed certificate chains each side checks at runtime",
+        "Require each worker to verify the authority serving the installed certificate",
+    ]
+    assert [names.index(name) for name in order] == sorted(names.index(name) for name in order)
+    by_name = {task["name"]: task for task in tasks}
+    reset = by_name["Reset the authority unit's failed state before its planned restart"]
+    assert reset["ansible.builtin.command"]["argv"][:2] == ["systemctl", "reset-failed"]
+    assert by_name["Restart the authority after changed credentials"]["ansible.builtin.meta"] == (
+        "flush_handlers"
+    )
+    restart = by_name["Restart the authority when no credential changed"]
+    assert restart["when"] == "not live_vm_host_authority_credentials.changed"
+    assert restart["ansible.builtin.systemd_service"]["state"] == "restarted"
+    for task in tasks[: names.index("Install the authority credentials")]:
+        if module(task) == "ansible.builtin.command":
+            assert task["delegate_to"] == "localhost" and task["become"] is False, task["name"]
+    expiry = by_name["Require installed authority certificates to outlive the expiry margin"]
+    checked = [item["name"] for item in expiry["vars"]["live_vm_host_tls_expiry_certificates"]]
+    assert len(checked) == 6
+    assert all(
+        "key" not in item["path"] for item in expiry["vars"]["live_vm_host_tls_expiry_certificates"]
+    )
+
+
+def test_authority_proof_resolves_the_role_siblings_it_imports() -> None:
+    """#3273: live_vm_host imports local_worker_host, so every carrier play sets the roles path."""
+    proof = _text(AUTHORITY_PROOF)
+    runs = re.findall(
+        r'(ANSIBLE_ROLES_PATH="?\$source_root/deploy/ansible/roles"?(?: \\\n\s*| ))?'
+        r"uv run --with ansible-core==2\.21\.1 ansible-playbook",
+        proof,
+    )
+    assert len(runs) == 3
+    assert all(runs), runs
+    assert proof.count("ansible-playbook") == 3
+    assert "role: $source_root/deploy/ansible/roles/live_vm_host" in proof
+
+
+def test_authority_proof_tears_down_only_after_its_prerequisites_installed_acl() -> None:
+    """#3273: teardown becomes unprivileged accounts, which needs the role-installed acl."""
+    defaults = _yaml(DEFAULTS)
+    assert "acl" in cast(list[str], defaults["live_vm_host_authority_packages"])
+    proof = _text(AUTHORITY_PROOF)
+    marker = '"$remote_root/prerequisites-installed"'
+    prerequisites = proof.index("--tags authority_prerequisites")
+    assert proof.index(f"touch {marker}") > prerequisites
+    assert proof.index(f"touch {marker}") < proof.index('createdb "$database"')
+    cleanup = proof[proof.index("<<'REMOTE_CLEANUP'") : proof.index("\nREMOTE_CLEANUP\n")]
+    guard = (
+        f"if [[ ! -f {marker} ]]; then\n"
+        '  echo "teardown skipped: the authority prerequisites never installed" >&2\n'
+        "elif [[ -f $source_root/deploy/ansible/playbooks/authority_host_teardown.yml"
+    )
+    assert guard in cleanup
+    assert cleanup.index(guard) < cleanup.index("ansible-playbook -i inventory")
