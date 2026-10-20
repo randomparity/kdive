@@ -158,6 +158,7 @@ def test_ansible_timings_preserve_failure_and_stop_later_harnesses(
         "run-local-worker-host.py",
         "run-local-libvirt-host.py",
         "run-remote-egress-preflight.py",
+        "run-authority-tls-expiry.py",
     ]
     stub = tmp_path / "uv"
     stub.write_text(

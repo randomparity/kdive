@@ -1575,7 +1575,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="debug.start_session",
         read_only=False,
         destructive=False,
-        help="Open a single-attach transport and insert a live DebugSession. Requires contributor.",
+        help="Reserve a single-attach transport and insert a live DebugSession. Requires contributor.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
