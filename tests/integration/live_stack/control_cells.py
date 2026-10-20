@@ -1,4 +1,4 @@
-"""Local traffic capture, diagnostic SysRq and crash-watch tool cells over HTTP (#3115).
+"""Traffic capture, diagnostic SysRq and crash-watch tool cells over HTTP (#3115, #3116).
 
 A functional cell provisions the lane image through
 :func:`~tests.integration.live_stack.tool_cells.on_lane_system`, boots the verified ``longterm``
@@ -19,37 +19,59 @@ frame's operator client.
 
 A rejection cell aims at :func:`~tests.integration.live_stack.capture_cells.capture_target`, a
 torn-down, Run-bound System. No rejection cell records a kernel field: none declares kernel
-inputs. No capability cell exists: local-libvirt supports all three (ADR-0722, 2026-10-13).
+inputs. No capability cell exists: both providers support all three (ADR-0722, 2026-10-13).
+
+A remote cell (#3116) runs the same sequences on the provider lane: native reads and the capture
+spool (the job's pool volume) come from the lane, the flow goes to the guest's libvirt-network
+gateway, which is the NIC a remote capture taps (ADR-0432), and a rejection cell aims at
+:func:`run_target`, a torn-down lane System and its booted Run that records the provider host.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import secrets
 import struct
 import subprocess  # noqa: S404 - the TimeoutExpired an ssh call raises  # nosec B404
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
-import libvirt
 import libvirt_qemu
 import psycopg
 
 from kdive.domain.errors import ErrorCategory
+from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
-from kdive.providers.shared.runtime_paths import domain_name_for, pcap_dir
-from tests.integration.live_stack.capture_cells import CaptureTarget, Session, boot, drained
+from kdive.providers.shared.runtime_paths import domain_name_for
+from tests.integration.live_stack.capture_cells import (
+    CaptureTarget,
+    Session,
+    boot,
+    drained,
+    named_jobs,
+)
 from tests.integration.live_stack.image_smoke import ssh
-from tests.integration.live_stack.power_snapshots import grants
-from tests.integration.live_stack.scenario import CellRun
-from tests.integration.live_stack.spine import full_artifact_text, ok, scalar, worker_libvirt_uri
-from tests.integration.live_stack.tool_cells import Boundary, Guest, HttpCaller, Rejection
+from tests.integration.live_stack.power_snapshots import Connect, domain_defined, grants
+from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.spine import full_artifact_text, ok, scalar
+from tests.integration.live_stack.tool_cells import (
+    Boundary,
+    Guest,
+    HttpCaller,
+    Rejection,
+    Snapshot,
+    on_lane_system,
+    project_state,
+    settled,
+)
 
 TOOLS = ("control.capture_traffic", "control.diagnostic_sysrq", "control.watch_for_crash")
 # Each tool's project gate (src/kdive/mcp/exposure.py).
@@ -99,6 +121,14 @@ _KMSG = (
     'echo "<2>Kernel panic - not syncing: {token}" > /dev/kmsg; sleep 2; done\' '
     "</dev/null >/dev/null 2>&1 & echo pid=$!"
 )
+# The first default route outside the user-mode SSH NIC's subnet: a remote capture taps the
+# libvirt-network NIC (ADR-0432), and the user-mode NIC is restrict=on (ADR-0291).
+_ROUTE = (
+    "printf 'gateway=%s\\n' "
+    "\"$(ip -4 route show default | awk '$3 !~ /^10[.]0[.]2[.]/ {print $3; exit}')\""
+)
+_SLIRP = ipaddress.ip_network("10.0.2.0/24")
+_TARGET_KEYS = ("host_os", "host_arch", "guest_os", "guest_arch", "accelerator", "image_sha256")
 _SYSRQ_COUNT = f"printf 'count=%s\\n' \"$(dmesg | grep -c '{SYSRQ_HEADER}')\""
 _SYSRQ_ENABLE = "sysctl -qw kernel.sysrq=1 && dmesg -n 8 && echo ok=1"
 
@@ -173,9 +203,23 @@ def verdict_of(job: ToolResponse) -> dict[str, object]:
     return verdict
 
 
-def capture_filters(system_id: str) -> list[str]:
+def gateway_of(probe: Mapping[str, str]) -> str:
+    """The guest's libvirt-network IPv4 default gateway from ``_ROUTE``'s answer.
+
+    The user-mode SSH NIC's gateway is refused: that NIC is not the captured netdev.
+    """
+    value = probe.get("gateway", "")
+    try:
+        address = ipaddress.ip_address(value)
+        assert address.version == 4 and address not in _SLIRP
+    except AssertionError, ValueError:
+        raise AssertionError(f"the guest has no libvirt-network gateway ({value!r})") from None
+    return value
+
+
+def capture_filters(system_id: str, connect: Connect) -> list[str]:
     """The QOM objects named ``kdive-dump-*`` on the System's domain."""
-    conn = libvirt.open(worker_libvirt_uri())
+    conn = connect()
     try:
         domain = conn.lookupByName(domain_name_for(UUID(system_id)))
         command = json.dumps({"execute": "qom-list", "arguments": {"path": "/objects"}})
@@ -225,11 +269,15 @@ async def _download(s: Session, artifact_id: str) -> bytes:
 async def capture_body(s: Session, _db_url: str) -> dict[str, object]:
     """A capture holds the guest's synthetic UDP flow; the domain keeps no capture filter."""
     marker = token()
-    s.guest.owned.append(str(pcap_dir(UUID(s.guest.system_id))))
-    flow = _FLOW.format(token=marker, gateway=_GATEWAY, port=FLOW_PORT)
+    local = s.guest.lane.provider == "local-libvirt"
+    gateway = _GATEWAY if local else gateway_of(await s.shell(_ROUTE))
+    flow = _FLOW.format(token=marker, gateway=gateway, port=FLOW_PORT)
     pid = await _background(s, flow)
     try:
         env = await s.exposed(run_id=s.run_id, duration_s=_CAPTURE_S)
+        # The spool the capture writes: the System's directory locally, the job's pool volume
+        # remotely. The frame's cleanup proves it reclaimed on the provider.
+        s.guest.owned.append(s.guest.lane.spool(s.guest.system_id, env.object_id))
         job = await drained(s.guest.op, "capture", env.object_id)
     finally:
         await _stop(s, pid)
@@ -238,7 +286,7 @@ async def capture_body(s: Session, _db_url: str) -> dict[str, object]:
     pcap = await _download(s, artifact)
     records = flow_records(pcap, marker.encode())
     assert records >= _MIN_FLOW_RECORDS, f"the pcap holds {records} flow records"
-    filters = await asyncio.to_thread(capture_filters, s.guest.system_id)
+    filters = await asyncio.to_thread(capture_filters, s.guest.system_id, s.guest.lane.connect)
     assert not filters, f"the domain still holds capture filters {filters}"
     return {"pcap_bytes": len(pcap), "flow_records": records, "filters_after": 0}
 
@@ -336,3 +384,100 @@ def rejection(tool: str, boundary: Boundary, target: CaptureTarget) -> Rejection
     stranger = grants(f"cov-{secrets.token_hex(4)}", "admin")
     twin = {**args, key: str(uuid4())}
     return Rejection(args, stranger, frozenset({_ISOLATION[tool].value}), absent_twin=twin)
+
+
+# --- the remote rejection target (#3116) -----------------------------------------------------
+
+
+def target_keys(observed: Mapping[str, object]) -> dict[str, object]:
+    """The provider-host and lane context a rejection record carries; no kernel field."""
+    return {key: observed[key] for key in _TARGET_KEYS if key in observed}
+
+
+@dataclass(frozen=True)
+class _Failed:
+    error: Exception
+    artifacts: tuple[str, ...]
+
+
+_TARGETS: dict[tuple[str, str], CaptureTarget | _Failed] = {}
+
+
+async def _prepare_run_target(
+    run: CellRun,
+    base_url: str,
+    issuer: OidcIssuer,
+    db_url: str,
+    fixture: Callable[[], tuple[Path, dict[str, Any]]],
+    scratch: CellRun,
+) -> CaptureTarget:
+    tree, manifest = fixture()
+    project = f"cov-{secrets.token_hex(4)}"
+    ids: dict[str, str] = {}
+
+    async def body(guest: Guest) -> dict[str, object]:
+        run_id, _endpoint = await boot(scratch, guest, tree, manifest)
+        ids.update(system=guest.system_id, run=run_id)
+        return {"run_target": "prepared"}
+
+    await on_lane_system(scratch, base_url, issuer, db_url, project=project, body=body)
+    await settled(db_url, project)
+    summary = run.writer.artifact(
+        {
+            "run_target": {"system": "torn_down", "run": "booted"},
+            "cleanup": scratch.assertions["cleanup"],
+        }
+    )
+    return CaptureTarget(
+        project,
+        ids["system"],
+        ids["run"],
+        "",
+        target_keys(scratch.observed),
+        (*scratch.artifacts, *scratch.assertions.values(), summary),
+    )
+
+
+async def run_target(
+    run: CellRun,
+    base_url: str,
+    issuer: OidcIssuer,
+    db_url: str,
+    fixture: Callable[[], tuple[Path, dict[str, Any]]],
+) -> CaptureTarget:
+    """A torn-down lane System and its booted Run, prepared once per stack and provider.
+
+    The remote rejection target: no crash options and no debug session, which none of the
+    three tools reads. A failed or blocked preparation is replayed, with its artifacts, for
+    every later cell rather than retried.
+    """
+    key = (base_url, run.cell.provider)
+    cached = _TARGETS.get(key)
+    if cached is None:
+        scratch = CellRun(run.cell, run.writer)
+        try:
+            cached = await _prepare_run_target(run, base_url, issuer, db_url, fixture, scratch)
+        except Exception as exc:  # noqa: BLE001 - remembered and replayed for every cell
+            cached = _Failed(exc, (*scratch.artifacts, *scratch.assertions.values()))
+        _TARGETS[key] = cached
+    if isinstance(cached, _Failed):
+        run.artifacts.extend(cached.artifacts)
+        if isinstance(cached.error, ScenarioStop):
+            raise ScenarioStop(cached.error.outcome, str(cached.error))
+        raise AssertionError(f"the run target could not be prepared: {cached.error!r}")
+    run.observed |= cached.observed
+    run.artifacts.extend(cached.artifacts)
+    return cached
+
+
+def target_state(db_url: str, target: CaptureTarget, connect: Connect) -> Snapshot:
+    """The project's rows, the jobs naming the System or Run, and the domain's definedness."""
+
+    async def state() -> dict[str, object]:
+        return {
+            "project": await project_state(db_url, target.project),
+            "jobs": await named_jobs(db_url, target.system_id, target.run_id),
+            "domain_defined": await asyncio.to_thread(domain_defined, target.system_id, connect),
+        }
+
+    return state

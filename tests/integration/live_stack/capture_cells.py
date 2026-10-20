@@ -73,7 +73,6 @@ from tests.integration.live_stack.tool_cells import (
     HttpCaller,
     Rejection,
     Snapshot,
-    domain_kernel,
     lane_image,
     observe_guest,
     on_lane_system,
@@ -578,7 +577,7 @@ async def boot(
         tree=tree,
         manifest=dict(manifest),
         tmp=tmp,
-        installed_kernel=domain_kernel,
+        installed_kernel=guest.lane.installed_kernel,
     )
     run.artifacts.extend(deep.assertions.values())
     return run_id, await ssh_endpoint(guest.op, guest.system_id)

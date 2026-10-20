@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import struct
 from collections.abc import Mapping
-from typing import cast
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
+from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
-from scripts.coverage_campaign.contract import build_contract
+from scripts.coverage_campaign.contract import Cell, build_contract
+from scripts.coverage_campaign.evidence import Outcome
 from scripts.coverage_campaign.gridgen import generate_rows
-from tests.integration.live_stack import control_cells
+from tests.integration.live_stack import capture_cells, control_cells
 from tests.integration.live_stack.capture_cells import CaptureTarget
 from tests.integration.live_stack.control_cells import (
     FLOW_PORT,
@@ -25,7 +29,9 @@ from tests.integration.live_stack.control_cells import (
     require_sysrq,
     verdict_of,
 )
-from tests.integration.live_stack.tool_cells import Boundary
+from tests.integration.live_stack.evidence import EvidenceWriter
+from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.tool_cells import Boundary, Guest
 
 _TOKEN = b"kdivecov0123456789abcdef"
 
@@ -175,3 +181,141 @@ def test_no_capability_rejection_cell_is_carried() -> None:
     assert boundaries == {"authentication", "authorization", "project-isolation", "validation"}
     with pytest.raises(AssertionError, match="no capability cell"):
         rejection("control.watch_for_crash", "capability", _TARGET)
+
+
+def _functional_cell(provider: str) -> Cell:
+    return next(
+        c
+        for c in build_contract().cells
+        if c.operation == "control.watch_for_crash"
+        and c.kind == "functional"
+        and c.provider == provider
+        and c.guest_arch == "x86_64"
+    )
+
+
+def test_boot_uses_the_lane_kernel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[object] = []
+
+    def kernel(*_: object) -> tuple[str, None]:
+        return "d" * 64, None
+
+    async def deep(*_: object, installed_kernel: object, **__: object) -> str:
+        seen.append(installed_kernel)
+        return "run-1"
+
+    async def endpoint(*_: object) -> object:
+        return "endpoint"
+
+    monkeypatch.setattr(capture_cells, "deep_body", deep)
+    monkeypatch.setattr(capture_cells, "ssh_endpoint", endpoint)
+    lane = type("L", (), {"entry": None, "installed_kernel": staticmethod(kernel)})()
+    guest = type(
+        "G",
+        (),
+        {
+            "op": None,
+            "system_id": "s",
+            "owned": [],
+            "project": "p",
+            "lane": lane,
+            "scratch": tmp_path,
+        },
+    )()
+    run = CellRun(_functional_cell("remote-libvirt"), EvidenceWriter(tmp_path))
+    booted = asyncio.run(capture_cells.boot(run, cast(Guest, guest), tmp_path, {}))
+    assert booted == ("run-1", "endpoint")
+    assert seen == [kernel]
+
+
+@pytest.mark.parametrize(
+    ("probe", "ok"),
+    [
+        ({"gateway": "192.168.122.1"}, True),
+        ({"gateway": ""}, False),
+        ({"gateway": "fe80::1"}, False),
+        ({"gateway": "10.0.2.2"}, False),
+        ({}, False),
+    ],
+)
+def test_gateway_is_the_libvirt_network_ipv4_gateway(probe: dict[str, str], ok: bool) -> None:
+    if ok:
+        assert control_cells.gateway_of(probe) == probe["gateway"]
+    else:
+        with pytest.raises(AssertionError, match="libvirt-network gateway"):
+            control_cells.gateway_of(probe)
+
+
+_RUN_TARGET = CaptureTarget("cov-t", "sys", "run", "", {"host_os": "rocky:10.2"}, ("a" * 64,))
+
+
+def test_run_target_prepares_once_per_provider_and_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    issuer = cast(OidcIssuer, object())
+
+    async def prepare(run: CellRun, *rest: object) -> CaptureTarget:
+        calls.append(run.cell.provider)
+        if run.cell.provider == "local-libvirt":
+            cast(CellRun, rest[-1]).artifacts.append("b" * 64)  # the scratch record
+            raise ScenarioStop(Outcome.BLOCKED, "no lane")
+        return _RUN_TARGET
+
+    def fixture() -> tuple[Path, dict[str, Any]]:
+        raise AssertionError("the stub preparation reads no fixture")
+
+    monkeypatch.setattr(control_cells, "_TARGETS", {})
+    monkeypatch.setattr(control_cells, "_prepare_run_target", prepare)
+    remote = CellRun(_functional_cell("remote-libvirt"), EvidenceWriter(tmp_path))
+    for _ in range(2):
+        target = asyncio.run(control_cells.run_target(remote, "u", issuer, "db", fixture))
+        assert target is _RUN_TARGET
+    local = CellRun(_functional_cell("local-libvirt"), EvidenceWriter(tmp_path))
+    for _ in range(2):
+        with pytest.raises(ScenarioStop):
+            asyncio.run(control_cells.run_target(local, "u", issuer, "db", fixture))
+    assert calls == ["remote-libvirt", "local-libvirt"]
+    assert local.artifacts.count("b" * 64) == 2
+    assert remote.observed["host_os"] == "rocky:10.2"
+    assert remote.artifacts.count("a" * 64) == 2
+
+
+def test_run_target_keeps_host_and_lane_keys() -> None:
+    observed = {
+        "host_os": "rocky:10.2",
+        "host_arch": "x86_64",
+        "guest_os": "fedora:43",
+        "guest_arch": "x86_64",
+        "accelerator": "kvm",
+        "image_sha256": "f" * 64,
+        "kernel_sha256": "c" * 64,
+    }
+    kept = control_cells.target_keys(observed)
+    assert kept == {k: v for k, v in observed.items() if k != "kernel_sha256"}
+
+
+def test_target_state_reads_jobs_and_domain_through_the_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect = object()
+    seen: list[object] = []
+
+    async def project_state(_db: str, project: str) -> dict[str, list[object]]:
+        seen.append(project)
+        return {}
+
+    async def named_jobs(_db: str, *ids: str) -> list[object]:
+        seen.append(ids)
+        return [0, ""]
+
+    def defined(system_id: str, conn: object) -> bool:
+        seen.append((system_id, conn))
+        return False
+
+    monkeypatch.setattr(control_cells, "project_state", project_state)
+    monkeypatch.setattr(control_cells, "named_jobs", named_jobs)
+    monkeypatch.setattr(control_cells, "domain_defined", defined)
+    state = asyncio.run(control_cells.target_state("db", _TARGET, cast(Any, connect))())
+    assert state == {"project": {}, "jobs": [0, ""], "domain_defined": False}
+    assert seen == ["cov-t", (_TARGET.system_id, _TARGET.run_id), (_TARGET.system_id, connect)]
