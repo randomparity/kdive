@@ -247,6 +247,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "System id of a pre-provisioned live VM for the gated local-libvirt install test.",
     ),
     ExternalEnvVar(
+        "KDIVE_3097_EXCLUSIVE_QUEUE",
+        "test",
+        None,
+        "Set to `approved` to let the run/system/job service-cell proof (#3097) pause and own an "
+        "idle job queue for its queued-install cells; any other value records them as blocked.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_VM_BZIMAGE",
         "test",
         None,
