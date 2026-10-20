@@ -831,15 +831,18 @@ def domain_kernel(
     return file_sha256(kernel), kernel
 
 
-def _local_spool(system_id: str, _job_id: str) -> str:
-    return str(pcap_dir(UUID(system_id)))
+def _local_spool(system_id: str) -> Callable[[str], str]:
+    """The System's capture directory, whichever job writes into it."""
+    path = str(pcap_dir(UUID(system_id)))
+    return lambda _job_id: path
 
 
-def remote_pcap_path(dest: str, pool: str, system_id: str, job_id: str) -> str:
-    """The provider-host path of the pcap volume capture job ``job_id`` writes into ``pool``.
+def remote_pcap_spool(dest: str, pool: str, system_id: str) -> Callable[[str], str]:
+    """Name the provider-host pcap volume a capture job of ``system_id`` writes into ``pool``.
 
     The remote capturer writes a per-job volume into the configured storage pool (ADR-0432), so
-    the System owns it until the job reclaims it.
+    the System owns it until the job reclaims it. The pool's target is read here, before any job
+    exists; the returned namer does no I/O.
     """
     conn = observer(dest)
     try:
@@ -848,7 +851,8 @@ def remote_pcap_path(dest: str, pool: str, system_id: str, job_id: str) -> str:
         conn.close()
     target = ET.fromstring(xml).findtext("./target/path")  # noqa: S314  # nosec B314
     assert target, f"storage pool {pool} has no target path"
-    return str(PurePosixPath(target) / pcap_volume_name(UUID(system_id), UUID(job_id)))
+    directory = PurePosixPath(target)
+    return lambda job_id: str(directory / pcap_volume_name(UUID(system_id), UUID(job_id)))
 
 
 class LaneFrame(Protocol):
@@ -873,11 +877,11 @@ class Lane:
 
     ``profile`` takes the profile's unread ``kernel_source_ref``. ``xml`` and ``absent`` read the
     provider's own libvirt: the worker's for local-libvirt, the provider host's through the
-    operator's observer for remote-libvirt. ``connect`` opens that libvirt for a native read;
-    ``spool(system, job)`` is the provider-host path a traffic capture writes (the System's
-    directory locally, the job's pool volume remotely); ``installed_kernel`` observes the kernel
-    an install put in place (the domain's direct kernel locally, the guest's own ``/boot``
-    remotely).
+    operator's observer for remote-libvirt. ``connect`` opens that libvirt for a native read.
+    ``spool(system)`` names the provider-host path each capture job of the System writes (the
+    System's directory locally, the job's pool volume remotely), reading any provider state
+    before a job exists. ``installed_kernel`` observes the kernel an install put in place (the
+    domain's direct kernel locally, the guest's own ``/boot`` remotely).
     """
 
     provider: str
@@ -887,7 +891,7 @@ class Lane:
     absent: Callable[[str], bool]
     frame: LaneFrame
     connect: Connect
-    spool: Callable[[str, str], str]
+    spool: Callable[[str], Callable[[str], str]]
     installed_kernel: InstalledKernel
 
 
@@ -925,7 +929,7 @@ def _remote_lane(arch: str) -> Lane:
         partial(remote_volume_absent, host.dest),
         partial(on_remote_system, family=family),
         partial(observer, host.dest),
-        partial(remote_pcap_path, host.dest, host.pool),
+        partial(remote_pcap_spool, host.dest, host.pool),
         partial(guest_boot_kernel, family=family),
     )
 

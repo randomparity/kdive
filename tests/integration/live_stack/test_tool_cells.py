@@ -702,19 +702,21 @@ class _PoolConn:
 _SYSTEM, _JOB = str(UUID(int=1)), str(UUID(int=2))
 
 
-def test_remote_pcap_path_joins_the_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remote_pcap_spool_reads_the_pool_target_once(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _PoolConn("<pool><target><path>/srv/pool</path></target></pool>")
     monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
-    path = tool_cells.remote_pcap_path("op@provider.example", "kdive", _SYSTEM, _JOB)
-    assert path == f"/srv/pool/{pcap_volume_name(UUID(_SYSTEM), UUID(_JOB))}"
+    namer = tool_cells.remote_pcap_spool("op@provider.example", "kdive", _SYSTEM)
     assert (conn.named, conn.closed) == ("kdive", True)
+    conn.named = ""
+    assert namer(_JOB) == f"/srv/pool/{pcap_volume_name(UUID(_SYSTEM), UUID(_JOB))}"
+    assert conn.named == "", "naming a job's volume read the pool again"
 
 
-def test_remote_pcap_path_needs_a_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remote_pcap_spool_needs_a_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _PoolConn("<pool><target/></pool>")
     monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
     with pytest.raises(AssertionError, match="no target path"):
-        tool_cells.remote_pcap_path("op@provider.example", "kdive", _SYSTEM, _JOB)
+        tool_cells.remote_pcap_spool("op@provider.example", "kdive", _SYSTEM)
     assert conn.closed
 
 
@@ -722,7 +724,7 @@ def test_local_lane_observes_the_worker(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
     lane = tool_cells.lane_for(_cell("control.power", "local-libvirt", "x86_64"))
     assert lane.connect is tool_cells.worker_connect
-    assert lane.spool(_SYSTEM, _JOB) == str(pcap_dir(UUID(_SYSTEM)))
+    assert lane.spool(_SYSTEM)(_JOB) == str(pcap_dir(UUID(_SYSTEM)))
     assert lane.installed_kernel is tool_cells.domain_kernel
 
 
@@ -735,7 +737,7 @@ def test_remote_lane_observes_the_provider_host(monkeypatch: pytest.MonkeyPatch)
     lane = tool_cells.lane_for(_cell("control.power", "remote-libvirt", "x86_64"))
     assert lane.connect() == "conn" and seen == ["op@provider.example"]
     spool = lane.spool
-    assert isinstance(spool, partial) and spool.func is tool_cells.remote_pcap_path
+    assert isinstance(spool, partial) and spool.func is tool_cells.remote_pcap_spool
     assert spool.args == ("op@provider.example", "kdive")
     kernel = lane.installed_kernel
     assert isinstance(kernel, partial) and kernel.func is guest_boot_kernel

@@ -41,9 +41,10 @@ filesystem, so they cannot run on a remote System:
    - `connect() -> libvirt.virConnect`: the provider's libvirt for a native read. Local:
      `worker_connect` (`libvirt.open(worker_libvirt_uri())`). Remote: `observer(host.dest)`, the
      operator's `qemu+ssh` observer that `remote_xml` and `remote_volume_absent` already use.
-   - `spool(system_id, job_id) -> str`: the provider-host path a capture job writes. Local:
-     `pcap_dir(system)`. Remote: `remote_pcap_path(dest, pool, system, job)`, the pool's target
-     path joined with `pcap_volume_name`, read through the observer.
+   - `spool(system_id)`: names the provider-host path each capture job of the System writes,
+     reading any provider state before a job exists. Local: `pcap_dir(system)` for every job.
+     Remote: `remote_pcap_spool(dest, pool, system)` reads the pool's target path through the
+     observer once and joins `pcap_volume_name(system, job)` with no I/O.
    - `installed_kernel`: the deep-body kernel observer. Local: `domain_kernel`, moved unchanged
      from `power_snapshots.py`. Remote: `guest_boot_kernel(family=fedora)`, as #2810 and #3120 do.
 2. **Power and snapshots** (`power_snapshots.py`). `domain_state`, `checkpoints` and
@@ -54,9 +55,10 @@ filesystem, so they cannot run on a remote System:
 3. **Control** (`control_cells.py`, `capture_cells.py`). `capture_cells.boot` observes the kernel
    with `guest.lane.installed_kernel` (the local value is the same function). In `control_cells`:
    - `capture_filters` takes a `connect`; the capture body passes `guest.lane.connect`;
-   - the capture spool joins `owned` as `guest.lane.spool(system, job)`: locally the System's
-     directory, before the call as today; remotely the job's pool volume, once the call returns
-     the job id;
+   - the capture body resolves `guest.lane.spool(system)` before the call; the spool joins
+     `owned` locally before the call as today (the System's directory), remotely once the call
+     returns the job id (its pool volume), so nothing that can fail runs between the enqueue
+     and the ownership;
    - the flow's destination is `10.0.2.2` on the local lane and, on the remote lane, the guest's
      IPv4 default-route gateway outside the user-mode subnet `10.0.2.0/24`, read in the guest
      (`ip -4 route show default`); an empty, non-IPv4 or user-mode answer fails the cell;
@@ -128,10 +130,10 @@ Considered and rejected:
 | Contract | Mode | Evidence |
 |---|---|---|
 | lane fields | focused-test | `test_tool_cells.py`: local lane reads the worker libvirt, `pcap_dir`, `domain_kernel`; remote lane uses the observer, the pool path and `guest_boot_kernel(fedora)` |
-| remote pcap path | focused-test | `test_tool_cells.py`: pool target joined with the job's volume name; a pool without a target path fails |
+| remote pcap spool | focused-test | `test_tool_cells.py`: the pool target is read once and joined with each job's volume name; a pool without a target path fails |
 | native reads through `connect` | focused-test | `test_power_snapshots.py`: state, checkpoints and definedness read the given connection and close it |
 | kernel observer from the lane | focused-test | `test_power_snapshots.py`, `test_control_cells.py`: `functional`/`boot` hand `deep_body` the lane's observer |
-| capture spool and flow gateway | focused-test | `test_control_cells.py`: the capture owns the lane spool (local before the call, remote for the job) and floods the lane's gateway |
+| capture spool and flow gateway | focused-test | `test_control_cells.py`: the spool is resolved before the call; the capture owns it (local before the call, remote for the job) and floods the lane's gateway |
 | remote flow gateway | focused-test | `test_control_cells.py`: libvirt-network IPv4 gateway accepted; empty, non-IPv4 or `10.0.2.2` refused |
 | run target | focused-test | `test_control_cells.py`: one preparation per stack and provider; a failure replayed with its artifacts; host keys kept, kernel keys dropped |
 | remote protected state | focused-test | `test_control_cells.py`: jobs of System and Run plus definedness through the lane |

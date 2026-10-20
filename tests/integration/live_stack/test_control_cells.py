@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import struct
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -325,11 +325,11 @@ def test_target_state_reads_jobs_and_domain_through_the_lane(
 @dataclass
 class _CaptureLane:
     provider: str
-    spooled: list[tuple[str, str]] = field(default_factory=list)
+    events: list[str] = field(default_factory=list)
 
-    def spool(self, system_id: str, job_id: str) -> str:
-        self.spooled.append((system_id, job_id))
-        return f"spool:{system_id}:{job_id}"
+    def spool(self, system_id: str) -> Callable[[str], str]:
+        self.events.append("spool-resolved")
+        return lambda job_id: f"spool:{system_id}:{job_id}"
 
     def connect(self) -> object:
         raise AssertionError("capture_filters is stubbed")
@@ -347,6 +347,7 @@ class _CaptureSession:
         return {"gateway": "192.168.122.1"} if "route" in command else {"pid": "42"}
 
     async def exposed(self, **_args: object) -> ToolResponse:
+        self.guest.lane.events.append("called")
         self.owned_at_call.extend(self.guest.owned)
         return ToolResponse.success("job-9", "queued")
 
@@ -383,3 +384,4 @@ def test_capture_owns_the_lane_spool_and_floods_the_lane_gateway(
     expected = "spool:sys:" if owned_before_call else "spool:sys:job-9"
     assert guest.owned == [expected]
     assert session.owned_at_call == ([expected] if owned_before_call else [])
+    assert lane.events == ["spool-resolved", "called"]

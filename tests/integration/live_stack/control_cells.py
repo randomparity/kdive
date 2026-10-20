@@ -39,7 +39,6 @@ import subprocess  # noqa: S404 - the TimeoutExpired an ssh call raises  # nosec
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -275,16 +274,16 @@ async def capture_body(s: Session, _db_url: str) -> dict[str, object]:
     gateway = _GATEWAY if local else gateway_of(await s.shell(_ROUTE))
     flow = _FLOW.format(token=marker, gateway=gateway, port=FLOW_PORT)
     # The spool the capture writes, which the frame's cleanup proves reclaimed: the System's
-    # directory locally, owned before the call; the job's pool volume remotely, named once the
-    # call returns the job id.
-    spool = partial(s.guest.lane.spool, s.guest.system_id)
+    # directory locally, owned before the call; the job's pool volume remotely, named from the
+    # job id with no I/O, since the namer read the pool before the job existed.
+    spool = await asyncio.to_thread(s.guest.lane.spool, s.guest.system_id)
     if local:
-        s.guest.owned.append(spool(""))
+        s.guest.owned.append(spool(""))  # System-scoped: no job names it
     pid = await _background(s, flow)
     try:
         env = await s.exposed(run_id=s.run_id, duration_s=_CAPTURE_S)
         if not local:
-            s.guest.owned.append(await asyncio.to_thread(spool, env.object_id))
+            s.guest.owned.append(spool(env.object_id))
         job = await drained(s.guest.op, "capture", env.object_id)
     finally:
         await _stop(s, pid)
