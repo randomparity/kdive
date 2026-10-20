@@ -5,6 +5,7 @@ version = 1
 [[groups]]
 owner = 2811
 execution = "service"
+cli = true
 [groups.tools]
 "fixtures.validate" = "Compare validated profiles and architectures with the configured fixture catalog."
 "projects.list" = "Compare grants and roles against the authenticated principal's real memberships."
@@ -16,6 +17,7 @@ execution = "service"
 [[groups]]
 owner = 3095
 execution = "service"
+cli = true
 [groups.tools]
 "images.delete" = "Verify the private catalog entry is removed without deleting unrelated entries."
 "images.describe" = "Compare identity, provenance and computed capabilities with the selected image."
@@ -32,6 +34,7 @@ execution = "service"
 [[groups]]
 owner = 3096
 execution = "service"
+cli = true
 [groups.tools]
 "artifacts.create_investigation_upload" = "PUT bytes to the issued target and verify investigation ownership."
 "artifacts.create_run_upload" = "PUT declared build bytes and compare stored content and run ownership."
@@ -50,6 +53,7 @@ execution = "service"
 [[groups]]
 owner = 3097
 execution = "service"
+cli = true
 [groups.tools]
 "jobs.cancel" = "Observe the operation-specific terminal cancellation effect and protected-state retention."
 "jobs.list" = "Compare job state/kind/ownership filters with seeded durable jobs."
@@ -70,6 +74,7 @@ execution = "service"
 [[groups]]
 owner = 3098
 execution = "service"
+cli = true
 [groups.tools]
 "accounting.estimate" = "Compare the estimate with the configured coefficients and requested time window."
 "accounting.report" = "Compare granted-project and auditor-wide rollups with seeded ledger charges."

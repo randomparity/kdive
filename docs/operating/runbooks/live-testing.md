@@ -1131,8 +1131,10 @@ in the [remote runbook](remote-live-stack.md#11-remote-orchestration-fault-cells
 
 `tests/integration/test_core_tool_cells_live.py::test_core_tool_cell` has one parameter for each
 contract cell of `session.whoami`, `projects.list`, `tools.search`, `tools.invoke`,
-`fixtures.validate` and `systems.profile_examples`: 56 cells, each a configuration (`default` or
-`recovery`), an exposure (`direct` or `gateway`) and a kind (`functional`, `authentication` or
+`fixtures.validate` and `systems.profile_examples`: 84 cells, each a configuration (`default` or
+`recovery`), an exposure (`direct` or `gateway`, or `cli` for the core service tools, which drives
+the tool's generated `kdivectl` verb per
+[ADR-0795](../../adr/0795-cli-translation-exposure.md)) and a kind (`functional`, `authentication` or
 `validation`). [ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md)
 defines what each of those means. The harness in `tests/integration/live_stack/tool_cells.py` is
 shared by the later tool-cell carriers.
@@ -1187,7 +1189,7 @@ recovery lane started with `local` proved `default` again, which is why the lane
 
 #### Catalog and configuration tool cells (#3095)
 
-`tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell` carries the 152 cells
+`tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell` carries the 228 cells
 of `images.{delete,describe,kernel_config,list,upload}`, `shapes.{delete,list,set}` and
 `resources.{availability,describe,list}` on the same harness, lanes, bindings and assembly as the
 core cells above; run both files in each lane's pytest command. The
@@ -1230,7 +1232,7 @@ A cell killed mid-run can leave any of these behind; `demo-down.sh --wipe --yes`
 #### Investigation and artifact tool cells (#3096)
 
 `tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell` carries the
-260 cells of `investigations.{open,get,list,set,link,unlink,close,complete_rootfs_upload}` and
+390 cells of `investigations.{open,get,list,set,link,unlink,close,complete_rootfs_upload}` and
 `artifacts.{create_investigation_upload,create_run_upload,fetch_raw,get,list}` on the same harness,
 lanes, bindings and assembly; run all three carriers in each lane's pytest command. The
 [design](../../workflow/specs/2026-10-02-investigation-tool-cells-design.md) lists what each

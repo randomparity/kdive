@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
+from scripts.coverage_campaign import contract
 from scripts.coverage_campaign.contract import (
     FILTERED_LIST_BOUNDARIES,
     Cell,
@@ -265,11 +266,11 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         "tests/integration/test_host_install_live.py::test_installed_host_boots_pinned_kernel"
     }
     core = [c for c in contract.cells if c.operation in _CORE_TOOLS]
-    assert len(core) == 56 and {c.node_id for c in core} == {_CORE_NODE}
+    assert len(core) == 84 and {c.node_id for c in core} == {_CORE_NODE}
     catalog = [c for c in contract.cells if c.operation in _SPLIT[3095]]
-    assert len(catalog) == 152 and {c.node_id for c in catalog} == {_CATALOG_NODE}
+    assert len(catalog) == 228 and {c.node_id for c in catalog} == {_CATALOG_NODE}
     investigation = [c for c in contract.cells if c.operation in _SPLIT[3096]]
-    assert len(investigation) == 260
+    assert len(investigation) == 390
     assert {c.node_id for c in investigation} == {_INVESTIGATION_NODE}
     operator = [c for c in contract.cells if c.operation in _OPERATOR_TOOLS]
     assert len(operator) == 124 and {c.node_id for c in operator} == {_OPERATOR_NODE}
@@ -308,9 +309,9 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert len(local_control) == 120 and {c.node_id for c in local_control} == {_CONTROL_NODE}
     assert {c.node_id for c in control if c.provider == "remote-libvirt"} == {None}
     service = [c for c in contract.cells if c.operation in _RUN_SYSTEM_JOB_TOOLS]
-    assert len(service) == 220 and {c.node_id for c in service} == {_RUN_SYSTEM_JOB_NODE}
+    assert len(service) == 330 and {c.node_id for c in service} == {_RUN_SYSTEM_JOB_NODE}
     accounting = [c for c in contract.cells if c.operation in _SPLIT[3098]]
-    assert len(accounting) == 220 and {c.node_id for c in accounting} == {_ACCOUNTING_NODE}
+    assert len(accounting) == 330 and {c.node_id for c in accounting} == {_ACCOUNTING_NODE}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -614,7 +615,8 @@ def test_filtered_list_boundaries_are_the_adr_named_pairs(inventory: Inventory) 
         and c.kind == "rejection"
         and (c.operation, c.scenario_id.rsplit("/", 1)[1]) in FILTERED_LIST_BOUNDARIES
     ]
-    original = [c for c in filtered if (c.operation, boundary_of(c)) in _ADR_0756_PAIRS]
+    named = [c for c in filtered if (c.operation, boundary_of(c)) in _ADR_0756_PAIRS]
+    original = [c for c in named if c.exposure != "cli"]
     assert len(original) == 12
     assert {(c.configuration, c.exposure) for c in original} == {
         (configuration, exposure)
@@ -622,6 +624,8 @@ def test_filtered_list_boundaries_are_the_adr_named_pairs(inventory: Inventory) 
         for exposure in ("direct", "gateway")
     }
     assert all(c.owner == 3096 and c.node_id is not None for c in original)
+    twins = [c for c in named if c.exposure == "cli"]
+    assert len(twins) == 6 and all(c.owner == 3099 and c.node_id is not None for c in twins)
     for cell in filtered:
         assert cell.assertions == (boundary_of(cell), "unchanged-state", "cleanup")
         assert "empty page to the denied caller" in cell.observation
@@ -819,3 +823,33 @@ def test_debug_owners_and_carrier_follow_the_approved_split(inventory: Inventory
     assert not [c for c in owned if c.id.endswith("/capability")]
     assert len(local) == 880 and {c.node_id for c in local} == {_DEBUG_NODE}
     assert not [c for c in cells if c.provider == "remote-libvirt" and c.node_id]
+
+
+_CLI_GROUPS = (2811, *_SPLIT)
+
+
+def test_cli_cells_twin_the_core_direct_cells(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+    by_id = {c.id: c for c in cells}
+    cli = [c for c in cells if c.exposure == "cli"]
+    assert len(cli) == 454
+    for cell in cli:
+        twin = by_id[cell.id.replace("/cli/", "/direct/")]
+        assert replace(cell, id=twin.id, exposure="direct", owner=twin.owner) == twin
+        assert cell.owner == 3099 and cell.node_id is not None
+    core = {t for g in load_mapping().groups if g.owner in _CLI_GROUPS for t in g.tools}
+    assert {c.operation for c in cli} == core and len(core) == 52
+
+
+def test_cli_exposure_validators_fail_closed(
+    inventory: Inventory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mapping = load_mapping().model_copy(deep=True)
+    provider = next(g for g in mapping.groups if g.execution == "provider")
+    provider.cli = True
+    with pytest.raises(ValueError, match="service tools only"):
+        build_contract(mapping=mapping, inventory=inventory)
+    verbs = tuple(v for v in contract.GENERATED_VERBS if v.tool != "session.whoami")
+    monkeypatch.setattr(contract, "GENERATED_VERBS", verbs)
+    with pytest.raises(ValueError, match="no generated kdivectl verb"):
+        build_contract(inventory=inventory)

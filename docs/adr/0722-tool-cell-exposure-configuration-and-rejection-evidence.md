@@ -144,6 +144,15 @@ termination. The worker there has a `local` incarnation, and the recovery row re
 own witnesses, so the same evidence rule covers them. The configuration proof and the other
 decisions are unchanged.
 
+### Amendment (2026-10-20): a `cli` exposure for the core service tools (#3099)
+
+This amends the two exposures of the Context and decision 1, by operator decision at the #3099
+design gate (2026-10-20). [ADR-0795](0795-cli-translation-exposure.md) adds a third exposure,
+`cli`, to the tools of the core service groups: every `direct` cell of them gains a `cli` twin on
+the same scenario and node, whose caller drives the tool's generated `kdivectl` verb. Decision 3
+holds for `cli` with the rejection readings ADR-0795 states. Every other tool keeps `direct` and
+`gateway` only.
+
 ## Consequences
 
 - Recovery-configuration evidence exists only from a run whose catalog proved it. A carrier of
