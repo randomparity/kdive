@@ -250,12 +250,15 @@ def _fill_libvirt_defaults(root: ET.Element[str], *, live: bool) -> None:
     """Apply the readback changes libvirt 12.0.0 makes to the rendered intent (#3296)."""
     os_type = root.find("./os/type")
     assert os_type is not None
-    serial_type = {"x86_64": "isa-serial", "ppc64le": "spapr-vio-serial"}[os_type.get("arch", "")]
+    serial_type, serial_model = {
+        "x86_64": ("isa-serial", "isa-serial"),
+        "ppc64le": ("spapr-vio-serial", "spapr-vty"),
+    }[os_type.get("arch", "")]
     serial_target = root.find("./devices/serial/target")
     assert serial_target is not None
     if serial_target.get("type") is None:
         serial_target.set("type", serial_type)
-        ET.SubElement(serial_target, "model", name=serial_type)
+        ET.SubElement(serial_target, "model", name=serial_model)
     if not live:
         return
     cpu = root.find("./cpu")
