@@ -82,6 +82,7 @@ _GOOD = of.Interruption(
     system_state="ready",
     domain_uuid_before=_UUID,
     domain_uuid_after=_UUID,
+    domain_active_after=True,
     overlay_present=True,
     stale_journal=_line(f"job {_JOB} completed but was reclaimed; result dropped"),
     job_id=_JOB,
@@ -116,6 +117,7 @@ def test_interruption_accepts_a_stale_failure_that_changed_nothing() -> None:
         (replace(_GOOD, system_state="provisioning"), "not ready"),
         (replace(_GOOD, domain_uuid_after=None), "tore down"),
         (replace(_GOOD, domain_uuid_after="00000000-0000-4000-8000-000000000000"), "UUID changed"),
+        (replace(_GOOD, domain_active_after=False), "stopped the reclaimed System's domain"),
         (replace(_GOOD, overlay_present=False), "reclaimed the overlay"),
         (replace(_GOOD, stale_journal=""), "logged no outcome"),
         (
@@ -139,6 +141,7 @@ def test_interruption_accepts_a_stale_failure_that_changed_nothing() -> None:
         "system-not-ready",
         "domain-gone",
         "domain-replaced",
+        "domain-stopped",
         "overlay-gone",
         "no-journal",
         "other-job-dropped",
@@ -222,6 +225,7 @@ _OUTAGE = of.Outage(
     ready_after_s=12.5,
     final=of.JobRow("succeeded", 2, _W2),
     system_state="ready",
+    domain_active=True,
     journal=_HEARTBEAT + "\n" + _line(f"job {_JOB} failed: infrastructure_failure"),
     job_id=_JOB,
 )
@@ -259,8 +263,17 @@ def test_outage_labels_the_resume_path(journal: str, path: str) -> None:
             "after the outage",
         ),
         (replace(_OUTAGE, final=of.JobRow("succeeded", 1, _W1)), "never reached"),
+        (replace(_OUTAGE, domain_active=False), "not running after the outage"),
     ],
-    ids=["container", "invocation", "main-pid", "not-ready", "job-failed", "attempt-1"],
+    ids=[
+        "container",
+        "invocation",
+        "main-pid",
+        "not-ready",
+        "job-failed",
+        "attempt-1",
+        "domain-down",
+    ],
 )
 def test_outage_refuses(seen: of.Outage, reason: str) -> None:
     assert reason in _refused(lambda: of.outage_verdict(seen))

@@ -131,6 +131,7 @@ class Interruption:
     system_state: str
     domain_uuid_before: str
     domain_uuid_after: str | None
+    domain_active_after: bool
     overlay_present: bool
     stale_journal: str
     job_id: str
@@ -159,6 +160,8 @@ def interruption_verdict(seen: Interruption) -> dict[str, object]:
         raise _fail(
             f"domain UUID changed from {seen.domain_uuid_before} to {seen.domain_uuid_after}"
         )
+    if not seen.domain_active_after:
+        raise _fail("the stale attempt stopped the reclaimed System's domain")
     if not seen.overlay_present:
         raise _fail("the stale attempt reclaimed the overlay the reclaimed System runs on")
     stale = stale_outcome(seen.stale_journal, seen.job_id)
@@ -241,6 +244,7 @@ class Outage:
     ready_after_s: float | None
     final: JobRow
     system_state: str
+    domain_active: bool
     journal: str
     job_id: str
 
@@ -261,6 +265,8 @@ def outage_verdict(seen: Outage) -> dict[str, object]:
         raise _fail(
             f"provision job {seen.final.state}, System {seen.system_state} after the outage"
         )
+    if not seen.domain_active:
+        raise _fail("the System's domain is not running after the outage")
     if seen.final.attempt <= 1:
         raise _fail("attempt 1 succeeded: the outage never reached the in-flight attempt")
     failed = attempt_categories(seen.journal, seen.job_id)
@@ -322,7 +328,10 @@ def unit_identity() -> dict[str, tuple[str, str]]:
 
 def postgres_container() -> str:
     """The stack's one compose ``postgres`` container; anything else blocks the cell."""
-    ids = _run(compose_argv(ROOT, "ps")).split()
+    try:
+        ids = _run(compose_argv(ROOT, "ps")).split()
+    except AssertionError as exc:
+        raise ScenarioStop(Outcome.BLOCKED, f"docker compose is not usable: {exc}") from None
     if len(ids) != 1:
         raise ScenarioStop(Outcome.BLOCKED, f"expected one compose postgres container, {ids}")
     return ids[0]
@@ -345,6 +354,14 @@ def preconditions(base_url: str, *, postgres: bool) -> str | None:
     )
     if sudo.returncode != 0:
         raise ScenarioStop(Outcome.BLOCKED, f"sudo -n may not run {_HOLD_PYTHON} (worker hold)")
+    journal = subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
+        ["journalctl", "--no-pager", "-o", "cat", "-n", "1", "-u", "kdive-live-worker@*"],
+        capture_output=True,
+        timeout=30.0,
+        check=False,
+    )
+    if journal.returncode != 0 or not journal.stdout.strip():
+        raise ScenarioStop(Outcome.BLOCKED, "no worker journal access; join systemd-journal")
     return postgres_container() if postgres else None
 
 
@@ -393,6 +410,18 @@ async def in_flight(
             return claim, uuid
         if window_missed(row) or time.monotonic() >= deadline:
             raise _fail(f"fault point not reached (incomplete): job {row}")
+        await asyncio.sleep(_POLL_S)
+
+
+async def until_running(db_url: str, job_id: str, deadline_s: float) -> JobRow:
+    """Wait for the job to be held by a worker; a terminal or late job is an incomplete cell."""
+    deadline = time.monotonic() + deadline_s
+    while True:
+        row = await job_holder(db_url, job_id)
+        if row.state == "running":
+            return row
+        if window_missed(row) or time.monotonic() >= deadline:
+            raise _fail(f"provision never ran before the in-flight replay: {row} (incomplete)")
         await asyncio.sleep(_POLL_S)
 
 
@@ -548,7 +577,7 @@ async def worker_interruption(
             await asyncio.to_thread(set_exact_worker_hold, claim, "continue")
         journal = await stale_journal(job_id, invocation, window_s + 60.0)
         await held.sampler.sample(held.op)
-        _active, uuid_after = await asyncio.to_thread(_domain, held.provider, held.system_id)
+        active_after, uuid_after = await asyncio.to_thread(_domain, held.provider, held.system_id)
         seen = Interruption(
             original=claim,
             replacement=replacement,
@@ -557,6 +586,7 @@ async def worker_interruption(
             system_state=await system_state(held.op, held.system_id),
             domain_uuid_before=uuid_before,
             domain_uuid_after=uuid_after,
+            domain_active_after=active_after,
             overlay_present=await overlay_present(held),
             stale_journal=journal,
             job_id=job_id,
@@ -600,9 +630,11 @@ async def lost_response(
         if stored is None:
             raise _fail("the keyed provision committed no idempotency row")
         job_id, _system = admitted(stored)
+        before = await until_running(db_url, job_id, window_s)
         running = await replay(held.allocation, profile, key)
-        if (await job_holder(db_url, job_id)).state in TERMINAL:
-            raise _fail("provision finished before the in-flight replay (incomplete)")
+        after = await job_holder(db_url, job_id)
+        if after.state != "running":
+            raise _fail(f"provision left running during the in-flight replay: {after} (incomplete)")
         await wait_terminal(held.op, job_id, held.sampler, deadline_s=terminal_s(window_s))
         done = await replay(held.allocation, profile, key)
         xml = await asyncio.to_thread(held.provider.xml, provisioned)
@@ -617,7 +649,8 @@ async def lost_response(
             final=await job_holder(db_url, job_id),
             system_state=await system_state(held.op, provisioned),
         )
-        run.prove("lost-response", lost_response_verdict(seen))
+        proof = lost_response_verdict(seen)
+        run.prove("lost-response", {**proof, "replayed_while": [before.state, after.state]})
         await _finish(held, job_id)
 
     await frame(run, base_url, issuer, db_url, remote=remote, body=body)
@@ -640,8 +673,8 @@ async def backing_service(
         await in_flight(held, db_url, job_id, window_s)
         await held.sampler.sample(held.op)
         domains: list[list[str]] = []
-        await asyncio.to_thread(_run, compose_argv(ROOT, "stop"))
         try:
+            await asyncio.to_thread(_run, compose_argv(ROOT, "stop"))
             # No MCP call while Postgres is down; the provider's libvirt is still observable.
             ends = time.monotonic() + OUTAGE_S
             while time.monotonic() < ends:
@@ -660,6 +693,7 @@ async def backing_service(
             ready_after_s=ready,
             final=await job_holder(db_url, job_id),
             system_state=await system_state(held.op, held.system_id),
+            domain_active=(await asyncio.to_thread(_domain, held.provider, held.system_id))[0],
             journal=await asyncio.to_thread(worker_journal, since),
             job_id=job_id,
         )
