@@ -1,13 +1,9 @@
-"""Remote-libvirt Connect plane: direct-TCP gdbstub transport (ADR-0079/0083).
+"""Remote-libvirt Connect endpoint resolution (ADR-0079/0083/0798).
 
-`open_transport(system, "gdbstub")` composes the endpoint from operator config (the host is
-``RemoteLibvirtConfig.gdb_addr``, the ACL'd listen address) and the per-System gdbstub port read
-from the domain XML (ADR-0080), applies the ACL-remote host policy (no loopback gate — the host
-is operator-trusted config, the operator ACL is the security boundary), probes RSP reachability,
-and returns the encoded handle the gdb-MI tier consumes. The port read is a real read over the
-mutual-TLS connection, mirroring the SSH endpoint read; only the socket ``open`` and the RSP
-probe are injected ``live_vm`` seams, so orchestration and the full error contract stay
-unit-tested with fakes. ``close_transport`` validates the handle and no-ops (connectionless RSP).
+Gdbstub transports compose operator configuration and the live domain XML port, apply
+ACL-remote host policy and return the existing encoded handle without debugger socket IO.
+Actual lazy GDB attachment validates reachability/protocol and may halt the guest.
+Remote drgn-live retains its connectionless bare-domain handle.
 """
 
 from __future__ import annotations
@@ -33,7 +29,6 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     recorded_ssh_port_strict,
 )
 from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_acl_remote
-from kdive.providers.shared.debug_common.rsp import rsp_reachable
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
@@ -41,7 +36,6 @@ _GDBSTUB: DebugTransportKind = "gdbstub"
 _DRGN_LIVE: DebugTransportKind = "drgn-live"
 
 type _ResolvePort = Callable[[SystemHandle], int]
-type _Probe = Callable[[str, int], bool]
 type _OpenConnection = Callable[[str], Any]
 
 
@@ -57,13 +51,11 @@ class RemoteLibvirtConnect:
         *,
         config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
         resolve_port: _ResolvePort | None = None,
-        probe: _Probe | None = None,
         open_connection: _OpenConnection | None = None,
         secret_backend_factory: Callable[[], SecretBackend] | None = None,
     ) -> None:
         self._config_factory = config_factory
         self._resolve_port = resolve_port if resolve_port is not None else self._read_gdb_port
-        self._probe = probe if probe is not None else _real_probe
         self._open_connection = open_connection if open_connection is not None else _open_libvirt
         self._secret_backend_factory = secret_backend_factory or (
             lambda: secret_backend_from_env(registry=SecretRegistry())
@@ -76,7 +68,7 @@ class RemoteLibvirtConnect:
         secret_registry: SecretRegistry,
         config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
     ) -> RemoteLibvirtConnect:
-        """Build with the real domain-XML readers + socket probe.
+        """Build with the real domain-XML readers; gdbstub resolution does not attach.
 
         Both domain-XML reads are real production reads over the mutual-TLS connection: the
         gdbstub port (ADR-0080) and the SSH endpoint (ADR-0291, called on the live worker by
@@ -94,13 +86,13 @@ class RemoteLibvirtConnect:
 
         ``drgn-live`` reaches in-guest drgn over the qemu-guest-agent keyed by domain, so its
         handle is the bare domain name core derived (``system``) — no gdb_addr, port, or probe
-        (ADR-0083 §4). ``gdbstub`` composes the ACL'd direct-TCP endpoint and probes RSP.
+        (ADR-0083 §4). ``gdbstub`` resolves the ACL'd direct-TCP endpoint without attaching.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for an unknown kind, an unset
                 ``gdb_addr``, a malformed host, or a domain recording no gdbstub port;
-                ``DEBUG_ATTACH_FAILURE`` if the domain is absent or the stub does not answer
-                RSP; ``TRANSPORT_FAILURE`` on a socket fault; ``INFRASTRUCTURE_FAILURE`` on a
+                ``DEBUG_ATTACH_FAILURE`` if the domain is absent;
+                ``TRANSPORT_FAILURE`` on the TLS connection; ``INFRASTRUCTURE_FAILURE`` on a
                 libvirt fault reading the domain.
         """
         if kind == _DRGN_LIVE:
@@ -113,20 +105,6 @@ class RemoteLibvirtConnect:
         host = config.gdb_addr
         allow_acl_remote(host)
         port = self._resolve_port(system)
-        try:
-            reachable = self._probe(host, port)
-        except OSError as exc:
-            raise CategorizedError(
-                "gdbstub transport socket fault",
-                category=ErrorCategory.TRANSPORT_FAILURE,
-                details={"port": port},
-            ) from exc
-        if not reachable:
-            raise CategorizedError(
-                "remote gdbstub did not answer RSP framing",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"host": host, "port": port},
-            )
         return TransportHandle(TransportHandleData(kind=_GDBSTUB, host=host, port=port).encode())
 
     def close_transport(self, handle: TransportHandle) -> None:
@@ -217,10 +195,6 @@ class RemoteLibvirtConnect:
 
 def _open_libvirt(uri: str) -> Any:  # pragma: no cover - live_vm
     return libvirt.open(uri)
-
-
-def _real_probe(host: str, port: int) -> bool:  # pragma: no cover - live_vm
-    return rsp_reachable(host, port)
 
 
 __all__ = ["RemoteLibvirtConnect"]

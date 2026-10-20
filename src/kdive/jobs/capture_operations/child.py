@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
+from collections.abc import Mapping
 from contextlib import suppress
 from hashlib import sha256
 from pathlib import Path
@@ -18,6 +20,13 @@ _CONFIGURATION_NAME = "configuration.json"
 _RESULT_NAME = "result.json"
 _MAX_REQUEST_BYTES = 16_384
 _MAX_CONFIGURATION_BYTES = 16_384
+# Provider detail keys that name a failure cause without host paths, identifiers, or secrets.
+# Token keys must look like identifiers so exception text cannot ride along under them; the
+# shapes below keep the forwarded details far inside CaptureResult's 4096-byte bound.
+_TOKEN_DETAIL_KEYS = ("reason", "operation", "error")
+_DETAIL_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+_MAX_DETAIL_BYTES_VALUE = 2**63 - 1
+_MAX_REMEDIATION_CHARS = 512
 
 
 def _read_bounded(fd: int, maximum: int) -> bytes:
@@ -95,6 +104,24 @@ def read_capture_inputs(directory_fd: int) -> tuple[CaptureRequest, bytes | None
     return request, configuration
 
 
+def _forwarded_details(
+    phase: str, details: Mapping[str, object]
+) -> dict[str, str | int | bool | None]:
+    """Keep the allow-listed, shape-checked provider details that name a failure cause."""
+    forwarded: dict[str, str | int | bool | None] = {"phase": phase}
+    for key in _TOKEN_DETAIL_KEYS:
+        value = details.get(key)
+        if isinstance(value, str) and _DETAIL_TOKEN.fullmatch(value):
+            forwarded[key] = value
+    size = details.get("bytes")
+    if type(size) is int and 0 <= size <= _MAX_DETAIL_BYTES_VALUE:
+        forwarded["bytes"] = size
+    remediation = details.get("remediation")
+    if isinstance(remediation, str) and remediation.isascii() and remediation.isprintable():
+        forwarded["remediation"] = remediation[:_MAX_REMEDIATION_CHARS]
+    return forwarded
+
+
 def run_capture_child(launch_token: str, gate_fd: int) -> int:
     """Validate released inputs, execute one provider phase, and write its bounded result."""
     invalid_character = any(character not in "0123456789abcdef" for character in launch_token)
@@ -123,7 +150,7 @@ def run_capture_child(launch_token: str, gate_fd: int) -> int:
                 error_category=error.category,
                 terminal=error.terminal,
                 reason="provider_execution_failed",
-                details={"phase": phase},
+                details=_forwarded_details(phase, error.details),
             )
         except Exception as error:
             result = CaptureResult(

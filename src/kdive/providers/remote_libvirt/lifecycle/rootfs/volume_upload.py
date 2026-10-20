@@ -106,7 +106,12 @@ def _infra(operation: str, **details: str) -> CategorizedError:
 
 
 def upload_qcow2_volume(
-    conn: VolumeUploadConn, pool_name: str, volume_name: str, qcow2_path: Path
+    conn: VolumeUploadConn,
+    pool_name: str,
+    volume_name: str,
+    qcow2_path: Path,
+    *,
+    require_new: bool = False,
 ) -> None:
     """Create ``volume_name`` in ``pool_name`` and stream ``qcow2_path`` into it.
 
@@ -119,6 +124,7 @@ def upload_qcow2_volume(
         pool_name: The storage pool to create the volume in.
         volume_name: The base-image volume name to create.
         qcow2_path: The local built qcow2 to upload.
+        require_new: Refuse an existing target instead of skipping (stage-volume attestation).
 
     Raises:
         CategorizedError: ``INFRASTRUCTURE_FAILURE`` on any libvirt error during lookup, create, or
@@ -138,6 +144,13 @@ def upload_qcow2_volume(
         if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
             raise _infra("looking up the volume", pool=pool_name, volume=volume_name) from exc
     else:
+        if require_new:
+            raise CategorizedError(
+                "stage-volume target already exists; choose a fresh declared volume or inspect "
+                "and manually clean up the prior target before retrying",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"pool": pool_name, "volume": volume_name},
+            )
         _log.info("volume %s already staged in pool %s; skipping upload", volume_name, pool_name)
         return
     _require_qcow2_magic(qcow2_path)
