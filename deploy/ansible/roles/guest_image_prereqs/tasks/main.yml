@@ -62,8 +62,8 @@
 
 - name: Ensure dnf + guestfs tools are present (RedHat-family scratch builds)
   ansible.builtin.dnf:
-    name:
-      - dnf
-      - libguestfs-tools
+    name: >-
+      {{ ['dnf', 'libguestfs-tools'] +
+         (['guestfs-tools'] if ansible_distribution == 'Fedora' else []) }}
     state: present
   when: ansible_os_family == 'RedHat'

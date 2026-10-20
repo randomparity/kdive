@@ -47,7 +47,7 @@ halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session 
 ## Breakpoints and watchpoints
 
 - `debug.set_breakpoint` — set a breakpoint at a symbol (a bare C function or variable name; not an address).
-- `debug.list_breakpoints` — list the current breakpoints.
+- `debug.list_breakpoints` — list each breakpoint and watchpoint with its number, kind and location.
 - `debug.clear_breakpoint` — remove a breakpoint.
 - `debug.set_watchpoint` — trap a write to a data address. A ppc64le guest under KVM cannot
   insert one; the call returns `not_implemented` with `watchpoint_unsupported` and arms

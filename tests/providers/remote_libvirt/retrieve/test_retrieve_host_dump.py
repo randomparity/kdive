@@ -21,8 +21,8 @@ import libvirt
 import pytest
 
 from kdive.artifacts.storage import (
-    ArtifactStreamRequest,
     ArtifactWriteRequest,
+    ConditionalArtifactWriteRequest,
     HeadResult,
     PresignedUpload,
     PresignPutRequest,
@@ -249,20 +249,21 @@ class FakeHostDumpConn:
 class FakeStore:
     def __init__(self, *, head: HeadResult | None) -> None:
         self._head = head
-        self.stream_requests: list[ArtifactStreamRequest] = []
-        self.put_requests: list[ArtifactWriteRequest] = []
+        self.stream_requests: list[ConditionalArtifactWriteRequest] = []
+        self.put_requests: list[ConditionalArtifactWriteRequest] = []
 
-    def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact:
-        self.stream_requests.append(request)
-        # Read enough to prove the store streams from the path, not an in-RAM buffer.
-        with request.path.open("rb") as fh:
-            fh.read(1)
+    def create_if_absent(self, request: ConditionalArtifactWriteRequest) -> StoredArtifact:
+        assert request.metadata == {"vmcore-execution": str(UUID(int=1)), "vmcore-kind": "capture"}
+        if isinstance(request.data, Path):
+            self.stream_requests.append(request)
+            with request.data.open("rb") as handle:
+                handle.read(1)
+            etag = "etag-raw"
+        else:
+            self.put_requests.append(request)
+            etag = "etag-red"
         return StoredArtifact(
-            request.key(),
-            "etag-raw",
-            request.sensitivity,
-            request.retention_class,
-            version_id="test-version",
+            request.key, etag, request.sensitivity, request.retention_class, "test-version"
         )
 
     def presign_put(self, request: PresignPutRequest) -> PresignedUpload:
@@ -274,14 +275,7 @@ class FakeStore:
         return self._head
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
-        self.put_requests.append(request)
-        return StoredArtifact(
-            request.key(),
-            "etag-red",
-            request.sensitivity,
-            request.retention_class,
-            version_id="test-version",
-        )
+        raise AssertionError("host dump must use conditional writes")
 
 
 def _retrieve(
@@ -357,7 +351,9 @@ def test_host_dump_happy_path_dumps_streams_uploads(tmp_path: Path) -> None:
     conn = FakeHostDumpConn(pool=pool)
     store = FakeStore(head=_head_ok())
 
-    out = _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+    out = _retrieve(conn, store, tmp_path).capture(
+        _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+    )
 
     # AC1: the dump targeted a path inside the pool dir with RAW (ELF) + MEMORY_ONLY.
     import libvirt
@@ -372,12 +368,16 @@ def test_host_dump_happy_path_dumps_streams_uploads(tmp_path: Path) -> None:
     assert vol.download_called
     # AC5: the upload streamed from a path, not an in-RAM bytes buffer.
     assert store.stream_requests
-    assert store.stream_requests[0].key().endswith("/vmcore-host_dump")
+    assert store.stream_requests[0].key.endswith(
+        "/vmcore-host_dump-00000000-0000-0000-0000-000000000001"
+    )
     assert store.stream_requests[0].sensitivity is Sensitivity.SENSITIVE
     # the streamed core's sha256 is bound into the PUT (S3 enforces it), not a vacuous check.
     assert store.stream_requests[0].sha256_b64 == _sha256_b64(b"CORE-BYTES")
     # the redacted dmesg landed too.
-    assert out.redacted.key.endswith("/vmcore-host_dump-redacted")
+    assert out.redacted.key.endswith(
+        "/vmcore-host_dump-00000000-0000-0000-0000-000000000001-redacted"
+    )
     assert out.vmcore_build_id == "deadbeef"
     # AC7: temp file + host volume both gone.
     assert vol.deleted
@@ -393,7 +393,7 @@ def test_host_dump_dmesg_extraction_failure_degrades_to_placeholder(tmp_path: Pa
     err = CategorizedError("printk needs debuginfo", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
 
     out = _retrieve(conn, store, tmp_path, dmesg_error=err).capture(
-        _SID, _RID, CaptureMethod.HOST_DUMP
+        _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
     )
 
     assert out.vmcore_build_id == "deadbeef"  # the mandatory provenance still captured
@@ -411,7 +411,7 @@ def test_host_dump_raw_dmesg_failure_degrades_to_placeholder(tmp_path: Path) -> 
     store = FakeStore(head=_head_ok())
 
     out = _retrieve(conn, store, tmp_path, dmesg_error=RuntimeError("drgn helper blew up")).capture(
-        _SID, _RID, CaptureMethod.HOST_DUMP
+        _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
     )
 
     assert out.vmcore_build_id == "deadbeef"
@@ -430,7 +430,7 @@ def test_host_dump_missing_drgn_dependency_is_not_degraded(tmp_path: Path) -> No
 
     with pytest.raises(CategorizedError) as exc:
         _retrieve(conn, store, tmp_path, dmesg_error=err).capture(
-            _SID, _RID, CaptureMethod.HOST_DUMP
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
         )
 
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
@@ -444,7 +444,7 @@ def test_host_dump_raw_build_id_failure_is_infrastructure_failure(tmp_path: Path
 
     with pytest.raises(CategorizedError) as exc:
         _retrieve(conn, store, tmp_path, build_id_error=RuntimeError("drgn blew up")).capture(
-            _SID, _RID, CaptureMethod.HOST_DUMP
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
         )
 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -462,7 +462,9 @@ def test_host_dump_deletes_a_stale_volume_before_dumping(tmp_path: Path) -> None
     conn = FakeHostDumpConn(pool=pool)
     store = FakeStore(head=_head_ok())
 
-    _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+    _retrieve(conn, store, tmp_path).capture(
+        _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+    )
 
     assert stale.deleted  # AC1: a stale same-named volume is removed before the dump
     assert conn.domain.core_dumps  # the dump still ran afterward
@@ -481,7 +483,9 @@ def test_host_dump_stale_volume_lookup_failure_is_infrastructure_failure(
     store = FakeStore(head=_head_ok())
 
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc.value.details == {
@@ -502,7 +506,9 @@ def test_host_dump_absent_stale_volume_still_allows_capture(tmp_path: Path) -> N
     conn = FakeHostDumpConn(pool=pool)
     store = FakeStore(head=_head_ok())
 
-    out = _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+    out = _retrieve(conn, store, tmp_path).capture(
+        _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+    )
 
     assert out.vmcore_build_id == "deadbeef"
     assert conn.domain.core_dumps
@@ -546,7 +552,9 @@ def test_host_dump_non_dir_pool_is_configuration_error_before_dump(tmp_path: Pat
     store = FakeStore(head=None)
 
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert not conn.domain.core_dumps  # AC3: no dump into a void
@@ -562,7 +570,9 @@ def test_host_dump_forbidden_pool_xml_is_infrastructure_failure_before_dump(
     store = FakeStore(head=None)
 
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc.value.details == {
@@ -586,7 +596,9 @@ def test_host_dump_pool_xml_lookup_failure_is_infrastructure_failure_before_dump
     store = FakeStore(head=None)
 
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc.value.details == {
@@ -606,7 +618,9 @@ def test_host_dump_over_ceiling_volume_is_configuration_error_before_download(
     store = FakeStore(head=None)
 
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert not huge.download_called  # AC4: ceiling enforced before the stream
@@ -622,7 +636,9 @@ def test_host_dump_volume_info_failure_is_infrastructure_failure_before_download
     store = FakeStore(head=None)
 
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc.value.details == {
@@ -643,7 +659,7 @@ def test_host_dump_missing_vmcoreinfo_build_id_is_configuration_error(tmp_path: 
 
     with pytest.raises(CategorizedError) as exc:
         _retrieve(conn, store, tmp_path, build_id_error=err).capture(
-            _SID, _RID, CaptureMethod.HOST_DUMP
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
         )
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -667,7 +683,9 @@ def test_host_dump_digest_read_failure_is_infrastructure_failure(
     )
 
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc.value.details["system_id"] == str(_SID)
@@ -686,7 +704,9 @@ def test_host_dump_download_failure_still_cleans_up(tmp_path: Path) -> None:
     store = FakeStore(head=None)
 
     with pytest.raises(CategorizedError):
-        _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
 
     assert vol.deleted  # AC7: finally deletes the volume on a forced download failure
     # AC5/AC7: the spool temp file is gone (no leftover under the worker temp dir).
@@ -700,7 +720,9 @@ def test_host_dump_missing_object_after_upload_is_infrastructure_failure(tmp_pat
     store = FakeStore(head=None)  # head returns None despite a successful stream put
 
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert vol.deleted
@@ -714,7 +736,9 @@ def test_host_dump_verifies_the_readback_checksum_when_present(tmp_path: Path) -
     # head returns the matching checksum: the post-put verification passes.
     store = FakeStore(head=_head_ok(payload, checksum=_sha256_b64(payload)))
 
-    out = _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+    out = _retrieve(conn, store, tmp_path).capture(
+        _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+    )
     assert out.vmcore_build_id == "deadbeef"
 
 
@@ -727,7 +751,9 @@ def test_host_dump_readback_checksum_mismatch_is_infrastructure_failure(tmp_path
     store = FakeStore(head=_head_ok(payload, checksum=_sha256_b64(b"TAMPERED")))
 
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert vol.deleted
 
@@ -744,7 +770,7 @@ def test_host_dump_stream_overrunning_the_ceiling_is_configuration_error(tmp_pat
 
     with pytest.raises(CategorizedError) as exc:
         _retrieve(conn, store, tmp_path, max_core_bytes=10).capture(
-            _SID, _RID, CaptureMethod.HOST_DUMP
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
         )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert vol.deleted  # the over-streaming dump volume is still cleaned up
@@ -779,11 +805,14 @@ def test_host_dump_spools_to_a_private_mode_file(tmp_path: Path) -> None:
     conn = FakeHostDumpConn(pool=pool)
 
     class _PermStore(FakeStore):
-        def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact:
-            captured_mode["mode"] = stat.S_IMODE(os.stat(request.path).st_mode)
-            return super().put_stream(request)
+        def create_if_absent(self, request: ConditionalArtifactWriteRequest) -> StoredArtifact:
+            if isinstance(request.data, Path):
+                captured_mode["mode"] = stat.S_IMODE(os.stat(request.data).st_mode)
+            return super().create_if_absent(request)
 
     store = _PermStore(head=_head_ok(payload))
-    _retrieve(conn, store, tmp_path).capture(_SID, _RID, CaptureMethod.HOST_DUMP)
+    _retrieve(conn, store, tmp_path).capture(
+        _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+    )
     # The spooled core (guest memory) must not be world/group readable.
     assert captured_mode["mode"] == 0o600

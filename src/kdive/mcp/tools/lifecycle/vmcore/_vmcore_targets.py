@@ -7,6 +7,7 @@ from typing import NamedTuple
 from psycopg import AsyncConnection
 
 from kdive.artifacts.catalog.read_model import raw_vmcore_key
+from kdive.artifacts.vmcore_retention import require_vmcore_available
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
@@ -41,6 +42,7 @@ _VMCORE_NEXT_ACTIONS: dict[str, list[str]] = {
     NO_DEBUGINFO: ["runs.get", "runs.complete_build"],
     NO_BUILD: ["runs.complete_build", "runs.get"],
     NO_VMCORE: ["vmcore.fetch", "runs.get"],
+    "vmcore_retired": ["runs.get"],
 }
 
 
@@ -75,6 +77,7 @@ async def resolve_run_vmcore_target(
     if run is None or run.project not in ctx.projects:
         raise _target_not_found()
     require_role(ctx, run.project, Role.VIEWER)
+    await require_vmcore_available(conn, uid)
     vmcore_ref = await raw_vmcore_key(conn, uid)
     if vmcore_ref is None:
         raise _no_vmcore_not_found(run)

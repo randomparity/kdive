@@ -22,13 +22,16 @@ control, and they are independent (ADR-0034 §3/§6).
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import functools
 import logging
+import shutil
 import threading
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
+from weakref import WeakValueDictionary
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -48,6 +51,7 @@ from kdive.mcp.tools.debug.sessions.registry import GdbMiSessionRegistry
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.ports.debug import (
     AttachSeam,
+    GdbMiAttachFailure,
     GdbMiAttachment,
     GdbMiEngine,
 )
@@ -61,6 +65,7 @@ from kdive.providers.shared.debug_common.gdbmi.policy.capabilities import (
     DebugCapability,
     supports,
 )
+from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import close_attachment
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
@@ -157,12 +162,35 @@ def _default_transcript_dir() -> Path:
     return Path(config.require(DEBUG_DIR))
 
 
+async def _finish_task[T](task: asyncio.Future[T]) -> T:
+    """Return only once ``task`` has finished; absorb each cancel until then, then re-raise it."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.wait((task,))
+        except asyncio.CancelledError:
+            cancelled = True
+    if cancelled:
+        with suppress(BaseException):
+            task.result()  # Retrieve a task error the cancel supersedes, so it is not unlogged.
+        raise asyncio.CancelledError
+    return task.result()
+
+
+class ReapFailure(Exception):
+    """Local cleanup failed after detach; ``halted`` is False when the halt before it also did."""
+
+    def __init__(self, halted: bool) -> None:
+        super().__init__("debug attachment cleanup failed")
+        self.halted = halted
+
+
 class DebugEngineRuntime:
     """Process-scoped holder for the lazy gdb-MI engines + per-session locks (ADR-0034 §4a).
 
     Owns the in-process :class:`GdbMiSessionRegistry`, a per-session ``asyncio.Lock`` table (the
     get-or-create guarded by a plain :class:`threading.Lock`), and the injected
-    :class:`AttachSeam`. One instance is built in ``debug.register`` and shared by every
+    :class:`AttachSeam`. One instance is built in app assembly and shared by every
     Debug-plane handler (and by `end_session`'s reap).
     """
 
@@ -175,7 +203,10 @@ class DebugEngineRuntime:
             transcript_dir if transcript_dir is not None else _default_transcript_dir()
         )
         self._registry = GdbMiSessionRegistry()
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._closing = False
+        self._pending_roots: dict[str, Path] = {}
+        self._active: set[asyncio.Task[ToolResponse]] = set()
         self._locks_guard = threading.Lock()
 
     @property
@@ -186,47 +217,94 @@ class DebugEngineRuntime:
         with self._locks_guard:
             return self._locks.setdefault(session_id, asyncio.Lock())
 
-    def attach_or_reuse(self, session: DebugSession) -> GdbMiAttachment:
-        """Return the live attachment for ``session``.
-
-        A registry miss opens the provider attachment and registers it for later ops on the same
-        debug session.
-        """
-        session_id = str(session.id)
-        existing = self._registry.get(session_id)
-        if existing is not None:
-            return existing
-        endpoint = TransportHandleData.decode(session.transport_handle or "")
-        attachment = self._attach(
-            host=endpoint.host,
-            port=endpoint.port,
-            run_id=str(session.run_id),
-            transcript_path=self._transcript_dir / f"{session_id}.jsonl",
-        )
-        self._registry.register(session_id, attachment)
-        return attachment
-
     def reap(self, session_id: str) -> bool:
-        """Exit + drop the live engine for ``session_id`` (no-op if never attached).
+        """Exit the session's gdb and remove its owned symbol root (no-op if never attached).
 
         A guest left running by a background continue is halted first, so gdb exits from a
         halted target as on every other detach (#3244). Returns False only when that halt
         failed, leaving the guest's execution unknown; blocking, so call it off the event loop.
+        A failed exit or attachment-root removal raises :class:`ReapFailure` and keeps the owner
+        registered for a retry; a failed removal of a root-only pending owner raises its OSError.
         """
-        attachment = self._registry.reap(session_id)
+        root = self._pending_roots.get(session_id)
+        if root is not None:
+            with suppress(FileNotFoundError):
+                shutil.rmtree(root)
+            self._pending_roots.pop(session_id)
+        attachment = self._registry.get(session_id)
+        if attachment is None:
+            return True
         halted = True
-        if attachment is not None:
-            if attachment.execution == "running":
-                try:
-                    self._engine.interrupt(attachment)
-                except Exception:
-                    _log.warning("debug session %s: halt before detach failed", session_id)
-                    halted = False
-            with contextlib.suppress(Exception):
-                attachment.controller.exit()
-        with self._locks_guard:
-            self._locks.pop(session_id, None)
+        if attachment.execution == "running":
+            try:
+                self._engine.interrupt(attachment)
+            except Exception:
+                _log.warning("debug session %s: halt before detach failed", session_id)
+                halted = False
+        try:
+            close_attachment(attachment)
+        except Exception as exc:
+            raise ReapFailure(halted) from exc
+        self._registry.reap(session_id)
         return halted
+
+    def attach_or_reuse(self, session: DebugSession) -> GdbMiAttachment:
+        session_id = str(session.id)
+        if self._closing:
+            raise CategorizedError(
+                "debug runtime is shutting down", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+        existing = self._registry.get(session_id)
+        if session_id in self._pending_roots or (existing is not None and existing.cleanup_pending):
+            try:
+                self.reap(session_id)
+            except Exception as exc:
+                raise CategorizedError(
+                    "debug attachment cleanup is pending",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"reason": "debug_cleanup_pending"},
+                ) from exc
+            existing = None
+        if existing is not None:
+            return existing
+        endpoint = TransportHandleData.decode(session.transport_handle or "")
+        try:
+            attachment = self._attach(
+                host=endpoint.host,
+                port=endpoint.port,
+                run_id=str(session.run_id),
+                transcript_path=self._transcript_dir / f"{session_id}.jsonl",
+            )
+        except GdbMiAttachFailure as failure:
+            if failure.attachment is None:
+                assert failure.staging_dir is not None
+                self._pending_roots[session_id] = failure.staging_dir
+            else:
+                failure.attachment.cleanup_pending = True
+                self._registry.register(session_id, failure.attachment)
+            raise CategorizedError(
+                "debug attachment cleanup is pending",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"reason": "debug_cleanup_pending"},
+            ) from failure
+        self._registry.register(session_id, attachment)
+        return attachment
+
+    async def run(
+        self, session: DebugSession, op: _EngineOp, *, while_running: bool = False
+    ) -> ToolResponse:
+        if self._closing:
+            raise CategorizedError(
+                "debug runtime is shutting down", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+        task = asyncio.create_task(
+            asyncio.to_thread(_attach_and_run, self, session, op, while_running)
+        )
+        self._active.add(task)
+        try:
+            return await _finish_task(task)
+        finally:
+            self._active.discard(task)
 
 
 class DebugRuntimeResolver:
@@ -235,6 +313,7 @@ class DebugRuntimeResolver:
     def __init__(self, resolver: ProviderResolver, *, transcript_dir: Path | None = None) -> None:
         self._resolver = resolver
         self._transcript_dir = transcript_dir
+        self._closing = False
         self._runtimes: dict[tuple[ResourceKind, str | None], DebugEngineRuntime] = {}
         self._guard = threading.Lock()
 
@@ -259,6 +338,12 @@ class DebugRuntimeResolver:
                 data={"reason": "provider_debug_unavailable"},
             )
         with self._guard:
+            if self._closing:
+                return ToolResponse.failure(
+                    object_id or binding.kind.value,
+                    ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    detail="debug runtime is shutting down",
+                )
             runtime = self._runtimes.get(binding.cache_key)
             if runtime is None:
                 runtime = DebugEngineRuntime(
@@ -268,6 +353,72 @@ class DebugRuntimeResolver:
                 )
                 self._runtimes[binding.cache_key] = runtime
             return runtime
+
+    def owned(self) -> tuple[tuple[DebugEngineRuntime, str], ...]:
+        with self._guard:
+            runtimes = tuple(self._runtimes.values())
+        return tuple(
+            (runtime, sid)
+            for runtime in runtimes
+            for sid in set(runtime._registry.ids()) | runtime._pending_roots.keys()
+        )
+
+    async def sweep_once(self, pool: AsyncConnectionPool, *, shutdown: bool = False) -> None:
+        for runtime, sid in self.owned():
+            try:
+                async with runtime.lock_for(sid):
+                    attachment = runtime._registry.get(sid)
+                    if attachment is None and sid not in runtime._pending_roots:
+                        continue
+                    if not shutdown and attachment is not None and not attachment.cleanup_pending:
+                        async with (
+                            asyncio.timeout(5.0),
+                            pool.connection() as conn,
+                            conn.cursor() as cur,
+                        ):
+                            await cur.execute(
+                                "SELECT state FROM debug_sessions WHERE id = %s", (UUID(sid),)
+                            )
+                            row = await cur.fetchone()
+                        if row is not None and row[0] == "live":
+                            continue
+                    await run_to_completion(functools.partial(runtime.reap, sid))
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "debug cleanup pending for %s (%s); retry debug.end_session after recovery",
+                    sid,
+                    type(exc).__name__,
+                )
+
+    @asynccontextmanager
+    async def lifespan(self, pool: AsyncConnectionPool) -> AsyncIterator[None]:
+        stopped = asyncio.Event()
+
+        async def sweep():
+            while not stopped.is_set():
+                await self.sweep_once(pool)
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stopped.wait(), timeout=30.0)
+
+        task = asyncio.create_task(sweep())
+        try:
+            yield
+        finally:
+
+            async def shutdown() -> None:
+                with self._guard:
+                    self._closing = True
+                    runtimes = tuple(self._runtimes.values())
+                    for runtime in runtimes:
+                        runtime._closing = True
+                stopped.set()
+                await task
+                active = {work for runtime in runtimes for work in tuple(runtime._active)}
+                if active:
+                    await asyncio.wait(active)
+                await self.sweep_once(pool, shutdown=True)
+
+            await _finish_task(asyncio.create_task(shutdown()))
 
 
 _RuntimeLookup = Callable[[DebugSession], Awaitable[DebugEngineRuntime | ToolResponse]]
@@ -280,6 +431,8 @@ def _op_failure(session_id: str, exc: CategorizedError) -> ToolResponse:
         category = ErrorCategory.DEBUG_ATTACH_FAILURE
     code = exc.details.get("code")
     actions = _RECOVERY_ACTIONS.get(code) if isinstance(code, str) else None
+    if exc.details.get("reason") == "debug_cleanup_pending":
+        actions = ("debug.end_session", "debug.get_session")
     return ToolResponse.failure_from_error(
         session_id,
         exc,
@@ -296,16 +449,7 @@ async def run_to_completion[T](call: Callable[[], T]) -> T:
     stream (#3244). ``asyncio.wait`` never cancels the task, so every cancel is absorbed until
     the thread finishes, then re-raised.
     """
-    task = asyncio.ensure_future(asyncio.to_thread(call))
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.wait((task,))
-        except asyncio.CancelledError:
-            cancelled = True
-    if cancelled:
-        raise asyncio.CancelledError
-    return task.result()
+    return await _finish_task(asyncio.ensure_future(asyncio.to_thread(call)))
 
 
 async def _live_session(
@@ -411,14 +555,13 @@ async def _run_engine_op(
         resolved_runtime = await runtime_for_session(session)
         if isinstance(resolved_runtime, ToolResponse):
             return resolved_runtime
-        async with resolved_runtime.lock_for(session_id):
-            regated = await _live_session(pool, ctx, session_id)
+        key = str(session.id)
+        async with resolved_runtime.lock_for(key):
+            regated = await _live_session(pool, ctx, key)
             if isinstance(regated, ToolResponse):
                 return regated
             try:
-                result = await run_to_completion(
-                    lambda: _attach_and_run(resolved_runtime, session, op, while_running)
-                )
+                result = await resolved_runtime.run(regated, op, while_running=while_running)
             except CategorizedError as exc:
                 return _op_failure(session_id, exc)
         if audit is not None and result.error_category is None:

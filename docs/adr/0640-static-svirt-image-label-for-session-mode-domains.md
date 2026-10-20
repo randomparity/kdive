@@ -153,6 +153,19 @@ does, and then runs a plain `restorecon -R` on each directory. `build-image.sh` 
 `just check-local-libvirt` now fails on an enforcing host when either directory is not
 `svirt_image_t`.
 
+### Amendment (2026-10-19): the pcap tree carries the label (#3270)
+
+This extends decision 1's directory set. It does not change the label. `/var/lib/kdive/pcap`
+joins `local_worker_host_svirt_image_directories`. The confined domain creates its traffic-capture
+pcap there through `filter-dump` (ADR-0385). Under the session daemon, a per-System directory left
+at the inherited `var_lib_t` is a directory that domain may not write. On Fedora 44 with QEMU
+10.2.2 and libvirt 12.0.0, the `object-add` was refused with `net dump: can't open …: Permission
+denied` and the journal logged `avc: denied { write } … tcontext=…:var_lib_t:s0 tclass=dir`. The
+same command into an `svirt_image_t` directory left a pcap labeled `svirt_image_t:s0`. The
+shared-`s0` consequence above now covers capture files as well as images. Under the session
+daemon, any `svirt_t` domain may read or write another System's pcap. Like the images, this needs
+a domain that has escaped its guest. `just check-local-libvirt` checks this directory too.
+
 ## Considered & rejected
 
 - **`security_driver = "none"` in the session daemon config (#2424 option 3).** judgment: a

@@ -108,10 +108,18 @@ Requires contributor.
 
 `implemented`
 
-Drive a live DebugSession to detached; close its transport. Requires contributor.
+Detach the session and clean up its local GDB process/symbol files. Contributor.
+
 A guest left running by debug.continue with wait=False is halted first so the detach
 resumes it as usual, which can add up to 20 seconds; if that halt fails the reply
 still reports 'detached' and adds data.guest_execution='unknown'.
+
+infrastructure_failure with reason=debug_cleanup_pending means the durable session may
+already be detached but local cleanup is incomplete. Retry debug.end_session after the
+host failure clears; debug.get_session reports durable state. Background cleanup retries
+every 30 monotonic seconds after a completed owner sweep; DB failures/active operations
+can defer cleanup, so this is not a completion deadline. Abrupt owner death has no
+automatic orphan-recovery guarantee.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -152,7 +160,13 @@ interrupt_refused; end the session.
 
 `implemented` · `read-only`
 
-List all breakpoints on a live DebugSession. Requires contributor.
+List breakpoints and watchpoints on a live DebugSession. Requires contributor.
+
+data.breakpoints has one row per gdb breakpoint-table entry: number, type
+(breakpoint or a watchpoint kind) and the location gdb reports, func and addr for a
+breakpoint or what (the watched expression, named expr by the watchpoint tools) for a
+watchpoint. data.count is the row count. A breakpoint gdb resolved to several locations
+shows addr `<MULTIPLE>` and no func.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

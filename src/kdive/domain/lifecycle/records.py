@@ -230,6 +230,9 @@ class Run(DomainModel, Attribution):
     #: Run — to record the Run's verdict. `None` until an agent records one; echoed in the runs
     #: read envelopes.
     outcome_note: str | None = None
+    #: Persistent pair retirement and issued-download protection (ADR-0786).
+    vmcore_retired_at: datetime | None = None
+    vmcore_download_protected_until: datetime | None = None
 
     def require_system_id(self) -> UUID:
         """Return the bound System id, or fail closed for an unbound Run (ADR-0169).
