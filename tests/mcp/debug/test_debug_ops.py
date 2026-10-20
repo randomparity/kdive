@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -37,6 +38,7 @@ from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
 from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
+from kdive.security import audit
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.debug.session_support import (
@@ -135,28 +137,30 @@ def _session_handlers(runtime: DebugEngineRuntime) -> debug_tools.DebugSessionHa
     )
 
 
+_OP_FACTORIES: dict[str, Any] = {
+    "set_breakpoint": ops_breakpoints._set_breakpoint_op,
+    "clear_breakpoint": ops_breakpoints._clear_breakpoint_op,
+    "list_breakpoints": ops_breakpoints._list_breakpoints_op,
+    "read_memory": ops_memory._read_memory_op,
+    "read_registers": ops_memory._read_registers_op,
+    "resolve_symbol": ops_memory._resolve_symbol_op,
+    "continue": ops_execution._continue_op,
+    "interrupt": ops_execution._interrupt_op,
+    "advance": ops_execution._advance_op,
+    "backtrace": ops_stack._backtrace_op,
+    "read_frame": ops_stack._read_frame_op,
+    "disassemble": ops_stack._disassemble_op,
+    "set_watchpoint": ops_watchpoints._set_watchpoint_op,
+    "list_watchpoints": ops_watchpoints._list_watchpoints_op,
+    "clear_watchpoint": ops_watchpoints._clear_watchpoint_op,
+    "list_modules": ops_modules._list_modules_op,
+    "load_module_symbols": ops_modules._load_module_symbols_op,
+}
+
+
 def _op_for(op: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any) -> Any:
     del runtime
-    factory = {
-        "set_breakpoint": ops_breakpoints._set_breakpoint_op,
-        "clear_breakpoint": ops_breakpoints._clear_breakpoint_op,
-        "list_breakpoints": ops_breakpoints._list_breakpoints_op,
-        "read_memory": ops_memory._read_memory_op,
-        "read_registers": ops_memory._read_registers_op,
-        "resolve_symbol": ops_memory._resolve_symbol_op,
-        "continue": ops_execution._continue_op,
-        "interrupt": ops_execution._interrupt_op,
-        "advance": ops_execution._advance_op,
-        "backtrace": ops_stack._backtrace_op,
-        "read_frame": ops_stack._read_frame_op,
-        "disassemble": ops_stack._disassemble_op,
-        "set_watchpoint": ops_watchpoints._set_watchpoint_op,
-        "list_watchpoints": ops_watchpoints._list_watchpoints_op,
-        "clear_watchpoint": ops_watchpoints._clear_watchpoint_op,
-        "list_modules": ops_modules._list_modules_op,
-        "load_module_symbols": ops_modules._load_module_symbols_op,
-    }[op]
-    return factory(session_id, **kwargs)
+    return _OP_FACTORIES[op](session_id, **kwargs)
 
 
 # --- happy paths ---------------------------------------------------------------------------
@@ -1315,6 +1319,7 @@ def test_end_session_reap_is_noop_without_engine(migrated_url: str) -> None:
             handlers = _session_handlers(runtime)
             resp = await handlers.end_session(pool, request_context(), session_id)
         assert resp.status == "detached"  # reap of a never-attached session is a no-op
+        assert "guest_execution" not in resp.data
 
     asyncio.run(_run())
 
@@ -1584,5 +1589,362 @@ def test_capability_allows_watchpoint_on_x86_64_kvm(
             )
         assert resp.status == "watching", resp
         assert controller.written == [command]
+
+    asyncio.run(_run())
+
+
+# --- a guest left running between calls (#3244) ----------------------------------------------
+
+
+class _RunningAttach(_CountingAttach):
+    """An attach seam whose attachment a background continue has left running."""
+
+    def __call__(
+        self, *, host: str, port: int, run_id: str, transcript_path: Path
+    ) -> GdbMiAttachment:
+        attachment = super().__call__(
+            host=host, port=port, run_id=run_id, transcript_path=transcript_path
+        )
+        attachment.execution = "running"
+        return attachment
+
+
+_SIGINT_STOP: dict[str, object] = {
+    "type": "notify",
+    "message": "stopped",
+    "payload": {"reason": "signal-received", "signal-name": "SIGINT"},
+}
+_INTERRUPT_STOPS: dict[str, list[dict[str, object]]] = {
+    "-exec-interrupt": [{"type": "result", "message": "done"}, _SIGINT_STOP]
+}
+
+_GUARDED_OPS: dict[str, dict[str, Any]] = {
+    "set_breakpoint": {"location": "panic"},
+    "clear_breakpoint": {"number": "1"},
+    "list_breakpoints": {},
+    "read_memory": {"address": 0x1000, "byte_count": 4},
+    "read_registers": {"registers": ["rip"]},
+    "resolve_symbol": {"name": "panic"},
+    "advance": {"mode": "out", "timeout_sec": 1.0},
+    "backtrace": {"max_frames": 4},
+    "read_frame": {"level": 0},
+    "disassemble": {"symbol": "panic", "address": None, "instruction_count": 4},
+    "set_watchpoint": {"symbol": "jiffies_64", "address": None, "byte_count": 8},
+    "list_watchpoints": {},
+    "clear_watchpoint": {"number": "1"},
+    "list_modules": {},
+    "load_module_symbols": {"module": "loop", "expected_base": None},
+}
+
+
+def test_guarded_ops_cover_every_op_but_continue_and_interrupt() -> None:
+    assert set(_GUARDED_OPS) == set(_OP_FACTORIES) - {"continue", "interrupt"}
+
+
+@pytest.mark.parametrize("op", sorted(_GUARDED_OPS))
+def test_a_running_guest_refuses_every_other_op_before_any_command(
+    op: str, migrated_url: str
+) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            attach = _RunningAttach()
+            runtime = _runtime(attach)
+            resp = await run_engine_op_with_runtime(
+                pool,
+                request_context(),
+                session_id,
+                runtime,
+                _op_for(op, runtime, session_id, **_GUARDED_OPS[op]),
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "debug_attach_failure"
+        assert resp.data["code"] == "inferior_running"
+        assert resp.suggested_next_actions == ["debug.interrupt", "debug.continue"]
+        assert attach.controller.written == []
+
+    asyncio.run(_run())
+
+
+def test_continue_without_waiting_returns_running(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {"-exec-continue": [{"type": "result", "message": "running"}]}
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await _call_registered_debug_tool(
+                pool,
+                runtime,
+                tool="debug.continue",
+                arguments={"session_id": session_id, "wait": False, "timeout_sec": 5.0},
+                ctx=request_context(),
+                monkeypatch=monkeypatch,
+            )
+            async with pool.connection() as conn:
+                cur = await conn.execute(
+                    "SELECT d.run_id::text, a.args_digest FROM debug_sessions d "
+                    "JOIN audit_log a ON a.object_id = d.id WHERE d.id = %s",
+                    (session_id,),
+                )
+                rows = await cur.fetchall()
+        assert (resp.status, resp.error_category) == ("running", None)
+        assert resp.suggested_next_actions == ["debug.interrupt", "debug.continue"]
+        assert controller.written == ["-exec-continue"]
+        [(run_id, digest)] = rows
+        assert digest == audit.args_digest(
+            {"session_id": session_id, "run_id": run_id, "timeout_sec": 5.0, "wait": False}
+        )
+
+    asyncio.run(_run())
+
+
+def test_interrupt_reports_it_halted_a_running_guest(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            attach = _RunningAttach(_FakeMiController(_INTERRUPT_STOPS))
+            runtime = _runtime(attach)
+            resp = await run_engine_op_with_runtime(
+                pool,
+                request_context(),
+                session_id,
+                runtime,
+                _op_for("interrupt", runtime, session_id),
+                while_running=True,
+            )
+        assert resp.status == "stopped"
+        assert resp.data == {
+            "halted_by": "interrupt",
+            "reason": "signal-received",
+            "timed_out": False,
+        }
+        assert attach.controller.written == ["-exec-interrupt"]
+
+    asyncio.run(_run())
+
+
+def test_interrupt_on_a_halted_guest_reports_already_halted(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            attach = _CountingAttach()
+            runtime = _runtime(attach)
+            resp = await run_engine_op_with_runtime(
+                pool,
+                request_context(),
+                session_id,
+                runtime,
+                _op_for("interrupt", runtime, session_id),
+                while_running=True,
+            )
+        assert resp.status == "stopped"
+        assert resp.data == {"halted_by": "already_halted", "timed_out": False}
+        assert attach.controller.written == []
+
+    asyncio.run(_run())
+
+
+def test_a_stalled_interrupt_names_its_recovery(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            runtime = _runtime(_RunningAttach())
+            resp = await run_engine_op_with_runtime(
+                pool,
+                request_context(),
+                session_id,
+                runtime,
+                _op_for("interrupt", runtime, session_id),
+                while_running=True,
+            )
+        assert resp.error_category == "infrastructure_failure"
+        assert resp.data["code"] == "transport_stall"
+        assert resp.suggested_next_actions == ["debug.interrupt", "debug.end_session"]
+
+    asyncio.run(_run())
+
+
+def test_a_refused_interrupt_names_ending_the_session(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            refused = {
+                "-exec-interrupt": [
+                    {"type": "result", "message": "error", "payload": {"msg": "closed"}}
+                ]
+            }
+            runtime = _runtime(_RunningAttach(_FakeMiController(cast(Any, refused))))
+            resp = await run_engine_op_with_runtime(
+                pool,
+                request_context(),
+                session_id,
+                runtime,
+                _op_for("interrupt", runtime, session_id),
+                while_running=True,
+            )
+        assert resp.error_category == "debug_attach_failure"
+        assert resp.data["code"] == "interrupt_refused"
+        assert resp.suggested_next_actions == ["debug.end_session"]
+
+    asyncio.run(_run())
+
+
+def test_a_cancelled_op_keeps_the_session_lock_until_its_engine_call_ends(
+    migrated_url: str,
+) -> None:
+    # A cancelled request must not free the lock while its thread still drives gdb, or the next
+    # op would write the same gdb/MI stream (#3244).
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def blocking_op(engine: Any, attachment: GdbMiAttachment) -> ToolResponse:
+        del engine, attachment
+        calls.append("first-start")
+        entered.set()
+        release.wait(timeout=30)
+        calls.append("first-end")
+        return ToolResponse.success("s", "listed")
+
+    def second_op(engine: Any, attachment: GdbMiAttachment) -> ToolResponse:
+        del engine, attachment
+        calls.append("second")
+        return ToolResponse.success("s", "listed")
+
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            runtime = _runtime(_CountingAttach())
+            lock = runtime.lock_for(session_id)
+            first = asyncio.create_task(
+                run_engine_op_with_runtime(
+                    pool, request_context(), session_id, runtime, blocking_op
+                )
+            )
+            await asyncio.to_thread(entered.wait, 30)
+            try:
+                first.cancel()
+                await asyncio.sleep(0.2)
+                assert lock.locked(), "the cancelled op freed the lock under a running thread"
+                second = asyncio.create_task(
+                    run_engine_op_with_runtime(
+                        pool, request_context(), session_id, runtime, second_op
+                    )
+                )
+                await asyncio.sleep(0.2)
+                assert calls == ["first-start"]
+            finally:
+                release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert (await second).status == "listed"
+        assert calls == ["first-start", "first-end", "second"]
+
+    asyncio.run(_run())
+
+
+def test_an_op_queued_behind_an_ended_session_attaches_nothing(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            attach = _CountingAttach()
+            runtime = _runtime(attach)
+            lock = runtime.lock_for(session_id)
+            await lock.acquire()
+            queued = asyncio.create_task(
+                run_engine_op_with_runtime(
+                    pool,
+                    request_context(),
+                    session_id,
+                    runtime,
+                    _op_for("list_breakpoints", runtime, session_id),
+                )
+            )
+            await asyncio.sleep(0.2)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE debug_sessions SET state = 'detached' WHERE id = %s", (session_id,)
+                )
+            lock.release()
+            resp = await queued
+        assert resp.data["code"] == "not_live"
+        assert attach.calls == 0
+
+    asyncio.run(_run())
+
+
+class _ThreadRecordingController(_FakeMiController):
+    def __init__(self, responses: dict[str, list[dict[str, object]]] | None = None) -> None:
+        super().__init__(responses)
+        self.threads: list[str] = []
+
+    def write(self, command: str, *, timeout_sec: float) -> list[dict[str, object]]:
+        self.threads.append(threading.current_thread().name)
+        return super().write(command, timeout_sec=timeout_sec)
+
+
+async def _end_running_session(
+    pool: AsyncConnectionPool, controller: _FakeMiController
+) -> tuple[ToolResponse, _RunningAttach]:
+    session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+    attach = _RunningAttach(controller)
+    runtime = _runtime(attach)
+    await run_engine_op_with_runtime(
+        pool,
+        request_context(),
+        session_id,
+        runtime,
+        _op_for("continue", runtime, session_id, timeout_sec=0.0, wait=False),
+        while_running=True,
+    )
+    resp = await _session_handlers(runtime).end_session(pool, request_context(), session_id)
+    return resp, attach
+
+
+def test_end_session_halts_a_running_guest_before_gdb_exits(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            controller = _ThreadRecordingController(_INTERRUPT_STOPS)
+            resp, attach = await _end_running_session(pool, controller)
+        assert resp.status == "detached"
+        assert "guest_execution" not in resp.data
+        assert attach.controller.written == ["-exec-interrupt"]
+        assert attach.controller.exited is True
+        assert controller.threads and threading.main_thread().name not in controller.threads
+
+    asyncio.run(_run())
+
+
+def test_end_session_reports_unknown_execution_when_the_halt_stalls(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            resp, attach = await _end_running_session(pool, _FakeMiController())
+        assert resp.status == "detached"
+        assert resp.data["guest_execution"] == "unknown"
+        assert attach.controller.exited is True
+
+    asyncio.run(_run())
+
+
+def test_end_session_of_a_halted_guest_sends_no_interrupt(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            attach = _CountingAttach()
+            runtime = _runtime(attach)
+            await run_engine_op_with_runtime(
+                pool,
+                request_context(),
+                session_id,
+                runtime,
+                _op_for("list_breakpoints", runtime, session_id),
+            )
+            resp = await _session_handlers(runtime).end_session(pool, request_context(), session_id)
+        assert resp.status == "detached" and "guest_execution" not in resp.data
+        assert "-exec-interrupt" not in attach.controller.written
 
     asyncio.run(_run())

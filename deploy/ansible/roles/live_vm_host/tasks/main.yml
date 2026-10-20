@@ -1672,6 +1672,26 @@
   changed_when: false
   when: live_vm_host_authority_enabled | bool
 
+- name: Require fixed local inventory authority paths
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_authority_account == 'kdive-provider-authority'
+      - live_vm_host_authority_rootfs_root == '/var/lib/kdive/provider-authority/rootfs'
+      - live_vm_host_authority_console_root == '/var/lib/kdive/provider-authority/console'
+    fail_msg: Inventory observer opt-in requires the fixed authority identity and private roots.
+  when:
+    - live_vm_host_authority_inventory_observer_enabled | bool
+    - live_vm_host_authority_enabled | bool
+
+- name: Converge the proof-only inventory observer
+  ansible.builtin.include_tasks: ../../provider_authority_host/tasks/inventory_observer.yml
+  vars:
+    inventory_observer_enabled: "{{ live_vm_host_authority_inventory_observer_enabled }}"
+    inventory_observer_source_root: "{{ live_vm_venv }}"
+    inventory_observer_uv_bin: "{{ live_vm_host_uv_bin }}"
+    inventory_observer_authority_enabled: "{{ live_vm_host_authority_enabled }}"
+    inventory_observer_local_mutation_enabled: "{{ live_vm_host_authority_local_mutation_enabled }}"
+
 - name: Create the transient authority proof identity
   when:
     - live_vm_host_authority_enabled | bool

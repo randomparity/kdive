@@ -118,7 +118,7 @@ def _add_generated_flag(
 
     Honors ``action`` (``store_true`` / ``bool_optional`` / ``append``), ``arg_type``
     (``str`` / ``int`` / ``float``), and ``choices`` (enum). ``bool_optional`` declares the
-    ``--flag`` / ``--no-flag`` pair a required boolean needs to express false.
+    ``--flag`` / ``--no-flag`` pair a required or true-by-default boolean needs to express false.
     The ``--<param>-json`` escape for non-scalar params is
     a sibling (:func:`_add_generated_json_flag`); the flag-value-to-payload assembly (#1450) is
     downstream. This only shapes the parser so every generated verb is reachable at its path.
