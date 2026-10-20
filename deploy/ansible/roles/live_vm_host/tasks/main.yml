@@ -405,44 +405,8 @@
   vars:
     local_worker_host_operator_user: "{{ live_vm_host_operator_user }}"
 
-- name: Inspect the fixed-worker authority secrets root without following links
-  ansible.builtin.stat:
-    path: "{{ live_vm_host_worker_authority_secrets_root }}"
-    follow: false
-  register: live_vm_host_worker_authority_secrets_before
-  when: live_vm_host_worker_authority_enabled | bool
-
-- name: Refuse a substituted fixed-worker authority secrets root
-  ansible.builtin.assert:
-    that: >-
-      not live_vm_host_worker_authority_secrets_before.stat.exists or
-      (live_vm_host_worker_authority_secrets_before.stat.isdir and
-       not live_vm_host_worker_authority_secrets_before.stat.islnk)
-  when: live_vm_host_worker_authority_enabled | bool
-
-- name: Create the protected fixed-worker authority secrets root
-  ansible.builtin.file:
-    path: "{{ live_vm_host_worker_authority_secrets_root }}"
-    state: directory
-    owner: root
-    group: "{{ live_vm_host_authority_client_group }}"
-    mode: "0750"
-    follow: false
-  when: live_vm_host_worker_authority_enabled | bool
-
-- name: Install protected fixed-worker authority TLS files
-  ansible.builtin.copy:
-    src: "{{ item.source }}"
-    dest: "{{ live_vm_host_worker_authority_secrets_root }}/{{ item.name }}"
-    owner: root
-    group: "{{ live_vm_host_authority_client_group }}"
-    mode: "0440"
-  loop:
-    - {name: server-ca, source: "{{ live_vm_host_worker_authority_server_ca_source }}"}
-    - {name: client-certificate, source: "{{ live_vm_host_worker_authority_client_certificate_source }}"}
-    - {name: client-key, source: "{{ live_vm_host_worker_authority_client_key_source }}"}
-  when: live_vm_host_worker_authority_enabled | bool
-  no_log: true
+- name: Import the fixed-worker authority TLS installation
+  ansible.builtin.import_tasks: worker_authority_tls.yml
 
 - name: Import reusable worker slots and runtime paths
   ansible.builtin.import_role:
@@ -738,25 +702,8 @@
   register: live_vm_host_authority_revision_result
   when: live_vm_host_authority_enabled | bool
 
-- name: Install external-boot authority credentials
-  ansible.builtin.copy:
-    src: "{{ item.source }}"
-    dest: "{{ live_vm_host_authority_credentials_dir }}/{{ item.name }}"
-    owner: "{{ live_vm_host_authority_account }}"
-    group: "{{ live_vm_host_authority_account }}"
-    mode: "0400"
-  loop:
-    - {name: database-dsn, source: "{{ live_vm_host_authority_database_dsn_source }}"}
-    - {name: service-credential, source: "{{ live_vm_host_authority_server_key_source }}"}
-    - {name: server-certificate, source: "{{ live_vm_host_authority_server_certificate_source }}"}
-    - {name: server-ca, source: "{{ live_vm_host_authority_server_ca_source }}"}
-    - {name: worker-client-ca, source: "{{ live_vm_host_authority_worker_client_ca_source }}"}
-    - {name: health-client-certificate, source: "{{ live_vm_host_authority_health_client_certificate_source }}"}
-    - {name: health-client-key, source: "{{ live_vm_host_authority_health_client_key_source }}"}
-  no_log: true
-  register: live_vm_host_authority_credentials
-  when: live_vm_host_authority_enabled | bool
-  notify: Restart the external-boot authority service after deployed changes
+- name: Import the external-boot authority credential installation
+  ansible.builtin.import_tasks: authority_credentials.yml
 
 - name: Install protected authority S3 credentials
   ansible.builtin.copy:
