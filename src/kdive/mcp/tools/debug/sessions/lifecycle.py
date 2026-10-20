@@ -50,7 +50,7 @@ from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools.debug.introspection.gate import augment_with_runtime_probe
-from kdive.mcp.tools.debug.operations.runtime import run_to_completion
+from kdive.mcp.tools.debug.operations.runtime import ReapFailure, run_to_completion
 from kdive.mcp.tools.debug.sessions.context import resolve_debug_session_context
 from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
 from kdive.observability.debug_session_telemetry import (
@@ -589,12 +589,15 @@ async def _end_debug_session(
             async with runtime.lock_for(key):
                 try:
                     halted = await run_to_completion(functools.partial(runtime.reap, key))
-                except Exception:
+                except Exception as exc:
+                    data: dict[str, JsonValue] = {"reason": "debug_cleanup_pending"}
+                    if isinstance(exc, ReapFailure) and not exc.halted:
+                        data["guest_execution"] = "unknown"
                     envelope = ToolResponse.failure(
                         session_id,
                         ErrorCategory.INFRASTRUCTURE_FAILURE,
                         detail="debug session detached; local GDB cleanup is pending",
-                        data={"reason": "debug_cleanup_pending"},
+                        data=data,
                         suggested_next_actions=["debug.end_session", "debug.get_session"],
                     )
                 else:

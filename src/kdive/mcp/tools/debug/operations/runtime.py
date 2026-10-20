@@ -171,8 +171,18 @@ async def _finish_task[T](task: asyncio.Future[T]) -> T:
         except asyncio.CancelledError:
             cancelled = True
     if cancelled:
+        with suppress(BaseException):
+            task.result()  # Retrieve a task error the cancel supersedes, so it is not unlogged.
         raise asyncio.CancelledError
     return task.result()
+
+
+class ReapFailure(Exception):
+    """Local cleanup failed after detach; ``halted`` is False when the halt before it also did."""
+
+    def __init__(self, halted: bool) -> None:
+        super().__init__("debug attachment cleanup failed")
+        self.halted = halted
 
 
 class DebugEngineRuntime:
@@ -213,7 +223,8 @@ class DebugEngineRuntime:
         A guest left running by a background continue is halted first, so gdb exits from a
         halted target as on every other detach (#3244). Returns False only when that halt
         failed, leaving the guest's execution unknown; blocking, so call it off the event loop.
-        A failed exit or removal raises and keeps the owner registered for a retry.
+        A failed exit or removal raises :class:`ReapFailure` and keeps the owner registered for
+        a retry.
         """
         root = self._pending_roots.get(session_id)
         if root is not None:
@@ -230,7 +241,10 @@ class DebugEngineRuntime:
             except Exception:
                 _log.warning("debug session %s: halt before detach failed", session_id)
                 halted = False
-        close_attachment(attachment)
+        try:
+            close_attachment(attachment)
+        except Exception as exc:
+            raise ReapFailure(halted) from exc
         self._registry.reap(session_id)
         return halted
 

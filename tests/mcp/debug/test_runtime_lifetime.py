@@ -112,8 +112,9 @@ def test_reap_retains_owner_until_retry(
             original(path)
 
         monkeypatch.setattr(ops.shutil, "rmtree", remove)
-    with pytest.raises(OSError):
+    with pytest.raises(ops.ReapFailure) as failure:
         runtime.reap("s")
+    assert isinstance(failure.value.__cause__, OSError) and failure.value.halted
     assert runtime._registry.get("s") is attachment
     assert attachment.staging_dir is not None and attachment.staging_dir.exists()
     runtime.reap("s")
@@ -210,14 +211,15 @@ def test_shutdown_drains_unpublished_first_attach(
         runtime._attach = attach
         session = _session()
         owner = _owner(runtime)
-        draining = asyncio.Event()
-        original_wait = asyncio.wait
+        swept = threading.Event()
+        original_sweep = owner.sweep_once
 
-        async def wait(tasks):
-            draining.set()
-            return await original_wait(tasks)
+        async def sweep_once(pool: AsyncConnectionPool, *, shutdown: bool = False) -> None:
+            if shutdown:
+                swept.set()
+            await original_sweep(pool, shutdown=shutdown)
 
-        monkeypatch.setattr(ops.asyncio, "wait", wait)
+        monkeypatch.setattr(owner, "sweep_once", sweep_once)
         context = owner.lifespan(_pool(("live",)))
         await context.__aenter__()
         running = asyncio.create_task(
@@ -228,7 +230,8 @@ def test_shutdown_drains_unpublished_first_attach(
             assert await asyncio.to_thread(entered.wait, 5)
             assert not owner.owned()
             closing = asyncio.create_task(context.__aexit__(None, None, None))
-            await asyncio.wait_for(draining.wait(), 5)
+            # Without the drain, shutdown's final sweep would run (and find nothing) at once.
+            assert not await asyncio.to_thread(swept.wait, 0.5)
             assert not closing.done()
         finally:
             release.set()
@@ -260,3 +263,37 @@ def test_repeated_live_cleanup_failure_is_typed(
         assert response.data["reason"] == "debug_cleanup_pending"
         assert response.suggested_next_actions == ["debug.end_session", "debug.get_session"]
     assert attachment.staging_dir.exists() and runtime._pending_roots
+
+
+def test_failed_halt_survives_a_failed_cleanup(tmp_path: Path) -> None:
+    runtime, attachment = _owned(tmp_path)
+    attachment.execution = "running"
+    cast(Mock, runtime.engine).interrupt.side_effect = OSError("synthetic halt")
+    cast(Mock, attachment.controller).exit.side_effect = OSError("synthetic exit")
+    runtime._registry.register("session", attachment)
+    with pytest.raises(ops.ReapFailure) as failure:
+        runtime.reap("session")
+    assert failure.value.halted is False
+    assert attachment.staging_dir is not None and attachment.staging_dir.exists()
+    assert runtime._registry.get("session") is attachment
+
+
+def test_cancelled_caller_still_retrieves_the_task_error() -> None:
+    async def check() -> None:
+        started = asyncio.Event()
+
+        async def work() -> None:
+            started.set()
+            await asyncio.sleep(0.05)
+            raise OSError("synthetic")
+
+        task = asyncio.ensure_future(work())
+        waiter = asyncio.create_task(ops._finish_task(task))
+        await started.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert task.done()
+        assert task._log_traceback is False  # Retrieved, so no "never retrieved" log at GC.
+
+    asyncio.run(check())

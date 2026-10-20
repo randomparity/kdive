@@ -18,7 +18,7 @@ from kdive.artifacts.catalog.read_model import ArtifactReadRef
 from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.debug import GdbController, GdbMiAttachment
+from kdive.providers.ports.debug import GdbController, GdbMiAttachFailure, GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi.policy import debuginfo
 from kdive.store.objectstore import ObjectStore
 
@@ -193,6 +193,41 @@ def test_stage_and_attach_removes_staging_dir_on_attach_failure(
     assert exc.value is boom
     # The staging dir was reclaimed on attach failure: nothing is left under the temp root.
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("exit_fails", [False, True])
+def test_stage_and_attach_exits_a_partial_attachment_before_removing_symbols(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exit_fails: bool
+) -> None:
+    monkeypatch.setattr(debuginfo.tempfile, "tempdir", str(tmp_path))
+    resolver = debuginfo.DebuginfoResolver(
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("key", None),
+        fetch_object=_RecordingFetch(data=b"ELF"),
+    )
+    partial = _fake_attachment()
+    controller = cast(Mock, partial.controller)
+    staged: list[Path] = []
+    # The symbols must still exist while gdb exits; a failed exit keeps them for the owner.
+    controller.exit.side_effect = (
+        OSError("synthetic exit") if exit_fails else lambda: staged[0].read_bytes()
+    )
+    cause = CategorizedError("target-select remote", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+
+    def attach(vmlinux_path: Path) -> GdbMiAttachment:
+        staged.append(vmlinux_path)
+        raise GdbMiAttachFailure(partial, cause)
+
+    if exit_fails:
+        with pytest.raises(GdbMiAttachFailure) as failure:
+            debuginfo.stage_and_attach(run_id="r1", attach=attach, resolver=resolver)
+        assert failure.value.attachment is partial and partial.cleanup_pending
+        assert partial.staging_dir is not None and partial.staging_dir.exists()
+    else:
+        with pytest.raises(CategorizedError) as error:
+            debuginfo.stage_and_attach(run_id="r1", attach=attach, resolver=resolver)
+        assert error.value is cause
+        assert list(tmp_path.iterdir()) == []
+    controller.exit.assert_called_once()
 
 
 def test_gdb_attach_seam_uses_engine_factory_with_staged_vmlinux(

@@ -1645,6 +1645,34 @@ def test_end_session_preserves_or_retries_cleanup(
     asyncio.run(check())
 
 
+def test_end_session_reports_a_failed_halt_with_pending_cleanup(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    from kdive.providers.ports.debug import GdbController
+
+    async def check() -> None:
+        async with open_pool(migrated_url) as pool:
+            sid = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = Mock(spec=GdbController)
+            controller.exit.side_effect = OSError("synthetic exit")
+            attachment = GdbMiAttachment(controller, "127.0.0.1", 1, tmp_path / "transcript")
+            attachment.execution = "running"
+            engine = GdbMiEngine()
+            monkeypatch.setattr(engine, "interrupt", Mock(side_effect=OSError("synthetic halt")))
+            runtime = DebugEngineRuntime(
+                engine=engine, attach=_CountingAttach(), transcript_dir=tmp_path
+            )
+            runtime._registry.register(sid, attachment)
+            result = await _session_handlers(runtime).end_session(pool, request_context(), sid)
+            assert result.data["reason"] == "debug_cleanup_pending"
+            assert result.data["guest_execution"] == "unknown"
+            assert runtime._registry.get(sid) is attachment
+
+    asyncio.run(check())
+
+
 # --- a guest left running between calls (#3244) ----------------------------------------------
 
 
