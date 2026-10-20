@@ -266,7 +266,9 @@ def test_refusal_of_accepts_only_the_handler_refusal() -> None:
             "run-1", ErrorCategory.CONFIGURATION_ERROR, data={**data, "reason": "x"}
         ),
         ToolResponse.failure("run-1", ErrorCategory.NOT_FOUND, data=data),
-        ToolResponse.success("run-1", "queued", refs={"job_id": "j"}),
+        ToolResponse.failure(
+            "run-1", ErrorCategory.CONFIGURATION_ERROR, refs={"job_id": "j"}, data=data
+        ),
     ]
     for env in wrong:
         with pytest.raises(AssertionError):
