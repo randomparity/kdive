@@ -99,7 +99,8 @@ def test_held_releases_and_requires_idle(
     assert fake.state == "idle"
 
 
-def test_held_releases_an_arm_that_was_never_reached() -> None:
+def test_held_releases_an_arm_that_was_never_reached(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(authority_faults, "HOLD_TIMEOUT_S", 1.0)
     fake = _FakeBarrier()
 
     async def body() -> None:
