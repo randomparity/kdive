@@ -20,7 +20,7 @@ every System and pins ``nokaslr``, and the fixture is installed in the guest's o
 functional cells then prove the gdb transport released at both ends of the domain's ``-gdb``
 endpoint, on the provider host and at this host's MCP server, which holds the gdb subprocess;
 its rejection target proves the same for its own session (:func:`released`). A remote drgn-live
-start stops ``blocked`` on #3124's own symptom, a ``missing_debuginfo`` warning.
+start stops ``blocked`` on #3124's own symptom, a ``debuginfo_unloadable`` warning.
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ from uuid import uuid4
 import psycopg
 
 from kdive.domain.errors import ErrorCategory
+from kdive.kernel_config.gate import DEBUGINFO_UNLOADABLE_REASON
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from kdive.providers.shared.libvirt_xml import QEMU_NS
@@ -148,7 +149,8 @@ _RESUME_LEAD_S = 1.0
 _REANSWER_S = 60.0
 REMOTE = "remote-libvirt"
 # drgn-live runs kdive-drgn in a remote guest, which never receives the Run's vmlinux; the start
-# envelope's missing_debuginfo warning is that defect's symptom (#3124, blocked by #3121).
+# envelope's debuginfo_unloadable warning is that defect's symptom (#3124, blocked by #3121). A
+# missing_debuginfo warning means no vmlinux was uploaded at all, which still fails the cell.
 REMOTE_DRGN_BLOCKED = "remote guests do not receive the uploaded vmlinux (#3124)"
 _HOST_KEYS = ("host_os", "host_arch")
 _GDB_TCP = re.compile(r"tcp:(?P<addr>[^:\s]+):(?P<port>\d+)")
@@ -626,8 +628,8 @@ async def start_body(s: Session) -> dict[str, object]:
         usable = {"registers_read": await s.register(env.object_id) > 0}
     else:
         warning = env.data.get("missing_debuginfo")
-        if warning is not None and s.run.cell.provider == REMOTE:
-            reason = cast(dict[str, Any], warning).get("reason")
+        reason = cast(dict[str, Any], warning).get("reason") if warning is not None else None
+        if reason == DEBUGINFO_UNLOADABLE_REASON and s.run.cell.provider == REMOTE:
             raise ScenarioStop(Outcome.BLOCKED, f"{REMOTE_DRGN_BLOCKED}: {reason}")
         assert warning is None, "drgn-live attached without debuginfo"
         report = await s.op("introspect.run", session_id=env.object_id, helper="sysinfo")
@@ -1150,7 +1152,7 @@ async def functional(
         if guest.lane.provider == REMOTE:
             await session.end_all()
             transport = await asyncio.to_thread(transport_of, guest)
-            observed["transport"] = await released(session, transport)
+            observed["transport_release"] = await released(session, transport)
     finally:
         await session.end_all()
     return {"tool": run.cell.operation, **observed}

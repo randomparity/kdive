@@ -803,6 +803,15 @@ def test_remote_drgn_live_stops_blocked_on_its_symptom() -> None:
     assert ended == ["ses-1"]
 
 
+def test_remote_drgn_live_without_an_upload_still_fails() -> None:
+    warning = {"reason": "missing_debuginfo", "missing": ["vmlinux"]}
+    debugger = _Debugger(
+        {"debug.get_session": _drgn_record}, start_data={"missing_debuginfo": warning}
+    )
+    with pytest.raises(AssertionError, match="without debuginfo"):
+        _run_session(_drgn_session(debugger, REMOTE))
+
+
 def test_local_drgn_live_warning_still_fails() -> None:
     debugger = _Debugger({"debug.get_session": _drgn_record}, start_data=dict(_UNLOADABLE))
     with pytest.raises(AssertionError, match="without debuginfo"):
@@ -1054,3 +1063,39 @@ def test_remote_target_records_transport(monkeypatch: pytest.MonkeyPatch) -> Non
     transport = cast(dict[str, Any], writer.written[-1]["debug_target"])["transport"]
     assert transport == {"attached": {"provider": 1, "server": 1}, "after": _NONE}
     assert target.observed == {"accelerator": "none", "guest_os": "fedora:43", **host}
+
+
+def test_functional_keeps_the_body_record_beside_the_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _scripted_sockets(monkeypatch, _NONE, _ONE, _NONE)
+    _scripted_rows(monkeypatch, _DETACHED)
+    debugger = _Debugger({"debug.read_registers": _ok("read", rip=_RIP)})
+    lane = SimpleNamespace(provider=REMOTE, xml=lambda _system: _DOMAIN)
+    session = _session("debug.get_session", debugger, provider=REMOTE, lane=lane)
+
+    async def body(s: Session) -> dict[str, object]:
+        return {"transport": "gdbstub"}
+
+    async def boot(*_args: object) -> tuple[str, Endpoint]:
+        return "run-1", Endpoint("127.0.0.1", 1)
+
+    async def truth(*_args: object) -> Truth:
+        return _truth()
+
+    monkeypatch.setitem(BODIES, "debug.get_session", body)
+    monkeypatch.setattr(debug_cells, "boot", boot)
+    monkeypatch.setattr(debug_cells, "read_truth", truth)
+    monkeypatch.setattr(debug_cells, "transport_of", lambda _guest: _TRANSPORT)
+    observed = asyncio.run(
+        debug_cells.functional(
+            session.run,
+            cast(HttpCaller, debugger),
+            Path("/fixture"),
+            {"release": "6.18.54-kdive"},
+            "postgresql://unused",
+            session.guest,
+        )
+    )
+    assert observed["transport"] == "gdbstub"
+    assert observed["transport_release"] == {"after": _NONE, "attached": _ONE, "sessions_open": 0}
