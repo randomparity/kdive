@@ -10,7 +10,8 @@ import struct
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from uuid import UUID
 
 import pytest
 
@@ -18,6 +19,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import HANDLER_REFUSAL, Cell, build_contract
 from scripts.coverage_campaign.evidence import Outcome
+from tests.integration.live_stack import capture_cells
 from tests.integration.live_stack.capture_cells import (
     PANIC,
     REFUSED_REASON,
@@ -36,8 +38,10 @@ from tests.integration.live_stack.capture_cells import (
     require_core,
     require_tool,
     script_facts,
+    snapshot_of,
     transcript_names,
     variant_of,
+    vmcore_body,
     vmcoreinfo,
 )
 from tests.integration.live_stack.image_smoke import Endpoint
@@ -625,3 +629,124 @@ def test_force_crash_preserves_evidence_and_original_failure(
             assert content["content_sha256"] == hashlib.sha256(text.encode()).hexdigest()
         assert "do-not-copy-private-key" not in json.dumps(payload)
         assert "download_uri" not in json.dumps(payload)
+
+
+_SYS = str(UUID(int=7))
+
+
+def _dump_session(
+    monkeypatch: pytest.MonkeyPatch, *, remote: bool, present: bool, fails: bool = False
+) -> Session:
+    async def nothing(*_a: object, **_k: object) -> None:
+        return None
+
+    async def capture(*_a: object, **_k: object) -> list[str]:
+        if fails:
+            raise AssertionError("capture job failed")
+        return ["artifact-1"]
+
+    async def core(*_a: object) -> tuple[str, bytes]:
+        return "0" * 64, b""
+
+    monkeypatch.setattr(Session, "crash", nothing)
+    monkeypatch.setattr(Session, "armed", nothing)
+    monkeypatch.setattr(Session, "capture", capture)
+    monkeypatch.setattr(capture_cells, "raw_core", core)
+    monkeypatch.setattr(capture_cells, "require_core", lambda *_a: None)
+    lane = SimpleNamespace(
+        pool_volume=(lambda name: f"/srv/pool/{name}") if remote else None,
+        absent=lambda _path: not present,
+    )
+    guest = SimpleNamespace(system_id=_SYS, lane=lane, owned=[], op=None)
+    cell = SimpleNamespace(scenario_id="tool/remote-libvirt/vmcore.fetch/host_dump/functional")
+    run = cast(CellRun, SimpleNamespace(cell=cell))
+    caller = cast(HttpCaller, None)
+    return Session(
+        run, cast(Guest, guest), caller, Grants("s", ("p",)), _MANIFEST, "run-1", Endpoint("h", 22)
+    )
+
+
+def test_remote_host_dump_capture_owns_and_checks_its_dump_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = _dump_session(monkeypatch, remote=True, present=False)
+    observed = asyncio.run(vmcore_body(s))
+    path = f"/srv/pool/kdive-host-dump-{_SYS}.kdump"
+    assert s.guest.owned == [path] and observed["dump_volume"] == "absent"
+    leaked = _dump_session(monkeypatch, remote=True, present=True)
+    with pytest.raises(AssertionError, match="outlived"):
+        asyncio.run(vmcore_body(leaked))
+    assert leaked.guest.owned == [path], "a leaked volume must stay owned for the cleanup"
+    failed = _dump_session(monkeypatch, remote=True, present=True, fails=True)
+    with pytest.raises(AssertionError, match="capture job failed"):
+        asyncio.run(vmcore_body(failed))
+    assert failed.guest.owned == [path], "a failed capture's volume must stay owned"
+
+
+def test_local_host_dump_capture_owns_no_dump_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _dump_session(monkeypatch, remote=False, present=True)
+    observed = asyncio.run(vmcore_body(s))
+    assert s.guest.owned == [] and "dump_volume" not in observed
+
+
+def _target_run(provider: str) -> CellRun:
+    cell = SimpleNamespace(provider=provider)
+    return cast(CellRun, SimpleNamespace(cell=cell, writer=None, observed={}, artifacts=[]))
+
+
+def test_capture_target_is_prepared_per_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    prepared: list[str] = []
+
+    async def prepare(run: CellRun, *_a: object) -> CaptureTarget:
+        prepared.append(run.cell.provider)
+        return CaptureTarget("p", "s", "r", "x", {"host_os": run.cell.provider}, ())
+
+    monkeypatch.setattr(capture_cells, "_TARGETS", {})
+    monkeypatch.setattr(capture_cells, "_prepare_target", prepare)
+    for provider in ("local-libvirt", "remote-libvirt", "remote-libvirt"):
+        run = _target_run(provider)
+        asyncio.run(
+            capture_cells.capture_target(
+                run, "http://s", cast(Any, None), "db", lambda: (Path(), {})
+            )
+        )
+        assert run.observed == {"host_os": provider}
+    assert prepared == ["local-libvirt", "remote-libvirt"]
+
+
+def test_failed_remote_target_replays_its_host_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def prepare(
+        _run: CellRun, _url: str, _issuer: object, _db: str, _fx: object, scratch: CellRun
+    ) -> CaptureTarget:
+        scratch.observed |= {"host_os": "rocky:10.2", "host_arch": "x86_64"}
+        raise AssertionError("boot failed")
+
+    monkeypatch.setattr(capture_cells, "_TARGETS", {})
+    monkeypatch.setattr(capture_cells, "_prepare_target", prepare)
+    for _ in range(2):
+        run = _target_run("remote-libvirt")
+        with pytest.raises(AssertionError, match="could not be prepared"):
+            asyncio.run(
+                capture_cells.capture_target(
+                    run, "http://s", cast(Any, None), "db", lambda: (Path(), {})
+                )
+            )
+        assert (run.observed["host_os"], run.observed["host_arch"]) == ("rocky:10.2", "x86_64")
+
+
+def test_snapshot_of_reads_the_targets_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[str] = []
+
+    async def rows(*_a: object) -> list[object]:
+        return []
+
+    def defined(_system_id: str, connect: object) -> bool:
+        opened.append(cast(Any, connect)())
+        return True
+
+    monkeypatch.setattr(capture_cells, "project_state", rows)
+    monkeypatch.setattr(capture_cells, "named_jobs", rows)
+    monkeypatch.setattr(capture_cells, "domain_defined", defined)
+    target = CaptureTarget("p", "s", "r", "x", {}, (), connect=cast(Any, lambda: "provider"))
+    state = cast(dict[str, object], asyncio.run(snapshot_of("db", target)()))
+    assert opened == ["provider"] and state["domain_defined"] is True
