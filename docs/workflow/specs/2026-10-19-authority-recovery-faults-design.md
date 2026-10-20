@@ -191,8 +191,6 @@ each reason, and #3186 reuses them.
   caller and an authority conflict observation fails the job".
 - `LOCAL_PRESENT_ORPHAN_BLOCKED`: "a quarantined receipt survives to resolution only if the
   release job ends terminally (ADR-0714), whose recovery is #3143".
-- `LOCAL_ORPHAN_BLOCKED`: used only if ADR-0787 is not approved: "no proof-control position fails
-  cleanup finalization after the terminal record".
 
 Each blocked arm runs the frame's revision and lane gates, then stops before mutation.
 
