@@ -1309,6 +1309,10 @@ def test_cli_tier_refusal_is_an_authorization_denial(
     rejection = Rejection({"investigation_id": "i"}, _GRANTS)
     asyncio.run(prove_rejection(run, caller, "authorization", rejection, _snapshot(1, 1)))
     assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
+    proof = json.loads(
+        (run.writer.root / "artifacts" / run.assertions["authorization"]).read_bytes()
+    )
+    assert proof["rejected"] == {"catalog_hidden": True, "error_category": "authorization_denied"}
 
 
 def test_cli_validation_accepts_a_usage_refusal_only_on_cli() -> None:

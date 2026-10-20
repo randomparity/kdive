@@ -619,6 +619,8 @@ def _shape(result: Result) -> dict[str, object]:
     if isinstance(result, CliUsageError):
         # Option names only: which declared option kdivectl refused, never its value.
         return {"usage_error": True, "refused": result.message.rsplit(": ", 1)[-1]}
+    if isinstance(result, CliTierRefusal):
+        return {"catalog_hidden": True, "error_category": ErrorCategory.AUTHORIZATION_DENIED.value}
     if isinstance(result, LiveStackToolError):
         return {
             "tool_error": True,
