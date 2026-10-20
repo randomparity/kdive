@@ -781,6 +781,26 @@ so it exits non-zero by design. After the run, `demo-down.sh --wipe --yes` clear
 Then check the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no
 `kdive-` overlay.
 
+Last run: candidate `43aa59e96` (server, worker and reconciler at that SHA in both
+configurations; later commits change only this record). The control plane was a disposable
+Fedora 44 x86_64 lab guest with the verified `longterm` fixture (6.18.54). The provider was a
+separate disposable Rocky Linux 10.2 x86_64 host, itself a KVM guest whose domains ran with the
+`kvm` accelerator (nested). It was prepared with `site.yml` (a fresh PKI from
+`playbooks/pki.yml`), §7's `DOCKER-USER` rule, and `image.yml -e force_image_rebuild=true`, so
+the staged `fedora-kdive-remote-base-43` carried the ADR-0721 return route. One attempt per
+configuration ran: the default configuration, `demo-down.sh --wipe --yes`, then
+`KDIVE_WORKER_DEATH_VERIFIER=docker` (`recovery`). Each recorded its 220 cells in about 95
+minutes and skipped the other 220.
+
+`qualify` qualified 436 of the 440 cells: 84 `success` and all 352 `rejection`, each record
+carrying the provider host as `rocky:10.2` and the guest as `fedora:43`. Every `success` record
+carries the transport proof: no socket at either end after the body, one at each end for the
+calibration attach, and no open session row. Both rejection targets carried the same proof. The
+4 `drgn-live` start cells recorded `blocked` on `debuginfo_unloadable` (#3124) after the
+fixture boot, so `qualify` lists them as `missing-prerequisite`. No record or artifact carried
+a host name or address. After the run, `demo-down.sh --wipe --yes` cleared the stack, the
+provider defined no `kdive-` domain, and its pool held only the base volumes.
+
 ## SUSE native image proof
 
 On untouched first boot, record the completed JeOS marker, skipped wizard units,
