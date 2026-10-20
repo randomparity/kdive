@@ -1146,6 +1146,48 @@ def test_console_snapshot_and_observation_drain_pages() -> None:
     ]
 
 
+def test_crash_kernel_evidence_binds_to_parts_sealed_after_this_crash() -> None:
+    # #3254: a crash-kernel banner plus elfcorehdr= that predates this crash — in the pre-crash
+    # baseline, or an earlier attempt's part listed below the baseline high-water mark — must
+    # never satisfy the observation. Only parts sealed after the crash are read and matched.
+    from tests.integration.live_stack.capture_cells import crash_evidence
+
+    release = "6.18.54-g1b357ecb3213"
+    stale = (
+        f"[    0.000000] Linux version {release} (builder@kernel-fixture) #1\r\n"
+        "[    0.000000] Command line: elfcorehdr=0x6f000000 console=ttyS0 reset_devices\r\n"
+    )
+    assert crash_evidence(stale, release) == "crash_kernel"
+    earlier, pre_crash, fresh = (
+        _console_part("earlier", 7),
+        _console_part("old", 8),
+        _console_part("new", 9),
+    )
+    client = _client(
+        [
+            _artifact_listing(earlier, pre_crash, fresh),
+            _artifact_content("new", "kdive login: \r\n"),
+        ]
+    )
+    observation = spine.ConsoleObservation(baseline={(1, 8): pre_crash})
+
+    with pytest.raises(SpinePhaseError, match="deadline"):
+        asyncio.run(
+            spine.poll_for_new_console_part(
+                _live_client(client),
+                "system-1",
+                {"old"},
+                "Kernel panic - not syncing",
+                deadline_s=0.05,
+                interval_s=1,
+                observation=observation,
+                predicate=lambda text: crash_evidence(text, release) is not None,
+            )
+        )
+    read = [args["request"] for name, args in client.calls if name == "artifacts.get"]
+    assert [cast(dict[str, object], request)["artifact_id"] for request in read] == ["new"]
+
+
 @pytest.mark.parametrize(
     "kind,reason",
     [
