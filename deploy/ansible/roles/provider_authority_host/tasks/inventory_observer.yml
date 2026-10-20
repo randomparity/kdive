@@ -99,7 +99,13 @@
           expected = {pathlib.Path(os.fsdecode(name)).relative_to('src/kdive')
                       for name in tracked.split(b'\0') if name}
           # The gitignored build identity stamp is packed into the wheel; bind it to its source.
-          if (source / 'src/kdive/_buildinfo.py').is_file():
+          stamp = source / 'src/kdive/_buildinfo.py'
+          if os.path.lexists(stamp):
+              lines = [] if stamp.is_symlink() else stamp.read_text(encoding='utf-8').splitlines()
+              stamped = ([f'COMMIT = "{revision[:12]}"', f'RELEASE = {release}']
+                         for release in ('False', 'True'))
+              if len(lines) != 3 or not lines[0].startswith('#') or lines[1:] not in stamped:
+                  raise ValueError('unexpected collector build identity')
               expected.add(pathlib.Path('_buildinfo.py'))
           actual = {p.relative_to(installed) for p in installed.rglob('*')
                     if p.is_file() and '__pycache__' not in p.parts}
