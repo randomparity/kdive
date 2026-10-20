@@ -24,6 +24,7 @@ from kdive.providers.ports.debug import (
     GdbMiAttachment,
     GdbModule,
     GdbStopRecord,
+    GdbVariable,
 )
 from kdive.providers.shared.debug_common.gdbmi.commands.disassembly import (
     MAX_DISASSEMBLE_INSTRUCTIONS,
@@ -1788,21 +1789,89 @@ def test_backtrace_redacts_registered_secret_in_func(tmp_path: Path) -> None:
     assert secret not in bt.frames[0].func
 
 
-def test_read_frame_returns_single_frame(tmp_path: Path) -> None:
-    controller = _stack_controller(
-        [{"level": "2", "func": "schedule", "addr": "0xffffffff8100a000"}],
-        command="-stack-list-frames 2 2",
+def _done(payload: dict[str, object] | None) -> list[dict[str, object]]:
+    return [{"type": "result", "message": "done", "payload": payload}]
+
+
+def _frame_controller(
+    level: int,
+    variables: list[dict[str, object]] | None,
+    *,
+    thread: str | None = "1",
+    frame: dict[str, object] | None = None,
+) -> _FakeMiController:
+    """Script read_frame's three commands; ``None`` variables/thread omit gdb's payload key."""
+    row = frame or {"level": str(level), "func": "schedule", "addr": "0xffffffff8100a000"}
+    command = f"-stack-list-variables --thread {thread} --frame {level} --simple-values"
+    return _FakeMiController(
+        responses={
+            f"-stack-list-frames {level} {level}": _done({"stack": [row]}),
+            "-thread-list-ids": _done(None if thread is None else {"current-thread-id": thread}),
+            command: _done(None if variables is None else {"variables": variables}),
+        }
     )
+
+
+def test_read_frame_returns_single_frame(tmp_path: Path) -> None:
+    controller = _frame_controller(2, [])
     frame = _engine().read_frame(_attachment(controller, tmp_path), level=2)
     assert frame.level == 2
     assert frame.func == "schedule"
     assert "-stack-list-frames 2 2" in controller.written
 
 
+def test_read_frame_returns_args_and_locals(tmp_path: Path) -> None:
+    variables: list[dict[str, object]] = [
+        {"name": "fd", "arg": "1", "type": "int", "value": "7"},
+        {"name": "b", "type": "struct big"},
+    ]
+    controller = _frame_controller(2, variables, thread="3")
+    frame = _engine().read_frame(_attachment(controller, tmp_path), level=2)
+    assert frame.args == [GdbVariable(name="fd", type="int", value="7")]
+    assert frame.locals == [GdbVariable(name="b", type="struct big")]
+    assert frame.truncated is False
+    assert "-stack-list-variables --thread 3 --frame 2 --simple-values" in controller.written
+
+
+def test_read_frame_bounds_variables(tmp_path: Path) -> None:
+    variables: list[dict[str, object]] = [
+        {"name": "fmt", "arg": "1", "type": "char *", "value": "x" * 300}
+    ] + [{"name": f"v{i}", "type": "int", "value": str(i)} for i in range(70)]
+    frame = _engine().read_frame(_attachment(_frame_controller(0, variables), tmp_path), level=0)
+    assert (len(frame.args), len(frame.locals)) == (1, 63)
+    assert frame.args[0].value == "x" * 256
+    assert frame.truncated is True
+
+
+def test_read_frame_redacts_before_cut(tmp_path: Path) -> None:
+    secret = "topsecretvalue"  # pragma: allowlist secret - fake test value
+    variables: list[dict[str, object]] = [
+        {"name": "buf", "arg": "1", "type": "char *", "value": "A" * 250 + secret}
+    ]
+    engine = _engine(Redactor(secret_values=[secret], registry=SecretRegistry()))
+    frame = engine.read_frame(_attachment(_frame_controller(0, variables), tmp_path), level=0)
+    assert frame.args[0].value is not None
+    assert secret[:6] not in frame.args[0].value
+
+
+def test_read_frame_raises_no_current_thread(tmp_path: Path) -> None:
+    controller = _frame_controller(0, [], thread=None)
+    with pytest.raises(CategorizedError) as exc:
+        _engine().read_frame(_attachment(controller, tmp_path), level=0)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "no_current_thread"
+
+
+def test_read_frame_raises_no_frame_variables(tmp_path: Path) -> None:
+    controller = _frame_controller(0, None)
+    with pytest.raises(CategorizedError) as exc:
+        _engine().read_frame(_attachment(controller, tmp_path), level=0)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "no_frame_variables"
+
+
 def test_read_frame_reaches_past_backtrace_cap(tmp_path: Path) -> None:
-    controller = _stack_controller(
-        [{"level": "70", "func": "deep"}], command="-stack-list-frames 70 70"
-    )
+    controller = _frame_controller(70, [], frame={"level": "70", "func": "deep"})
     frame = _engine().read_frame(_attachment(controller, tmp_path), level=70)
     assert frame.level == 70
     assert "-stack-list-frames 70 70" in controller.written

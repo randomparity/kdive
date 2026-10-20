@@ -572,12 +572,80 @@ def test_list_breakpoints_needs_the_cleared_row_gone(monkeypatch: pytest.MonkeyP
         _run("debug.list_breakpoints", debugger, monkeypatch)
 
 
-def test_read_frame_known_gap_fails_after_the_observable_proof(
-    monkeypatch: pytest.MonkeyPatch,
+_ENTRY = "0xffffffff81200000"
+_ARGS = {"file": "0xffff888004c1e300", "buf": '0x55d0c0de1000 "x"', "count": "16384", "pos": "0x0"}
+_REGISTERS = {"rdi": "0xffff888004c1e300", "rsi": "0x55d0c0de1000", "rdx": "0x4000", "rcx": "0x0"}
+
+
+def _read_frame(
+    args: Mapping[str, str] = _ARGS,
+    registers: Mapping[str, str] = _REGISTERS,
+    local: str = "ret",
+    rip: str = _ENTRY,
+) -> _Debugger:
+    rows = [{"name": n, "type": "t", "value": v} for n, v in args.items()]
+    frame = {"func": BREAK_AT, "addr": rip, "args": rows, "locals": [{"name": local}]}
+    return _Debugger(
+        _stop_answers(
+            **{
+                "debug.read_registers": _ok("read", rip=rip, **registers),
+                "debug.read_frame": _ok("read", level=0, frame=frame, truncated=False),
+            }
+        )
+    )
+
+
+def test_read_frame_compares_vfs_read_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = _run("debug.read_frame", _read_frame(), monkeypatch)
+    assert observed == {
+        "frame0": BREAK_AT,
+        "args": ["file", "buf", "count", "pos"],
+        "entry_values": 0,
+        "registers_match": True,
+    }
+
+
+def _with_entry_values(args: Mapping[str, str]) -> dict[str, str]:
+    """Each parameter followed by its gdb ``@entry`` row, as gdb 17 lists them at an entry stop."""
+    return {key: value for n, v in args.items() for key, value in ((n, v), (f"{n}@entry", v))}
+
+
+def test_read_frame_sets_entry_values_aside(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = _run("debug.read_frame", _read_frame(args=_with_entry_values(_ARGS)), monkeypatch)
+    assert observed["entry_values"] == 4
+    assert observed["args"] == ["file", "buf", "count", "pos"]
+
+
+def test_read_frame_needs_entry_values_at_the_registers(monkeypatch: pytest.MonkeyPatch) -> None:
+    args = _with_entry_values(_ARGS) | {"count@entry": "16"}
+    debugger = _read_frame(args=args)
+    with pytest.raises(AssertionError, match="count@entry is not rdx"):
+        _run("debug.read_frame", debugger, monkeypatch)
+    assert debugger.calls[-1][0] == "debug.end_session"
+
+
+@pytest.mark.parametrize(
+    ("debugger", "message"),
+    [
+        (_read_frame(args=dict(reversed(_ARGS.items()))), "arguments are"),
+        (_read_frame(args=_ARGS | {"buf": "<optimized out>"}), "buf reads"),
+        (_read_frame(args=_ARGS | {"count": "16"}), "count is not rdx"),
+        (
+            _read_frame(
+                args=_ARGS | {"buf": "0xffff888000001000"},
+                registers=_REGISTERS | {"rsi": "0xffff888000001000"},
+            ),
+            "buf is not a user pointer",
+        ),
+        (_read_frame(local="tmp"), "no ret local"),
+        (_read_frame(rip=_RIP), "entry"),
+    ],
+    ids=["order", "optimized-out", "count", "kernel-buf", "no-ret", "past-entry"],
+)
+def test_read_frame_needs_the_entry_arguments(
+    debugger: _Debugger, message: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    frame = _ok("read", level=0, frame={"func": BREAK_AT, "addr": _RIP})
-    debugger = _Debugger(_stop_answers(**{"debug.read_frame": frame}))
-    with pytest.raises(AssertionError, match="no arguments or locals"):
+    with pytest.raises(AssertionError, match=message):
         _run("debug.read_frame", debugger, monkeypatch)
     assert debugger.calls[-1][0] == "debug.end_session"
 
