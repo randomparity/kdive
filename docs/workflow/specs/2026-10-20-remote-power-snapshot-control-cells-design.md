@@ -54,8 +54,9 @@ filesystem, so they cannot run on a remote System:
 3. **Control** (`control_cells.py`, `capture_cells.py`). `capture_cells.boot` observes the kernel
    with `guest.lane.installed_kernel` (the local value is the same function). In `control_cells`:
    - `capture_filters` takes a `connect`; the capture body passes `guest.lane.connect`;
-   - the capture spool joins `owned` as `guest.lane.spool(system, job)` once the call returns the
-     job id (locally the same directory as before);
+   - the capture spool joins `owned` as `guest.lane.spool(system, job)`: locally the System's
+     directory, before the call as today; remotely the job's pool volume, once the call returns
+     the job id;
    - the flow's destination is `10.0.2.2` on the local lane and, on the remote lane, the guest's
      IPv4 default-route gateway outside the user-mode subnet `10.0.2.0/24`, read in the guest
      (`ip -4 route show default`); an empty, non-IPv4 or user-mode answer fails the cell;
@@ -130,6 +131,7 @@ Considered and rejected:
 | remote pcap path | focused-test | `test_tool_cells.py`: pool target joined with the job's volume name; a pool without a target path fails |
 | native reads through `connect` | focused-test | `test_power_snapshots.py`: state, checkpoints and definedness read the given connection and close it |
 | kernel observer from the lane | focused-test | `test_power_snapshots.py`, `test_control_cells.py`: `functional`/`boot` hand `deep_body` the lane's observer |
+| capture spool and flow gateway | focused-test | `test_control_cells.py`: the capture owns the lane spool (local before the call, remote for the job) and floods the lane's gateway |
 | remote flow gateway | focused-test | `test_control_cells.py`: libvirt-network IPv4 gateway accepted; empty, non-IPv4 or `10.0.2.2` refused |
 | run target | focused-test | `test_control_cells.py`: one preparation per stack and provider; a failure replayed with its artifacts; host keys kept, kernel keys dropped |
 | remote protected state | focused-test | `test_control_cells.py`: jobs of System and Run plus definedness through the lane |

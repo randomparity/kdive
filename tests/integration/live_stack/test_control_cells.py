@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import struct
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -319,3 +320,66 @@ def test_target_state_reads_jobs_and_domain_through_the_lane(
     state = asyncio.run(control_cells.target_state("db", _TARGET, cast(Any, connect))())
     assert state == {"project": {}, "jobs": [0, ""], "domain_defined": False}
     assert seen == ["cov-t", (_TARGET.system_id, _TARGET.run_id), (_TARGET.system_id, connect)]
+
+
+@dataclass
+class _CaptureLane:
+    provider: str
+    spooled: list[tuple[str, str]] = field(default_factory=list)
+
+    def spool(self, system_id: str, job_id: str) -> str:
+        self.spooled.append((system_id, job_id))
+        return f"spool:{system_id}:{job_id}"
+
+    def connect(self) -> object:
+        raise AssertionError("capture_filters is stubbed")
+
+
+@dataclass
+class _CaptureSession:
+    guest: Any
+    run_id: str = "run-1"
+    commands: list[str] = field(default_factory=list)
+    owned_at_call: list[str] = field(default_factory=list)
+
+    async def shell(self, command: str) -> dict[str, str]:
+        self.commands.append(command)
+        return {"gateway": "192.168.122.1"} if "route" in command else {"pid": "42"}
+
+    async def exposed(self, **_args: object) -> ToolResponse:
+        self.owned_at_call.extend(self.guest.owned)
+        return ToolResponse.success("job-9", "queued")
+
+
+@pytest.mark.parametrize(
+    ("provider", "gateway", "owned_before_call"),
+    [("local-libvirt", "10.0.2.2", True), ("remote-libvirt", "192.168.122.1", False)],
+)
+def test_capture_owns_the_lane_spool_and_floods_the_lane_gateway(
+    monkeypatch: pytest.MonkeyPatch, provider: str, gateway: str, owned_before_call: bool
+) -> None:
+    lane = _CaptureLane(provider)
+    guest = type("G", (), {"lane": lane, "owned": [], "system_id": "sys", "op": None})()
+    session = _CaptureSession(guest)
+
+    async def drained(*_: object) -> ToolResponse:
+        return ToolResponse.success("job-9", "succeeded", refs={"result": "art-1"})
+
+    async def download(*_: object) -> bytes:
+        return _pcap([_udp(_TOKEN)] * 5)
+
+    async def stop(*_: object) -> None:
+        return None
+
+    monkeypatch.setattr(control_cells, "token", lambda: _TOKEN.decode())
+    monkeypatch.setattr(control_cells, "drained", drained)
+    monkeypatch.setattr(control_cells, "_download", download)
+    monkeypatch.setattr(control_cells, "_stop", stop)
+    monkeypatch.setattr(control_cells, "capture_filters", lambda *_: [])
+    observed = asyncio.run(control_cells.capture_body(cast(Any, session), "db"))
+    assert observed["flow_records"] == 5
+    flow = next(c for c in session.commands if "/dev/udp/" in c)
+    assert f"/dev/udp/{gateway}/{FLOW_PORT}" in flow
+    expected = "spool:sys:" if owned_before_call else "spool:sys:job-9"
+    assert guest.owned == [expected]
+    assert session.owned_at_call == ([expected] if owned_before_call else [])
