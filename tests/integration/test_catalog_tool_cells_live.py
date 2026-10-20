@@ -54,12 +54,12 @@ from tests.integration.live_stack.catalog import (
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.integration.live_stack.tool_cells import (
     Boundary,
-    Exposure,
     Functional,
     Grants,
     HttpCaller,
     Rejection,
     boundary_of,
+    caller_for,
     one,
     project_state,
     prove_functional,
@@ -561,7 +561,7 @@ _SETUPS = {
 
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> None:
     cell = run.cell
-    caller = HttpCaller(cast(Exposure, cell.exposure), base_url, issuer)
+    caller = caller_for(cell.exposure, base_url, issuer)
     project = f"cov-{secrets.token_hex(4)}"
     snapshot = partial(_catalog_state, db_url, project)
     if cell.kind == "functional":
