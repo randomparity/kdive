@@ -20,6 +20,7 @@ from kdive.mcp.tools.debug.operations.runtime import (
     _gdbmi_maturity,
     _op_audit,
     run_engine_op_with_resolver,
+    with_halt_bounds,
 )
 from kdive.providers.ports.debug import GdbMiAttachment, GdbMiEngine, GdbStopRecord
 from kdive.providers.shared.debug_common.gdbmi.policy.capabilities import DebugCapability
@@ -175,6 +176,7 @@ def _register_debug_continue(
         annotations=_docmeta.mutating(),
         meta=_gdbmi_maturity(),
     )
+    @with_halt_bounds
     async def debug_continue(
         session_id: Annotated[str, _session_id_field("continue execution on")],
         timeout_sec: Annotated[float, _timeout_field()] = 0.0,
@@ -183,17 +185,18 @@ def _register_debug_continue(
         """Resume a live DebugSession. Requires contributor. With wait=True (default) it waits
         for a stop event and returns status 'stopped' with the stop's reason; a wait that ends
         without one interrupts the guest back and returns timed_out=True, so the call can hold
-        the session for the wait plus about 20 seconds (about 80 seconds at most). With
-        wait=False it resumes and returns status 'running' at once, leaving the guest running
-        after the call, or 'stopped' if the resume already reported a stop. While the guest
-        runs, every other debug tool except debug.interrupt and debug.continue refuses with
-        debug_attach_failure code inferior_running and sends nothing to the guest. A stop that
-        ends the run (for example a breakpoint) is reported only by the next debug.interrupt or
-        debug.continue with wait=True, which waits for that stop without resuming again;
-        debug.continue with wait=False on a running guest returns 'running' again. Another call
-        on the same session, debug.interrupt included, waits while a wait=True continue is in
-        progress; use wait=False when you need to break in. A transport_stall failure leaves the
-        guest's state unknown: call debug.interrupt again or debug.end_session."""
+        the session for the wait plus up to {halt_s} seconds ({continue_hold_s} seconds at
+        most). With wait=False it resumes and returns status 'running' at once, leaving the
+        guest running after the call, or 'stopped' if the resume already reported a stop. While
+        the guest runs, every other debug tool except debug.interrupt and debug.continue refuses
+        with debug_attach_failure code inferior_running and sends nothing to the guest. A stop
+        that ends the run (for example a breakpoint) is reported only by the next
+        debug.interrupt or debug.continue with wait=True, which waits for that stop without
+        resuming again; debug.continue with wait=False on a running guest returns 'running'
+        again. Another call on the same session, debug.interrupt included, waits while a
+        wait=True continue is in progress; use wait=False when you need to break in. A
+        transport_stall failure leaves the guest's state unknown: call debug.interrupt again or
+        debug.end_session."""
         return await run_engine_op_with_resolver(
             pool,
             current_context(),
@@ -213,6 +216,7 @@ def _register_debug_interrupt(
         annotations=_docmeta.mutating(),
         meta=_gdbmi_maturity(),
     )
+    @with_halt_bounds
     async def debug_interrupt(
         session_id: Annotated[str, _session_id_field("interrupt")],
     ) -> ToolResponse:
@@ -224,7 +228,7 @@ def _register_debug_interrupt(
         first debug call; 'already_halted' when nothing was running. 'attach' and
         'already_halted' send nothing to the guest and return at once. The guest runs between
         calls only after debug.continue with wait=False. If a running guest reports no stop the
-        call fails with infrastructure_failure code transport_stall after about 20 seconds and
+        call fails with infrastructure_failure code transport_stall after up to {halt_s} seconds and
         the guest's state is unknown; call debug.interrupt again or debug.end_session."""
         return await run_engine_op_with_resolver(
             pool,

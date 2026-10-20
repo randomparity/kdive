@@ -75,6 +75,7 @@ from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 __all__ = [
+    "HALT_BOUND_SEC",
     "GdbMiEngine",
     "MAX_INTERACTIVE_WAIT_SEC",
     "MAX_MEMORY_READ_BYTES",
@@ -92,6 +93,8 @@ _timeout_error = mi_controller.timeout_error
 # path uses ASYNC continue (mi-async on), so `-exec-continue` returns `^running` immediately
 # rather than blocking until a stop a free-running kernel never produces.
 _MI_COMMAND_TIMEOUT_SEC = 10.0
+# The longest one halt of a running guest can take: the interrupt write plus its stop wait.
+HALT_BOUND_SEC = _MI_COMMAND_TIMEOUT_SEC + _INTERRUPT_STOP_TIMEOUT_SEC
 # gdb's RSP read timeout (`set remotetimeout`): generous-but-finite so a slow/silent stub
 # yields a clean gdb-reported disconnect rather than an opaque hang.
 RSP_REMOTE_TIMEOUT_SEC = 30

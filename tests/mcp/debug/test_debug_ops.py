@@ -1801,15 +1801,19 @@ def test_a_cancelled_op_keeps_the_session_lock_until_its_engine_call_ends(
                 )
             )
             await asyncio.to_thread(entered.wait, 30)
-            first.cancel()
-            await asyncio.sleep(0.2)
-            assert lock.locked(), "the cancelled op freed the lock under a running thread"
-            second = asyncio.create_task(
-                run_engine_op_with_runtime(pool, request_context(), session_id, runtime, second_op)
-            )
-            await asyncio.sleep(0.2)
-            assert calls == ["first-start"]
-            release.set()
+            try:
+                first.cancel()
+                await asyncio.sleep(0.2)
+                assert lock.locked(), "the cancelled op freed the lock under a running thread"
+                second = asyncio.create_task(
+                    run_engine_op_with_runtime(
+                        pool, request_context(), session_id, runtime, second_op
+                    )
+                )
+                await asyncio.sleep(0.2)
+                assert calls == ["first-start"]
+            finally:
+                release.set()
             with pytest.raises(asyncio.CancelledError):
                 await first
             assert (await second).status == "listed"

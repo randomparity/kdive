@@ -52,6 +52,10 @@ from kdive.providers.ports.debug import (
     GdbMiEngine,
 )
 from kdive.providers.ports.lifecycle import TransportHandleData
+from kdive.providers.shared.debug_common.gdbmi.core.engine import (
+    HALT_BOUND_SEC,
+    MAX_INTERACTIVE_WAIT_SEC,
+)
 from kdive.providers.shared.debug_common.gdbmi.core.execution import inferior_running
 from kdive.providers.shared.debug_common.gdbmi.policy.capabilities import (
     DebugCapability,
@@ -128,6 +132,17 @@ def _op_audit(tool: str, transition: str | None = None, /, **args: object) -> _O
     if tool not in _AUDITED_OPS:
         return None
     return _OpAudit(tool=tool, transition=transition or tool.removeprefix("debug."), args=args)
+
+
+def with_halt_bounds[F: Callable[..., object]](func: F) -> F:
+    """Interpolate the enforced halt and wait bounds into a wrapper docstring (#3244)."""
+    if func.__doc__ is None:
+        raise AssertionError("a debug wrapper that states halt bounds must have a docstring")
+    func.__doc__ = func.__doc__.format(
+        halt_s=f"{HALT_BOUND_SEC:g}",
+        continue_hold_s=f"{MAX_INTERACTIVE_WAIT_SEC + HALT_BOUND_SEC:g}",
+    )
+    return func
 
 
 def _gdbmi_maturity() -> dict[str, object]:

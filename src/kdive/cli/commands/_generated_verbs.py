@@ -1011,7 +1011,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="debug.continue",
         read_only=False,
         destructive=False,
-        help="Resume a live DebugSession and wait for a stop event. Requires contributor.",
+        help="Resume a live DebugSession. Requires contributor. With wait=True (default) it waits",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
@@ -1030,6 +1030,15 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                 help="Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap.",
                 arg_type="float",
                 action=None,
+                choices=(),
+            ),
+            GeneratedFlag(
+                name="--wait",
+                dest="wait",
+                required=False,
+                help="True (default) waits for a stop event. False resumes and returns status 'running' at once, leaving the guest running after the call; timeout_sec is then ignored.",
+                arg_type=None,
+                action="store_true",
                 choices=(),
             ),
         ),
@@ -1143,7 +1152,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="debug.interrupt",
         read_only=False,
         destructive=False,
-        help="Send an interrupt to halt a running live DebugSession. Requires contributor.",
+        help="Halt the guest of a live DebugSession and report what halted it. Requires",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
