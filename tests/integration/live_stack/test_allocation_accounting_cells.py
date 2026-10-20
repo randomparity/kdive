@@ -13,7 +13,7 @@ import pytest
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import OidcIssuer
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse
 from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES, build_contract
 from tests.integration._seed import seed_granted_allocation, seed_project_limits
 from tests.integration.conftest import open_pool
@@ -312,3 +312,46 @@ def test_restore_failure_is_noted_on_the_primary_failure() -> None:
 
     with pytest.raises(ConnectionError):
         asyncio.run(passing())
+
+
+def _admission_fixture(monkeypatch: pytest.MonkeyPatch, answer: ToolResponse) -> list[str]:
+    released: list[str] = []
+
+    async def reply(*_args: object, **_kwargs: object) -> ToolResponse:
+        return answer
+
+    async def release(self: carrier._Fixture, allocation_id: str) -> None:
+        released.append(allocation_id)
+
+    monkeypatch.setattr(carrier, "_answer", reply)
+    monkeypatch.setattr(carrier._Fixture, "release", release)
+    return released
+
+
+def test_budget_boundary_probe_fails_when_the_product_over_admits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    granted = ToolResponse.success("over", "granted")
+    released = _admission_fixture(monkeypatch, granted)
+    fixture = carrier._Fixture("p", "db", cast(HttpCaller, None))
+    with pytest.raises(AssertionError, match="over-budget admitted"):
+        asyncio.run(carrier.check_admission(fixture, admitted=False))
+    # At the boundary the same grant is the expected answer and is released.
+    asyncio.run(carrier.check_admission(fixture, admitted=True))
+    assert released == ["over"]
+
+
+def test_budget_boundary_probe_needs_a_budget_unmet_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    unmet: list[JsonValue] = [{"gate": "budget", "required_limit_kcu": "1"}]
+    denied = ToolResponse.failure("x", ErrorCategory.ALLOCATION_DENIED, data={"unmet": unmet})
+    _admission_fixture(monkeypatch, denied)
+    fixture = carrier._Fixture("p", "db", cast(HttpCaller, None))
+    asyncio.run(carrier.check_admission(fixture, admitted=False))
+    with pytest.raises(AssertionError, match="boundary was refused"):
+        asyncio.run(carrier.check_admission(fixture, admitted=True))
+    quota = ToolResponse.failure(
+        "x", ErrorCategory.ALLOCATION_DENIED, data={"unmet": [{"gate": "quota"}]}
+    )
+    _admission_fixture(monkeypatch, quota)
+    with pytest.raises(AssertionError, match="no unmet budget gate"):
+        asyncio.run(carrier.check_admission(fixture, admitted=False))
