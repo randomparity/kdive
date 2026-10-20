@@ -492,3 +492,34 @@ def test_unlock_phase_runs_no_other_verifier_phase(monkeypatch):
     with pytest.raises(SystemExit) as exited:
         exec(compile(code, str(SHARED), "exec"), {"__name__": "__main__"})
     assert exited.value.code is None
+
+
+@pytest.mark.parametrize("stamp", ["stamped", "mismatch", "no-source"])
+def test_runtime_binds_the_stamped_build_identity_to_its_source(monkeypatch, tmp_path, stamp):
+    ns = verifier()
+    source, install = tmp_path / "source", tmp_path / "installed"
+    for root in (source / "src/kdive", install / "kdive", source / "deploy/authority-inventory"):
+        root.mkdir(parents=True)
+    for tree in (source / "src/kdive", install / "kdive"):
+        (tree / "__init__.py").write_text("")
+    (install / "kdive/_buildinfo.py").write_text('COMMIT = "aaaaaaaaaaaa"\n')
+    if stamp != "no-source":
+        identity = "aaaaaaaaaaaa" if stamp == "stamped" else "bbbbbbbbbbbb"
+        (source / "src/kdive/_buildinfo.py").write_text(f'COMMIT = "{identity}"\n')
+    ns["ROOT"] = install
+    ns["CLIENT"] = install / "client.py"
+    for name in ("client.py", "collector.py"):
+        (source / "deploy/authority-inventory" / name).write_text("pass\n")
+        (install / name).write_text("pass\n")
+    ns["trusted"] = Mock()
+    monkeypatch.setattr(ns["sysconfig"], "get_path", lambda _: str(install))
+    monkeypatch.setattr(
+        ns["importlib"].util, "find_spec", lambda _: SimpleNamespace(origin="/immutable")
+    )
+    monkeypatch.setattr(ns["subprocess"], "check_output", lambda _: b"src/kdive/__init__.py\0")
+    if stamp == "stamped":
+        ns["runtime"](source, "a" * 40)
+    else:
+        message = "package bytes differ" if stamp == "mismatch" else "package file set differs"
+        with pytest.raises(ValueError, match=message):
+            ns["runtime"](source, "a" * 40)

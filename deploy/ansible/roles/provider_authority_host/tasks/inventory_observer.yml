@@ -98,6 +98,9 @@
           tracked = subprocess.check_output(['git', '-C', str(source), 'ls-files', '-z', '--', 'src/kdive'])
           expected = {pathlib.Path(os.fsdecode(name)).relative_to('src/kdive')
                       for name in tracked.split(b'\0') if name}
+          # The gitignored build identity stamp is packed into the wheel; bind it to its source.
+          if (source / 'src/kdive/_buildinfo.py').is_file():
+              expected.add(pathlib.Path('_buildinfo.py'))
           actual = {p.relative_to(installed) for p in installed.rglob('*')
                     if p.is_file() and '__pycache__' not in p.parts}
           if not expected or actual != expected:
