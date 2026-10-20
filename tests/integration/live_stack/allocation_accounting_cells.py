@@ -297,13 +297,13 @@ class _Fixture:
         """Release every owned allocation still live; what could not be released."""
         failed: list[str] = []
         for allocation_id in self.owned:
-            row = await _row(self.db, _ALLOCATION, allocation_id)
-            if row["state"] not in _LIVE:
-                continue
             try:
-                await self.release(allocation_id)
-            except AssertionError:
-                failed.append(allocation_id)
+                row = await _row(self.db, _ALLOCATION, allocation_id)
+                if row["state"] in _LIVE:
+                    await self.release(allocation_id)
+            except Exception as exc:  # noqa: BLE001 - every owned allocation gets its attempt
+                # The type only: a message can carry a URL or host detail (ADR-0715 evidence).
+                failed.append(f"{allocation_id}: {type(exc).__name__}")
         return failed
 
 
@@ -756,6 +756,7 @@ async def _generate_body(c: HttpCaller, g: Grants, *, db: str, guest: Guest) -> 
         run = await _create(inv, inv.caller, _contributor(project), guest.system_id)
         request = {"scope": "granted-set", "projects": [project], "formats": ["csv", "xlsx"]}
         env = await _call(c, g, "reports.generate", request=request)
+        _REPORTS.append(str(env.data["report_id"]))
         assert "spreadsheet_unavailable" not in env.data, "report store degraded to inline-only"
         as_of = _ts(env.data["as_of"])
         workbook = await _download(str(env.refs["xlsx"]))
@@ -773,7 +774,6 @@ async def _generate_body(c: HttpCaller, g: Grants, *, db: str, guest: Guest) -> 
             inline = json.loads(str(item.data["rows_json"]))
             assert_prefix(key, inline, expected, bool(item.data["inline_truncated"]))
             compared.append({"section": key, "rows": len(expected)})
-        _REPORTS.append(str(env.data["report_id"]))
         return {"sections": compared, "owned": [inv.id, run]}
 
 
@@ -922,18 +922,24 @@ def rejection_for(tool: str, boundary: Boundary, project: str) -> Rejection:
         bad = {"request": {"limit": "many"}} if tool == "allocations.list" else {}
         return Rejection(bad, floor_grants(tool, project))
     if boundary == "authentication":
-        return Rejection(args, floor_grants(tool, project))
+        # The issued-token control must pass authentication yet write nothing: below the floor.
+        return Rejection(args, _below_floor(tool, project))
     if boundary == "project-isolation":
         if tool in _BY_ALLOCATION:
             return Rejection(
                 args, _stranger(), frozenset({ErrorCategory.NOT_FOUND.value}), absent_twin=args
             )
         return Rejection(args, _stranger())
+    return Rejection(args, _below_floor(tool, project))
+
+
+def _below_floor(tool: str, project: str) -> Grants:
+    """A member of ``project`` one role short of what ``tool`` needs."""
     if tool in _VIEWER_FLOOR:
-        return Rejection(args, _member(project))
+        return _member(project)
     if tool in _ADMIN_FLOOR:
-        return Rejection(args, _contributor(project))
-    return Rejection(args, _viewer(project))
+        return _contributor(project)
+    return _viewer(project)
 
 
 async def _denied(run: CellRun, c: HttpCaller, project: str, db: str) -> None:
@@ -978,9 +984,15 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db: str) ->
             await prove_functional(
                 run, c, floor_grants(tool, project), body, partial(accounting_state, db, project)
             )
-    finally:
+    except BaseException as primary:
         if _REPORTS:
-            run.artifacts.append(run.writer.artifact(await _retained_reports(db)))
+            try:
+                run.artifacts.append(run.writer.artifact(await _retained_reports(db)))
+            except Exception as exc:  # noqa: BLE001 - noted on the primary failure
+                primary.add_note(f"retained report artifacts unrecorded: {type(exc).__name__}")
+        raise
+    if _REPORTS:
+        run.artifacts.append(run.writer.artifact(await _retained_reports(db)))
 
 
 async def _retained_reports(db: str) -> dict[str, object]:
@@ -989,7 +1001,7 @@ async def _retained_reports(db: str) -> dict[str, object]:
     _REPORTS.clear()
     rows = await _rows(
         db,
-        "SELECT id, owner_kind, owner_id, created_at FROM artifacts "
+        "SELECT id, owner_id, object_key, created_at FROM artifacts "
         "WHERE owner_kind = 'reports' AND owner_id::text = ANY(%s) ORDER BY id",
         (ids,),
     )
@@ -999,6 +1011,7 @@ async def _retained_reports(db: str) -> dict[str, object]:
             {
                 "artifact": str(r["id"]),
                 "report": str(r["owner_id"]),
+                "key": str(r["object_key"]),
                 "created_at": str(r["created_at"]),
             }
             for r in rows

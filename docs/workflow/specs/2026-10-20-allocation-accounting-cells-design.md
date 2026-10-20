@@ -147,7 +147,9 @@ every caller's cleanup evidence records it.
 
 All use `prove_rejection` with the narrowed snapshot as protected state.
 
-- authentication: a forged signature answers 401; the issued token does not.
+- authentication: a forged signature answers 401; the issued token does not. That issued
+  token is one role below the tool's floor, so its control call is refused by role and writes
+  nothing.
 - validation: missing required arguments (`{}`), or `{"request": {"limit": "many"}}` for
   `allocations.list`.
 - authorization: a member without a role for viewer-floor tools, a viewer for

@@ -185,6 +185,8 @@ def test_rejections_follow_each_tools_role_floor(tool: str) -> None:
     else:
         assert isolated.categories == {ErrorCategory.AUTHORIZATION_DENIED.value}
         assert isolated.absent_twin is None
+    # The authentication control's issued-token call must be refused by role, writing nothing.
+    assert carrier.rejection_for(tool, "authentication", project).grants == below.grants
     assert carrier.rejection_for(tool, "validation", project).args != carrier.valid_args(
         tool, project
     )
@@ -263,3 +265,21 @@ def test_release_cell_requires_the_body_to_have_released(
     else:
         with pytest.raises(AssertionError, match="not the cell, released"):
             asyncio.run(scenario)
+
+
+def test_fixture_release_continues_past_a_failed_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    released: list[str] = []
+
+    async def row(_db: str, _query: str, key: str) -> dict[str, object]:
+        return {"state": "granted"}
+
+    async def release(self: carrier._Fixture, allocation_id: str) -> None:
+        if allocation_id == "a":
+            raise ConnectionError("transport")
+        released.append(allocation_id)
+
+    monkeypatch.setattr(carrier, "_row", row)
+    monkeypatch.setattr(carrier._Fixture, "release", release)
+    fixture = carrier._Fixture("p", "db", cast(HttpCaller, None), ["a", "b"])
+    assert asyncio.run(fixture.release_all()) == ["a: ConnectionError"]
+    assert released == ["b"]
