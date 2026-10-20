@@ -411,6 +411,20 @@ def _empty_page(tool: str, args: Mapping[str, object]) -> ToolResponse:
         object_id, actions = "systems", ["systems.get", "runs.create"]
     elif tool == "jobs.list":
         object_id, actions = "jobs", ["jobs.wait", "jobs.cancel"]
+    elif tool == "allocations.list":
+        # Names the requested project; its next actions are filtered to the caller's roles there.
+        request = args.get("request")
+        project = request.get("project") if isinstance(request, Mapping) else None
+        assert isinstance(project, str) and project, (
+            "an allocations.list filtered rejection must name a project"
+        )
+        return ToolResponse.collection(
+            "allocations",
+            "ok",
+            [],
+            suggested_next_actions=[],
+            data={"truncated": False, "next_cursor": None, "project": project},
+        )
     else:
         raise AssertionError(f"no canonical empty page is configured for {tool}")
     return ToolResponse.collection(

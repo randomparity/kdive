@@ -47,7 +47,7 @@ halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session 
 ## Breakpoints and watchpoints
 
 - `debug.set_breakpoint` — set a breakpoint at a symbol (a bare C function or variable name; not an address).
-- `debug.list_breakpoints` — list the current breakpoints.
+- `debug.list_breakpoints` — list each breakpoint and watchpoint with its number, kind and location.
 - `debug.clear_breakpoint` — remove a breakpoint.
 - `debug.set_watchpoint` — trap a write to a data address. A ppc64le guest under KVM cannot
   insert one; the call returns `not_implemented` with `watchpoint_unsupported` and arms
@@ -66,7 +66,7 @@ halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session 
 - `debug.read_memory` — read kernel memory at an address.
 - `debug.resolve_symbol` — resolve a symbol name to an address.
 - `debug.backtrace` — unwind the call stack at the halt.
-- `debug.read_frame` — select and read a single stack frame.
+- `debug.read_frame` — read one stack frame with its arguments and locals.
 - `debug.disassemble` — disassemble instructions around an address.
 
 `debug.resolve_symbol` yields an address; it does not evaluate member, array, or type-aware

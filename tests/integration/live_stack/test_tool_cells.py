@@ -48,6 +48,7 @@ from tests.integration.live_stack.tool_cells import (
     Grants,
     HttpCaller,
     Rejection,
+    _empty_page,
     bindings,
     claims_of,
     configuration_of,
@@ -350,19 +351,53 @@ def test_debug_sessions_denied_page_and_unconfigured_pages(tmp_path: Path) -> No
     caller = _Filtering("direct", page, control=listed)
     asyncio.run(prove_rejection(run, caller, "project-isolation", rejection, _snapshot(1, 1)))
     assert "project-isolation" in run.assertions
-    # A named pair whose carrier has not configured its page fails before any call.
-    unconfigured = _Filtering("direct", page, control=listed)
+    # A tool whose carrier has not configured its page fails rather than borrowing another's.
     with pytest.raises(AssertionError, match="no canonical empty page"):
+        _empty_page("cov.unconfigured_list", {"request": {}})
+
+
+def test_allocations_list_page_names_the_project_and_no_actions(tmp_path: Path) -> None:
+    page = ToolResponse.collection(
+        "allocations",
+        "ok",
+        [],
+        suggested_next_actions=[],
+        data={"truncated": False, "next_cursor": None, "project": "p"},
+    )
+    assert _empty_page("allocations.list", {"request": {"project": "p"}}) == page
+    listed = page.model_copy(update={"items": [ToolResponse.success(_ITEM, "granted")]})
+    rejection = Rejection({"request": {"project": "p"}}, _GRANTS, filtered=_control())
+    for boundary in ("authorization", "project-isolation"):
+        run = _list_run(tmp_path, "allocations.list", boundary)
+        caller = _Filtering("gateway", page, control=listed)
+        asyncio.run(prove_rejection(run, caller, boundary, rejection, _snapshot(1, 1)))
+        assert boundary in run.assertions
+    for leak in (
+        page.model_copy(update={"data": {"truncated": False, "next_cursor": None}}),
+        page.model_copy(update={"suggested_next_actions": ["allocations.wait"]}),
+    ):
+        with pytest.raises(AssertionError, match="not the empty page"):
+            asyncio.run(
+                prove_rejection(
+                    _list_run(tmp_path, "allocations.list", "authorization"),
+                    _Filtering("direct", leak, control=listed),
+                    "authorization",
+                    rejection,
+                    _snapshot(1, 1),
+                )
+            )
+    unnamed = _Filtering("direct", page, control=listed)
+    with pytest.raises(AssertionError, match="must name a project"):
         asyncio.run(
             prove_rejection(
                 _list_run(tmp_path, "allocations.list", "authorization"),
-                unconfigured,
+                unnamed,
                 "authorization",
                 Rejection({"request": {}}, _GRANTS, filtered=_control()),
                 _snapshot(1, 1),
             )
         )
-    assert unconfigured.calls == []
+    assert unnamed.calls == []
 
 
 def test_filtered_exception_is_closed(tmp_path: Path) -> None:

@@ -1,0 +1,12 @@
+[   55.290591] sshd-session (3411) used greatest stack depth: 12648 bytes left
+[   55.439254] loop: module loaded
+
+
+Fedora Linux 44 (Cloud Edition)
+Kernel 6.18.54-g1b357ecb3213 on x86_64 (ttyS0)
+
+enp0s16: <REDACTED-ADDR>
+kdive login: [    0.000000] Linux version 6.18.54-g1b357ecb3213 (builder@kernel-fixture) (gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2), GNU ld version 2.46.1-1.fc44) #1 SMP PREEMPT_DYNAMIC Fri Sep 25 14:35:54 UTC 2026
+[    0.000000] Command line: elfcorehdr=0x6f000000 console=ttyS0 novmcoredd hugetlb_cma=0 kfence.sample_interval=0 initramfs_options=size=90% irqpoll nr_cpus=1 reset_devices cgroup_disable=memory mce=off numa=off udev.children-max=2 panic=10 acpi_no_memhotplug transparent_hugepage=never nokaslr hest_disable cma=0 pcie_ports=compat disable_cpu_apicid=0 rd.systemd.gpt_auto=no
+[    0.000000] x86/split lock detection: #DB: warning on user-space bus_locks
+[    0.000000] BIOS-provided physical RAM map:

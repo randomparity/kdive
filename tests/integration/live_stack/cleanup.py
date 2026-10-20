@@ -124,13 +124,20 @@ async def release_and_verify(
     ``from_failed`` releases the Allocation of a System that already failed. ``failed`` is
     terminal and such a System has no domain left to tear down, so it stays ``failed`` rather
     than reaching ``torn_down``; everything else is proven the same way.
+
+    An Allocation the cell's body already released (the ``allocations.release`` cell, #3098)
+    skips the release and the held-capacity precondition; ``released_by`` says which happened.
     """
-    in_use_held = await capacity_in_use(client)
-    assert in_use_held > in_use_before, (
-        f"capacity in use is {in_use_held} while allocated, not above {in_use_before}; "
-        "resources.availability does not see this allocation"
-    )
-    ok(await scalar(client, "allocations.release", allocation_id=allocation_id), "release")
+    current = await scalar(client, "allocations.wait", allocation_id=allocation_id, timeout_s=0)
+    by_body = current.status == "released"
+    in_use_held: int | None = None
+    if not by_body:
+        in_use_held = await capacity_in_use(client)
+        assert in_use_held > in_use_before, (
+            f"capacity in use is {in_use_held} while allocated, not above {in_use_before}; "
+            "resources.availability does not see this allocation"
+        )
+        ok(await scalar(client, "allocations.release", allocation_id=allocation_id), "release")
     if from_failed:
         state = await client.call_tool("systems.get", system_id=system_id)
         assert isinstance(state, ToolResponse) and system_failed(state), (
@@ -161,4 +168,5 @@ async def release_and_verify(
         "domain": "absent",
         "disks_absent": len(disks),
         "in_use": [in_use_before, in_use_held, in_use_after],
+        "released_by": "body" if by_body else "frame",
     }

@@ -1176,7 +1176,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="debug.list_breakpoints",
         read_only=True,
         destructive=False,
-        help="List all breakpoints on a live DebugSession. Requires contributor.",
+        help="List breakpoints and watchpoints on a live DebugSession. Requires contributor.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(

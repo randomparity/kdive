@@ -849,7 +849,25 @@ def test_read_frame_returns_read(migrated_url: str) -> None:
                                 ]
                             },
                         }
-                    ]
+                    ],
+                    "-thread-list-ids": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {"current-thread-id": "1"},
+                        }
+                    ],
+                    "-stack-list-variables --thread 1 --frame 2 --simple-values": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "variables": [
+                                    {"name": "fd", "arg": "1", "type": "int", "value": "7"}
+                                ]
+                            },
+                        }
+                    ],
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
@@ -862,8 +880,12 @@ def test_read_frame_returns_read(migrated_url: str) -> None:
             )
         assert resp.status == "read"
         assert resp.data["level"] == 2
+        assert resp.data["truncated"] is False
         frame = cast("dict[str, Any]", resp.data["frame"])
         assert frame["func"] == "schedule"
+        assert frame["args"] == [{"name": "fd", "type": "int", "value": "7"}]
+        assert frame["locals"] == []
+        assert "truncated" not in frame
 
     asyncio.run(_run())
 
@@ -1020,6 +1042,47 @@ def test_list_watchpoints_returns_listed(migrated_url: str) -> None:
             )
         assert resp.status == "listed"
         assert resp.data["count"] == 1
+
+    asyncio.run(_run())
+
+
+def test_list_breakpoints_lists_rows(migrated_url: str) -> None:
+    breakpoint_row = {
+        "number": "1",
+        "type": "breakpoint",
+        "addr": "0xffffffff81000010",
+        "func": "panic",
+    }
+    watchpoint_row = {"number": "2", "type": "hw watchpoint", "what": "*(char(*)[8])0x1000"}
+
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-break-list": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "BreakpointTable": {
+                                    "body": [{"bkpt": breakpoint_row}, {"bkpt": watchpoint_row}]
+                                }
+                            },
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op_with_runtime(
+                pool,
+                request_context(),
+                session_id,
+                runtime,
+                _op_for("list_breakpoints", runtime, session_id),
+            )
+        assert resp.status == "listed"
+        assert resp.data == {"count": 2, "breakpoints": [breakpoint_row, watchpoint_row]}
 
     asyncio.run(_run())
 
