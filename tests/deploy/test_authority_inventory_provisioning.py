@@ -367,3 +367,185 @@ def test_disabled_withdrawal_uses_control_interpreter(control_python):
     assert rendered == (control_python or "/usr/bin/python3")
     assert argv[1:4] == ["-I", "-S", "-c"] and argv[-1] == "withdraw"
     assert argv[4] == "{{ provider_authority_host_inventory_verifier }}"
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "stderr", "fails"),
+    [
+        (1, "", "User kdive-authority-observer is not allowed to run sudo on h.\n", False),
+        (0, "User kdive-authority-observer is not allowed to run sudo on h.\n", "", False),
+        (
+            0,
+            "User kdive-authority-observer may run the following commands on h:\n"
+            "    (ALL) NOPASSWD: ALL\n",
+            "",
+            True,
+        ),
+        (2, "User kdive-authority-observer is not allowed to run sudo on h.\n", "", True),
+        (
+            0,
+            "User kdive-authority-observer may run the following commands on h:\n",
+            "User kdive-authority-observer is not allowed to run sudo on h.\n",
+            True,
+        ),
+    ],
+    ids=["classic-denial", "sudo-rs-denial", "granted", "unexpected-rc", "denial-beside-grant"],
+)
+def test_observer_sudo_refusal_accepts_only_a_denial(rc, stdout, stderr, fails):
+    refusal = next(t for t in flatten(tasks()) if t["name"] == "Refuse observer sudo privileges")
+    assert refusal["ansible.builtin.command"]["argv"] == [
+        "sudo",
+        "-n",
+        "-l",
+        "-U",
+        "kdive-authority-observer",
+    ]
+    assert refusal["environment"] == {"LC_ALL": "C"} and refusal["no_log"] is True
+    result = {"rc": rc, "stdout": stdout, "stderr": stderr}
+    verdict = (
+        Environment(undefined=StrictUndefined)
+        .from_string("{{ " + refusal["failed_when"] + " }}")
+        .render(provider_authority_host_inventory_sudo=result)
+    )
+    assert verdict == str(fails)
+
+
+def uv_runtime(monkeypatch, tmp_path):
+    """A collector root whose venv holds the world-writable lock `uv sync` leaves behind."""
+    ns = verifier()
+    root = tmp_path / "runtime"
+    (root / ".venv").mkdir(parents=True)
+    lock = root / ".venv/.lock"
+    lock.touch()
+    lock.chmod(0o666)
+    ns["ROOT"] = root
+    real_lstat = ns["os"].lstat
+
+    def metadata(path, *args, **kwargs):
+        st = real_lstat(path, *args, **kwargs)
+        # Model root ownership; keep real modes inside the runtime, trusted ones above it.
+        mode = st.st_mode if root in (Path(path), *Path(path).parents) else st.st_mode & ~0o022
+        return SimpleNamespace(st_uid=0, st_mode=mode)
+
+    monkeypatch.setattr(ns["os"], "lstat", metadata)
+    monkeypatch.setattr(ns["os"], "listxattr", lambda p, **kw: [])
+    return ns, root, lock
+
+
+def test_uv_lock_is_removed_so_the_strict_guard_passes(monkeypatch, tmp_path):
+    ns, root, lock = uv_runtime(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="not root-controlled"):
+        ns["trusted"](root, tree=True)
+    ns["unlock"]()
+    assert not lock.exists()
+    ns["trusted"](root, tree=True)
+    ns["unlock"]()
+
+
+@pytest.mark.parametrize("substitute", ["venv", "lock"])
+def test_uv_lock_removal_refuses_a_substituted_path(monkeypatch, tmp_path, substitute):
+    ns, root, lock = uv_runtime(monkeypatch, tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / ".lock").touch()
+    if substitute == "venv":
+        (root / ".venv").rename(tmp_path / "moved")
+        (root / ".venv").symlink_to(elsewhere)
+    else:
+        lock.unlink()
+        lock.symlink_to(elsewhere / ".lock")
+    with pytest.raises(ValueError, match="substituted inventory installation"):
+        ns["unlock"]()
+    assert (elsewhere / ".lock").exists()
+
+
+def test_uv_lock_is_removed_before_every_verifier_can_see_it():
+    top = tasks()
+    names = [t["name"] for t in top]
+    unlock = "Remove uv's install lock from the collector runtime"
+    assert names.index(unlock) < names.index(
+        "Verify ownership before changing or withdrawing collector files"
+    )
+    block = [
+        t["name"] for t in top[names.index("Converge the enabled inventory boundary")]["block"]
+    ]
+    install = block.index("Install the locked independent collector runtime")
+    assert block.index("Remove uv's install lock after the runtime sync") == install + 1
+    for task in (t for t in flatten(top) if "install lock" in t["name"]):
+        assert task["ansible.builtin.command"]["argv"][-1] == "unlock"
+
+
+def test_uv_lock_removal_requires_a_root_controlled_venv(monkeypatch, tmp_path):
+    ns, root, lock = uv_runtime(monkeypatch, tmp_path)
+    (root / ".venv").chmod(0o777)
+    with pytest.raises(ValueError, match="not root-controlled"):
+        ns["unlock"]()
+    assert lock.exists()
+
+
+@pytest.mark.skipif(
+    Path("/opt/kdive-authority-inventory").exists(), reason="host has a collector runtime"
+)
+def test_unlock_phase_runs_no_other_verifier_phase(monkeypatch):
+    code = tasks()[0]["ansible.builtin.set_fact"]["provider_authority_host_inventory_verifier"]
+    monkeypatch.setattr("sys.argv", ["-c", "unlock"])
+    with pytest.raises(SystemExit) as exited:
+        exec(compile(code, str(SHARED), "exec"), {"__name__": "__main__"})
+    assert exited.value.code is None
+
+
+STAMP = '# Generated by scripts/stamp-buildinfo.sh\nCOMMIT = "{}"\nRELEASE = False\n'
+
+
+@pytest.mark.parametrize(
+    ("stamp", "message"),
+    [
+        ("stamped", None),
+        ("mismatch", "package bytes differ"),
+        ("no-source", "package file set differs"),
+        ("stale", "unexpected collector build identity"),
+        ("foreign", "unexpected collector build identity"),
+        ("link", "unexpected collector build identity"),
+        ("code-header", "unexpected collector build identity"),
+    ],
+)
+def test_runtime_binds_the_stamped_build_identity_to_its_source(
+    monkeypatch, tmp_path, stamp, message
+):
+    ns = verifier()
+    source, install = tmp_path / "source", tmp_path / "installed"
+    for root in (source / "src/kdive", install / "kdive", source / "deploy/authority-inventory"):
+        root.mkdir(parents=True)
+    for tree in (source / "src/kdive", install / "kdive"):
+        (tree / "__init__.py").write_text("")
+    content = {
+        "stamped": STAMP.format("a" * 12),
+        "mismatch": STAMP.format("a" * 12),
+        "stale": STAMP.format("b" * 12),
+        "foreign": STAMP.format("a" * 12) + "import os\n",
+        "code-header": STAMP.format("a" * 12).replace("# Generated", "import os  #"),
+    }
+    (install / "kdive/_buildinfo.py").write_text(content.get(stamp, STAMP.format("a" * 12)))
+    if stamp == "mismatch":
+        (install / "kdive/_buildinfo.py").write_text(STAMP.format("a" * 12).replace("#", "# "))
+    if stamp in content:
+        (source / "src/kdive/_buildinfo.py").write_text(content[stamp])
+    if stamp == "link":
+        (tmp_path / "elsewhere.py").write_text(STAMP.format("a" * 12))
+        (source / "src/kdive/_buildinfo.py").symlink_to(tmp_path / "elsewhere.py")
+    ns["ROOT"] = install
+    ns["CLIENT"] = install / "client.py"
+    for name in ("client.py", "collector.py"):
+        (source / "deploy/authority-inventory" / name).write_text("pass\n")
+        (install / name).write_text("pass\n")
+    ns["trusted"] = Mock()
+    monkeypatch.setattr(ns["sysconfig"], "get_path", lambda _: str(install))
+    monkeypatch.setattr(
+        ns["importlib"].util, "find_spec", lambda _: SimpleNamespace(origin="/immutable")
+    )
+    monkeypatch.setattr(ns["subprocess"], "check_output", lambda _: b"src/kdive/__init__.py\0")
+    if message is None:
+        ns["runtime"](source, "a" * 40)
+    else:
+        with pytest.raises(ValueError, match=message):
+            ns["runtime"](source, "a" * 40)
