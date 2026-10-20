@@ -547,6 +547,24 @@ def test_list_breakpoints_needs_the_address_inside_the_function(
     assert debugger.calls[-1][0] == "debug.end_session"
 
 
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"number": "1", "type": "hw watchpoint", "func": BREAK_AT, "addr": _RIP},
+        {"number": "1", "type": "breakpoint", "func": "ksys_read", "addr": _RIP},
+    ],
+    ids=["kind", "function"],
+)
+def test_list_breakpoints_needs_the_installed_kind_and_function(
+    row: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = {"number": "2", "type": "breakpoint", "func": "vfs_write", "addr": _VFS_WRITE[2]}
+    wrong = _ok("listed", count=2, breakpoints=[row, second])({})
+    debugger = _list_breakpoints(wrong, _listing(_VFS_WRITE))
+    with pytest.raises(AssertionError, match="breakpoint 1 is"):
+        _run("debug.list_breakpoints", debugger, monkeypatch)
+
+
 def test_list_breakpoints_needs_the_cleared_row_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     first = ("1", BREAK_AT, _RIP)
     debugger = _list_breakpoints(_listing(first, _VFS_WRITE), _listing(first))
