@@ -294,9 +294,17 @@ class _Fixture:
         )
 
     async def release_all(self) -> list[str]:
-        """Release every owned allocation still live; what could not be released."""
+        """Release every live allocation of the project; what could not be released.
+
+        The project is the cell's own, so a probe the product wrongly admitted is swept too.
+        """
         failed: list[str] = []
-        for allocation_id in self.owned:
+        live = await _rows(
+            self.db,
+            "SELECT id FROM allocations WHERE project = %s AND state = ANY(%s) ORDER BY created_at",
+            (self.project, _LIVE),
+        )
+        for allocation_id in dict.fromkeys([*self.owned, *(str(r["id"]) for r in live)]):
             try:
                 row = await _row(self.db, _ALLOCATION, allocation_id)
                 if row["state"] in _LIVE:
@@ -514,31 +522,45 @@ async def _wait_body(c: HttpCaller, g: Grants, *, db: str, project: str) -> dict
 
 async def _budget_body(c: HttpCaller, g: Grants, *, db: str, project: str) -> dict[str, object]:
     seeded = await _row(db, "SELECT limit_kcu, spent_kcu FROM budgets WHERE project = %s", project)
-    async with _fixture(c, project, db) as fx:
-        try:
-            allocation = (await fx.request()).object_id
-            spent = await _spent(db, project)
-            estimate = await _reserved(db, allocation, Decimal(1))
-            boundary = spent + estimate
-            for limit, admitted in ((boundary - _QUANTUM, False), (boundary, True)):
-                env = await _call(
-                    c, g, "accounting.set_budget", project=project, limit_kcu=str(limit)
-                )
-                assert_kcu(env.data["limit_kcu"], limit, "answered limit")
-                row = await _row(
-                    db, "SELECT limit_kcu, spent_kcu FROM budgets WHERE project = %s", project
-                )
-                assert Decimal(row["limit_kcu"]) == limit and Decimal(row["spent_kcu"]) == spent
-                await check_admission(fx, admitted)
-        finally:
-            await _call(
-                fx.setup,
-                _admin(project),
-                "accounting.set_budget",
-                project=project,
-                limit_kcu=str(seeded["limit_kcu"]),
+    restore = partial(_set_budget, c, project, str(seeded["limit_kcu"]))
+    async with _fixture(c, project, db) as fx, _restoring(restore):
+        allocation = (await fx.request()).object_id
+        spent = await _spent(db, project)
+        estimate = await _reserved(db, allocation, Decimal(1))
+        boundary = spent + estimate
+        for limit, admitted in ((boundary - _QUANTUM, False), (boundary, True)):
+            env = await _call(c, g, "accounting.set_budget", project=project, limit_kcu=str(limit))
+            assert_kcu(env.data["limit_kcu"], limit, "answered limit")
+            row = await _row(
+                db, "SELECT limit_kcu, spent_kcu FROM budgets WHERE project = %s", project
             )
+            assert Decimal(row["limit_kcu"]) == limit and Decimal(row["spent_kcu"]) == spent
+            await check_admission(fx, admitted)
         return {"boundary": str(boundary), "owned": fx.owned}
+
+
+async def _set_budget(c: HttpCaller, project: str, limit: str) -> None:
+    setup = HttpCaller("direct", c.base_url, c.issuer)
+    await _call(setup, _admin(project), "accounting.set_budget", project=project, limit_kcu=limit)
+
+
+async def _set_quota(c: HttpCaller, project: str, caps: Mapping[str, object]) -> None:
+    setup = HttpCaller("direct", c.base_url, c.issuer)
+    await _call(setup, _admin(project), "accounting.set_quota", project=project, **caps)
+
+
+@asynccontextmanager
+async def _restoring(restore: Callable[[], Awaitable[None]]) -> AsyncIterator[None]:
+    """Run ``restore`` on exit; its failure is noted on a primary failure, not raised over it."""
+    try:
+        yield
+    except BaseException as primary:
+        try:
+            await restore()
+        except Exception as exc:  # noqa: BLE001 - noted on the primary failure
+            primary.add_note(f"seeded limit restore failed: {type(exc).__name__}")
+        raise
+    await restore()
 
 
 async def check_admission(fx: _Fixture, admitted: bool) -> None:
@@ -559,30 +581,26 @@ async def check_admission(fx: _Fixture, admitted: bool) -> None:
 
 async def _quota_body(c: HttpCaller, g: Grants, *, db: str, project: str) -> dict[str, object]:
     seeded = await _row(db, _CAPS, project)
-    async with _fixture(c, project, db) as fx:
-        try:
-            wanted = {
-                "max_concurrent_allocations": 1,
-                "max_concurrent_systems": 0,
-                "max_pending_allocations": 1,
-            }
-            env = await _call(c, g, "accounting.set_quota", project=project, **wanted)
-            row = await _row(db, _CAPS, project)
-            assert dict(row) == wanted and {k: env.data[k] for k in wanted} == wanted
-            granted = (await fx.request()).object_id
-            args = {"project": project, "resource": {"mode": "kind"}, "window": 1, **_SIZE}
-            over = await _answer(fx.setup, _contributor(project), "allocations.request", **args)
-            assert over.error_category == ErrorCategory.QUOTA_EXCEEDED.value, "cap 1 admitted 2"
-            await fx.request(queue=True)
-            full = await _answer(
-                fx.setup, _contributor(project), "allocations.request", **args, on_capacity="queue"
-            )
-            assert full.error_category == ErrorCategory.QUOTA_EXCEEDED.value, "pending cap passed"
-            await check_system_quota(fx, granted)
-        finally:
-            await _call(
-                fx.setup, _admin(project), "accounting.set_quota", project=project, **seeded
-            )
+    restore = partial(_set_quota, c, project, seeded)
+    async with _fixture(c, project, db) as fx, _restoring(restore):
+        wanted = {
+            "max_concurrent_allocations": 1,
+            "max_concurrent_systems": 0,
+            "max_pending_allocations": 1,
+        }
+        env = await _call(c, g, "accounting.set_quota", project=project, **wanted)
+        row = await _row(db, _CAPS, project)
+        assert dict(row) == wanted and {k: env.data[k] for k in wanted} == wanted
+        granted = (await fx.request()).object_id
+        args = {"project": project, "resource": {"mode": "kind"}, "window": 1, **_SIZE}
+        over = await _answer(fx.setup, _contributor(project), "allocations.request", **args)
+        assert over.error_category == ErrorCategory.QUOTA_EXCEEDED.value, "cap 1 admitted 2"
+        await fx.request(queue=True)
+        full = await _answer(
+            fx.setup, _contributor(project), "allocations.request", **args, on_capacity="queue"
+        )
+        assert full.error_category == ErrorCategory.QUOTA_EXCEEDED.value, "pending cap passed"
+        await check_system_quota(fx, granted)
         return {"caps": wanted, "owned": fx.owned}
 
 

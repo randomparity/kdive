@@ -278,8 +278,37 @@ def test_fixture_release_continues_past_a_failed_release(monkeypatch: pytest.Mon
             raise ConnectionError("transport")
         released.append(allocation_id)
 
+    async def rows(_db: str, _query: str, _params: object = ()) -> list[dict[str, object]]:
+        return [{"id": "b"}, {"id": "stray"}]
+
     monkeypatch.setattr(carrier, "_row", row)
+    monkeypatch.setattr(carrier, "_rows", rows)
     monkeypatch.setattr(carrier._Fixture, "release", release)
     fixture = carrier._Fixture("p", "db", cast(HttpCaller, None), ["a", "b"])
     assert asyncio.run(fixture.release_all()) == ["a: ConnectionError"]
-    assert released == ["b"]
+    # A live allocation the fixture never recorded (an over-admitted probe) is swept too.
+    assert released == ["b", "stray"]
+
+
+def test_restore_failure_is_noted_on_the_primary_failure() -> None:
+    restored: list[bool] = []
+
+    async def restore() -> None:
+        restored.append(True)
+        raise ConnectionError("transport")
+
+    async def failing() -> None:
+        async with carrier._restoring(restore):
+            raise AssertionError("primary")
+
+    with pytest.raises(AssertionError, match="primary") as caught:
+        asyncio.run(failing())
+    assert restored == [True]
+    assert caught.value.__notes__ == ["seeded limit restore failed: ConnectionError"]
+
+    async def passing() -> None:
+        async with carrier._restoring(restore):
+            pass
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(passing())
