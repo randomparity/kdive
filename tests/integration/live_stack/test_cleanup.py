@@ -30,9 +30,12 @@ _XML = """<domain type='kvm'><devices>
 
 
 class _Client:
-    def __init__(self, *in_use: int, system: str = "torn_down") -> None:
+    def __init__(
+        self, *in_use: int, system: str = "torn_down", released_before: bool = False
+    ) -> None:
         self.in_use = list(in_use)
         self.system = system
+        self.released = released_before
         self.calls: list[str] = []
 
     def _next_in_use(self) -> int:
@@ -52,7 +55,10 @@ class _Client:
             return ToolResponse.failure(
                 "x", ErrorCategory.PROVISIONING_FAILURE, data={"current_status": "failed"}
             )
-        status = {"systems.get": self.system, "allocations.wait": "released"}.get(name, "ok")
+        if name == "allocations.release":
+            self.released = True
+        allocation = "released" if self.released else "granted"
+        status = {"systems.get": self.system, "allocations.wait": allocation}.get(name, "ok")
         return ToolResponse.success("x", status)
 
 
@@ -106,8 +112,33 @@ def test_verified_cleanup_reports_every_observation(tmp_path: Path) -> None:
         "domain": "absent",
         "disks_absent": 1,
         "in_use": [0, 1, 0],
+        "released_by": "frame",
     }
-    assert client.calls[:2] == ["resources.availability", "allocations.release"]
+    assert client.calls[:3] == ["allocations.wait", "resources.availability", "allocations.release"]
+
+
+def test_an_allocation_the_body_released_is_proven_without_a_second_release() -> None:
+    client = _Client(0, released_before=True)
+    result = _verify(client, [])
+    assert (result["released_by"], result["in_use"]) == ("body", [0, None, 0])
+    assert "allocations.release" not in client.calls
+    assert "systems.get" in client.calls
+
+
+def test_a_body_released_allocation_still_waits_for_torn_down() -> None:
+    with pytest.raises(AssertionError):
+        _verify(_Client(0, system="ready", released_before=True), [])
+
+
+def test_a_body_released_allocation_still_proves_absence(tmp_path: Path) -> None:
+    disk = tmp_path / "overlay.qcow2"
+    disk.write_bytes(b"x")
+    with pytest.raises(AssertionError, match="disk"):
+        _verify(_Client(0, released_before=True), [str(disk)])
+    with pytest.raises(AssertionError, match="domain"):
+        _verify(_Client(0, released_before=True), [], defined=True)
+    with pytest.raises(AssertionError, match="not the 0 held before"):
+        _verify(_Client(1, released_before=True), [])
 
 
 def test_a_failed_system_is_released_without_a_teardown() -> None:
