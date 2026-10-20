@@ -727,6 +727,63 @@ so did the 4 crash-watch functional cells. The 8 others recorded `failure` and a
 No record or artifact carried a host name or address. After the run, `demo-down.sh --wipe --yes`
 cleared the stack, the provider defined no `kdive-` domain and its pool held only the base volumes.
 
+## 13. Remote capture and introspection tool cells (#3114)
+
+`tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell` also carries the 180
+x86_64 remote-libvirt cells of `control.force_crash`, `vmcore.fetch`, `introspect.from_vmcore`,
+`introspect.run`, `introspect.script` and `postmortem.crash`. That is 28 functional, 8
+unsupported and 144 rejection cells over two configurations and two exposures; `-k remote-libvirt`
+selects them. The bodies and rejection boundaries are the local cells' of the
+[live-testing runbook](live-testing.md), on the remote lane of "Remote System tool cells (#3080)".
+The [design](../../workflow/specs/2026-10-20-remote-capture-tool-cells-design.md) lists what
+differs:
+
+- The crash options edit the profile's `remote-libvirt` section: `kdump` reserves `crashkernel`,
+  `host_dump` sets `host_dump: true`, and every crashing cell opts into `force_crash`.
+- `vmcore.fetch` with `console` or `gdbstub` produces no core, so those 8 cells are `unsupported`
+  ([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md),
+  2026-10-20). Each crashes its own fixture System and proves the handler's refusal through the
+  cell's exposure: `configuration_error`, "method does not produce a vmcore", no job, and the
+  System still `crashed`.
+- A remote `host_dump` capture owns `kdive-host-dump-<system>.kdump` in the provider's pool before
+  the capture starts, and proves it absent right after the capture and again after release.
+- The `introspect.run` and `introspect.script` functional cells record `blocked` on #3124 before
+  provisioning: remote guests do not receive the uploaded `vmlinux`, so drgn-live in the guest
+  cannot resolve kernel symbols. Their rejection cells run.
+- Rejection cells aim at one torn-down remote fixture System per stack, whose Run opened and ended a
+  drgn-live session. Its protected state is the project's rows, the jobs naming the System or Run
+  and the domain's definedness on the provider host.
+
+Prerequisites are those of "Remote power, snapshot and control tool cells (#3116)". In addition,
+`control.force_crash` reads the panic from the serial console. The image role writes the serial
+GRUB console into `fedora-kdive-remote-base-43` only since #3236, and it skips a base that is
+already staged. Rebuild an older one with `deploy/ansible/playbooks/image.yml -e
+force_image_rebuild=true`.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix REMOTE_PROVIDER_SSH=<user>@<provider-host>
+export KDIVE_SYSTEMS_TOML=<the stack's systems.toml> KDIVE_S3_ENDPOINT_URL=<guest-reachable URL>
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
+examples/local-libvirt/demo-up.sh             # default configuration, on a wiped stack
+uv run python -m pytest -m live_stack -k remote-libvirt \
+  tests/integration/test_capture_tool_cells_live.py
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack -k remote-libvirt \
+  tests/integration/test_capture_tool_cells_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Each configuration records 90 cells and skips the other configuration's 90. A remote kdump,
+console or dump-volume failure is a failing cell, not a skipped one. After the run,
+`demo-down.sh --wipe --yes` clears the stack. Then check the provider: `virsh list --all` shows no
+`kdive-` domain, and the pool holds no `kdive-` overlay or `kdive-host-dump-` volume.
+
 ## SUSE native image proof
 
 On untouched first boot, record the completed JeOS marker, skipped wizard units,
