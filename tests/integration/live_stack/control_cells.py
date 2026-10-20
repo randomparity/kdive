@@ -60,11 +60,12 @@ from tests.integration.live_stack.capture_cells import (
     named_jobs,
 )
 from tests.integration.live_stack.image_smoke import ssh
-from tests.integration.live_stack.power_snapshots import Connect, domain_defined, grants
+from tests.integration.live_stack.power_snapshots import domain_defined, grants
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.integration.live_stack.spine import full_artifact_text, ok, scalar
 from tests.integration.live_stack.tool_cells import (
     Boundary,
+    Connect,
     Guest,
     HttpCaller,
     Rejection,

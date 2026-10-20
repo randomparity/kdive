@@ -47,6 +47,7 @@ from tests.integration.live_stack.scenario import (
 from tests.integration.live_stack.spine import drain_job, ok, scalar
 from tests.integration.live_stack.tool_cells import (
     Boundary,
+    Connect,
     Grants,
     Guest,
     HttpCaller,
@@ -84,7 +85,6 @@ STATE_PROBE = (
     '[ -n "$pid" ] && start=$(cut -d" " -f22 /proc/"$pid"/stat 2>/dev/null); '
     'printf "process=%s:%s\\n" "$pid" "$start"'
 )
-Connect = Callable[[], libvirt.virConnect]
 _STATES = {
     libvirt.VIR_DOMAIN_RUNNING: "running",
     libvirt.VIR_DOMAIN_PAUSED: "paused",

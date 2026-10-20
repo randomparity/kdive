@@ -24,7 +24,7 @@ from tests.integration.live_stack.power_snapshots import (
     seed_command,
 )
 from tests.integration.live_stack.scenario import CellRun
-from tests.integration.live_stack.tool_cells import Grants, Guest, HttpCaller, LaneTarget
+from tests.integration.live_stack.tool_cells import Connect, Grants, Guest, HttpCaller, LaneTarget
 
 _CHECKPOINT = GuestState("boot-a", "d0", "r0", "41:900")
 _MUTATED = GuestState("boot-a", "d1", "r1", "41:900")
@@ -212,7 +212,7 @@ def test_a_failed_job_still_owns_the_disks_it_switched_to(
     assert owned == ["base", "overlay-2"]
 
 
-def _connect(conn: object) -> power_snapshots.Connect:
+def _connect(conn: object) -> Connect:
     """A ``connect`` answering the fake ``conn``."""
     return lambda: cast(Any, conn)
 

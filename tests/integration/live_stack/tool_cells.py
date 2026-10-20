@@ -814,6 +814,9 @@ def lane_image() -> tuple[str, RootfsCatalogEntry]:
     return name, load_rootfs_catalog()[name]
 
 
+Connect = Callable[[], libvirt.virConnect]
+
+
 def worker_connect() -> libvirt.virConnect:
     """The worker's own libvirt: the local lane's provider."""
     return libvirt.open(worker_libvirt_uri())
@@ -883,7 +886,7 @@ class Lane:
     xml: Callable[[str], str]
     absent: Callable[[str], bool]
     frame: LaneFrame
-    connect: Callable[[], libvirt.virConnect]
+    connect: Connect
     spool: Callable[[str, str], str]
     installed_kernel: InstalledKernel
 
