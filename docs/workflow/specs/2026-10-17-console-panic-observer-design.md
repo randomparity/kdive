@@ -252,7 +252,9 @@ generation, consecutive parts after the baseline high-water mark, unchanged rule
    `panic_seen`. The first `Command line:` record after that banner must carry `elfcorehdr=` as
    a parameter, and the record must be complete (newline-terminated). Only kexec into a
    crash-dump kernel passes `elfcorehdr=`. A normal boot or reboot into the fixture kernel does
-   not, so it cannot satisfy this form.
+   not, so it cannot satisfy this form. The `Command line:` record is x86's (`setup_arch`);
+   force-crash cells run only on x86_64 today, and another arch would match its
+   `Kernel command line:` record instead.
 
 Anything else stays a failure: no marker, a normal fixture boot, a banner for another release,
 a release-prefix collision, a crash-kernel command line before any banner, an unterminated

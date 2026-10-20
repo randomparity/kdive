@@ -121,7 +121,8 @@ _LANE_KEYS = ("guest_os", "guest_arch", "accelerator", "image_sha256")
 PANIC = "Kernel panic - not syncing"
 # The panic's dump_stack ``CPU:`` record follows it within a few lines.
 _PANIC_LINES = 8
-# kexec hands a crash-dump kernel its ELF core header address on the command line.
+# kexec hands a crash-dump kernel its ELF core header address on the command line. Only x86's
+# setup_arch prints a `Command line:` record; other arches would need `Kernel command line:`.
 _CRASH_KERNEL_CMDLINE = re.compile(r"Command line:(?:.*\s)?elfcorehdr=\S")
 # VMCOREINFO sits right after a core's headers: QEMU's ELF note, makedumpfile's sub-header block.
 _CORE_PREFIX = 16 << 20
@@ -468,7 +469,7 @@ class Session:
 
 
 async def force_crash_body(s: Session) -> dict[str, object]:
-    """The exposed crash: job success, durable ``crashed``, and the panic on the console."""
+    """The exposed crash: job success, durable ``crashed``, and crash evidence on the console."""
     await s.armed()
     observation = ConsoleObservation()
     failure: BaseException | None = None
