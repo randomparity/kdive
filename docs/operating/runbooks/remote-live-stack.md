@@ -630,7 +630,10 @@ what differs:
   on the provider host through §7's observer. The QMP read is a monitor command, so the observer
   account needs read-write libvirt access, not a read-only connection.
 - A remote capture writes `kdive-pcap-<system>-<job>.pcap` into the provider's storage pool;
-  the cell owns that volume and the cleanup proves it absent. The synthetic flow goes to the
+  the cell owns that volume and the cleanup proves it absent. The cell derives the name from the
+  job id the way the capturer does and never sees the volume present, so a capturer that named
+  it differently would pass that check vacuously: the provider check after the run is the
+  backstop. The synthetic flow goes to the
   guest's libvirt-network default gateway, the NIC a remote capture taps; the user-mode SSH NIC
   is not captured.
 - Disk-only snapshots and their restore may create overlay volumes beside the System's overlay;
