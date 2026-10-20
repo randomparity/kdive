@@ -48,8 +48,9 @@ Verification (all: `uv run pytest tests/integration/live_stack/test_tool_cells.p
   + stdout `'x' is not positively classified …`; `LiveStackToolError` for exit 1 + `error: boom`.
   `rejected_by_validation("cli", CliUsageError(...))` is `True`; for `"gateway"` it stays `False`.
 - focused-test — denial: `prove_rejection` on an `authorization` cell with a `CliCaller` whose
-  runner answers `CliTierRefusal` records `rejected` `{"tool_error": True, ...}` with category
-  `authorization_denied`.
+  runner answers `CliTierRefusal` (and `_catalog` monkeypatched to omit the tool) records
+  `rejected` `{"tool_error": True, ...}` with category `authorization_denied`; with `_catalog`
+  listing the tool the call raises `AssertionError` naming it.
 - focused-test — authentication: `prove_rejection` with a `CliCaller` and boundary
   `authentication` records `{"exit": 1, "diagnostic": "authentication-failed", ...}` when the fake
   runner answers the forged token with the diagnostic; it fails when the issued token also does,
@@ -256,7 +257,15 @@ class CliCaller(HttpCaller):
     ) -> ToolResponse | list[ToolResponse]:
         argv = cli_argv(tool, args)
         _check_exact(tool, argv, args)
-        return _result(tool, argv, await run_kdivectl(argv, token=token, base_url=self.base_url))
+        done = await run_kdivectl(argv, token=token, base_url=self.base_url)
+        try:
+            return _result(tool, argv, done)
+        except CliTierRefusal:
+            # UNKNOWN also answers a listed tool with bad annotations; only a hidden one is denied.
+            assert tool not in await _catalog(self.base_url, token), (
+                f"kdivectl refused listed {tool}"
+            )
+            raise
 
     async def authenticate(
         self, tool: str, args: Mapping[str, object], genuine: str
@@ -276,6 +285,12 @@ class CliCaller(HttpCaller):
             "token": "foreign-signature",
             "issued_token_exit": control.code,
         }
+
+
+async def _catalog(base_url: str, token: str) -> set[str]:
+    transport = StreamableHttpTransport(url=base_url, headers={"Authorization": f"Bearer {token}"})
+    async with Client(transport) as client:
+        return {tool.name for tool in await client.list_tools()}
 
 
 def caller_for(exposure: str, base_url: str, issuer: OidcIssuer) -> HttpCaller:
@@ -312,7 +327,9 @@ Verification: task-test-not-applicable — each entry-point edit swaps
 `await _end_runs(http_caller(c), project, db, inv.id)`, so owned-Run cleanup never depends on a
 verb translation. These are live-only call sites whose selection and fallback Task 1's tests
 cover; `just type` and `just lint` confirm them (drop `Exposure`/`cast` imports where unused). The
-runbook sentence gains "or `cli` for the core service tools (ADR-0795)". Run
+runbook sentence at `:1135` gains "or `cli` for the core service tools (ADR-0795)", and its
+current per-carrier cell counts at `:1134`, `:1190` and `:1233` (56, 152, 260) become 84, 228
+and 390; its recorded past-run results stay as written. Run
 `uv run pytest tests/integration/live_stack -q` → passed (live cells skip with no stack). Commit
 `test(live-stack): select the cell's caller in the core carriers`.
 
@@ -336,6 +353,10 @@ Verification:
 - focused-test — filtered pairs: in `test_filtered_list_boundaries_are_the_adr_named_pairs`
   (`test_coverage_contract.py:606`) restrict the existing assertions to `direct`/`gateway` and
   assert the six `cli` twins of the `investigations.list`/`artifacts.list` pairs, owner 3099.
+- focused-test — existing counts: in `test_coverage_contract.py` the per-carrier counts at
+  lines 268, 270, 272, 311 and 313 (56, 152, 260, 220, 220) become 84, 228, 390, 330 and 330,
+  since each carrier's node now carries its `cli` twins. Red before the TOML edit is reversed:
+  the new numbers fail until `cli = true` lands.
 - task-test-not-applicable — the ADR status and amendment edits: prose with no executable
   consumer beyond `just records`, which `just ci` runs.
 
