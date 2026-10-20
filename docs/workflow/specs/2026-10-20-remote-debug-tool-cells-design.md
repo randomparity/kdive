@@ -61,6 +61,9 @@ host keys, which can fold into #3114's `capture_cells` helpers once both land.
    carries `transport: {after, attached, sessions_open: 0}`. A server not on this host fails the
    calibration rather than passing vacuously. The calibration runs inside the body's
    `try/finally`, so a failed check still ends its session.
+   Remote drgn-live holds no socket of its own: it reaches the guest through the guest agent
+   (`remote_libvirt/lifecycle/connect.py`), so for its cells the transport proof is the Run's
+   session rows reading `detached`.
 5. **Rejection target per provider.** `_TARGETS` keys on `(base_url, provider)`. On the remote
    lane the target keeps the provider host's `host_os`/`host_arch` beside its lane keys.
    `snapshot_of(db_url, target, connect)` reads `domain_defined(system_id, connect)` through the
