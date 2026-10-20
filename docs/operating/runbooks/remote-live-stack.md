@@ -608,6 +608,69 @@ delay ended all three attempts `boot_timeout`, each retry waiting out the still-
 before its baseline read. `insufficient-disk` left 60 KiB available; the worker logged the
 overlay-create refusal and the job failed `provisioning_failure` with no partial volume.
 
+## 11. Remote power, snapshot and control tool cells (#3116)
+
+`tests/integration/test_power_snapshot_tool_cells_live.py::test_power_snapshot_tool_cell` and
+`tests/integration/test_control_tool_cells_live.py::test_control_tool_cell` also carry the 160
+x86_64 remote-libvirt cells of `control.power`, `systems.snapshot`, `systems.restore`,
+`systems.list_snapshots`, `systems.delete_snapshot`, `control.capture_traffic`,
+`control.diagnostic_sysrq` and `control.watch_for_crash`: two configurations, two exposures, one
+functional and four rejection cells each. Remote-libvirt supports every gated capability, so no
+capability cell exists ([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md),
+2026-10-13). Their parameter ids contain `remote-libvirt`, so `-k remote-libvirt` selects them.
+The bodies and rejection boundaries are the local cells' of the
+[live-testing runbook](live-testing.md), on §8's remote lane; the
+[design](../../workflow/specs/2026-10-20-remote-power-snapshot-control-cells-design.md) lists
+what differs:
+
+- Every functional cell provisions `fedora-kdive-remote-base-43`, installs and boots the
+  `longterm` fixture in the guest (the installed kernel is the digest of the guest's
+  `/boot/vmlinuz-<release>`), then runs its tool's sequence.
+- Domain state, native checkpoints, the QMP capture-filter list and domain definedness are read
+  on the provider host through §7's observer. The QMP read is a monitor command, so the observer
+  account needs read-write libvirt access, not a read-only connection.
+- A remote capture writes `kdive-pcap-<system>-<job>.pcap` into the provider's storage pool;
+  the cell owns that volume and the cleanup proves it absent. The synthetic flow goes to the
+  guest's libvirt-network default gateway, the NIC a remote capture taps; the user-mode SSH NIC
+  is not captured.
+- Disk-only snapshots and their restore may create overlay volumes beside the System's overlay;
+  the cell owns each one it sees in the domain XML.
+- Power and snapshot rejection cells aim at §8's remote System target. Control rejection cells
+  aim at one torn-down remote System per stack whose Run booted the fixture; its protected state
+  is the project's rows, the jobs naming the System or Run and the domain's definedness on the
+  provider host.
+
+Prerequisites are §9's: §8's lane, a verified `longterm` fixture under `KDIVE_FIXTURE_ROOT`,
+and `KDIVE_S3_ENDPOINT_URL` set to an object-store address the remote guests reach (§3), with
+§7's `DOCKER-USER` rule if the provider host runs Docker.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix REMOTE_PROVIDER_SSH=<user>@<provider-host>
+export KDIVE_SYSTEMS_TOML=<the stack's systems.toml> KDIVE_S3_ENDPOINT_URL=<guest-reachable URL>
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
+examples/local-libvirt/demo-up.sh             # default configuration, on a wiped stack
+uv run python -m pytest -m live_stack -k remote-libvirt \
+  tests/integration/test_power_snapshot_tool_cells_live.py \
+  tests/integration/test_control_tool_cells_live.py
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack -k remote-libvirt \
+  tests/integration/test_power_snapshot_tool_cells_live.py \
+  tests/integration/test_control_tool_cells_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Each configuration records 80 cells, 16 functional and 64 rejection, and skips the other
+configuration's 80. A remote disk-only revert, memory-snapshot or pcap fetch-back failure is a
+failing cell, not a skipped one. After the run, `demo-down.sh --wipe --yes` clears the stack.
+Then check the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no
+`kdive-` overlay, snapshot overlay or `kdive-pcap-` volume.
+
 ## SUSE native image proof
 
 On untouched first boot, record the completed JeOS marker, skipped wizard units,
