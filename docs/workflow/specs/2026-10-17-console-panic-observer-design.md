@@ -219,3 +219,85 @@ generation on growth and bumping it on prepare+regrow; a nonce from both truncat
 symlinked, FIFO, foreign-owned, oversized and malformed marker degrading to an empty nonce; and
 the unchanged stat-failure degradation. ADR-0576 gains an amendment. The genuine force-crash cell is
 the end-to-end proof.
+
+## Amendment 2 (2026-10-20): crash-kernel evidence on kdump-armed guests
+
+### Evidence
+
+The rerun with amendment 1 deployed kept the console identity stable through the crash: about
+25 rotations after the crash carried the same nonce, and the only generation change was the
+cell's own reboot into the fixture kernel. It still failed (`deadline`). The serial log runs from
+the login prompt straight into the kdump crash kernel's boot banner (`kdive login: [ 0.000000]
+Linux version 6.18.54-g1b357ecb3213 …`). Its next record is `Command line: elfcorehdr=0x… …
+irqpoll nr_cpus=1 reset_devices …`, and the log later reaches `kdump[…]: saving vmcore
+complete`. It has no `Kernel panic`, `sysrq` or `panic` text at all. With kdump loaded, the
+crashing kernel enters the crash kernel before its console output is flushed, so the panic
+exists only in the dump.
+
+The one eligible post-crash part (`console-part-1-000001`, 61,440 bytes read in four windows)
+holds that banner and the `elfcorehdr=` command line. It does not hold the saved line. A part
+seals only when 64 KiB are pending, minus the 4 KiB held back (`rotation.py`). The kdump final
+action powers the guest off about 3.8 KB after the saved line, so the tail is never sealed. A
+contract that waits for the saved line cannot pass.
+
+### Contract
+
+The force-crash observation accepts, in this order, over the closed post-crash stream (same
+generation, consecutive parts after the baseline high-water mark, unchanged rules 1–6):
+
+1. **Console panic:** unchanged `panic_seen`. The panic marker, and the fixture release on its
+   `CPU:` record within the existing line window.
+2. **Crash kernel:** a kernel boot banner `[    0.000000] Linux version <release>`. It may start
+   mid-line after an unterminated prompt, and the release must match exactly, bounded as in
+   `panic_seen`. The first `Command line:` record after that banner must carry `elfcorehdr=` as
+   a parameter, and the record must be complete (newline-terminated). Only kexec into a
+   crash-dump kernel passes `elfcorehdr=`. A normal boot or reboot into the fixture kernel does
+   not, so it cannot satisfy this form.
+
+Anything else stays a failure: no marker, a normal fixture boot, a banner for another release,
+a release-prefix collision, a crash-kernel command line before any banner, an unterminated
+command line, or a generation change (`generation_change`). Kexec into the crash kernel does not
+pass through a start path, so it keeps the console generation under amendment 1.
+
+`force_crash_body` passes the combined predicate to the observer. It then re-checks the
+returned stream with the same predicate and classifies the form. The result records
+`crash_evidence: "console_panic" | "crash_kernel"` in place of the former `console_panic`
+flag; the only reader is the scenario's own unit test.
+
+What each form proves:
+
+- The crashed kernel's identity is already bound before the crash by the cell's boot-identity
+  check and `armed()`.
+- The banner binds the crash kernel's release. On this fixture that is the fixture kernel,
+  because it loads itself as its crash kernel.
+- Form 2 shows the crash entered kdump's capture kernel. It does not show that the dump was
+  written; the vmcore cells own dump capture and fetch.
+- Reading the panic from the dump's dmesg is not part of this cell.
+
+### Residuals
+
+- A generation starts at truncation, so its boot banner is in part index 0, which is always in
+  the baseline (an empty baseline fails, rule 1). The carry ahead of the first post-crash part
+  is therefore later output of the same boot. That boot's own banner has no `elfcorehdr=`.
+  Only an earlier crash-kernel boot in the same generation could satisfy form 2 early. The cell
+  boots a fresh generation and crashes once.
+- The guest is the harness's own fixture. Guest user space printing a fake banner and command
+  line to the serial console is an accepted residual.
+- Production console panic detection has the same blind spot on kdump-armed guests. The
+  live-testing runbook records it; changing production detection is out of scope.
+
+### Validation
+
+Red-green tests use sanitized excerpts of real console content:
+
+- **Rerun's sealed post-crash part:** must match form 2. The predicate is also run over the
+  retained observation records of that run, to show it would have passed.
+- **First run's pre-crash boot snapshot:** has the fixture banner with a normal command line
+  and must not match.
+
+Negative cases also cover:
+
+- a part that ends inside the `Command line:` record;
+- a banner for another release, or a release prefix;
+- a crash-kernel command line before any banner;
+- kdump text without a banner, such as `saving vmcore-dmesg.txt complete`.
