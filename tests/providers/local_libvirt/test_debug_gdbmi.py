@@ -1011,6 +1011,22 @@ def test_interrupt_without_a_stop_is_a_transport_stall_and_stays_running(tmp_pat
     assert attachment.execution == "running"
 
 
+def test_a_refused_interrupt_fails_at_once_and_stays_running(tmp_path: Path) -> None:
+    error: dict[str, object] = {
+        "type": "result",
+        "message": "error",
+        "payload": {"msg": "Remote connection closed"},
+    }
+    controller = _FakeMiController(responses={"-exec-interrupt": [error]})
+    attachment = _running_attachment(controller, tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        _engine().interrupt(attachment)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "interrupt_refused"
+    assert controller.read_timeouts == []  # no stop wait after a refusal
+    assert attachment.execution == "running"
+
+
 @pytest.mark.parametrize(
     ("execution", "halted_by"), [("attach_halted", "attach"), ("halted", "already_halted")]
 )

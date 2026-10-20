@@ -68,18 +68,17 @@ Clear a watchpoint by number on a live DebugSession. Requires contributor.
 Resume a live DebugSession. Requires contributor. With wait=True (default) it waits
 for a stop event and returns status 'stopped' with the stop's reason; a wait that ends
 without one interrupts the guest back and returns timed_out=True, so the call can hold
-the session for the wait plus up to 20 seconds (80 seconds at
-most). With wait=False it resumes and returns status 'running' at once, leaving the
-guest running after the call, or 'stopped' if the resume already reported a stop. While
-the guest runs, every other debug tool except debug.interrupt and debug.continue refuses
-with debug_attach_failure code inferior_running and sends nothing to the guest. A stop
-that ends the run (for example a breakpoint) is reported only by the next
-debug.interrupt or debug.continue with wait=True, which waits for that stop without
-resuming again; debug.continue with wait=False on a running guest returns 'running'
-again. Another call on the same session, debug.interrupt included, waits while a
-wait=True continue is in progress; use wait=False when you need to break in. A
-transport_stall failure leaves the guest's state unknown: call debug.interrupt again or
-debug.end_session.
+the session for up to 90 seconds. With wait=False it resumes and returns
+status 'running' at once, leaving the guest running after the call, or 'stopped' if the
+resume already reported a stop. While the guest runs, every other debug tool except
+debug.interrupt and debug.continue refuses with debug_attach_failure code
+inferior_running and sends nothing to the guest. A stop that ends the run (for example a
+breakpoint) is reported only by the next debug.interrupt or debug.continue with
+wait=True, which waits for that stop without resuming again; debug.continue with
+wait=False on a running guest returns 'running' again. Another call on the same session,
+debug.interrupt included, waits while a wait=True continue is in progress; use
+wait=False when you need to break in. A transport_stall failure leaves the guest's state
+unknown: call debug.interrupt again or debug.end_session.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -138,8 +137,10 @@ names it); 'attach' when the guest was halted by gdb attaching to it on this ses
 first debug call; 'already_halted' when nothing was running. 'attach' and
 'already_halted' send nothing to the guest and return at once. The guest runs between
 calls only after debug.continue with wait=False. If a running guest reports no stop the
-call fails with infrastructure_failure code transport_stall after up to 20 seconds and
-the guest's state is unknown; call debug.interrupt again or debug.end_session.
+call fails with infrastructure_failure code transport_stall after up to 20 seconds
+and the guest's state is unknown; call debug.interrupt again or debug.end_session. If
+gdb refuses the interrupt the call fails with debug_attach_failure code
+interrupt_refused; end the session.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

@@ -54,7 +54,7 @@ from kdive.providers.ports.debug import (
 from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.shared.debug_common.gdbmi.core.engine import (
     HALT_BOUND_SEC,
-    MAX_INTERACTIVE_WAIT_SEC,
+    RESUME_HOLD_BOUND_SEC,
 )
 from kdive.providers.shared.debug_common.gdbmi.core.execution import inferior_running
 from kdive.providers.shared.debug_common.gdbmi.policy.capabilities import (
@@ -74,6 +74,7 @@ _log = logging.getLogger(__name__)
 _RECOVERY_ACTIONS: dict[str, tuple[str, ...]] = {
     "inferior_running": ("debug.interrupt", "debug.continue"),
     "transport_stall": ("debug.interrupt", "debug.end_session"),
+    "interrupt_refused": ("debug.end_session",),
 }
 
 
@@ -140,7 +141,7 @@ def with_halt_bounds[F: Callable[..., object]](func: F) -> F:
         raise AssertionError("a debug wrapper that states halt bounds must have a docstring")
     func.__doc__ = func.__doc__.format(
         halt_s=f"{HALT_BOUND_SEC:g}",
-        continue_hold_s=f"{MAX_INTERACTIVE_WAIT_SEC + HALT_BOUND_SEC:g}",
+        continue_hold_s=f"{RESUME_HOLD_BOUND_SEC:g}",
     )
     return func
 

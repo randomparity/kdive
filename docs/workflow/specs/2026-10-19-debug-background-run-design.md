@@ -134,7 +134,7 @@ watchpoints, memory, registers, symbols, stack, disassembly and modules.
   - A stop that ends a run is reported only by the next `debug.interrupt` or
     `debug.continue(wait=true)`.
   - A waiting `debug.continue` holds the session until its stop, or until its wait plus the
-    interrupt-back, which is about 80 seconds at most. An interrupt waits during that time.
+    interrupt-back, which is about 90 seconds at most. An interrupt waits during that time.
   - `debug.end_session` states that ending a running session first halts it, adding up to about
     20 seconds.
   - The read tools' existing "target must already be stopped" sentences stay true and are left
@@ -204,7 +204,7 @@ stalled, it adds `data.guest_execution="unknown"` to the detached reply.
    - guest execution after `end_session` (the existing detach-resumes contract).
    - the published tool contract (`debug.continue`, `debug.interrupt`, `debug.end_session`).
 3. Accepted failure classes
-   - an interrupt waits behind a waiting continue for up to about 80 s. That is bounded and
+   - an interrupt waits behind a waiting continue for up to about 90 s. That is bounded and
      documented, and `wait=false` is the interruptible form.
    - a server restart loses the state along with the attachment. The next attachment halts the
      guest and reports `attach`, which is the existing ADR-0034 decision 1 behavior.

@@ -47,7 +47,7 @@ An agent can let the kernel run for as long as it likes, drive a workload with o
 then break in. A stop that ends a run is reported by the next `debug.interrupt` or
 `debug.continue`, never by other operations, which refuse until then. A waiting
 `debug.continue` still holds the lock, so an interrupt queues behind it for its wait plus the
-interrupt-back (about 80 seconds at most). A cancelled request now keeps the session busy until
+interrupt-back (about 90 seconds at most). A cancelled request now keeps the session busy until
 its engine call returns. The state is process-local like the attachment it sits on: a server
 restart loses it and the next attachment halts the guest again. No schema, migration or
 lifecycle protocol changes.

@@ -113,6 +113,15 @@ class ExecutionControl:
         self._engine.append_transcript(attachment.transcript_path, "-exec-interrupt", records)
         stop = self._stop_from_records(attachment, records)
         if stop is None:
+            result = MiRecord.first_result(records)
+            if result is not None and result.message == "error":
+                # gdb refused (its target is gone, say): no stop will follow, so do not wait
+                # out the stop bound and call it a stalled link. The state stays `running`.
+                raise CategorizedError(
+                    "gdb/MI refused the interrupt; end the session",
+                    category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                    details={"code": "interrupt_refused", "command": "-exec-interrupt"},
+                )
             stop = self.wait_for_stop(attachment, timeout_sec=INTERRUPT_STOP_TIMEOUT_SEC)
         return self._engine.redact_stop(stop) if stop is not None else None
 
