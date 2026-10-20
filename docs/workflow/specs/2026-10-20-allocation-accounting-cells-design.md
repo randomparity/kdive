@@ -26,36 +26,47 @@ ADR-0212 report retention, ADR-0715 evidence). Reserved ADR 0790 is unused.
   inject faults into the carrier's assertion predicates.
 - `scripts/coverage_campaign/obligations.toml` — 55 `tool/<name>/default/<scenario>` bindings.
 - `tests/integration/live_stack/tool_cells.py` — `_empty_page` gains `allocations.list`.
-- `tests/integration/live_stack/authority_lane.py` — `_cleanup` accepts an allocation the
-  body already released (release cell only; see Release).
+- `tests/integration/live_stack/cleanup.py` — `release_and_verify` accepts an allocation
+  the body already released (release cell only; see Release). This replaces the
+  `authority_lane.py` frame change the scope named, and is an operator decision (D1).
 
 Reused seams: `HttpCaller`, `Grants`, `prove_functional`, `prove_rejection`,
-`FilteredListControl`, `project_state`, `on_lane_system`, `on_authority_system`,
-`seed_metering`, `capacity_in_use`, `service_cells` grants and `_rows`.
+`FilteredListControl`, `project_state`, `on_lane_system`, `seed_metering`,
+`capacity_in_use`, `release_and_verify`, `service_cells` grants and `_rows`.
 
 ## Fixtures and snapshot
 
 Each cell uses a fresh `cov-<hex>` project. Admission is fail-closed without budget and
-quota rows, so setup seeds them (`seed_metering`, plus `max_pending_allocations` where a
-cell queues) *before* the cell's snapshot. Allocations are small (1 vCPU, 1 GiB, minimal
-disk, `resource={"mode": "kind"}`), hold capacity only, and never provision.
+quota rows, so setup seeds them *before* the cell's snapshot: `seed_metering`, plus a
+carrier-local `_seed_pending(db, project, n)` upsert of `quotas.max_pending_allocations`
+on the same harness DSN where a cell queues (`seed_metering` leaves it at 0, which refuses
+every queued request). Allocations are small (1 vCPU, 1 GiB, minimal disk,
+`resource={"mode": "kind"}`, explicit `window`), hold capacity only, and never provision.
 
 The accounting snapshot `_accounting_state(db, project)` is `project_state` with four
-tables narrowed under ADR-0722 §4:
+tables narrowed under ADR-0722 §4 (projections exclude `updated_at`, which the tables'
+triggers move on every update):
 
 - `allocations` → live rows only (`requested`, `granted`, `active`, `releasing`);
-- `ledger` and terminal allocations are history: retained, never deleted, excluded;
-- `budgets` → `limit_kcu` only (`spent_kcu` is the ledger's running total, history);
-- `quotas` → all caps.
+- `ledger` → rows of those live allocations; rows of terminal allocations are history,
+  retained and never deleted;
+- `budgets` → `limit_kcu`, `spent_kcu`. A never-active grant's release credits its whole
+  reservation, so these cells end at the seeded `spent_kcu`;
+- `quotas` → the three cap columns.
 
-A cell that changes a limit or cap restores the seeded value before it returns, so
-`cleanup` is the unchanged narrowed snapshot plus, for allocating cells, the granted
-resource's `in_use` back at its pre-cell value.
+A rejected call that writes a ledger row, moves `spent_kcu` or changes a cap therefore
+changes the snapshot. A cell that changes a limit or cap restores the seeded value before
+it returns, so `cleanup` is the unchanged narrowed snapshot plus, for allocating cells, the
+granted resource's `in_use` back at its pre-cell value. Lane-System cells (usage,
+reports.generate, release) use their frame's own cleanup proof.
 
-Independent observations read durable rows on a read-only session (`_rows`); expected
-KCU values are computed in the test from `cost_class_coefficients.coeff` and the documented
-formula `coeff × A(accel) × (vcpus + 0.25·memory_gb) × hours` (A: kvm 1.0, tcg 4.0),
-quantized to 0.0001, never by importing the product's cost functions.
+Independent observations read durable rows on a read-only session (`_rows`). Expected KCU
+is computed in the test, never by importing the product's cost functions:
+`rate = coeff × A × (vcpus + 0.25·memory_gb)` with `coeff` from `cost_class_coefficients`
+for the resource's `cost_class`, and `A` from the System's or resource's accelerator
+(kvm 1.0, tcg 4.0, absent 1.0); a reservation is `quantize(rate × window_hours)`; a
+reconciliation is `quantize(rate × Decimal(active_seconds) / 3600 − Σreserved)`; quantize
+is to 0.0001 with `ROUND_HALF_EVEN`.
 
 ## Functional observations
 
@@ -72,15 +83,17 @@ use a separate admin token and do not prove the tool.
   per-state pages equal the independent `created_at DESC, id DESC` order; paging with
   `limit=1` drains the same set through `next_cursor`.
 - `allocations.renew` (contributor): `extend=1` moves `lease_expiry` by exactly one hour
-  and writes one `reserved` row equal to rate × 1 h; an extension past `KDIVE_LEASE_MAX`
-  clamps (charge equals rate × the actual expiry delta); a renew at the cap answers
-  `configuration_error` and writes nothing; a renew of the released allocation answers
-  `stale_handle`.
+  and writes one `reserved` row equal to rate × 1 h; an extension of 10 000 h is clamped
+  (the expiry delta is below 10 000 h and the new expiry is at most the answer's
+  `server_time` plus the requested span) and its `reserved` row equals rate × the actual
+  expiry delta; a renew of the released allocation answers `stale_handle` and writes
+  nothing. The ceiling slides with server time, so no "at the cap" refusal is asserted.
 - `allocations.wait` (viewer; roles server, reconciler): quota caps 1 concurrent/1 pending;
   a holder grant and a queued request; `timeout_s=0` reports `requested` with
   `queue_position`; the holder is released through a setup token; repeated `timeout_s=60`
-  waits observe `granted` within 180 s, promoted by the deployed reconciler's own sweep
-  (no `ops.reconcile_now`), with a resource and a `reserved` row.
+  waits observe `granted` within 180 s, with a resource and a `reserved` row. The test
+  issues no promotion call; promotion is attributed to the deployed reconciler only through
+  the recorded reconciler revision, since no durable row names the promoting actor.
 - `allocations.release`: see Release.
 - `accounting.set_budget` (admin): after one grant, the limit changes and `spent_kcu` does
   not; with limit `spent + E − 0.0001` a request of estimate `E` is denied
@@ -93,10 +106,13 @@ use a separate admin token and do not prove the tool.
   investigation attribution needs a Run on the allocation's System (ledger.py). A Run bound
   to the System in one investigation makes `investigation_kcu` equal that allocation's
   ledger sum; project `spent_kcu`, `budget_remaining`, `shared_kcu` and `by_cost_class`
-  equal independent sums. `reports.generate` (granted-set, both formats) is compared section
-  by section (`inventory`, `leases`, `activity`, `costs`; `images` against the catalog
-  query) with the inline `rows_json`, and each presigned CSV and the XLSX is downloaded and
-  parsed (stdlib `csv`, `openpyxl`, already a dependency) and must equal the inline rows.
+  equal independent sums. `reports.generate` (granted-set, both formats) must return refs
+  for every section CSV and the XLSX (a `spreadsheet_unavailable` answer fails the cell).
+  Each downloaded spreadsheet (stdlib `csv`, `openpyxl`, already a dependency) equals the
+  independent query for its section (`inventory`, `leases`, `activity`, `costs`; `images`
+  against the catalog query), comparing values as strings, with `None` as empty; each
+  section's `truncated` must be false for the cell's small fixture; inline `rows_json` equals
+  a prefix of those rows, the whole set exactly when `inline_truncated` is false.
 - `accounting.report` (viewer, then a platform_auditor token): granted-set for the project
   with `group_by=principal`, and all-projects, both over a closed past window. Rows for the
   cell's project and the totals equal independent windowed ledger sums; every project with
@@ -104,17 +120,24 @@ use a separate admin token and do not prove the tool.
 
 ## Release
 
-`allocations.release` requires server, worker, reconciler and authority. Its functional
-body runs on the local fixture-mode authority System (`on_authority_system`): drain the
-System's jobs, release through the cell exposure as a contributor, then observe the
-deployed reconciler's orphan sweep enqueue the `<system>:teardown` job, the worker run it
-to success, the System reach `torn_down`, the domain and storage absent from the authority
-inventory, the allocation `released`, the `reconciled` row equal to
-rate × active hours (from `active_started_at`/`active_ended_at`) minus Σreserved, and the
-resource's capacity reclaimed. `_cleanup` then finds the allocation released: it still
-drains, closes investigations, removes the authority fixture and proves domain, disk,
-capacity and inventory absence, but skips the teardown/release calls and the "capacity
-held" precondition. Every other frame user is unchanged.
+`allocations.release` cells require server, worker, reconciler and authority revisions.
+Its functional body runs on a ready local lane System (`on_lane_system`, decision D1):
+release through the cell exposure as a contributor, then observe the deployed reconciler's
+orphan sweep enqueue the `<system>:teardown` job, the worker run it to `succeeded`, the
+System reach `torn_down`, the worker domain and disks absent, the allocation `released`,
+the `reconciled` row equal to the reconciliation formula above (active seconds from
+`active_started_at`/`active_ended_at`), `spent_kcu` equal to the project's ledger sum, and
+the resource's capacity back at its pre-allocation value. The authority daemon takes no
+part in a local release (neither a lane System nor a fixture-mode authority System is
+torn down through it); the authority role is satisfied by the matching installed revision
+in the cell's identity.
+
+`release_and_verify` gains one branch keyed on the allocation alone: when
+`allocations.wait(timeout_s=0)` already reports `released`, it skips its release call and
+its "capacity held" precondition, then proves `torn_down`, domain/disk absence and capacity
+exactly as today (the frame's `systems.teardown` before it is idempotent on `torn_down`).
+A body that fails after release with the System not yet torn down takes the same branch,
+which still waits for `torn_down`. Callers whose allocation is still held are unchanged.
 
 ## Rejections
 
@@ -132,7 +155,9 @@ All use `prove_rejection` with the narrowed snapshot as protected state.
 - `allocations.list` authorization/project-isolation: `FilteredListControl` (a viewer lists
   the real allocation), then the denied caller must receive exactly the canonical page:
   object `allocations`, no items, no next actions, data
-  `{truncated: false, next_cursor: null, project: <named project>}`.
+  `{truncated: false, next_cursor: null, project: <named project>}`. A request naming no
+  project fails the harness's assertion rather than a `KeyError`; the existing
+  unconfigured-page test moves to a synthetic tool name.
 - `accounting.report`/`reports.generate` use granted-set with `projects=[<project>]`,
   because an unnamed granted-set cannot be denied.
 
@@ -155,18 +180,29 @@ ledger history of throwaway projects are retained.
 - Accepted: concurrent foreign traffic on the stack would perturb capacity and
   all-projects totals — the lane is exclusive by the operation plan; report artifacts
   live until the retention sweep; budget/quota rows and ledger history of throwaway
-  projects persist; the authority teardown race with the fixture is observed, not
-  prevented — a failure is recorded as failing.
+  projects persist; promotion is not attributed to the reconciler by a durable row.
 - Covered elsewhere: production utilization reports (#2720/#2725); authority recovery
-  orphans (#3185); remote and POWER lanes (#2818); CLI (#3099).
+  orphans (#3185); remote-authority teardown and POWER lanes (#3152, #2818); CLI (#3099).
+
+## Operator decisions
+
+- D1 release System: a local lane System with the `cleanup.py` branch (recommended; real
+  worker-side teardown) versus the fixture-mode authority System (its worker teardown is a
+  no-op while the harness keeps the domain on the authority daemon). Either needs the
+  `cleanup.py` branch, which is outside the frozen surface's wording.
+- D2 usage and reports.generate on a lane System (recommended; investigation attribution
+  and non-empty inventory/activity sections) versus server-only with an empty investigation.
+- D3 report artifacts retained under ADR-0212 (recommended) versus direct object deletion,
+  which would leave artifact rows naming deleted objects.
 
 ## Validation and operation gate
 
 Focused tests inject faults into each predicate: wrong estimate/coefficient, missing or
-extra ledger row, changed `spent_kcu`, wrong lease delta and clamp, wrong page order or
-filter, non-canonical empty page, promotion by a non-reconciler path or timeout, wrong
-reconciled delta, report section/CSV/XLSX mismatch, and the frame's released-allocation
-branch. Record red then green. Run `just lint`, `just type`, the coverage-contract binding
+extra ledger row, changed `spent_kcu`, a rejection that writes a ledger row, an
+`updated_at`-only change (must not move the digest), wrong lease delta and clamp, wrong
+page order or filter, non-canonical empty page, promotion timeout, wrong reconciled delta,
+report section/CSV/XLSX mismatch or missing refs, and `release_and_verify`'s
+released branch (released + torn_down, released + ready, held). Record red then green. Run `just lint`, `just type`, the coverage-contract binding
 test and relevant hooks; the one managed pre-push `just ci` is the final gate.
 
 No live run is authorized by this design. The operation packet (host, deployed revisions,
