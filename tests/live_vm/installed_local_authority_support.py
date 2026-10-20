@@ -2072,7 +2072,7 @@ def remove_authority_fixture(config: NativeAuthorityConfig, ledger: ResourceLedg
 _RELEASE_ADMISSION_ATTEMPTS = 3
 
 
-async def _release_external_boot(client: LiveStackClient, run_id: str) -> ToolResponse:
+async def release_external_boot(client: LiveStackClient, run_id: str) -> ToolResponse:
     """Admit the release, first draining any System job its conflict names.
 
     A job queued during the boot (a console rotation) can still hold the System when the boot
@@ -2108,7 +2108,7 @@ async def drive_normal_operations(
         client, ledger, **_activation_target(config), guest_arch=guest_arch
     )
     await drain_job(client, "activate", activation.activate_job_id)
-    release = await _release_external_boot(client, activation.run_id)
+    release = await release_external_boot(client, activation.run_id)
     await drain_job(client, "release", release.object_id)
     return NormalOperationJobs(
         investigation_id=activation.investigation_id,
