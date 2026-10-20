@@ -1104,7 +1104,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="debug.end_session",
         read_only=False,
         destructive=False,
-        help="Drive a live DebugSession to detached; close its transport. Requires contributor.",
+        help="Detach the session and clean up its local GDB process/symbol files. Contributor.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(

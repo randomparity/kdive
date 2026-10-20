@@ -1671,9 +1671,9 @@ compares. The prerequisites are the capture cells' above (drgn for the `drgn-liv
 plus `gdb` on the MCP server's PATH, which runs the debugger beside QEMU's loopback gdbstub,
 and `objdump` on the test host, which decodes the fixture `vmlinux` for the `debug.advance` and
 `debug.disassemble` cells; either missing records the cell `blocked`. Each attach stages a copy
-of the Run's `vmlinux` (about 437 MB for `longterm`) in the server's temp directory and nothing
-removes it yet (#3229), so give the server an on-disk `TMPDIR` when `/tmp` is a small or
-quota-limited tmpfs. Run both configurations into one evidence root:
+of the Run's `vmlinux` (about 437 MB for `longterm`) in the server's temp directory, and ending
+the session removes it (#3229), so that directory needs room for one copy per live session.
+Run both configurations into one evidence root:
 
 ```bash
 sha=$(git rev-parse HEAD)
@@ -1729,6 +1729,13 @@ before each run. `qualify` reported 420 of the 440 cells qualified: all 352 `rej
 
 After `demo-down.sh --wipe --yes` neither libvirt defined a `kdive-` domain,
 `KDIVE_INSTALL_STAGING` was empty, and no staging directory remained in either temp directory.
+
+A later rerun at the #3229 candidate `9697b4caa` ran 10 `gdbstub` `default`/`direct` functional
+cells (`start_session`, `end_session`, `load_module_symbols`, `list_modules`, `read_memory`,
+`read_registers`, `resolve_symbol`, `set_breakpoint`, `backtrace`, `disassemble`) with the
+server's `TMPDIR` on a tmpfs whose per-user quota was 1200 MB, below three staged copies. All 10
+recorded `success`; 11 staging directories came and went, never more than one at a time, and
+the temp directory was empty after the cells and after `demo-down.sh --wipe --yes`.
 
 #### Break-glass provider tool cells (#3112)
 

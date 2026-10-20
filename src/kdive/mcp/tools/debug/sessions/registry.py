@@ -15,6 +15,10 @@ class GdbMiSessionRegistry:
         self._lock = threading.Lock()
         self._sessions: dict[str, GdbMiAttachment] = {}
 
+    def ids(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(self._sessions)
+
     def register(self, session_id: str, attachment: GdbMiAttachment) -> None:
         with self._lock:
             self._sessions[session_id] = attachment
