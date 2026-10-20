@@ -144,6 +144,23 @@ termination. The worker there has a `local` incarnation, and the recovery row re
 own witnesses, so the same evidence rule covers them. The configuration proof and the other
 decisions are unchanged.
 
+### Amendment (2026-10-20): a variant the tool's handler refuses is unsupported (#3114)
+
+This amends the 2026-10-13 amendment's verdict. `_capability_variants` turns every advertised
+capture method into a `vmcore.fetch` variant. `remote-libvirt` advertises `console` and `gdbstub`,
+but the handler admits only its core-producing set (`VMCORE_METHODS`). It answers any other method
+with `configuration_error`, `data.reason` "method does not produce a vmcore", and no job. That
+refusal does not depend on the provider or the architecture. A `vmcore.fetch` variant outside that
+set is therefore `unsupported`, with the handler as its `unsupported_reason`, on every lane. This
+covers the x86_64 and ppc64le `remote-libvirt` `console` and `gdbstub` cells.
+
+The refusal is not ADR-0209's `capability_unsupported`, so the verdict generates no `capability`
+rejection cell. The `unsupported` cell proves the refusal itself. It first meets the handler's
+preconditions: a crashed, Run-bound System. Then a real-issuer `contributor` token in the cell's
+exposure must receive exactly that envelope. The System must stay `crashed`, and the jobs naming
+the System or Run must be unchanged. Cell identities, owners and the other boundaries are
+unchanged. A change to `VMCORE_METHODS` moves the cell set and the contract digest.
+
 ## Consequences
 
 - Recovery-configuration evidence exists only from a run whose catalog proved it. A carrier of
