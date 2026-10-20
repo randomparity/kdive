@@ -815,7 +815,7 @@ async def _prepare_target(
     tree, manifest = fixture()
     project = f"cov-{secrets.token_hex(4)}"
     ids: dict[str, str] = {}
-    lanes: list[Connect] = []
+    connects: list[Connect] = []
 
     async def body(guest: Guest) -> dict[str, object]:
         run_id, endpoint = await boot(scratch, guest, tree, manifest)
@@ -824,7 +824,7 @@ async def _prepare_target(
         session = await s.drgn_session()
         await s.end(session)
         ids.update(system=guest.system_id, run=run_id, session=session)
-        lanes.append(guest.lane.connect)
+        connects.append(guest.lane.connect)
         return {"capture_target": "prepared"}
 
     await on_lane_system(
@@ -850,7 +850,7 @@ async def _prepare_target(
         ids["session"],
         lane_keys(scratch.observed, remote=run.cell.provider == "remote-libvirt"),
         (*scratch.artifacts, *scratch.assertions.values(), summary),
-        lanes[0],
+        connects[0],
     )
 
 
