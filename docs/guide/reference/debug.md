@@ -160,7 +160,13 @@ interrupt_refused; end the session.
 
 `implemented` · `read-only`
 
-List all breakpoints on a live DebugSession. Requires contributor.
+List breakpoints and watchpoints on a live DebugSession. Requires contributor.
+
+data.breakpoints has one row per gdb breakpoint-table entry: number, type
+(breakpoint or a watchpoint kind) and the location gdb reports, func and addr for a
+breakpoint or what (the watched expression, named expr by the watchpoint tools) for a
+watchpoint. data.count is the row count. A breakpoint gdb resolved to several locations
+shows addr `<MULTIPLE>` and no func.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
