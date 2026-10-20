@@ -9,7 +9,11 @@ from uuid import UUID
 import pytest
 
 import kdive.providers.fault_inject.lifecycle.connect as connect_module
-from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.artifacts.storage import (
+    ArtifactWriteRequest,
+    ConditionalArtifactWriteRequest,
+    StoredArtifact,
+)
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -40,16 +44,22 @@ _PROVISIONING_PROFILE = cast(ProvisioningProfile, object())
 
 class _FakeStore:
     def __init__(self) -> None:
-        self.writes: list[ArtifactWriteRequest] = []
+        self.writes: list[ConditionalArtifactWriteRequest] = []
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
-        self.writes.append(request)
         return StoredArtifact(
             request.key(),
             "etag",
             request.sensitivity,
             request.retention_class,
             version_id="test-version",
+        )
+
+    def create_if_absent(self, request: ConditionalArtifactWriteRequest) -> StoredArtifact:
+        self.writes.append(request)
+        assert request.metadata == {"vmcore-execution": str(UUID(int=1)), "vmcore-kind": "capture"}
+        return StoredArtifact(
+            request.key, "etag", request.sensitivity, request.retention_class, "test-version"
         )
 
 
@@ -262,7 +272,7 @@ def test_capture_stores_a_synthetic_vmcore_with_raw_and_redacted_artifacts() -> 
     store = _FakeStore()
     retrieve = FaultInjectRetrieve(store_factory=lambda: store)
 
-    output = retrieve.capture(_SYSTEM, _RUN, CaptureMethod.HOST_DUMP)
+    output = retrieve.capture(_SYSTEM, _RUN, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1))
 
     sensitivities = {w.sensitivity for w in store.writes}
     assert Sensitivity.SENSITIVE in sensitivities  # the raw core

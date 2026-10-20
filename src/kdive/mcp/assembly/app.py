@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
@@ -25,6 +27,7 @@ from kdive.mcp.middleware.telemetry import TelemetryMiddleware
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
+from kdive.mcp.tools.debug.operations.runtime import DebugRuntimeResolver
 from kdive.mcp.verbosity import compact_responses_enabled
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -60,8 +63,20 @@ def build_app_from_assembly(
     Returns:
         The assembled FastMCP app.
     """
+    process = process_assembly
+    stores = process.object_stores
+    composition = process.providers
+    resolver = composition.build_provider_resolver()
+    runtime = DebugRuntimeResolver(resolver)
+
+    @asynccontextmanager
+    async def debug_lifespan(_app: FastMCP) -> AsyncIterator[dict[str, object]]:
+        async with runtime.lifespan(pool):
+            yield {}
+
     app: FastMCP = FastMCP(
         name="kdive",
+        lifespan=debug_lifespan,
         auth=verifier or build_verifier(),
         instructions=build_instructions(gateway_enabled()),
     )
@@ -79,10 +94,6 @@ def build_app_from_assembly(
             meter=effective_meter,
         )
     )
-    process = process_assembly
-    stores = process.object_stores
-    composition = process.providers
-    resolver = composition.build_provider_resolver()
     app.add_middleware(UsageTrackingMiddleware(pool, secret_registry=composition.secret_registry))
     app.add_middleware(ToolExposureMiddleware(resolver))
     app.add_middleware(DocExposureMiddleware())
@@ -92,6 +103,7 @@ def build_app_from_assembly(
 
     assembly = AppAssembly(
         resolver=resolver,
+        debug_runtime=runtime,
         secret_registry=composition.secret_registry,
         reaper=composition.build_reconciler_reaper(),
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),

@@ -122,13 +122,14 @@ class ArtifactWriteRequest:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ConditionalArtifactWriteRequest:
-    """A conditional write whose caller supplies the validated full object key."""
+    """Conditional bytes or file write to a validated destination (ADR-0786)."""
 
     key: str
-    data: bytes
+    data: bytes | Path
     metadata: Mapping[str, str]
     sensitivity: Sensitivity
     retention_class: str
+    sha256_b64: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -261,3 +262,6 @@ class PresignPutRequest:
     sensitivity: Sensitivity
     retention_class: str
     expires_in: int
+
+    if_absent: bool = False
+    metadata: Mapping[str, str] = MappingProxyType({})

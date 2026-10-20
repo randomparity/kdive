@@ -48,6 +48,8 @@ from kdive.artifacts.uploads.write_lease import LIVE_HOLDER_SQL
 #: selects whether its one key survived.
 _OWNER_FENCE_SQL = f"""
       NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.object_key = c.key)
+  AND NOT EXISTS (SELECT 1 FROM vmcore_capture_executions v
+                  WHERE v.raw_key = c.key OR v.redacted_key = c.key)
   AND NOT EXISTS (SELECT 1 FROM capture_operations o
                   WHERE o.publication_object_key = c.key
                     AND o.publication_state IN ('publishing', 'canceling', 'discarded'))

@@ -225,6 +225,8 @@ _ORDINARY_TABLES = {
     "systems",
     "tool_invocation",
     "upload_manifests",
+    "vmcore_capture_executions",
+    "vmcore_retention_baseline",
 }
 _SERVER_MUTATIONS = {
     "INSERT": _ORDINARY_TABLES
@@ -234,6 +236,8 @@ _SERVER_MUTATIONS = {
         "investigation_build_gc_cursor",
         "investigation_build_tombstones",
         "system_object_sweep_cursors",
+        "vmcore_capture_executions",
+        "vmcore_retention_baseline",
     },
     "UPDATE": _ORDINARY_TABLES
     - {
@@ -248,6 +252,7 @@ _SERVER_MUTATIONS = {
         "system_object_sweep_cursors",
         "system_root_provenance",
         "tool_invocation",
+        "vmcore_retention_baseline",
     },
     "DELETE": {
         "artifacts",
@@ -302,6 +307,8 @@ _WORKER_SELECT = {
     "system_shapes",
     "systems",
     "upload_manifests",
+    "vmcore_capture_executions",
+    "vmcore_retention_baseline",
 }
 _WORKER_MUTATIONS = {
     "INSERT": {
@@ -317,6 +324,7 @@ _WORKER_MUTATIONS = {
         "snapshots",
         "system_bootstrap_keys",
         "upload_manifests",
+        "vmcore_capture_executions",
     },
     "UPDATE": {
         "allocations",
@@ -333,6 +341,7 @@ _WORKER_MUTATIONS = {
         "snapshots",
         "systems",
         "upload_manifests",
+        "vmcore_capture_executions",
     },
     "DELETE": {
         "artifacts",
@@ -381,6 +390,7 @@ _RECONCILER_MUTATIONS = {
         "system_object_sweep_cursors",
         "systems",
         "upload_manifests",
+        "vmcore_capture_executions",
     },
     "DELETE": {
         "artifacts",

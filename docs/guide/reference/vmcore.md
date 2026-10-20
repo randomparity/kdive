@@ -29,9 +29,12 @@ text, not a sanitized binary core). A replay may omit the reference if the redac
 sibling is gone while the raw core remains.
 For analysis, pass the Run ID to postmortem.crash, which resolves the raw core itself.
 For raw download use artifacts.fetch_raw(run_id, asset="vmcore") (contributor, URL-only).
+A retired Run returns not_found with reason vmcore_retired and runs.get as recovery.
+Retirement rejects admission and replay, including an old idempotency key; a new capture
+cannot restore the retired evidence.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; repeats return the prior envelope unless the vmcore has retired. |
 | `method` | `console`, `host_dump`, `gdbstub`, `kdump`, `fadump` (nullable) | no | Core-producing capture method (kdump/fadump/host_dump) listed in the System's systems.get supported_capture_methods; fadump is refused on x86_64. Omit to resolve the System profile's method; a profile with no implicit core method requires an explicit one. |
 | `run_id` | string | yes | The Run ID whose bound System is CRASHED; not a System or artifact ID. |

@@ -142,7 +142,7 @@ class GdbController(Protocol):
         ...
 
     def exit(self) -> None:
-        """Terminate the underlying gdb/MI controller.
+        """Confirm the underlying gdb process has exited before returning.
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` if the controller cannot be
@@ -173,6 +173,20 @@ class GdbMiAttachment:
     loaded_modules: set[str] = field(default_factory=set)
     guest_arch: str | None = None
     execution: GdbExecution = "halted"
+
+    staging_dir: Path | None = None
+    cleanup_pending: bool = False
+    controller_exited: bool = False
+
+
+class GdbMiAttachFailure(Exception):
+    """An attach failure whose partial resources still require owned cleanup (ADR-0799)."""
+
+    def __init__(self, attachment: GdbMiAttachment | None, cause: BaseException) -> None:
+        super().__init__("GDB attachment setup failed")
+        self.attachment = attachment
+        self.cause = cause
+        self.staging_dir: Path | None = None
 
 
 class GdbMiEngine(Protocol):

@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 
+import psycopg
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.vmcore_retention import (
+    await_vmcore_io,
+    require_vmcore_available,
+    vmcore_retention_view,
+)
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod, capture_methods_for_arch
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
@@ -236,6 +242,10 @@ async def _fetch_vmcore(
             if run is None or run.project not in ctx.projects:
                 return _config_error(run_id)
             require_role(ctx, run.project, Role.CONTRIBUTOR)
+            try:
+                await require_vmcore_available(conn, uid)
+            except CategorizedError as exc:
+                return vmcore_target_failure(run_id, exc)
             if run.system_id is None:
                 return _config_error(
                     run_id,
@@ -339,7 +349,15 @@ async def _fetch_vmcore(
             # SAVEPOINT, not a top-level transaction: `conn` already read the Run and System
             # above, so this block defers to the request's own commit and holds the SYSTEM lock
             # until then. Nothing follows it in this handler, so the lock never spans later work.
-            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
+            async with (
+                conn.transaction(),
+                advisory_xact_lock(conn, LockScope.SYSTEM, system.id),
+                advisory_xact_lock(conn, LockScope.RUN, uid),
+            ):
+                try:
+                    await require_vmcore_available(conn, uid)
+                except CategorizedError as exc:
+                    return vmcore_target_failure(run_id, exc)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,
@@ -368,28 +386,42 @@ async def _postmortem_crash(
                 detail=f"crash command rejected: {rejection}",
                 data={"reason": rejection},
             )
-        async with pool.connection() as conn:
-            try:
-                resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
-            except CategorizedError as exc:
-                redirect = console_crash_redirect(run_id, exc)
-                return redirect if redirect is not None else vmcore_target_failure(run_id, exc)
         try:
-            output = await asyncio.to_thread(
-                crash.run_crash_postmortem,
-                vmcore_ref=resolved.vmcore_ref,
-                debuginfo_ref=resolved.debuginfo_ref,
-                debuginfo_version_id=resolved.debuginfo_version_id,
-                expected_build_id=resolved.build_id,
-                commands=commands,
-            )
+            async with pool.connection() as conn, conn.transaction():
+                uid = _as_uuid(run_id)
+                if uid is None:
+                    return _config_error(run_id)
+                await resolve_run_vmcore_target(conn, ctx, run_id)
+                async with advisory_xact_lock(conn, LockScope.RUN, uid):
+                    resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
+                    output = await await_vmcore_io(
+                        conn,
+                        partial(
+                            crash.run_crash_postmortem,
+                            vmcore_ref=resolved.vmcore_ref,
+                            debuginfo_ref=resolved.debuginfo_ref,
+                            debuginfo_version_id=resolved.debuginfo_version_id,
+                            expected_build_id=resolved.build_id,
+                            commands=commands,
+                        ),
+                    )
+                    retention = await vmcore_retention_view(conn, uid)
+                    response = postmortem_success_response(
+                        run_id,
+                        transcript=output.transcript,
+                        truncated=output.truncated,
+                        secret_registry=secret_registry,
+                    )
+                    response.data["vmcore_retention"] = retention
+            return response
         except CategorizedError as exc:
-            # A provenance mismatch (configuration_error) or an unavailable crash
-            # dependency (missing_dependency) becomes a typed failure, never a 500.
-            return ToolResponse.failure_from_error(run_id, exc)
-        return postmortem_success_response(
-            run_id,
-            transcript=output.transcript,
-            truncated=output.truncated,
-            secret_registry=secret_registry,
-        )
+            redirect = console_crash_redirect(run_id, exc)
+            return redirect if redirect is not None else vmcore_target_failure(run_id, exc)
+        except psycopg.Error:
+            return ToolResponse.failure_from_error(
+                run_id,
+                CategorizedError(
+                    "vmcore analysis lost database authority; retry the read",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                ),
+            )
