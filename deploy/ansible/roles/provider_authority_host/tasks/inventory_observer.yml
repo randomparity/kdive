@@ -1,0 +1,404 @@
+---
+- name: Define the shared immutable inventory verifier
+  ansible.builtin.set_fact:
+    provider_authority_host_inventory_verifier: |
+      import grp, importlib.util, os, pathlib, pwd, stat, subprocess, sys, sysconfig
+      ROOT = pathlib.Path('/opt/kdive-authority-inventory')
+      CLIENT = pathlib.Path('/usr/libexec/kdive-authority-inventory-client.py')
+      UNITS = pathlib.Path('/etc/systemd/system')
+      NAMES = ('kdive-authority-inventory.socket', 'kdive-authority-inventory@.service')
+      def trusted(path, tree=False, seen=None):
+          path = pathlib.Path(path).absolute()
+          seen = set() if seen is None else seen
+          for part in (*reversed(path.parents), path):
+              info = os.lstat(part)
+              if info.st_uid != 0 or (not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022):
+                  raise ValueError('inventory input is not root-controlled')
+              if {'system.posix_acl_access', 'system.posix_acl_default'} & set(
+                      os.listxattr(part, follow_symlinks=False)):
+                  raise ValueError('inventory input has an ACL')
+              if stat.S_ISLNK(info.st_mode):
+                  trusted(part.resolve(strict=True), seen=seen)
+          resolved = path.resolve(strict=True)
+          if tree and resolved not in seen:
+              seen.add(resolved)
+              if resolved.is_dir():
+                  for child in resolved.iterdir():
+                      trusted(child, tree=True, seen=seen)
+          return resolved
+      def system_python():
+          if sys.version_info[:2] != (3, 14):
+              raise ValueError('inventory opt-in requires immutable system Python 3.14 at /usr/bin/python3')
+          trusted('/usr/bin/python3')
+          trusted(sysconfig.get_path('stdlib'), tree=True)
+          trusted(sysconfig.get_config_var('DESTSHARED'), tree=True)
+      def identity(required):
+          try:
+              group = grp.getgrnam('kdive-authority-observer')
+          except KeyError:
+              group = None
+          if group is not None and (group.gr_gid == 0 or group.gr_mem or any(
+                  g.gr_gid == group.gr_gid and g.gr_name != group.gr_name for g in grp.getgrall()) or any(
+                  p.pw_gid == group.gr_gid and p.pw_name != 'kdive-authority-observer' for p in pwd.getpwall())):
+              raise ValueError('inventory observer identity collides or has extra grants')
+          try:
+              observer = pwd.getpwnam('kdive-authority-observer')
+          except KeyError:
+              if required:
+                  raise ValueError('inventory observer is missing') from None
+              return
+          authority = pwd.getpwnam('kdive-provider-authority')
+          if group is None:
+              raise ValueError('inventory observer group is missing')
+          if (observer.pw_uid in (0, authority.pw_uid) or observer.pw_gid != group.gr_gid
+                  or group.gr_gid == 0 or observer.pw_dir != '/nonexistent'
+                  or observer.pw_shell != '/usr/sbin/nologin'
+                  or set(os.getgrouplist(observer.pw_name, observer.pw_gid)) != {group.gr_gid}
+                  or group.gr_mem or any(p.pw_name != observer.pw_name and
+                      (p.pw_uid == observer.pw_uid or p.pw_gid == group.gr_gid) for p in pwd.getpwall())):
+              raise ValueError('inventory observer identity collides or has extra grants')
+      def existing():
+          for path in (ROOT, CLIENT, *(UNITS / n for n in NAMES),
+                       pathlib.Path('/etc/tmpfiles.d/kdive-authority-inventory.conf')):
+              if os.path.lexists(path):
+                  if path.is_symlink():
+                      raise ValueError('substituted inventory installation')
+                  trusted(path, tree=True)
+              else:
+                  parent = path.parent
+                  while not os.path.lexists(parent):
+                      parent = parent.parent
+                  trusted(parent)
+          pth_inputs()
+          endpoint = pathlib.Path('/run/kdive-authority-inventory')
+          if os.path.lexists(endpoint):
+              if endpoint.is_symlink() or not endpoint.is_dir():
+                  raise ValueError('substituted inventory endpoint')
+              trusted(endpoint)
+      def pth_inputs():
+          for pth in ROOT.rglob('*.pth'):
+              for line in pth.read_text().splitlines():
+                  if not line or line.startswith('#') or line == 'import _virtualenv':
+                      continue
+                  if line.startswith(('import ', 'import\t')):
+                      raise ValueError('unexpected executable pth input')
+                  trusted(pth.parent / line, tree=True)
+      def runtime(source, revision):
+          source = pathlib.Path(source)
+          trusted(ROOT, tree=True)
+          trusted(CLIENT)
+          pth_inputs()
+          for name in ('libvirt', 'libvirtmod', 'defusedxml'):
+              spec = importlib.util.find_spec(name)
+              if spec is None or spec.origin is None:
+                  raise ValueError('missing collector import')
+              trusted(spec.origin, tree=True)
+          installed = pathlib.Path(sysconfig.get_path('purelib')) / 'kdive'
+          trusted(installed, tree=True)
+          tracked = subprocess.check_output(['git', '-C', str(source), 'ls-files', '-z', '--', 'src/kdive'])
+          expected = {pathlib.Path(os.fsdecode(name)).relative_to('src/kdive')
+                      for name in tracked.split(b'\0') if name}
+          actual = {p.relative_to(installed) for p in installed.rglob('*')
+                    if p.is_file() and '__pycache__' not in p.parts}
+          if not expected or actual != expected:
+              raise ValueError('installed collector package file set differs')
+          for relative in expected:
+              if (installed / relative).read_bytes() != (source / 'src/kdive' / relative).read_bytes():
+                  raise ValueError('installed collector package bytes differ')
+          for installed_script, original in ((ROOT / 'collector.py', 'collector.py'), (CLIENT, 'client.py')):
+              if installed_script.read_bytes() != (source / 'deploy/authority-inventory' / original).read_bytes():
+                  raise ValueError('installed collector script bytes differ')
+          if len(revision) != 40 or any(c not in '0123456789abcdef' for c in revision):
+              raise ValueError('invalid collector revision')
+      def revision_marker(revision):
+          marker = ROOT / 'revision'
+          if marker.read_text().strip() != revision or stat.S_IMODE(marker.stat().st_mode) != 0o444:
+              raise ValueError('collector revision mismatch')
+      if __name__ == '__main__':
+          phase = sys.argv[1]
+          existing()
+          if phase != 'withdraw':
+              system_python()
+              identity(phase != 'preflight')
+          if phase == 'runtime':
+              runtime(sys.argv[2], sys.argv[3])
+          if phase == 'verify':
+              runtime(sys.argv[2], sys.argv[3])
+              revision_marker(sys.argv[3])
+
+- name: Inspect the inventory socket unit before withdrawal
+  ansible.builtin.stat:
+    path: /etc/systemd/system/kdive-authority-inventory.socket
+    follow: false
+  register: provider_authority_host_inventory_socket_unit
+
+- name: Reject an unsafe installed socket unit before manager operations
+  ansible.builtin.assert:
+    that: >-
+      not provider_authority_host_inventory_socket_unit.stat.exists or
+      (provider_authority_host_inventory_socket_unit.stat.isreg and
+       not provider_authority_host_inventory_socket_unit.stat.islnk and
+       provider_authority_host_inventory_socket_unit.stat.uid == 0 and
+       provider_authority_host_inventory_socket_unit.stat.mode == '0644')
+    fail_msg: Refusing an unsafe existing inventory socket unit.
+
+- name: Read inventory listener manager state including a removed unit file
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=LoadState, --value, kdive-authority-inventory.socket]
+  register: provider_authority_host_inventory_load_state
+  changed_when: false
+  failed_when: provider_authority_host_inventory_load_state.stdout | trim not in ['loaded', 'not-found']
+
+- name: Withdraw the inventory listener before convergence
+  ansible.builtin.systemd_service:
+    name: kdive-authority-inventory.socket
+    state: stopped
+    enabled: false
+  when: provider_authority_host_inventory_load_state.stdout | trim == 'loaded'
+
+- name: Require accepted inventory instances to have stopped
+  ansible.builtin.command:
+    argv: [systemctl, list-units, "kdive-authority-inventory@*.service", "--state=active,activating,deactivating", --no-legend, --no-pager]
+  register: provider_authority_host_inventory_instances
+  changed_when: false
+  failed_when: provider_authority_host_inventory_instances.rc != 0 or provider_authority_host_inventory_instances.stdout | trim | length > 0
+
+- name: Verify ownership before changing or withdrawing collector files
+  ansible.builtin.command:
+    argv: ["{{ ansible_python_interpreter | default('/usr/bin/python3') }}", -I, -S, -c,
+           "{{ provider_authority_host_inventory_verifier }}", withdraw]
+  changed_when: false
+
+- name: Remove disabled inventory boundary files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/kdive-authority-inventory.socket
+    - /etc/systemd/system/kdive-authority-inventory@.service
+    - /etc/tmpfiles.d/kdive-authority-inventory.conf
+    - /usr/libexec/kdive-authority-inventory-client.py
+    - /opt/kdive-authority-inventory
+  when: not inventory_observer_enabled | bool or not inventory_observer_authority_enabled | bool
+
+- name: Remove only the empty disabled endpoint directory
+  ansible.builtin.command:
+    argv: [rmdir, /run/kdive-authority-inventory]
+    removes: /run/kdive-authority-inventory
+  when: not inventory_observer_enabled | bool or not inventory_observer_authority_enabled | bool
+
+- name: Reload withdrawn inventory units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not inventory_observer_enabled | bool or not inventory_observer_authority_enabled | bool
+
+- name: Converge the enabled inventory boundary
+  when: inventory_observer_enabled | bool
+  block:
+    - name: Require the local authority mutation lane
+      ansible.builtin.assert:
+        that:
+          - inventory_observer_authority_enabled | bool
+          - inventory_observer_local_mutation_enabled | bool
+        fail_msg: Inventory observer opt-in requires the fixed local authority and its private roots.
+
+    - name: Validate the fixed system interpreter prerequisite and existing identity
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -S, -c, "{{ provider_authority_host_inventory_verifier }}", preflight]
+      changed_when: false
+
+    - name: Read the clean collector source revision
+      ansible.builtin.command:
+        argv: [git, -C, "{{ inventory_observer_source_root }}", rev-parse, HEAD]
+      register: provider_authority_host_inventory_revision
+      changed_when: false
+
+    - name: Require clean collector source
+      ansible.builtin.command:
+        argv: [git, -C, "{{ inventory_observer_source_root }}", status, --porcelain, --untracked-files=no]
+      register: provider_authority_host_inventory_source_status
+      changed_when: false
+      failed_when: provider_authority_host_inventory_source_status.rc != 0 or provider_authority_host_inventory_source_status.stdout | length > 0
+
+    - name: Create the dedicated observer group
+      ansible.builtin.group:
+        name: kdive-authority-observer
+        system: true
+
+    - name: Create the dedicated observer
+      ansible.builtin.user:
+        name: kdive-authority-observer
+        group: kdive-authority-observer
+        groups: []
+        append: false
+        system: true
+        home: /nonexistent
+        create_home: false
+        shell: /usr/sbin/nologin
+        password_lock: true
+
+    - name: Refuse observer sudo privileges
+      ansible.builtin.command:
+        argv: [sudo, -n, -l, -U, kdive-authority-observer]
+      register: provider_authority_host_inventory_sudo
+      changed_when: false
+      environment:
+        LC_ALL: C
+      failed_when: >-
+        provider_authority_host_inventory_sudo.rc != 1 or
+        'is not allowed to run sudo' not in
+        (provider_authority_host_inventory_sudo.stdout + provider_authority_host_inventory_sudo.stderr)
+      no_log: true
+
+    - name: Create the independent root-owned collector directory
+      ansible.builtin.file:
+        path: /opt/kdive-authority-inventory
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the locked independent collector runtime
+      ansible.builtin.command:
+        argv: ["{{ inventory_observer_uv_bin }}", sync, --locked, --no-dev, --no-editable,
+               --project, "{{ inventory_observer_source_root }}", --python, /usr/bin/python3,
+               --reinstall-package, kdive]
+      environment:
+        UV_PROJECT_ENVIRONMENT: /opt/kdive-authority-inventory/.venv
+        UV_PYTHON_DOWNLOADS: never
+        GRPC_PYTHON_BUILD_SYSTEM_OPENSSL: "1"
+        GRPC_PYTHON_BUILD_SYSTEM_ZLIB: "1"
+      register: provider_authority_host_inventory_install
+      changed_when: provider_authority_host_inventory_install.stderr is search('(?m)^(Installed|Uninstalled|Creating virtual environment) ')
+
+    - name: Create the immutable client parent
+      ansible.builtin.file:
+        path: /usr/libexec
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the fixed collector and client bytes
+      ansible.builtin.copy:
+        src: "{{ inventory_observer_source_root }}/deploy/authority-inventory/{{ item.source }}"
+        dest: "{{ item.dest }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - {source: collector.py, dest: /opt/kdive-authority-inventory/collector.py, mode: "0444"}
+        - {source: client.py, dest: /usr/libexec/kdive-authority-inventory-client.py, mode: "0555"}
+
+    - name: Require immutable collector inputs
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -S, -c, "{{ provider_authority_host_inventory_verifier }}", preflight]
+      changed_when: false
+
+    - name: Validate installed runtime imports and bytes before publication
+      ansible.builtin.command:
+        argv: [/opt/kdive-authority-inventory/.venv/bin/python, -I, -c,
+               "{{ provider_authority_host_inventory_verifier }}", runtime,
+               "{{ inventory_observer_source_root }}", "{{ provider_authority_host_inventory_revision.stdout }}"]
+      changed_when: false
+
+    - name: Install the fixed inventory units
+      ansible.builtin.copy:
+        src: "{{ inventory_observer_source_root }}/deploy/systemd/system/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      loop: [kdive-authority-inventory.socket, kdive-authority-inventory@.service]
+
+    - name: Install the root-owned inventory endpoint rule
+      ansible.builtin.copy:
+        dest: /etc/tmpfiles.d/kdive-authority-inventory.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: "d /run/kdive-authority-inventory 0750 root kdive-authority-observer -\n"
+
+    - name: Create the root-controlled inventory endpoint directory
+      ansible.builtin.command:
+        argv: [systemd-tmpfiles, --create, /etc/tmpfiles.d/kdive-authority-inventory.conf]
+      changed_when: false
+
+    - name: Confirm the installed source revision is still the candidate
+      ansible.builtin.command:
+        argv: [git, -C, "{{ inventory_observer_source_root }}", rev-parse, HEAD]
+      register: provider_authority_host_inventory_final_revision
+      changed_when: false
+      failed_when: >-
+        provider_authority_host_inventory_final_revision.rc != 0 or
+        provider_authority_host_inventory_final_revision.stdout != provider_authority_host_inventory_revision.stdout
+
+    - name: Confirm installed candidate source stayed clean
+      ansible.builtin.command:
+        argv: [git, -C, "{{ inventory_observer_source_root }}", diff, --exit-code, HEAD, --]
+      changed_when: false
+
+    - name: Record the verified collector revision
+      ansible.builtin.copy:
+        dest: /opt/kdive-authority-inventory/revision
+        content: "{{ provider_authority_host_inventory_revision.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0444"
+
+    - name: Start inventory socket
+      ansible.builtin.systemd_service:
+        name: kdive-authority-inventory.socket
+        enabled: true
+        daemon_reload: true
+        state: started
+
+    - name: Verify installed inventory identity imports and revision
+      ansible.builtin.command:
+        argv: [/opt/kdive-authority-inventory/.venv/bin/python, -I, -c,
+               "{{ provider_authority_host_inventory_verifier }}", verify,
+               "{{ inventory_observer_source_root }}", "{{ provider_authority_host_inventory_revision.stdout }}"]
+      changed_when: false
+
+    - name: Prove complete inventory readiness as the observer
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -S, /usr/libexec/kdive-authority-inventory-client.py]
+      become: true
+      become_user: kdive-authority-observer
+      register: provider_authority_host_inventory_ready
+      changed_when: false
+      no_log: true
+      timeout: 120
+
+    - name: Require the complete zero-selection inventory
+      ansible.builtin.assert:
+        that:
+          - (provider_authority_host_inventory_ready.stdout | from_json).keys() | sort == ['domains', 'roots', 'system']
+          - >-
+            (provider_authority_host_inventory_ready.stdout | from_json).roots.keys() | sort ==
+            ['/var/lib/kdive/provider-authority/console', '/var/lib/kdive/provider-authority/rootfs']
+          - (provider_authority_host_inventory_ready.stdout | from_json).system is none
+          - (provider_authority_host_inventory_ready.stdout | from_json).domains | type_debug == 'list'
+          - (provider_authority_host_inventory_ready.stdout | from_json).domains | reject('string') | list | length == 0
+          - (provider_authority_host_inventory_ready.stdout | from_json).roots.values() | map('type_debug') | unique | list == ['list']
+          - (provider_authority_host_inventory_ready.stdout | from_json).roots.values() | flatten(1) | reject('string') | list | length == 0
+        quiet: true
+      no_log: true
+  rescue:
+    - name: Inspect failed collector unit installation
+      ansible.builtin.stat:
+        path: /etc/systemd/system/kdive-authority-inventory.socket
+      register: provider_authority_host_inventory_failed_unit
+
+    - name: Withdraw failed inventory readiness and accepted instances
+      ansible.builtin.systemd_service:
+        name: kdive-authority-inventory.socket
+        state: stopped
+        enabled: false
+      when: provider_authority_host_inventory_failed_unit.stat.exists
+
+    - name: Fail closed on inventory installation or readiness
+      ansible.builtin.fail:
+        msg: Inventory observer convergence failed; repair the prerequisite and rerun the role.
