@@ -17,8 +17,8 @@ Expected implementation size: 450–650 changed lines (L) — the file map below
 
 ## Global Constraints
 
-- No product source (`src/`), ADR, migration, `contract.py` or matrix change. ADR slot 0793 stays
-  unused.
+- No product source (`src/`), ADR, migration or `contract.py` change; the matrix digest moves
+  only by the new bindings. ADR slot 0793 stays unused.
 - Test-only env inputs stay unprefixed (`REMOTE_PROVIDER_SSH`); never add a `KDIVE_` variable.
 - Local-libvirt cells keep their observed values: the moved `domain_kernel`, `worker_connect` and
   `pcap_dir` spool are the same functions or values the local drivers use today.

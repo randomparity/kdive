@@ -76,10 +76,11 @@ filesystem, so they cannot run on a remote System:
 6. **Runbook** section in `docs/operating/runbooks/remote-live-stack.md` and one live run of both
    configurations against a separate x86_64 provider host (operator-granted).
 
-No product source, ADR, migration, `contract.py` or matrix change. Functional effects and
-rejection boundaries are #2815's and #3115's, observed through the remote lane, and the cleanup
-is `remote_cleanup` (domain undefined, owned volumes, external snapshot overlays and pcap volumes
-absent on the provider host, no new `kdive-*` domain, capacity returned). A remote disk-only
+No product source, ADR, migration or `contract.py` change; the matrix digest moves only by the
+new bindings, as for every carrier. Functional effects and rejection boundaries are #2815's and
+#3115's, observed through the remote lane, and the cleanup is `remote_cleanup` (domain
+undefined, owned volumes, external snapshot overlays and pcap volumes absent on the provider host,
+no new `kdive-*` domain, capacity returned). A remote disk-only
 revert, a memory snapshot of a domain carrying the user-mode NIC, or a pcap fetch-back failure is
 recorded as a failing cell and reported as a product finding, never fixed or waived here.
 
