@@ -737,21 +737,35 @@ async def clear_breakpoint_body(s: Session) -> dict[str, object]:
 
 
 async def list_breakpoints_body(s: Session) -> dict[str, object]:
-    """The count follows the installed breakpoints; identifiers and locations are not listed."""
+    """Each installed breakpoint is listed with its number, kind and kallsyms-true location."""
     session_id = await s.start()
     first = await s.breakpoint(session_id)
-    await s.breakpoint(session_id, "vfs_write")
+    second = await s.breakpoint(session_id, "vfs_write")
     both = await s.exposed(session_id=session_id)
     await s.op("debug.clear_breakpoint", session_id=session_id, number=first)
     one_left = await s.exposed(session_id=session_id)
     await s.end(session_id)
-    counts = (both.data.get("count"), one_left.data.get("count"))
-    assert counts == (2, 1), f"the listed counts are {counts}"
-    assert "breakpoints" in both.data, (
-        "debug.list_breakpoints returns only a count, so its identifiers and locations cannot "
-        "be compared with the installed breakpoints (known product gap)"
+    _require_breakpoints(s, both, {first: BREAK_AT, second: "vfs_write"})
+    _require_breakpoints(s, one_left, {second: "vfs_write"})
+    return {"counts": [2, 1], "numbers_match": True, "addr_within_kallsyms": True}
+
+
+def _require_breakpoints(s: Session, env: ToolResponse, expected: dict[str, str]) -> None:
+    rows = env.data.get("breakpoints")
+    assert isinstance(rows, list), "no breakpoints listed"
+    seen = {str(row.get("number")): row for row in rows if isinstance(row, dict)}
+    numbers = sorted(seen)
+    assert env.data.get("count") == len(expected) and numbers == sorted(expected), (
+        f"listed {numbers}, expected {sorted(expected)}"
     )
-    return {"counts": list(counts)}
+    for number, func in expected.items():
+        row = seen[number]
+        assert (row.get("type"), row.get("func")) == ("breakpoint", func), (
+            f"breakpoint {number} is {row}"
+        )
+        assert s.truth.within(func, hex_value(row.get("addr"))), (
+            f"breakpoint {number} is not in {func}"
+        )
 
 
 async def set_watchpoint_body(s: Session) -> dict[str, object]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,54 @@ def test_cells_are_the_six_x86_limit_cells() -> None:
         for f in ("minimum-cpu-ram", "insufficient-disk", "slow-boot")
     }
     assert {c.guest_arch for c in selected} == {"x86_64"}
+
+
+def test_cells_select_by_owner() -> None:
+    contract_ids = {c.id for c in build_contract().cells if c.owner == 3118}
+    assert {c.id for c in rl.cells()} == contract_ids
+    faults = rl.cells(owner=3117)
+    assert {(c.provider, rl.failure(c)) for c in faults} == {
+        (p, f)
+        for p in ("local-libvirt", "remote-libvirt")
+        for f in ("worker-interruption", "lost-response", "backing-service")
+    }
+
+
+def test_bindings_select_by_owner(tmp_path: Path) -> None:
+    image = tmp_path / "rocky.qcow2"
+    image.write_bytes(b"qcow")
+    bind = partial(
+        rl.bindings,
+        "a" * 40,
+        root=tmp_path,
+        host_os="rocky:10",
+        host_arch="x86_64",
+        matrix="b" * 64,
+        staged=lambda _name: image,
+        fixture_at=_unbuilt,
+    )
+    default = bind()
+    assert set(default.cells) == {
+        c.id for c in build_contract().cells if c.owner == 3118 and c.provider == "local-libvirt"
+    }
+    faults = bind(owner=3117)
+    assert set(faults.cells) == {c.id for c in rl.cells("local-libvirt", owner=3117)}
+    host = rl.RemoteHost("op@host", "default", "rocky:10.2", "x86_64", "kvm")
+    remote = rl.remote_bindings(
+        "a" * 40,
+        root=None,
+        matrix="b" * 64,
+        host=host,
+        digest=lambda *_a: "c" * 64,
+        staged=lambda _name: "rocky-10-kdive-remote-base.qcow2",
+        owner=3117,
+    )
+    bound = {c.id for c in rl.cells("remote-libvirt", owner=3117) if c.node_id is not None}
+    assert set(remote.cells) == bound
+
+
+def _unbuilt(*_a: object) -> tuple[Path, dict[str, object]]:
+    raise ValueError("no fixture")
 
 
 def _journal(*lines: tuple[str, str]) -> str:

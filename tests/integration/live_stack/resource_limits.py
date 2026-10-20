@@ -136,12 +136,12 @@ _SAMPLE_S = 15.0
 _TERMINAL_JOB = frozenset({"succeeded", "failed", "canceled"})
 
 
-def cells(provider: str | None = None) -> list[Cell]:
-    """The six x86_64 ``failure-resource`` cells #3118 owns, optionally for one provider."""
+def cells(provider: str | None = None, *, owner: int = OWNER) -> list[Cell]:
+    """The six x86_64 ``failure-resource`` cells ``owner`` holds, optionally for one provider."""
     return [
         cell
         for cell in build_contract().cells
-        if cell.owner == OWNER and (provider is None or cell.provider == provider)
+        if cell.owner == owner and (provider is None or cell.provider == provider)
     ]
 
 
@@ -825,23 +825,24 @@ async def on_allocation(
     sizing: Sizing,
     body: Body,
     provider: Provider = LOCAL,
+    project: str = PROJECT,
 ) -> None:
-    """Hold one Allocation of ``sizing`` for ``body``; record a cleanup attempt on failure.
+    """Hold one Allocation of ``sizing`` in ``project`` for ``body``; record a cleanup attempt.
 
     ``body`` proves ``cleanup`` itself, because its owned fixtures are removed after release.
     """
     token = mint_role_token(
-        issuer, project=PROJECT, agent_session=f"{PROJECT}-sess", role="operator"
+        issuer, project=project, agent_session=f"{project}-sess", role="operator"
     )
     async with LiveStackClient.over_http(base_url, token) as op:
-        await seed_metering(db_url, PROJECT)
+        await seed_metering(db_url, project)
         in_use = await capacity_in_use(op)
         domains = await asyncio.to_thread(provider.domains)
         allocation = ok(
             await scalar(
                 op,
                 "allocations.request",
-                project=PROJECT,
+                project=project,
                 resource=provider.resource,
                 **sizing.request(),
             ),
@@ -1405,8 +1406,9 @@ def bindings(
     matrix: str,
     staged: Callable[[str], Path | None] = staged_image,
     fixture_at: Fixture = load_fixture,
+    owner: int = OWNER,
 ) -> InputBindings:
-    """The expected ``Context`` of every local #3118 cell; null where unstaged or unbuilt."""
+    """The expected ``Context`` of every local ``owner`` cell; null where unstaged or unbuilt."""
     entry = load_rootfs_catalog()[IMAGE]
     image = staged(IMAGE)
     kernel = bound_kernel(root, "longterm", host_arch, fixture_at)
@@ -1422,7 +1424,7 @@ def bindings(
                 **kernel,
             }
         )
-        for cell in cells("local-libvirt")
+        for cell in cells("local-libvirt", owner=owner)
     }
     return InputBindings(version=1, candidate_sha=candidate, matrix_sha256=matrix, cells=contexts)
 
@@ -1436,8 +1438,9 @@ def remote_bindings(
     digest: Callable[[str, str, str], str] = volume_sha256,
     staged: Callable[[str], str | None] = staged_volume,
     fixture_at: Fixture = load_fixture,
+    owner: int = OWNER,
 ) -> InputBindings:
-    """The expected ``Context`` of every bound remote #3118 cell, on ``host``."""
+    """The expected ``Context`` of every bound remote ``owner`` cell, on ``host``."""
     image = REMOTE_REPRESENTATIVES[REMOTE_FAMILY]
     volume = staged(image.name)
     kernel = bound_kernel(root, "longterm", host.host_arch, fixture_at)
@@ -1453,19 +1456,20 @@ def remote_bindings(
                 **kernel,
             }
         )
-        for cell in cells("remote-libvirt")
+        for cell in cells("remote-libvirt", owner=owner)
         if cell.node_id is not None
     }
     return InputBindings(version=1, candidate_sha=candidate, matrix_sha256=matrix, cells=contexts)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Write local resource-boundary input bindings.")
+    parser = argparse.ArgumentParser(description="Write resource-frame cell input bindings.")
     commands = parser.add_subparsers(dest="command", required=True)
     write = commands.add_parser("bindings")
     write.add_argument("--candidate", required=True)
     write.add_argument("--out", type=Path, required=True)
     write.add_argument("--remote", action="store_true", help="bind the remote-libvirt cells")
+    write.add_argument("--owner", type=int, default=OWNER, help="the issue owning the cells")
     args = parser.parse_args(argv)
     root = Path(os.environ[FIXTURE_ROOT_ENV]) if os.environ.get(FIXTURE_ROOT_ENV) else None
     matrix = build_contract().matrix_sha256
@@ -1475,7 +1479,9 @@ def main(argv: list[str] | None = None) -> int:
         except ScenarioStop as stop:
             print(f"cannot bind the remote cells: {stop}")
             return 2
-        inputs = remote_bindings(args.candidate, root=root, matrix=matrix, host=host)
+        inputs = remote_bindings(
+            args.candidate, root=root, matrix=matrix, host=host, owner=args.owner
+        )
     else:
         inputs = bindings(
             args.candidate,
@@ -1483,6 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
             host_os=os_identity(Path("/etc/os-release").read_text(encoding="utf-8")),
             host_arch=platform.machine(),
             matrix=matrix,
+            owner=args.owner,
         )
     args.out.write_text(inputs.model_dump_json(indent=1) + "\n", encoding="utf-8")
     print(f"wrote {len(inputs.cells)} binding(s)")

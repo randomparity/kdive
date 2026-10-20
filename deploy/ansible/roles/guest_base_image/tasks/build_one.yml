@@ -511,7 +511,7 @@
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: true
 
-# --- Put the GRUB terminal on the serial console for the Rocky remote image. ---
+# --- Serve the Fedora/Rocky x86_64 GRUB terminal on the serial console. ---
 # The upstream Rocky 10 cloud image sets GRUB_TERMINAL_OUTPUT="gfxterm", and a remote domain
 # carries no video device (only a serial console), so GRUB never draws its menu and the guest
 # spins before the kernel starts: no serial output and no guest agent. Serve GRUB on the serial
@@ -531,8 +531,8 @@
           'GRUB_SERIAL_COMMAND="serial --speed=115200"' >> /etc/default/grub
         grub2-mkconfig -o /boot/grub2/grub.cfg
   when:
-    # The proven arm only: the x86_64 Rocky 10 image. Fedora and ppc64le are unverified.
-    - image.distro == 'rocky'
+    # POWER build-fs images boot directly with hvc0, without GRUB (ADR-0272).
+    - image.distro in ['rocky', 'fedora']
     - ansible_architecture == 'x86_64'
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: true
