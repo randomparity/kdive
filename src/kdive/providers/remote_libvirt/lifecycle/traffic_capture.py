@@ -66,8 +66,8 @@ _DIR_POOL_TYPES = frozenset({"dir", "fs", "netfs"})
 REMOTE_PCAP_WRITE_REMEDIATION = (
     "the remote qemu:///system hypervisor could not write the capture pcap into the operator "
     "storage_pool; ensure the pool is a filesystem/dir pool whose directory the remote QEMU "
-    "runtime user can create files in (the pool already backs the domain's disk images, so this "
-    "usually indicates a full or read-only pool filesystem)"
+    "runtime user can create files in: check the directory's ownership and its SELinux/AppArmor "
+    "label for the QEMU process, and that the pool filesystem is neither full nor read-only"
 )
 
 
@@ -385,6 +385,7 @@ class RemoteLibvirtTrafficCapture:
         cmd = {"execute": "object-add", "arguments": arguments}
         reply = self._send(domain, domain_name, cmd, "object_add", verb="adding capture filter on")
         if reply.pcap_open_denied:
+            _log_refusal(reply, "object_add", domain_name)
             raise CategorizedError(
                 "the remote hypervisor was denied creating the capture pcap",
                 category=ErrorCategory.CONFIGURATION_ERROR,
@@ -452,7 +453,7 @@ class RemoteLibvirtTrafficCapture:
         )
 
 
-def _refused(reply: QmpReply, operation: str, domain_name: str) -> CategorizedError:
+def _log_refusal(reply: QmpReply, operation: str, domain_name: str) -> None:
     _log.warning(
         "QEMU refused %s on %s: %s %r",
         operation,
@@ -460,6 +461,10 @@ def _refused(reply: QmpReply, operation: str, domain_name: str) -> CategorizedEr
         reply.error_class,
         reply.description[:_LOGGED_DESCRIPTION_CHARS],
     )
+
+
+def _refused(reply: QmpReply, operation: str, domain_name: str) -> CategorizedError:
+    _log_refusal(reply, operation, domain_name)
     return CategorizedError(
         "QEMU refused the capture filter command",
         category=ErrorCategory.CONTROL_FAILURE,

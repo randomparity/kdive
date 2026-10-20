@@ -247,7 +247,9 @@ def test_a_refused_filter_command_is_a_control_failure(tmp_path: Path, execute: 
     }
 
 
-def test_a_denied_pcap_open_is_a_configuration_error_with_remediation(tmp_path: Path) -> None:
+def test_a_denied_pcap_open_is_a_configuration_error_with_remediation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """An unwritable pool fails terminally with operator guidance, not as a retryable refusal."""
     domain = _FakeDomain()
     domain.replies["object-add"] = _error_reply(
@@ -263,6 +265,7 @@ def test_a_denied_pcap_open_is_a_configuration_error_with_remediation(tmp_path: 
         "error": "GenericError",
         "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
     }
+    assert "Permission denied" in caplog.text  # the bounded description reaches the worker log
 
 
 @pytest.mark.parametrize("reply", ["{}", "not json", '{"return": {}, "error": {"class": "X"}}'])
