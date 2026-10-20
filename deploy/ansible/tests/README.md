@@ -11,6 +11,8 @@ Regression harnesses for role logic that no unit test in `tests/` can reach, all
 | `run-remote-libvirt-facts-render.sh` | `remote_libvirt_facts` staged-volume confirmation (#1629) |
 | `run-remote-module-appliance.sh` | clean-host digest verification and idempotent extraction (#2128) |
 | `run-external-boot-recovery-root.sh` | the `live_vm_host` external-boot recovery-root shape, idempotence, and health gate (#2210) |
+| `run-authority-tls-expiry.py` | the `live_vm_host` authority/worker TLS certificate expiry-margin check (#3272) |
+| `run-authority-tls-renewal.py` | the TLS renewal playbook's controller chain/key and exact-revision checks, and its `local_worker_host` defaults loading (#3273) |
 
 Each drives the **real** tasks — never a copy of the logic — in isolation.
 

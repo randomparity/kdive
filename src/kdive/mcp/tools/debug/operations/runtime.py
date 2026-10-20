@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -51,6 +52,11 @@ from kdive.providers.ports.debug import (
     GdbMiEngine,
 )
 from kdive.providers.ports.lifecycle import TransportHandleData
+from kdive.providers.shared.debug_common.gdbmi.core.engine import (
+    HALT_BOUND_SEC,
+    RESUME_HOLD_BOUND_SEC,
+)
+from kdive.providers.shared.debug_common.gdbmi.core.execution import inferior_running
 from kdive.providers.shared.debug_common.gdbmi.policy.capabilities import (
     DebugCapability,
     supports,
@@ -60,6 +66,16 @@ from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
 
 _EngineOp = Callable[[GdbMiEngine, GdbMiAttachment], ToolResponse]
+
+_log = logging.getLogger(__name__)
+
+# Next actions for engine failures an agent recovers from without new input (#3244): a running
+# guest is halted or waited on; a stalled link is interrupted again or the session ended.
+_RECOVERY_ACTIONS: dict[str, tuple[str, ...]] = {
+    "inferior_running": ("debug.interrupt", "debug.continue"),
+    "transport_stall": ("debug.interrupt", "debug.end_session"),
+    "interrupt_refused": ("debug.end_session",),
+}
 
 
 @dataclass(frozen=True)
@@ -117,6 +133,17 @@ def _op_audit(tool: str, transition: str | None = None, /, **args: object) -> _O
     if tool not in _AUDITED_OPS:
         return None
     return _OpAudit(tool=tool, transition=transition or tool.removeprefix("debug."), args=args)
+
+
+def with_halt_bounds[F: Callable[..., object]](func: F) -> F:
+    """Interpolate the enforced halt and wait bounds into a wrapper docstring (#3244)."""
+    if func.__doc__ is None:
+        raise AssertionError("a debug wrapper that states halt bounds must have a docstring")
+    func.__doc__ = func.__doc__.format(
+        halt_s=f"{HALT_BOUND_SEC:g}",
+        continue_hold_s=f"{RESUME_HOLD_BOUND_SEC:g}",
+    )
+    return func
 
 
 def _gdbmi_maturity() -> dict[str, object]:
@@ -179,14 +206,27 @@ class DebugEngineRuntime:
         self._registry.register(session_id, attachment)
         return attachment
 
-    def reap(self, session_id: str) -> None:
-        """Exit + drop the live engine for ``session_id`` (no-op if never attached)."""
+    def reap(self, session_id: str) -> bool:
+        """Exit + drop the live engine for ``session_id`` (no-op if never attached).
+
+        A guest left running by a background continue is halted first, so gdb exits from a
+        halted target as on every other detach (#3244). Returns False only when that halt
+        failed, leaving the guest's execution unknown; blocking, so call it off the event loop.
+        """
         attachment = self._registry.reap(session_id)
+        halted = True
         if attachment is not None:
+            if attachment.execution == "running":
+                try:
+                    self._engine.interrupt(attachment)
+                except Exception:
+                    _log.warning("debug session %s: halt before detach failed", session_id)
+                    halted = False
             with contextlib.suppress(Exception):
                 attachment.controller.exit()
         with self._locks_guard:
             self._locks.pop(session_id, None)
+        return halted
 
 
 class DebugRuntimeResolver:
@@ -238,7 +278,34 @@ def _op_failure(session_id: str, exc: CategorizedError) -> ToolResponse:
     category = exc.category
     if category is ErrorCategory.MISSING_DEPENDENCY:
         category = ErrorCategory.DEBUG_ATTACH_FAILURE
-    return ToolResponse.failure_from_error(session_id, exc, category=category)
+    code = exc.details.get("code")
+    actions = _RECOVERY_ACTIONS.get(code) if isinstance(code, str) else None
+    return ToolResponse.failure_from_error(
+        session_id,
+        exc,
+        category=category,
+        suggested_next_actions=list(actions) if actions is not None else None,
+    )
+
+
+async def run_to_completion[T](call: Callable[[], T]) -> T:
+    """Run blocking ``call`` off the event loop and return only once it has finished.
+
+    Await it while holding the per-session lock. A cancelled caller would otherwise leave
+    ``async with`` while the thread still drives gdb, letting the next op write the same gdb/MI
+    stream (#3244). ``asyncio.wait`` never cancels the task, so every cancel is absorbed until
+    the thread finishes, then re-raised.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(call))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.wait((task,))
+        except asyncio.CancelledError:
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    return task.result()
 
 
 async def _live_session(
@@ -260,13 +327,16 @@ async def run_engine_op_with_runtime(
     op: _EngineOp,
     *,
     audit: _OpAudit | None = None,
+    while_running: bool = False,
 ) -> ToolResponse:
     """Run a Debug-plane op against an already constructed engine runtime."""
 
     async def _runtime_for_session(_session: DebugSession) -> DebugEngineRuntime:
         return runtime
 
-    return await _run_engine_op(pool, ctx, session_id, _runtime_for_session, op, audit=audit)
+    return await _run_engine_op(
+        pool, ctx, session_id, _runtime_for_session, op, audit=audit, while_running=while_running
+    )
 
 
 async def run_engine_op_with_resolver(
@@ -278,14 +348,26 @@ async def run_engine_op_with_resolver(
     *,
     audit: _OpAudit | None = None,
     requires: CapabilityRequirement | None = None,
+    while_running: bool = False,
 ) -> ToolResponse:
-    """Run a Debug-plane op after resolving the session's provider debug runtime."""
+    """Run a Debug-plane op after resolving the session's provider debug runtime.
+
+    ``while_running`` admits the op while a background continue has the guest running; every
+    other op is refused with ``inferior_running`` before it sends a gdb/MI command (#3244).
+    """
 
     async def _runtime_for_session(session: DebugSession) -> DebugEngineRuntime | ToolResponse:
         return await runtime_resolver.runtime_for_session(pool, session.id)
 
     return await _run_engine_op(
-        pool, ctx, session_id, _runtime_for_session, op, audit=audit, requires=requires
+        pool,
+        ctx,
+        session_id,
+        _runtime_for_session,
+        op,
+        audit=audit,
+        requires=requires,
+        while_running=while_running,
     )
 
 
@@ -298,6 +380,7 @@ async def _run_engine_op(
     *,
     audit: _OpAudit | None = None,
     requires: CapabilityRequirement | None = None,
+    while_running: bool = False,
 ) -> ToolResponse:
     """Gate the session, take the per-session lock, attach-or-reuse, and run ``op`` off-loop.
 
@@ -312,6 +395,9 @@ async def _run_engine_op(
 
     When ``requires`` is set and the session's System lacks that capability, the refusal returns
     before the runtime lookup, so no gdb/MI command reaches the target (ADR-0712).
+
+    The session is re-gated after the lock is taken: an op queued behind ``end_session``'s reap
+    gets the not-live refusal instead of attaching a new gdb to a detached session (#3244).
     """
     with bind_context(principal=ctx.principal):
         gated = await _live_session(pool, ctx, session_id)
@@ -326,8 +412,13 @@ async def _run_engine_op(
         if isinstance(resolved_runtime, ToolResponse):
             return resolved_runtime
         async with resolved_runtime.lock_for(session_id):
+            regated = await _live_session(pool, ctx, session_id)
+            if isinstance(regated, ToolResponse):
+                return regated
             try:
-                result = await asyncio.to_thread(_attach_and_run, resolved_runtime, session, op)
+                result = await run_to_completion(
+                    lambda: _attach_and_run(resolved_runtime, session, op, while_running)
+                )
             except CategorizedError as exc:
                 return _op_failure(session_id, exc)
         if audit is not None and result.error_category is None:
@@ -388,6 +479,9 @@ async def _record_op_audit(
 
 
 def _attach_and_run(
-    runtime: DebugEngineRuntime, session: DebugSession, op: _EngineOp
+    runtime: DebugEngineRuntime, session: DebugSession, op: _EngineOp, while_running: bool
 ) -> ToolResponse:
-    return op(runtime.engine, runtime.attach_or_reuse(session))
+    attachment = runtime.attach_or_reuse(session)
+    if attachment.execution == "running" and not while_running:
+        raise inferior_running()
+    return op(runtime.engine, attachment)
