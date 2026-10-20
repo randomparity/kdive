@@ -600,8 +600,28 @@ def test_read_frame_compares_vfs_read_args(monkeypatch: pytest.MonkeyPatch) -> N
     assert observed == {
         "frame0": BREAK_AT,
         "args": ["file", "buf", "count", "pos"],
+        "entry_values": 0,
         "registers_match": True,
     }
+
+
+def _with_entry_values(args: Mapping[str, str]) -> dict[str, str]:
+    """Each parameter followed by its gdb ``@entry`` row, as gdb 17 lists them at an entry stop."""
+    return {key: value for n, v in args.items() for key, value in ((n, v), (f"{n}@entry", v))}
+
+
+def test_read_frame_sets_entry_values_aside(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = _run("debug.read_frame", _read_frame(args=_with_entry_values(_ARGS)), monkeypatch)
+    assert observed["entry_values"] == 4
+    assert observed["args"] == ["file", "buf", "count", "pos"]
+
+
+def test_read_frame_needs_entry_values_at_the_registers(monkeypatch: pytest.MonkeyPatch) -> None:
+    args = _with_entry_values(_ARGS) | {"count@entry": "16"}
+    debugger = _read_frame(args=args)
+    with pytest.raises(AssertionError, match="count@entry is not rdx"):
+        _run("debug.read_frame", debugger, monkeypatch)
+    assert debugger.calls[-1][0] == "debug.end_session"
 
 
 @pytest.mark.parametrize(

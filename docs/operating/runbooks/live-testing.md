@@ -1771,6 +1771,7 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
 - The `debug.read_frame` cell requires the stop at `vfs_read`'s entry and compares frame 0's
   arguments with its v6.18 signature (`file`, `buf`, `count`, `pos`) and their values with the
   `rdi`, `rsi`, `rdx` and `rcx` registers, plus a user-half `buf` and a `ret` local (ADR-0781).
+  gdb's `<name>@entry` rows are set aside for the name check and must equal the same register.
   The `debug.list_breakpoints` cell compares each listed row's
   number, kind, function and address with the installed breakpoints (ADR-0780).
 - The `debug.interrupt` cell leaves the guest running with `debug.continue` `wait=false`

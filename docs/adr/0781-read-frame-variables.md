@@ -33,6 +33,9 @@ restores the selected frame after a `--frame` command.
   already read verbatim with `debug.read_memory`. Redaction of registered secrets in it is best
   effort: gdb cuts the preview at 200 elements and compresses repeats before kdive redacts.
 - An `<optimized out>` variable is reported as gdb prints it, not hidden.
+- Under gdb's default `print entry-values`, an argument whose entry value DWARF recovers is
+  followed by a `<name>@entry` row holding its value at function entry; it is passed through
+  (#3243 live run, 2026-10-20).
 - `read_frame` issues three MI commands instead of one; a missing current thread answers
   `no_current_thread` and a missing variable list `no_frame_variables`, both
   `DEBUG_ATTACH_FAILURE`.

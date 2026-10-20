@@ -910,7 +910,11 @@ def _variables(frame: Mapping[str, object], key: str) -> list[dict[str, Any]]:
 
 
 async def read_frame_body(s: Session) -> dict[str, object]:
-    """Frame 0 is ``vfs_read`` at its entry, its arguments the ABI registers and ``ret`` a local."""
+    """Frame 0 is ``vfs_read`` at its entry, its arguments the ABI registers and ``ret`` a local.
+
+    gdb adds a ``<name>@entry`` row for a parameter whose entry value DWARF recovers; at the entry
+    stop it must equal the same register as the parameter itself.
+    """
     session_id = await s.start()
     rip = await s.stop_in_vfs_read(session_id)
     assert rip == s.truth.at(BREAK_AT), "the stop is not at vfs_read's entry"
@@ -920,13 +924,23 @@ async def read_frame_body(s: Session) -> dict[str, object]:
     frame = env.data.get("frame")
     assert isinstance(frame, dict), "no frame returned"
     assert (frame.get("func"), hex_value(frame.get("addr"))) == (BREAK_AT, rip), "frame differs"
-    args = {str(v.get("name")): v.get("value") for v in _variables(frame, "args")}
-    assert tuple(args) == _VFS_READ_ARGS, f"vfs_read's arguments are {tuple(args)}"
-    for (name, value), register, reg in zip(args.items(), registers, _ARG_REGISTERS, strict=True):
-        assert _number(value, name) == register, f"{name} is not {reg}"
+    rows = {str(v.get("name")): v.get("value") for v in _variables(frame, "args")}
+    declared = tuple(name for name in rows if not name.endswith("@entry"))
+    assert declared == _VFS_READ_ARGS, f"vfs_read's arguments are {declared}"
+    for name, value in rows.items():
+        parameter = name.removesuffix("@entry")
+        assert parameter in _VFS_READ_ARGS, f"{name} is not a vfs_read parameter"
+        index = _VFS_READ_ARGS.index(parameter)
+        assert _number(value, name) == registers[index], f"{name} is not {_ARG_REGISTERS[index]}"
     assert 0 < registers[1] < KERNEL_BASE, "buf is not a user pointer"
     assert "ret" in [v.get("name") for v in _variables(frame, "locals")], "no ret local"
-    return {"frame0": BREAK_AT, "args": list(_VFS_READ_ARGS), "registers_match": True}
+    entry_values = len(rows) - len(declared)
+    return {
+        "frame0": BREAK_AT,
+        "args": list(_VFS_READ_ARGS),
+        "entry_values": entry_values,
+        "registers_match": True,
+    }
 
 
 def _module_row(env: ToolResponse) -> dict[str, Any]:

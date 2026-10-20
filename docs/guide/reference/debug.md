@@ -239,7 +239,8 @@ selection is only valid at a halt.
 data.frame holds the frame's location plus args and locals, each a name, gdb's type and,
 for a scalar or pointer, gdb's printed value (a struct or array shows its type only). Up
 to 64 variables return and each type and value is cut at 256
-characters; data.truncated says whether anything was cut.
+characters; data.truncated says whether anything was cut. gdb may follow an argument with
+a <name>@entry row holding its value at function entry.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
