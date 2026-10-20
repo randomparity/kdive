@@ -1618,8 +1618,10 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
   session rows and prove the guest halts while attached and answers again after the detach.
 - Two cells fail after proving what they can, until the tool exposes the effect:
   `debug.list_breakpoints` returns only a count and `debug.read_frame` no arguments or locals.
-  `debug.interrupt` fails while no running guest reaches it: `debug.start_session`'s gdbstub
-  reachability probe leaves the guest paused (ADR-0184), and every resume halts it again.
+- The `debug.interrupt` cell leaves the guest running with `debug.continue` `wait=false`
+  (ADR-0783), requires `halted_by=interrupt` with `signal-received`, records which path the
+  `vfs_read` breakpoint stop took (`resume_reply` or `waiting_continue`), and ends the session
+  while the guest runs, requiring it to answer again.
 - Rejection cells aim at one target per stack: a torn-down fixture System, its Run and an ended
   gdbstub session. They compare the project rows (including its debug sessions), the jobs naming
   the System or Run, and whether its domain is defined.
