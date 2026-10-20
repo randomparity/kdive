@@ -36,7 +36,8 @@ remains. The known-gap assertion is removed; the runbook's gap line drops the to
    unchanged); redaction already applied by the engine projection.
 3. Accepted: a multi-location breakpoint lists `addr` `<MULTIPLE>` without `func` (ADR-0780);
    rows are unbounded beyond what the caller installed, as for `debug.list_watchpoints`; the
-   fake reports `enabled`, the real engine does not.
+   fault-inject fake lists only breakpoints, without `addr`, with `enabled`; a watchpoint's
+   expression is `what` here, `expr` in the watchpoint tools.
 4. Covered elsewhere: frame arguments/locals #3243; interrupt behaviour #3230/#3244; ppc64le
    live cells #2818.
 

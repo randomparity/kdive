@@ -21,10 +21,12 @@ its meaning: the number of rows. The engine, its row set and its projection are 
 
 ## Consequences
 
-- A watchpoint appears in both list tools, distinguished here by `type`.
+- A watchpoint appears in both list tools, distinguished here by `type`; its expression is
+  `what` here and `expr` in `debug.set_watchpoint` and `debug.list_watchpoints`.
 - A breakpoint gdb resolved to several locations shows `addr` `<MULTIPLE>` and no `func`; its
   per-location detail is not listed.
-- The real engine never reports `enabled` for a breakpoint; the fault-inject fake does.
+- The fault-inject fake lists only its breakpoints, without `addr` and with `enabled`; the real
+  engine never reports `enabled`.
 
 ## Considered & rejected
 
