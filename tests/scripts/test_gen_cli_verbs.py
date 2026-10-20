@@ -208,6 +208,20 @@ def test_boolean_parameter_uses_store_true() -> None:
     assert flag is not None and flag.action == "store_true" and flag.arg_type is None
 
 
+@pytest.mark.parametrize(
+    ("spec", "action"),
+    [
+        ({"type": "boolean", "default": True}, "bool_optional"),
+        ({"anyOf": [{"type": "boolean"}, {"type": "null"}], "default": True}, "bool_optional"),
+        ({"type": "boolean", "default": False}, "store_true"),
+    ],
+)
+def test_true_default_boolean_can_express_false(spec: dict[str, object], action: str) -> None:
+    # An optional boolean that defaults to true needs --no-<flag> to send false (#3244).
+    flag = gen._flag_for("wait", {**spec, "description": "Wait."}, False)
+    assert flag is not None and flag.action == action
+
+
 def test_number_parameter_maps_to_float() -> None:
     flag = gen._flag_for("ratio", {"type": "number", "description": "R."}, False)
     assert flag is not None and flag.arg_type == "float"

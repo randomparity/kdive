@@ -35,14 +35,15 @@ _QEMU_RUNTIME_USERS = ("qemu", "libvirt-qemu")
 # (with any MCS categories) can create files under an ``svirt_image_t:s0`` directory.
 _SVIRT_IMAGE_CONTEXT = "system_u:object_r:svirt_image_t:s0"
 
-# Operator guidance when the hypervisor could not write the capture pcap (ADR-0385). The root
-# worker prepares the directory automatically (owns it to the QEMU user + labels it
-# ``svirt_image_t``); a non-root worker cannot, so the directory must be provisioned out of band.
+# Operator guidance when the hypervisor could not create the capture pcap (ADR-0385, ADR-0640).
+# It names both daemons' write paths and stays printable ASCII within 512 characters, so the
+# capture child forwards it into the job record whole (#3269).
 PCAP_HYPERVISOR_WRITE_REMEDIATION = (
-    f"the qemu:///system hypervisor could not write the capture pcap under {_PCAP_DIR}/; ensure "
-    "that directory is writable by the QEMU runtime user and, on SELinux hosts, labeled "
-    "svirt_image_t. The root worker prepares it automatically; run the worker as root or "
-    "provision the directory out of band"
+    f"the hypervisor could not create the capture pcap under {_PCAP_DIR}/; on an "
+    "SELinux-enforcing host that tree must be labeled svirt_image_t (run just "
+    "prepare-local-libvirt-host, ADR-0640), and the hypervisor account must be able to write "
+    "the per-System directory: through the kdive-live-libvirt group on the session stack, or as "
+    "the QEMU user under qemu:///system"
 )
 
 # Shared operator guidance for the non-root-worker-under-qemu:///system readability wall
@@ -178,12 +179,13 @@ def _relabel_svirt_image(directory: Path) -> None:
 def prepare_pcap_dir(system_id: UUID) -> Path:
     """Create the per-System pcap dir and make it writable by the qemu:///system hypervisor.
 
-    QEMU's ``filter-dump`` (added via raw QMP) writes the pcap as the unprivileged, SELinux-confined
-    hypervisor user, but libvirt's dynamic ownership only relabels its own managed devices — not
-    this out-of-band file. So the root worker prepares the directory: owns it to the QEMU runtime
-    user and, on SELinux hosts, labels it ``svirt_image_t`` so the confined domain can create the
-    pcap. Every step is best-effort (a non-root worker cannot chown/relabel); a genuine write
-    failure is caught loudly at readback via :data:`PCAP_HYPERVISOR_WRITE_REMEDIATION`.
+    QEMU's ``filter-dump`` (added via raw QMP) writes the pcap as the SELinux-confined hypervisor
+    account, and no libvirt daemon relabels this out-of-band file. Host preparation labels the
+    pcap tree ``svirt_image_t`` (ADR-0640), so the directory inherits a label the confined domain
+    can write. A root worker under ``qemu:///system`` also owns the directory to the QEMU runtime
+    user and relabels it; both steps are best-effort and do nothing for a non-root worker, whose
+    session-stack QEMU writes through the shared group. A refused write fails the attach loudly
+    with :data:`PCAP_HYPERVISOR_WRITE_REMEDIATION` (ADR-0385 amendment).
     """
     directory = pcap_dir(system_id)
     directory.mkdir(parents=True, exist_ok=True)

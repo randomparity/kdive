@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from hashlib import sha256
@@ -836,7 +837,11 @@ def test_local_fixed_workers_receive_protected_authority_client_files() -> None:
     assert defaults["live_vm_host_worker_authority_server_ca_ref"] == (
         "external-boot-authority/server-ca"
     )
-    tasks = (ROLE.parent / "live_vm_host" / "tasks" / "main.yml").read_text(encoding="utf-8")
+    live_tasks = ROLE.parent / "live_vm_host" / "tasks"
+    assert "ansible.builtin.import_tasks: worker_authority_tls.yml" in (
+        live_tasks / "main.yml"
+    ).read_text(encoding="utf-8")
+    tasks = (live_tasks / "worker_authority_tls.yml").read_text(encoding="utf-8")
     tasks += (ROLE.parent / "local_worker_host" / "tasks" / "worker_accounts.yml").read_text(
         encoding="utf-8"
     )
@@ -910,3 +915,136 @@ def test_authority_discovers_native_guestfs_and_verifies_installed_import(
     broken = subprocess.run([str(python), *verify_argv[1:]], capture_output=True, check=False)
     assert broken.returncode != 0
     assert b"unusable native binding" in broken.stderr
+
+
+LIVE_TASKS = ROLE.parent / "live_vm_host" / "tasks"
+CARRIER = ROOT / "scripts" / "operations" / "prove-external-boot-authority-host.sh"
+AUTHORITY_UNITS = (
+    UNIT,
+    ROLE.parent / "live_vm_host" / "templates" / "external-boot-authority.service.j2",
+    ROOT / "deploy" / "systemd" / "system" / "kdive-external-boot-authority.service",
+)
+
+
+def _flattened(tasks: list[dict[str, object]]) -> list[dict[str, object]]:
+    flat: list[dict[str, object]] = []
+    for task in tasks:
+        flat.append(task)
+        for section in ("block", "rescue", "always"):
+            flat.extend(_flattened(cast(list[dict[str, object]], task.get(section, []))))
+    return flat
+
+
+def _expiry_includes(path: Path) -> list[dict[str, object]]:
+    return [
+        task
+        for task in _flattened(_tasks(path))
+        if cast(dict[str, object], task.get("ansible.builtin.include_tasks", {})).get("file")
+        == "tls_expiry.yml"
+    ]
+
+
+def _certificates(task: dict[str, object]) -> list[tuple[str, str]]:
+    variables = cast(dict[str, list[dict[str, str]]], task["vars"])
+    certificates = variables["live_vm_host_tls_expiry_certificates"]
+    return [(item["name"], item["path"]) for item in certificates]
+
+
+def test_tls_expiry_checks_cover_authority_and_worker_certificates() -> None:
+    preflight = _expiry_includes(LIVE_TASKS / "authority_preflight.yml")
+    assert [_certificates(task) for task in preflight] == [
+        [
+            ("server-ca", "{{ live_vm_host_worker_authority_server_ca_source }}"),
+            ("client-certificate", "{{ live_vm_host_worker_authority_client_certificate_source }}"),
+        ],
+        [
+            ("server-certificate", "{{ live_vm_host_authority_server_certificate_source }}"),
+            ("server-ca", "{{ live_vm_host_authority_server_ca_source }}"),
+            ("worker-client-ca", "{{ live_vm_host_authority_worker_client_ca_source }}"),
+            (
+                "health-client-certificate",
+                "{{ live_vm_host_authority_health_client_certificate_source }}",
+            ),
+        ],
+    ]
+    for task in preflight:
+        include = cast(dict[str, object], task["ansible.builtin.include_tasks"])
+        assert include["apply"] == {"delegate_to": "localhost", "become": False}
+    assert preflight[0]["when"] == "live_vm_host_worker_authority_enabled | bool"
+
+    verify_tasks = _tasks(LIVE_TASKS / "verify.yml")
+    verify = _expiry_includes(LIVE_TASKS / "verify.yml")
+    installed = "{{ live_vm_host_authority_credentials_dir }}"
+    worker = "{{ live_vm_host_worker_authority_secrets_root }}"
+    assert [_certificates(task) for task in verify] == [
+        [
+            (name, f"{installed}/{name}")
+            for name in (
+                "server-certificate",
+                "server-ca",
+                "worker-client-ca",
+                "health-client-certificate",
+            )
+        ],
+        [(name, f"{worker}/{name}") for name in ("server-ca", "client-certificate")],
+    ]
+    assert [task["when"] for task in verify] == [
+        "live_vm_host_authority_enabled | bool",
+        "live_vm_host_worker_authority_enabled | bool",
+    ]
+    ready = verify_tasks.index(_named(verify_tasks, "Assert the authority service is ready"))
+    for task in verify:
+        assert "apply" not in cast(dict[str, object], task["ansible.builtin.include_tasks"])
+        assert verify_tasks.index(task) < ready
+    for task in preflight + verify:
+        assert all("key" not in path for _, path in _certificates(task))
+
+    margin = _yaml(ROLE.parent / "live_vm_host" / "defaults" / "main.yml")[
+        "live_vm_host_authority_tls_expiry_margin_seconds"
+    ]
+    assert margin == 43200
+    # The disposable carrier issues one-day certificates and provisions through this role.
+    assert re.findall(r"--days (\S+)", CARRIER.read_text(encoding="utf-8")) == ["1"] * 4
+    assert cast(int, margin) < 86400
+
+
+def _directives(text: str) -> dict[str, str]:
+    return dict(
+        line.split("=", 1)
+        for line in text.splitlines()
+        if "=" in line and not line.startswith(("#", "{"))
+    )
+
+
+def _seconds(value: str) -> int:
+    return int(value.removesuffix("s"))
+
+
+@pytest.mark.parametrize("path", AUTHORITY_UNITS, ids=lambda path: path.name)
+def test_authority_units_bound_their_restart_loop(path: Path) -> None:
+    unit_text, service_text = path.read_text(encoding="utf-8").split("[Service]", 1)
+    unit, service = _directives(unit_text), _directives(service_text)
+    assert unit["StartLimitIntervalSec"] == "600"
+    assert unit["StartLimitBurst"] == "5"
+    assert "StartLimitIntervalSec" not in service
+    assert "StartLimitBurst" not in service
+    interval, burst = int(unit["StartLimitIntervalSec"]), int(unit["StartLimitBurst"])
+    restart, timeout = _seconds(service["RestartSec"]), _seconds(service["TimeoutStartSec"])
+    # Even starts that hang until their timeout must reach the limit inside one interval.
+    assert burst * (timeout + restart) < interval
+
+
+def test_drift_proof_resets_the_start_limit_before_restoring() -> None:
+    proof = _named(
+        _tasks(LIVE_TASKS / "verify.yml"),
+        "Prove authority readiness retracts on credential and ACL drift",
+    )
+    always = cast(list[dict[str, object]], proof["always"])
+    restore = always.index(_named(always, "Restore authority readiness after drift proofs"))
+    reset = always[restore - 1]
+    assert cast(dict[str, object], reset["ansible.builtin.command"])["argv"] == [
+        "systemctl",
+        "reset-failed",
+        "kdive-external-boot-authority.service",
+    ]
+    assert reset["changed_when"] is False

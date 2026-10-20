@@ -19,14 +19,14 @@ import libvirt
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
-from kdive.artifacts.storage import ArtifactStreamRequest, StoredArtifact
+from kdive.artifacts.storage import ConditionalArtifactWriteRequest, StoredArtifact
+from kdive.artifacts.vmcore_retention import capture_metadata, require_capture_write, vmcore_keys
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.retrieve import CaptureOutput
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.retrieve.common import (
-    OWNER_KIND,
     RETENTION,
     TENANT,
     CoreBuildIdFromFile,
@@ -116,14 +116,16 @@ class HostDumpCapturer:
             options=options,
         )
 
-    def capture(self, system_id: UUID, run_id: UUID) -> CaptureOutput:
+    def capture(self, system_id: UUID, run_id: UUID, *, execution_id: UUID) -> CaptureOutput:
         """Host-side core-dump -> storage-pool volume -> stream download -> upload.
 
         ``system_id`` locates the live domain/dump volume; ``run_id`` owns the stored core
         (``owner_kind='runs'``, ADR-0244).
         """
         with self._spooler.capture_to_spool(system_id) as spool:
-            return self._persister.capture_output(system_id, run_id, spool)
+            return self._persister.capture_output(
+                system_id, run_id, spool, execution_id=execution_id
+            )
 
 
 class _HostDumpSpooler:
@@ -314,7 +316,9 @@ class _HostDumpPersister:
         self._store_factory = store_factory
         self._options = options
 
-    def capture_output(self, system_id: UUID, run_id: UUID, spool: Path) -> CaptureOutput:
+    def capture_output(
+        self, system_id: UUID, run_id: UUID, spool: Path, *, execution_id: UUID
+    ) -> CaptureOutput:
         try:
             build_id = self._options.core_build_id_from_file(spool)
         except CategorizedError:
@@ -342,7 +346,7 @@ class _HostDumpPersister:
                 },
             ) from exc
         raw_size_bytes = spool.stat().st_size
-        raw = self._stream_put(run_id, spool, sha256_b64)
+        raw = self._stream_put(run_id, spool, sha256_b64, execution_id=execution_id)
         self._verify_stored(raw.key, sha256_b64, system_id)
         redacted = persist_redacted(
             self._store_factory,
@@ -350,6 +354,7 @@ class _HostDumpPersister:
             run_id,
             CaptureMethod.HOST_DUMP,
             dmesg,
+            execution_id=execution_id,
         )
         return CaptureOutput(
             raw=raw, redacted=redacted, vmcore_build_id=build_id, raw_size_bytes=raw_size_bytes
@@ -377,17 +382,20 @@ class _HostDumpPersister:
             )
             return DMESG_UNAVAILABLE
 
-    def _stream_put(self, run_id: UUID, spool: Path, sha256_b64: str) -> StoredArtifact:
-        return self._store_factory().put_stream(
-            ArtifactStreamRequest(
-                tenant=TENANT,
-                owner_kind=OWNER_KIND,
-                owner_id=str(run_id),
-                name=f"vmcore-{CaptureMethod.HOST_DUMP.value}",
-                path=spool,
-                sha256_b64=sha256_b64,
-                sensitivity=Sensitivity.SENSITIVE,
-                retention_class=RETENTION,
+    def _stream_put(
+        self, run_id: UUID, spool: Path, sha256_b64: str, *, execution_id: UUID
+    ) -> StoredArtifact:
+        key, _ = vmcore_keys(TENANT, run_id, CaptureMethod.HOST_DUMP, execution_id)
+        return require_capture_write(
+            self._store_factory().create_if_absent(
+                ConditionalArtifactWriteRequest(
+                    key=key,
+                    data=spool,
+                    metadata=capture_metadata(execution_id),
+                    sha256_b64=sha256_b64,
+                    sensitivity=Sensitivity.SENSITIVE,
+                    retention_class=RETENTION,
+                )
             )
         )
 

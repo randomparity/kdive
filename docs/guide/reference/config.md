@@ -8,6 +8,7 @@
 |----------|-----------|---------|----------|-------|
 | `KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` | server | `900` | no | Expiry in seconds of the presigned download URL `artifacts.get` mints in `refs.download_uri` for a redacted artifact (ADR-0140). |
 | `KDIVE_ARTIFACT_INLINE_MAX_BYTES` | server | `65536` | no | Upper bound in bytes on the `artifacts.get` inline window in `data.content`. The returned window is the smaller of this, the caller's `max_bytes`, and a fixed 24 KiB token-safe ceiling (ADR-0257) — so raising this above 24 KiB has no effect; lowering it narrows the window further. Objects above the 1 MiB fetch ceiling omit inline content and are retrieved via the presigned `refs.download_uri` (ADR-0140, ADR-0247). |
+| `KDIVE_VMCORE_RETENTION_DAYS` | reconciler, server, worker | — | no | Optional positive days before Run-owned raw/redacted vmcore evidence is eligible for retirement; unset disables deletion. Both Run and Investigation must be terminal. Uses PostgreSQL time and the later sibling capture timestamp. Eligibility is not a cleanup completion deadline. Disabling cannot restore retired evidence. |
 
 ## build
 
@@ -279,6 +280,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `KDIVE_3097_EXCLUSIVE_QUEUE` | — | Set to `approved` to let the run/system/job service-cell proof (#3097) pause and own an idle job queue for its queued-install cells; any other value records them as blocked. |
 | `KDIVE_ARTIFACT_DIR` | — | Directory the live_stack spine writes run artifacts to (default: an out-of-tree temp dir). |
 | `KDIVE_EL9_REACHABILITY_DOMAIN` | — | Running, agent-ready EL9/RHEL-family remote-libvirt domain name for the host-model CPU reachability live test (#975, ADR-0297); unset → that test skips. |
 | `KDIVE_EL9_REACHABILITY_URI` | — | libvirt qemu+tls connection URI for the EL9 host-model CPU reachability live test (#975, ADR-0297). |
@@ -393,6 +395,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_REMOTE_SSH_PORT` | `22` | SSH port `check-remote-libvirt.sh` connects on. |
 | `KDIVE_ROLE` | `admin` | Role `scripts/live-stack/onboard.sh` writes into the minted token's `roles` claim and the printed binding contract; a sub-CONTRIBUTOR value warns (allocations.request needs CONTRIBUTOR+). |
 | `KDIVE_ROOTFS_DIR` | `/var/lib/kdive/rootfs` | Per-System qcow2 overlay directory for the local-libvirt provider; `scripts/live-stack/lib.sh` reads this to locate and create guest disk overlays. |
+| `KDIVE_SEAWEEDFS_IMAGE` | `kdive-seaweedfs:dev` | Image tag for the Compose seaweedfs service built from the bundled source. The isolated volume-persistence proof ignores inherited overrides and uses its own invocation tag. |
 | `KDIVE_SEAWEEDFS_PORT` | `8333` | Host port the compose `seaweedfs` S3 API publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_S3_ENDPOINT_URL`. Accepts `PORT` or `ADDR:PORT`; a loopback or wildcard address keeps `localhost` in the derived URL. |
 | `KDIVE_SERVER_DATABASE_URL` | `local Compose server-member DSN` | Database login DSN supplied only to the host server process (and the Compose reference server service); external deployments override the local development member. |
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |

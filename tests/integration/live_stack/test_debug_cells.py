@@ -372,31 +372,117 @@ def test_list_watchpoints_compares_the_address_expression(
         _run("debug.list_watchpoints", _Debugger(listed("jiffies_64")), monkeypatch)
 
 
-@pytest.mark.parametrize(
-    ("reason", "match"),
-    [(None, "stopped for None"), ("breakpoint-hit", "stopped for")],
-)
-def test_interrupt_needs_a_signal_stop(
-    reason: str | None, match: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    states = iter((True, False))
+def _interrupted(halted_by: str, reason: str | None) -> _Answer:
+    data: dict[str, object] = {"timed_out": False, "halted_by": halted_by}
+    if reason is not None:
+        data["reason"] = reason
+    return lambda _args: ToolResponse.success("ses-1", "stopped", data=cast(Any, data))
+
+
+def _background(reply_stops: bool = False) -> _Answer:
+    """``debug.continue``: a non-waiting one runs, except that the breakpoint arm's (the second)
+    carries the hit in its reply when ``reply_stops``; a waiting one reports the hit."""
+    background: list[Mapping[str, object]] = []
+
+    def answer(args: Mapping[str, object]) -> ToolResponse:
+        if args.get("wait") is not False:
+            return _stopped("breakpoint-hit")(args)
+        background.append(args)
+        if reply_stops and len(background) == 2:
+            return _stopped("breakpoint-hit")(args)
+        return ToolResponse.success("ses-1", "running")
+
+    return answer
+
+
+def _guest_answers(monkeypatch: pytest.MonkeyPatch, *states: bool) -> None:
+    replies = iter(states)
 
     async def answers(_endpoint: Endpoint, timeout: float = 5.0) -> bool:
-        return next(states)
+        return next(replies)
+
+    async def answers_again(_endpoint: Endpoint) -> bool:
+        return True
 
     monkeypatch.setattr(debug_cells, "answers", answers)
-    debugger = _Debugger(_stop_answers(**{"debug.interrupt": _stopped(reason)}))
-    with pytest.raises(AssertionError, match=match):
-        _run("debug.interrupt", debugger, monkeypatch)
-    states = iter((True, False))
-    signal = _Debugger(_stop_answers(**{"debug.interrupt": _stopped("signal-received")}))
-    assert _run("debug.interrupt", signal, monkeypatch)["reason"] == "signal-received"
-    # The started session's probe already halted the guest: the gap, after a clean stop.
-    states = iter((False, False))
-    halted = _Debugger(_stop_answers(**{"debug.interrupt": _stopped("signal-received")}))
-    with pytest.raises(AssertionError, match="probe had already halted the guest"):
-        _run("debug.interrupt", halted, monkeypatch)
-    assert halted.calls[-1][0] == "debug.end_session"
+    monkeypatch.setattr(debug_cells, "answers_again", answers_again)
+
+
+@pytest.mark.parametrize(
+    ("reply_stops", "path"), [(False, "waiting_continue"), (True, "resume_reply")]
+)
+def test_interrupt_halts_a_guest_left_running(
+    reply_stops: bool, path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _guest_answers(monkeypatch, True, False, True)
+    answers = _stop_answers(
+        **{
+            "debug.continue": _background(reply_stops),
+            "debug.interrupt": _interrupted("interrupt", "signal-received"),
+        }
+    )
+    debugger = _Debugger(answers)
+    observed = _run("debug.interrupt", debugger, monkeypatch)
+    assert observed == {
+        "halted_by": "interrupt",
+        "reason": "signal-received",
+        "breakpoint_path": path,
+        "ended_running": True,
+    }
+    continues = [args for tool, args in debugger.calls if tool == "debug.continue"]
+    assert [c.get("wait") for c in continues][0] is False
+    assert debugger.calls[-1][0] == "debug.end_session"
+
+
+@pytest.mark.parametrize(
+    ("halted_by", "reason"),
+    [("already_halted", None), ("attach", None), ("stop_event", "breakpoint-hit")],
+)
+def test_interrupt_needs_its_own_halt(
+    halted_by: str, reason: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _guest_answers(monkeypatch, True, False, True)
+    answers = _stop_answers(
+        **{"debug.continue": _background(), "debug.interrupt": _interrupted(halted_by, reason)}
+    )
+    with pytest.raises(AssertionError, match="the interrupt reported"):
+        _run("debug.interrupt", _Debugger(answers), monkeypatch)
+
+
+def test_interrupt_needs_the_guest_running_between_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _guest_answers(monkeypatch, False)
+    answers = _stop_answers(
+        **{
+            "debug.continue": _background(),
+            "debug.interrupt": _interrupted("interrupt", "signal-received"),
+        }
+    )
+    with pytest.raises(AssertionError, match="does not run between calls"):
+        _run("debug.interrupt", _Debugger(answers), monkeypatch)
+
+
+def test_interrupt_needs_a_clean_running_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    _guest_answers(monkeypatch, True, False, True)
+
+    class _Unknown(_Debugger):
+        def answer(self, tool: str, args: Mapping[str, object]) -> ToolResponse:
+            if tool == "debug.end_session":
+                self.calls.append((tool, dict(args)))
+                return ToolResponse.success(
+                    str(args["session_id"]), "detached", data={"guest_execution": "unknown"}
+                )
+            return super().answer(tool, args)
+
+    answers = _stop_answers(
+        **{
+            "debug.continue": _background(),
+            "debug.interrupt": _interrupted("interrupt", "signal-received"),
+        }
+    )
+    with pytest.raises(AssertionError, match="halt before detach failed"):
+        _run("debug.interrupt", _Unknown(answers), monkeypatch)
 
 
 def test_continue_needs_a_breakpoint_hit_in_vfs_read(monkeypatch: pytest.MonkeyPatch) -> None:

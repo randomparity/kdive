@@ -24,6 +24,7 @@ import logging
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -42,7 +43,9 @@ from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.config.core_settings import UPLOAD_ORPHAN_GRACE, UPLOAD_TTL_SECONDS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.jobs.capture_operations.storage.publication import CapturePublicationCoordinator
 from kdive.reconciler.cleanup.uploads import upload_orphans
+from kdive.reconciler.cleanup.uploads.upload_fences import owner_key_is_fenced
 from kdive.reconciler.cleanup.uploads.upload_orphans import (
     MAX_RECLAIMS_PER_ROOT,
     MAX_VERSIONS_PER_KEY,
@@ -55,6 +58,14 @@ from kdive.reconciler.cleanup.uploads.upload_orphans import (
 )
 from kdive.reconciler.cleanup.uploads.uploads import (
     repair_abandoned_uploads as _repair_abandoned_uploads,
+)
+from kdive.store.objectstore import ObjectStore
+from tests.conftest import _RoleDsns
+from tests.jobs.capture_operations.conftest import (
+    _cleanup_publication,
+    _close,
+    _Store,
+    _subject,
 )
 from tests.reconciler.conftest import connect, run_repair, seed_run, seed_system
 
@@ -1883,3 +1894,141 @@ def test_a_listing_failure_on_the_second_root_still_records_the_first_root_s_del
         assert "confirmed 1 version target(s) reclaimed by completed batches" in errors[0]
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("state", ["publishing", "canceling", "discarded"])
+@pytest.mark.parametrize("role", ["kdive_server", "kdive_reconciler"])
+def test_capture_publication_owner_is_exact_and_durable(
+    migrated_url: str, authority_role_dsns: _RoleDsns, state: str, role: str
+) -> None:
+    async def run() -> None:
+        subject = await _subject(migrated_url)
+        try:
+            run_id = UUID(subject.job.payload["run_id"])
+            key = f"local/runs/{run_id}/pcap-{subject.operation.id}"
+            other = f"local/runs/{run_id}/abandoned"
+            investigation = f"local/investigations/{uuid4()}/abandoned"
+            age = timedelta(days=2)
+            store = _FakeUploadStore({key: age, other: age, investigation: age})
+            candidate = UploadOrphanCandidate(key, datetime.now(UTC) - age, "runs", run_id)
+            await _cleanup_publication(subject, state, key)
+            async with await psycopg.AsyncConnection.connect(authority_role_dsns(role)) as conn:
+                assert await reclaimable_upload_keys(conn, [candidate], _GRACE) == []
+                async with conn.transaction():
+                    assert await owner_key_is_fenced(conn, "runs", run_id, key)
+                for _ in range(2):
+                    await _repair_leaked_upload_objects(conn, store, _GRACE, _NO_TTL)
+                assert store.present == {key}
+                assert store.version_ids(key) == {"v1"}
+                assert set(store.deleted) == {other, investigation}
+        finally:
+            await _close(subject)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_pending_and_published_keep_existing_ownership(migrated_url: str, published: bool) -> None:
+    async def run() -> None:
+        subject = await _subject(migrated_url)
+        try:
+            run_id = UUID(subject.job.payload["run_id"])
+            key = f"local/runs/{run_id}/pcap-{subject.operation.id}"
+            if published:
+                await CapturePublicationCoordinator(
+                    cast(ObjectStore, _Store()), subject.credential
+                ).publish(subject.worker, subject.job, subject.operation, subject.snapshot, b"pcap")
+            else:
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    await subject.admin.execute(
+                        "UPDATE capture_operations SET publication_object_key = %s WHERE id = %s",
+                        (key, subject.operation.id),
+                    )
+            async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+                candidate = UploadOrphanCandidate(
+                    key, datetime.now(UTC) - timedelta(days=2), "runs", run_id
+                )
+                assert await reclaimable_upload_keys(conn, [candidate], _GRACE) == (
+                    [] if published else [key]
+                )
+                async with conn.transaction():
+                    assert await owner_key_is_fenced(conn, "runs", run_id, key) is published
+        finally:
+            await _close(subject)
+
+    asyncio.run(run())
+
+
+def test_capture_cleanup_column_grant_is_narrow(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(authority_role_dsns("kdive_server"), autocommit=True) as conn:
+        conn.execute("SELECT publication_object_key, publication_state FROM capture_operations")
+        for statement in (
+            "SELECT launch_token FROM capture_operations",
+            "SELECT * FROM capture_operations",
+            "UPDATE capture_operations SET publication_state = publication_state WHERE false",
+            "DELETE FROM capture_operations WHERE false",
+        ):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                conn.execute(statement)
+    with (
+        psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as conn,
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+    ):
+        conn.execute("SELECT publication_object_key, publication_state FROM capture_operations")
+
+    with psycopg.connect(migrated_url) as conn:
+        definition = conn.execute(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' "
+            "AND indexname = 'capture_operations_publication_owner_key_idx'"
+        ).fetchone()
+        assert definition is not None
+        assert "USING btree (publication_object_key) WHERE" in definition[0]
+        assert all(state in definition[0] for state in ("publishing", "canceling", "discarded"))
+        for role in ("kdive_worker", "kdive_lifecycle_witness", "kdive_provider_authority"):
+            for column in ("publication_object_key", "publication_state"):
+                assert conn.execute(
+                    "SELECT has_column_privilege(%s, 'capture_operations', %s, 'SELECT')",
+                    (role, column),
+                ).fetchone() == (False,)
+
+
+def test_orphan_capture_owner_committed_after_version_capture_is_rechecked(
+    migrated_url: str, authority_role_dsns: _RoleDsns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        subject = await _subject(migrated_url)
+        try:
+            run_id = UUID(subject.job.payload["run_id"])
+            prefix = f"local/runs/{run_id}/"
+            key, other = f"{prefix}pcap-{subject.operation.id}", prefix + "unrelated"
+            store = _FakeUploadStore({key: timedelta(days=2), other: timedelta(days=2)})
+            original = store.capture_exact_versions
+            captured: list[str] = []
+
+            def capture(captured_key: str, limit: int) -> VersionBatch:
+                batch = original(captured_key, limit)
+                if captured_key == key:
+                    captured.extend(target.version_id for target in batch.targets)
+                    with psycopg.connect(migrated_url, autocommit=True) as writer:
+                        writer.execute(
+                            "UPDATE capture_operations SET publication_state = 'publishing', "
+                            "publication_object_key = %s, publication_started_at = now() "
+                            "WHERE id = %s",
+                            (key, subject.operation.id),
+                        )
+                return batch
+
+            monkeypatch.setattr(store, "capture_exact_versions", capture)
+            async with await psycopg.AsyncConnection.connect(
+                authority_role_dsns("kdive_reconciler")
+            ) as conn:
+                await _repair_leaked_upload_objects(conn, store, timedelta(0), timedelta(0))
+            assert captured
+            assert not any(deleted_key == key for deleted_key, _ in store.deleted_versions)
+            assert any(deleted_key == other for deleted_key, _ in store.deleted_versions)
+        finally:
+            await _close(subject)
+
+    asyncio.run(run())

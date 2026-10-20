@@ -1,5 +1,5 @@
 """Live proof for #747 (ADR-0233): real libvirt accepts kdive's gdbstub+preserve domain XML,
-and the gdbstub is reachable (kdive's own ``rsp_reachable``) on a preserved early-boot panic.
+and actual GDB reads registers from the gdbstub on a preserved early-boot panic.
 
 `live_vm`-gated (bzimage family, ADR-0392). The operator points ``KDIVE_LIVE_VM_BZIMAGE`` at a
 kernel image that panics early in boot when it cannot mount its root (a bare bzImage with no
@@ -8,8 +8,8 @@ needs no root). The test renders the real provisioning XML (its SUT) with the di
 ``<os>`` the install step adds in the full pipeline, sets a panic-halting cmdline, and hands the
 finished XML to
 ``boot_gdbstub_domain`` — which starts the domain against a deliberately empty disk to
-force the panic, waits for it, and tears the transient domain down. The test then asserts the stub
-answers ``rsp_reachable``.
+force the panic, waits for it, and tears the transient domain down. The test then makes an
+actual bounded native GDB attachment and reads registers.
 
 The rendered XML is stripped of its production ownership claim first (#1968); the unmarked tests
 below hold that contract so the gated proof cannot silently regain it.
@@ -17,6 +17,9 @@ below hold that contract so the gated proof cannot silently regain it.
 
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from uuid import uuid4
@@ -26,7 +29,6 @@ import pytest
 from kdive.domain.platform.arch_traits import arch_traits
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
-from kdive.providers.shared.debug_common.rsp import rsp_reachable
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, QEMU_NS
 from kdive.providers.shared.runtime_paths import system_id_from_domain_name
 from kdive.testing.live_vm import boot_gdbstub_domain
@@ -72,7 +74,7 @@ def test_live_vm_preserve_crash_stub_is_reachable(tmp_path: Path) -> None:  # pr
     ):
         # The crash signal is the console panic; the stub stays reachable on the halted vCPU
         # (domain may remain RUNNING with panic=0, so this does NOT assert VIR_DOMAIN_CRASHED).
-        assert rsp_reachable("127.0.0.1", _GDB_PORT), "gdbstub not reachable on the halted panic"
+        _assert_gdb_registers()
 
 
 def test_preserve_domain_claims_no_production_ownership(tmp_path: Path) -> None:
@@ -199,10 +201,103 @@ def _profile_data(disk: Path, arch: str) -> dict[str, object]:
 
 
 def _make_empty_qcow2(path: Path) -> None:
-    import subprocess  # noqa: PLC0415
-
     subprocess.run(
         ["qemu-img", "create", "-f", "qcow2", str(path), "1G"],
         check=True,
         capture_output=True,
     )
+
+
+def _assert_gdb_registers() -> None:
+    gdb = shutil.which("gdb")
+    assert gdb is not None, (
+        "panic-stub qualification requires native gdb; install the live prerequisites"
+    )
+    result = subprocess.run(
+        [
+            gdb,
+            "--nx",
+            "--batch",
+            "-ex",
+            "set confirm off",
+            "-ex",
+            "set remotetimeout 2",
+            "-ex",
+            f"target remote 127.0.0.1:{_GDB_PORT}",
+            "-ex",
+            "info registers",
+            "-ex",
+            "disconnect",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert re.search(r"(?m)^(?:rip|eip|pc|nip)\s+0x[0-9a-fA-F]+", result.stdout), (
+        "actual gdb attachment returned no program-counter register"
+    )
+
+
+@pytest.mark.parametrize("output", ["rip 0x1234 0x1234\n", "pc 0x1234 0x1234\n", ""])
+def test_panic_stub_assertion_requires_actual_register_observation(
+    monkeypatch: pytest.MonkeyPatch, output: str
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: "/test/gdb")
+    seen: list[list[str]] = []
+
+    def run(command: list[str], *, check: bool, capture_output: bool, text: bool, timeout: int):
+        assert check and capture_output and text
+        assert timeout == 10
+        seen.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    if output:
+        _assert_gdb_registers()
+    else:
+        with pytest.raises(AssertionError, match="no program-counter"):
+            _assert_gdb_registers()
+    assert seen == [
+        [
+            "/test/gdb",
+            "--nx",
+            "--batch",
+            "-ex",
+            "set confirm off",
+            "-ex",
+            "set remotetimeout 2",
+            "-ex",
+            f"target remote 127.0.0.1:{_GDB_PORT}",
+            "-ex",
+            "info registers",
+            "-ex",
+            "disconnect",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.TimeoutExpired("gdb", 10),
+        subprocess.CalledProcessError(1, "gdb"),
+    ],
+)
+def test_panic_stub_assertion_propagates_subprocess_failure(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: "/test/gdb")
+
+    def run(*args: object, **kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(type(failure)):
+        _assert_gdb_registers()
+
+
+def test_panic_stub_assertion_requires_existing_gdb(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    with pytest.raises(AssertionError, match="requires native gdb"):
+        _assert_gdb_registers()

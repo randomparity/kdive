@@ -581,7 +581,7 @@ lint-ansible:
     ANSIBLE_CONFIG=deploy/ansible/ansible.cfg \
         uv run --with 'ansible-lint==26.4.0' --with 'ansible-core==2.21.1' \
         ansible-lint -c deploy/ansible/.ansible-lint deploy/ansible
-    cd deploy/ansible && for p in site.yml playbooks/pki.yml playbooks/image.yml playbooks/local-libvirt-host.yml playbooks/installed-local-authority.yml; do \
+    cd deploy/ansible && for p in site.yml playbooks/pki.yml playbooks/image.yml playbooks/local-libvirt-host.yml playbooks/installed-local-authority.yml playbooks/renew-local-authority-tls.yml; do \
         uv run --with 'ansible-core==2.21.1' \
         ansible-playbook "$p" --syntax-check -i inventory/hosts.yml; done
 
@@ -599,6 +599,8 @@ test-ansible:
     TIMEFORMAT='run-local-worker-host.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-worker-host.py
     TIMEFORMAT='run-local-libvirt-host.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-local-libvirt-host.py
     TIMEFORMAT='run-remote-egress-preflight.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-remote-egress-preflight.py
+    TIMEFORMAT='run-authority-tls-expiry.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-authority-tls-expiry.py
+    TIMEFORMAT='run-authority-tls-renewal.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-authority-tls-renewal.py
 
 # Lint and security-scan the GitHub Actions workflows.
 # actionlint-py bundles a prebuilt actionlint and upstream ships no ppc64le binary, so its

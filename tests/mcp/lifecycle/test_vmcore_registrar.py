@@ -121,7 +121,7 @@ def test_register_publishes_vmcore_and_postmortem_contracts(
     )
     assert "Omit to resolve the System profile's method" in fetch_descriptions["method"]
     assert fetch_descriptions["idempotency_key"] == (
-        "Replay-safe key; a repeated key returns the prior envelope."
+        "Replay-safe key; repeats return the prior envelope unless the vmcore has retired."
     )
     assert set(tools["vmcore.fetch"].parameters["$defs"]["CaptureMethod"]["enum"]) == {
         method.value for method in CaptureMethod
@@ -176,3 +176,19 @@ def test_registered_wrappers_delegate_to_vmcore_handlers(
         # An omitted `commands` reaches the handler as None; the handler picks the default batch.
         ("postmortem_crash", pool, ctx, {"run_id": "run-4", "commands": None}),
     ]
+
+
+def test_vmcore_retirement_contract_is_advertised(monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _, _ = _register_tools(monkeypatch)
+    assert "vmcore_retired" in (tools["vmcore.fetch"].description or "")
+    description = tools["postmortem.crash"].description or ""
+    for field in (
+        "vmcore_retention",
+        "server_time",
+        "eligible_at",
+        "protected_until",
+        "retired_at",
+    ):
+        assert field in description
+    assert "infrastructure_failure" in description
+    assert "runs.get" in description

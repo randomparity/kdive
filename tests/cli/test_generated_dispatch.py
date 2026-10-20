@@ -18,6 +18,7 @@ import pytest
 
 from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX, assemble_generated_payload
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 
@@ -397,3 +398,27 @@ def test_fixtures_list_verb_no_longer_parses() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["fixtures", "list"])
     assert build_parser().parse_args(["fixtures", "validate"]).subcommand == "validate"
+
+
+def _debug_continue_payload(monkeypatch: pytest.MonkeyPatch, *flags: str) -> dict[str, object]:
+    client = _install(monkeypatch, _mutating_tool("debug.continue"))
+    verb = next(v for v in GENERATED_VERBS if v.tool == "debug.continue")
+    args = build_parser().parse_args(["debug", "continue", "--session-id", "ses-1", *flags])
+    assert _run(verb, args) == 0
+    [(tool, payload)] = client.calls
+    assert tool == "debug.continue"
+    return payload
+
+
+def test_a_true_default_boolean_can_send_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    # debug.continue's wait defaults to true, so a bare store_true switch could never send the
+    # wait=false that leaves the guest running (#3244).
+    assert _debug_continue_payload(monkeypatch, "--no-wait") == {
+        "session_id": "ses-1",
+        "wait": False,
+    }
+
+
+def test_a_true_default_boolean_sends_true_or_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _debug_continue_payload(monkeypatch, "--wait")["wait"] is True
+    assert "wait" not in _debug_continue_payload(monkeypatch)

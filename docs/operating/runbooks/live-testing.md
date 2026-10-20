@@ -555,8 +555,21 @@ System; the installation remains for downstream children. If the existing transi
 proof is explicitly enabled, verify its incarnation is terminated and its temporary account,
 group and proof material are removed; a failed proof must retain a named cleanup obligation.
 Do not run the whole `prove-external-boot-authority-host.sh` carrier over a retained lane: it
-installs a predecessor and tears down its authority. Review any reuse of its disposable PKI/DSN
-preparation separately, including credential expiry and database grants.
+installs a predecessor and tears down its authority. Review any reuse of its disposable DSN
+preparation separately, including database grants. Issue and renew the lane's TLS credentials as
+described in [Renewing retained-lane TLS credentials](#renewing-retained-lane-tls-credentials).
+
+Provisioning preflight (on the controller sources) and verification (on the installed copies)
+refuse any authority or fixed-worker TLS certificate that is expired or expires within
+`live_vm_host_authority_tls_expiry_margin_seconds` (default 43200, twelve hours), naming the
+credential and its `notAfter`; the controller needs `openssl` for that check. Renew before
+provisioning. The authority unit allows five starts of any kind (automatic, manual or
+provisioning) within ten minutes; a sixth is refused and leaves the unit `failed`, stopping it if
+it was running. A provisioning run spends one or two of those starts and one pass of the
+installed-authority live proofs about three, so do not re-provision or rerun those proofs
+repeatedly within that window without first running the reset below; after replacing credentials
+on a failed unit run
+`sudo systemctl reset-failed kdive-external-boot-authority.service` before restarting it.
 
 Retire only explicitly owned proof objects after confirming terminal provider effects. Do not
 remove shared backends, bases or journals to make a failure disappear. The existing local
@@ -566,6 +579,87 @@ Preserve narrower blockers under their existing owners: #3138, #3144/#3148,
 #3130/#3131/#3135. Exhausted-job recovery (#3143) is merged; report a recurrence as a new
 issue. System framing, fault construction and HTTP qualification belong to
 #3184–#3186. Do not publish the release from this procedure.
+
+#### Renewing retained-lane TLS credentials
+
+A retained lane's authority server, health client and worker client certificates come from
+`scripts/operations/authority-pki.sh` and are installed by
+`deploy/ansible/playbooks/renew-local-authority-tls.yml` (ADR-0803). Keep the lane's CA key and
+leaf keys in one private directory on the control host that runs Ansible, for example
+`~/.local/share/kdive/authority-pki/<lane>/`. The script refuses a directory that is not owned by
+you with mode `0700`, is a symlink, or lies inside any Git work tree or `.git` directory, and it
+never copies the CA key to a lane host. Point the lane's protected vars at that directory:
+`live_vm_host_authority_server_key_source` and `..._server_certificate_source` at `server.key`
+and `server.pem`; `..._server_ca_source`, `..._worker_client_ca_source` and
+`live_vm_host_worker_authority_server_ca_source` (which defaults to the authority's server CA) at
+`ca.pem`; the health client sources at `health-client.{pem,key}`; and
+`live_vm_host_worker_authority_client_{certificate,key}_source` at `worker-client.{pem,key}`.
+Renewal rewrites those files in place, so the vars file does not change. Back the directory up
+privately: losing it forces a CA rotation.
+
+Every lifetime is your choice, in whole days, at each issuance; the script has no default. It
+refuses a leaf that would outlive the CA certificate, and a CA re-issue that existing leaves would
+outlive. The recommended lifetimes are 30-day leaves under a 365-day CA. For a new lane, with
+`D` the lane directory and `I` the lane's `live_vm_host_authority_instance`:
+
+```bash
+P=scripts/operations/authority-pki.sh
+install -d -m 0700 "$D"
+$P ca --dir "$D" --subject <lane>-authority-ca --days 365 --key new
+$P leaf --dir "$D" --name server --usage server --days 30 --key new --authority-instance "$I"
+$P leaf --dir "$D" --name health-client --usage client --days 30 --key new
+$P leaf --dir "$D" --name worker-client --usage client --days 30 --key new
+```
+
+To renew, run the same `leaf` commands with `--key existing`, which keeps every key and issues new
+certificates. When the CA certificate no longer covers a new 30-day leaf, first re-issue it from
+the same key with `ca --key existing` and the same `--subject`. Keep the printed lines (file name,
+`notAfter`, public-key hash) in the private lane result; they contain no secret.
+
+A lane installed from a revision that predates this playbook must first be reprovisioned once
+with `installed-local-authority.yml` at a revision that contains it. Then, from a clean checkout
+at exactly the installed authority revision (the value of
+`/opt/kdive-provider-authority/revision`, which must equal `live_vm_repo_version` in the vars):
+
+```bash
+cd deploy/ansible
+uv run --with 'ansible-core==2.21.1' ansible-playbook \
+  playbooks/renew-local-authority-tls.yml -i "$AUTHORITY_INVENTORY" \
+  --limit "$LOCAL_AUTHORITY_LANE" --extra-vars "@$LOCAL_AUTHORITY_VARS"
+```
+
+Before changing the host it runs the provisioning preflight (so the lane's System manifest and
+bases must still be present on the controller, and their digests are checked again), verifies the
+server certificate against both server CAs with the authority's server name and both client
+certificates against the worker-client CA, checks that each certificate matches its key, and
+refuses a dirty or different checkout. It then installs the authority credentials through the
+same `live_vm_host` task provisioning uses, runs `systemctl reset-failed` on
+`kdive-external-boot-authority.service` (clearing a failed state and the start limit), and
+restarts the authority exactly once, even when no file changed, so a rerun repairs an interrupted
+run. The restart returns only after the authority's TLS self-check passes. Only then does it
+install the fixed worker's three files, through the same tasks as provisioning. It finishes by
+checking expiry of the six installed certificates, that the authority is active, the installed
+chains, and a TLS handshake as each fixed-worker account that must verify the authority and see
+it serving the installed server certificate.
+
+The fixed workers are not restarted: a worker reads its authority certificate, key and CA on every
+request, so it uses the renewed files from its next request. Never restart a fixed worker with
+`systemctl` for a renewal; that can wedge its slot. The playbook does not perform a real
+worker-to-authority request; the first authority-backed operation afterwards is that proof.
+
+If a precondition fails, nothing on the host changed. If the authority fails to start, the
+worker files are untouched and the authority is not ready; read
+`journalctl -u kdive-external-boot-authority.service`, which names an expired or invalid
+certificate, correct the source files, and rerun the playbook. Do not rerun without a
+correction: each failed start counts against the unit's start limit.
+
+A CA rotation replaces the CA key and every leaf key. Use it when the lane directory is lost or a
+key may be exposed; there is no revocation. Move the old directory aside
+(`mv "$D" "$D.retired-$(date +%F)"`), recreate `$D` with mode `0700`, issue everything with
+`--key new` as for a new lane, and run the playbook. Between the authority restart and the worker
+file installation, worker requests fail closed, so rotate only while no job is using the authority;
+the playbook does not check this. Keep the retired directory until the rotated lane verifies, then
+destroy it if a key was exposed, or archive it like any backup.
 
 ### Installed remote authority proof prerequisite
 
@@ -1585,9 +1679,9 @@ compares. The prerequisites are the capture cells' above (drgn for the `drgn-liv
 plus `gdb` on the MCP server's PATH, which runs the debugger beside QEMU's loopback gdbstub,
 and `objdump` on the test host, which decodes the fixture `vmlinux` for the `debug.advance` and
 `debug.disassemble` cells; either missing records the cell `blocked`. Each attach stages a copy
-of the Run's `vmlinux` (about 437 MB for `longterm`) in the server's temp directory and nothing
-removes it yet (#3229), so give the server an on-disk `TMPDIR` when `/tmp` is a small or
-quota-limited tmpfs. Run both configurations into one evidence root:
+of the Run's `vmlinux` (about 437 MB for `longterm`) in the server's temp directory, and ending
+the session removes it (#3229), so that directory needs room for one copy per live session.
+Run both configurations into one evidence root:
 
 ```bash
 sha=$(git rev-parse HEAD)
@@ -1614,8 +1708,10 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
   session rows and prove the guest halts while attached and answers again after the detach.
 - Two cells fail after proving what they can, until the tool exposes the effect:
   `debug.list_breakpoints` returns only a count and `debug.read_frame` no arguments or locals.
-  `debug.interrupt` fails while no running guest reaches it: `debug.start_session`'s gdbstub
-  reachability probe leaves the guest paused (ADR-0184), and every resume halts it again.
+- The `debug.interrupt` cell leaves the guest running with `debug.continue` `wait=false`
+  (ADR-0783), requires `halted_by=interrupt` with `signal-received`, records which path the
+  `vfs_read` breakpoint stop took (`resume_reply` or `waiting_continue`), and ends the session
+  while the guest runs, requiring it to answer again.
 - Rejection cells aim at one target per stack: a torn-down fixture System, its Run and an ended
   gdbstub session. They compare the project rows (including its debug sessions), the jobs naming
   the System or Run, and whether its domain is defined.
@@ -1641,6 +1737,13 @@ before each run. `qualify` reported 420 of the 440 cells qualified: all 352 `rej
 
 After `demo-down.sh --wipe --yes` neither libvirt defined a `kdive-` domain,
 `KDIVE_INSTALL_STAGING` was empty, and no staging directory remained in either temp directory.
+
+A later rerun at the #3229 candidate `9697b4caa` ran 10 `gdbstub` `default`/`direct` functional
+cells (`start_session`, `end_session`, `load_module_symbols`, `list_modules`, `read_memory`,
+`read_registers`, `resolve_symbol`, `set_breakpoint`, `backtrace`, `disassemble`) with the
+server's `TMPDIR` on a tmpfs whose per-user quota was 1200 MB, below three staged copies. All 10
+recorded `success`; 11 staging directories came and went, never more than one at a time, and
+the temp directory was empty after the cells and after `demo-down.sh --wipe --yes`.
 
 #### Break-glass provider tool cells (#3112)
 
@@ -1787,6 +1890,70 @@ A killed run skips cleanup. Remove its fixture with the exact-name loop under
 [fixture cleanup](#installed-local-authority-carrier), then run `systems.teardown` for the System
 with an `admin` token for its project and wait for `torn_down`, then `allocations.release`.
 
+##### Local inventory observer prerequisite (#3237)
+
+The local frame requires the proof-only collector from [ADR-0800](../../adr/0800-proof-authority-inventory-collector.md).
+Enable `live_vm_host_authority_inventory_observer_enabled` or, for the production host role,
+`provider_authority_host_inventory_observer_enabled` in the approved local-lane inputs.
+Both default to false and require local authority mutation support and the fixed private roots.
+The provider role's configurable authority interpreter does **not** satisfy the collector
+prerequisite: `/usr/bin/python3` must separately be immutable system Python 3.14.
+Provisioning refuses an older or mutable interpreter; arrange the documented host prerequisites
+before retrying. No alternate privileged interpreter or root inventory fallback is used.
+
+Both roles install the same locked, noneditable runtime under `/opt/kdive-authority-inventory`,
+with root-owned code/imports, a root-owned systemd listener and the locked
+`kdive-authority-observer` identity with no supplementary groups or sudo grant. This adds one
+runtime copy and its native build/storage cost, including existing POWER build prerequisites.
+The observer can connect only to `/run/kdive-authority-inventory/inventory.sock`; private roots
+remain authority-owned mode `0700`. The fixed collector runs as the trusted authority identity.
+Its read-only libvirt call is defense in depth; it does not make a compromised authority safe.
+The installed collector revision must match the frame's configured candidate before allocation.
+
+Each connection accepts EOF after LF or one canonical UUID plus LF (at most 37 bytes).
+A complete response is limited to 1,048,576 UTF-8 bytes; excess fails without truncation.
+The outer call and client each have a 120-second monotonic deadline from invocation/connect
+preparation, and each accepted service has a 120-second systemd lifetime including backend calls,
+with one-second stop escalation. The listener admits four active handlers and backlog 16.
+A timeout, refused connection, incomplete facts or oversize response fails the observation and
+cleanup evidence. Repair the prerequisite/backend or serialize calls, then rerun the proof;
+there is no retry, cache or reduced inventory fallback.
+
+Before changing collector bytes the roles withdraw its socket and wait for all instances to stop.
+Readiness failures leave it disabled. Disabling its opt-in withdraws its listener, units and
+root-owned runtime/client, preserving the locked account and all authority/guest state. Disable
+before rolling back to source without the collector. Re-running unchanged provisioning must
+retain the same grants. `authority_host_teardown.yml` withdraws the boundary the same way before it retires the authority.
+A connection never starts the authority: while the authority is stopped or failed, each
+accepted instance fails instead. The listener stops with the authority, so after an
+out-of-band authority stop and start, re-run the role to restore it.
+Offline tests and unit-file inspection do not prove these permissions.
+
+**Native proof remains a separately approved operation.** Review an execution packet naming the
+exact candidate, one existing idle local lane, native architecture, runtime/install budget and
+negative request bytes before running any host commands. Neither these instructions nor a green
+offline suite grants host access. Bind caller, collector scripts/imports/revision, authority and
+stack to that candidate, and check the host OS/Python/systemd/libvirt prerequisites first.
+Within that approved window, record private commands, exits, durations and hashes for:
+
+1. Zero-selection and one existing selected-System observation, compared with independent
+   trusted queries in the same quiescent state: complete domain set, both root entry sets and
+   active/type facts. No guest creation, start or deletion is needed.
+2. Observer denial of direct private RW-socket connection, private authority runtime traversal,
+   and `O_RDONLY` opening of representative rootfs/console, journal, credential and proof-control
+   files, without reading bytes. `sudo -n -u root -- /usr/bin/true` and
+   `sudo -n -u kdive-provider-authority -- /usr/bin/true` must fail as the observer.
+3. Literal `destroy UUID\n` and overlong bytes sent only to the collector, yielding EOF/failure
+   and fixed `request-rejected` evidence, with unchanged before/after inventory. Never send a
+   mutation operation to libvirt. Source/sentinel tests establish the rejection order;
+   journal evidence is not an independent syscall trace.
+4. Unchanged reconvergence, then approved collector-only disable/re-enable: compare grants,
+   prove endpoint withdrawal and restored inventory without changing private permissions.
+
+Report which native arm actually ran. Native x86_64 evidence does not qualify ppc64le; retain
+both targets and keep #3185/#3186 fault matrices outside this bounded procedure. Keep host
+identifiers and private inventory names out of public summaries.
+
 ##### Remote authority branch (#3209)
 
 A `remote-libvirt` cell provisions on the installed remote authority instead. There is no fixture
@@ -1800,6 +1967,24 @@ path: the frame uses public provisioning on the remote resource that routes to t
   registered public `remote-libvirt` image for the cell's architecture with a digest and an
   inspected root (`root_spec`); admission refuses an authority-owned System without one. Otherwise
   the cell stops `blocked` before any mutation.
+- Obtain these catalog facts by declaring/reconciling a public `remote-libvirt` image with
+  `source.kind = "staged"` and a **fresh** volume name, then running
+  `python -m kdive stage-volume --image IMAGE --arch ARCH --from /path/to/base.qcow2`
+  against the lane's configured database and single remote instance. Install `virt-inspector`
+  for mandatory root inspection; optional config capture uses `guestfish`. Staging copies one
+  qcow2 into a private temporary directory, rejects backing/external-data images, hashes and
+  inspects that snapshot, uploads those exact bytes, then commits its digest and `root_spec`
+  (ADR-0776).
+  Inspection or root-metadata persistence failure fails the command. Existing remote volumes
+  are refused; no overwrite/delete is implied. If metadata fails after upload, inspect and
+  manually clean up the unverified residue or declare a fresh target before retrying.
+  Kernel-config capture/attachment is advisory. Reconcile preserves inspected facts only for
+  the unchanged staged volume declaration; repointing invalidates them. Plain staged images
+  remain unverified and eligible only for their existing disk/GRUB path.
+  These facts attest stage-time bytes, not subsequent remote replacement. Separately install
+  the **same digest-pinned base** into the authority's private store using the existing
+  [authority base contract](#installed-remote-authority-proof-prerequisite); its manifest root
+  identity, private-base digest and ongoing file-identity checks remain mandatory (ADR-0623).
 - The operator's batch-mode SSH to `ssh_target` and passwordless `sudo -n -u
   kdive-provider-authority` there are required. As that account, never root, the frame runs one
   fixed program with the authority's interpreter. The program reads

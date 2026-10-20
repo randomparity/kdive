@@ -43,12 +43,13 @@ from kdive.providers.ports.retrieve import (
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.capture_store import WrittenObjects
+from tests.capture_store import WrittenObjects, journal_existing_test_pair
 from tests.mcp._seed import _PROFILE as _SEED_PROFILE
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.json_data import data_str
 from tests.mcp.systems_support import provider_resolver
 from tests.services.external_boot.conftest import seed_activation
+from tests.support.worker_fence import dequeue_as_current_worker
 
 _AUTH = Authorizing(principal="u", agent_session="s", project="proj")
 _TEST_CAPTURE_METHODS = frozenset({CaptureMethod.HOST_DUMP})
@@ -111,16 +112,16 @@ async def _fetch_vmcore(
     )
 
 
-def _capture_output(run_id: str, method: CaptureMethod = CaptureMethod.HOST_DUMP) -> CaptureOutput:
+def _capture_output(run_id: str, method: CaptureMethod, execution_id: UUID) -> CaptureOutput:
     raw = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{method.value}",
+        f"local/runs/{run_id}/vmcore-{method.value}-{execution_id}",
         "e1",
         Sensitivity.SENSITIVE,
         "vmcore",
         version_id="test-version",
     )
     red = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{method.value}-redacted",
+        f"local/runs/{run_id}/vmcore-{method.value}-{execution_id}-redacted",
         "e2",
         Sensitivity.REDACTED,
         "vmcore",
@@ -143,16 +144,22 @@ class _FakeRetriever:
         self._objects = WrittenObjects()
         self.calls = 0
         self.methods: list[CaptureMethod] = []
+        self.execution_ids: list[UUID] = []
 
     def head(self, key: str) -> HeadResult | None:
         return self._objects.head(key)
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
         self.calls += 1
         self.methods.append(method)
+        self.execution_ids.append(execution_id)
         if self._raises is not None:
             raise self._raises
-        return self._objects.record(_capture_output(self._run_id, method))
+        return self._objects.record(
+            _capture_output(self._run_id, method, execution_id), execution_id=execution_id
+        )
 
 
 class _NoCaptureRetriever:
@@ -162,7 +169,9 @@ class _NoCaptureRetriever:
     object (ADR-0497). A replay that reached the verify would fail here rather than silently pass.
     """
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
         raise AssertionError("capture must not be called when a vmcore row already exists")
 
     def head(self, key: str) -> HeadResult | None:
@@ -1056,13 +1065,18 @@ async def _enqueue_capture(
     pool: AsyncConnectionPool, run_id: str, method: str = "host_dump"
 ) -> Job:
     async with pool.connection() as conn:
-        return await queue.enqueue(
+        job = await queue.enqueue(
             conn,
             JobKind.CAPTURE_VMCORE,
             CaptureVmcorePayload(run_id=run_id, method=CaptureMethod(method)),
             _AUTH,
             f"{run_id}:capture_vmcore:{method}",
         )
+        if job.attempt:
+            return job
+        claimed = await dequeue_as_current_worker(conn, "consumer-capture-worker")
+        assert claimed is not None and claimed.id == job.id
+        return claimed
 
 
 async def _artifact_count(pool: AsyncConnectionPool, run_id: str) -> int:
@@ -1096,6 +1110,7 @@ async def _seed_core_rows(pool: AsyncConnectionPool, run_id: str, raw_key: str) 
             (run_id, f"{raw_key}-redacted"),
         )
         row = await cur.fetchone()
+        await journal_existing_test_pair(conn, run_id, raw_key, method=CaptureMethod.HOST_DUMP)
     assert row is not None
     return str(row["id"])
 
@@ -1117,7 +1132,7 @@ def test_capture_handler_stores_rows_and_returns_redacted_artifact_id(migrated_u
                 )
             assert ref is not None
             assert await _artifact_key_for(pool, ref) == (
-                f"local/runs/{run_id}/vmcore-host_dump-redacted"
+                f"local/runs/{run_id}/vmcore-host_dump-{retriever.execution_ids[0]}-redacted"
             )
             assert retriever.calls == 1
             assert await _artifact_count(pool, run_id) == 2
@@ -1189,6 +1204,15 @@ def test_capture_handler_replay_without_redacted_row_returns_no_ref(migrated_url
                     "retention_class) VALUES ('runs', %s, %s, 'e', 'sensitive', 'vmcore')",
                     (run_id, f"local/runs/{run_id}/vmcore-host_dump"),
                 )
+                await journal_existing_test_pair(
+                    conn,
+                    run_id,
+                    f"local/runs/{run_id}/vmcore-host_dump",
+                    method=CaptureMethod.HOST_DUMP,
+                )
+                await conn.execute(
+                    "DELETE FROM artifacts WHERE owner_id=%s AND sensitivity='redacted'", (run_id,)
+                )
             job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
                 replay = _NoCaptureRetriever()
@@ -1214,6 +1238,12 @@ def test_capture_handler_rejects_different_method(migrated_url: str) -> None:
                     "retention_class) VALUES ('runs', %s, %s, 'e', 'sensitive', 'vmcore')",
                     (run_id, f"local/runs/{run_id}/vmcore-host_dump"),
                 )
+                await journal_existing_test_pair(
+                    conn,
+                    run_id,
+                    f"local/runs/{run_id}/vmcore-host_dump",
+                    method=CaptureMethod.HOST_DUMP,
+                )
             job = await _enqueue_capture(pool, run_id, method="kdump")
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as exc:
@@ -1227,15 +1257,9 @@ def test_capture_handler_rejects_different_method(migrated_url: str) -> None:
             assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
             assert exc.value.details["existing_method"] == "host_dump"
             assert exc.value.details["requested_method"] == "kdump"
-            assert await _artifact_count(pool, run_id) == 1  # no second core written
+            assert await _artifact_count(pool, run_id) == 2  # no second pair written
 
     asyncio.run(_run())
-
-
-def test_captured_method_rejects_bare_key() -> None:
-    with pytest.raises(CategorizedError) as exc:
-        vmcore_plane.captured_method("local/systems/x/vmcore")
-    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_capture_handler_no_core_raises_readiness(migrated_url: str) -> None:
@@ -1722,8 +1746,7 @@ def test_capture_handler_emits_telemetry_on_success(migrated_url: str) -> None:
         assert dur_pts[0].attributes["outcome"] == "ok"
         assert byte_pts, "bytes not emitted on success"
         assert byte_pts[0].attributes["capture_method"] == CaptureMethod.HOST_DUMP.value
-        expected_output = _capture_output(run_id)
-        assert byte_pts[0].sum == expected_output.raw_size_bytes
+        assert byte_pts[0].sum == 512
 
     asyncio.run(_run())
 
@@ -1798,3 +1821,41 @@ def test_vmcore_fetch_is_denied_for_a_run_that_does_not_own_the_activation(
                 assert row is not None and row[0] == 0
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("system_state", ["crashed", "torn_down"])
+def test_retired_run_rejects_old_idempotency_key(migrated_url: str, system_state: str) -> None:
+    async def check() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id, run_id = await _crashed_run(pool)
+            first = await _fetch_vmcore(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                method=CaptureMethod.HOST_DUMP,
+                idempotency_key="retirement-replay",
+            )
+            assert first.status == "queued"
+            async with pool.connection() as conn:
+                await conn.execute("UPDATE runs SET vmcore_retired_at=now() WHERE id=%s", (run_id,))
+                await conn.execute(
+                    "UPDATE systems SET state=%s WHERE id=%s", (system_state, system_id)
+                )
+            replay = await _fetch_vmcore(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                method=CaptureMethod.HOST_DUMP,
+                idempotency_key="retirement-replay",
+            )
+            assert replay.error_category == "not_found"
+            assert replay.data["reason"] == "vmcore_retired"
+            assert replay.suggested_next_actions == ["runs.get"]
+            with pytest.raises(AuthorizationError):
+                await _fetch_vmcore(pool, _ctx(Role.VIEWER), run_id=run_id)
+            denied = await _fetch_vmcore(pool, _ctx(projects=("other",)), run_id=run_id)
+            assert denied.error_category == "not_found"
+            assert denied.data.get("reason") != "vmcore_retired"
+            assert await _job_count(pool) == 1
+
+    asyncio.run(check())

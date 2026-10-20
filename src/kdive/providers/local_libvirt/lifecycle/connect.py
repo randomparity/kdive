@@ -1,22 +1,9 @@
-"""Local-libvirt Connect plane: single-attach gdbstub + drgn-live-over-SSH transports (ADR-0032).
+"""Local-libvirt Connect endpoint resolution and SSH reachability (ADR-0032/0798).
 
-`LocalLibvirtConnect` realizes the handler-facing `Connector` port: `open_transport(system,
-"gdbstub")` resolves the System's gdbstub endpoint and `open_transport(system, "drgn-live")`
-resolves the loopback-forwarded guest SSH endpoint; both enforce loopback-only **before any
-network IO** (the ported v1 "F2" SSRF control), probe reachability over an injected seam (an RSP
-framing probe for gdbstub, an SSH connect for drgn-live), and return an opaque `TransportHandle`
-(an encoded `TransportHandleData`) the session row persists; `close_transport(handle)` validates
-the handle and then no-ops (both are connectionless from the Connect plane's view). Each endpoint
-resolver reads the port the provisioner recorded in the **live** libvirt domain XML over an
-injected `connect` seam — the gdbstub `-gdb` port (ADR-0210 §1) and the SSH `hostfwd` port
-(ADR-0218 §5); only the `libvirt.open`/`XMLDesc` calls and the real socket/SSH probes are
-`# pragma: no cover - live_vm`, so both resolvers' lookup/parse/error branches and the
-orchestration are unit-tested with fakes.
-
-The RSP-framing codec (`rsp_frame`/`valid_rsp_frame`) and the bounded probe are ported from
-v1 `transport/core/rsp_probe.py` + `bounded.py`: the probe exchanges one **read-only** `?`
-halt-reason query and accepts only a complete, checksum-valid `$...#xx` frame, so a stale or
-non-RSP listener is rejected rather than mistaken for a healthy stub.
+Gdbstub transports resolve the live domain XML endpoint, enforce the loopback literal
+policy and return a connectionless handle. They perform no debugger socket IO: actual
+lazy GDB attachment owns reachability/protocol validation and may halt the guest.
+The independent drgn-live transport retains its SSH banner check (ADR-0039/0218).
 """
 
 from __future__ import annotations
@@ -44,7 +31,6 @@ from kdive.providers.ports.lifecycle import (
     DebugTransportKind,
     TransportHandleData,
 )
-from kdive.providers.shared.debug_common.rsp import rsp_reachable
 from kdive.providers.shared.libvirt_xml import (
     recorded_gdb_port_from_root,
     recorded_ssh_port_from_root,
@@ -56,7 +42,6 @@ _SSH_SCHEME = "ssh"  # the handle scheme local emits — its SSH realization (AD
 _LOOPBACK_HOST = "127.0.0.1"  # loopback-only: local transports never listen off-host (ADR-0210)
 
 type _ResolveEndpoint = Callable[[SystemHandle], tuple[str, int]]
-type _Probe = Callable[[str, int], bool]
 type _SshConnect = Callable[[str, int], bool]
 
 
@@ -99,21 +84,18 @@ class LocalLibvirtConnect:
 
     The agent-facing ``drgn-live`` transport (ADR-0085) is realized locally over SSH
     (ADR-0039); its handle keeps the ``ssh://`` scheme (a provider-internal realization
-    detail). Both transports enforce loopback-only **before any network IO** (the ported v1
-    "F2" SSRF control, ADR-0032 §5 / ADR-0039 §1) and probe reachability over an injected,
-    ``live_vm``-gated seam: an RSP framing probe for gdbstub, an SSH connect for drgn-live.
+    detail). Both enforce loopback-only before network IO (ADR-0032 §5 / ADR-0039 §1).
+    Only drgn-live probes reachability; gdbstub resolution does not attach (ADR-0798).
     """
 
     def __init__(
         self,
         *,
         resolve_endpoint: _ResolveEndpoint,
-        probe: _Probe,
         resolve_ssh_endpoint: _ResolveEndpoint | None = None,
         ssh_connect: _SshConnect | None = None,
     ) -> None:
         self._resolve_endpoint = resolve_endpoint
-        self._probe = probe
         self._resolve_ssh_endpoint = (
             resolve_ssh_endpoint if resolve_ssh_endpoint is not None else _real_resolve_ssh_endpoint
         )
@@ -121,10 +103,9 @@ class LocalLibvirtConnect:
 
     @classmethod
     def from_env(cls) -> LocalLibvirtConnect:
-        """Build with the real resolvers + probers; opens no connection until a transport opens."""
+        """Build with real endpoint resolvers and the independent SSH banner check."""
         return cls(
             resolve_endpoint=_resolve_endpoint_via(_default_connect),
-            probe=_real_probe,
             resolve_ssh_endpoint=_real_resolve_ssh_endpoint,
             ssh_connect=_real_ssh_connect,
         )
@@ -132,14 +113,14 @@ class LocalLibvirtConnect:
     def open_transport(self, system: SystemHandle, kind: DebugTransportKind) -> TransportHandle:
         """Open a single-attach transport (gdbstub or ssh) and return its handle.
 
-        Resolves the System's endpoint, enforces loopback-only before any IO, and probes
-        reachability. Runs no DB work — the caller owns the session row and the per-System
-        lock (the probe deliberately runs lock-free, ADR-0032 §6a).
+        Resolves the endpoint and enforces loopback-only. Gdbstub performs no debugger IO;
+        actual attachment validates it later. Drgn-live retains its SSH reachability check.
+        Runs no DB work — the caller owns the session row and per-System lock.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for an unknown kind, a non-loopback
                 resolved host (no IO), an absent domain, or a System not provisioned with a
-                gdbstub; ``DEBUG_ATTACH_FAILURE`` if the peer does not answer;
+                gdbstub; ``DEBUG_ATTACH_FAILURE`` if the SSH peer does not answer;
                 ``TRANSPORT_FAILURE`` on a socket fault; ``INFRASTRUCTURE_FAILURE`` for a
                 libvirt read fault.
         """
@@ -153,20 +134,6 @@ class LocalLibvirtConnect:
         host, port = self._resolve_endpoint(system)
         if not _is_loopback_literal(host):
             raise _config_error("gdbstub host must be a loopback IP literal")
-        try:
-            reachable = self._probe(host, port)
-        except OSError as exc:
-            raise CategorizedError(
-                "gdbstub transport socket fault",
-                category=ErrorCategory.TRANSPORT_FAILURE,
-                details={"port": port},
-            ) from exc
-        if not reachable:
-            raise CategorizedError(
-                "gdbstub did not answer RSP framing",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"port": port},
-            )
         return TransportHandle(TransportHandleData(kind=_GDBSTUB, host=host, port=port).encode())
 
     def _open_ssh(self, system: SystemHandle) -> TransportHandle:
@@ -289,10 +256,6 @@ def _close(conn: _Conn) -> None:
         conn.close()
 
 
-def _real_probe(host: str, port: int) -> bool:  # pragma: no cover - live_vm
-    return rsp_reachable(host, port)
-
-
 def _resolve_ssh_endpoint_via(connect: _Connect) -> _ResolveEndpoint:
     """Build the drgn-live SSH endpoint resolver over ``connect`` (ADR-0218 §5).
 
@@ -388,8 +351,7 @@ def _real_ssh_connect(host: str, port: int) -> bool:  # pragma: no cover - live_
     loopback-forwarded port — which in turn proves the guest NIC/DHCP is up and QEMU's
     ``hostfwd`` reaches it — without performing auth (introspect.run's helper does the
     authenticated round-trip, ADR-0219). A listener that accepts but never sends an SSH banner
-    is rejected. Mirrors ``rsp_reachable`` for the SSH transport; runs only under the
-    ``live_vm`` gate.
+    is rejected. Runs only under the ``live_vm`` gate.
     """
     deadline = time.monotonic() + _SSH_PROBE_TIMEOUT_S
     sock = socket.create_connection((host, port), timeout=_SSH_PROBE_TIMEOUT_S)
