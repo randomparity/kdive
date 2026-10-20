@@ -4122,7 +4122,7 @@ def test_authority_proof_resolves_the_role_siblings_it_imports() -> None:
     """#3273: live_vm_host imports local_worker_host, so every carrier play sets the roles path."""
     proof = _text(AUTHORITY_PROOF)
     runs = re.findall(
-        r'(ANSIBLE_ROLES_PATH="?\$source_root/deploy/ansible/roles"? )?'
+        r'(ANSIBLE_ROLES_PATH="?\$source_root/deploy/ansible/roles"?(?: \\\n\s*| ))?'
         r"uv run --with ansible-core==2\.21\.1 ansible-playbook",
         proof,
     )
@@ -4142,6 +4142,10 @@ def test_authority_proof_tears_down_only_after_its_prerequisites_installed_acl()
     assert proof.index(f"touch {marker}") > prerequisites
     assert proof.index(f"touch {marker}") < proof.index('createdb "$database"')
     cleanup = proof[proof.index("<<'REMOTE_CLEANUP'") : proof.index("\nREMOTE_CLEANUP\n")]
-    assert f"-f {marker}" in cleanup
-    assert cleanup.index(f"-f {marker}") < cleanup.index("authority_host_teardown.yml")
-    assert "teardown skipped: the authority prerequisites never installed" in cleanup
+    guard = (
+        f"if [[ ! -f {marker} ]]; then\n"
+        '  echo "teardown skipped: the authority prerequisites never installed" >&2\n'
+        "elif [[ -f $source_root/deploy/ansible/playbooks/authority_host_teardown.yml"
+    )
+    assert guard in cleanup
+    assert cleanup.index(guard) < cleanup.index("ansible-playbook -i inventory")

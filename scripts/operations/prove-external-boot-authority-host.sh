@@ -75,7 +75,8 @@ if [[ ! -f "$remote_root/prerequisites-installed" ]]; then
 elif [[ -f $source_root/deploy/ansible/playbooks/authority_host_teardown.yml \
   && -f $remote_root/inventory ]]; then
   cd "$remote_root"
-  env ANSIBLE_ROLES_PATH="$source_root/deploy/ansible/roles" uv run --with ansible-core==2.21.1 ansible-playbook -i inventory \
+  env ANSIBLE_ROLES_PATH="$source_root/deploy/ansible/roles" \
+    uv run --with ansible-core==2.21.1 ansible-playbook -i inventory \
     "$source_root/deploy/ansible/playbooks/authority_host_teardown.yml" \
     --extra-vars "authority_database_admin_dsn=postgresql:///$database?host=/var/run/postgresql" \
     --extra-vars "authority_database_login=$database_login" \
