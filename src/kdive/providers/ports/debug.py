@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
+from pydantic import Field
+
 from kdive.providers.ports._common import ProviderModel
 
 
@@ -17,6 +19,22 @@ class GdbFrame(ProviderModel):
     addr: str | None = None
     file: str | None = None
     line: int | None = None
+
+
+class GdbVariable(ProviderModel):
+    """One frame argument or local from gdb/MI ``-stack-list-variables --simple-values``."""
+
+    name: str
+    type: str | None = None
+    value: str | None = None
+
+
+class GdbFrameDetail(GdbFrame):
+    """A selected frame with its arguments and locals, bounded (ADR-0781)."""
+
+    args: list[GdbVariable] = Field(default_factory=list)
+    locals: list[GdbVariable] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class GdbStopRecord(ProviderModel):
@@ -355,14 +373,16 @@ class GdbMiEngine(Protocol):
         """
         ...
 
-    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
-        """Inspect one selected stack frame by ``level`` through gdb/MI.
+    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrameDetail:
+        """Inspect one selected stack frame by ``level``, with its arguments and locals.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_level`` for a negative or
                 non-integer ``level`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
                 ``inferior_running`` when the target is running, ``no_frame_at_level`` when no
-                frame exists at ``level``, or for other gdb/MI command failures;
+                frame exists at ``level``, ``no_current_thread`` when gdb reports no current
+                thread, ``no_frame_variables`` when gdb returns no variable list, or for other
+                gdb/MI command failures;
                 ``INFRASTRUCTURE_FAILURE`` for command timeouts.
         """
         ...

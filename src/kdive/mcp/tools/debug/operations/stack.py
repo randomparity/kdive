@@ -50,7 +50,11 @@ def _read_frame_op(session_id: str, level: int) -> _EngineOp:
             session_id,
             "read",
             suggested_next_actions=["debug.read_registers", "debug.read_memory"],
-            data={"level": level, "frame": frame.model_dump(mode="json", exclude_none=True)},
+            data={
+                "level": level,
+                "frame": frame.model_dump(mode="json", exclude_none=True, exclude={"truncated"}),
+                "truncated": frame.truncated,
+            },
         )
 
     return op
@@ -134,6 +138,11 @@ def _register_debug_read_frame(
 
         The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); frame
         selection is only valid at a halt.
+
+        data.frame holds the frame's location plus args and locals, each a name, gdb's type and,
+        for a scalar or pointer, gdb's printed value (a struct or array shows its type only). At
+        most 64 variables return and each type and value is cut at 256 characters; data.truncated
+        says whether anything was cut.
         """
         return await run_engine_op_with_resolver(
             pool,
