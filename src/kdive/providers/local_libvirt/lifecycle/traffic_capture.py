@@ -23,14 +23,14 @@ import libvirt
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.qmp_reply import (
+from kdive.providers.local_libvirt.lifecycle.xml import SYSTEM_SSH_NETDEV_ID
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+from kdive.providers.ports.traffic import TrafficCapturer as TrafficCapturer
+from kdive.providers.shared.qmp_reply import (
     MalformedQmpReplyError,
     QmpReply,
     parse_qmp_reply,
 )
-from kdive.providers.local_libvirt.lifecycle.xml import SYSTEM_SSH_NETDEV_ID
-from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.ports.traffic import TrafficCapturer as TrafficCapturer
 from kdive.providers.shared.runtime_paths import (
     PCAP_HYPERVISOR_WRITE_REMEDIATION,
     pcap_path,

@@ -1,4 +1,4 @@
-"""The local QMP passthrough reply parser (ADR-0385 amendment, #3270)."""
+"""The shared QMP passthrough reply parser (ADR-0385 amendment, #3270)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from kdive.providers.local_libvirt.lifecycle.qmp_reply import (
+from kdive.providers.shared.qmp_reply import (
     MalformedQmpReplyError,
     parse_qmp_reply,
 )

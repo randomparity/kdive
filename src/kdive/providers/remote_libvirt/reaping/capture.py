@@ -19,9 +19,9 @@ host instead of libvirt's ~130 s kernel TCP connect timeout — the retry-budget
 
 Like every reaper under ADR-0556 this is idempotent: a crash between a successful provider
 call and the sweep's completion marker repeats an already-effective call, so an already-missing
-filter, domain, or volume is tolerated. A libvirt error that is *not* an absence surfaces as a
-``CategorizedError`` — a degraded host must defer the row, not record a reclaim that did not
-happen.
+filter, domain, or volume is tolerated. A libvirt error or a QEMU error reply (parsed with the
+shared QMP reply parser, #3294) that is *not* an absence surfaces as a ``CategorizedError`` — a
+degraded host must defer the row, not record a reclaim that did not happen.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_co
 from kdive.providers.remote_libvirt.connection.monitor import qemu_monitor_command
 from kdive.providers.remote_libvirt.connection.transport import remote_connection
 from kdive.providers.remote_libvirt.reaping.connections import open_libvirt_reaper
+from kdive.providers.shared.qmp_reply import MalformedQmpReplyError, parse_qmp_reply
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
@@ -130,16 +131,25 @@ class RemoteLibvirtCaptureReaper:
             raise _control("looking up", capture.domain_name) from exc
         cmd = {"execute": "object-del", "arguments": {"id": qom_id}}
         try:
-            qemu_monitor_command(domain, json.dumps(cmd), 0)
-        except libvirt.libvirtError as exc:
-            if _is_not_found(exc):
-                _log.info(
-                    "reconciler: capture filter %s already absent on %s; continuing",
-                    qom_id,
-                    capture.domain_name,
-                )
-                return
+            reply = parse_qmp_reply(qemu_monitor_command(domain, json.dumps(cmd), 0))
+        except (libvirt.libvirtError, MalformedQmpReplyError) as exc:
             raise _control("removing capture filter on", capture.domain_name) from exc
+        if reply.absent:
+            _log.info(
+                "reconciler: capture filter %s already absent on %s; continuing",
+                qom_id,
+                capture.domain_name,
+            )
+            return
+        if reply.error_class is not None:
+            _log.warning(
+                "reconciler: QEMU refused removing capture filter %s on %s: %s %r",
+                qom_id,
+                capture.domain_name,
+                reply.error_class,
+                reply.description[:256],
+            )
+            raise _control("removing capture filter on", capture.domain_name)
 
     def _delete_volume(
         self, conn: _ReaperConn, storage_pool: str, capture: OrphanedCapture
@@ -166,16 +176,6 @@ class RemoteLibvirtCaptureReaper:
         except libvirt.libvirtError as exc:
             raise _infra("deleting capture volume", volume=vol_name) from exc
         _log.info("reconciler: deleted orphaned capture volume %s", vol_name)
-
-
-def _is_not_found(exc: libvirt.libvirtError) -> bool:
-    """A QMP ``object-del`` on a missing id yields "object 'X' not found" / ``DeviceNotFound``.
-
-    Same QMP semantics as the lifecycle capturer's check; kept local so the reaper slice stays
-    independent of the capture path's wider connection slice (ADR-0076).
-    """
-    message = str(exc).lower()
-    return "not found" in message or "devicenotfound" in message
 
 
 def _control(verb: str, domain_name: str) -> CategorizedError:

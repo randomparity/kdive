@@ -1,8 +1,9 @@
-"""Parse a local QMP passthrough reply (ADR-0385 amendment, #3270).
+"""Parse a QMP passthrough reply (ADR-0385 amendment, #3270; remote callers #3294).
 
 ``libvirt_qemu.qemuMonitorCommand`` returns QEMU's reply text whatever it contains: a refused
 command comes back as ``{"error": {...}}`` on a successful call, not as a ``libvirtError``. Every
-local passthrough caller therefore parses the reply here and decides what an error means for it.
+local and remote passthrough caller therefore parses the reply here and decides what an error
+means for it.
 """
 
 from __future__ import annotations

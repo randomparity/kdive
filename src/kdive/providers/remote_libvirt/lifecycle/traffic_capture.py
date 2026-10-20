@@ -29,7 +29,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -47,10 +47,13 @@ from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
     remote_connection,
 )
+from kdive.providers.shared.qmp_reply import MalformedQmpReplyError, QmpReply, parse_qmp_reply
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
 _log = logging.getLogger(__name__)
+# QEMU-controlled text reaches operator logs only, bounded and repr-quoted.
+_LOGGED_DESCRIPTION_CHARS = 256
 
 # A remote System's traffic rides a libvirt-managed dir/fs storage pool; only those pool types
 # expose a host directory the filter-dump can write into and libvirt can then list as a volume.
@@ -211,7 +214,7 @@ class RemoteLibvirtTrafficCapture:
         with self._connection() as conn:
             domain = self._lookup_domain(conn, domain_name)
             netdev = discover_netdev_id(self._domain_xml(domain, domain_name))
-            self._object_del(domain, domain_name, qom_id, tolerate_missing=True)
+            self._object_del(domain, domain_name, qom_id)
             self._object_add(
                 domain,
                 domain_name,
@@ -228,7 +231,7 @@ class RemoteLibvirtTrafficCapture:
         """Remove the filter-dump ``qom_id`` (tolerating not-found)."""
         with self._connection() as conn:
             domain = self._lookup_domain(conn, domain_name)
-            self._object_del(domain, domain_name, qom_id, tolerate_missing=True)
+            self._object_del(domain, domain_name, qom_id)
 
     def captured_size(self, dest_path: str) -> int:
         """Current byte size of the growing remote pcap volume (0 if not yet written)."""
@@ -380,22 +383,47 @@ class RemoteLibvirtTrafficCapture:
         self, domain: _CaptureDomain, domain_name: str, arguments: dict[str, object]
     ) -> None:
         cmd = {"execute": "object-add", "arguments": arguments}
-        try:
-            qemu_monitor_command(domain, json.dumps(cmd), 0)
-        except libvirt.libvirtError as exc:
-            raise self._control_failure("adding capture filter on", domain_name) from exc
+        reply = self._send(domain, domain_name, cmd, "object_add", verb="adding capture filter on")
+        if reply.error_class is not None:
+            raise _refused(reply, "object_add", domain_name)
 
-    def _object_del(
-        self, domain: _CaptureDomain, domain_name: str, qom_id: str, *, tolerate_missing: bool
-    ) -> None:
+    def _object_del(self, domain: _CaptureDomain, domain_name: str, qom_id: str) -> None:
         cmd = {"execute": "object-del", "arguments": {"id": qom_id}}
+        reply = self._send(
+            domain, domain_name, cmd, "object_del", verb="removing capture filter on"
+        )
+        if reply.absent:
+            _log.info("capture filter %s already absent on %s; continuing", qom_id, domain_name)
+            return
+        if reply.error_class is not None:
+            raise _refused(reply, "object_del", domain_name)
+
+    def _send(
+        self,
+        domain: _CaptureDomain,
+        domain_name: str,
+        cmd: Mapping[str, object],
+        operation: str,
+        *,
+        verb: str,
+    ) -> QmpReply:
+        """Run one QMP command and parse its reply; QEMU refusals arrive as error replies."""
         try:
-            qemu_monitor_command(domain, json.dumps(cmd), 0)
+            raw = qemu_monitor_command(domain, json.dumps(cmd), 0)
         except libvirt.libvirtError as exc:
-            if tolerate_missing and _is_not_found(exc):
-                _log.info("capture filter %s already absent on %s; continuing", qom_id, domain_name)
-                return
-            raise self._control_failure("removing capture filter on", domain_name) from exc
+            raise self._control_failure(verb, domain_name) from exc
+        try:
+            return parse_qmp_reply(raw)
+        except MalformedQmpReplyError as exc:
+            raise CategorizedError(
+                "QEMU returned a malformed capture filter reply",
+                category=ErrorCategory.CONTROL_FAILURE,
+                details={
+                    "domain": domain_name,
+                    "reason": "qmp_reply_malformed",
+                    "operation": operation,
+                },
+            ) from exc
 
     @staticmethod
     def _control_failure(verb: str, domain_name: str) -> CategorizedError:
@@ -413,10 +441,24 @@ class RemoteLibvirtTrafficCapture:
         )
 
 
-def _is_not_found(exc: libvirt.libvirtError) -> bool:
-    """A QMP ``object-del`` on a missing id yields "object 'X' not found" / ``DeviceNotFound``."""
-    message = str(exc).lower()
-    return "not found" in message or "devicenotfound" in message
+def _refused(reply: QmpReply, operation: str, domain_name: str) -> CategorizedError:
+    _log.warning(
+        "QEMU refused %s on %s: %s %r",
+        operation,
+        domain_name,
+        reply.error_class,
+        reply.description[:_LOGGED_DESCRIPTION_CHARS],
+    )
+    return CategorizedError(
+        "QEMU refused the capture filter command",
+        category=ErrorCategory.CONTROL_FAILURE,
+        details={
+            "domain": domain_name,
+            "reason": "capture_filter_rejected",
+            "operation": operation,
+            "error": str(reply.error_class),
+        },
+    )
 
 
 def _delete_volume(volume: _CaptureVolume) -> None:

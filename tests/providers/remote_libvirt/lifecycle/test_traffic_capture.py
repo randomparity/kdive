@@ -109,6 +109,7 @@ class _FakeDomain:
         self._xml = xml
         self.commands: list[dict] = []
         self.raise_on: dict[str, Exception] = {}
+        self.replies: dict[str, str] = {}
 
     def XMLDesc(self, flags: int) -> str:  # noqa: N802 - libvirt binding name
         return self._xml
@@ -119,7 +120,11 @@ class _FakeDomain:
         exc = self.raise_on.get(parsed["execute"])
         if exc is not None:
             raise exc
-        return "{}"
+        return self.replies.get(parsed["execute"], '{"return": {}, "id": "libvirt-1"}')
+
+
+def _error_reply(error_class: str, desc: str) -> str:
+    return json.dumps({"id": "libvirt-1", "error": {"class": error_class, "desc": desc}})
 
 
 class _FakeConn:
@@ -213,10 +218,47 @@ def test_attach_discovers_netdev_then_deletes_stale_and_adds_filter_dump(tmp_pat
 
 def test_attach_tolerates_object_not_found_on_first_run(tmp_path: Path) -> None:
     domain = _FakeDomain()
-    domain.raise_on["object-del"] = libvirt.libvirtError("object 'kdive-dump-J' not found")
+    domain.replies["object-del"] = _error_reply("GenericError", "object 'kdive-dump-J' not found")
     cap = _capturer(_FakeConn(domain=domain), tmp_path)
     cap.attach(_DOMAIN, qom_id="kdive-dump-J", dest_path="/pool/cap.pcap", snaplen=128)
     assert [c["execute"] for c in domain.commands] == ["object-del", "object-add"]
+
+
+def test_detach_tolerates_a_device_not_found_reply(tmp_path: Path) -> None:
+    domain = _FakeDomain()
+    domain.replies["object-del"] = _error_reply("DeviceNotFound", "Device 'x' not found")
+    _capturer(_FakeConn(domain=domain), tmp_path).detach(_DOMAIN, qom_id="kdive-dump-J")
+
+
+@pytest.mark.parametrize("execute", ["object-add", "object-del"])
+def test_a_refused_filter_command_is_a_control_failure(tmp_path: Path, execute: str) -> None:
+    """QEMU refuses with an error reply on a successful libvirt call; it must not pass (#3294)."""
+    domain = _FakeDomain()
+    domain.replies[execute] = _error_reply("GenericError", "net dump: can't open '/pool/x'")
+    cap = _capturer(_FakeConn(domain=domain), tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        cap.attach(_DOMAIN, qom_id="kdive-dump-J", dest_path="/pool/cap.pcap", snaplen=128)
+    assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert exc.value.details == {
+        "domain": _DOMAIN,
+        "reason": "capture_filter_rejected",
+        "operation": execute.replace("-", "_"),
+        "error": "GenericError",
+    }
+
+
+@pytest.mark.parametrize("reply", ["{}", "not json", '{"return": {}, "error": {"class": "X"}}'])
+def test_a_malformed_filter_reply_is_a_control_failure(tmp_path: Path, reply: str) -> None:
+    domain = _FakeDomain()
+    domain.replies["object-del"] = reply
+    with pytest.raises(CategorizedError) as exc:
+        _capturer(_FakeConn(domain=domain), tmp_path).detach(_DOMAIN, qom_id="kdive-dump-J")
+    assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert exc.value.details == {
+        "domain": _DOMAIN,
+        "reason": "qmp_reply_malformed",
+        "operation": "object_del",
+    }
 
 
 def test_attach_reraises_other_monitor_error_as_control_failure(tmp_path: Path) -> None:

@@ -11,12 +11,12 @@ from uuid import UUID
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.qmp_reply import (
-    MalformedQmpReplyError,
-    parse_qmp_reply,
-)
 from kdive.providers.ports.traffic import (
     QuiescenceEvidence,
+)
+from kdive.providers.shared.qmp_reply import (
+    MalformedQmpReplyError,
+    parse_qmp_reply,
 )
 
 
