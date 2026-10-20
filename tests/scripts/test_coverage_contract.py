@@ -199,6 +199,10 @@ _RUN_SYSTEM_JOB_TOOLS = {
 _RUN_SYSTEM_JOB_NODE = (
     "tests/integration/test_run_system_job_tool_cells_live.py::test_run_system_job_tool_cell"
 )
+_ACCOUNTING_NODE = (
+    "tests/integration/test_allocation_accounting_tool_cells_live.py"
+    "::test_allocation_accounting_tool_cell"
+)
 
 
 def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> None:
@@ -291,7 +295,9 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     local_power = [c for c in power if c.provider == "local-libvirt"]
     # A local scenario id names no architecture, so the ppc64le cells (#2818's) share the node.
     assert len(local_power) == 200 and {c.node_id for c in local_power} == {_POWER_NODE}
-    assert {c.node_id for c in power if c.provider == "remote-libvirt"} == {None}
+    remote_power = [c for c in power if c.provider == "remote-libvirt"]
+    # As for local: the remote ppc64le cells (#2818's) share the provider-qualified ids.
+    assert len(remote_power) == 200 and {c.node_id for c in remote_power} == {_POWER_NODE}
     capture = [c for c in contract.cells if c.operation in _CAPTURE_TOOLS]
     local_capture = [c for c in capture if c.provider == "local-libvirt"]
     # As for power: the local ppc64le cells (#2818's) share the arch-free scenario ids.
@@ -306,9 +312,14 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     local_control = [c for c in control if c.provider == "local-libvirt"]
     # As for power: the local ppc64le cells (#2818's) share the arch-free scenario ids.
     assert len(local_control) == 120 and {c.node_id for c in local_control} == {_CONTROL_NODE}
-    assert {c.node_id for c in control if c.provider == "remote-libvirt"} == {None}
+    remote_control = [c for c in control if c.provider == "remote-libvirt"]
+    assert len(remote_control) == 120
+    assert {c.node_id for c in remote_control} == {_CONTROL_NODE}
+    assert {c.node_id for c in contract.cells if c.owner == 3116} == {_POWER_NODE, _CONTROL_NODE}
     service = [c for c in contract.cells if c.operation in _RUN_SYSTEM_JOB_TOOLS]
     assert len(service) == 220 and {c.node_id for c in service} == {_RUN_SYSTEM_JOB_NODE}
+    accounting = [c for c in contract.cells if c.operation in _SPLIT[3098]]
+    assert len(accounting) == 220 and {c.node_id for c in accounting} == {_ACCOUNTING_NODE}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -329,6 +340,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *(c.operation for c in contract.cells if c.operation.startswith("debug.")),
         *_LOCAL_CONTROL_TOOLS,
         *_RUN_SYSTEM_JOB_TOOLS,
+        *_SPLIT[3098],
     }
     limits = [c for c in contract.cells if c.owner == 3118]
     local_limits = [c for c in limits if c.provider == "local-libvirt"]

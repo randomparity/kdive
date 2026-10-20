@@ -1768,8 +1768,12 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
   relocated address are compared with the guest's own values, and instruction steps and
   disassembly with the fixture binary's instruction boundaries; session cells compare the
   session rows and prove the guest halts while attached and answers again after the detach.
-- Two cells fail after proving what they can, until the tool exposes the effect:
-  `debug.list_breakpoints` returns only a count and `debug.read_frame` no arguments or locals.
+- The `debug.read_frame` cell requires the stop at `vfs_read`'s entry and compares frame 0's
+  arguments with its v6.18 signature (`file`, `buf`, `count`, `pos`) and their values with the
+  `rdi`, `rsi`, `rdx` and `rcx` registers, plus a user-half `buf` and a `ret` local (ADR-0781).
+  gdb's `<name>@entry` rows are set aside for the name check and must equal the same register.
+  The `debug.list_breakpoints` cell compares each listed row's
+  number, kind, function and address with the installed breakpoints (ADR-0780).
 - The `debug.interrupt` cell leaves the guest running with `debug.continue` `wait=false`
   (ADR-0783), requires `halted_by=interrupt` with `signal-received`, records which path the
   `vfs_read` breakpoint stop took (`resume_reply` or `waiting_continue`), and ends the session
@@ -1806,6 +1810,15 @@ cells (`start_session`, `end_session`, `load_module_symbols`, `list_modules`, `r
 server's `TMPDIR` on a tmpfs whose per-user quota was 1200 MB, below three staged copies. All 10
 recorded `success`; 11 staging directories came and went, never more than one at a time, and
 the temp directory was empty after the cells and after `demo-down.sh --wipe --yes`.
+
+A rerun at the #3242 candidate `424f2fb40` ran the four `debug.list_breakpoints` `gdbstub`
+functional cells (`default` and `recovery`, each `direct` and `gateway`) on the same kind of
+guest, with the server's `TMPDIR` on the same 1200 MB quota tmpfs; the `recovery` configuration
+came up after a plain `demo-down.sh` with `KDIVE_WORKER_DEATH_VERIFIER=docker`. All four recorded
+`success`, each listing its `vfs_read` and `vfs_write` breakpoints by the numbers they were set
+with, as `breakpoint` rows whose addresses fall inside those functions in `/proc/kallsyms`, and
+only the `vfs_write` row after the first was cleared. After `demo-down.sh --wipe --yes` no
+`kdive-` domain remained and the temp directory held no staging directory.
 
 #### Break-glass provider tool cells (#3112)
 

@@ -9,8 +9,10 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import cast
+from uuid import UUID
 
 import pytest
 
@@ -18,13 +20,15 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import LiveStackToolError, OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import capability_unsupported
+from kdive.providers.ports.traffic import pcap_volume_name
+from kdive.providers.shared.runtime_paths import pcap_dir
 from kdive.serialization import JsonValue
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Evidence, Outcome
 from scripts.coverage_campaign.results import qualify
 from tests.integration.live_stack import scenario, tool_cells
 from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
-from tests.integration.live_stack.remote_lifecycle import RemoteHost
+from tests.integration.live_stack.remote_lifecycle import RemoteHost, guest_boot_kernel
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.integration.live_stack.tool_cell_fakes import (
     _GRANTS,
@@ -44,6 +48,7 @@ from tests.integration.live_stack.tool_cells import (
     Grants,
     HttpCaller,
     Rejection,
+    _empty_page,
     bindings,
     claims_of,
     configuration_of,
@@ -346,19 +351,53 @@ def test_debug_sessions_denied_page_and_unconfigured_pages(tmp_path: Path) -> No
     caller = _Filtering("direct", page, control=listed)
     asyncio.run(prove_rejection(run, caller, "project-isolation", rejection, _snapshot(1, 1)))
     assert "project-isolation" in run.assertions
-    # A named pair whose carrier has not configured its page fails before any call.
-    unconfigured = _Filtering("direct", page, control=listed)
+    # A tool whose carrier has not configured its page fails rather than borrowing another's.
     with pytest.raises(AssertionError, match="no canonical empty page"):
+        _empty_page("cov.unconfigured_list", {"request": {}})
+
+
+def test_allocations_list_page_names_the_project_and_no_actions(tmp_path: Path) -> None:
+    page = ToolResponse.collection(
+        "allocations",
+        "ok",
+        [],
+        suggested_next_actions=[],
+        data={"truncated": False, "next_cursor": None, "project": "p"},
+    )
+    assert _empty_page("allocations.list", {"request": {"project": "p"}}) == page
+    listed = page.model_copy(update={"items": [ToolResponse.success(_ITEM, "granted")]})
+    rejection = Rejection({"request": {"project": "p"}}, _GRANTS, filtered=_control())
+    for boundary in ("authorization", "project-isolation"):
+        run = _list_run(tmp_path, "allocations.list", boundary)
+        caller = _Filtering("gateway", page, control=listed)
+        asyncio.run(prove_rejection(run, caller, boundary, rejection, _snapshot(1, 1)))
+        assert boundary in run.assertions
+    for leak in (
+        page.model_copy(update={"data": {"truncated": False, "next_cursor": None}}),
+        page.model_copy(update={"suggested_next_actions": ["allocations.wait"]}),
+    ):
+        with pytest.raises(AssertionError, match="not the empty page"):
+            asyncio.run(
+                prove_rejection(
+                    _list_run(tmp_path, "allocations.list", "authorization"),
+                    _Filtering("direct", leak, control=listed),
+                    "authorization",
+                    rejection,
+                    _snapshot(1, 1),
+                )
+            )
+    unnamed = _Filtering("direct", page, control=listed)
+    with pytest.raises(AssertionError, match="must name a project"):
         asyncio.run(
             prove_rejection(
                 _list_run(tmp_path, "allocations.list", "authorization"),
-                unconfigured,
+                unnamed,
                 "authorization",
                 Rejection({"request": {}}, _GRANTS, filtered=_control()),
                 _snapshot(1, 1),
             )
         )
-    assert unconfigured.calls == []
+    assert unnamed.calls == []
 
 
 def test_filtered_exception_is_closed(tmp_path: Path) -> None:
@@ -673,6 +712,71 @@ def test_lane_for_selects_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ScenarioStop) as stop:
         tool_cells.lane_for(_cell("systems.ssh_info", "remote-libvirt", "x86_64"))
     assert stop.value.outcome is Outcome.BLOCKED
+
+
+class _Pool:
+    def __init__(self, xml: str) -> None:
+        self.xml = xml
+
+    def XMLDesc(self, _flags: int) -> str:  # noqa: N802 - libvirt binding name
+        return self.xml
+
+
+class _PoolConn:
+    def __init__(self, xml: str) -> None:
+        self.pool, self.closed, self.named = _Pool(xml), False, ""
+
+    def storagePoolLookupByName(self, name: str) -> _Pool:  # noqa: N802 - libvirt binding name
+        self.named = name
+        return self.pool
+
+    def close(self) -> None:
+        self.closed = True
+
+
+_SYSTEM, _JOB = str(UUID(int=1)), str(UUID(int=2))
+
+
+def test_remote_pcap_spool_reads_the_pool_target_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _PoolConn("<pool><target><path>/srv/pool</path></target></pool>")
+    monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
+    namer = tool_cells.remote_pcap_spool("op@provider.example", "kdive", _SYSTEM)
+    assert (conn.named, conn.closed) == ("kdive", True)
+    conn.named = ""
+    assert namer(_JOB) == f"/srv/pool/{pcap_volume_name(UUID(_SYSTEM), UUID(_JOB))}"
+    assert conn.named == "", "naming a job's volume read the pool again"
+
+
+def test_remote_pcap_spool_needs_a_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _PoolConn("<pool><target/></pool>")
+    monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
+    with pytest.raises(AssertionError, match="no target path"):
+        tool_cells.remote_pcap_spool("op@provider.example", "kdive", _SYSTEM)
+    assert conn.closed
+
+
+def test_local_lane_observes_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
+    lane = tool_cells.lane_for(_cell("control.power", "local-libvirt", "x86_64"))
+    assert lane.connect is tool_cells.worker_connect
+    assert lane.spool(_SYSTEM)(_JOB) == str(pcap_dir(UUID(_SYSTEM)))
+    assert lane.installed_kernel is tool_cells.domain_kernel
+
+
+def test_remote_lane_observes_the_provider_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    host = RemoteHost("op@provider.example", "kdive", "rocky:10.2", "x86_64", "kvm")
+    monkeypatch.setattr(tool_cells, "remote_host", lambda: host)
+    monkeypatch.setattr(tool_cells, "staged_base_volume", lambda _image: "base.qcow2")
+    seen: list[str] = []
+    monkeypatch.setattr(tool_cells, "observer", lambda dest: seen.append(dest) or "conn")
+    lane = tool_cells.lane_for(_cell("control.power", "remote-libvirt", "x86_64"))
+    assert lane.connect() == "conn" and seen == ["op@provider.example"]
+    spool = lane.spool
+    assert isinstance(spool, partial) and spool.func is tool_cells.remote_pcap_spool
+    assert spool.args == ("op@provider.example", "kdive")
+    kernel = lane.installed_kernel
+    assert isinstance(kernel, partial) and kernel.func is guest_boot_kernel
+    assert kernel.keywords == {"family": "fedora"}
 
 
 def test_remote_cell_is_not_skipped_by_control_plane_arch(
