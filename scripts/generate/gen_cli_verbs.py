@@ -10,7 +10,8 @@ generator only emits the descriptor data.
 Per parameter (after resolving any ``#/$defs`` reference and unwrapping the Pydantic
 ``[T, null]`` optional wrapper): JSON-Schema
 ``type`` -> argparse type (``string``/``integer``/``number`` -> ``str``/``int``/``float``,
-``boolean`` -> ``store_true``); ``enum`` -> ``choices``; array-of-string -> ``append``;
+``boolean`` -> ``store_true``, or the ``--flag``/``--no-flag`` pair when the boolean is
+required or defaults to true); ``enum`` -> ``choices``; array-of-string -> ``append``;
 ``required`` -> ``required=True``; ``description`` -> flag help. Flag names come from
 :func:`kdive.cli.reserved_flags.derive_cli_flag`; a parameter that would derive to a
 :data:`RESERVED_CLI_FLAGS` name is a generation error.
@@ -244,10 +245,13 @@ def _flag_for(
     if type_ == "boolean":
         # A required boolean must be able to express *false*, which ``store_true`` cannot:
         # its only two states are "flag given" (true) and "flag absent", and absent is not
-        # a legal payload when the parameter is required. Such a flag pairs with a
-        # ``--no-<flag>`` instead. An optional boolean keeps ``store_true`` so "unset"
-        # stays distinguishable from an explicit false and the server default holds.
-        action = "bool_optional" if required else "store_true"
+        # a legal payload when the parameter is required. An optional boolean that defaults
+        # to true has the same problem: absent already means true. Both pair with a
+        # ``--no-<flag>`` instead (an unset optional one is still omitted). Any other optional
+        # boolean keeps ``store_true`` so "unset" stays distinguishable and the server
+        # default holds.
+        defaults_true = spec.get("default") is True
+        action = "bool_optional" if required or defaults_true else "store_true"
         return GeneratedFlag(flag, dest, required, help_, action=action)
     argtype = _SCALAR_ARGTYPE.get(type_) if isinstance(type_, str) else None
     if argtype is None:
