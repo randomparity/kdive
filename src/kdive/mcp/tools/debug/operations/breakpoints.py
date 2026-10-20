@@ -19,6 +19,7 @@ from kdive.mcp.tools.debug.operations.runtime import (
     run_engine_op_with_resolver,
 )
 from kdive.providers.ports.debug import GdbMiAttachment, GdbMiEngine
+from kdive.serialization import JsonValue
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver) -> None:
@@ -53,11 +54,14 @@ def _clear_breakpoint_op(session_id: str, number: str) -> _EngineOp:
 def _list_breakpoints_op(session_id: str) -> _EngineOp:
     def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
         refs = engine.list_breakpoints(attachment)
+        breakpoints: list[JsonValue] = [
+            ref.model_dump(mode="json", exclude_none=True) for ref in refs
+        ]
         return ToolResponse.success(
             session_id,
             "listed",
             suggested_next_actions=["debug.set_breakpoint", "debug.continue"],
-            data={"count": len(refs)},
+            data={"count": len(breakpoints), "breakpoints": breakpoints},
         )
 
     return op
@@ -129,7 +133,14 @@ def _register_debug_list_breakpoints(
             str, Field(description="The live DebugSession whose breakpoints to list.")
         ],
     ) -> ToolResponse:
-        """List all breakpoints on a live DebugSession. Requires contributor."""
+        """List breakpoints and watchpoints on a live DebugSession. Requires contributor.
+
+        data.breakpoints has one row per gdb breakpoint-table entry (ADR-0780): number, type
+        (breakpoint or a watchpoint kind) and the location gdb reports, func and addr for a
+        breakpoint or what (the watched expression, named expr by the watchpoint tools) for a
+        watchpoint. data.count is the row count. A breakpoint gdb resolved to several locations
+        shows addr `<MULTIPLE>` and no func.
+        """
         return await run_engine_op_with_resolver(
             pool, current_context(), session_id, runtime, _list_breakpoints_op(session_id)
         )

@@ -1024,6 +1024,47 @@ def test_list_watchpoints_returns_listed(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_list_breakpoints_lists_rows(migrated_url: str) -> None:
+    breakpoint_row = {
+        "number": "1",
+        "type": "breakpoint",
+        "addr": "0xffffffff81000010",
+        "func": "panic",
+    }
+    watchpoint_row = {"number": "2", "type": "hw watchpoint", "what": "*(char(*)[8])0x1000"}
+
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-break-list": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "BreakpointTable": {
+                                    "body": [{"bkpt": breakpoint_row}, {"bkpt": watchpoint_row}]
+                                }
+                            },
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op_with_runtime(
+                pool,
+                request_context(),
+                session_id,
+                runtime,
+                _op_for("list_breakpoints", runtime, session_id),
+            )
+        assert resp.status == "listed"
+        assert resp.data == {"count": 2, "breakpoints": [breakpoint_row, watchpoint_row]}
+
+    asyncio.run(_run())
+
+
 def test_clear_watchpoint_returns_cleared(migrated_url: str) -> None:
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
