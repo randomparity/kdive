@@ -44,7 +44,12 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
-from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, overlay_name
+from kdive.providers.shared.runtime_paths import (
+    console_boot_marker_path,
+    console_log_path,
+    domain_name_for,
+    overlay_name,
+)
 
 
 def _validate_standalone_qcow2(descriptor: int, size: int) -> None:
@@ -132,6 +137,7 @@ def _fixture_artifacts(system_id: UUID) -> tuple[str, ...]:
         baseline_dir(system_id),
         overlay_path(system_id),
         str(console_log_path(system_id)),
+        str(console_boot_marker_path(console_log_path(system_id))),
         domain_name_for(system_id),
     )
 
@@ -475,10 +481,12 @@ def main() -> None:
     _undefine_domain(_WORKER_URI, system_id)
     _remove_regular(Path("/var/lib/kdive/rootfs") / overlay_name(system_id))
     _remove_regular(Path("/var/lib/kdive/console") / f"{system_id}.log")
+    _remove_regular(Path("/var/lib/kdive/console") / f"{system_id}.boot")
     legacy_baseline = Path("/var/lib/kdive/rootfs") / f"{system_id}-baseline"
     _remove_directory(legacy_baseline)
     _remove_regular(Path(overlay_path(system_id)))
     _remove_regular(console_log_path(system_id))
+    _remove_regular(console_boot_marker_path(console_log_path(system_id)))
     _remove_baseline(system_id)
 
     os.initgroups(_AUTHORITY, identity.pw_gid)

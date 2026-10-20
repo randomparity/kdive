@@ -21,7 +21,10 @@ from kdive.providers.local_libvirt.lifecycle.host_tool_search import (
     PROVIDER_TOOL_SEARCH_PATH,
     resolve_provider_tool,
 )
-from kdive.providers.local_libvirt.lifecycle.storage import _open_validated_console_log
+from kdive.providers.local_libvirt.lifecycle.storage import (
+    _open_validated_console_log,
+    record_console_boot,
+)
 from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIRT_URI
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, read_console_log
 
@@ -222,11 +225,15 @@ class ConsoleReadinessWindow:
 def prepare_console_readiness_window(
     system_id: UUID, *, multiplier: float = 1.0, window_s: int | None = None
 ) -> ConsoleReadinessWindow:
-    """Truncate and retain a console inode for one boot's scaled readiness window."""
+    """Truncate and retain a console inode for one boot's scaled readiness window.
+
+    Records the per-start boot marker after the truncate, as the storage seam does (#3254).
+    """
     path = console_log_path(system_id)
     descriptor = _open_validated_console_log(path, os.O_RDWR)
     try:
         os.ftruncate(descriptor, 0)
+        record_console_boot(path)
         duration = (
             window_s if window_s is not None else config.require(LIBVIRT_BOOT_WINDOW_S) * multiplier
         )

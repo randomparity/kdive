@@ -177,6 +177,26 @@ def test_prepared_window_discards_prior_marker_before_new_crash(
     assert result == ReadinessResult(True, False, None, "Kernel panic")
 
 
+def test_prepared_window_records_a_fresh_boot_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #3254: the external boot and authority lanes truncate through this window instead of the
+    # storage seam, so it must record the per-start boot nonce too.
+    path = tmp_path / "console.log"
+    path.write_bytes(b"prior boot")
+    marker = tmp_path / "console.boot"
+    marker.write_text("0" * 32)
+    monkeypatch.setattr(readiness_module, "console_log_path", lambda _system_id: path)
+    monkeypatch.setattr(readiness_module.config, "require", lambda _setting: 10)
+
+    window = prepare_console_readiness_window(SYSTEM_ID)
+    window.close()
+
+    assert path.read_bytes() == b""
+    assert marker.read_text() != "0" * 32
+    assert len(marker.read_text()) == 32
+
+
 @pytest.mark.parametrize(("multiplier", "expected"), [(1.0, 10.0), (7.0, 70.0)])
 def test_prepared_window_uses_multiplier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, multiplier: float, expected: float

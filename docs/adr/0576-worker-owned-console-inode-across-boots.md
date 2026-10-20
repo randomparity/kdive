@@ -46,6 +46,31 @@ virtlogd into the worker.
 5. Readers are unchanged: `read_console_log` still reads the whole file as this boot's
    byte-exact window; the remote part-index mechanism (ADR-0241/ADR-0429) stands.
 
+### Amendment (2026-10-20): every truncating start records a per-start boot marker (#3254)
+
+This is an amendment rather than a rewrite. Later evidence qualifies decision 2's truncate and
+decision 3's claim that every start path calls the seam, and the record stays append-only.
+Keeping one inode across boots removed the only per-boot signal that console rotation's
+`boot_id` had. `dev:ino` no longer changes per boot, and mtime advances on every append. So the
+`dev:ino:mtime` identity started a new console-part generation whenever a rotation pass saw new
+output, including a crash's panic stream. That contradicts the per-boot signal that
+[ADR-0273](0273-observe-rotating-console-parts.md) decision 4 requires.
+
+Each truncating start now writes a fresh 128-bit nonce, after its truncate, to a sibling marker
+`<system_id>.boot`. The write is atomic: an exclusive temp file is renamed into place. A failed
+write fails the start with the same `PROVISIONING_FAILURE` identity error, naming the marker.
+Two functions truncate:
+
+- `storage._prepare_console_log`, the seam.
+- `readiness.prepare_console_readiness_window`, which the external boot session and the system
+  authority lane use in place of the seam.
+
+Both call `storage.record_console_boot`. The reconciler's identity is `dev:ino:<nonce>`. It
+reads the marker only when it is a regular file owned by the log's owner and holds exactly 32
+lowercase hex characters; otherwise the nonce is empty. Ordinary growth keeps its generation. A
+power-cycle that regrows past the prior cursor still starts a new one, and a stat failure still
+degrades to the reset-forcing empty identity. The marker follows the log's lifecycle.
+
 ## Consequences
 
 A fixed non-root worker under the shared session daemon reads its own console again: the
