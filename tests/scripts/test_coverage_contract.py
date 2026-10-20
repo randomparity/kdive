@@ -197,6 +197,10 @@ _RUN_SYSTEM_JOB_TOOLS = {
 _RUN_SYSTEM_JOB_NODE = (
     "tests/integration/test_run_system_job_tool_cells_live.py::test_run_system_job_tool_cell"
 )
+_ACCOUNTING_NODE = (
+    "tests/integration/test_allocation_accounting_tool_cells_live.py"
+    "::test_allocation_accounting_tool_cell"
+)
 
 
 def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> None:
@@ -305,6 +309,8 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert {c.node_id for c in control if c.provider == "remote-libvirt"} == {None}
     service = [c for c in contract.cells if c.operation in _RUN_SYSTEM_JOB_TOOLS]
     assert len(service) == 220 and {c.node_id for c in service} == {_RUN_SYSTEM_JOB_NODE}
+    accounting = [c for c in contract.cells if c.operation in _SPLIT[3098]]
+    assert len(accounting) == 220 and {c.node_id for c in accounting} == {_ACCOUNTING_NODE}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -325,6 +331,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *(c.operation for c in contract.cells if c.operation.startswith("debug.")),
         *_LOCAL_CONTROL_TOOLS,
         *_RUN_SYSTEM_JOB_TOOLS,
+        *_SPLIT[3098],
     }
     limits = [c for c in contract.cells if c.owner == 3118]
     local_limits = [c for c in limits if c.provider == "local-libvirt"]

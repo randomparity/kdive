@@ -344,7 +344,9 @@ def test_debug_engine_backtrace_and_read_frame(tmp_path: Path) -> None:
     bt = engine.backtrace(attachment, max_frames=64)
     assert bt.truncated is False
     assert [frame.level for frame in bt.frames] == [0, 1]
-    assert engine.read_frame(attachment, level=3).level == 3
+    frame = engine.read_frame(attachment, level=3)
+    assert frame.level == 3
+    assert [variable.name for variable in frame.args] == ["fmt"]
 
 
 def test_debug_engine_disassemble(tmp_path: Path) -> None:

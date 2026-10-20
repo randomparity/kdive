@@ -891,18 +891,10 @@ def test_cleanup_accepts_a_body_completed_teardown_and_release(
 ) -> None:
     calls = _fake_lane(monkeypatch, tmp_path)
     monkeypatch.setattr(authority_lane.LiveStackClient, "over_http", _completed_over_http(calls))
-    verified: list[object] = []
-
-    async def release_and_verify(*_args: object, **kwargs: object) -> dict[str, object]:
-        verified.append(kwargs["released_by_body"])
-        return {"system": "torn_down"}
-
-    monkeypatch.setattr(authority_lane, "release_and_verify", release_and_verify)
     run = _run(tmp_path)
     _frame(run, _body_ok)
     assert "systems.teardown" not in calls
     assert "allocations.release" not in calls
-    assert verified == [True]
     assert set(run.assertions) == {"effect", "cleanup"}
 
 

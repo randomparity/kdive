@@ -118,17 +118,20 @@ async def release_and_verify(
     deadline_s: float = DRAIN_DEADLINE_S,
     poll_s: float = POLL_INTERVAL_S,
     from_failed: bool = False,
-    released_by_body: bool = False,
 ) -> dict[str, object]:
     """Release the Allocation and prove its owned domain, disks and capacity were reclaimed.
 
     ``from_failed`` releases the Allocation of a System that already failed. ``failed`` is
     terminal and such a System has no domain left to tear down, so it stays ``failed`` rather
     than reaching ``torn_down``; everything else is proven the same way.
-    ``released_by_body`` proves the same reclamation for an Allocation the body already
-    released (the #3185 force-release proof), without releasing it again.
+
+    An Allocation the cell's body already released (the ``allocations.release`` cell, #3098)
+    skips the release and the held-capacity precondition; ``released_by`` says which happened.
     """
-    if not released_by_body:
+    current = await scalar(client, "allocations.wait", allocation_id=allocation_id, timeout_s=0)
+    by_body = current.status == "released"
+    in_use_held: int | None = None
+    if not by_body:
         in_use_held = await capacity_in_use(client)
         assert in_use_held > in_use_before, (
             f"capacity in use is {in_use_held} while allocated, not above {in_use_before}; "
@@ -165,4 +168,5 @@ async def release_and_verify(
         "domain": "absent",
         "disks_absent": len(disks),
         "in_use": [in_use_before, in_use_held, in_use_after],
+        "released_by": "body" if by_body else "frame",
     }

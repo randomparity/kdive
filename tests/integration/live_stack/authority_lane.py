@@ -832,7 +832,6 @@ async def _cleanup(frame: _Frame) -> dict[str, object]:
             domain=domain_name_for(UUID(frame.system_id)),
             disks=frame.worker_disks,
             in_use_before=frame.in_use,
-            released_by_body=await _allocation_released(op, frame.allocation),
         )
     after = await asyncio.to_thread(lane_inventory)
     _require_unchanged(frame.before, after)
