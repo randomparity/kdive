@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import UUID
 
 import libvirt
@@ -79,6 +80,13 @@ _JID = UUID("00000000-0000-0000-0000-0000000000dd")
 _DOMAIN = "kdive-x"
 
 
+_OK = json.dumps({"return": {}, "id": "libvirt-1"})
+
+
+def _error_reply(desc: str) -> str:
+    return json.dumps({"error": {"class": "GenericError", "desc": desc}, "id": "libvirt-2"})
+
+
 def _capture() -> OrphanedCapture:
     return OrphanedCapture(
         provider_kind="local-libvirt",
@@ -136,7 +144,7 @@ def test_detach_happens_before_the_unlink(monkeypatch) -> None:
 
     def monitor(domain, cmd, flags):
         order.append("object-del")
-        return "{}"
+        return _OK
 
     reaper = _reaper_for(conn, monitor)
 
@@ -158,7 +166,7 @@ def test_a_missing_domain_is_tolerated_and_the_pcap_still_unlinks(monkeypatch, t
 
     def monitor(domain, cmd, flags):  # pragma: no cover - must never run
         qmp_calls.append("object-del")
-        return "{}"
+        return _OK
 
     assert asyncio.run(_reaper_for(conn, monitor).reclaim_capture(_capture())) is True
     assert conn.lookups == [_DOMAIN]
@@ -177,17 +185,44 @@ def test_a_missing_domain_and_missing_pcap_reclaim_cleanly(tmp_path) -> None:
 
 
 def test_a_missing_filter_is_tolerated_and_the_pcap_still_unlinks(monkeypatch, tmp_path) -> None:
-    """A QMP object-del on an absent id must not fail the reclaim (spec R2)."""
+    """A QMP object-del on an absent id must not fail the reclaim (spec R2).
+
+    QEMU reports the absence as an error *reply* on a successful passthrough (#3270).
+    """
     pcap = tmp_path / f"{_JID}.pcap"
     pcap.write_bytes(b"stale")
     monkeypatch.setattr(reaping_module, "pcap_path", lambda sid, jid: tmp_path / f"{jid}.pcap")
     conn = _ReaperConn()
 
     def monitor(domain, cmd, flags):
-        raise libvirt.libvirtError(f"Device '{capture_qom_id(_JID)}' not found")
+        return _error_reply(f"object '{capture_qom_id(_JID)}' not found")
 
     assert asyncio.run(_reaper_for(conn, monitor).reclaim_capture(_capture())) is True
     assert not pcap.exists()
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["", "{}", '{"error": "busy"}', None],
+    ids=["empty", "neither", "error-not-object", "refused"],
+)
+def test_a_refused_or_malformed_reply_aborts_before_the_unlink(
+    monkeypatch, tmp_path, reply: str | None
+) -> None:
+    """A refused object-del must not read as reclaimed; the sweep defers the row (#3270)."""
+    pcap = tmp_path / f"{_JID}.pcap"
+    pcap.write_bytes(b"stale")
+    monkeypatch.setattr(reaping_module, "pcap_path", lambda sid, jid: tmp_path / f"{jid}.pcap")
+    conn = _ReaperConn()
+    raw = _error_reply("object is busy") if reply is None else reply
+
+    with pytest.raises(CategorizedError) as excinfo:
+        asyncio.run(_reaper_for(conn, lambda domain, cmd, flags: raw).reclaim_capture(_capture()))
+
+    assert excinfo.value.category is ErrorCategory.CONTROL_FAILURE
+    assert excinfo.value.details == {"domain": _DOMAIN}
+    assert pcap.exists()
+    assert conn.closed
 
 
 def test_a_missing_pcap_is_tolerated(tmp_path) -> None:
@@ -195,7 +230,7 @@ def test_a_missing_pcap_is_tolerated(tmp_path) -> None:
     conn = _ReaperConn()
 
     def monitor(domain, cmd, flags):
-        return "{}"
+        return _OK
 
     assert asyncio.run(_reaper_for(conn, monitor).reclaim_capture(_capture())) is True
 
@@ -229,7 +264,7 @@ def test_a_non_absence_unlink_failure_is_infrastructure_failure(monkeypatch) -> 
     conn = _ReaperConn()
 
     def monitor(domain, cmd, flags):
-        return "{}"
+        return _OK
 
     with pytest.raises(CategorizedError) as excinfo:
         asyncio.run(_reaper_for(conn, monitor).reclaim_capture(_capture()))

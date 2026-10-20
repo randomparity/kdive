@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from hashlib import sha256
@@ -836,7 +837,11 @@ def test_local_fixed_workers_receive_protected_authority_client_files() -> None:
     assert defaults["live_vm_host_worker_authority_server_ca_ref"] == (
         "external-boot-authority/server-ca"
     )
-    tasks = (ROLE.parent / "live_vm_host" / "tasks" / "main.yml").read_text(encoding="utf-8")
+    live_tasks = ROLE.parent / "live_vm_host" / "tasks"
+    assert "ansible.builtin.import_tasks: worker_authority_tls.yml" in (
+        live_tasks / "main.yml"
+    ).read_text(encoding="utf-8")
+    tasks = (live_tasks / "worker_authority_tls.yml").read_text(encoding="utf-8")
     tasks += (ROLE.parent / "local_worker_host" / "tasks" / "worker_accounts.yml").read_text(
         encoding="utf-8"
     )
@@ -999,7 +1004,7 @@ def test_tls_expiry_checks_cover_authority_and_worker_certificates() -> None:
     ]
     assert margin == 43200
     # The disposable carrier issues one-day certificates and provisions through this role.
-    assert CARRIER.read_text(encoding="utf-8").count("-days 1") == 2
+    assert re.findall(r"--days (\S+)", CARRIER.read_text(encoding="utf-8")) == ["1"] * 4
     assert cast(int, margin) < 86400
 
 

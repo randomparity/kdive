@@ -1,0 +1,313 @@
+---
+# Renew a retained installed-local-authority lane's TLS credentials (ADR-0803, #3273). Run it
+# with the lane's own protected inventory and vars file, from a clean checkout at the installed
+# authority revision. It installs credentials only: no checkout, venv, unit or System change.
+- name: Renew the installed local authority lane TLS credentials
+  hosts: live_vm_runners
+  become: true
+  gather_facts: false
+  vars:
+    renew_authority_unit: kdive-external-boot-authority.service
+    renew_authority_pki: "{{ playbook_dir }}/../../../scripts/operations/authority-pki.sh"
+    renew_authority_installed: "{{ live_vm_host_authority_credentials_dir }}"
+    renew_authority_worker: "{{ live_vm_host_worker_authority_secrets_root }}"
+  tasks:
+    # The moved worker tasks read local_worker_host defaults (client group, worker accounts).
+    # A skipped static import loads them at role-default precedence, below inventory overrides.
+    - name: Load the local worker host defaults without running its tasks
+      ansible.builtin.import_role:
+        name: local_worker_host
+        tasks_from: worker_install_dirs.yml
+      when: false
+
+    - name: Require an authority lane with fixed worker clients
+      ansible.builtin.assert:
+        that:
+          - live_vm_host_authority_enabled | bool
+          - live_vm_host_worker_authority_enabled | bool
+          - live_vm_repo_version is match('^[0-9a-f]{40}$')
+          - live_vm_host_worker_authority_instance == live_vm_host_authority_instance
+        fail_msg: >-
+          Run this playbook with the lane's protected vars file: it must enable the authority
+          and fixed worker clients, name the installed revision in live_vm_repo_version, and
+          give the workers the authority's own instance, whose server name they verify.
+
+    - name: Validate protected authority inputs before host mutation
+      ansible.builtin.import_role:
+        name: live_vm_host
+        tasks_from: authority_preflight.yml
+
+    - name: Derive the authority server name on the controller
+      ansible.builtin.command:
+        argv:
+          - "{{ renew_authority_pki }}"
+          - server-name
+          - --authority-instance
+          - "{{ live_vm_host_authority_instance }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      register: renew_authority_server_name
+
+    - name: Verify the source certificate chains each side checks at runtime
+      ansible.builtin.command:
+        argv: >-
+          {{ ['openssl', 'verify', '-x509_strict', '-purpose', item.purpose]
+             + (['-verify_hostname', renew_authority_server_name.stdout]
+                if item.purpose == 'sslserver' else [])
+             + ['-CAfile', item.ca, item.certificate] }}
+      loop:
+        - {name: server-certificate against the worker server-ca, purpose: sslserver,
+           certificate: "{{ live_vm_host_authority_server_certificate_source }}",
+           ca: "{{ live_vm_host_worker_authority_server_ca_source }}"}
+        - {name: server-certificate against the authority server-ca, purpose: sslserver,
+           certificate: "{{ live_vm_host_authority_server_certificate_source }}",
+           ca: "{{ live_vm_host_authority_server_ca_source }}"}
+        - {name: worker client-certificate against worker-client-ca, purpose: sslclient,
+           certificate: "{{ live_vm_host_worker_authority_client_certificate_source }}",
+           ca: "{{ live_vm_host_authority_worker_client_ca_source }}"}
+        - {name: health-client-certificate against worker-client-ca, purpose: sslclient,
+           certificate: "{{ live_vm_host_authority_health_client_certificate_source }}",
+           ca: "{{ live_vm_host_authority_worker_client_ca_source }}"}
+      loop_control:
+        label: "{{ item.name }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+
+    - name: Read each source certificate's public key
+      ansible.builtin.command:
+        argv: [openssl, x509, -noout, -pubkey, -in, "{{ item.certificate }}"]
+      loop: &renew_authority_key_pairs
+        - {name: server-certificate, certificate: "{{ live_vm_host_authority_server_certificate_source }}",
+           key: "{{ live_vm_host_authority_server_key_source }}"}
+        - {name: health-client-certificate,
+           certificate: "{{ live_vm_host_authority_health_client_certificate_source }}",
+           key: "{{ live_vm_host_authority_health_client_key_source }}"}
+        - {name: worker client-certificate,
+           certificate: "{{ live_vm_host_worker_authority_client_certificate_source }}",
+           key: "{{ live_vm_host_worker_authority_client_key_source }}"}
+      loop_control:
+        label: "{{ item.name }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      register: renew_authority_certificate_keys
+
+    - name: Read each source key's public key
+      ansible.builtin.command:
+        argv: [openssl, pkey, -pubout, -in, "{{ item.key }}"]
+      loop: *renew_authority_key_pairs
+      loop_control:
+        label: "{{ item.name }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      register: renew_authority_source_keys
+
+    - name: Require each source certificate to match its key
+      ansible.builtin.assert:
+        that:
+          - item.0.stdout == item.1.stdout
+        fail_msg: "{{ item.0.item.name }} does not match its private key source."
+        quiet: true
+      loop: "{{ renew_authority_certificate_keys.results | zip(renew_authority_source_keys.results) | list }}"
+      loop_control:
+        label: "{{ item.0.item.name }}"
+
+    - name: Read the controller checkout state
+      ansible.builtin.command:
+        argv: [git, -C, "{{ playbook_dir }}", status, --porcelain, --untracked-files=all]
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      register: renew_authority_controller_status
+
+    - name: Read the controller checkout revision
+      ansible.builtin.command:
+        argv: [git, -C, "{{ playbook_dir }}", rev-parse, HEAD]
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      register: renew_authority_controller_head
+
+    - name: Read the installed authority revision
+      ansible.builtin.slurp:
+        src: "{{ live_vm_host_authority_runtime_install }}/revision"
+      register: renew_authority_installed_revision
+
+    - name: Require a clean controller checkout at exactly the installed revision
+      ansible.builtin.assert:
+        that:
+          - renew_authority_controller_status.stdout == ''
+          - renew_authority_controller_head.stdout == live_vm_repo_version
+          - (renew_authority_installed_revision.content | b64decode | trim) == live_vm_repo_version
+        fail_msg: >-
+          Renewal runs only the installed revision's tasks. Installed
+          {{ renew_authority_installed_revision.content | b64decode | trim }}, controller
+          {{ renew_authority_controller_head.stdout }}
+          ({{ 'clean' if renew_authority_controller_status.stdout == '' else 'dirty' }}),
+          live_vm_repo_version {{ live_vm_repo_version }}. Check out that revision cleanly.
+
+    - name: Install the authority credentials
+      ansible.builtin.import_role:
+        name: live_vm_host
+        tasks_from: authority_credentials.yml
+
+    # Clears a failed state and the start-limit counter, so recent provisioning or proof
+    # starts cannot refuse this one planned restart.
+    - name: Reset the authority unit's failed state before its planned restart
+      ansible.builtin.command:
+        argv: [systemctl, reset-failed, "{{ renew_authority_unit }}"]
+      changed_when: false
+
+    - name: Restart the authority after changed credentials
+      ansible.builtin.meta: flush_handlers
+
+    # A rerun after an interrupted or failed run finds the files unchanged; the authority read
+    # its credentials at start, so restart it onto the files on disk anyway.
+    - name: Restart the authority when no credential changed
+      ansible.builtin.systemd_service:
+        name: "{{ renew_authority_unit }}"
+        state: restarted
+      when: not live_vm_host_authority_credentials.changed
+
+    - name: Install the fixed-worker authority TLS files
+      ansible.builtin.import_role:
+        name: live_vm_host
+        tasks_from: worker_authority_tls.yml
+
+    - name: Require installed authority certificates to outlive the expiry margin
+      ansible.builtin.import_role:
+        name: live_vm_host
+        tasks_from: tls_expiry.yml
+      vars:
+        live_vm_host_tls_expiry_certificates:
+          - {name: server-certificate, path: "{{ renew_authority_installed }}/server-certificate"}
+          - {name: server-ca, path: "{{ renew_authority_installed }}/server-ca"}
+          - {name: worker-client-ca, path: "{{ renew_authority_installed }}/worker-client-ca"}
+          - {name: health-client-certificate,
+             path: "{{ renew_authority_installed }}/health-client-certificate"}
+          - {name: worker server-ca, path: "{{ renew_authority_worker }}/server-ca"}
+          - {name: worker client-certificate, path: "{{ renew_authority_worker }}/client-certificate"}
+
+    - name: Read the authority unit state
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=ActiveState, --value, "{{ renew_authority_unit }}"]
+      changed_when: false
+      check_mode: false
+      register: renew_authority_active_state
+
+    - name: Require the authority to be active
+      ansible.builtin.assert:
+        that:
+          - renew_authority_active_state.stdout == 'active'
+        fail_msg: >-
+          {{ renew_authority_unit }} is {{ renew_authority_active_state.stdout }} after renewal;
+          read its journal, correct the credential sources and rerun this playbook.
+
+    - name: Derive the authority server name with the installed authority
+      ansible.builtin.command:
+        argv:
+          - "{{ live_vm_host_authority_runtime_install }}/.venv/bin/python"
+          - -c
+          - >-
+            import sys;
+            from kdive.providers.external_boot_authority.protocol import authority_server_name;
+            print(authority_server_name(sys.argv[1]))
+          - "{{ live_vm_host_authority_instance }}"
+      changed_when: false
+      check_mode: false
+      register: renew_authority_installed_server_name
+
+    - name: Require the controller and installed server names to agree
+      ansible.builtin.assert:
+        that:
+          - renew_authority_installed_server_name.stdout == renew_authority_server_name.stdout
+        quiet: true
+
+    - name: Verify the installed certificate chains each side checks at runtime
+      ansible.builtin.command:
+        argv: >-
+          {{ ['openssl', 'verify', '-x509_strict', '-purpose', item.purpose]
+             + (['-verify_hostname', renew_authority_server_name.stdout]
+                if item.purpose == 'sslserver' else [])
+             + ['-CAfile', item.ca, item.certificate] }}
+      loop:
+        - {name: server-certificate against the worker server-ca, purpose: sslserver,
+           certificate: "{{ renew_authority_installed }}/server-certificate",
+           ca: "{{ renew_authority_worker }}/server-ca"}
+        - {name: worker client-certificate against worker-client-ca, purpose: sslclient,
+           certificate: "{{ renew_authority_worker }}/client-certificate",
+           ca: "{{ renew_authority_installed }}/worker-client-ca"}
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+      check_mode: false
+
+    - name: Read the installed server certificate fingerprint
+      ansible.builtin.command:
+        argv: [openssl, x509, -noout, -fingerprint, -sha256, -in, "{{ renew_authority_installed }}/server-certificate"]
+      changed_when: false
+      check_mode: false
+      register: renew_authority_installed_fingerprint
+
+    # TLS 1.3 completes the client side before the server judges the client certificate, so
+    # this proves the worker's view of the server; the chain checks above prove the other side.
+    - name: Handshake with the authority as each fixed worker
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "30"
+          - runuser
+          - -u
+          - "{{ item }}"
+          - --
+          - openssl
+          - s_client
+          - -unix
+          - "{{ live_vm_host_worker_authority_request_socket }}"
+          - -tls1_3
+          - -verify_return_error
+          - -verify_hostname
+          - "{{ renew_authority_server_name.stdout }}"
+          - -CAfile
+          - "{{ renew_authority_worker }}/server-ca"
+          - -cert
+          - "{{ renew_authority_worker }}/client-certificate"
+          - -key
+          - "{{ renew_authority_worker }}/client-key"
+        stdin: ""
+      loop: "{{ live_vm_host_worker_accounts }}"
+      changed_when: false
+      check_mode: false
+      register: renew_authority_handshakes
+
+    - name: Read the served server certificate fingerprints
+      ansible.builtin.command:
+        argv: [openssl, x509, -noout, -fingerprint, -sha256]
+        stdin: "{{ item.stdout }}"
+      loop: "{{ renew_authority_handshakes.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      changed_when: false
+      check_mode: false
+      register: renew_authority_served_fingerprints
+
+    - name: Require each worker to verify the authority serving the installed certificate
+      ansible.builtin.assert:
+        that:
+          - "'Verify return code: 0 (ok)' in item.0.stdout"
+          - item.1.stdout == renew_authority_installed_fingerprint.stdout
+        fail_msg: >-
+          {{ item.0.item }} did not verify an authority serving the installed server-certificate.
+        quiet: true
+      loop: "{{ renew_authority_handshakes.results | zip(renew_authority_served_fingerprints.results) | list }}"
+      loop_control:
+        label: "{{ item.0.item }}"

@@ -26,8 +26,9 @@ class GeneratedFlag:
 
     * ``arg_type`` — ``"str"`` | ``"int"`` | ``"float"`` for a typed single value.
     * ``action`` — ``"store_true"`` for an optional boolean flag, ``"bool_optional"`` for a
-      required one (argparse ``BooleanOptionalAction``: ``--flag`` / ``--no-flag``, because a
-      required boolean must be able to express false), or ``"append"`` for an
+      required one or an optional one that defaults to true (argparse
+      ``BooleanOptionalAction``: ``--flag`` / ``--no-flag``, because both must be able to
+      express false; an unset optional one is omitted), or ``"append"`` for an
       array-of-string parameter (repeat the flag once per element).
 
     ``choices`` is the enum's allowed values (argparse ``choices=``) when the parameter

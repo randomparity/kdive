@@ -10,9 +10,11 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.jobs.capture_operations.protocol import CaptureRequest
 from kdive.providers.local_libvirt.lifecycle import traffic_capture as traffic_capture_module
 from kdive.providers.local_libvirt.lifecycle.traffic_capture import LocalLibvirtTrafficCapture
 from kdive.providers.shared.runtime_paths import PCAP_HYPERVISOR_WRITE_REMEDIATION
+from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 
 
 class _FakeConn:
@@ -26,6 +28,19 @@ class _FakeConn:
         return 0
 
 
+_OK = json.dumps({"return": {}, "id": "libvirt-1"})
+_ABSENT = json.dumps(
+    {
+        "error": {"class": "GenericError", "desc": "object 'kdive-dump-J' not found"},
+        "id": "libvirt-2",
+    }
+)
+
+
+def _refused(desc: str, error_class: str = "GenericError") -> str:
+    return json.dumps({"error": {"class": error_class, "desc": desc}, "id": "libvirt-3"})
+
+
 def _capturer(monitor):
     domain = object()
     cap = LocalLibvirtTrafficCapture(connect=lambda: _FakeConn(domain), monitor=monitor)
@@ -37,7 +52,7 @@ def test_attach_deletes_stale_then_adds_filter_dump() -> None:
 
     def monitor(domain, cmd, flags):
         seen.append(json.loads(cmd))
-        return "{}"
+        return _OK
 
     _capturer(monitor).attach(
         "kdive-x",
@@ -59,19 +74,137 @@ def test_attach_deletes_stale_then_adds_filter_dump() -> None:
     assert args["maxlen"] == 128
 
 
-def test_attach_swallows_object_not_found_on_first_run() -> None:
+@pytest.mark.parametrize(
+    "absent",
+    [_ABSENT, _refused("no such object", "DeviceNotFound")],
+    ids=["not-found-text", "device-not-found-class"],
+)
+def test_attach_tolerates_an_absent_filter_reply_on_first_run(absent: str) -> None:
+    """QEMU reports a missing id as an error *reply*, not a libvirtError (ADR-0385 amendment)."""
     calls: list[str] = []
 
     def monitor(domain, cmd, flags):
         parsed = json.loads(cmd)
         calls.append(parsed["execute"])
-        if parsed["execute"] == "object-del":
-            raise libvirt.libvirtError("Device 'kdive-dump-J' not found")
-        return "{}"
+        return absent if parsed["execute"] == "object-del" else _OK
 
     # Must NOT raise: the first capture has no stale filter to delete.
     _capturer(monitor).attach("kdive-x", qom_id="kdive-dump-J", dest_path="/p.pcap", snaplen=128)
     assert calls == ["object-del", "object-add"]
+
+
+def _add_refused_with(reply: str):
+    def monitor(domain, cmd, flags):
+        return reply if json.loads(cmd)["execute"] == "object-add" else _ABSENT
+
+    return monitor
+
+
+def test_attach_eacces_open_refusal_is_a_configuration_error_without_the_path() -> None:
+    path = "/var/lib/kdive/pcap/S/J.pcap"
+    monitor = _add_refused_with(_refused(f"net dump: can't open {path}: Permission denied"))
+
+    with pytest.raises(CategorizedError) as excinfo:
+        _capturer(monitor).attach("kdive-x", qom_id="kdive-dump-J", dest_path=path, snaplen=128)
+
+    error = excinfo.value
+    assert error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert error.details == {
+        "reason": "pcap_open_denied",
+        "operation": "object_add",
+        "error": "GenericError",
+        "remediation": PCAP_HYPERVISOR_WRITE_REMEDIATION,
+    }
+    assert path not in str(error)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        _refused("net dump: can't open /p/J.pcap: No such file or directory"),
+        _refused("net dump: can't open /p/J.pcap: No space left on device"),
+        _refused("net dump: can't open /p/J.pcap: Permission denied (stale)"),
+        _refused("Invalid parameter 'netdev'", "CommandNotFound"),
+    ],
+    ids=["enoent", "enospc", "suffix-mismatch", "other-class"],
+)
+def test_attach_other_refusal_is_a_retryable_control_failure(reply: str) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        _capturer(_add_refused_with(reply)).attach(
+            "kdive-x", qom_id="kdive-dump-J", dest_path="/p/J.pcap", snaplen=128
+        )
+
+    error = excinfo.value
+    assert error.category is ErrorCategory.CONTROL_FAILURE
+    assert error.details["reason"] == "capture_filter_rejected"
+    assert error.details["operation"] == "object_add"
+    assert error.details["error"] == json.loads(reply)["error"]["class"]
+    assert "/p/J.pcap" not in json.dumps(error.details)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "",
+        "{}",
+        "[]",
+        '{"return": {}, "error": {"class": "GenericError"}}',
+        '{"error": "denied"}',
+        '{"error": {"desc": "no class"}}',
+    ],
+    ids=["empty", "neither", "not-object", "both", "error-not-object", "error-no-class"],
+)
+def test_attach_malformed_reply_is_a_control_failure(reply: str) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        _capturer(lambda domain, cmd, flags: reply).attach(
+            "kdive-x", qom_id="kdive-dump-J", dest_path="/p.pcap", snaplen=128
+        )
+
+    assert excinfo.value.category is ErrorCategory.CONTROL_FAILURE
+    assert excinfo.value.details["reason"] == "qmp_reply_malformed"
+
+
+def test_detach_tolerates_an_absent_filter_reply() -> None:
+    _capturer(lambda domain, cmd, flags: _ABSENT).detach("kdive-x", qom_id="kdive-dump-J")
+
+
+def test_detach_refusal_is_a_control_failure() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        _capturer(lambda domain, cmd, flags: _refused("object is busy")).detach(
+            "kdive-x", qom_id="kdive-dump-J"
+        )
+
+    assert excinfo.value.category is ErrorCategory.CONTROL_FAILURE
+    assert excinfo.value.details["reason"] == "capture_filter_rejected"
+    assert excinfo.value.details["operation"] == "object_del"
+
+
+def test_executor_surfaces_a_refused_attach_without_polling(tmp_path) -> None:
+    """A refused add plus an absent detach reaches the child as the attach error, zero polls."""
+    path = tmp_path / "J.pcap"
+    capturer = _capturer(
+        _add_refused_with(_refused(f"net dump: can't open {path}: Permission denied"))
+    )
+    capturer.prepare = lambda system_id, job_id: str(path)  # type: ignore[method-assign]
+    sleeps: list[float] = []
+    executor = CaptureExecutor(capturer=capturer, provider_label="local", sleep=sleeps.append)
+    request = CaptureRequest(
+        job_id=uuid4(),
+        provider_kind="local-libvirt",
+        resource_id=uuid4(),
+        system_id=uuid4(),
+        domain_name="kdive-x",
+        snaplen=128,
+        max_bytes=1_048_576,
+        max_polls=30,
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        executor.execute(request, tmp_path)
+
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["reason"] == "pcap_open_denied"
+    assert sleeps == []
 
 
 def test_attach_reraises_other_monitor_error_as_control_failure() -> None:
@@ -88,7 +221,7 @@ def test_detach_issues_object_del() -> None:
 
     def monitor(domain, cmd, flags):
         seen.append(json.loads(cmd))
-        return "{}"
+        return _OK
 
     _capturer(monitor).detach("kdive-x", qom_id="kdive-dump-J")
     assert seen[0]["execute"] == "object-del"
@@ -96,11 +229,18 @@ def test_detach_issues_object_del() -> None:
 
 
 def _noop_monitor(domain, cmd, flags):  # pragma: no cover - unused by the file-side tests
-    return "{}"
+    return _OK
 
 
 def test_write_remediation_is_the_local_hypervisor_remedy() -> None:
     assert _capturer(_noop_monitor).write_remediation == PCAP_HYPERVISOR_WRITE_REMEDIATION
+
+
+def test_write_remediation_fits_the_forwarded_detail_shape() -> None:
+    """The capture child forwards only printable ASCII remediation up to 512 characters (#3269)."""
+    remediation = PCAP_HYPERVISOR_WRITE_REMEDIATION
+    assert remediation.isascii() and remediation.isprintable() and len(remediation) <= 512
+    assert "svirt_image_t" in remediation and "kdive-live-libvirt" in remediation
 
 
 def test_prepare_prepares_dir_and_returns_worker_pcap_path(monkeypatch, tmp_path) -> None:

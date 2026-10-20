@@ -11,6 +11,10 @@ from uuid import UUID
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.qmp_reply import (
+    MalformedQmpReplyError,
+    parse_qmp_reply,
+)
 from kdive.providers.ports.traffic import (
     QuiescenceEvidence,
 )
@@ -27,34 +31,25 @@ type Monitor = Callable[[object, str, int], str]
 
 def _ordered_reply(raw: str, *, allow_not_found: bool = False) -> object:
     try:
-        response = json.loads(raw)
-    except json.JSONDecodeError as error:
+        reply = parse_qmp_reply(raw)
+    except MalformedQmpReplyError as error:
         raise CategorizedError(
             "local QMP quiescence response was malformed",
             category=ErrorCategory.CONTROL_FAILURE,
         ) from error
-    if (
-        not isinstance(response, dict)
-        or not isinstance(response.get("id"), str)
-        or not response["id"]
-    ):
+    if not isinstance(reply.reply_id, str) or not reply.reply_id:
         raise CategorizedError(
             "local QMP transport did not correlate the ordered response",
             category=ErrorCategory.CONTROL_FAILURE,
         )
-    error = response.get("error")
-    if allow_not_found and isinstance(error, dict):
-        description = error.get("desc")
-        if error.get("class") == "DeviceNotFound" or (
-            isinstance(description, str) and "not found" in description.lower()
-        ):
-            return None
-    if "return" not in response:
+    if allow_not_found and reply.absent:
+        return None
+    if reply.error_class is not None:
         raise CategorizedError(
             "local QMP quiescence response was inconclusive",
             category=ErrorCategory.CONTROL_FAILURE,
         )
-    return response["return"]
+    return reply.value
 
 
 class LocalLibvirtCaptureQuiescence:
@@ -106,9 +101,6 @@ class LocalLibvirtCaptureQuiescence:
         try:
             raw = self._monitor(domain, json.dumps(command), 0)
         except libvirt.libvirtError as error:
-            message = str(error).lower()
-            if "not found" in message or "devicenotfound" in message:
-                return
             raise CategorizedError(
                 "local capture detach failed during quiescence",
                 category=ErrorCategory.CONTROL_FAILURE,
