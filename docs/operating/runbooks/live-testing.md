@@ -1648,7 +1648,7 @@ before each run. `qualify` reported 420 of the 440 cells qualified: all 352 `rej
 After `demo-down.sh --wipe --yes` neither libvirt defined a `kdive-` domain,
 `KDIVE_INSTALL_STAGING` was empty, and no staging directory remained in either temp directory.
 
-A later rerun at the #3229 candidate `f7222b864` ran 10 `gdbstub` `default`/`direct` functional
+A later rerun at the #3229 candidate `9697b4caa` ran 10 `gdbstub` `default`/`direct` functional
 cells (`start_session`, `end_session`, `load_module_symbols`, `list_modules`, `read_memory`,
 `read_registers`, `resolve_symbol`, `set_breakpoint`, `backtrace`, `disassemble`) with the
 server's `TMPDIR` on a tmpfs whose per-user quota was 1200 MB, below three staged copies. All 10
