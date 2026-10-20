@@ -351,6 +351,23 @@ def test_orphan_failure_after_publication_resolves_its_rows(
     assert [args["object_identities"] for args in resolved] == [["sha256:a"]]
 
 
+def test_orphan_failure_before_the_row_is_seen_resolves_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeBarrier()
+    resolved = _fake_arm_b(monkeypatch, fake, _async())
+    unseen = {"a": _row("a")}
+    _quarantine_sequence(monkeypatch, [{}, {}, unseen])
+
+    async def interrupted(*_args: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(authority_faults, "_published_row", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(authority_faults.quarantined_orphan(_system(), "db", _resolver(resolved)))
+    assert [args["object_identities"] for args in resolved] == [["sha256:a"]]
+
+
 def test_remote_orphan_is_blocked_before_any_fault() -> None:
     with pytest.raises(ScenarioStop) as stop:
         asyncio.run(authority_faults.quarantined_orphan(_system(remote=True), "db", _resolver([])))

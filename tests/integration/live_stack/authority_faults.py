@@ -430,11 +430,29 @@ async def _resolve(system: AuthoritySystem, resolve: ToolCall, identities: list[
 
 
 async def _resolve_published(
-    system: AuthoritySystem, resolve: ToolCall, identities: list[str], failure: BaseException
+    system: AuthoritySystem,
+    resolve: ToolCall,
+    db_url: str,
+    owner: tuple[dict[str, dict[str, object]], str],
+    failure: BaseException,
 ) -> None:
-    """Failure cleanup: resolve exactly the rows this arm published, or name them as residue."""
+    """Failure cleanup: resolve the rows this arm's abort published, or name them as residue.
+
+    The set comes from the database, not from what the arm observed: the authority publishes
+    after the abort returns, so a row can exist before the arm's poll sees it.
+    """
+    before, activation_id = owner
+    identities: list[str] = []
     try:
-        await _resolve(system, resolve, identities)
+        identities = [
+            str(row["object_identity"])
+            for key, row in (await quarantine_rows(db_url)).items()
+            if key not in before
+            and (row["system_id"], row["activation_id"], row["status"])
+            == (system.system_id, activation_id, "quarantined")
+        ]
+        if identities:
+            await _resolve(system, resolve, identities)
     except Exception as cleanup:  # noqa: BLE001 - recorded on the primary failure below
         failure.add_note(f"owned quarantine residue {identities}: {type(cleanup).__name__}")
 
@@ -450,7 +468,7 @@ async def quarantined_orphan(
     activation = await _activate(system)
     activation_id = await activation_of(db_url, activation.run_id)
     before = await quarantine_rows(db_url)
-    published: list[str] = []
+    aborted = False
     try:
         async with held(
             barrier_for(system), activation.run_id, "cleanup", "before-finalize"
@@ -466,8 +484,8 @@ async def quarantined_orphan(
             assert await quarantine_rows(db_url) == before, "a quarantine row preceded the abort"
             await require_hold_budget(db_url, job, attempt)
             await hold.abort()
+            aborted = True
             row_id, row = await _published_row(db_url, before)
-            published.append(str(row["object_identity"]))
         assert (
             row["system_id"],
             row["activation_id"],
@@ -489,10 +507,10 @@ async def quarantined_orphan(
         assert not (await asyncio.to_thread(receipt_state, system_id, activation_id)).present
         quarantined = await quarantine_rows(db_url)
         assert quarantined[row_id]["status"] == "quarantined"
-        resolved_by = await _resolve(system, resolve, published)
+        resolved_by = await _resolve(system, resolve, [str(row["object_identity"])])
     except BaseException as failure:
-        if published:
-            await _resolve_published(system, resolve, published, failure)
+        if aborted:
+            await _resolve_published(system, resolve, db_url, (before, activation_id), failure)
         raise
     after = await quarantine_rows(db_url)
     assert {k: v for k, v in after.items() if k != row_id} == {
