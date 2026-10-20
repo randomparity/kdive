@@ -110,12 +110,28 @@
                   raise ValueError('installed collector script bytes differ')
           if len(revision) != 40 or any(c not in '0123456789abcdef' for c in revision):
               raise ValueError('invalid collector revision')
+      def unlock():
+          # uv sync leaves .venv/.lock mode 0666; the runtime never opens it.
+          venv, lock = ROOT / '.venv', ROOT / '.venv' / '.lock'
+          if not os.path.lexists(venv):
+              return
+          if ROOT.is_symlink() or venv.is_symlink() or not venv.is_dir():
+              raise ValueError('substituted inventory installation')
+          trusted(venv)
+          if os.path.lexists(lock):
+              if lock.is_symlink() or not lock.is_file():
+                  raise ValueError('substituted inventory installation')
+              lock.unlink()
+              print('removed')
       def revision_marker(revision):
           marker = ROOT / 'revision'
           if marker.read_text().strip() != revision or stat.S_IMODE(marker.stat().st_mode) != 0o444:
               raise ValueError('collector revision mismatch')
       if __name__ == '__main__':
           phase = sys.argv[1]
+          if phase == 'unlock':
+              unlock()
+              sys.exit()
           existing()
           if phase != 'withdraw':
               system_python()
@@ -162,6 +178,13 @@
   register: provider_authority_host_inventory_instances
   changed_when: false
   failed_when: provider_authority_host_inventory_instances.rc != 0 or provider_authority_host_inventory_instances.stdout | trim | length > 0
+
+- name: Remove uv's install lock from the collector runtime
+  ansible.builtin.command:
+    argv: ["{{ ansible_python_interpreter | default('/usr/bin/python3') }}", -I, -S, -c,
+           "{{ provider_authority_host_inventory_verifier }}", unlock]
+  register: provider_authority_host_inventory_unlock
+  changed_when: provider_authority_host_inventory_unlock.stdout == 'removed'
 
 - name: Verify ownership before changing or withdrawing collector files
   ansible.builtin.command:
@@ -273,6 +296,12 @@
         GRPC_PYTHON_BUILD_SYSTEM_ZLIB: "1"
       register: provider_authority_host_inventory_install
       changed_when: provider_authority_host_inventory_install.stderr is search('(?m)^(Installed|Uninstalled|Creating virtual environment) ')
+
+    - name: Remove uv's install lock after the runtime sync
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -S, -c, "{{ provider_authority_host_inventory_verifier }}", unlock]
+      register: provider_authority_host_inventory_synced_unlock
+      changed_when: provider_authority_host_inventory_synced_unlock.stdout == 'removed'
 
     - name: Create the immutable client parent
       ansible.builtin.file:

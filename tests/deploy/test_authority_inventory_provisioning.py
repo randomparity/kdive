@@ -408,3 +408,68 @@ def test_observer_sudo_refusal_accepts_only_a_denial(rc, stdout, stderr, fails):
         .render(provider_authority_host_inventory_sudo=result)
     )
     assert verdict == str(fails)
+
+
+def uv_runtime(monkeypatch, tmp_path):
+    """A collector root whose venv holds the world-writable lock `uv sync` leaves behind."""
+    ns = verifier()
+    root = tmp_path / "runtime"
+    (root / ".venv").mkdir(parents=True)
+    lock = root / ".venv/.lock"
+    lock.touch()
+    lock.chmod(0o666)
+    ns["ROOT"] = root
+    real_lstat = ns["os"].lstat
+
+    def metadata(path, *args, **kwargs):
+        st = real_lstat(path, *args, **kwargs)
+        # Model root ownership; keep real modes inside the runtime, trusted ones above it.
+        mode = st.st_mode if root in (Path(path), *Path(path).parents) else st.st_mode & ~0o022
+        return SimpleNamespace(st_uid=0, st_mode=mode)
+
+    monkeypatch.setattr(ns["os"], "lstat", metadata)
+    monkeypatch.setattr(ns["os"], "listxattr", lambda p, **kw: [])
+    return ns, root, lock
+
+
+def test_uv_lock_is_removed_so_the_strict_guard_passes(monkeypatch, tmp_path):
+    ns, root, lock = uv_runtime(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="not root-controlled"):
+        ns["trusted"](root, tree=True)
+    ns["unlock"]()
+    assert not lock.exists()
+    ns["trusted"](root, tree=True)
+    ns["unlock"]()
+
+
+@pytest.mark.parametrize("substitute", ["venv", "lock"])
+def test_uv_lock_removal_refuses_a_substituted_path(monkeypatch, tmp_path, substitute):
+    ns, root, lock = uv_runtime(monkeypatch, tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / ".lock").touch()
+    if substitute == "venv":
+        (root / ".venv").rename(tmp_path / "moved")
+        (root / ".venv").symlink_to(elsewhere)
+    else:
+        lock.unlink()
+        lock.symlink_to(elsewhere / ".lock")
+    with pytest.raises(ValueError, match="substituted inventory installation"):
+        ns["unlock"]()
+    assert (elsewhere / ".lock").exists()
+
+
+def test_uv_lock_is_removed_before_every_verifier_can_see_it():
+    top = tasks()
+    names = [t["name"] for t in top]
+    unlock = "Remove uv's install lock from the collector runtime"
+    assert names.index(unlock) < names.index(
+        "Verify ownership before changing or withdrawing collector files"
+    )
+    block = [
+        t["name"] for t in top[names.index("Converge the enabled inventory boundary")]["block"]
+    ]
+    install = block.index("Install the locked independent collector runtime")
+    assert block.index("Remove uv's install lock after the runtime sync") == install + 1
+    for task in (t for t in flatten(top) if "install lock" in t["name"]):
+        assert task["ansible.builtin.command"]["argv"][-1] == "unlock"
