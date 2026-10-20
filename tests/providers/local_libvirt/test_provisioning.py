@@ -2089,6 +2089,18 @@ def test_record_console_boot_failure_is_provisioning_failure_without_temp_files(
     assert [p.name for p in tmp_path.iterdir()] == [f"{_SYS}.log"]
 
 
+def test_record_console_boot_replaces_a_stale_temp_file(tmp_path: Path) -> None:
+    # A start that died between create and rename leaves the temp name; the next start reuses it.
+    path = tmp_path / f"{_SYS}.log"
+    path.touch()
+    (tmp_path / f"{_SYS}.boot.tmp").write_text("stale")
+
+    storage_module.record_console_boot(path)
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{_SYS}.boot", f"{_SYS}.log"]
+    assert len((tmp_path / f"{_SYS}.boot").read_text()) == 32
+
+
 def test_prepare_console_log_creates_missing_parents_and_file(tmp_path: Path) -> None:
     # A never-provisioned build host has no /var/lib/kdive/console yet; the customization
     # boot's prepare is what guarantees the directory exists before createXML.

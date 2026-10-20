@@ -398,19 +398,27 @@ def record_console_boot(log_path: Path) -> None:
         CategorizedError: ``PROVISIONING_FAILURE`` naming the marker when it cannot be written.
     """
     marker = console_boot_marker_path(log_path)
-    temp = marker.with_name(f"{marker.name}.{secrets.token_hex(4)}.tmp")
+    temp = marker.with_name(f"{marker.name}.tmp")
+    nonce = secrets.token_hex(16).encode("ascii")
     try:
+        # A start that died mid-write leaves the fixed temp name behind; the next start reuses it.
+        temp.unlink(missing_ok=True)
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, _BOOT_MARKER_MODE)
         try:
             os.fchmod(fd, _BOOT_MARKER_MODE)
-            os.write(fd, secrets.token_hex(16).encode("ascii"))
+            if os.write(fd, nonce) != len(nonce):
+                raise OSError("short write")
         finally:
             os.close(fd)
         os.replace(temp, marker)
     except OSError as io_err:
         with contextlib.suppress(OSError):
             temp.unlink(missing_ok=True)
-        raise _console_identity_failure(marker, type(io_err).__name__) from io_err
+        raise CategorizedError(
+            "cannot record the console boot marker the domain start requires",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"path": str(marker), "reason": type(io_err).__name__},
+        ) from io_err
 
 
 def prepare_console_for_domain(domain_name: str) -> None:

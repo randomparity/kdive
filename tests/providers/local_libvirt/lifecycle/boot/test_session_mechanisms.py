@@ -197,6 +197,34 @@ def test_prepared_window_records_a_fresh_boot_marker(
     assert len(marker.read_text()) == 32
 
 
+def test_prepared_window_closes_its_descriptor_when_the_marker_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "console.log"
+    path.touch()
+    monkeypatch.setattr(readiness_module, "console_log_path", lambda _system_id: path)
+    failure = CategorizedError("marker", category=ErrorCategory.PROVISIONING_FAILURE)
+
+    def _marker_failed(_path: Path) -> None:
+        raise failure
+
+    closed: list[int] = []
+    real_close = os.close
+
+    def _close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(readiness_module, "record_console_boot", _marker_failed)
+    monkeypatch.setattr(readiness_module.os, "close", _close)
+
+    with pytest.raises(CategorizedError) as caught:
+        prepare_console_readiness_window(SYSTEM_ID)
+
+    assert caught.value is failure
+    assert len(closed) == 1
+
+
 @pytest.mark.parametrize(("multiplier", "expected"), [(1.0, 10.0), (7.0, 70.0)])
 def test_prepared_window_uses_multiplier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, multiplier: float, expected: float
