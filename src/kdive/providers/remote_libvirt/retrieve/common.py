@@ -11,13 +11,15 @@ from uuid import UUID
 import libvirt
 
 from kdive.artifacts.storage import (
-    ArtifactStreamRequest,
     ArtifactWriteRequest,
+    ConditionalArtifactWriteRequest,
+    ConditionalCreateResult,
     HeadResult,
     PresignedUpload,
     PresignPutRequest,
     StoredArtifact,
 )
+from kdive.artifacts.vmcore_retention import capture_metadata, require_capture_write, vmcore_keys
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -52,10 +54,12 @@ class CoreInfo(NamedTuple):
 class StorePort(Protocol):
     """Object-store operations used by remote retrieve capture paths."""
 
-    def presign_put(self, request: PresignPutRequest) -> PresignedUpload: ...
-    def head(self, key: str) -> HeadResult | None: ...
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
-    def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact: ...
+    def presign_put(self, request: PresignPutRequest) -> PresignedUpload: ...
+    def create_if_absent(
+        self, request: ConditionalArtifactWriteRequest
+    ) -> ConditionalCreateResult: ...
+    def head(self, key: str) -> HeadResult | None: ...
 
 
 class Domain(Protocol):
@@ -128,17 +132,20 @@ def persist_redacted(
     run_id: UUID,
     method: CaptureMethod,
     dmesg: bytes,
+    *,
+    execution_id: UUID,
 ) -> StoredArtifact:
     text = dmesg.decode("utf-8", "replace")
     redacted = Redactor(registry=secret_registry).redact_text(text)
-    return store_factory().put_artifact(
-        ArtifactWriteRequest(
-            tenant=TENANT,
-            owner_kind=OWNER_KIND,
-            owner_id=str(run_id),
-            name=f"vmcore-{method.value}-redacted",
-            data=redacted.encode("utf-8"),
-            sensitivity=Sensitivity.REDACTED,
-            retention_class=RETENTION,
+    _, key = vmcore_keys(TENANT, run_id, method, execution_id)
+    return require_capture_write(
+        store_factory().create_if_absent(
+            ConditionalArtifactWriteRequest(
+                key=key,
+                data=redacted.encode("utf-8"),
+                metadata=capture_metadata(execution_id),
+                sensitivity=Sensitivity.REDACTED,
+                retention_class=RETENTION,
+            )
         )
     )

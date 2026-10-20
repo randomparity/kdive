@@ -13,11 +13,11 @@ from typing import Protocol
 from uuid import UUID
 
 from kdive.artifacts.storage import (
-    ArtifactStreamRequest,
-    ArtifactWriteRequest,
+    ConditionalArtifactWriteRequest,
+    ConditionalCreateResult,
     HeadResult,
-    StoredArtifact,
 )
+from kdive.artifacts.vmcore_retention import capture_metadata, require_capture_write, vmcore_keys
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -73,8 +73,9 @@ KDUMP_CORE_INCOMPLETE_REMEDIATION = (
 
 
 class _StorePort(Protocol):
-    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
-    def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact: ...
+    def create_if_absent(
+        self, request: ConditionalArtifactWriteRequest
+    ) -> ConditionalCreateResult: ...
     def head(self, key: str) -> HeadResult | None: ...
 
 
@@ -142,42 +143,60 @@ class LocalLibvirtRetrieve:
             secret_registry=secret_registry,
         )
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
         """Capture a Run-owned core plus redacted dmesg, returning refs and build-id."""
         if method is CaptureMethod.HOST_DUMP:
             return self._capture_via_file(
-                system_id, run_id, method, self._host_dump_capture(system_id)
+                system_id, run_id, method, self._host_dump_capture(system_id), execution_id
             )
         outcome = self._wait_for_vmcore(system_id)
         if outcome.core is None and outcome.incomplete_found:
             raise self._incomplete_core(system_id)
-        return self._capture_via_file(system_id, run_id, method, outcome.core)
+        return self._capture_via_file(system_id, run_id, method, outcome.core, execution_id)
 
     def _capture_via_file(
-        self, system_id: UUID, run_id: UUID, method: CaptureMethod, core: Path | None
+        self,
+        system_id: UUID,
+        run_id: UUID,
+        method: CaptureMethod,
+        core: Path | None,
+        execution_id: UUID,
     ) -> CaptureOutput:
-        """Store a captured core without whole-core buffering, then remove its spool dir."""
         if core is None:
             raise self._no_core(system_id, method)
         try:
             build_id = self._read_vmcore_build_id_from_file(core)
-            raw = self._put_stream(run_id, f"vmcore-{method.value}", core)
-            redacted = self._put(
-                run_id,
-                f"vmcore-{method.value}-redacted",
-                self._extract_redacted_from_file(core),
-                Sensitivity.REDACTED,
+            raw_key, redacted_key = vmcore_keys(self._tenant, run_id, method, execution_id)
+            checksum = file_sha256_b64(core)
+            store = self._ensure_store()
+            raw = require_capture_write(
+                store.create_if_absent(
+                    ConditionalArtifactWriteRequest(
+                        key=raw_key,
+                        data=core,
+                        metadata=capture_metadata(execution_id),
+                        sensitivity=Sensitivity.SENSITIVE,
+                        retention_class=_RETENTION_CLASS,
+                        sha256_b64=checksum,
+                    )
+                )
             )
-            return CaptureOutput(
-                raw=raw,
-                redacted=redacted,
-                vmcore_build_id=build_id,
-                raw_size_bytes=core.stat().st_size,
+            self._verify_stored(raw.key, checksum, run_id)
+            redacted = require_capture_write(
+                store.create_if_absent(
+                    ConditionalArtifactWriteRequest(
+                        key=redacted_key,
+                        data=self._extract_redacted_from_file(core),
+                        metadata=capture_metadata(execution_id),
+                        sensitivity=Sensitivity.REDACTED,
+                        retention_class=_RETENTION_CLASS,
+                    )
+                )
             )
+            return CaptureOutput(raw, redacted, build_id, core.stat().st_size)
         except PermissionError as err:
-            # A host_dump core is written by the QEMU/root process under qemu:///system, so a
-            # non-root worker cannot read it back (ADR-0223). This is a host config problem that
-            # never heals on retry, not the uncategorized infrastructure failure it surfaced as.
             raise CategorizedError(
                 "failed to read the captured core",
                 category=ErrorCategory.CONFIGURATION_ERROR,
@@ -226,25 +245,6 @@ class LocalLibvirtRetrieve:
             },
         )
 
-    def _put_stream(self, run_id: UUID, name: str, core: Path) -> StoredArtifact:
-        """Stream ``core`` to the object store (Run-owned) and verify the checksum (ADR-0094)."""
-        sha256_b64 = file_sha256_b64(core)
-        store = self._ensure_store()
-        stored = store.put_stream(
-            ArtifactStreamRequest(
-                tenant=self._tenant,
-                owner_kind="runs",
-                owner_id=str(run_id),
-                name=name,
-                path=core,
-                sha256_b64=sha256_b64,
-                sensitivity=Sensitivity.SENSITIVE,
-                retention_class=_RETENTION_CLASS,
-            )
-        )
-        self._verify_stored(stored.key, sha256_b64, run_id)
-        return stored
-
     def _verify_stored(self, key: str, sha256_b64: str, run_id: UUID) -> None:
         head = self._ensure_store().head(key)
         if head is None:
@@ -264,19 +264,6 @@ class LocalLibvirtRetrieve:
         if self._store is None:
             self._store = self._store_factory()
         return self._store
-
-    def _put(self, run_id: UUID, name: str, data: bytes, sens: Sensitivity) -> StoredArtifact:
-        return self._ensure_store().put_artifact(
-            ArtifactWriteRequest(
-                tenant=self._tenant,
-                owner_kind="runs",
-                owner_id=str(run_id),
-                name=name,
-                data=data,
-                sensitivity=sens,
-                retention_class=_RETENTION_CLASS,
-            )
-        )
 
     def run_crash_postmortem(
         self,

@@ -51,7 +51,17 @@ def register(
             ),
         ],
     ) -> ToolResponse:
-        """Run offline drgn introspection over a Run's captured core; returns redacted report."""
+        """Run offline drgn introspection over a Run's captured core; returns redacted report.
+
+        Vmcore reads return data.vmcore_retention with server_time, policy_enabled, eligible_at,
+        protected_until, retired_at and protection_reason. Timestamps are absolute UTC on the
+        PostgreSQL reference clock, per Run raw/redacted pair. eligible_at is earliest possible
+        reclamation, not a cleanup completion deadline; open Investigations remain protected.
+        A retired authorized Run returns not_found with reason vmcore_retired; use runs.get.
+        Original retired bytes cannot be restored by recapture. Reads remain protected while
+        their database session holds the Run lock; session loss returns infrastructure_failure
+        and requires retrying the read.
+        """
         ctx = current_context()
 
         async def _gated(runtime: ProviderRuntime) -> ToolResponse:

@@ -8,8 +8,8 @@ import libvirt
 import pytest
 
 from kdive.artifacts.storage import (
-    ArtifactStreamRequest,
     ArtifactWriteRequest,
+    ConditionalArtifactWriteRequest,
     HeadResult,
     PresignedUpload,
     PresignPutRequest,
@@ -33,16 +33,15 @@ class _LookupFails:
 
 class _Store:
     def __init__(self) -> None:
-        self.requests: list[ArtifactWriteRequest] = []
+        self.requests: list[ConditionalArtifactWriteRequest] = []
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        raise AssertionError("vmcore derivative must use conditional creation")
+
+    def create_if_absent(self, request: ConditionalArtifactWriteRequest) -> StoredArtifact:
         self.requests.append(request)
         return StoredArtifact(
-            request.key(),
-            "etag",
-            request.sensitivity,
-            request.retention_class,
-            version_id="test-version",
+            request.key, "etag", request.sensitivity, request.retention_class, "test-version"
         )
 
     def presign_put(self, request: PresignPutRequest) -> PresignedUpload:
@@ -50,9 +49,6 @@ class _Store:
 
     def head(self, key: str) -> HeadResult | None:
         raise AssertionError("persist_redacted must not head")
-
-    def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact:
-        raise AssertionError("persist_redacted must not stream")
 
 
 class _LookupSucceeds:
@@ -118,12 +114,17 @@ def test_persist_redacted_masks_dmesg_before_storing() -> None:
         system_id,
         CaptureMethod.KDUMP,
         b"panic SECRET\n",
+        execution_id=UUID(int=1),
     )
 
     assert stored.sensitivity is Sensitivity.REDACTED
-    assert store.requests[0].owner_kind == common.OWNER_KIND
-    assert store.requests[0].owner_id == str(system_id)
-    assert store.requests[0].name == "vmcore-kdump-redacted"
+    assert store.requests[0].key == (
+        f"{common.TENANT}/runs/{system_id}/vmcore-kdump-{UUID(int=1)}-redacted"
+    )
+    assert store.requests[0].metadata == {
+        "vmcore-execution": str(UUID(int=1)),
+        "vmcore-kind": "capture",
+    }
     assert store.requests[0].retention_class == common.RETENTION
     assert store.requests[0].data == b"panic [REDACTED]\n"
 
@@ -138,6 +139,7 @@ def test_persist_redacted_replaces_invalid_utf8_bytes() -> None:
         system_id,
         CaptureMethod.KDUMP,
         b"panic \xff\xfe end\n",
+        execution_id=UUID(int=1),
     )
 
     assert store.requests[0].data == "panic �� end\n".encode()
