@@ -121,6 +121,8 @@ _LANE_KEYS = ("guest_os", "guest_arch", "accelerator", "image_sha256")
 PANIC = "Kernel panic - not syncing"
 # The panic's dump_stack ``CPU:`` record follows it within a few lines.
 _PANIC_LINES = 8
+# kexec hands a crash-dump kernel its ELF core header address on the command line.
+_CRASH_KERNEL_CMDLINE = re.compile(r"Command line:(?:.*\s)?elfcorehdr=\S")
 # VMCOREINFO sits right after a core's headers: QEMU's ELF note, makedumpfile's sub-header block.
 _CORE_PREFIX = 16 << 20
 _ARM_BUDGET_S = 600.0
@@ -215,6 +217,29 @@ def panic_seen(text: str, release: str) -> bool:
     _, found, after = text.partition(PANIC)
     record = re.compile(rf"\bCPU: \d+ .*(?<![\w.-]){re.escape(release)}(?![\w.-])")
     return bool(found) and any(record.search(line) for line in after.splitlines()[:_PANIC_LINES])
+
+
+def crash_evidence(text: str, release: str) -> str | None:
+    """Which accepted form of a force crash ``text`` shows, or ``None`` (#3254).
+
+    ``console_panic`` is :func:`panic_seen`. ``crash_kernel`` covers kdump-armed guests, whose
+    crashing kernel enters the crash kernel before flushing its panic to the serial console:
+    a ``Linux version <release>`` boot banner whose first newline-terminated ``Command line:``
+    record carries ``elfcorehdr=``, which only kexec into a crash-dump kernel passes. A normal
+    boot of the same kernel lacks it, and a record belonging to a later banner does not count.
+    """
+    if panic_seen(text, release):
+        return "console_panic"
+    banner = re.compile(rf"\[\s*0\.000000\] Linux version {re.escape(release)}(?![\w.-])")
+    for found in banner.finditer(text):
+        record = text.find("Command line:", found.end())
+        later_banner = text.find("Linux version", found.end())
+        if record < 0 or 0 <= later_banner < record:
+            continue
+        end = text.find("\n", record)
+        if end >= 0 and _CRASH_KERNEL_CMDLINE.search(text, record, end):
+            return "crash_kernel"
+    return None
 
 
 def transcript_names(transcript: str, *facts: str) -> list[str]:
@@ -457,15 +482,16 @@ async def force_crash_body(s: Session) -> dict[str, object]:
             PANIC,
             deadline_s=_CONSOLE_DEADLINE_S,
             interval_s=10,
-            predicate=lambda value: panic_seen(value, s.manifest["release"]),
+            predicate=lambda value: crash_evidence(value, s.manifest["release"]) is not None,
             observation=observation,
         )
-        assert panic_seen(text, s.manifest["release"]), (
-            "the console panic is not the fixture kernel's"
+        form = crash_evidence(text, s.manifest["release"])
+        assert form is not None, (
+            "the console shows neither the fixture kernel's panic nor its crash kernel"
         )
         return {
             "system": "crashed",
-            "console_panic": True,
+            "crash_evidence": form,
             "console_part_sha256": hashlib.sha256(part.encode()).hexdigest(),
         }
     except BaseException as exc:
