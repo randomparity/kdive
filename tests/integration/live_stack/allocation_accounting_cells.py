@@ -110,11 +110,6 @@ _ACCEL = {"kvm": Decimal(1), "tcg": Decimal(4), None: Decimal(1)}
 _SIZE: dict[str, object] = {"vcpus": 1, "memory_gb": 1, "disk_gb": LOCAL_ALLOCATION_DISK_GB}
 
 
-# Server cells run at one concurrent allocation, so a second request queues; the budget cell
-# holds one grant while it probes admission with another.
-_SEED_CAPS = {"accounting.set_budget": 2}
-
-
 _WAIT_DEADLINE_S = 180.0
 
 
@@ -524,9 +519,11 @@ async def _budget_body(c: HttpCaller, g: Grants, *, db: str, project: str) -> di
     seeded = await _row(db, "SELECT limit_kcu, spent_kcu FROM budgets WHERE project = %s", project)
     restore = partial(_set_budget, c, project, str(seeded["limit_kcu"]))
     async with _fixture(c, project, db) as fx, _restoring(restore):
+        # Price one grant, then free it: the lane host may admit one allocation at a time.
         allocation = (await fx.request()).object_id
-        spent = await _spent(db, project)
         estimate = await _reserved(db, allocation, Decimal(1))
+        await fx.release(allocation)
+        spent = await _spent(db, project)
         boundary = spent + estimate
         for limit, admitted in ((boundary - _QUANTUM, False), (boundary, True)):
             env = await _call(c, g, "accounting.set_budget", project=project, limit_kcu=str(limit))
@@ -996,7 +993,8 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db: str) ->
         elif tool in _SYSTEM_BODIES:
             await _on_system(run, c, base_url, issuer, db, project, _SYSTEM_BODIES[tool])
         else:
-            await seed_metering(db, project, max_allocations=_SEED_CAPS.get(tool, 1))
+            # One concurrent allocation, so a second request queues instead of being granted.
+            await seed_metering(db, project, max_allocations=1)
             await _seed_pending(db, project, 1)
             body = partial(_SERVER_BODIES[tool], db=db, project=project)
             await prove_functional(
