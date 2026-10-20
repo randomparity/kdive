@@ -244,8 +244,9 @@
       changed_when: false
       environment:
         LC_ALL: C
+      # Classic sudo exits 1 on a denial; sudo-rs prints the same denial and exits 0.
       failed_when: >-
-        provider_authority_host_inventory_sudo.rc != 1 or
+        provider_authority_host_inventory_sudo.rc not in [0, 1] or
         'is not allowed to run sudo' not in
         (provider_authority_host_inventory_sudo.stdout + provider_authority_host_inventory_sudo.stderr)
       no_log: true

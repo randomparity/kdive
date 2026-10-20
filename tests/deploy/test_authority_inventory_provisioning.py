@@ -367,3 +367,38 @@ def test_disabled_withdrawal_uses_control_interpreter(control_python):
     assert rendered == (control_python or "/usr/bin/python3")
     assert argv[1:4] == ["-I", "-S", "-c"] and argv[-1] == "withdraw"
     assert argv[4] == "{{ provider_authority_host_inventory_verifier }}"
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "stderr", "fails"),
+    [
+        (1, "", "User kdive-authority-observer is not allowed to run sudo on h.\n", False),
+        (0, "User kdive-authority-observer is not allowed to run sudo on h.\n", "", False),
+        (
+            0,
+            "User kdive-authority-observer may run the following commands on h:\n"
+            "    (ALL) NOPASSWD: ALL\n",
+            "",
+            True,
+        ),
+        (2, "User kdive-authority-observer is not allowed to run sudo on h.\n", "", True),
+    ],
+    ids=["classic-denial", "sudo-rs-denial", "granted", "unexpected-rc"],
+)
+def test_observer_sudo_refusal_accepts_only_a_denial(rc, stdout, stderr, fails):
+    refusal = next(t for t in flatten(tasks()) if t["name"] == "Refuse observer sudo privileges")
+    assert refusal["ansible.builtin.command"]["argv"] == [
+        "sudo",
+        "-n",
+        "-l",
+        "-U",
+        "kdive-authority-observer",
+    ]
+    assert refusal["environment"] == {"LC_ALL": "C"} and refusal["no_log"] is True
+    result = {"rc": rc, "stdout": stdout, "stderr": stderr}
+    verdict = (
+        Environment(undefined=StrictUndefined)
+        .from_string("{{ " + refusal["failed_when"] + " }}")
+        .render(provider_authority_host_inventory_sudo=result)
+    )
+    assert verdict == str(fails)
