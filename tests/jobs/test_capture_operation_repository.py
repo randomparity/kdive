@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -15,8 +16,11 @@ from psycopg import AsyncConnection, errors, sql
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
+from kdive.artifacts.storage import ConditionalArtifactWriteRequest, StoredArtifact
 from kdive.db import migrate
+from kdive.db.locks import try_capture_job_fence
 from kdive.domain.capacity.state import JobState
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.capture_operations.launcher import (
@@ -24,6 +28,7 @@ from kdive.jobs.capture_operations.launcher import (
     LaunchAbortEvidence,
 )
 from kdive.jobs.capture_operations.protocol import CaptureRequest
+from kdive.jobs.capture_operations.storage.publication import CapturePublicationCoordinator
 from kdive.jobs.capture_operations.storage.repository import (
     CaptureOperation,
     CaptureOperationIdentity,
@@ -42,6 +47,7 @@ from kdive.jobs.capture_operations.storage.repository import (
     request_cancel,
 )
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor, CaptureSnapshot
+from kdive.store.objectstore import ObjectStore
 from tests.reconciler.conftest import connect
 
 
@@ -724,14 +730,23 @@ def test_capture_retry_is_not_charged_after_provider_only_closure(
         (True, "aborted_before_identity"),
     ],
 )
-def test_supervisor_leaves_clean_launch_abort_for_publication_recovery(
+@pytest.mark.parametrize("attempt", [1, 3])
+@pytest.mark.parametrize("failure", [None, "publication", "disposal", "authority"])
+def test_supervisor_finalizes_verified_launch_abort(
     migrated_url: str,
+    tmp_path: Path,
+    attempt: int,
+    failure: str | None,
     process_created: bool,
     exit_outcome: str,
 ) -> None:
     class _AbortingLauncher:
         def __init__(self) -> None:
             self.error = RuntimeError(f"{exit_outcome} launch fault")
+            self.spool = GatedCaptureLauncher(runtime_root=tmp_path / "runtime")
+
+        def dispose_operation_spool(self, operation_id: UUID) -> bool:
+            return failure != "disposal" and self.spool.dispose_operation_spool(operation_id)
 
         async def launch(
             self,
@@ -740,7 +755,7 @@ def test_supervisor_leaves_clean_launch_abort_for_publication_recovery(
             *,
             on_abort: Any = None,
         ) -> None:
-            del request
+            self.spool._attempt_directory(operation, request)
             assert on_abort is not None
             provider_quiescence: dict[str, object]
             if process_created:
@@ -774,7 +789,7 @@ def test_supervisor_leaves_clean_launch_abort_for_publication_recovery(
         worker_id = f"local:supervisor-{exit_outcome}"
         credential = SecretStr(f"credential-{exit_outcome}")
         await _register(admin, worker_id, credential)
-        job_id, seeded_snapshot = await _seed_job(admin, worker_id, credential)
+        job_id, seeded_snapshot = await _seed_job(admin, worker_id, credential, attempt=attempt)
         request = CaptureRequest(
             job_id=job_id,
             provider_kind="local-libvirt",
@@ -797,7 +812,7 @@ def test_supervisor_leaves_clean_launch_abort_for_publication_recovery(
             updated_at=datetime.now(UTC),
             kind=JobKind.CAPTURE_TRAFFIC,
             state=JobState.RUNNING,
-            attempt=1,
+            attempt=attempt,
             max_attempts=3,
             worker_id=worker_id,
             authorizing={"principal": "principal", "agent_session": None, "project": "project"},
@@ -813,6 +828,33 @@ def test_supervisor_leaves_clean_launch_abort_for_publication_recovery(
             configuration=lambda: b"unused",
             quiescence=cast(Any, lambda _configuration: None),
         )
+
+        class TombstoneStore:
+            def head(self, key: str, *, version_id: str | None = None) -> None:
+                return None
+
+            def create_if_absent(self, write: ConditionalArtifactWriteRequest) -> StoredArtifact:
+                if failure == "publication":
+                    raise RuntimeError("store unavailable")
+                assert write.data == b"" and write.metadata["publication-kind"] == "tombstone"
+                return StoredArtifact(
+                    write.key,
+                    "tombstone-etag",
+                    write.sensitivity,
+                    write.retention_class,
+                    "tombstone-version",
+                )
+
+        publication = CapturePublicationCoordinator(
+            cast(ObjectStore, TombstoneStore()),
+            SecretStr("stale-credential") if failure == "authority" else credential,
+        )
+
+        async def recover(conn: AsyncConnection, operation: CaptureOperation) -> CaptureOperation:
+            async with admin.transaction():
+                assert await try_capture_job_fence(admin, job_id) is False
+            return await publication.recover(conn, operation)
+
         try:
             with pytest.raises(RuntimeError) as raised:
                 await supervisor.execute(
@@ -821,9 +863,11 @@ def test_supervisor_leaves_clean_launch_abort_for_publication_recovery(
                     supervisor_snapshot,
                     request,
                     publisher=cast(Any, None),
-                    publication_recoverer=cast(Any, None),
+                    publication_recoverer=recover,
                 )
             assert raised.value is launcher.error
+            async with admin.transaction():
+                assert await try_capture_job_fence(admin, job_id) is True
             row = await (
                 await admin.execute(
                     "SELECT state, exit_outcome, process_absent FROM capture_operations "
@@ -832,19 +876,70 @@ def test_supervisor_leaves_clean_launch_abort_for_publication_recovery(
                 )
             ).fetchone()
             assert row == ("exited", exit_outcome, True)
-            await admin.execute(
-                "UPDATE jobs SET lease_expires_at = clock_timestamp() - interval '1 second' "
-                "WHERE id = %s",
-                (job_id,),
-            )
-            assert await queue.dequeue(worker, worker_id, incarnation_credential=credential) is None
-            persisted = await (
+            closure = await (
                 await admin.execute(
-                    "SELECT attempt, current_capture_operation_id FROM jobs WHERE id = %s",
+                    "SELECT id, publication_state, publication_tombstone_version, "
+                    "spool_disposed_at IS NOT NULL FROM capture_operations WHERE job_id = %s",
                     (job_id,),
                 )
             ).fetchone()
-            assert persisted is not None and persisted[0] == 1 and persisted[1] is not None
+            assert closure is not None
+            operation_id, publication_state, tombstone, disposed = closure
+            assert disposed is (failure is None)
+            assert (tmp_path / "runtime" / str(operation_id)).exists() is (failure is not None)
+            if failure is None or failure == "disposal":
+                assert publication_state == "discarded" and tombstone == "tombstone-version"
+            else:
+                assert publication_state == ("canceling" if failure == "publication" else "pending")
+            assert await (await admin.execute("SELECT count(*) FROM artifacts")).fetchone() == (0,)
+            assert (
+                await queue.fail(
+                    worker,
+                    job,
+                    ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    incarnation_credential=SecretStr("wrong-credential"),
+                )
+            ).state is JobState.RUNNING
+            assert (
+                await queue.fail(
+                    worker,
+                    job.model_copy(update={"attempt": attempt + 1}),
+                    ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    incarnation_credential=credential,
+                )
+            ).state is JobState.RUNNING
+            finalized = await queue.fail(
+                worker,
+                job,
+                ErrorCategory.INFRASTRUCTURE_FAILURE,
+                incarnation_credential=credential,
+            )
+            expected = (
+                JobState.RUNNING
+                if failure
+                else (JobState.QUEUED if attempt == 1 else JobState.FAILED)
+            )
+            assert finalized.state is expected
+            persisted = await (
+                await admin.execute(
+                    "SELECT state, attempt, current_capture_operation_id FROM jobs WHERE id = %s",
+                    (job_id,),
+                )
+            ).fetchone()
+            assert persisted == (expected.value, attempt, operation_id)
+            if expected is JobState.QUEUED:
+                next_job = await queue.dequeue(worker, worker_id, incarnation_credential=credential)
+                assert next_job is not None and next_job.attempt == attempt + 1
+            elif failure:
+                await admin.execute(
+                    "UPDATE jobs SET lease_expires_at = clock_timestamp() - interval '1 second' "
+                    "WHERE id = %s",
+                    (job_id,),
+                )
+                assert (
+                    await queue.dequeue(worker, worker_id, incarnation_credential=credential)
+                    is None
+                )
         finally:
             await worker.close()
             await admin.close()
