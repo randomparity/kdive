@@ -575,8 +575,8 @@ async def worker_interruption(
     preconditions(base_url, postgres=False)
 
     async def body(held: Held, profile: dict[str, object], window_s: float) -> None:
-        assert held.system_id is not None and held.sampler is not None
         job_id = await held.provision(profile)
+        assert held.system_id is not None and held.sampler is not None
         await require_direct(db_url, job_id)
         claim, uuid_before = await in_flight(held, db_url, job_id, window_s)
         invocation = await asyncio.to_thread(set_exact_worker_hold, claim, "stop")
@@ -679,10 +679,10 @@ async def backing_service(
     assert container is not None
 
     async def body(held: Held, profile: dict[str, object], window_s: float) -> None:
-        assert held.system_id is not None and held.sampler is not None
         since = time.time()
         units = await asyncio.to_thread(unit_identity)
         job_id = await held.provision(profile)
+        assert held.system_id is not None and held.sampler is not None
         await require_direct(db_url, job_id)
         await in_flight(held, db_url, job_id, window_s)
         await held.sampler.sample(held.op)
