@@ -20,7 +20,8 @@ an honest empty answer. Rows with a string `name` become `GdbVariable(name, type
 
 Bounds: the whole `GdbFrameDetail` is redacted first, then cut to 64 variables (arguments first)
 with each `type` and `value` cut to 256 characters; `truncated` is true when anything was cut.
-Redacting before cutting means a secret split by the cut is still redacted.
+kdive's cut runs after redaction, so it never splits a registered secret; gdb's own string
+preview cut (200 elements) runs before it, so that redaction stays best effort (ADR-0781).
 
 Port (`providers/ports/debug.py`): `GdbVariable` and `GdbFrameDetail(GdbFrame)` with `args`,
 `locals`, `truncated`; `read_frame` returns `GdbFrameDetail` and documents the two new codes.
@@ -39,9 +40,13 @@ unchanged. Example:
 The tool docstring states the fields and bounds; the generated reference and CLI verbs are
 regenerated and both toolset summaries name arguments and locals.
 
-Live cell `read_frame_body`: at the `vfs_read` stop, frame 0's argument names equal the fixture
-v6.18 signature `(file, buf, count, pos)`, `locals` names `ret`, `file` reads as a kernel-half
-pointer, `buf` as a nonzero user-half pointer, `count` as a positive integer. The known-gap
+Live cell `read_frame_body`: the stop must be at `vfs_read`'s entry (`rip` equals its kallsyms
+address, where gdb places `break vfs_read` in the fixture). There, frame 0's argument names equal
+the fixture v6.18 signature `(file, buf, count, pos)`, each value equals the ABI argument
+register (`rdi`, `rsi`, `rdx`, `rcx`) read with `debug.read_registers`, `buf` is a nonzero
+user-half pointer and `locals` names `ret`. A static probe of the fixture `vmlinux`
+(v6.18.54, `gdb -batch vmlinux -ex 'info scope *<vfs_read>'`) shows all four arguments in
+exactly those registers at the entry address and `ret` without a location there. The known-gap
 assertion goes; the runbook's gap line is replaced by this comparison.
 
 ## Failure model
@@ -50,16 +55,18 @@ assertion goes; the runbook's gap line is replaced by this comparison.
    local- and remote-libvirt engines, x86_64 cells; ppc64le shares the code path.
 2. Invariants: the published `debug.read_frame` result (additive fields; `level` and the
    location unchanged); redaction of guest-derived text; no selected-frame change after the call.
-3. Accepted: an `<optimized out>` variable is reported verbatim (the live cell then fails on it,
-   honestly); struct/array variables carry no value (ADR-0781); 64/256 bounds cut long frames,
-   flagged by `truncated`; three MI commands per call.
+3. Accepted: an `<optimized out>` variable is reported verbatim (`ret` at the cell's stop);
+   struct/array variables carry no value (ADR-0781); 64/256 bounds cut long frames, flagged by
+   `truncated`; redaction inside gdb's string preview is best effort; three MI commands per
+   call. Not accepted: an argument the cell compares reading `<optimized out>` fails C3 and
+   returns to design.
 4. Covered elsewhere: remote carrier #3113; ppc64le live cells #2818; interrupt/resume #3244.
 
 ## Success
 
 - S1 `read_frame` returns the frame's gdb-reported arguments and locals split by `arg` (C1).
 - S2 the answer holds at most 64 variables with each type and value at most 256 characters,
-  redacted before the cut, and says whether it was cut (C2).
+  kdive's cut running after redaction, and says whether it was cut (C2).
 - S3 the four `debug.read_frame` gdbstub functional cells record `success` on a live x86_64 run
   (C3; live-gated).
 - S4 the tool reference and CLI verbs match the docstring.

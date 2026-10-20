@@ -14,7 +14,8 @@ docstring ~15, engine/MCP/fake tests ~90, cell body and tests ~50, docs and rege
 
 ## Task 1 — engine, port, fake and MCP op return the variables
 
-Files: `src/kdive/providers/ports/debug.py`,
+Files: `docs/adr/0275-gdb-backtrace-frame-inspection.md` (amendments, done in design),
+`src/kdive/providers/ports/debug.py`,
 `src/kdive/providers/shared/debug_common/gdbmi/core/mi_protocol.py`,
 `src/kdive/providers/shared/debug_common/gdbmi/commands/stack.py`,
 `src/kdive/providers/fault_inject/debug/gdb.py`, `src/kdive/mcp/tools/debug/operations/stack.py`,
@@ -53,9 +54,9 @@ Verification:
 - docs — task-test-not-applicable for the summary wording; `just docs-check`,
   `just cli-verbs-check`, `just resources-docs-check` gate the generated output.
 
-Green: `uv run pytest tests/providers/local_libvirt/test_debug_gdbmi.py -k read_frame
-tests/mcp/debug/test_debug_ops.py -k read_frame tests/providers/fault_inject/test_provider.py
-tests/providers/test_ports_contracts.py` → all pass.
+Green: `uv run pytest tests/providers/local_libvirt/test_debug_gdbmi.py
+tests/mcp/debug/test_debug_ops.py tests/providers/fault_inject/test_provider.py -k read_frame`
+→ all selected pass.
 
 Steps (write the tests first and see them fail):
 
@@ -185,14 +186,20 @@ arguments and locals." ADR-0781 Status `Accepted (<merge date>)`. Run `just docs
 Files: `tests/integration/live_stack/debug_cells.py`,
 `tests/integration/live_stack/test_debug_cells.py`, `docs/operating/runbooks/live-testing.md`
 (the read-frame gap bullet becomes the comparison; history entries untouched).
-Interfaces: existing `Session.stop_in_vfs_read`, `Session.exposed`, `KERNEL_BASE`, `BREAK_AT`.
+Interfaces: existing `Session.stop_in_vfs_read(session_id) -> int` (the stop `rip`),
+`Session.register(session_id, name) -> int`, `Session.exposed(**args)`, `Truth.at(name) -> int`,
+`hex_value(value) -> int`, `KERNEL_BASE`, `BREAK_AT`.
 
-Verification: focused-test in `test_debug_cells.py` — (a) `test_read_frame_compares_vfs_read_args`
-with frame args `file=0xffff888004c1e300`, `buf=0x55d0c0de1000 "x"`, `count=16384`, `pos=0x0` and
-local `ret`: result `{"frame0": "vfs_read", "args": ["file", "buf", "count", "pos"],
-"count": 16384}`; (b) parametrized failures: names out of order → "arguments are";
-`buf` `<optimized out>` → "buf reads"; `buf` a kernel address → "buf is not a user pointer";
-no `ret` local → "ret". Each ends the session. Replace
+Verification: focused-test in `test_debug_cells.py` — (a) `test_read_frame_compares_vfs_read_args`:
+the stop `rip` is the fake kallsyms `vfs_read` address, `debug.read_registers` answers
+`rdi=0xffff888004c1e300`, `rsi=0x55d0c0de1000`, `rdx=0x4000`, `rcx=0x0`, and the frame args are
+`file=0xffff888004c1e300`, `buf=0x55d0c0de1000 "x"`, `count=16384`, `pos=0x0` with local `ret`:
+result `{"frame0": "vfs_read", "args": ["file", "buf", "count", "pos"], "registers_match": True}`;
+(b) parametrized failures: names out of order → "arguments are"; `buf` `<optimized out>` →
+"buf reads"; `count` 16 while `rdx` is 0x4000 → "count is not rdx"; `buf` and `rsi` both
+0xffff888000001000 → "buf is not a user pointer"; no `ret` local → "ret"; a stop `rip` past the
+entry → "entry". Each ends the session. If the fake session's `rip` is not the kallsyms address
+today, give the read-frame cases their own `debug.read_registers` answer. Replace
 `test_read_frame_known_gap_fails_after_the_observable_proof`. Red: (a) fails on the old body.
 Green: `uv run pytest tests/integration/live_stack/test_debug_cells.py` → all pass.
 
@@ -205,17 +212,26 @@ def _number(value: object, name: str) -> int:
     return int(token, 0)
 ```
 
-then the body after the existing location assertion:
+and `_ARG_REGISTERS = ("rdi", "rsi", "rdx", "rcx")  # x86_64 SysV argument registers`, then
+the body:
 
 ```python
+    session_id = await s.start()
+    rip = await s.stop_in_vfs_read(session_id)
+    assert rip == s.truth.at(BREAK_AT), "the stop is not at vfs_read's entry"
+    registers = [await s.register(session_id, name) for name in _ARG_REGISTERS]
+    env = await s.exposed(session_id=session_id, level=0)
+    await s.end(session_id)
+    frame = env.data.get("frame")
+    assert isinstance(frame, dict), "no frame returned"
+    assert (frame.get("func"), hex_value(frame.get("addr"))) == (BREAK_AT, rip), "frame differs"
     args = {str(v.get("name")): v.get("value") for v in frame.get("args", [])}
     assert tuple(args) == _VFS_READ_ARGS, f"vfs_read's arguments are {tuple(args)}"
+    for (name, value), register, reg in zip(args.items(), registers, _ARG_REGISTERS, strict=True):
+        assert _number(value, name) == register, f"{name} is not {reg}"
+    assert 0 < registers[1] < KERNEL_BASE, "buf is not a user pointer"
     assert "ret" in [v.get("name") for v in frame.get("locals", [])], "no ret local"
-    assert _number(args["file"], "file") >= KERNEL_BASE, "file is not a kernel pointer"
-    assert 0 < _number(args["buf"], "buf") < KERNEL_BASE, "buf is not a user pointer"
-    count = _number(args["count"], "count")
-    assert count > 0, "count is not positive"
-    return {"frame0": BREAK_AT, "args": list(_VFS_READ_ARGS), "count": count}
+    return {"frame0": BREAK_AT, "args": list(_VFS_READ_ARGS), "registers_match": True}
 ```
 
 with the docstring "Frame 0 is ``vfs_read`` at the stop, with its parameters and ``ret``."
@@ -228,4 +244,5 @@ after; server `TMPDIR` on a 1200 MB quota tmpfs), at the branch head, run the fo
 `debug.read_frame` gdbstub functional cells (`default` and `recovery`, each `direct` and
 `gateway`) through `examples/local-libvirt/demo-up.sh`, as the #3242 rerun did; expect
 `success`. Clean up with `demo-down.sh --wipe --yes`; record the result under the runbook's
-rerun notes.
+rerun notes. An argument the cell compares reading `<optimized out>`, or a stop past the entry,
+fails C3 and returns to design and the orchestrator — never to a cell edit that relaxes it.

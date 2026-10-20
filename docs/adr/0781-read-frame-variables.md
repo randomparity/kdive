@@ -9,7 +9,9 @@ Proposed
 `debug.read_frame` answers only the frame's location, from `-stack-list-frames L L`, because
 ADR-0275 decided "no `-stack-select-frame` session state, no frame-local values". A client
 therefore cannot read the arguments or locals of the frame it selected, and the #2813
-`debug.read_frame` functional cells fail on that gap (#3243).
+`debug.read_frame` functional cells fail on that gap (#3243). ADR-0275's two grounds no
+longer hold for `-stack-list-variables`: it takes no caller expression, so the expression
+surface ADR-0034 excluded stays closed, and the whole frame record can be redacted in one pass.
 
 ## Decision
 
@@ -27,8 +29,9 @@ restores the selected frame after a `--frame` command.
 
 ## Consequences
 
-- A `char *` value includes gdb's string preview, read from guest memory: the contributor gate
-  and redaction that already cover `debug.read_memory` cover it.
+- A `char *` value includes gdb's string preview of guest memory, which a contributor can
+  already read verbatim with `debug.read_memory`. Redaction of registered secrets in it is best
+  effort: gdb cuts the preview at 200 elements and compresses repeats before kdive redacts.
 - An `<optimized out>` variable is reported as gdb prints it, not hidden.
 - `read_frame` issues three MI commands instead of one; a missing current thread answers
   `no_current_thread` and a missing variable list `no_frame_variables`, both
