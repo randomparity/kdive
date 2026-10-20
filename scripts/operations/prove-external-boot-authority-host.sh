@@ -68,10 +68,14 @@ database_login=$4
 proof_incarnation=$5
 source_root="$remote_root/source"
 cleanup_status=0
-if [[ -f $source_root/deploy/ansible/playbooks/authority_host_teardown.yml \
+# Teardown becomes unprivileged accounts, which needs the acl package the prerequisite
+# step installs; before that step completes no authority state exists to retire.
+if [[ ! -f "$remote_root/prerequisites-installed" ]]; then
+  echo "teardown skipped: the authority prerequisites never installed" >&2
+elif [[ -f $source_root/deploy/ansible/playbooks/authority_host_teardown.yml \
   && -f $remote_root/inventory ]]; then
   cd "$remote_root"
-  uv run --with ansible-core==2.21.1 ansible-playbook -i inventory \
+  env ANSIBLE_ROLES_PATH="$source_root/deploy/ansible/roles" uv run --with ansible-core==2.21.1 ansible-playbook -i inventory \
     "$source_root/deploy/ansible/playbooks/authority_host_teardown.yml" \
     --extra-vars "authority_database_admin_dsn=postgresql:///$database?host=/var/run/postgresql" \
     --extra-vars "authority_database_login=$database_login" \
@@ -148,7 +152,7 @@ authority_instance=$7
 proof_incarnation=$8
 source_root="$remote_root/source"
 secrets="$remote_root/secrets"
-ansible="uv run --with ansible-core==2.21.1 ansible-playbook"
+ansible="env ANSIBLE_ROLES_PATH=$source_root/deploy/ansible/roles uv run --with ansible-core==2.21.1 ansible-playbook"
 
 git clone -q "$remote_root/kdive.bundle" "$source_root"
 git -C "$source_root" checkout -q "$revision"
@@ -178,6 +182,7 @@ echo "prerequisites: installing through the live_vm_host role"
 cd "$remote_root"
 $ansible -i inventory proof.yml --tags authority_prerequisites \
   --extra-vars "live_vm_host_authority_enabled=true"
+touch "$remote_root/prerequisites-installed"
 
 sudo -n -u postgres createdb "$database"
 sudo -n install -d -o postgres -g postgres -m 0700 "$remote_root/migrate"
@@ -355,7 +360,7 @@ database_login=$6
 authority_instance=$7
 proof_incarnation=$8
 source_root="$remote_root/source"
-ansible="uv run --with ansible-core==2.21.1 ansible-playbook"
+ansible="env ANSIBLE_ROLES_PATH=$source_root/deploy/ansible/roles uv run --with ansible-core==2.21.1 ansible-playbook"
 cd "$remote_root"
 
 echo "reboot: validating boot-persistent authority services"

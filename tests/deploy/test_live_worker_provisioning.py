@@ -4116,3 +4116,32 @@ def test_renewal_playbook_installs_credentials_in_the_reviewed_order() -> None:
     assert all(
         "key" not in item["path"] for item in expiry["vars"]["live_vm_host_tls_expiry_certificates"]
     )
+
+
+def test_authority_proof_resolves_the_role_siblings_it_imports() -> None:
+    """#3273: live_vm_host imports local_worker_host, so every carrier play sets the roles path."""
+    proof = _text(AUTHORITY_PROOF)
+    runs = re.findall(
+        r'(ANSIBLE_ROLES_PATH="?\$source_root/deploy/ansible/roles"? )?'
+        r"uv run --with ansible-core==2\.21\.1 ansible-playbook",
+        proof,
+    )
+    assert len(runs) == 3
+    assert all(runs), runs
+    assert proof.count("ansible-playbook") == 3
+    assert "role: $source_root/deploy/ansible/roles/live_vm_host" in proof
+
+
+def test_authority_proof_tears_down_only_after_its_prerequisites_installed_acl() -> None:
+    """#3273: teardown becomes unprivileged accounts, which needs the role-installed acl."""
+    defaults = _yaml(DEFAULTS)
+    assert "acl" in cast(list[str], defaults["live_vm_host_authority_packages"])
+    proof = _text(AUTHORITY_PROOF)
+    marker = '"$remote_root/prerequisites-installed"'
+    prerequisites = proof.index("--tags authority_prerequisites")
+    assert proof.index(f"touch {marker}") > prerequisites
+    assert proof.index(f"touch {marker}") < proof.index('createdb "$database"')
+    cleanup = proof[proof.index("<<'REMOTE_CLEANUP'") : proof.index("\nREMOTE_CLEANUP\n")]
+    assert f"-f {marker}" in cleanup
+    assert cleanup.index(f"-f {marker}") < cleanup.index("authority_host_teardown.yml")
+    assert "teardown skipped: the authority prerequisites never installed" in cleanup
