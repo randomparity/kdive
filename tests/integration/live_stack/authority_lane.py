@@ -44,7 +44,7 @@ from kdive.inventory.loader import load_inventory
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.providers.local_libvirt.config import local_authority_instance_for_resource
 from kdive.providers.remote_libvirt.config import remote_config_for_resource
-from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import console_boot_marker_path, domain_name_for
 from kdive.services.investigations.common import TERMINAL_INVESTIGATION_STATES
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.cleanup import (
@@ -423,12 +423,13 @@ async def drain_system_jobs(
 
 
 def fixture_names(system_id: str) -> list[str]:
-    """The five names a fixture create makes for ``system_id``, in creation order (runbook)."""
+    """The six names a fixture create makes for ``system_id``, in creation order (runbook)."""
     return [
         f"{_AUTHORITY_ROOTFS}/{system_id}-fixture-base.qcow2",
         f"{_AUTHORITY_ROOTFS}/{system_id}-baseline",
         f"{_AUTHORITY_ROOTFS}/{system_id}-overlay.qcow2",
         f"{_AUTHORITY_CONSOLE}/{system_id}.log",
+        str(console_boot_marker_path(Path(_AUTHORITY_CONSOLE) / f"{system_id}.log")),
         domain_name_for(UUID(system_id)),
     ]
 
@@ -699,7 +700,7 @@ async def _create_remote_and_run(
 
 
 async def _move_to_authority(frame: _Frame, config: NativeAuthorityConfig) -> None:
-    """Run the fixture create and record its names; a failed create records the fixed five."""
+    """Run the fixture create and record its names; a failed create records the fixed six."""
     assert frame.ledger is not None and frame.system_id is not None
     names = fixture_names(frame.system_id)
     created = ResourceLedger(config.ownership_prefix, fixture_system=config.system_id)
@@ -712,7 +713,7 @@ async def _move_to_authority(frame: _Frame, config: NativeAuthorityConfig) -> No
     reported = [resource.identity for resource in created.resources]
     for identity in reported:
         frame.ledger.record(OwnedResource(kind="authority-fixture", identity=identity))
-    assert reported == names, "the fixture create reported names other than its five"
+    assert reported == names, "the fixture create reported names other than its six"
 
 
 async def _create_and_run(

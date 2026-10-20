@@ -272,13 +272,14 @@ overlay and console owner and the live private-daemon domain before any public i
 request. The configured System must be disposable; this setup is not a migration mechanism for
 ordinary worker-owned Systems.
 
-**Fixture cleanup.** In `create` mode the fixture script reports the five exact names it made for
+**Fixture cleanup.** In `create` mode the fixture script reports the six exact names it made for
 the configured System, and the carrier records each one in its resource ledger:
 
 - `/var/lib/kdive/provider-authority/rootfs/<uuid>-fixture-base.qcow2`
 - `/var/lib/kdive/provider-authority/rootfs/<uuid>-baseline`
 - `/var/lib/kdive/provider-authority/rootfs/<uuid>-overlay.qcow2`
 - `/var/lib/kdive/provider-authority/console/<uuid>.log`
+- `/var/lib/kdive/provider-authority/console/<uuid>.boot` (the per-start boot marker, #3254)
 - the domain `kdive-<uuid>` on the private authority daemon
 
 When the rest of the run ends, whether it passed or failed and after the Investigation close
@@ -298,6 +299,7 @@ came back. Run the same exact-name mode, domain first:
 ```sh
 uuid=<system_id>
 for name in "kdive-$uuid" \
+  "/var/lib/kdive/provider-authority/console/$uuid.boot" \
   "/var/lib/kdive/provider-authority/console/$uuid.log" \
   "/var/lib/kdive/provider-authority/rootfs/$uuid-overlay.qcow2" \
   "/var/lib/kdive/provider-authority/rootfs/$uuid-baseline" \
@@ -325,7 +327,7 @@ the allocation has external-boot history (#2966): the teardown always runs first
 
 - `create` (the default): the fixture script refuses when the System's domain still exists on
   the private authority daemon. Otherwise it removes the System's worker domain and old fixture
-  files, provisions a new fixture on the private authority daemon, and reports its five names.
+  files, provisions a new fixture on the private authority daemon, and reports its six names.
   The carrier records them and removes them when the run ends
   ([fixture cleanup](#installed-local-authority-carrier)).
 - `verify-existing`: the carrier only verifies, read-only, a fixture that is already present, and
