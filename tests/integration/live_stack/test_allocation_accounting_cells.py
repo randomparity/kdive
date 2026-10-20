@@ -355,3 +355,27 @@ def test_budget_boundary_probe_needs_a_budget_unmet_entry(monkeypatch: pytest.Mo
     _admission_fixture(monkeypatch, quota)
     with pytest.raises(AssertionError, match="no unmet budget gate"):
         asyncio.run(carrier.check_admission(fixture, admitted=False))
+
+
+def test_accounting_snapshot_compares_kcu_by_value_not_scale(migrated_url: str) -> None:
+    # A never-active release credits its whole reservation: spent_kcu returns to the same value
+    # with the ledger's four-decimal scale, which a row-text digest would read as a change.
+    async def seed() -> None:
+        async with open_pool(migrated_url) as pool:
+            await seed_project_limits(pool, project="proj", limit_kcu=1000)
+
+    asyncio.run(seed())
+    _seed_accounting(
+        migrated_url,
+        [("UPDATE budgets SET spent_kcu = 0, limit_kcu = 1000 WHERE project = 'proj'", ())],
+    )
+    before = asyncio.run(carrier.accounting_state(migrated_url, "proj"))
+    _seed_accounting(
+        migrated_url,
+        [
+            ("UPDATE budgets SET spent_kcu = spent_kcu + 1.2500 WHERE project = 'proj'", ()),
+            ("UPDATE budgets SET spent_kcu = spent_kcu - 1.2500 WHERE project = 'proj'", ()),
+            ("UPDATE budgets SET limit_kcu = 1000.0000 WHERE project = 'proj'", ()),
+        ],
+    )
+    assert asyncio.run(carrier.accounting_state(migrated_url, "proj")) == before

@@ -125,7 +125,9 @@ _ACCOUNTING_QUERIES: dict[str, LiteralString] = {
     "allocations:live": "FROM allocations t WHERE t.project = %(p)s AND t.state = ANY(%(live)s)",
     "ledger:live": "FROM ledger t WHERE t.allocation_id IN (SELECT id FROM allocations "
     "WHERE project = %(p)s AND state = ANY(%(live)s))",
-    "budgets:limit-spent": "FROM (SELECT project, limit_kcu, spent_kcu FROM budgets "
+    # Unconstrained numeric keeps each write's scale: 0 and 0.0000 are one balance.
+    "budgets:limit-spent": "FROM (SELECT project, trim_scale(limit_kcu), trim_scale(spent_kcu) "
+    "FROM budgets "
     "WHERE project = %(p)s) t",
     "quotas:caps": "FROM (SELECT project, max_concurrent_allocations, max_concurrent_systems, "
     "max_pending_allocations FROM quotas WHERE project = %(p)s) t",
