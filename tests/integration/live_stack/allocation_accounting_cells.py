@@ -27,9 +27,10 @@ import psycopg
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
+from kdive.services.allocation.lease_bounds import configured_lease_bounds
 from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES
 from tests.integration.live_stack.run_system_job_cells import _create, _owned
-from tests.integration.live_stack.scenario import CellRun, catalog_profile
+from tests.integration.live_stack.scenario import CellRun, Sizing, catalog_profile
 from tests.integration.live_stack.service_cells import (
     _ABSENT_ID,
     _DIGEST,
@@ -108,6 +109,9 @@ _ACCEL = {"kvm": Decimal(1), "tcg": Decimal(4), None: Decimal(1)}
 
 
 _SIZE: dict[str, object] = {"vcpus": 1, "memory_gb": 1, "disk_gb": LOCAL_ALLOCATION_DISK_GB}
+
+
+_PROBE_SIZING = Sizing(vcpu=1, memory_mb=1024, disk_gb=LOCAL_ALLOCATION_DISK_GB)
 
 
 _WAIT_DEADLINE_S = 180.0
@@ -512,9 +516,16 @@ async def _wait_body(c: HttpCaller, g: Grants, *, db: str, project: str) -> dict
         row = await _row(db, _ALLOCATION, queued)
         assert env.status == row["state"] == "granted", f"queued request became {env.status}"
         assert row["resource_id"] is not None and env.data["resource_id"] == str(row["resource_id"])
-        reserve = await _reserved(db, queued, Decimal(1))
+        # A queued row keeps no window: promotion reserves the operator's default lease.
+        default = configured_lease_bounds().default_hours
+        reserve = await _reserved(db, queued, default)
         assert_ledger(await _rows(db, _LEDGER, (queued,)), [("reserved", reserve)])
-        return {"promoted": True, "promotion_call_by_test": False, "owned": fx.owned}
+        return {
+            "promoted": True,
+            "promoted_window_h": str(default),
+            "promotion_call_by_test": False,
+            "owned": fx.owned,
+        }
 
 
 async def _budget_body(c: HttpCaller, g: Grants, *, db: str, project: str) -> dict[str, object]:
@@ -606,7 +617,8 @@ async def _quota_body(c: HttpCaller, g: Grants, *, db: str, project: str) -> dic
 async def check_system_quota(fx: _Fixture, allocation_id: str) -> None:
     """``systems.provision`` at a zero System cap is refused before any System or job exists."""
     name, entry = lane_image()
-    profile = catalog_profile(entry, name, f"{fx.project}-unread")
+    # The profile restates the allocation's size: a conflicting size is refused before quota.
+    profile = catalog_profile(entry, name, f"{fx.project}-unread", _PROBE_SIZING)
     env = await _answer(
         fx.setup,
         Grants(f"{fx.project}-operator", (fx.project,), {fx.project: "operator"}),

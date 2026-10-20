@@ -379,3 +379,28 @@ def test_accounting_snapshot_compares_kcu_by_value_not_scale(migrated_url: str) 
         ],
     )
     assert asyncio.run(carrier.accounting_state(migrated_url, "proj")) == before
+
+
+def test_system_quota_probe_restates_the_allocation_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A profile whose size conflicts with the allocation is refused before the System quota,
+    # so the probe would never reach the cap it claims to prove.
+    sent: dict[str, object] = {}
+
+    async def reply(*_args: object, **kwargs: object) -> ToolResponse:
+        sent.update(kwargs)
+        return ToolResponse.failure("x", ErrorCategory.QUOTA_EXCEEDED)
+
+    async def none(*_args: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr(carrier, "_answer", reply)
+    monkeypatch.setattr(carrier, "_rows", none)
+    fixture = carrier._Fixture("p", "db", cast(HttpCaller, None))
+    asyncio.run(carrier.check_system_quota(fixture, "a"))
+    profile = cast(dict[str, object], sent["profile"])
+    size = carrier._SIZE
+    assert (profile["vcpu"], profile["memory_mb"], profile["disk_gb"]) == (
+        size["vcpus"],
+        cast(int, size["memory_gb"]) * 1024,
+        size["disk_gb"],
+    )
