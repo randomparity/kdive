@@ -18,6 +18,7 @@ insert, and a lost race closes the just-opened transport (ADR-0032 §6a). The
 from __future__ import annotations
 
 import asyncio
+import functools
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -49,6 +50,7 @@ from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools.debug.introspection.gate import augment_with_runtime_probe
+from kdive.mcp.tools.debug.operations.runtime import run_to_completion
 from kdive.mcp.tools.debug.sessions.context import resolve_debug_session_context
 from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
 from kdive.observability.debug_session_telemetry import (
@@ -581,13 +583,12 @@ async def _end_debug_session(
             envelope = await _detach_locked(
                 conn, ctx, uid, resolved_session.system_id, resources.connector
             )
-        from kdive.mcp.tools.debug.operations.runtime import _finish_thread
-
         key = str(uid)
         if resources.runtime is not None and envelope.error_category is None:
-            async with resources.runtime.lock_for(key):
+            runtime = resources.runtime
+            async with runtime.lock_for(key):
                 try:
-                    await _finish_thread(resources.runtime.reap, key)
+                    halted = await run_to_completion(functools.partial(runtime.reap, key))
                 except Exception:
                     envelope = ToolResponse.failure(
                         session_id,
@@ -596,6 +597,12 @@ async def _end_debug_session(
                         data={"reason": "debug_cleanup_pending"},
                         suggested_next_actions=["debug.end_session", "debug.get_session"],
                     )
+                else:
+                    if not halted:
+                        # The guest was running and the halt before detach failed (#3244).
+                        envelope = envelope.model_copy(
+                            update={"data": {**envelope.data, "guest_execution": "unknown"}}
+                        )
         seconds = (datetime.now(UTC) - resolved_session.session.created_at).total_seconds()
         outcome: DebugSessionOutcome = "ok" if envelope.status != "error" else "error"
         telemetry.record(resolved_session.session.transport, outcome, seconds)

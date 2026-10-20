@@ -28,8 +28,10 @@ is benign: the early-boot handler has already consumed the option.
 
 ## Run control
 
-- `debug.continue` — resume a halted kernel and wait for a stop event.
-- `debug.interrupt` — halt a running kernel to inspect it.
+- `debug.continue` — resume a halted kernel and wait for a stop event; with `wait=false` it
+  returns `running` at once and leaves the kernel running between calls. While it runs, other
+  debug tools refuse with `inferior_running` until `debug.interrupt` or `debug.continue`.
+- `debug.interrupt` — halt a running kernel to inspect it; `halted_by` says what halted it.
 - `debug.advance` — advance a stopped kernel by one step; `mode` picks the unit:
   - `into` — one source line, into called functions.
   - `over` — one source line, over called functions.

@@ -279,6 +279,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `KDIVE_3097_EXCLUSIVE_QUEUE` | — | Set to `approved` to let the run/system/job service-cell proof (#3097) pause and own an idle job queue for its queued-install cells; any other value records them as blocked. |
 | `KDIVE_ARTIFACT_DIR` | — | Directory the live_stack spine writes run artifacts to (default: an out-of-tree temp dir). |
 | `KDIVE_EL9_REACHABILITY_DOMAIN` | — | Running, agent-ready EL9/RHEL-family remote-libvirt domain name for the host-model CPU reachability live test (#975, ADR-0297); unset → that test skips. |
 | `KDIVE_EL9_REACHABILITY_URI` | — | libvirt qemu+tls connection URI for the EL9 host-model CPU reachability live test (#975, ADR-0297). |
@@ -393,6 +394,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_REMOTE_SSH_PORT` | `22` | SSH port `check-remote-libvirt.sh` connects on. |
 | `KDIVE_ROLE` | `admin` | Role `scripts/live-stack/onboard.sh` writes into the minted token's `roles` claim and the printed binding contract; a sub-CONTRIBUTOR value warns (allocations.request needs CONTRIBUTOR+). |
 | `KDIVE_ROOTFS_DIR` | `/var/lib/kdive/rootfs` | Per-System qcow2 overlay directory for the local-libvirt provider; `scripts/live-stack/lib.sh` reads this to locate and create guest disk overlays. |
+| `KDIVE_SEAWEEDFS_IMAGE` | `kdive-seaweedfs:dev` | Image tag for the Compose seaweedfs service built from the bundled source. The isolated volume-persistence proof ignores inherited overrides and uses its own invocation tag. |
 | `KDIVE_SEAWEEDFS_PORT` | `8333` | Host port the compose `seaweedfs` S3 API publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_S3_ENDPOINT_URL`. Accepts `PORT` or `ADDR:PORT`; a loopback or wildcard address keeps `localhost` in the derived URL. |
 | `KDIVE_SERVER_DATABASE_URL` | `local Compose server-member DSN` | Database login DSN supplied only to the host server process (and the Compose reference server service); external deployments override the local development member. |
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |

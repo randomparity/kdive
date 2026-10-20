@@ -558,6 +558,18 @@ Do not run the whole `prove-external-boot-authority-host.sh` carrier over a reta
 installs a predecessor and tears down its authority. Review any reuse of its disposable PKI/DSN
 preparation separately, including credential expiry and database grants.
 
+Provisioning preflight (on the controller sources) and verification (on the installed copies)
+refuse any authority or fixed-worker TLS certificate that is expired or expires within
+`live_vm_host_authority_tls_expiry_margin_seconds` (default 43200, twelve hours), naming the
+credential and its `notAfter`; the controller needs `openssl` for that check. Renew before
+provisioning. The authority unit allows five starts of any kind (automatic, manual or
+provisioning) within ten minutes; a sixth is refused and leaves the unit `failed`, stopping it if
+it was running. A provisioning run spends one or two of those starts and one pass of the
+installed-authority live proofs about three, so do not re-provision or rerun those proofs
+repeatedly within that window without first running the reset below; after replacing credentials
+on a failed unit run
+`sudo systemctl reset-failed kdive-external-boot-authority.service` before restarting it.
+
 Retire only explicitly owned proof objects after confirming terminal provider effects. Do not
 remove shared backends, bases or journals to make a failure disappear. The existing local
 `authority_host_teardown.yml` is an authority retirement operation requiring its own reviewed
@@ -1606,8 +1618,10 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
   session rows and prove the guest halts while attached and answers again after the detach.
 - Two cells fail after proving what they can, until the tool exposes the effect:
   `debug.list_breakpoints` returns only a count and `debug.read_frame` no arguments or locals.
-  `debug.interrupt` fails while no running guest reaches it: `debug.start_session`'s gdbstub
-  reachability probe leaves the guest paused (ADR-0184), and every resume halts it again.
+- The `debug.interrupt` cell leaves the guest running with `debug.continue` `wait=false`
+  (ADR-0783), requires `halted_by=interrupt` with `signal-received`, records which path the
+  `vfs_read` breakpoint stop took (`resume_reply` or `waiting_continue`), and ends the session
+  while the guest runs, requiring it to answer again.
 - Rejection cells aim at one target per stack: a torn-down fixture System, its Run and an ended
   gdbstub session. They compare the project rows (including its debug sessions), the jobs naming
   the System or Run, and whether its domain is defined.
@@ -1779,6 +1793,70 @@ A killed run skips cleanup. Remove its fixture with the exact-name loop under
 [fixture cleanup](#installed-local-authority-carrier), then run `systems.teardown` for the System
 with an `admin` token for its project and wait for `torn_down`, then `allocations.release`.
 
+##### Local inventory observer prerequisite (#3237)
+
+The local frame requires the proof-only collector from [ADR-0800](../../adr/0800-proof-authority-inventory-collector.md).
+Enable `live_vm_host_authority_inventory_observer_enabled` or, for the production host role,
+`provider_authority_host_inventory_observer_enabled` in the approved local-lane inputs.
+Both default to false and require local authority mutation support and the fixed private roots.
+The provider role's configurable authority interpreter does **not** satisfy the collector
+prerequisite: `/usr/bin/python3` must separately be immutable system Python 3.14.
+Provisioning refuses an older or mutable interpreter; arrange the documented host prerequisites
+before retrying. No alternate privileged interpreter or root inventory fallback is used.
+
+Both roles install the same locked, noneditable runtime under `/opt/kdive-authority-inventory`,
+with root-owned code/imports, a root-owned systemd listener and the locked
+`kdive-authority-observer` identity with no supplementary groups or sudo grant. This adds one
+runtime copy and its native build/storage cost, including existing POWER build prerequisites.
+The observer can connect only to `/run/kdive-authority-inventory/inventory.sock`; private roots
+remain authority-owned mode `0700`. The fixed collector runs as the trusted authority identity.
+Its read-only libvirt call is defense in depth; it does not make a compromised authority safe.
+The installed collector revision must match the frame's configured candidate before allocation.
+
+Each connection accepts EOF after LF or one canonical UUID plus LF (at most 37 bytes).
+A complete response is limited to 1,048,576 UTF-8 bytes; excess fails without truncation.
+The outer call and client each have a 120-second monotonic deadline from invocation/connect
+preparation, and each accepted service has a 120-second systemd lifetime including backend calls,
+with one-second stop escalation. The listener admits four active handlers and backlog 16.
+A timeout, refused connection, incomplete facts or oversize response fails the observation and
+cleanup evidence. Repair the prerequisite/backend or serialize calls, then rerun the proof;
+there is no retry, cache or reduced inventory fallback.
+
+Before changing collector bytes the roles withdraw its socket and wait for all instances to stop.
+Readiness failures leave it disabled. Disabling its opt-in withdraws its listener, units and
+root-owned runtime/client, preserving the locked account and all authority/guest state. Disable
+before rolling back to source without the collector. Re-running unchanged provisioning must
+retain the same grants. `authority_host_teardown.yml` withdraws the boundary the same way before it retires the authority.
+A connection never starts the authority: while the authority is stopped or failed, each
+accepted instance fails instead. The listener stops with the authority, so after an
+out-of-band authority stop and start, re-run the role to restore it.
+Offline tests and unit-file inspection do not prove these permissions.
+
+**Native proof remains a separately approved operation.** Review an execution packet naming the
+exact candidate, one existing idle local lane, native architecture, runtime/install budget and
+negative request bytes before running any host commands. Neither these instructions nor a green
+offline suite grants host access. Bind caller, collector scripts/imports/revision, authority and
+stack to that candidate, and check the host OS/Python/systemd/libvirt prerequisites first.
+Within that approved window, record private commands, exits, durations and hashes for:
+
+1. Zero-selection and one existing selected-System observation, compared with independent
+   trusted queries in the same quiescent state: complete domain set, both root entry sets and
+   active/type facts. No guest creation, start or deletion is needed.
+2. Observer denial of direct private RW-socket connection, private authority runtime traversal,
+   and `O_RDONLY` opening of representative rootfs/console, journal, credential and proof-control
+   files, without reading bytes. `sudo -n -u root -- /usr/bin/true` and
+   `sudo -n -u kdive-provider-authority -- /usr/bin/true` must fail as the observer.
+3. Literal `destroy UUID\n` and overlong bytes sent only to the collector, yielding EOF/failure
+   and fixed `request-rejected` evidence, with unchanged before/after inventory. Never send a
+   mutation operation to libvirt. Source/sentinel tests establish the rejection order;
+   journal evidence is not an independent syscall trace.
+4. Unchanged reconvergence, then approved collector-only disable/re-enable: compare grants,
+   prove endpoint withdrawal and restored inventory without changing private permissions.
+
+Report which native arm actually ran. Native x86_64 evidence does not qualify ppc64le; retain
+both targets and keep #3185/#3186 fault matrices outside this bounded procedure. Keep host
+identifiers and private inventory names out of public summaries.
+
 ##### Remote authority branch (#3209)
 
 A `remote-libvirt` cell provisions on the installed remote authority instead. There is no fixture
@@ -1792,6 +1870,24 @@ path: the frame uses public provisioning on the remote resource that routes to t
   registered public `remote-libvirt` image for the cell's architecture with a digest and an
   inspected root (`root_spec`); admission refuses an authority-owned System without one. Otherwise
   the cell stops `blocked` before any mutation.
+- Obtain these catalog facts by declaring/reconciling a public `remote-libvirt` image with
+  `source.kind = "staged"` and a **fresh** volume name, then running
+  `python -m kdive stage-volume --image IMAGE --arch ARCH --from /path/to/base.qcow2`
+  against the lane's configured database and single remote instance. Install `virt-inspector`
+  for mandatory root inspection; optional config capture uses `guestfish`. Staging copies one
+  qcow2 into a private temporary directory, rejects backing/external-data images, hashes and
+  inspects that snapshot, uploads those exact bytes, then commits its digest and `root_spec`
+  (ADR-0776).
+  Inspection or root-metadata persistence failure fails the command. Existing remote volumes
+  are refused; no overwrite/delete is implied. If metadata fails after upload, inspect and
+  manually clean up the unverified residue or declare a fresh target before retrying.
+  Kernel-config capture/attachment is advisory. Reconcile preserves inspected facts only for
+  the unchanged staged volume declaration; repointing invalidates them. Plain staged images
+  remain unverified and eligible only for their existing disk/GRUB path.
+  These facts attest stage-time bytes, not subsequent remote replacement. Separately install
+  the **same digest-pinned base** into the authority's private store using the existing
+  [authority base contract](#installed-remote-authority-proof-prerequisite); its manifest root
+  identity, private-base digest and ongoing file-identity checks remain mandatory (ADR-0623).
 - The operator's batch-mode SSH to `ssh_target` and passwordless `sudo -n -u
   kdive-provider-authority` there are required. As that account, never root, the frame runs one
   fixed program with the authority's interpreter. The program reads
