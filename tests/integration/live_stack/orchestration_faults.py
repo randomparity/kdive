@@ -62,6 +62,7 @@ from tests.integration.live_stack.skew import readyz_urls
 from tests.integration.live_stack.spine import mint_role_token, ok, scalar
 from tests.live_vm.installed_local_authority_support import (
     RunningJobClaim,
+    _active_worker_readyz_urls,
     running_job_claim,
     set_exact_worker_hold,
     wait_for_reclaimed_job,
@@ -270,7 +271,9 @@ def outage_verdict(seen: Outage) -> dict[str, object]:
     if seen.final.attempt <= 1:
         raise _fail("attempt 1 succeeded: the outage never reached the in-flight attempt")
     failed = attempt_categories(seen.journal, seen.job_id)
-    if "infrastructure_failure" in failed:
+    if any(category != "infrastructure_failure" for category in failed):
+        raise _fail(f"an attempt failed {failed}, not with the outage's infrastructure_failure")
+    if failed:
         path = "requeued"
     elif HEARTBEAT_LOST.format(job_id=seen.job_id) in seen.journal:
         path = "lease-reclaimed"
@@ -462,10 +465,20 @@ async def stale_journal(job_id: str, invocation_id: str, deadline_s: float) -> s
         await asyncio.sleep(2.0)
 
 
+def ready_urls(base_url: str, units: Sequence[str]) -> list[str]:
+    """The ``/readyz`` of the server, the reconciler and every running fixed worker slot.
+
+    The host lane runs no lifecycle-witness listener, so its default port is not probed.
+    """
+    roles = readyz_urls(base_url, {})
+    slots = _active_worker_readyz_urls(base_url, "\n".join(units))
+    return [roles["server"], roles["reconciler"], *(url for _, url in slots)]
+
+
 async def wait_ready(base_url: str, deadline_s: float) -> float | None:
     """Seconds until every role's ``/readyz`` answers 200, or ``None`` past the deadline."""
     started = time.monotonic()
-    urls = list(readyz_urls(base_url).values())
+    urls = ready_urls(base_url, await asyncio.to_thread(running_units))
     async with httpx.AsyncClient(timeout=5.0) as client:
         while time.monotonic() - started < deadline_s:
             codes = []

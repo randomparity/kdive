@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -17,8 +19,9 @@ from kdive.mcp.tools._common import job_envelope
 from kdive.services.systems.admission import ProvisionJobAdmitted, stored_admission_result
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import orchestration_faults as of
-from tests.integration.live_stack.resource_limits import cells, failure
-from tests.integration.live_stack.scenario import ScenarioStop
+from tests.integration.live_stack.evidence import EvidenceWriter
+from tests.integration.live_stack.resource_limits import Held, Provider, cells, failure
+from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.live_vm.installed_local_authority_support import RunningJobClaim
 
 _NOW = datetime(2026, 10, 20, tzinfo=UTC)
@@ -236,10 +239,11 @@ _OUTAGE = of.Outage(
     [
         (_line(f"job {_JOB} failed: infrastructure_failure"), "requeued"),
         (_HEARTBEAT, "lease-reclaimed"),
+        (_HEARTBEAT + "\n" + _line(f"job {_JOB} failed: infrastructure_failure"), "requeued"),
         (_line(f"heartbeat for job {_OTHER} failed; stopping (lease will lapse)"), "unknown"),
         ("", "unknown"),
     ],
-    ids=["requeued", "lease-reclaimed", "other-job", "silent"],
+    ids=["requeued", "lease-reclaimed", "both", "other-job", "silent"],
 )
 def test_outage_labels_the_resume_path(journal: str, path: str) -> None:
     assert of.outage_verdict(replace(_OUTAGE, journal=journal))["resume_path"] == path
@@ -264,6 +268,10 @@ def test_outage_labels_the_resume_path(journal: str, path: str) -> None:
         ),
         (replace(_OUTAGE, final=of.JobRow("succeeded", 1, _W1)), "never reached"),
         (replace(_OUTAGE, domain_active=False), "not running after the outage"),
+        (
+            replace(_OUTAGE, journal=_HEARTBEAT + "\n" + _line(f"job {_JOB} failed: boot_timeout")),
+            "not with the outage's",
+        ),
     ],
     ids=[
         "container",
@@ -273,6 +281,7 @@ def test_outage_labels_the_resume_path(journal: str, path: str) -> None:
         "job-failed",
         "attempt-1",
         "domain-down",
+        "other-category",
     ],
 )
 def test_outage_refuses(seen: of.Outage, reason: str) -> None:
@@ -297,3 +306,82 @@ def test_cells_are_the_six_orchestration_cells() -> None:
         for p in ("local-libvirt", "remote-libvirt")
         for f in ("worker-interruption", "lost-response", "backing-service")
     }
+
+
+def test_ready_urls_probe_every_running_slot_and_no_witness() -> None:
+    urls = of.ready_urls(
+        "http://127.0.0.1:8000/mcp",
+        ["kdive-live-worker@1.service", "kdive-live-worker@2.service"],
+    )
+    assert urls == [
+        "http://127.0.0.1:9464/readyz",
+        "http://127.0.0.1:9466/readyz",
+        "http://127.0.0.1:9465/readyz",
+        "http://127.0.0.1:9470/readyz",
+    ]
+
+
+# --- the in-flight probe ---------------------------------------------------------------
+
+_XML = (
+    f"<domain><uuid>{_UUID}</uuid><devices><disk><source file='/var/lib/kdive/o.qcow2'/>"
+    "</disk></devices></domain>"
+)
+
+
+def _held(tmp_path: Path) -> Held:
+    provider = Provider({}, set, lambda _s: _XML, lambda _p: 0, lambda: None, lambda _p: False)
+    run = CellRun(cells("local-libvirt", owner=of.OWNER)[0], EvidenceWriter(tmp_path))
+    return Held(run, cast(Any, None), provider, "alloc", 0, set(), system_id=_UUID)
+
+
+def _probe(
+    monkeypatch: pytest.MonkeyPatch,
+    rows: list[of.JobRow],
+    domains: list[tuple[bool, str | None]],
+    claim_attempt: int = 1,
+) -> None:
+    async def holder(_db: str, _job: str) -> of.JobRow:
+        return rows.pop(0) if len(rows) > 1 else rows[0]
+
+    def domain(_p: object, _s: str) -> tuple[bool, str | None]:
+        return domains.pop(0) if len(domains) > 1 else domains[0]
+
+    async def claim(_db: str, _job: str) -> RunningJobClaim:
+        return _claim(_W1, claim_attempt)
+
+    monkeypatch.setattr(of, "job_holder", holder)
+    monkeypatch.setattr(of, "_domain", domain)
+    monkeypatch.setattr(of, "running_job_claim", claim)
+    monkeypatch.setattr(of, "_POLL_S", 0.0)
+
+
+def test_in_flight_waits_for_attempt_one_on_an_active_domain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows = [
+        of.JobRow("queued", 0, None),
+        of.JobRow("running", 1, _W1),
+        of.JobRow("running", 1, _W1),
+    ]
+    _probe(monkeypatch, rows, [(False, None), (False, None), (True, _UUID)])
+    held = _held(tmp_path)
+    found, uuid = asyncio.run(of.in_flight(held, "db", _JOB, 60.0))
+    assert (found.worker_id, uuid) == (_W1, _UUID)
+    assert held.overlays == held.disks == ["/var/lib/kdive/o.qcow2"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "attempt"),
+    [([of.JobRow("succeeded", 1, _W1)], 1), ([of.JobRow("running", 1, _W1)], 2)],
+    ids=["finished-first", "claim-moved-on"],
+)
+def test_in_flight_refuses_a_missed_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rows: list[of.JobRow], attempt: int
+) -> None:
+    _probe(monkeypatch, rows, [(True, _UUID)], claim_attempt=attempt)
+    held = _held(tmp_path)
+    assert "fault point not reached" in _refused(
+        lambda: asyncio.run(of.in_flight(held, "db", _JOB, 60.0))
+    )
+    assert held.overlays == []
