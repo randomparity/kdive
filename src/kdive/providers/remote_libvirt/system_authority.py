@@ -78,6 +78,7 @@ _MAX_STATE_ENTRIES = 4096
 _MAX_STATE_BYTES = 1_048_576
 _MAX_DOMAIN_DOCUMENTS = 4096
 _MAX_STORAGE_PATH_BYTES = 4096
+_SERIAL_TARGET_DEFAULTS = {"x86_64": "isa-serial", "ppc64le": "spapr-vio-serial"}
 _PHASES = {
     "planned": 0,
     "overlay-ready": 1,
@@ -433,14 +434,17 @@ def _one(root: ET.Element, path: str, what: str) -> ET.Element:
     return values[0]
 
 
-def _target_devices(root: ET.Element, tag: str) -> list[tuple[str | None, str | None, str | None]]:
+def _target_devices(
+    root: ET.Element, tag: str, *, default_type: str | None = None
+) -> list[tuple[str | None, str | None, str | None]]:
     values = []
     for device in root.findall(f"./devices/{tag}"):
         target = device.find("./target")
+        target_type = target.get("type") if target is not None else None
         values.append(
             (
                 device.get("type"),
-                target.get("type") if target is not None else None,
+                None if target_type == default_type else target_type,
                 target.get("name")
                 if tag == "channel" and target is not None
                 else (target.get("port") if target is not None else None),
@@ -449,7 +453,23 @@ def _target_devices(root: ET.Element, tag: str) -> list[tuple[str | None, str | 
     return values
 
 
-def _domain_projection(domain_xml: str) -> dict[str, object]:
+def _cpu_mode(cpu: ET.Element, *, live: bool) -> str | None:
+    mode = cpu.get("mode")
+    expanded = mode == "custom" and cpu.get("match") == "exact" and cpu.get("check") == "full"
+    return "host-model" if live and expanded else mode
+
+
+def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, object]:
+    """Project the configuration KDIVE renders, ignoring only what libvirt fills in (#3296).
+
+    libvirt stores the architecture's default serial target type the intent omits, so that
+    default projects as omitted. A ``live`` document also reports runtime state in place of
+    configuration: a started ``host-model`` CPU reads back expanded to ``custom`` with
+    ``match='exact' check='full'``, and a ``network`` interface reads back its network's bridge.
+    The inactive document is always compared without those two allowances. The live CPU model
+    is not compared: a running CPU defined as ``custom`` with those attributes and then redefined
+    back to ``host-model`` is not detected until the next start applies the inactive definition.
+    """
     root = parse_domain_xml(domain_xml)
     os_element = _one(root, "./os", "operating system")
     os_type = _one(os_element, "./type", "machine type")
@@ -476,7 +496,9 @@ def _domain_projection(domain_xml: str) -> dict[str, object]:
             (
                 interface.get("type"),
                 network_source.get("network") if network_source is not None else None,
-                network_source.get("bridge") if network_source is not None else None,
+                network_source.get("bridge")
+                if network_source is not None and not (live and interface.get("type") == "network")
+                else None,
                 network_source.get("dev") if network_source is not None else None,
                 model.get("type") if model is not None else None,
             )
@@ -487,7 +509,7 @@ def _domain_projection(domain_xml: str) -> dict[str, object]:
         "uuid": root.findtext("./uuid"),
         "memory_bytes": _memory_bytes(memory),
         "vcpus": (vcpu.text or "").strip(),
-        "cpu_mode": _one(root, "./cpu", "CPU").get("mode"),
+        "cpu_mode": _cpu_mode(_one(root, "./cpu", "CPU"), live=live),
         "architecture": os_type.get("arch"),
         "machine": os_type.get("machine"),
         "boots": [element.get("dev") for element in os_element.findall("./boot")],
@@ -505,7 +527,9 @@ def _domain_projection(domain_xml: str) -> dict[str, object]:
         },
         "networks": networks,
         "channels": _target_devices(root, "channel"),
-        "serials": _target_devices(root, "serial"),
+        "serials": _target_devices(
+            root, "serial", default_type=_SERIAL_TARGET_DEFAULTS.get(os_type.get("arch") or "")
+        ),
         "consoles": _target_devices(root, "console"),
         "filesystems": len(root.findall("./devices/filesystem")),
         "hostdevs": len(root.findall("./devices/hostdev")),
@@ -1087,7 +1111,8 @@ class RemoteAuthoritySystemProvider:
     def _validate_domain(domain: _Domain, intent: _ProvisionIntentV1) -> bool:
         expected = _domain_projection(intent.domain_xml)
         try:
-            documents = [domain.XMLDesc(0), domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)]
+            live_document = domain.XMLDesc(0)
+            inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
             active = bool(domain.isActive())
         except libvirt.libvirtError as exc:
             raise CategorizedError(
@@ -1095,8 +1120,8 @@ class RemoteAuthoritySystemProvider:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             ) from exc
         try:
-            for document in documents:
-                if _domain_projection(document) != expected:
+            for document, live in ((live_document, True), (inactive, False)):
+                if _domain_projection(document, live=live) != expected:
                     raise CategorizedError(
                         "remote authority System domain differs from private intent",
                         category=ErrorCategory.CONFLICT,
@@ -1112,7 +1137,6 @@ class RemoteAuthoritySystemProvider:
                 "remote authority System domain projection is invalid",
                 category=ErrorCategory.CONFLICT,
             ) from exc
-        inactive = documents[1]
         normalized = preserved_definition_identity(inactive)
         if intent.normalized_definition is not None and normalized != intent.normalized_definition:
             raise CategorizedError(
