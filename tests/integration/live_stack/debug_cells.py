@@ -1197,8 +1197,9 @@ async def _prepare_target(
 
     async def body(guest: Guest) -> dict[str, object]:
         run_id, _endpoint = await boot(scratch, guest, tree, manifest)
-        remote = guest.lane.provider == REMOTE
-        transport = await asyncio.to_thread(transport_of, guest) if remote else None
+        transport = None
+        if guest.lane.provider == REMOTE:
+            transport = await asyncio.to_thread(transport_of, guest)
         started = checked(
             await scalar(guest.op, "debug.start_session", run_id=run_id, transport="gdbstub"),
             "target-start",
