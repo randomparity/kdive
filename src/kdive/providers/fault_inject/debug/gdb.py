@@ -10,12 +10,14 @@ from kdive.providers.ports.debug import (
     GdbBreakpointRef,
     GdbDisassembly,
     GdbFrame,
+    GdbFrameDetail,
     GdbHalt,
     GdbInstruction,
     GdbMiAttachment,
     GdbModule,
     GdbModuleList,
     GdbStopRecord,
+    GdbVariable,
     GdbWatchpointRef,
 )
 
@@ -134,10 +136,15 @@ class FaultInjectDebugEngine:
             truncated=False,
         )
 
-    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
+    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrameDetail:
         del attachment
-        return GdbFrame(
-            level=level, func="panic", addr="0xffffffff81000000", file="kernel/panic.c", line=1
+        return GdbFrameDetail(
+            level=level,
+            func="panic",
+            addr="0xffffffff81000000",
+            file="kernel/panic.c",
+            line=1,
+            args=[GdbVariable(name="fmt", type="const char *", value="0xffffffff82000000")],
         )
 
     def set_watchpoint(

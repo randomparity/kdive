@@ -849,7 +849,25 @@ def test_read_frame_returns_read(migrated_url: str) -> None:
                                 ]
                             },
                         }
-                    ]
+                    ],
+                    "-thread-list-ids": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {"current-thread-id": "1"},
+                        }
+                    ],
+                    "-stack-list-variables --thread 1 --frame 2 --simple-values": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "variables": [
+                                    {"name": "fd", "arg": "1", "type": "int", "value": "7"}
+                                ]
+                            },
+                        }
+                    ],
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
@@ -862,8 +880,12 @@ def test_read_frame_returns_read(migrated_url: str) -> None:
             )
         assert resp.status == "read"
         assert resp.data["level"] == 2
+        assert resp.data["truncated"] is False
         frame = cast("dict[str, Any]", resp.data["frame"])
         assert frame["func"] == "schedule"
+        assert frame["args"] == [{"name": "fd", "type": "int", "value": "7"}]
+        assert frame["locals"] == []
+        assert "truncated" not in frame
 
     asyncio.run(_run())
 

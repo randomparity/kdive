@@ -66,7 +66,7 @@ halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session 
 - `debug.read_memory` — read kernel memory at an address.
 - `debug.resolve_symbol` — resolve a symbol name to an address.
 - `debug.backtrace` — unwind the call stack at the halt.
-- `debug.read_frame` — select and read a single stack frame.
+- `debug.read_frame` — read one stack frame with its arguments and locals.
 - `debug.disassemble` — disassemble instructions around an address.
 
 `debug.resolve_symbol` yields an address; it does not evaluate member, array, or type-aware
