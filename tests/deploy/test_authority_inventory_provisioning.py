@@ -473,3 +473,22 @@ def test_uv_lock_is_removed_before_every_verifier_can_see_it():
     assert block.index("Remove uv's install lock after the runtime sync") == install + 1
     for task in (t for t in flatten(top) if "install lock" in t["name"]):
         assert task["ansible.builtin.command"]["argv"][-1] == "unlock"
+
+
+def test_uv_lock_removal_requires_a_root_controlled_venv(monkeypatch, tmp_path):
+    ns, root, lock = uv_runtime(monkeypatch, tmp_path)
+    (root / ".venv").chmod(0o777)
+    with pytest.raises(ValueError, match="not root-controlled"):
+        ns["unlock"]()
+    assert lock.exists()
+
+
+@pytest.mark.skipif(
+    Path("/opt/kdive-authority-inventory").exists(), reason="host has a collector runtime"
+)
+def test_unlock_phase_runs_no_other_verifier_phase(monkeypatch):
+    code = tasks()[0]["ansible.builtin.set_fact"]["provider_authority_host_inventory_verifier"]
+    monkeypatch.setattr("sys.argv", ["-c", "unlock"])
+    with pytest.raises(SystemExit) as exited:
+        exec(compile(code, str(SHARED), "exec"), {"__name__": "__main__"})
+    assert exited.value.code is None
