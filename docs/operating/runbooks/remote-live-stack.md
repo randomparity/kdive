@@ -720,8 +720,9 @@ boundaries are the local cells' of the
   counts must reach 0, and every session row of the Run must read `detached`. A fresh attach must
   then show one socket at each end, and none after it ends, so an observer that cannot see the
   connection fails the cell. Run the tests on the control-plane host.
-- The `drgn-live` start cells stop `blocked` when the start reports `missing_debuginfo`. That
-  warning is the symptom of remote guests never receiving the uploaded vmlinux (#3124).
+- The `drgn-live` start cells stop `blocked` when the start's `missing_debuginfo` warning gives
+  the reason `debuginfo_unloadable`. That is the symptom of remote guests never receiving the
+  uploaded vmlinux (#3124); any other warning fails the cell.
 - Rejection cells aim at one torn-down remote System per stack whose Run booted the fixture and
   whose gdbstub session ended. That target proves its own connection released the same way. Its
   protected state is the project's rows, the jobs naming the System or Run, and the domain's

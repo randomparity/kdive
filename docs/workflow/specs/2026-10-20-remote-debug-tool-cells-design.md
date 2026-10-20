@@ -42,10 +42,12 @@ host keys, which can fold into #3114's `capture_cells` helpers once both land.
 3. **drgn-live.** The four `debug.start_session/drgn-live` remote functional cells run.
    drgn-live on a remote System runs `kdive-drgn` in the guest, which never receives the Run's
    DWARF vmlinux (#3124, blocked by #3121). The start envelope then carries #3124's own
-   symptom, a `missing_debuginfo` warning (ADR-0322/0335 runtime probe). On the remote lane
-   alone, `start_body` stops that cell `blocked`, naming #3124 and the warning's `reason`, after
-   the session was recorded for ending. Without the warning the cell runs the local assertions,
-   so a closed #3124 turns it into a success and any other defect fails it.
+   symptom, a `missing_debuginfo` warning whose `reason` is `debuginfo_unloadable` (the
+   ADR-0335 runtime probe). On the remote lane alone, `start_body` stops that cell `blocked`,
+   naming #3124 and the reason, after the session was recorded for ending. Any other warning
+   (`missing_debuginfo` reason: no vmlinux uploaded at all) fails the cell. Without a warning the
+   cell runs the local assertions, so a closed #3124 turns it into a success and any other
+   defect fails it.
 4. **Transport observer** (new, in `debug_cells.py`). A remote functional cell reads the
    domain's `-gdb tcp:<addr>:<port>` argument from `Lane.xml` and counts ESTABLISHED TCP
    sockets on that 4-tuple at both ends: on the provider host,
@@ -58,7 +60,7 @@ host keys, which can fold into #3114's `capture_cells` helpers once both land.
    Then a calibration session (operator client) must show `{provider: 1, server: 1}` while
    attached and `{0, 0}` after its end, with every row `detached` again. Calibrating after the
    body keeps the body's own session rows exact (`list_body` compares them). The cell's effect
-   carries `transport: {after, attached, sessions_open: 0}`. A server not on this host fails the
+   carries `transport_release: {after, attached, sessions_open: 0}`. A server not on this host fails the
    calibration rather than passing vacuously. The calibration runs inside the body's
    `try/finally`, so a failed check still ends its session.
    Remote drgn-live holds no socket of its own: it reaches the guest through the guest agent
