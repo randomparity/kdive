@@ -18,7 +18,7 @@ Spec: [2026-10-20-remote-capture-tool-cells-design.md](../specs/2026-10-20-remot
 
 Tech stack: Python 3.14, pytest, libvirt-python, `uv`, `just`.
 
-Expected implementation size: 420–600 changed lines (L). Derived from the file map below: the
+Expected implementation size: 480–680 changed lines (L). Derived from the file map below: the
 contract rule and handler rename (~25), the lane field (~30), the capture-cell changes (~140), the
 carrier (~30), 45 binding rows, three unit-test files (~200) and one runbook section (~50).
 
@@ -52,13 +52,14 @@ carrier (~30), 45 binding rows, three unit-test files (~200) and one runbook sec
 | `tests/providers/test_composition.py` | comment names `_VMCORE_METHODS` | names `VMCORE_METHODS` |
 | `scripts/coverage_campaign/contract.py` | every advertised method a supported variant | handler-refused variants `unsupported`, no capability cell; `HANDLER_REFUSAL` |
 | `tests/scripts/test_coverage_contract.py` | remote capture unbound, 4 local unsupported | handler rule, remote counts, remote bindings |
-| `tests/integration/live_stack/tool_cells.py` | `Lane` with #3116 fields | + `pool_volume`; owns `pool_volume_path` |
+| `tests/integration/live_stack/tool_cells.py` | `Lane` with #3116 fields | + `pool_volume`; owns `pool_target` (shared with `remote_pcap_spool`) and `pool_volume_path` |
 | `tests/integration/live_stack/test_tool_cells.py` | lane tests | + pool volume tests |
-| `tests/integration/live_stack/capture_cells.py` | local by construction | `variant_of`, provider-aware profile, `refusal_of`, `refused_method`, dump-volume check, per-provider target |
+| `tests/integration/live_stack/capture_cells.py` | local by construction | `variant_of`, provider-aware profile, `refusal_of`, `refused_method`, dump-volume check, per-provider target, #3124 blocked route |
 | `tests/integration/live_stack/test_capture_cells.py` | local oracles | + remote cases |
 | `tests/integration/test_capture_tool_cells_live.py` | local cells | + remote x86_64 cells |
 | `scripts/coverage_campaign/obligations.toml` | local capture rows | + 45 remote rows |
-| `docs/operating/runbooks/remote-live-stack.md` | §1–§11 | + §12 |
+| `docs/operating/runbooks/remote-live-stack.md` | numbered sections | + one remote capture section |
+| `tests/integration/live_stack/debug_cells.py` | binds `protected_state` with four arguments | unchanged reader; the new `connect` keyword defaults to the worker |
 
 No compatibility path is retained. `lane_keys(observed)` keeps its local behaviour as the default
 of its new keyword.
@@ -191,7 +192,8 @@ Interfaces:
 
 - consumes `tool_cells.observer` (imported from `remote_lifecycle` by #3116) and the `_PoolConn`
   fake and `_cell` helper already in `test_tool_cells.py` (added by #3116).
-- provides `tool_cells.pool_volume_path(dest: str, pool: str, name: str) -> str` and
+- provides `tool_cells.pool_target(dest: str, pool: str) -> PurePosixPath`,
+  `tool_cells.pool_volume_path(dest: str, pool: str, name: str) -> str` and
   `Lane.pool_volume: Callable[[str], str] | None` (last field).
 
 Verification:
@@ -235,11 +237,13 @@ Steps:
    ```
 
 2. Run the green command. Expect the red failures above.
-3. In `tool_cells.py`, after `remote_pcap_spool`:
+3. In `tool_cells.py`, move `remote_pcap_spool`'s pool read into one helper that both namers
+   use. The existing pcap tests (`test_remote_pcap_spool_*`) keep passing unchanged, because the
+   read, the close and the assertion message are the same:
 
    ```python
-   def pool_volume_path(dest: str, pool: str, name: str) -> str:
-       """The provider-host path of volume ``name`` in storage pool ``pool``."""
+   def pool_target(dest: str, pool: str) -> PurePosixPath:
+       """The target directory of storage pool ``pool``, read through the operator's observer."""
        conn = observer(dest)
        try:
            xml = conn.storagePoolLookupByName(pool).XMLDesc(0)
@@ -247,7 +251,23 @@ Steps:
            conn.close()
        target = ET.fromstring(xml).findtext("./target/path")  # noqa: S314  # nosec B314
        assert target, f"storage pool {pool} has no target path"
-       return str(PurePosixPath(target) / name)
+       return PurePosixPath(target)
+
+
+   def remote_pcap_spool(dest: str, pool: str, system_id: str) -> Callable[[str], str]:
+       """Name the provider-host pcap volume a capture job of ``system_id`` writes into ``pool``.
+
+       The remote capturer writes a per-job volume into the configured storage pool (ADR-0432), so
+       the System owns it until the job reclaims it. The pool's target is read here, before any job
+       exists; the returned namer does no I/O.
+       """
+       directory = pool_target(dest, pool)
+       return lambda job_id: str(directory / pcap_volume_name(UUID(system_id), UUID(job_id)))
+
+
+   def pool_volume_path(dest: str, pool: str, name: str) -> str:
+       """The provider-host path of volume ``name`` in storage pool ``pool``."""
+       return str(pool_target(dest, pool) / name)
    ```
 
    Add the `Lane` field `pool_volume: Callable[[str], str] | None` last. Extend its docstring with:
@@ -272,12 +292,15 @@ Interfaces:
 - consumes
   `kdive.providers.remote_libvirt.retrieve.host_dump_capture.host_dump_volume_name(system_id: UUID) -> str`;
 - provides `variant_of(cell: Cell) -> str`, `REFUSED_REASON: str`,
+  `REMOTE_DEBUGINFO_BLOCKED: dict[str, str]`,
   `refusal_of(env: ToolResponse, method: str) -> dict[str, object]`,
   `refused_method(run, caller, tree, manifest, db_url, guest) -> dict[str, object]`,
   `lane_keys(observed, *, remote: bool = False)`, `CaptureTarget.connect: Connect` (default
   `worker_connect`),
-  `protected_state(db_url, project, system_id, run_id, connect)` and the unchanged
-  `snapshot_of(db_url, target)` and `capture_target(...)` signatures.
+  `protected_state(db_url, project, system_id, run_id, *, connect: Connect = worker_connect)`
+  (keyword with the local default, so `debug_cells.snapshot_of`'s four-argument `partial`
+  (`debug_cells.py:1151`) keeps working unchanged) and the unchanged `snapshot_of(db_url, target)`
+  and `capture_target(...)` signatures.
 
 Verification:
 
@@ -285,7 +308,7 @@ Verification:
   `::test_variant_of_reads_either_provider` and
   `::test_options_follow_each_remote_functional_and_unsupported_cell`; red: `ImportError`
   (`variant_of`); green:
-  `uv run python -m pytest tests/integration/live_stack/test_capture_cells.py -q -k "variant or options or crash_profile or refusal or dump_volume or keys or target"`.
+  `uv run python -m pytest tests/integration/live_stack/test_capture_cells.py -q -k "variant or options or crash_profile or refusal or dump_volume or keys or target or snapshot or 3124"`.
 - Contract: remote crash profile. Mode: focused-test.
   `::test_remote_crash_profile_edits_only_the_remote_section`; red:
   `KeyError: 'local-libvirt'`; green: same command.
@@ -295,17 +318,24 @@ Verification:
   `::test_remote_host_dump_capture_owns_and_checks_its_dump_volume` and
   `::test_local_host_dump_capture_owns_no_dump_volume`; red: an `owned` list without the volume
   path; green: same command.
-- Contract: remote target. Mode: focused-test. `::test_lane_keys_keep_host_keys_remotely` and
-  `::test_capture_target_is_prepared_per_provider`; red: `TypeError` (unexpected keyword
-  `remote`) and a single cached target; green: same command.
+- Contract: remote target. Mode: focused-test. `::test_lane_keys_keep_host_keys_remotely`,
+  `::test_capture_target_is_prepared_per_provider` and
+  `::test_failed_remote_target_replays_its_host_keys`; red: `TypeError` (unexpected keyword
+  `remote`), a single cached target and a replay without host keys; green: same command.
+- Contract: protected state reads the target's provider. Mode: focused-test.
+  `::test_snapshot_of_reads_the_targets_connect`; red: the fake `connect` is never called; green:
+  same command.
+- Contract: blocked remote introspection (#3124). Mode: focused-test.
+  `::test_remote_live_introspection_is_blocked_on_3124`; red: `options` returns `"live"`; green:
+  same command.
 
 Steps:
 
 1. Add tests to `test_capture_cells.py`. New imports:
    `from scripts.coverage_campaign.contract import HANDLER_REFUSAL`,
    `from tests.integration.live_stack import capture_cells`,
-   `from uuid import UUID`, and the names `REFUSED_REASON`, `refusal_of`, `variant_of`,
-   `vmcore_body` from `capture_cells`.
+   `from uuid import UUID`, and the names `REFUSED_REASON`, `REMOTE_DEBUGINFO_BLOCKED`,
+   `refusal_of`, `snapshot_of`, `variant_of` and `vmcore_body` from `capture_cells`.
 
    ```python
    def _remote_cells(arch: str = "x86_64") -> list[Cell]:
@@ -327,8 +357,6 @@ Steps:
        expected = {
            "control.force_crash": "kdump",
            "introspect.from_vmcore": "kdump",
-           "introspect.run": "live",
-           "introspect.script": "live",
            "postmortem.crash": "kdump",
            "vmcore.fetch/kdump": "kdump",
            "vmcore.fetch/host_dump": "host_dump",
@@ -337,11 +365,26 @@ Steps:
        }
        seen = {}
        for cell in _remote_cells():
-           if cell.kind == "rejection":
+           if cell.kind == "rejection" or cell.operation in REMOTE_DEBUGINFO_BLOCKED:
                continue
            op = cell.operation
            seen[f"{op}/{variant_of(cell)}" if op == "vmcore.fetch" else op] = options(cell)
        assert seen == expected
+
+
+   def test_remote_live_introspection_is_blocked_on_3124() -> None:
+       cells = [
+           c
+           for c in _remote_cells()
+           if c.kind == "functional" and c.operation in ("introspect.run", "introspect.script")
+       ]
+       assert len(cells) == 8
+       for cell in cells:
+           with pytest.raises(ScenarioStop, match="#3124") as stop:
+               options(cell)
+           assert stop.value.outcome is Outcome.BLOCKED
+       local = [c for c in _cells() if c.operation == "introspect.run" and c.kind == "functional"]
+       assert {options(c) for c in local} == {"live"}
 
 
    def _remote_profile() -> dict[str, object]:
@@ -396,11 +439,15 @@ Steps:
    _SYS = str(UUID(int=7))
 
 
-   def _dump_session(monkeypatch: pytest.MonkeyPatch, *, remote: bool, present: bool) -> Session:
+   def _dump_session(
+       monkeypatch: pytest.MonkeyPatch, *, remote: bool, present: bool, fails: bool = False
+   ) -> Session:
        async def nothing(*_a: object, **_k: object) -> None:
            return None
 
        async def capture(*_a: object, **_k: object) -> list[str]:
+           if fails:
+               raise AssertionError("capture job failed")
            return ["artifact-1"]
 
        async def core(*_a: object) -> tuple[str, bytes]:
@@ -435,6 +482,10 @@ Steps:
        with pytest.raises(AssertionError, match="outlived"):
            asyncio.run(vmcore_body(leaked))
        assert leaked.guest.owned == [path], "a leaked volume must stay owned for the cleanup"
+       failed = _dump_session(monkeypatch, remote=True, present=True, fails=True)
+       with pytest.raises(AssertionError, match="capture job failed"):
+           asyncio.run(vmcore_body(failed))
+       assert failed.guest.owned == [path], "a failed capture's volume must stay owned"
 
 
    def test_local_host_dump_capture_owns_no_dump_volume(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -472,6 +523,45 @@ Steps:
            )
            assert run.observed == {"host_os": provider}
        assert prepared == ["local-libvirt", "remote-libvirt"]
+
+
+   def test_failed_remote_target_replays_its_host_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+       async def prepare(
+           _run: CellRun, _url: str, _issuer: object, _db: str, _fx: object, scratch: CellRun
+       ) -> CaptureTarget:
+           scratch.observed |= {"host_os": "rocky:10.2", "host_arch": "x86_64"}
+           raise AssertionError("boot failed")
+
+       monkeypatch.setattr(capture_cells, "_TARGETS", {})
+       monkeypatch.setattr(capture_cells, "_prepare_target", prepare)
+       cell = next(c for c in _remote_cells() if c.kind == "rejection")
+       for _ in range(2):
+           run = CellRun(cell, cast(Any, None))
+           with pytest.raises(AssertionError, match="could not be prepared"):
+               asyncio.run(
+                   capture_cells.capture_target(
+                       run, "http://s", cast(Any, None), "db", lambda: (Path(), {})
+                   )
+               )
+           assert run.observed["host_os"] == "rocky:10.2"
+
+
+   def test_snapshot_of_reads_the_targets_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+       opened: list[str] = []
+
+       async def rows(*_a: object) -> list[object]:
+           return []
+
+       def defined(system_id: str, connect: object) -> bool:
+           opened.append(cast(Any, connect)())
+           return True
+
+       monkeypatch.setattr(capture_cells, "project_state", rows)
+       monkeypatch.setattr(capture_cells, "named_jobs", rows)
+       monkeypatch.setattr(capture_cells, "domain_defined", defined)
+       target = CaptureTarget("p", "s", "r", "x", {}, (), connect=lambda: "provider")
+       state = asyncio.run(snapshot_of("db", target)())
+       assert opened == ["provider"] and state["domain_defined"] is True
    ```
 
    `CellRun` is a plain dataclass (`tests/integration/live_stack/scenario.py`), so
@@ -489,6 +579,13 @@ Steps:
      _HOST_KEYS = ("host_os", "host_arch")
      # vmcore.fetch's refusal of a method outside its core-producing set (handlers.py).
      REFUSED_REASON = "method does not produce a vmcore"
+     # Remote drgn-live runs in the guest, which never receives the Run's vmlinux: these cells
+     # stay blocked on the open defect, not failed (#3124, blocked by #3121). Drop an entry when
+     # its issue closes.
+     REMOTE_DEBUGINFO_BLOCKED = {
+         tool: "remote guests do not receive the uploaded vmlinux (#3124)"
+         for tool in ("introspect.run", "introspect.script")
+     }
      ```
 
    - helpers:
@@ -499,8 +596,16 @@ Steps:
          return cell.scenario_id.split("/")[-2]
      ```
 
-     In `options`, replace `variant = cell.scenario_id.split("/")[2]` with
-     `variant = variant_of(cell)` and add, after the kdump/host_dump branch:
+     In `options`, after the ppc64le check, add:
+
+     ```python
+         if cell.provider == "remote-libvirt" and cell.operation in REMOTE_DEBUGINFO_BLOCKED:
+             raise ScenarioStop(Outcome.BLOCKED, REMOTE_DEBUGINFO_BLOCKED[cell.operation])
+     ```
+
+     `options` runs before the carrier provisions anything, so a blocked cell mutates nothing.
+     Then replace `variant = cell.scenario_id.split("/")[2]` with `variant = variant_of(cell)`
+     and add, after the kdump/host_dump branch:
 
      ```python
          if cell.operation == "vmcore.fetch" and variant in ("console", "gdbstub"):
@@ -537,21 +642,28 @@ Steps:
          return {key: observed[key] for key in keys if key in observed}
      ```
 
-   - in `vmcore_body`, after `refs = await s.capture(method, exposed=True)`:
+   - in `vmcore_body`, replace `method = s.run.cell.scenario_id.split("/")[2]` with
+     `method = variant_of(s.run.cell)`. Then replace the capture line
+     `refs = await s.capture(method, exposed=True)` with:
 
      ```python
-         dump: dict[str, object] = {}
+         path = None
          if method == "host_dump" and s.guest.lane.pool_volume is not None:
-             # The remote capture reclaims its per-System dump volume in its own finally.
+             # Owned before the capture: a failed capture can leave the deterministic volume.
              path = s.guest.lane.pool_volume(host_dump_volume_name(UUID(s.guest.system_id)))
              s.guest.owned.append(path)
+         refs = await s.capture(method, exposed=True)
+         dump: dict[str, object] = {}
+         if path is not None:
+             # The remote capture reclaims its per-System dump volume in its own finally.
              assert await asyncio.to_thread(s.guest.lane.absent, path), (
                  "the host_dump volume outlived its capture"
              )
              dump = {"dump_volume": "absent"}
      ```
 
-     and add `**dump` to the returned mapping.
+     and add `**dump` to the returned mapping. Afterwards
+     `rg -n 'split\("/"\)\[2\]' tests/integration/live_stack/capture_cells.py` prints nothing.
 
    - the refusal:
 
@@ -604,10 +716,14 @@ Steps:
      `connect=lanes[0].connect`.
    - `capture_target`: key `_TARGETS` by `(base_url, run.cell.provider)` and type it
      `dict[tuple[str, str], CaptureTarget | _Failed]`. Docstring: "Each provider of a stack has its
-     own target."
-   - `protected_state(db_url, project, system_id, run_id, connect: Connect)` reads
-     `domain_defined(system_id, connect)`. `snapshot_of` passes `target.connect`. `capability`
-     passes `worker_connect`.
+     own target." `_Failed` gains a last field `observed: dict[str, object]`. The `except` branch
+     stores `lane_keys(scratch.observed, remote=run.cell.provider == "remote-libvirt")` there, and
+     the replay runs `run.observed |= cached.observed` before raising. A failed remote target then
+     still names the provider host it reached.
+   - `protected_state(db_url, project, system_id, run_id, *, connect: Connect = worker_connect)`
+     reads `domain_defined(system_id, connect)`. `snapshot_of` passes `connect=target.connect`.
+     `capability` and `debug_cells` keep the default. `debug_cells.py` is a reader and is not
+     edited.
    - Update the module docstring's first line to "Crash capture and introspection tool cells
      over HTTP on both providers (#2814, #3114, ADR-0722)". Add one paragraph: a remote cell runs
      the same bodies on the remote lane; its profile edits the `remote-libvirt` section; a
@@ -633,27 +749,35 @@ Interfaces: consumes `variant_of`, `refused_method`, `HANDLER_REFUSAL`,
 Verification:
 
 - Contract: remote bindings. Mode: focused-test.
-  `test_coverage_contract.py::test_remote_capture_cells_bind_the_capture_carrier`; red:
-  `node_id` `None` for the remote cells; green:
-  `uv run python -m pytest tests/scripts/test_coverage_contract.py -q -k "capture"`.
+  `test_coverage_contract.py::test_remote_capture_cells_bind_the_capture_carrier` and the updated
+  `::test_pending_cells_have_owned_assertions_but_no_invented_nodes`; red: `node_id` `None` for
+  the remote cells; green:
+  `uv run python -m pytest tests/scripts/test_coverage_contract.py -q -k "capture or pending_cells"`.
 - Contract: carrier selection and dispatch. Mode: task-test-not-applicable — the module is
   `live_stack`-marked and only runs against a stack. Its selection is the same predicate the System
   carrier uses, and the live run plus `qualify`'s `missing-result` check prove it.
 
 Steps:
 
-1. Append to `test_coverage_contract.py`:
+1. Append to `test_coverage_contract.py`. It reuses the module's existing `_CAPTURE_NODE`
+   (line 149), so do not redefine it:
 
    ```python
-   _CAPTURE_NODE = "tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell"
-
-
    def test_remote_capture_cells_bind_the_capture_carrier(inventory: Inventory) -> None:
        cells = [c for c in build_contract(inventory=inventory).cells if c.owner == 3114]
        assert len(cells) == 180 and {c.node_id for c in cells} == {_CAPTURE_NODE}
    ```
 
-2. Run the green command. Expect `{None}` in the failure.
+   In `test_pending_cells_have_owned_assertions_but_no_invented_nodes`, replace
+   `assert {c.node_id for c in capture if c.provider == "remote-libvirt"} == {None}` with:
+
+   ```python
+       remote_capture = [c for c in capture if c.provider == "remote-libvirt"]
+       # A remote scenario id names no architecture either: the ppc64le cells (#2818's) share it.
+       assert len(remote_capture) == 360 and {c.node_id for c in remote_capture} == {_CAPTURE_NODE}
+   ```
+
+2. Run the green command. Expect `{None}` in the new test's failure.
 3. In `obligations.toml`, after the local `tool/vmcore.fetch/...` capture rows, add 45 rows
    `"tool/remote-libvirt/<tool>/<variant>/<kind>" = "tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell"`,
    sorted like their neighbours, for these `<tool>/<variant>` pairs:
@@ -744,22 +868,26 @@ Verification:
 
 Steps:
 
-1. After §11, add `## 12. Remote capture and introspection tool cells (#3114)`. Content:
+1. After the last numbered section (after Task 0's merge, the one after "Remote power, snapshot
+   and control tool cells (#3116)"), add a section numbered one higher and titled
+   `Remote capture and introspection tool cells (#3114)`. Refer to other sections by title, not
+   by number. Content:
    - the carrier node id and the 180 cells: 28 functional, 8 unsupported and 144 rejection,
      selected with `-k remote-libvirt`;
    - the differences from the local cells, per the spec: the remote profile options;
      `console`/`gdbstub` proving the handler refusal on a crashed Run (ADR-0722, 2026-10-20);
      the `host_dump` pool volume `kdive-host-dump-<system>.kdump` being owned and proven absent;
      drgn-live running in the guest over the guest agent; one remote rejection target per stack;
-   - prerequisites. §11's apply. In addition, the staged `fedora-kdive-remote-base-43` must be built
+   - prerequisites. Those of "Remote power, snapshot and control tool cells (#3116)" apply. In addition, the staged `fedora-kdive-remote-base-43` must be built
      after #3236 so its GRUB writes to the serial console that `control.force_crash` reads. A
      volume staged earlier is skipped by the image role, so rebuild it with
      `deploy/ansible/playbooks/image.yml` and force the rebuild;
-   - the command block of §11, with the carrier path
+   - that section's command block, with the carrier path
      `tests/integration/test_capture_tool_cells_live.py` and the same `bindings --remote
      --kernel-baseline longterm`;
-   - each configuration records 90 cells and skips the other configuration's 90. A remote kdump,
-     in-guest drgn or console failure is a failing cell. The provider check after the run: no
+   - each configuration records 90 cells and skips the other configuration's 90. The 4 functional
+     cells of `introspect.run` and `introspect.script` per configuration record `blocked` on #3124
+     until it closes. A remote kdump, console or dump-volume failure is a failing cell. The provider check after the run: no
      `kdive-` domain, and no `kdive-` overlay or `kdive-host-dump-` volume in the pool.
 2. `just docs-check`, exit 0.
 3. Commit: `docs(runbook): run the remote capture tool cells`.
@@ -777,12 +905,14 @@ Verification:
 Steps (only with an explicit grant naming the hosts, cap and cleanup):
 
 1. Deploy the committed head on the granted control plane, and confirm the deployed revision
-   equals `git rev-parse HEAD`. Then run §12's block for `default`, then `recovery`.
+   equals `git rev-parse HEAD`. Then run the new runbook section's block for `default`, then
+   `recovery`.
 2. Assemble and `qualify`. Record the outcome counts per configuration. Every failing or blocked
    cell is a finding with its cell id, reported and not fixed here.
-3. Cleanup: `demo-down.sh --wipe --yes`, the §12 provider check, shredding the scratch CA key,
+3. Cleanup: `demo-down.sh --wipe --yes`, the new section's provider check, shredding the scratch CA key,
    and the host restores the grant names.
 
 ## Deferrals and follow-ups
 
-None at plan time.
+- Remote `introspect.run`/`introspect.script` functional cells: blocked on #3124 (blocked by
+  #3121). When it closes, drop its `REMOTE_DEBUGINFO_BLOCKED` entries and prove the 8 cells.

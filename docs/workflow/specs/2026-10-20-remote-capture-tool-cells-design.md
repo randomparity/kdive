@@ -63,16 +63,22 @@ Two things stand in the way.
 
    The frame proves cleanup.
 3. **Provider-aware carrier** (`capture_cells.py`).
-   - `variant_of(cell)` is `scenario_id.split("/")[-2]`. `options` and the rejection `method`
-     use it.
+   - `variant_of(cell)` is `scenario_id.split("/")[-2]`. `options`, `vmcore_body` and the
+     rejection `method` use it.
+   - Remote `introspect.run` and `introspect.script` functional cells stop `blocked` on #3124
+     before provisioning. #3124 is open and blocked by #3121: remote guests never receive the
+     Run's `vmlinux` (`remote_libvirt/lifecycle/install.py` presigns only the kernel), and the
+     in-guest drgn cannot resolve symbols. `REMOTE_DEBUGINFO_BLOCKED` names them and loses its
+     entries when #3124 closes. Their rejection cells still run: the target's `debug.start_session`
+     does not resolve symbols.
    - `crash_profile` writes the profile's own provider section. Remote: `kdump` sets `crashkernel`
      (the arch default) and `destructive_ops`; `host_dump` sets `host_dump: true` and
      `destructive_ops`; `target` sets `destructive_ops`; `live` changes nothing.
      `console`/`gdbstub` provision with `host_dump`.
-   - `vmcore_body` with `host_dump` on a lane that has `pool_volume` checks the provider host after
-     the capture. The per-System dump volume `kdive-host-dump-<system>.kdump` must already be
-     absent, because the capture's own `finally` reclaims it. The body appends the volume's path
-     to `guest.owned`, so the frame proves it absent again after release.
+   - `vmcore_body` with `host_dump` on a lane that has `pool_volume` appends the per-System dump
+     volume `kdive-host-dump-<system>.kdump` to `guest.owned` before the capture. A failed capture
+     can leave the volume, and the frame's cleanup still proves it absent. After a successful
+     capture the volume must already be absent, because the capture's own `finally` reclaims it.
    - The drgn-live session tools prove detach, as locally. A remote drgn-live session runs in the
      guest over the guest agent (`RemoteLibvirtLiveIntrospect`) and holds no provider-host
      resource. The domain's undefinition proves the guest is gone.
@@ -80,11 +86,14 @@ Two things stand in the way.
    lane it provisions the representative through `on_lane_system` with `target` options, boots the
    fixture, opens and ends a drgn-live session and tears the System down. Its context keeps the
    lane keys plus the provider-host keys (`host_os`, `host_arch`). The protected state reads domain
-   definedness through the lane's `connect`. A failed preparation is replayed, not retried. The
-   local target is unchanged.
+   definedness through the lane's `connect`, which `protected_state` takes as a keyword
+   defaulting to the worker's libvirt. `debug_cells`, a reader of `protected_state`, therefore
+   keeps its local behaviour. A failed preparation is replayed, not retried. The replay carries
+   the provider-host keys the target had already observed. The local target is unchanged.
 5. **Lane** (`tool_cells.py`). `Lane` gains `pool_volume: Callable[[str], str] | None`. It is
-   `None` locally. Remotely it is `pool_volume_path(dest, pool, name)`, beside #3116's
-   `remote_pcap_spool`, which joins the pool's target path read through the observer.
+   `None` locally. Remotely it is `pool_volume_path(dest, pool, name)`, which joins the pool's
+   target path. That path is read through the observer by `pool_target`, a helper that #3116's
+   `remote_pcap_spool` also uses after this change, so the pool read is not duplicated.
 6. **Carrier** (`test_capture_tool_cells_live.py`):
    - parametrize the remote cells whose guest architecture is in `REMOTE_LANE_FAMILIES`;
    - load the fixture for the cell's guest architecture;
@@ -111,19 +120,26 @@ Considered and rejected:
   so a narrower rule would leave the ppc64le remote cells claiming impossible functional coverage.
 - *Stop advertising `console`/`gdbstub` as remote capture methods*: a product change to
   `systems.get` and the descriptor that other tools read, outside this test issue's surface.
+- *Check the dump volume by name (`storageVolLookupByName`) rather than by path*: the frame's
+  cleanup proves `owned` paths absent through `Lane.absent`. A name check would need its own
+  post-release step outside the frame.
 - *A frame-wide "no volume names the System" sweep in `remote_cleanup`*: it strengthens every remote
   carrier's cleanup (#3080, #3116, #3120) beyond this issue's surface. The named dump volume covers
   the one provider-host artifact these tools add.
 
 ## Success
 
-- `test_capture_tool_cell` parametrizes exactly the 180 x86_64 remote cells besides the 164 local
-  ones. On the granted live run, each of the 36 System cells per lane records `success`
-  (functional) or `unsupported` (handler refusal), or a truthful `blocked`/`fail`. Each of the 144
-  rejection cells records `rejection`. Every recorded cell carries the provider-host identity, and
-  every System cell also carries the kernel identity that its binding declares.
-- `qualify` against the run's bindings reports no `matrix-mismatch` and no `missing-result` for the
-  run's configuration.
+- `test_capture_tool_cell` parametrizes the 180 x86_64 remote cells (owner #3114) besides the 164
+  local ones.
+- On the granted live run, each configuration records its 90 #3114 cells:
+  - 18 System cells: 10 functional cells `success`, 4 handler-refusal cells `unsupported`, 4
+    `introspect.run`/`introspect.script` cells `blocked` on #3124, or a truthful `fail` or
+    `blocked` reported as a finding;
+  - 72 rejection cells `rejection`, or a truthful `fail`.
+- Every #3114 cell that reached the provider-host probe carries the provider-host identity, and
+  every System cell that booted the fixture carries the kernel identity its binding declares.
+- For those 90 cells per configuration, `qualify` against the run's bindings reports no
+  `matrix-mismatch`, `input-binding-missing` or `missing-result`.
 - The unit and contract tests listed under Validation pass under `just test`, and `just lint` is
   clean.
 
@@ -146,8 +162,11 @@ Considered and rejected:
      `demo-down.sh --wipe --yes` plus the runbook's provider check clear them;
    - a failed or blocked `capture_target` fails or blocks every rejection cell of that provider
      lane. It is not retried;
-   - a remote product defect found live (kdump capture, in-guest drgn debuginfo, console capture,
-     dump-volume leak) is a failing cell, reported as a finding and never fixed or waived here;
+   - a remote product defect found live (kdump capture, console capture, dump-volume leak) is a
+     failing cell, reported as a finding and never fixed or waived here. A known open defect
+     (#3124) is `blocked`;
+   - a cell blocked before the provider-host probe (unset `REMOTE_PROVIDER_SSH`, unstaged image)
+     records the control-plane host;
    - torn-down Systems, terminal Runs, stored cores and audit rows remain as history;
    - concurrent allocators on the stack or the provider host are not modelled.
 4. **Covered elsewhere:** local cells (#2814); ppc64le and POWER qualification, including the 8
@@ -163,9 +182,11 @@ Considered and rejected:
 | variant parsing | focused-test | `test_capture_cells.py`: `variant_of` reads local and remote ids; `options` maps remote `console`/`gdbstub` to `host_dump` |
 | remote crash profile | focused-test | `test_capture_cells.py`: each option edits only the remote section with the listed keys; the input is unchanged |
 | refused method | focused-test | `test_capture_cells.py`: `refusal_of` accepts the exact refusal and fails on refs, another reason, category or method |
-| dump-volume observer | focused-test | `test_capture_cells.py`: a remote `host_dump` capture appends the volume path and fails if the volume is present; a local lane appends nothing |
-| remote target | focused-test | `test_capture_cells.py`: one preparation per stack and provider; host keys kept remotely; definedness read through the lane's `connect`; failure replayed |
-| pool volume path | focused-test | `test_tool_cells.py`: the pool target joined with the name; no target path fails; local lane has none |
+| dump-volume observer | focused-test | `test_capture_cells.py`: a remote `host_dump` capture owns the volume path, even when the capture fails, and fails if the volume is present; a local lane owns nothing |
+| remote target | focused-test | `test_capture_cells.py`: one preparation per stack and provider; host keys kept remotely, including on a replayed failure |
+| pool volume path | focused-test | `test_tool_cells.py`: the pool target joined with the name; no target path fails; local lane has none; the pcap namer still passes over the shared read |
+| blocked remote introspection | focused-test | `test_capture_cells.py`: the 8 remote `introspect.run`/`script` functional cells stop `blocked` naming #3124; local cells unchanged |
+| protected state through the target | focused-test | `test_capture_cells.py`: `snapshot_of` reads the target's `connect` |
 | bindings | focused-test | `test_coverage_contract.py`: the 180 remote cells bind `test_capture_tool_cell` |
 | carrier selection and dispatch | task-test-not-applicable | a `live_stack` module that runs only against a stack; the live run and `qualify`'s `missing-result` prove it |
 | live cells | task-test-not-applicable | act only against a live stack and provider host; proven by the lab run and `qualify` |
