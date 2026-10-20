@@ -58,8 +58,6 @@ def _close(conn: _LibvirtConn) -> None:
         _log.warning("libvirt connection close failed; continuing", exc_info=True)
 
 
-_PCAP_OPEN_REFUSAL = "net dump: can't open "
-_EACCES_SUFFIX = ": Permission denied"
 # QEMU-controlled text reaches operator logs only, bounded and repr-quoted.
 _LOGGED_DESCRIPTION_CHARS = 256
 
@@ -183,9 +181,7 @@ class LocalLibvirtTrafficCapture:
             reply.error_class,
             reply.description[:_LOGGED_DESCRIPTION_CHARS],
         )
-        if reply.description.startswith(_PCAP_OPEN_REFUSAL) and reply.description.endswith(
-            _EACCES_SUFFIX
-        ):
+        if reply.pcap_open_denied:
             raise CategorizedError(
                 "the hypervisor was denied creating the capture pcap",
                 category=ErrorCategory.CONFIGURATION_ERROR,

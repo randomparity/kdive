@@ -9,7 +9,14 @@ means for it.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
+
+# QMP error classes are short CamelCase tokens (GenericError, DeviceNotFound). The class is the one
+# QEMU string that reaches failure details, so anything else is a malformed reply.
+_ERROR_CLASS = re.compile(r"[A-Za-z]{1,64}")
+_PCAP_OPEN_REFUSAL = "net dump: can't open "
+_EACCES_SUFFIX = ": Permission denied"
 
 
 class MalformedQmpReplyError(ValueError):
@@ -32,6 +39,15 @@ class QmpReply:
             self.error_class is not None and "not found" in self.description.lower()
         )
 
+    @property
+    def pcap_open_denied(self) -> bool:
+        """A ``filter-dump`` ``object-add`` refused: the hypervisor could not open the pcap."""
+        return (
+            self.error_class is not None
+            and self.description.startswith(_PCAP_OPEN_REFUSAL)
+            and self.description.endswith(_EACCES_SUFFIX)
+        )
+
 
 def parse_qmp_reply(raw: str) -> QmpReply:
     """Parse ``raw``; raise :class:`MalformedQmpReplyError` for any other shape."""
@@ -47,12 +63,15 @@ def parse_qmp_reply(raw: str) -> QmpReply:
     if "return" in response:
         return QmpReply(value=response["return"], reply_id=reply_id)
     error = response["error"]
-    if not isinstance(error, dict) or not isinstance(error.get("class"), str):
-        raise MalformedQmpReplyError("error member lacks a string class")
+    if not isinstance(error, dict):
+        raise MalformedQmpReplyError("error member is not an object")
+    error_class = error.get("class")
+    if not isinstance(error_class, str) or not _ERROR_CLASS.fullmatch(error_class):
+        raise MalformedQmpReplyError("error member lacks a QMP error class token")
     description = error.get("desc")
     return QmpReply(
         value=None,
         reply_id=reply_id,
-        error_class=error["class"],
+        error_class=error_class,
         description=description if isinstance(description, str) else "",
     )

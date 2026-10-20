@@ -62,8 +62,26 @@ def test_a_missing_description_reads_as_empty() -> None:
         '{"error": "denied"}',
         '{"error": {"desc": "no class"}}',
         '{"error": {"class": 7}}',
+        '{"error": {"class": ""}}',
+        '{"error": {"class": "Generic Error"}}',
+        '{"error": {"class": "\\u001b[31mGenericError"}}',
+        json.dumps({"error": {"class": "E" * 65}}),
     ],
 )
 def test_any_other_shape_is_malformed(raw: str) -> None:
     with pytest.raises(MalformedQmpReplyError):
         parse_qmp_reply(raw)
+
+
+@pytest.mark.parametrize(
+    ("desc", "denied"),
+    [
+        ("net dump: can't open /pool/x.pcap: Permission denied", True),
+        ("net dump: can't open /pool/x.pcap: No space left on device", False),
+        ("object 'x' not found", False),
+    ],
+)
+def test_pcap_open_denied_is_only_the_eacces_open_refusal(desc: str, denied: bool) -> None:
+    reply = parse_qmp_reply(json.dumps({"error": {"class": "GenericError", "desc": desc}}))
+
+    assert reply.pcap_open_denied is denied

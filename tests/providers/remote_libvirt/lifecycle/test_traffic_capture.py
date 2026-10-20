@@ -247,6 +247,24 @@ def test_a_refused_filter_command_is_a_control_failure(tmp_path: Path, execute: 
     }
 
 
+def test_a_denied_pcap_open_is_a_configuration_error_with_remediation(tmp_path: Path) -> None:
+    """An unwritable pool fails terminally with operator guidance, not as a retryable refusal."""
+    domain = _FakeDomain()
+    domain.replies["object-add"] = _error_reply(
+        "GenericError", "net dump: can't open '/pool/cap.pcap': Permission denied"
+    )
+    cap = _capturer(_FakeConn(domain=domain), tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        cap.attach(_DOMAIN, qom_id="kdive-dump-J", dest_path="/pool/cap.pcap", snaplen=128)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {
+        "reason": "pcap_open_denied",
+        "operation": "object_add",
+        "error": "GenericError",
+        "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
+    }
+
+
 @pytest.mark.parametrize("reply", ["{}", "not json", '{"return": {}, "error": {"class": "X"}}'])
 def test_a_malformed_filter_reply_is_a_control_failure(tmp_path: Path, reply: str) -> None:
     domain = _FakeDomain()

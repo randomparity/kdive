@@ -384,6 +384,17 @@ class RemoteLibvirtTrafficCapture:
     ) -> None:
         cmd = {"execute": "object-add", "arguments": arguments}
         reply = self._send(domain, domain_name, cmd, "object_add", verb="adding capture filter on")
+        if reply.pcap_open_denied:
+            raise CategorizedError(
+                "the remote hypervisor was denied creating the capture pcap",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "reason": "pcap_open_denied",
+                    "operation": "object_add",
+                    "error": str(reply.error_class),
+                    "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
+                },
+            )
         if reply.error_class is not None:
             raise _refused(reply, "object_add", domain_name)
 
