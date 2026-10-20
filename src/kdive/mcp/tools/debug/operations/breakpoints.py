@@ -135,7 +135,7 @@ def _register_debug_list_breakpoints(
     ) -> ToolResponse:
         """List breakpoints and watchpoints on a live DebugSession. Requires contributor.
 
-        data.breakpoints has one row per gdb breakpoint-table entry (ADR-0780): number, type
+        data.breakpoints has one row per gdb breakpoint-table entry: number, type
         (breakpoint or a watchpoint kind) and the location gdb reports, func and addr for a
         breakpoint or what (the watched expression, named expr by the watchpoint tools) for a
         watchpoint. data.count is the row count. A breakpoint gdb resolved to several locations
