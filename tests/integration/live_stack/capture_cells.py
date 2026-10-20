@@ -44,7 +44,7 @@ from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.deep_lifecycle import deep_body
 from tests.integration.live_stack.image_smoke import Endpoint, parse_probe, ssh
-from tests.integration.live_stack.power_snapshots import domain_defined, domain_kernel, grants
+from tests.integration.live_stack.power_snapshots import domain_defined, grants
 from tests.integration.live_stack.scenario import (
     CellRun,
     Provision,
@@ -73,6 +73,7 @@ from tests.integration.live_stack.tool_cells import (
     HttpCaller,
     Rejection,
     Snapshot,
+    domain_kernel,
     lane_image,
     observe_guest,
     on_lane_system,

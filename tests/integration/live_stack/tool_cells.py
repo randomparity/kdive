@@ -37,14 +37,17 @@ import os
 import platform
 import secrets
 import tempfile
+import xml.etree.ElementTree as ET  # noqa: S405 - libvirt XML of the provider  # nosec B405
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol, TypeIs, cast, get_args
+from uuid import UUID
 
 import httpx
+import libvirt
 import psycopg
 import pytest
 from fastmcp import Client
@@ -64,12 +67,15 @@ from kdive.mcp.dev_harness import (
 )
 from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.responses import ToolResponse
+from kdive.providers.ports.traffic import pcap_volume_name
+from kdive.providers.shared.runtime_paths import pcap_dir
 from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES, Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings, Outcome
 from tests.integration.live_stack.cleanup import disk_absent
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.deep_lifecycle import (
     FIXTURE_ROOT_ENV,
+    InstalledKernel,
     bound_kernel,
     file_sha256,
     load_fixture,
@@ -86,6 +92,8 @@ from tests.integration.live_stack.remote_lifecycle import (
     HOST_SSH_ENV,
     REMOTE_REPRESENTATIVES,
     RemoteHost,
+    guest_boot_kernel,
+    observer,
     on_remote_system,
     remote_host,
     remote_profile,
@@ -108,6 +116,7 @@ from tests.integration.live_stack.scenario import (
     run_cell,
     ssh_probe,
 )
+from tests.integration.live_stack.spine import worker_libvirt_uri
 
 Exposure = Literal["direct", "gateway"]
 Boundary = Literal[
@@ -805,6 +814,40 @@ def lane_image() -> tuple[str, RootfsCatalogEntry]:
     return name, load_rootfs_catalog()[name]
 
 
+def worker_connect() -> libvirt.virConnect:
+    """The worker's own libvirt: the local lane's provider."""
+    return libvirt.open(worker_libvirt_uri())
+
+
+def domain_kernel(
+    system_id: str, _endpoint: Endpoint, _key: Path, _release: str
+) -> tuple[str, str]:
+    """The ``<os><kernel>`` file the domain boots (the install's staged kernel) and its digest."""
+    kernel = ET.fromstring(domain_xml(system_id)).findtext("./os/kernel")  # noqa: S314  # nosec B314
+    assert kernel, "the installed domain names no direct kernel"
+    return file_sha256(kernel), kernel
+
+
+def _local_spool(system_id: str, _job_id: str) -> str:
+    return str(pcap_dir(UUID(system_id)))
+
+
+def remote_pcap_path(dest: str, pool: str, system_id: str, job_id: str) -> str:
+    """The provider-host path of the pcap volume capture job ``job_id`` writes into ``pool``.
+
+    The remote capturer writes a per-job volume into the configured storage pool (ADR-0432), so
+    the System owns it until the job reclaims it.
+    """
+    conn = observer(dest)
+    try:
+        xml = conn.storagePoolLookupByName(pool).XMLDesc(0)
+    finally:
+        conn.close()
+    target = ET.fromstring(xml).findtext("./target/path")  # noqa: S314  # nosec B314
+    assert target, f"storage pool {pool} has no target path"
+    return str(PurePosixPath(target) / pcap_volume_name(UUID(system_id), UUID(job_id)))
+
+
 class LaneFrame(Protocol):
     """A provider's System frame: provision, run ``body``, then prove owned cleanup."""
 
@@ -827,7 +870,11 @@ class Lane:
 
     ``profile`` takes the profile's unread ``kernel_source_ref``. ``xml`` and ``absent`` read the
     provider's own libvirt: the worker's for local-libvirt, the provider host's through the
-    operator's observer for remote-libvirt.
+    operator's observer for remote-libvirt. ``connect`` opens that libvirt for a native read;
+    ``spool(system, job)`` is the provider-host path a traffic capture writes (the System's
+    directory locally, the job's pool volume remotely); ``installed_kernel`` observes the kernel
+    an install put in place (the domain's direct kernel locally, the guest's own ``/boot``
+    remotely).
     """
 
     provider: str
@@ -836,6 +883,9 @@ class Lane:
     xml: Callable[[str], str]
     absent: Callable[[str], bool]
     frame: LaneFrame
+    connect: Callable[[], libvirt.virConnect]
+    spool: Callable[[str, str], str]
+    installed_kernel: InstalledKernel
 
 
 def _local_lane() -> Lane:
@@ -847,6 +897,9 @@ def _local_lane() -> Lane:
         domain_xml,
         disk_absent,
         partial(on_catalog_system, image=name),
+        worker_connect,
+        _local_spool,
+        domain_kernel,
     )
 
 
@@ -868,6 +921,9 @@ def _remote_lane(arch: str) -> Lane:
         partial(remote_xml, host.dest),
         partial(remote_volume_absent, host.dest),
         partial(on_remote_system, family=family),
+        partial(observer, host.dest),
+        partial(remote_pcap_path, host.dest, host.pool),
+        partial(guest_boot_kernel, family=family),
     )
 
 

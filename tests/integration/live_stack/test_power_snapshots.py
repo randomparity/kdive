@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -154,7 +154,7 @@ def test_only_the_tool_under_test_uses_the_exposure(tmp_path: Path) -> None:
 
 
 def test_protected_state_adds_the_target_jobs_and_domain(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[str] = []
+    seen: list[object] = []
 
     async def project_state(_db: str, project: str) -> dict[str, list[object]]:
         seen.append(project)
@@ -166,10 +166,17 @@ def test_protected_state_adds_the_target_jobs_and_domain(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(power_snapshots, "project_state", project_state)
     monkeypatch.setattr(power_snapshots, "system_jobs", system_jobs)
-    monkeypatch.setattr(power_snapshots, "domain_defined", lambda system_id: False)
-    state = asyncio.run(power_snapshots.protected_state("db", _TARGET))
+    connect = object()
+
+    def defined(system_id: str, conn: object) -> bool:
+        seen.append((system_id, conn))
+        return False
+
+    monkeypatch.setattr(power_snapshots, "domain_defined", defined)
+    snapshot = power_snapshots.snapshot_of("db", _TARGET, cast(Any, connect))
+    state = asyncio.run(snapshot())
     assert state == {"project": {"snapshots": [0, "x"]}, "jobs": [2, "y"], "domain_defined": False}
-    assert seen == ["cov-t", _TARGET.system_id]
+    assert seen == ["cov-t", _TARGET.system_id, (_TARGET.system_id, connect)]
 
 
 def test_grants_without_a_role_are_membership_only() -> None:
@@ -205,6 +212,11 @@ def test_a_failed_job_still_owns_the_disks_it_switched_to(
     assert owned == ["base", "overlay-2"]
 
 
+def _connect(conn: object) -> power_snapshots.Connect:
+    """A ``connect`` answering the fake ``conn``."""
+    return lambda: cast(Any, conn)
+
+
 class _Conn:
     def __init__(self, code: int | None) -> None:
         self.code, self.closed = code, False
@@ -224,31 +236,107 @@ class _Conn:
     ("code", "defined"),
     [(None, True), (power_snapshots.libvirt.VIR_ERR_NO_DOMAIN, False)],
 )
-def test_domain_defined_reads_the_lookup(
-    monkeypatch: pytest.MonkeyPatch, code: int | None, defined: bool
-) -> None:
+def test_domain_defined_reads_the_lookup(code: int | None, defined: bool) -> None:
     conn = _Conn(code)
-    monkeypatch.setattr(power_snapshots.libvirt, "open", lambda _uri: conn)
-    monkeypatch.setattr(power_snapshots, "worker_libvirt_uri", lambda: "test:///")
-    assert power_snapshots.domain_defined(_TARGET.system_id) is defined
+    assert power_snapshots.domain_defined(_TARGET.system_id, _connect(conn)) is defined
     assert conn.closed
 
 
-def test_domain_defined_never_reads_a_fault_as_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_domain_defined_never_reads_a_fault_as_absent() -> None:
     # A connection or lookup fault must fail the snapshot, not read as an absent domain.
     conn = _Conn(power_snapshots.libvirt.VIR_ERR_INTERNAL_ERROR)
-    monkeypatch.setattr(power_snapshots.libvirt, "open", lambda _uri: conn)
-    monkeypatch.setattr(power_snapshots, "worker_libvirt_uri", lambda: "test:///")
     with pytest.raises(power_snapshots.libvirt.libvirtError):
-        power_snapshots.domain_defined(_TARGET.system_id)
+        power_snapshots.domain_defined(_TARGET.system_id, _connect(conn))
     assert conn.closed
 
 
-def test_domain_defined_fails_when_libvirt_cannot_connect(monkeypatch: pytest.MonkeyPatch) -> None:
-    def refuse(_uri: str) -> _Conn:
+def test_domain_defined_fails_when_libvirt_cannot_connect() -> None:
+    def refuse() -> _Conn:
         raise power_snapshots.libvirt.libvirtError("connect")
 
-    monkeypatch.setattr(power_snapshots.libvirt, "open", refuse)
-    monkeypatch.setattr(power_snapshots, "worker_libvirt_uri", lambda: "test:///")
     with pytest.raises(power_snapshots.libvirt.libvirtError):
-        power_snapshots.domain_defined(_TARGET.system_id)
+        power_snapshots.domain_defined(_TARGET.system_id, cast(Any, refuse))
+
+
+class _Snap:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def getName(self) -> str:  # noqa: N802 - libvirt binding name
+        return self.name
+
+
+class _Dom:
+    def state(self) -> list[int]:
+        return [power_snapshots.libvirt.VIR_DOMAIN_PAUSED, 0]
+
+    def listAllSnapshots(self) -> list[_Snap]:  # noqa: N802 - libvirt binding name
+        return [_Snap("b"), _Snap("a")]
+
+
+class _StateConn:
+    def __init__(self) -> None:
+        self.closed = 0
+
+    def lookupByName(self, _name: str) -> _Dom:  # noqa: N802 - libvirt binding name
+        return _Dom()
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_native_reads_use_the_lane_connection() -> None:
+    conn = _StateConn()
+    system = _TARGET.system_id
+    assert power_snapshots.domain_state(system, _connect(conn)) == "paused"
+    assert power_snapshots.checkpoints(system, _connect(conn)) == ["a", "b"]
+    assert power_snapshots.domain_defined(system, _connect(conn))
+    assert conn.closed == 3
+
+
+def test_functional_boots_with_the_lane_kernel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cell = next(
+        c
+        for c in build_contract().cells
+        if c.operation == "control.power" and c.kind == "functional"
+    )
+    seen: list[object] = []
+
+    def kernel(*_: object) -> tuple[str, None]:
+        return "d" * 64, None
+
+    async def deep(*_: object, installed_kernel: object, **__: object) -> str:
+        seen.append(installed_kernel)
+        return "run"
+
+    async def endpoint(*_: object) -> power_snapshots.Endpoint:
+        return power_snapshots.Endpoint("h", 22)
+
+    async def body(_s: object) -> dict[str, object]:
+        return {}
+
+    monkeypatch.setattr(power_snapshots, "deep_body", deep)
+    monkeypatch.setattr(power_snapshots, "ssh_endpoint", endpoint)
+    monkeypatch.setitem(power_snapshots.BODIES, "control.power", body)
+    lane = type("L", (), {"entry": None, "installed_kernel": staticmethod(kernel)})()
+    guest = type(
+        "G",
+        (),
+        {
+            "op": None,
+            "system_id": "s",
+            "owned": [],
+            "project": "p",
+            "lane": lane,
+            "scratch": tmp_path,
+        },
+    )()
+    run = CellRun(cell, EvidenceWriter(tmp_path))
+    asyncio.run(
+        power_snapshots.functional(
+            run, cast(HttpCaller, None), "t", tmp_path, {}, cast(Guest, guest)
+        )
+    )
+    assert seen == [kernel]
