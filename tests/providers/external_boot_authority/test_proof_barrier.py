@@ -1,4 +1,4 @@
-"""Closed native-only fault barrier tests (ADR-0622)."""
+"""Closed native-only fault barrier tests (ADR-0622, ADR-0787)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import pytest
 
 from kdive.providers.external_boot_authority.proof_barrier import (
     AuthorityProofBarrier,
+    ProofBarrierAbort,
     ProofBarrierShutdown,
 )
 from kdive.providers.external_boot_authority.protocol import AuthorityOperation
@@ -171,3 +172,96 @@ async def test_barrier_refuses_to_replace_a_live_owner_socket(tmp_path: Path) ->
             await AuthorityProofBarrier(path, operator_uid=os.geteuid()).start()
     finally:
         listener.close()
+
+
+def _arm(system_id: object, run_id: object, operation: str, checkpoint: str) -> dict[str, object]:
+    return {
+        "action": "arm",
+        "system_id": str(system_id),
+        "run_id": str(run_id),
+        "operation": operation,
+        "checkpoint": checkpoint,
+    }
+
+
+async def _until_reached(path: Path) -> None:
+    for _ in range(50):
+        if await _request(path, {"action": "status"}) == {"state": "reached"}:
+            return
+        await asyncio.sleep(0)
+    pytest.fail("matching checkpoint did not reach the armed barrier")
+
+
+@pytest.mark.anyio
+async def test_abort_fails_only_a_reached_cleanup_finalize_wait(tmp_path: Path) -> None:
+    path = tmp_path / "control.sock"
+    barrier = AuthorityProofBarrier(path, operator_uid=os.geteuid())
+    await barrier.start()
+    system_id, run_id = uuid4(), uuid4()
+    invalid = {"error": "invalid-request"}
+    try:
+        assert await _request(path, {"action": "abort"}) == invalid
+        assert await _request(path, _arm(system_id, run_id, "activate", "before-finalize")) == (
+            invalid
+        )
+        assert await _request(path, _arm(system_id, run_id, "cleanup", "after-provider")) == {
+            "state": "armed"
+        }
+        provider = asyncio.create_task(
+            barrier.checkpoint(system_id, run_id, AuthorityOperation.CLEANUP, "after-provider")
+        )
+        await _until_reached(path)
+        assert await _request(path, {"action": "abort"}) == invalid
+        assert await _request(path, {"action": "release"}) == {"state": "released"}
+        await provider
+
+        assert await _request(path, _arm(system_id, run_id, "cleanup", "before-finalize")) == {
+            "state": "armed"
+        }
+        assert await _request(path, {"action": "abort"}) == invalid
+        finalize = asyncio.create_task(
+            barrier.checkpoint(system_id, run_id, AuthorityOperation.CLEANUP, "before-finalize")
+        )
+        await _until_reached(path)
+        assert await _request(path, {"action": "abort"}) == {"state": "aborted"}
+        with pytest.raises(ProofBarrierAbort):
+            await finalize
+        assert await _request(path, {"action": "status"}) == {"state": "idle"}
+        await barrier.checkpoint(system_id, run_id, AuthorityOperation.CLEANUP, "before-finalize")
+    finally:
+        await barrier.close()
+
+
+@pytest.mark.anyio
+async def test_release_clears_an_unreached_arm(tmp_path: Path) -> None:
+    path = tmp_path / "control.sock"
+    barrier = AuthorityProofBarrier(path, operator_uid=os.geteuid())
+    await barrier.start()
+    system_id, run_id = uuid4(), uuid4()
+    try:
+        assert await _request(path, _arm(system_id, run_id, "teardown", "after-provider")) == {
+            "state": "armed"
+        }
+        assert await _request(path, {"action": "release"}) == {"state": "released"}
+        assert await _request(path, {"action": "status"}) == {"state": "idle"}
+        await barrier.checkpoint(system_id, run_id, AuthorityOperation.TEARDOWN, "after-provider")
+        assert await _request(path, _arm(uuid4(), uuid4(), "cleanup", "before-finalize")) == {
+            "state": "armed"
+        }
+    finally:
+        await barrier.close()
+
+
+@pytest.mark.anyio
+async def test_shutdown_clears_an_aborted_wait_without_a_stale_arm(tmp_path: Path) -> None:
+    barrier = AuthorityProofBarrier(tmp_path / "control.sock", operator_uid=os.geteuid())
+    system_id, run_id = uuid4(), uuid4()
+    await barrier.arm(system_id, run_id, AuthorityOperation.CLEANUP, "before-finalize")
+    checkpoint = asyncio.create_task(
+        barrier.checkpoint(system_id, run_id, AuthorityOperation.CLEANUP, "before-finalize")
+    )
+    await barrier.reached.wait()
+    await barrier.close()
+    with pytest.raises(ProofBarrierShutdown):
+        await checkpoint
+    assert await barrier.status() == "idle"

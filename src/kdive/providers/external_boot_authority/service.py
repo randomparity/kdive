@@ -87,6 +87,10 @@ class AuthorityMutationAdapter(Protocol):
     ) -> AuthorityObservationV1: ...
 
 
+class ProofBarrierAbort(RuntimeError):
+    """The operator failed one paused cleanup finalization (ADR-0787)."""
+
+
 class AuthorityProofCheckpoint(Protocol):
     """Optional native-only pause boundary around one already-admitted provider commit."""
 
@@ -95,7 +99,7 @@ class AuthorityProofCheckpoint(Protocol):
         system_id: UUID,
         run_id: UUID,
         operation: AuthorityOperation,
-        checkpoint: Literal["before-provider", "after-provider"],
+        checkpoint: Literal["before-provider", "after-provider", "before-finalize"],
     ) -> None: ...
 
 
@@ -850,6 +854,15 @@ class ExternalBootAuthorityService:
         )
         if started is None:
             raise AuthorityServiceError("journal_conflict", reason="mutation_started_missing")
+        if self._proof_checkpoint is not None:
+            # Only an operator abort is a finalize failure; a shutdown propagates unmapped and so
+            # never publishes a quarantine (ADR-0787).
+            try:
+                await self._proof_checkpoint.checkpoint(
+                    request.system_id, request.run_id, request.operation, "before-finalize"
+                )
+            except ProofBarrierAbort as error:
+                raise self._provider_error(request, error) from None
         try:
             await self._adapter.finalize(request, AuthorityCommitContextV1.for_record(started))
         except AuthorityServiceError:
