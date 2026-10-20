@@ -34,8 +34,7 @@ Expected implementation size: 450–650 changed lines (L) — the file map below
 
 | File | Today | After |
 |---|---|---|
-| `tests/integration/live_stack/remote_lifecycle.py` | remote observer, cleanup, bindings | + `remote_pcap_path` |
-| `tests/integration/live_stack/tool_cells.py` | `Lane` with xml/absent | + `connect`, `spool`, `installed_kernel`; owns `worker_connect`, `domain_kernel` (moved) |
+| `tests/integration/live_stack/tool_cells.py` | `Lane` with xml/absent | + `connect`, `spool`, `installed_kernel`; owns `worker_connect`, `remote_pcap_path`, `domain_kernel` (moved) |
 | `tests/integration/live_stack/power_snapshots.py` | local native reads | native reads take `connect`; kernel from lane |
 | `tests/integration/live_stack/capture_cells.py` | `boot` with local kernel | `boot` with lane kernel |
 | `tests/integration/live_stack/control_cells.py` | local filters, spool, gateway | lane `connect`/`spool`; remote gateway; `run_target`, `target_state` |
@@ -50,15 +49,15 @@ one importer (`capture_cells`) migrates in Task 3.
 
 ## Task 1 — Lane fields
 
-Files: modify `tests/integration/live_stack/remote_lifecycle.py`,
-`tests/integration/live_stack/tool_cells.py`, `tests/integration/live_stack/power_snapshots.py`
-(remove the moved `domain_kernel`); test `tests/integration/live_stack/test_remote_lifecycle.py`,
+Files: modify `tests/integration/live_stack/tool_cells.py`,
+`tests/integration/live_stack/power_snapshots.py` (remove the moved `domain_kernel`),
+`tests/integration/live_stack/capture_cells.py` (its `domain_kernel` import); test
 `tests/integration/live_stack/test_tool_cells.py`.
 
 Interfaces (later tasks rely on):
 
-- `remote_lifecycle.remote_pcap_path(dest: str, pool: str, system_id: str, job_id: str) -> str`
 - `tool_cells.worker_connect() -> libvirt.virConnect`
+- `tool_cells.remote_pcap_path(dest: str, pool: str, system_id: str, job_id: str) -> str`
 - `tool_cells.domain_kernel(system_id: str, _endpoint: Endpoint, _key: Path, _release: str) -> tuple[str, str]`
 - `Lane.connect: Callable[[], libvirt.virConnect]`, `Lane.spool: Callable[[str, str], str]`,
   `Lane.installed_kernel: InstalledKernel` (`deep_lifecycle.InstalledKernel`)
@@ -66,10 +65,10 @@ Interfaces (later tasks rely on):
 Verification:
 
 - Contract: remote pcap path. Mode: focused-test.
-  `test_remote_lifecycle.py::test_remote_pcap_path_joins_the_pool_target` and
+  `test_tool_cells.py::test_remote_pcap_path_joins_the_pool_target` and
   `::test_remote_pcap_path_needs_a_pool_target`; red: `AttributeError` (no
   `remote_pcap_path`); green:
-  `uv run python -m pytest tests/integration/live_stack/test_remote_lifecycle.py -q -k pcap`.
+  `uv run python -m pytest tests/integration/live_stack/test_tool_cells.py -q -k pcap`.
 - Contract: lane fields. Mode: focused-test.
   `test_tool_cells.py::test_local_lane_observes_the_worker` and
   `::test_remote_lane_observes_the_provider_host`; red: `AttributeError: 'Lane' object has no
@@ -78,7 +77,11 @@ Verification:
 
 Steps:
 
-1. Add to `test_remote_lifecycle.py` (it already imports `remote_lifecycle`, `pytest`):
+1. Add to `test_tool_cells.py` (new imports: `from functools import partial`,
+   `from uuid import UUID`, `from kdive.providers.ports.traffic import pcap_volume_name`,
+   `from kdive.providers.shared.runtime_paths import pcap_dir`,
+   `from tests.integration.live_stack.remote_lifecycle import guest_boot_kernel`; `RemoteHost`,
+   `tool_cells`, `pytest` and `_cell` are already there):
 
    ```python
    class _Pool:
@@ -101,64 +104,30 @@ Steps:
            self.closed = True
 
 
-   _SYSTEM = "11111111-1111-1111-1111-111111111111"
-   _JOB = "22222222-2222-2222-2222-222222222222"
+   _SYSTEM, _JOB = str(UUID(int=1)), str(UUID(int=2))
 
 
    def test_remote_pcap_path_joins_the_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
        conn = _PoolConn("<pool><target><path>/srv/pool</path></target></pool>")
-       monkeypatch.setattr(remote_lifecycle, "observer", lambda _dest: conn)
-       path = remote_lifecycle.remote_pcap_path("op@provider.example", "kdive", _SYSTEM, _JOB)
-       assert path == f"/srv/pool/kdive-pcap-{_SYSTEM}-{_JOB}.pcap"
+       monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
+       path = tool_cells.remote_pcap_path("op@provider.example", "kdive", _SYSTEM, _JOB)
+       assert path == f"/srv/pool/{pcap_volume_name(UUID(_SYSTEM), UUID(_JOB))}"
        assert (conn.named, conn.closed) == ("kdive", True)
 
 
    def test_remote_pcap_path_needs_a_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
        conn = _PoolConn("<pool><target/></pool>")
-       monkeypatch.setattr(remote_lifecycle, "observer", lambda _dest: conn)
+       monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
        with pytest.raises(AssertionError, match="no target path"):
-           remote_lifecycle.remote_pcap_path("op@provider.example", "kdive", _SYSTEM, _JOB)
+           tool_cells.remote_pcap_path("op@provider.example", "kdive", _SYSTEM, _JOB)
        assert conn.closed
-   ```
 
-   Confirm `.pcap` against `kdive.providers.ports.traffic._PCAP_VOLUME_SUFFIX`; if it differs,
-   build the expected name with `pcap_volume_name(UUID(_SYSTEM), UUID(_JOB))` instead.
-   Run the green command; expect `AttributeError ... remote_pcap_path`.
-2. In `remote_lifecycle.py` add `from pathlib import Path, PurePosixPath` (extend the existing
-   `Path` import) and `from kdive.providers.ports.traffic import pcap_volume_name`, then after
-   `remote_volume_absent`:
 
-   ```python
-   def remote_pcap_path(dest: str, pool: str, system_id: str, job_id: str) -> str:
-       """The provider-host path of the pcap volume capture job ``job_id`` writes into ``pool``.
-
-       The remote capturer writes a per-job volume into the configured storage pool (ADR-0432),
-       so the System owns it until the job reclaims it.
-       """
-       conn = observer(dest)
-       try:
-           xml = conn.storagePoolLookupByName(pool).XMLDesc(0)
-       finally:
-           conn.close()
-       target = ET.fromstring(xml).findtext("./target/path")  # noqa: S314  # nosec B314
-       assert target, f"storage pool {pool} has no target path"
-       return str(PurePosixPath(target) / pcap_volume_name(UUID(system_id), UUID(job_id)))
-   ```
-
-   Run step 1's command; expect `2 passed`. Break the join (`/ "x"`) once, see red, revert.
-3. Add to `test_tool_cells.py` (imports: `from functools import partial`, `from uuid import UUID`,
-   `from kdive.providers.shared.runtime_paths import pcap_dir`,
-   `from tests.integration.live_stack import remote_lifecycle`,
-   `from tests.integration.live_stack.remote_lifecycle import guest_boot_kernel`; `RemoteHost`
-   is already imported):
-
-   ```python
    def test_local_lane_observes_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
        monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
        lane = tool_cells.lane_for(_cell("control.power", "local-libvirt", "x86_64"))
-       system, job = str(UUID(int=1)), str(UUID(int=2))
        assert lane.connect is tool_cells.worker_connect
-       assert lane.spool(system, job) == str(pcap_dir(UUID(system)))
+       assert lane.spool(_SYSTEM, _JOB) == str(pcap_dir(UUID(_SYSTEM)))
        assert lane.installed_kernel is tool_cells.domain_kernel
 
 
@@ -171,20 +140,22 @@ Steps:
        lane = tool_cells.lane_for(_cell("control.power", "remote-libvirt", "x86_64"))
        assert lane.connect() == "conn" and seen == ["op@provider.example"]
        spool = lane.spool
-       assert isinstance(spool, partial) and spool.func is remote_lifecycle.remote_pcap_path
+       assert isinstance(spool, partial) and spool.func is tool_cells.remote_pcap_path
        assert spool.args == ("op@provider.example", "kdive")
        kernel = lane.installed_kernel
        assert isinstance(kernel, partial) and kernel.func is guest_boot_kernel
        assert kernel.keywords == {"family": "fedora"}
    ```
 
-   Run the green command; expect `AttributeError ... 'connect'`.
-4. In `tool_cells.py`:
-   - imports: `import libvirt`; `from uuid import UUID`;
-     `import xml.etree.ElementTree as ET  # noqa: S405 - the worker's own domain XML  # nosec B405`;
+   Run both green commands; expect `AttributeError` as stated.
+2. In `tool_cells.py`:
+   - imports: `import libvirt`; `from pathlib import PurePosixPath` (beside `Path`);
+     `from uuid import UUID`;
+     `import xml.etree.ElementTree as ET  # noqa: S405 - libvirt XML  # nosec B405`;
+     `from kdive.providers.ports.traffic import pcap_volume_name`;
      `from kdive.providers.shared.runtime_paths import pcap_dir`; add `InstalledKernel` to the
-     `deep_lifecycle` import; add `guest_boot_kernel, observer, remote_pcap_path` to the
-     `remote_lifecycle` import; `from tests.integration.live_stack.spine import worker_libvirt_uri`.
+     `deep_lifecycle` import; add `guest_boot_kernel, observer` to the `remote_lifecycle`
+     import; `from tests.integration.live_stack.spine import worker_libvirt_uri`.
    - before `class Lane`:
 
      ```python
@@ -204,32 +175,41 @@ Steps:
 
      def _local_spool(system_id: str, _job_id: str) -> str:
          return str(pcap_dir(UUID(system_id)))
-     ```
-   - `Lane`: append the three fields after `frame` and extend the docstring:
 
-     ```python
-         connect: Callable[[], libvirt.virConnect]
-         spool: Callable[[str, str], str]
-         installed_kernel: InstalledKernel
+
+     def remote_pcap_path(dest: str, pool: str, system_id: str, job_id: str) -> str:
+         """The provider-host path of the pcap volume capture job ``job_id`` writes into ``pool``.
+
+         The remote capturer writes a per-job volume into the configured storage pool (ADR-0432),
+         so the System owns it until the job reclaims it.
+         """
+         conn = observer(dest)
+         try:
+             xml = conn.storagePoolLookupByName(pool).XMLDesc(0)
+         finally:
+             conn.close()
+         target = ET.fromstring(xml).findtext("./target/path")  # noqa: S314  # nosec B314
+         assert target, f"storage pool {pool} has no target path"
+         return str(PurePosixPath(target) / pcap_volume_name(UUID(system_id), UUID(job_id)))
      ```
 
-     Docstring addition: "``connect`` opens that libvirt for a native read; ``spool(system,
-     job)`` is the provider-host path a traffic capture writes (the System's directory locally,
-     the job's pool volume remotely); ``installed_kernel`` observes the kernel an install put in
-     place (the domain's direct kernel locally, the guest's own ``/boot`` remotely)."
-   - `_local_lane` passes `worker_connect, _local_spool, domain_kernel` after the frame.
-   - `_remote_lane` passes, after the frame:
-
-     ```python
-     (partial(observer, host.dest),)
-     (partial(remote_pcap_path, host.dest, host.pool),)
-     (partial(guest_boot_kernel, family=family),)
-     ```
+   - `Lane`: append three fields after `frame`
+     (`connect: Callable[[], libvirt.virConnect]`, `spool: Callable[[str, str], str]`,
+     `installed_kernel: InstalledKernel`) and extend its docstring: "``connect`` opens that
+     libvirt for a native read; ``spool(system, job)`` is the provider-host path a traffic
+     capture writes (the System's directory locally, the job's pool volume remotely);
+     ``installed_kernel`` observes the kernel an install put in place (the domain's direct
+     kernel locally, the guest's own ``/boot`` remotely)."
+   - `_local_lane` adds the arguments `worker_connect, _local_spool, domain_kernel` after the
+     frame; `_remote_lane` adds `partial(observer, host.dest)`,
+     `partial(remote_pcap_path, host.dest, host.pool)` and
+     `partial(guest_boot_kernel, family=family)` after the frame.
    - In `power_snapshots.py` delete `domain_kernel` and the imports only it used (`ET`,
      `file_sha256`, `domain_xml`); in `capture_cells.py` import `domain_kernel` from `tool_cells`
      instead of `power_snapshots` (Task 3 replaces that use with the lane's observer).
-5. Run both green commands; expect all pass. Run `just lint` and `just type`; expect clean.
-6. Commit: `test(live): give the provider lane native, spool and kernel observers`.
+3. Run both green commands; expect all pass. Break the pool join once (append `/ "x"`), see
+   `test_remote_pcap_path_joins_the_pool_target` red, revert. `just lint`, `just type` clean.
+4. Commit: `test(live): give the provider lane native, spool and kernel observers`.
 
 Acceptance: both lanes expose the three fields; local values are the same functions as before.
 

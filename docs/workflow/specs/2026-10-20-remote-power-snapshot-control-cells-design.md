@@ -43,7 +43,7 @@ filesystem, so they cannot run on a remote System:
      operator's `qemu+ssh` observer that `remote_xml` and `remote_volume_absent` already use.
    - `spool(system_id, job_id) -> str`: the provider-host path a capture job writes. Local:
      `pcap_dir(system)`. Remote: `remote_pcap_path(dest, pool, system, job)`, the pool's target
-     path joined with `pcap_volume_name` (`remote_lifecycle.py`).
+     path joined with `pcap_volume_name`, read through the observer.
    - `installed_kernel`: the deep-body kernel observer. Local: `domain_kernel`, moved unchanged
      from `power_snapshots.py`. Remote: `guest_boot_kernel(family=fedora)`, as #2810 and #3120 do.
 2. **Power and snapshots** (`power_snapshots.py`). `domain_state`, `checkpoints` and
@@ -126,7 +126,7 @@ Considered and rejected:
 | Contract | Mode | Evidence |
 |---|---|---|
 | lane fields | focused-test | `test_tool_cells.py`: local lane reads the worker libvirt, `pcap_dir`, `domain_kernel`; remote lane uses the observer, the pool path and `guest_boot_kernel(fedora)` |
-| remote pcap path | focused-test | `test_remote_lifecycle.py`: pool target joined with the job's volume name; a pool without a target path fails |
+| remote pcap path | focused-test | `test_tool_cells.py`: pool target joined with the job's volume name; a pool without a target path fails |
 | native reads through `connect` | focused-test | `test_power_snapshots.py`: state, checkpoints and definedness read the given connection and close it |
 | kernel observer from the lane | focused-test | `test_power_snapshots.py`, `test_control_cells.py`: `functional`/`boot` hand `deep_body` the lane's observer |
 | remote flow gateway | focused-test | `test_control_cells.py`: IPv4 gateway accepted; empty or non-IPv4 refused |
