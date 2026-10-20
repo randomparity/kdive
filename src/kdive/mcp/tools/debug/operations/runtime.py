@@ -223,8 +223,8 @@ class DebugEngineRuntime:
         A guest left running by a background continue is halted first, so gdb exits from a
         halted target as on every other detach (#3244). Returns False only when that halt
         failed, leaving the guest's execution unknown; blocking, so call it off the event loop.
-        A failed exit or removal raises :class:`ReapFailure` and keeps the owner registered for
-        a retry.
+        A failed exit or attachment-root removal raises :class:`ReapFailure` and keeps the owner
+        registered for a retry; a failed removal of a root-only pending owner raises its OSError.
         """
         root = self._pending_roots.get(session_id)
         if root is not None:
