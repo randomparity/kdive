@@ -15,6 +15,7 @@ from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
+from kdive.mcp.tools.debug.operations.runtime import with_halt_bounds
 from kdive.mcp.tools.debug.sessions.lifecycle import (
     _GDBSTUB,
     DebugSessionHandlers,
@@ -81,7 +82,12 @@ def register(
             Field(description="Transport kind: `gdbstub` (default) or `drgn-live`."),
         ] = _GDBSTUB,
     ) -> ToolResponse:
-        """Open a single-attach transport and insert a live DebugSession. Requires contributor.
+        """Reserve a single-attach transport and insert a live DebugSession. Requires contributor.
+
+        For local/remote libvirt `gdbstub`, this resolves and validates the endpoint without
+        connecting to the debugger. A live session does not guarantee current reachability.
+        The first actual GDB operation attaches, validates the protocol, and may halt the guest;
+        an unreachable or invalid target is reported then as a categorized attach failure.
 
         A `gdbstub` session on a System whose guest architecture differs from the worker host's
         (e.g. a ppc64le guest on an x86_64 host) needs a multiarch-capable gdb on the worker; a
@@ -105,10 +111,14 @@ def register(
         annotations=_docmeta.mutating(),
         meta={"maturity": "implemented"},
     )
+    @with_halt_bounds
     async def debug_end_session(
         session_id: Annotated[str, Field(description="The DebugSession to detach and close.")],
     ) -> ToolResponse:
-        """Drive a live DebugSession to detached; close its transport. Requires contributor."""
+        """Drive a live DebugSession to detached; close its transport. Requires contributor.
+        A guest left running by debug.continue with wait=False is halted first so the detach
+        resumes it as usual, which can add up to {halt_s} seconds; if that halt fails the reply
+        still reports 'detached' and adds data.guest_execution='unknown'."""
         return await handlers.end_session(pool, current_context(), session_id)
 
     @app.tool(

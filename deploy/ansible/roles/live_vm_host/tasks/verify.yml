@@ -693,6 +693,32 @@
   failed_when: live_vm_host_authority_denied_virsh_results.rc == 0
   when: live_vm_host_authority_enabled | bool
 
+- name: Require installed authority certificates to outlive the expiry margin
+  ansible.builtin.include_tasks:
+    file: tls_expiry.yml
+  vars:
+    live_vm_host_tls_expiry_certificates:
+      - name: server-certificate
+        path: "{{ live_vm_host_authority_credentials_dir }}/server-certificate"
+      - name: server-ca
+        path: "{{ live_vm_host_authority_credentials_dir }}/server-ca"
+      - name: worker-client-ca
+        path: "{{ live_vm_host_authority_credentials_dir }}/worker-client-ca"
+      - name: health-client-certificate
+        path: "{{ live_vm_host_authority_credentials_dir }}/health-client-certificate"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Require installed fixed-worker authority certificates to outlive the expiry margin
+  ansible.builtin.include_tasks:
+    file: tls_expiry.yml
+  vars:
+    live_vm_host_tls_expiry_certificates:
+      - name: server-ca
+        path: "{{ live_vm_host_worker_authority_secrets_root }}/server-ca"
+      - name: client-certificate
+        path: "{{ live_vm_host_worker_authority_secrets_root }}/client-certificate"
+  when: live_vm_host_worker_authority_enabled | bool
+
 - name: Assert the authority service is ready
   ansible.builtin.systemd_service:
     name: kdive-external-boot-authority.service
@@ -934,6 +960,11 @@
         path: "{{ live_vm_host_authority_credentials_dir }}/server-certificate.proof-backup"
         state: absent
 
+    - name: Clear the start limit the drift proof tripped
+      ansible.builtin.command:
+        argv: [systemctl, reset-failed, kdive-external-boot-authority.service]
+      changed_when: false
+
     - name: Restore authority readiness after drift proofs
       ansible.builtin.systemd_service:
         name: kdive-external-boot-authority.service
@@ -1029,3 +1060,44 @@
     path: "/tmp/kdive-live-worker-{{ item }}-permission-probe"
     state: absent
   loop: "{{ live_vm_host_worker_accounts }}"
+
+- name: Verify final inventory boundary state
+  block:
+    - name: Inspect the final inventory socket unit
+      ansible.builtin.stat:
+        path: /etc/systemd/system/kdive-authority-inventory.socket
+      register: live_vm_host_inventory_unit
+
+    - name: Require disabled inventory absence
+      ansible.builtin.assert:
+        that: not live_vm_host_inventory_unit.stat.exists
+      when: not live_vm_host_authority_inventory_observer_enabled | bool
+
+    - name: Verify final collector identity runtime and revision
+      ansible.builtin.command:
+        argv: [/opt/kdive-authority-inventory/.venv/bin/python, -I, -c,
+               "{{ provider_authority_host_inventory_verifier }}", verify,
+               "{{ live_vm_venv }}", "{{ live_vm_host_checkout.after }}"]
+      changed_when: false
+      when: live_vm_host_authority_inventory_observer_enabled | bool
+
+    - name: Repeat final observer readiness
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -S, /usr/libexec/kdive-authority-inventory-client.py]
+      become: true
+      become_user: kdive-authority-observer
+      changed_when: false
+      no_log: true
+      timeout: 120
+      when: live_vm_host_authority_inventory_observer_enabled | bool
+  rescue:
+    - name: Withdraw the collector after final verification failure
+      ansible.builtin.systemd_service:
+        name: kdive-authority-inventory.socket
+        state: stopped
+        enabled: false
+      when: live_vm_host_inventory_unit.stat.exists | default(false)
+
+    - name: Report final inventory boundary failure
+      ansible.builtin.fail:
+        msg: Final inventory boundary verification failed; repair prerequisites and reconverge.

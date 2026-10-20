@@ -33,6 +33,7 @@ from pathlib import Path
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import (
     GdbController,
+    GdbHalt,
     GdbMiAttachment,
     GdbStopRecord,
 )
@@ -74,7 +75,9 @@ from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 __all__ = [
+    "HALT_BOUND_SEC",
     "GdbMiEngine",
+    "RESUME_HOLD_BOUND_SEC",
     "MAX_INTERACTIVE_WAIT_SEC",
     "MAX_MEMORY_READ_BYTES",
     "MiRecord",
@@ -91,6 +94,10 @@ _timeout_error = mi_controller.timeout_error
 # path uses ASYNC continue (mi-async on), so `-exec-continue` returns `^running` immediately
 # rather than blocking until a stop a free-running kernel never produces.
 _MI_COMMAND_TIMEOUT_SEC = 10.0
+# The longest one halt of a running guest can take: the interrupt write plus its stop wait.
+HALT_BOUND_SEC = _MI_COMMAND_TIMEOUT_SEC + _INTERRUPT_STOP_TIMEOUT_SEC
+# The longest a waiting resume holds its session: the resume write, the wait, then a halt.
+RESUME_HOLD_BOUND_SEC = _MI_COMMAND_TIMEOUT_SEC + MAX_INTERACTIVE_WAIT_SEC + HALT_BOUND_SEC
 # gdb's RSP read timeout (`set remotetimeout`): generous-but-finite so a slow/silent stub
 # yields a clean gdb-reported disconnect rather than an opaque hang.
 RSP_REMOTE_TIMEOUT_SEC = 30
@@ -214,6 +221,8 @@ class GdbMiEngine(
             with contextlib.suppress(Exception):
                 controller.exit()
             raise self._as_attach_failure(exc) from exc
+        # The RSP connect halts a running guest (ADR-0798), so debug.interrupt reports `attach`.
+        attachment.execution = "attach_halted"
         return attachment
 
     def _connect_with_retry(
@@ -321,8 +330,12 @@ class GdbMiEngine(
         """Resume until the current (innermost) frame returns (ADR-0379)."""
         return self._execution.resume(attachment, "-exec-finish", timeout_sec=timeout_sec)
 
-    def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
-        """Idempotent 'ensure HALTED': -exec-interrupt then wait the short fixed bound."""
+    def continue_background(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
+        """Resume without waiting; None leaves the guest running (#3244)."""
+        return self._execution.resume_background(attachment)
+
+    def interrupt(self, attachment: GdbMiAttachment) -> GdbHalt:
+        """Halt a running guest and attribute the halt; a halted guest gets no command."""
         return self._execution.interrupt(attachment)
 
     def wait_for_stop(
@@ -345,8 +358,10 @@ class GdbMiEngine(
         frame_payload = payload_dict(frame_payload)
         frame = self._frame_from(frame_payload) if frame_payload else None
         thread = payload.get("stopped-threads")
+        signal_name = payload.get("signal-name")
         return GdbStopRecord(
             reason=reason if isinstance(reason, str) else None,
+            signal_name=signal_name if isinstance(signal_name, str) else None,
             bkptno=payload.get("bkptno") if isinstance(payload.get("bkptno"), str) else None,
             stopped_thread=thread if isinstance(thread, str) else None,
             frame=frame,
@@ -359,6 +374,8 @@ class GdbMiEngine(
 
     def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
         """Write one MI command, accumulate + transcribe its records, raise on ``^error``."""
+        if attachment.execution == "attach_halted":
+            attachment.execution = "halted"
         records = self.records_from(
             attachment.controller.write(command, timeout_sec=_MI_COMMAND_TIMEOUT_SEC)
         )

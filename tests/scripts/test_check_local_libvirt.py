@@ -621,15 +621,23 @@ def test_unlistable_boot_dir_fails_the_kernel_probe(tmp_path: Path) -> None:
 
 
 def _selinux_env(
-    tmp_path: Path, *, mode: str, rootfs_type: str, install_type: str
+    tmp_path: Path,
+    *,
+    mode: str,
+    rootfs_type: str,
+    install_type: str,
+    pcap_type: str = "svirt_image_t",
 ) -> dict[str, str]:
     """A healthy host whose getenforce reports ``mode`` and whose ``stat -c %C`` reports each
-    image directory's SELinux type (ADR-0640, #2779)."""
+    image directory's SELinux type (ADR-0640, #2779) and the pcap root's (#3270)."""
     bindir, py = _healthy_bin(tmp_path)
     env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
     rootfs = tmp_path / "rootfs"
     rootfs.mkdir()
     env["KDIVE_ROOTFS_DIR"] = str(rootfs)
+    pcap = tmp_path / "pcap"
+    pcap.mkdir()
+    env["CHECK_PCAP_DIR"] = str(pcap)
     _stub(bindir, "getenforce", f"echo {mode}")
     _stub(
         bindir,
@@ -637,6 +645,7 @@ def _selinux_env(
         'case "$*" in\n'
         f'  *" {rootfs}") echo system_u:object_r:{rootfs_type}:s0 ;;\n'
         f'  *" {env["KDIVE_INSTALL_STAGING"]}") echo system_u:object_r:{install_type}:s0 ;;\n'
+        f'  *" {pcap}") echo system_u:object_r:{pcap_type}:s0 ;;\n'
         "  *) exit 1 ;;\n"
         "esac",
     )
@@ -649,18 +658,30 @@ def test_enforcing_host_with_svirt_image_labels_passes(tmp_path: Path) -> None:
     )
     result = _run(env)
     assert result.returncode == 0, result.stderr
-    assert result.stderr.count("is labeled svirt_image_t") == 2, result.stderr
+    assert result.stderr.count("is labeled svirt_image_t") == 3, result.stderr
 
 
-@pytest.mark.parametrize("mislabeled", ["rootfs", "install"])
+_LABELED_DIR_ENV = {
+    "rootfs": "KDIVE_ROOTFS_DIR",
+    "install": "KDIVE_INSTALL_STAGING",
+    "pcap": "CHECK_PCAP_DIR",
+}
+
+
+@pytest.mark.parametrize("mislabeled", ["rootfs", "install", "pcap"])
 def test_enforcing_host_without_svirt_image_label_fails(tmp_path: Path, mislabeled: str) -> None:
-    """A host prepared without the ADR-0640 rules fails the check, naming the directory (#2779)."""
-    types = {"rootfs": "svirt_image_t", "install": "svirt_image_t", mislabeled: "var_lib_t"}
+    """A host prepared without the ADR-0640 rules fails the check, naming the directory (#2779,
+    and the pcap root the confined domain writes, #3270)."""
+    types = dict.fromkeys(_LABELED_DIR_ENV, "svirt_image_t") | {mislabeled: "var_lib_t"}
     env = _selinux_env(
-        tmp_path, mode="Enforcing", rootfs_type=types["rootfs"], install_type=types["install"]
+        tmp_path,
+        mode="Enforcing",
+        rootfs_type=types["rootfs"],
+        install_type=types["install"],
+        pcap_type=types["pcap"],
     )
     result = _run(env)
-    directory = env["KDIVE_ROOTFS_DIR" if mislabeled == "rootfs" else "KDIVE_INSTALL_STAGING"]
+    directory = env[_LABELED_DIR_ENV[mislabeled]]
     assert result.returncode == 1, result.stderr
     assert f"FAIL  {directory} is labeled var_lib_t, not svirt_image_t" in result.stderr
     assert "just prepare-local-libvirt-host" in result.stderr
@@ -675,6 +696,17 @@ def test_unreadable_label_on_enforcing_host_fails(tmp_path: Path) -> None:
     result = _run(env)
     assert result.returncode == 1, result.stderr
     assert "absent-rootfs is labeled unknown, not svirt_image_t" in result.stderr
+
+
+def test_missing_pcap_root_on_enforcing_host_fails(tmp_path: Path) -> None:
+    """An unprovisioned pcap root fails like an unlabeled one: the capture would be refused."""
+    env = _selinux_env(
+        tmp_path, mode="Enforcing", rootfs_type="svirt_image_t", install_type="svirt_image_t"
+    )
+    env["CHECK_PCAP_DIR"] = str(tmp_path / "absent-pcap")
+    result = _run(env)
+    assert result.returncode == 1, result.stderr
+    assert "absent-pcap is labeled unknown, not svirt_image_t" in result.stderr
 
 
 @pytest.mark.parametrize("mode", ["Permissive", "Disabled"])
