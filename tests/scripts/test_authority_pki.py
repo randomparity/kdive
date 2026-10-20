@@ -1,5 +1,5 @@
 # tests/scripts/test_authority_pki.py
-"""Behavioral tests for scripts/operations/authority-pki.sh (#3273).
+"""Behavioral tests for scripts/operations/authority-pki.sh (ADR-0803, #3273).
 
 Every case drives the real script and real openssl in a private temporary directory, then
 inspects the produced certificates with ``cryptography``.

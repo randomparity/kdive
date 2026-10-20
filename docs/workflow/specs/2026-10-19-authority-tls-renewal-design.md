@@ -7,7 +7,7 @@ The frozen charter is issue #3273, `WORK:SCOPE` token `q3273-bbefbb02`. Campaign
 exclusions: changing the authority's mTLS model, adding a certificate service, and changing
 the disposable proof carrier's one-day lifetime (all dropped, no owner). The operator approved
 this design and its operator-facing interface on 2026-10-19; see the operator decisions
-section. Nothing here is implemented yet.
+section. PR #3279 implements it.
 The decision record is [ADR-0803](../../adr/0803-retained-authority-tls-custody-and-renewal.md).
 
 **Built on #3272.** PR #3278 merged at `b2d93172e`. The implementation is based on that merge,

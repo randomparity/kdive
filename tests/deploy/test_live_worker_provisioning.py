@@ -3985,7 +3985,7 @@ def test_authority_proof_issues_its_one_day_pki_through_authority_pki() -> None:
 
 
 def test_credential_installation_is_shared_with_the_renewal_playbook() -> None:
-    """#3273: the credential tasks moved verbatim into files main.yml imports in place."""
+    """ADR-0803: the credential tasks moved verbatim into files main.yml imports in place."""
     tasks_dir = ROLE / "tasks"
 
     def task_list(name: str) -> list[dict[str, Any]]:
@@ -4041,7 +4041,7 @@ def test_credential_installation_is_shared_with_the_renewal_playbook() -> None:
 
 
 def test_renewal_playbook_installs_credentials_in_the_reviewed_order() -> None:
-    """#3273: preconditions, authority files, one restart, then worker files and verification."""
+    """ADR-0803: preconditions, authority files, one restart, then worker files and verification."""
     playbook = ROOT / "deploy" / "ansible" / "playbooks" / "renew-local-authority-tls.yml"
     play = cast(list[dict[str, Any]], yaml.safe_load(playbook.read_text()))[0]
     assert play["hosts"] == "live_vm_runners"
