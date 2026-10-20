@@ -101,6 +101,16 @@ def stack_frames(records: list[MiRecord]) -> list[dict[str, Any]]:
     return rows
 
 
+def frame_variables(records: list[MiRecord]) -> list[dict[str, Any]] | None:
+    """The variable dicts from a ``-stack-list-variables`` result, or None when gdb sent none.
+
+    gdb/MI emits ``variables=[{name,arg,type,value},...]``; ``arg="1"`` marks an argument and
+    ``--simple-values`` omits ``value`` for a struct, union or array.
+    """
+    variables = result_payload_dict(records).get("variables")
+    return _dict_rows(variables) if isinstance(variables, list) else None
+
+
 def disassembly_rows(records: list[MiRecord]) -> list[dict[str, Any]]:
     """The instruction dicts from a ``-data-disassemble`` result.
 
