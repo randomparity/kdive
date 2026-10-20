@@ -1,4 +1,4 @@
-"""Local power and snapshot tool cells over HTTP (#2815, ADR-0722).
+"""Power and snapshot tool cells over HTTP on both providers (#2815, #3116, ADR-0722).
 
 A functional cell provisions the lane image through
 :func:`~tests.integration.live_stack.tool_cells.on_lane_system`, installs and boots the verified
@@ -7,8 +7,10 @@ runs its tool's sequence. Only the tool under test goes through the cell's expos
 supporting calls use the operator client. The guest oracles read a synthetic value from the disk
 (after dropping the page cache, so a restore that brings back RAM alone cannot pass), the same
 value from tmpfs (RAM only) and a long-lived process's identity, so a no-op restore, a reboot in
-place of a memory restore and a RAM-only revert each fail. Native observations read the worker's
-libvirt for the exact owned domain.
+place of a memory restore and a RAM-only revert each fail. Native observations read the
+provider's libvirt for the exact owned domain through the lane's ``connect``: the worker's for a
+local cell, the provider host's through the operator's observer for a remote one, whose kernel is
+installed in the guest's own ``/boot`` (the lane's ``installed_kernel``).
 
 A rejection cell aims at the stack's torn-down lane target. Every tool resolves the System and
 checks the caller's project and role before its state, so the target is valid, and the protected
@@ -21,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
-import xml.etree.ElementTree as ET  # noqa: S405 - the worker's own domain XML  # nosec B405
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -36,17 +37,17 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.providers.shared.runtime_paths import domain_name_for
 from tests.integration.live_stack.cleanup import domain_disks
-from tests.integration.live_stack.deep_lifecycle import deep_body, file_sha256
+from tests.integration.live_stack.deep_lifecycle import deep_body
 from tests.integration.live_stack.image_smoke import Endpoint, parse_probe, ssh
 from tests.integration.live_stack.scenario import (
     CellRun,
-    domain_xml,
     probe_new_boot,
     ssh_endpoint,
 )
-from tests.integration.live_stack.spine import drain_job, ok, scalar, worker_libvirt_uri
+from tests.integration.live_stack.spine import drain_job, ok, scalar
 from tests.integration.live_stack.tool_cells import (
     Boundary,
+    Connect,
     Grants,
     Guest,
     HttpCaller,
@@ -54,6 +55,7 @@ from tests.integration.live_stack.tool_cells import (
     Rejection,
     one,
     project_state,
+    worker_connect,
 )
 
 TOOLS = (
@@ -162,8 +164,8 @@ def snapshot_name() -> str:
     return f"cov-{secrets.token_hex(4)}"
 
 
-def _domain(system_id: str) -> tuple[libvirt.virConnect, libvirt.virDomain]:
-    conn = libvirt.open(worker_libvirt_uri())
+def _domain(system_id: str, connect: Connect) -> tuple[libvirt.virConnect, libvirt.virDomain]:
+    conn = connect()
     try:
         return conn, conn.lookupByName(domain_name_for(UUID(system_id)))
     except libvirt.libvirtError:
@@ -171,9 +173,9 @@ def _domain(system_id: str) -> tuple[libvirt.virConnect, libvirt.virDomain]:
         raise
 
 
-def domain_state(system_id: str) -> str:
-    """The worker's libvirt state of the System's domain: running, paused or shutoff."""
-    conn, domain = _domain(system_id)
+def domain_state(system_id: str, connect: Connect) -> str:
+    """The provider's libvirt state of the System's domain: running, paused or shutoff."""
+    conn, domain = _domain(system_id, connect)
     try:
         state = domain.state()[0]
     finally:
@@ -181,18 +183,18 @@ def domain_state(system_id: str) -> str:
     return _STATES.get(state, f"state-{state}")
 
 
-def checkpoints(system_id: str) -> list[str]:
+def checkpoints(system_id: str, connect: Connect) -> list[str]:
     """The domain's native snapshot names, sorted by name."""
-    conn, domain = _domain(system_id)
+    conn, domain = _domain(system_id, connect)
     try:
         return sorted(snap.getName() for snap in domain.listAllSnapshots())
     finally:
         conn.close()
 
 
-def domain_defined(system_id: str) -> bool:
-    """Whether the worker's libvirt defines the domain: absent only on VIR_ERR_NO_DOMAIN."""
-    conn = libvirt.open(worker_libvirt_uri())
+def domain_defined(system_id: str, connect: Connect = worker_connect) -> bool:
+    """Whether the provider's libvirt defines the domain: absent only on VIR_ERR_NO_DOMAIN."""
+    conn = connect()
     try:
         conn.lookupByName(domain_name_for(UUID(system_id)))
     except libvirt.libvirtError as exc:
@@ -202,15 +204,6 @@ def domain_defined(system_id: str) -> bool:
     finally:
         conn.close()
     return True
-
-
-def domain_kernel(
-    system_id: str, _endpoint: Endpoint, _key: Path, _release: str
-) -> tuple[str, str]:
-    """The ``<os><kernel>`` file the domain boots (the install's staged kernel) and its digest."""
-    kernel = ET.fromstring(domain_xml(system_id)).findtext("./os/kernel")  # noqa: S314  # nosec B314
-    assert kernel, "the installed domain names no direct kernel"
-    return file_sha256(kernel), kernel
 
 
 @dataclass
@@ -284,7 +277,9 @@ class Session:
         )
         rows = {str(r.get("name")): r for r in await self.listing()}
         assert rows.get(name, {}).get("state") == "available", f"{name} is not available"
-        assert name in checkpoints(self.guest.system_id), f"libvirt holds no {name} checkpoint"
+        assert name in checkpoints(self.guest.system_id, self.guest.lane.connect), (
+            f"libvirt holds no {name} checkpoint"
+        )
 
     async def restore(self, name: str, *, paused: bool = False) -> None:
         await self.job(
@@ -293,7 +288,9 @@ class Session:
 
     async def delete(self, name: str) -> None:
         await self.job("systems.delete_snapshot", system_id=self.guest.system_id, name=name)
-        assert name not in checkpoints(self.guest.system_id), f"libvirt still holds {name}"
+        assert name not in checkpoints(self.guest.system_id, self.guest.lane.connect), (
+            f"libvirt still holds {name}"
+        )
         assert name not in {str(r.get("name")) for r in await self.listing()}, f"{name} listed"
 
     async def power(self, action: str) -> None:
@@ -317,11 +314,11 @@ async def _memory_restore(s: Session, *, paused: bool) -> dict[str, object]:
     await s.restore(name, paused=paused)
     observed: dict[str, object] = {}
     if paused:
-        native, durable = domain_state(s.guest.system_id), await s.status()
+        native, durable = domain_state(s.guest.system_id, s.guest.lane.connect), await s.status()
         assert (native, durable) == ("paused", "paused"), f"paused restore: {native}, {durable}"
         await s.power("resume")
         observed["paused"] = {"domain": native, "system": durable}
-    native, durable = domain_state(s.guest.system_id), await s.status()
+    native, durable = domain_state(s.guest.system_id, s.guest.lane.connect), await s.status()
     assert (native, durable) == ("running", "ready"), f"after restore: {native}, {durable}"
     require_restored(checkpoint, mutated, await s.state())
     await s.delete(name)
@@ -369,7 +366,7 @@ async def list_body(s: Session) -> dict[str, object]:
     # The tool lists newest first. libvirt's creation times have one-second resolution, so its
     # inventory is compared as a set.
     assert rows == [(n, "available", True) for n in reversed(names)], f"listed {rows}"
-    native = checkpoints(s.guest.system_id)
+    native = checkpoints(s.guest.system_id, s.guest.lane.connect)
     assert native == sorted(names), f"libvirt holds {native}"
     for name in names:
         await s.delete(name)
@@ -393,14 +390,14 @@ async def power_body(s: Session) -> dict[str, object]:
     """off, on, reset and cycle from READY, then resume from a real paused restore."""
     before = await s.state()
     await s.power("off")
-    off = domain_state(s.guest.system_id), await s.status()
+    off = domain_state(s.guest.system_id, s.guest.lane.connect), await s.status()
     assert off == ("shutoff", "ready"), f"after off: {off}"
     observed: dict[str, object] = {"off": {"domain": off[0], "system": off[1]}}
     boot_id = before.boot_id
     for action in ("on", "reset", "cycle"):
         await s.power(action)
         booted = await s.new_boot(boot_id)
-        native = domain_state(s.guest.system_id)
+        native = domain_state(s.guest.system_id, s.guest.lane.connect)
         assert native == "running", f"after {action}: {native}"
         observed[action] = {"domain": native, "new_boot": True}
         boot_id = booted.boot_id
@@ -439,7 +436,7 @@ async def functional(
         tree=tree,
         manifest=manifest,
         tmp=tmp,
-        installed_kernel=domain_kernel,
+        installed_kernel=guest.lane.installed_kernel,
     )
     run.artifacts.extend(deep.assertions.values())
     endpoint = await ssh_endpoint(guest.op, guest.system_id)
@@ -497,14 +494,16 @@ async def system_jobs(db_url: str, system_id: str) -> list[object]:
     return [row[0], hashlib.sha256(str(row[1]).encode()).hexdigest()]
 
 
-async def protected_state(db_url: str, target: LaneTarget) -> dict[str, object]:
-    """The target project's rows, the target's jobs and whether its domain is defined."""
+async def protected_state(db_url: str, target: LaneTarget, connect: Connect) -> dict[str, object]:
+    """The target project's rows, the target's jobs and whether the provider defines its domain."""
     return {
         "project": await project_state(db_url, target.project),
         "jobs": await system_jobs(db_url, target.system_id),
-        "domain_defined": await asyncio.to_thread(domain_defined, target.system_id),
+        "domain_defined": await asyncio.to_thread(domain_defined, target.system_id, connect),
     }
 
 
-def snapshot_of(db_url: str, target: LaneTarget) -> Callable[[], Awaitable[object]]:
-    return partial(protected_state, db_url, target)
+def snapshot_of(
+    db_url: str, target: LaneTarget, connect: Connect
+) -> Callable[[], Awaitable[object]]:
+    return partial(protected_state, db_url, target, connect)
