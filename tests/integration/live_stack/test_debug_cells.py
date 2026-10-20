@@ -509,33 +509,58 @@ def test_clear_breakpoint_needs_the_workload_to_run_on(monkeypatch: pytest.Monke
         _run("debug.clear_breakpoint", _Debugger(answers), monkeypatch)
 
 
-@pytest.mark.parametrize(
-    ("tool", "answers", "gap"),
-    [
-        (
-            "debug.list_breakpoints",
-            {
-                "debug.set_breakpoint": _ok("set", number="1"),
-                "debug.clear_breakpoint": _ok("cleared"),
-            },
-            "returns only a count",
-        ),
-        (
-            "debug.read_frame",
-            {"debug.read_frame": _ok("read", level=0, frame={"func": BREAK_AT, "addr": _RIP})},
-            "no arguments or locals",
-        ),
-    ],
-    ids=["list_breakpoints", "read_frame"],
-)
-def test_a_known_gap_fails_after_the_observable_proof(
-    tool: str, answers: dict[str, _Answer], gap: str, monkeypatch: pytest.MonkeyPatch
+def _listing(*rows: tuple[str, str, str]) -> ToolResponse:
+    listed = [{"number": n, "type": "breakpoint", "func": f, "addr": a} for n, f, a in rows]
+    return _ok("listed", count=len(listed), breakpoints=listed)({})
+
+
+_VFS_WRITE = ("2", "vfs_write", "0xffffffff81200810")
+
+
+def _list_breakpoints(*listings: ToolResponse) -> _Debugger:
+    numbers = iter(("1", "2"))
+    answers = iter(listings)
+    return _Debugger(
+        _stop_answers(
+            **{
+                "debug.set_breakpoint": lambda _a: _ok("set", number=next(numbers))(_a),
+                "debug.list_breakpoints": lambda _a: next(answers),
+            }
+        )
+    )
+
+
+def test_list_breakpoints_matches_the_installed_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    debugger = _list_breakpoints(_listing(("1", BREAK_AT, _RIP), _VFS_WRITE), _listing(_VFS_WRITE))
+    observed = _run("debug.list_breakpoints", debugger, monkeypatch)
+    assert observed == {"counts": [2, 1], "numbers_match": True, "addr_within_kallsyms": True}
+    assert ("debug.clear_breakpoint", {"session_id": "ses-1", "number": "1"}) in debugger.calls
+
+
+def test_list_breakpoints_needs_the_address_inside_the_function(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    counts = iter((2, 1))
-    listed = {"debug.list_breakpoints": lambda _a: _ok("listed", count=next(counts))(_a)}
-    debugger = _Debugger(_stop_answers(**answers, **listed))
-    with pytest.raises(AssertionError, match=gap):
-        _run(tool, debugger, monkeypatch)
+    outside = ("1", BREAK_AT, "0xffffffff81200400")
+    debugger = _list_breakpoints(_listing(outside, _VFS_WRITE), _listing(_VFS_WRITE))
+    with pytest.raises(AssertionError, match="not in vfs_read"):
+        _run("debug.list_breakpoints", debugger, monkeypatch)
+    assert debugger.calls[-1][0] == "debug.end_session"
+
+
+def test_list_breakpoints_needs_the_cleared_row_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    first = ("1", BREAK_AT, _RIP)
+    debugger = _list_breakpoints(_listing(first, _VFS_WRITE), _listing(first))
+    with pytest.raises(AssertionError, match="listed"):
+        _run("debug.list_breakpoints", debugger, monkeypatch)
+
+
+def test_read_frame_known_gap_fails_after_the_observable_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _ok("read", level=0, frame={"func": BREAK_AT, "addr": _RIP})
+    debugger = _Debugger(_stop_answers(**{"debug.read_frame": frame}))
+    with pytest.raises(AssertionError, match="no arguments or locals"):
+        _run("debug.read_frame", debugger, monkeypatch)
     assert debugger.calls[-1][0] == "debug.end_session"
 
 

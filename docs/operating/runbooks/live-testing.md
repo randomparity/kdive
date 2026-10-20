@@ -1698,8 +1698,9 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
   relocated address are compared with the guest's own values, and instruction steps and
   disassembly with the fixture binary's instruction boundaries; session cells compare the
   session rows and prove the guest halts while attached and answers again after the detach.
-- Two cells fail after proving what they can, until the tool exposes the effect:
-  `debug.list_breakpoints` returns only a count and `debug.read_frame` no arguments or locals.
+- The `debug.read_frame` cell fails after proving what it can, until the tool returns the
+  frame's arguments and locals. The `debug.list_breakpoints` cell compares each listed row's
+  number, kind, function and address with the installed breakpoints (ADR-0780).
 - The `debug.interrupt` cell leaves the guest running with `debug.continue` `wait=false`
   (ADR-0783), requires `halted_by=interrupt` with `signal-received`, records which path the
   `vfs_read` breakpoint stop took (`resume_reply` or `waiting_continue`), and ends the session
