@@ -608,6 +608,32 @@ delay ended all three attempts `boot_timeout`, each retry waiting out the still-
 before its baseline read. `insufficient-disk` left 60 KiB available; the worker logged the
 overlay-create refusal and the job failed `provisioning_failure` with no partial volume.
 
+## 11. Remote orchestration-fault cells (#3117)
+
+`tests/integration/test_orchestration_faults_live.py::test_remote_orchestration_fault` has one
+parameter for each `failure-resource/remote-libvirt/x86_64/*` cell that #3117 owns. The cells
+run the same faults as the
+[local cells](live-testing.md#local-orchestration-fault-cells-3117) against the enterprise remote
+base, with the observer access of section 7 (`REMOTE_PROVIDER_SSH`):
+
+- a worker pause;
+- a lost provision response;
+- a Postgres outage.
+
+The fault window is the 180 s guest-agent wait of the remote provision. The worker, Postgres
+and the preconditions are on the control-plane host; domains and volumes are checked on the
+provider host.
+
+```bash
+uv run python -m tests.integration.live_stack.resource_limits bindings --remote --owner 3117 \
+  --candidate "$(git rev-parse HEAD)" --out inputs.json
+uv run python -m pytest -m live_stack tests/integration/test_orchestration_faults_live.py \
+  -k test_remote_orchestration_fault
+```
+
+After the run, the provider host must define no `kdive-` domain the run added, and its pool must
+hold the same volumes as before.
+
 ## SUSE native image proof
 
 On untouched first boot, record the completed JeOS marker, skipped wizard units,
