@@ -42,20 +42,40 @@ names.
   (`src/kdive/providers/remote_libvirt/lifecycle/provisioning.py:200-293`). That is the
   documented recovery outcome for a reclaimed provision. No advisory lock is held across the
   provider call (`systems.py:296-340`), so a paused holder does not block the reclaim.
-- **Fenced side effects.** A stale attempt whose provider call raises after `started` tears
-  down the domain (`provisioning.py:383-386`), and nothing fences that teardown. The
-  worker-interruption cell resumes the stale worker. It then observes the domain and System
-  after the stale attempt finishes. If the stale attempt tears down the domain, the cell fails
-  `protected-state`.
+- **Unfenced stale side effects.** When a stale attempt's provider call raises, three of its
+  writes are not fenced against the reclaimed attempt:
+  - the local teardown of the domain after `started` (`provisioning.py:383-386`);
+  - the local reclaim of the overlay and baseline that attempt 1 created (`provisioning.py:387-391`);
+  - `_record_system_failure`, which moves a `ready` System to `failed`. That transition is legal
+    (`systems.py:321-334`, `src/kdive/domain/capacity/state.py:250-257`).
+
+  Locally, the 900 s boot window outlasts the roughly 6-minute hold, so the stale attempt can
+  still finish cleanly. Remotely, the paused worker's libvirt connection is expected to drop on
+  keepalive. The resumed `wait_for_agent` would then raise
+  (`src/kdive/providers/remote_libvirt/lifecycle/readiness.py:62-71`), and the System would be
+  marked `failed`. That outcome is inferred from source and not run. If it happens, the remote
+  worker-interruption cell records it as a product defect, routes it to the root, and does not
+  pass. The carrier observes System state, domain and overlay separately after the stale
+  attempt ends.
 - **Idempotency.** A `systems.provision` key is stored per principal and tool, inside the
   admission transaction. The stored admission envelope is replayed unchanged. A failed
   admission stores nothing. The arguments are not compared (`provision.py:101-146`,
-  `docs/guide/async-jobs.md:70-96`). No repository evidence says whether a client disconnect
-  cancels the handler. The mcp SDK dispatches tool calls in the session task group, not the
-  HTTP request task.
-- **Backing services.** On a database outage the worker's claim loop and process survive. A
-  failed heartbeat ends that job's renewal. The row stays `running` until the lease lapses and
-  is then reclaimed (`worker.py:69-73, 431-443, 695-721`). A not-ready worker pauses dequeue
+  `docs/guide/async-jobs.md:70-96`). The row stores
+  `{"envelope": {"type": "provision_job", "job": <job>, "system_id": <id>}}`
+  (`src/kdive/services/idempotency/envelope.py:103-105`, `admission.py:186-195`). The server
+  builds its response directly after that commit (`provision.py:130-146`). So once the commit
+  is visible, abandoning the connection and discarding a received envelope look the same to the
+  server.
+- **Backing services.** On a database outage the worker's claim loop and process survive
+  (`worker.py:431-443`). The handler holds one pool connection for its whole run
+  (`worker.py:503-509`). A stopped Postgres breaks that connection, so attempt 1 cannot commit.
+  It recovers in one of two ways:
+  - The attempt fails and is requeued as the retryable `infrastructure_failure`
+    (`worker.py:848-852`).
+  - If the fail write itself is lost, the lease lapses and the job is reclaimed
+    (`worker.py:695-721`).
+
+  A not-ready worker pauses dequeue
   rather than failing jobs (ADR-0090 §5). An object-store failure maps to the retryable
   `infrastructure_failure` with no backoff (`src/kdive/store/objectstore.py:68-82`). The worker
   readiness check includes the store, so new claims pause during an outage.
@@ -89,13 +109,31 @@ running claim (worker id, attempt, lease deadline). Locally the window is the re
 wait. Remotely it is the guest-agent wait. If the job leaves `running` before the window is
 seen, the cell fails with `fault point not reached (incomplete)`. It is never a pass.
 
-Preconditions are checked before any mutation. Each unmet one blocks the cell:
+At the in-flight point, the carrier reads the domain XML and sets `Held.overlays` and
+`Held.disks`. `prove_held` and `release_and_verify` then check the real overlay. Without this,
+they would pass an empty list.
+
+The carrier checks these preconditions before `allocations.request` and before image
+acquisition, so nothing has been mutated yet. Each unmet one blocks the cell:
 
 - at least two running fixed worker slots (`KDIVE_WORKER_COUNT=2`);
+- no installed authority (`run_identity` reports no `authority` role), and a provision job
+  payload with no `authority_system_v1` marker, which is re-checked after enqueue. This pins
+  the direct path D1 selects.
 - the longterm fixture and the staged image;
 - for the remote cells, `REMOTE_PROVIDER_SSH`;
-- passwordless `sudo -n` for the fixed hold argv;
+- `sudo -n -l` lists the exact hold argv (`/usr/bin/python3 -c ...`);
 - for backing-service, the compose `postgres` container that serves `KDIVE_DATABASE_URL`.
+
+Every wait has a bound:
+
+- the in-flight window: one boot window;
+- reclaim: the lease remainder plus 120 s, and at most 8 minutes;
+- terminal job: 3 attempts times one boot window, plus the lease (5 minutes), plus 120 s;
+- stale journal: one boot window;
+- readyz: 120 s.
+
+An expired bound records the cell as an incomplete failure.
 
 ### worker-interruption
 
@@ -106,14 +144,16 @@ Preconditions are checked before any mutation. Each unmet one blocks the cell:
    Sampler runs every 15 s while waiting.
 4. Wait until the job is terminal. The cell requires `succeeded` at the replacement's attempt
    by the replacement worker, and the System `ready`.
-5. Resume with `"continue"`. Wait at most 15 minutes, which covers one first-boot window, for
+5. Resume with `"continue"`. Wait at most one boot window (900 s locally, 300 s remotely) for
    the stale invocation's journal to show one of two lines for this job:
    - `completed but was reclaimed; result dropped`, or
    - a provision failure line.
-   Record which line appeared. Then require all of the following:
+   Record which line appeared. Then require each of the following, recorded separately so a
+   failure names the stale effect:
    - the job row is unchanged (`succeeded`, same attempt, same worker);
    - the System is still `ready`;
-   - the owned domain is still active with the same UUID.
+   - the owned domain is still active with the same UUID;
+   - the overlay recorded at the in-flight point still exists.
 6. Prove `worker-interruption` with the original and replacement claims, both invocation ids,
    the stale outcome and the final job row. Prove `no-duplicates`: one System under the
    Allocation, one added domain named `kdive-<system_id>`, and one overlay equal to the one
@@ -126,30 +166,32 @@ A `finally` always resumes a still-paused holder before the cleanup attempt.
 ### lost-response
 
 1. Generate a fresh idempotency key `q3117-<uuid4>`.
-2. Send `systems.provision` with that key from a raw streamable-HTTP JSON-RPC client. The
-   client runs `initialize`, then `notifications/initialized`, then a streamed `tools/call`
-   POST.
-3. Wait for an evidence-only database read to show the `idempotency_keys` row for
-   (key, `systems.provision`). The bound is 60 s. Then close the connection without reading
-   the response body and send no MCP cancel notification. This is the lost response: the
-   server committed and the client never received the answer.
-4. Retry from a new `LiveStackClient` session with the same key, while the job is still
+2. Call `Held.provision(profile, idempotency_key=key)`. That sets `system_id` and the
+   Sampler.
+3. Require the `idempotency_keys` row for (key, `systems.provision`) to exist, using an
+   evidence-only database read.
+4. Drop the returned envelope from all later use, together with the `system_id` that
+   `Held.provision` recorded. From here on, the carrier knows the job and System only from the
+   replay and the stored row. That is the lost response: the server committed and the caller
+   holds no answer (D2).
+5. Retry from a new `LiveStackClient` session with the same key, while the job is still
    `running`. Retry again after the job is terminal.
-5. Require all of the following:
-   - each replay's `object_id` (the job id) and `data.system_id` equal the stored row's
-     result;
-   - exactly one `provision` job references the Allocation;
+6. Require all of the following:
+   - each replay's job id equals the stored `envelope.job.id`;
+   - each replay's `system_id` equals the stored `envelope.system_id`;
+   - the replay's `system_id` equals the one `Held.provision` returned;
+   - exactly one `provision` job references a System of the Allocation;
    - exactly one System exists under the Allocation;
    - the job is `succeeded` and the System `ready`.
-6. If the row never appears, the cell fails, recording whether the handler was cancelled
-   before commit (no System, no row) or an admission error was returned.
-7. Prove `lost-response` with the stored result, both replays and the job and System counts.
-   Prove `no-duplicates`, `protected-state` and `cleanup` as in worker-interruption.
+7. Read the domain XML into `Held.overlays` and `Held.disks`. Prove `lost-response` with the
+   stored row, both replays and the job and System counts. Prove `no-duplicates`,
+   `protected-state` and `cleanup` as in worker-interruption.
 
 ### backing-service
 
-1. Before the cell, record the compose `postgres` container id and the service roles' readyz
-   and deployed identity (`run_identity`).
+1. Before the cell, record:
+   - the compose `postgres` container id;
+   - each running worker unit's `InvocationID` and `MainPID`, from `systemctl show`.
 2. Provision. Wait for `in_flight`.
 3. Stop Postgres with fixed argv: `docker compose --project-directory <stack checkout> stop
    postgres`.
@@ -157,11 +199,22 @@ A `finally` always resumes a still-paused holder before the cleanup attempt.
    carrier makes no MCP call. Libvirt observation of the owned domain continues.
 5. Start Postgres with `docker compose ... start postgres`. Require the same container id.
 6. Wait at most 120 s for every role's readyz to return ready.
-7. Wait for the job to be terminal. The documented resume path requires `succeeded`, the System
-   `ready` and one active domain. The success may come from a reclaimed attempt after the lease
-   lapsed, or from an attempt whose delayed writes succeeded. Record which happened: the
-   attempt counter and the worker journal's heartbeat and failure lines for the job.
-8. Require all three roles to keep their pre-fault deployed identity, so no role restarted.
+7. Wait, within the terminal-job bound, for the job to be terminal. The documented resume path
+   requires all of the following:
+   - the job `succeeded` at an attempt above 1;
+   - the System is `ready`;
+   - exactly one domain is active.
+
+   The carrier labels `resume_path` from the worker journal and the job row:
+   - `requeued`: a `job <id> failed: infrastructure_failure` line exists for attempt 1;
+   - `lease-reclaimed`: there is no failure line, and a heartbeat-failure line exists;
+   - `unknown`: neither line exists, and the evidence is recorded.
+
+   An attempt-1 success cannot pass. It means the outage never reached the in-flight attempt,
+   so the cell records an incomplete failure.
+8. Require every worker unit to keep its pre-fault `InvocationID` and `MainPID`. This shows the
+   outage restarted no slot and wedged none. Server and reconciler restarts are not part of
+   the claim. Their readyz in step 6 is the usability check.
 9. Prove `backing-service` with the outage interval, container id, readiness timeline, attempt
    evidence and terminal job. Prove `no-duplicates`, `protected-state` and `cleanup` as above.
    The protected-state samples bracket the outage, because Postgres holds the allocation and
@@ -200,8 +253,9 @@ A `finally` always starts a stopped Postgres before any cleanup call.
 3. **Accepted failure classes.**
    - A first boot too fast for the 0.5 s window poll. The cell records an incomplete failure
      and does not pass, and the cost is one rerun.
-   - Lost-response proves only the committed-then-lost case. Abort-before-commit is
-     nondeterministic, and the admission transaction makes the System and the key atomic.
+   - Lost-response proves only the committed-then-lost case, observed client-side (D2).
+     Abort-before-commit is nondeterministic, and the admission transaction makes the System and
+     the key atomic. Whether a disconnect cancels the handler is not tested here.
    - Samples are discrete, with no instantaneous guarantee between them. The same bound is
      accepted in #3118.
    - The kernel inputs are bound as setup identity and are not booted (D4).
@@ -228,32 +282,40 @@ controlled fault.
   - a replacement with the same worker or attempt;
   - a non-succeeded job;
   - a changed job row after resume;
+  - a System moved to `failed`;
   - a missing or torn-down domain;
+  - a reclaimed overlay;
   - a stale journal with no matching line.
 - Lost-response verdict. It refuses each of these:
   - a replay whose job id or `system_id` differs;
   - two provision jobs;
   - two Systems;
-  - a row that never appears.
-  The raw client's request framing is tested against a fake transport that confirms the body
-  is never read.
+  - a stored row that is missing.
+  The fixture row is built with `stored_admission_result`, so it has the real
+  `envelope.job`/`envelope.system_id` shape.
 - Backing-service verdict. It refuses each of these:
   - a changed container id;
-  - a role whose identity changed;
+  - a worker unit whose `InvocationID` or `MainPID` changed;
   - readiness that never returns;
-  - a failed terminal job.
+  - a failed terminal job;
+  - an attempt-1 success.
+  It labels `requeued`, `lease-reclaimed` and `unknown` from realistic journal lines.
   The compose argv builder is tested to accept only `stop` and `start` of `postgres`.
 - `cells(owner=3117)` resolves exactly the six cells.
   `tests/scripts/test_coverage_contract.py` requires the six node bindings.
-- The `owner` default keeps the #3118 binding output byte-identical.
+- The `owner` default still selects exactly #3118's six cell ids, taken from
+  `build_contract()`.
 - First real run: the bounded live plan in the design-gate report, after an operator grant.
 
 ## Operator decisions pending
 
 - **D1 execution path.** Recommended: the direct path on the managed host stack. Alternative:
   the authority lane, which waits on #3152 and #3185.
-- **D2 lost-response transport.** Recommended: a raw connection abort after the commit.
-  Alternative: discard the envelope after reading it.
+- **D2 lost-response transport.** Recommended: discard the received envelope after the commit
+  is visible, then retry with the same key from a new session. Once the commit is visible, the
+  server cannot tell this apart from a dropped connection (`provision.py:130-146`).
+  Alternative: a raw streamable-HTTP client that abandons the connection without reading the
+  response. That adds about 100 lines and observes nothing more at the server.
 - **D3 backing service.** Recommended: stop Postgres during the first-boot wait. Alternative:
   stop the object store around `runs.install`. That alternative only shows a paused dequeue,
   not an in-flight loss.
