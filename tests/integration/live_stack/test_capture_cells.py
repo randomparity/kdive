@@ -16,10 +16,12 @@ import pytest
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
-from scripts.coverage_campaign.contract import Cell, build_contract
+from scripts.coverage_campaign.contract import HANDLER_REFUSAL, Cell, build_contract
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.capture_cells import (
     PANIC,
+    REFUSED_REASON,
+    REMOTE_DEBUGINFO_BLOCKED,
     TOOLS,
     CaptureTarget,
     Session,
@@ -29,11 +31,13 @@ from tests.integration.live_stack.capture_cells import (
     lane_keys,
     options,
     panic_seen,
+    refusal_of,
     rejection,
     require_core,
     require_tool,
     script_facts,
     transcript_names,
+    variant_of,
     vmcoreinfo,
 )
 from tests.integration.live_stack.image_smoke import Endpoint
@@ -176,6 +180,106 @@ def test_options_follow_each_functional_and_unsupported_cell() -> None:
         key = f"{cell.operation}/{variant}" if cell.operation == "vmcore.fetch" else cell.operation
         seen[key] = options(cell)
     assert seen == expected
+
+
+def _remote_cells(arch: str = "x86_64") -> list[Cell]:
+    return [
+        c
+        for c in build_contract().cells
+        if c.operation in TOOLS and c.provider == "remote-libvirt" and c.guest_arch == arch
+    ]
+
+
+def test_variant_of_reads_either_provider() -> None:
+    local = next(c for c in _cells() if c.operation == "vmcore.fetch" and c.kind == "functional")
+    remote = next(c for c in _remote_cells() if c.operation == "vmcore.fetch")
+    assert variant_of(local) == local.scenario_id.split("/")[2]
+    assert variant_of(remote) == remote.scenario_id.split("/")[3]
+
+
+def test_options_follow_each_remote_functional_and_unsupported_cell() -> None:
+    expected = {
+        "control.force_crash": "kdump",
+        "introspect.from_vmcore": "kdump",
+        "postmortem.crash": "kdump",
+        "vmcore.fetch/kdump": "kdump",
+        "vmcore.fetch/host_dump": "host_dump",
+        "vmcore.fetch/console": "host_dump",
+        "vmcore.fetch/gdbstub": "host_dump",
+    }
+    seen = {}
+    for cell in _remote_cells():
+        if cell.kind == "rejection" or cell.operation in REMOTE_DEBUGINFO_BLOCKED:
+            continue
+        op = cell.operation
+        seen[f"{op}/{variant_of(cell)}" if op == "vmcore.fetch" else op] = options(cell)
+    assert seen == expected
+
+
+def test_remote_live_introspection_is_blocked_on_3124() -> None:
+    cells = [
+        c
+        for c in _remote_cells()
+        if c.kind == "functional" and c.operation in ("introspect.run", "introspect.script")
+    ]
+    assert len(cells) == 8
+    for cell in cells:
+        with pytest.raises(ScenarioStop, match="#3124") as stop:
+            options(cell)
+        assert stop.value.outcome is Outcome.BLOCKED
+    local = [c for c in _cells() if c.operation == "introspect.run" and c.kind == "functional"]
+    assert {options(c) for c in local} == {"live"}
+
+
+def _remote_profile() -> dict[str, object]:
+    return {"arch": "x86_64", "provider": {"remote-libvirt": {"base_image_volume": "b"}}}
+
+
+@pytest.mark.parametrize(
+    ("crash", "expected"),
+    [
+        ("kdump", {"destructive_ops": ["force_crash"], "crashkernel": "256M"}),
+        ("host_dump", {"destructive_ops": ["force_crash"], "host_dump": True}),
+        ("target", {"destructive_ops": ["force_crash"]}),
+        ("live", {}),
+    ],
+)
+def test_remote_crash_profile_edits_only_the_remote_section(
+    crash: str, expected: dict[str, object]
+) -> None:
+    profile = _remote_profile()
+    edited = crash_profile(profile, crash)
+    assert edited["provider"] == {"remote-libvirt": {"base_image_volume": "b", **expected}}
+    assert profile == _remote_profile(), "the lane profile was changed in place"
+
+
+def test_refusal_of_accepts_only_the_handler_refusal() -> None:
+    data = {"method": "console", "reason": REFUSED_REASON}
+    refusal = ToolResponse.failure("run-1", ErrorCategory.CONFIGURATION_ERROR, data=data)
+    assert refusal_of(refusal, "console") == {
+        "error_category": "configuration_error",
+        "reason": REFUSED_REASON,
+        "method": "console",
+    }
+    wrong = [
+        ToolResponse.failure(
+            "run-1", ErrorCategory.CONFIGURATION_ERROR, data={**data, "reason": "x"}
+        ),
+        ToolResponse.failure("run-1", ErrorCategory.NOT_FOUND, data=data),
+        ToolResponse.success("run-1", "queued", refs={"job_id": "j"}),
+    ]
+    for env in wrong:
+        with pytest.raises(AssertionError):
+            refusal_of(env, "console")
+    with pytest.raises(AssertionError):
+        refusal_of(refusal, "gdbstub")
+    assert HANDLER_REFUSAL.endswith(REFUSED_REASON)
+
+
+def test_lane_keys_keep_host_keys_remotely() -> None:
+    observed = {"host_os": "rocky:10.2", "host_arch": "x86_64", "guest_os": "fedora:43"}
+    assert lane_keys(observed) == {"guest_os": "fedora:43"}
+    assert lane_keys(observed, remote=True) == observed
 
 
 def test_options_stop_a_ppc64le_cell_as_blocked() -> None:

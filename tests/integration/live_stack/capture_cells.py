@@ -118,6 +118,16 @@ _EXTRA: dict[str, dict[str, object]] = {
 # the admin role deny force_crash on the rejection target; live adds nothing.
 _CRASH_OPTIONS = frozenset({"kdump", "host_dump", "target", "live"})
 _LANE_KEYS = ("guest_os", "guest_arch", "accelerator", "image_sha256")
+_HOST_KEYS = ("host_os", "host_arch")
+# vmcore.fetch's refusal of a method outside its core-producing set (handlers.py).
+REFUSED_REASON = "method does not produce a vmcore"
+# Remote drgn-live runs in the guest, which never receives the Run's vmlinux: these cells stay
+# blocked on the open defect, not failed (#3124, blocked by #3121). Drop an entry when its issue
+# closes.
+REMOTE_DEBUGINFO_BLOCKED = {
+    tool: "remote guests do not receive the uploaded vmlinux (#3124)"
+    for tool in ("introspect.run", "introspect.script")
+}
 PANIC = "Kernel panic - not syncing"
 # The panic's dump_stack ``CPU:`` record follows it within a few lines.
 _PANIC_LINES = 8
@@ -143,29 +153,42 @@ for task in for_each_task(prog):
 """
 
 
+def variant_of(cell: Cell) -> str:
+    """The tool variant of ``cell``, read from a local or a provider-qualified scenario id."""
+    return cell.scenario_id.split("/")[-2]
+
+
 def options(cell: Cell) -> str:
     """The crash options a functional or unsupported cell provisions with."""
     if cell.guest_arch != "x86_64":
         raise ScenarioStop(Outcome.BLOCKED, f"{cell.id} is the POWER lane's (#2818)")
-    variant = cell.scenario_id.split("/")[2]
+    if cell.provider == "remote-libvirt" and cell.operation in REMOTE_DEBUGINFO_BLOCKED:
+        raise ScenarioStop(Outcome.BLOCKED, REMOTE_DEBUGINFO_BLOCKED[cell.operation])
+    variant = variant_of(cell)
     if cell.operation == "vmcore.fetch" and variant in ("kdump", "host_dump"):
         return variant
+    if cell.operation == "vmcore.fetch" and variant in ("console", "gdbstub"):
+        return "host_dump"  # a crashed System the handler refuses to fetch from
     if cell.operation in ("introspect.run", "introspect.script") or variant == "fadump":
         return "live"
     return "kdump"
 
 
 def crash_profile(profile: Mapping[str, object], crash: str) -> dict[str, object]:
-    """``profile`` with the local-libvirt crash options ``crash`` names; the input is unchanged."""
+    """``profile`` with ``crash`` options in its provider section; the input is unchanged."""
     assert crash in _CRASH_OPTIONS, f"unknown crash options {crash!r}"
     edited = copy.deepcopy(dict(profile))
-    local = cast(dict[str, Any], edited["provider"])["local-libvirt"]
+    sections = cast(dict[str, Any], edited["provider"])
+    assert len(sections) == 1, f"the profile names {len(sections)} provider sections"
+    ((provider, section),) = sections.items()
     if crash != "live":
-        local["destructive_ops"] = ["force_crash"]
+        section["destructive_ops"] = ["force_crash"]
     if crash == "kdump":
-        local["crashkernel"] = arch_traits(str(edited["arch"])).default_crashkernel
-    if crash == "host_dump":
-        local["debug"] = {"preserve_on_crash": True}
+        section["crashkernel"] = arch_traits(str(edited["arch"])).default_crashkernel
+    if crash == "host_dump" and provider == "remote-libvirt":
+        section["host_dump"] = True
+    elif crash == "host_dump":
+        section["debug"] = {"preserve_on_crash": True}
     return edited
 
 
@@ -178,9 +201,13 @@ def provision_with(crash: str) -> Provision:
     return provision
 
 
-def lane_keys(observed: Mapping[str, object]) -> dict[str, object]:
-    """The lane context of ``observed``: no kernel field, which no rejection cell declares."""
-    return {key: observed[key] for key in _LANE_KEYS if key in observed}
+def lane_keys(observed: Mapping[str, object], *, remote: bool = False) -> dict[str, object]:
+    """The lane context of ``observed``: no kernel field, which no rejection cell declares.
+
+    On the remote lane it keeps the provider host's keys, which the frame observed there.
+    """
+    keys = (*_LANE_KEYS, *_HOST_KEYS) if remote else _LANE_KEYS
+    return {key: observed[key] for key in keys if key in observed}
 
 
 def require_tool(env: ToolResponse, phase: str) -> ToolResponse:
@@ -521,7 +548,7 @@ async def force_crash_body(s: Session) -> dict[str, object]:
 
 async def vmcore_body(s: Session) -> dict[str, object]:
     """Crash, capture through the exposure, then read the stored core back twice."""
-    method = s.run.cell.scenario_id.split("/")[2]
+    method = variant_of(s.run.cell)
     if method == "kdump":
         await s.armed()
     await s.crash()
@@ -618,6 +645,23 @@ BODIES: dict[str, Callable[[Session], Awaitable[dict[str, object]]]] = {
     "postmortem.crash": postmortem_body,
     "vmcore.fetch": vmcore_body,
 }
+
+
+def refusal_of(env: ToolResponse, method: str) -> dict[str, object]:
+    """``vmcore.fetch``'s refusal of a non-core ``method``, with no job (ADR-0722)."""
+    refused = {
+        "error_category": env.error_category,
+        "reason": env.data.get("reason"),
+        "method": env.data.get("method"),
+    }
+    expected = {
+        "error_category": ErrorCategory.CONFIGURATION_ERROR.value,
+        "reason": REFUSED_REASON,
+        "method": method,
+    }
+    assert refused == expected, f"vmcore.fetch({method}) was not refused: {refused}"
+    assert not env.refs, f"the refused vmcore.fetch({method}) returned refs"
+    return refused
 
 
 async def boot(
