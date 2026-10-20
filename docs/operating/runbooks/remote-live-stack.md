@@ -700,6 +700,59 @@ failing cell, not a skipped one. After the run, `demo-down.sh --wipe --yes` clea
 Then check the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no
 `kdive-` overlay, snapshot overlay or `kdive-pcap-` volume.
 
+## 13. Remote GDB debug tool cells (#3113)
+
+`tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell` also carries the 440
+x86_64 remote-libvirt cells of the 21 `debug.*` tools. Each tool has functional, authentication,
+authorization, project-isolation and validation cells in both configurations and both exposures,
+and `debug.start_session` has a `gdbstub` and a `drgn-live` variant. Their parameter ids contain
+`remote-libvirt`, so `-k remote-libvirt` selects them. The bodies, ground truth and rejection
+boundaries are the local cells' of the
+[live-testing runbook](live-testing.md#gdb-debug-tool-cells-2813), on §8's remote lane; the
+[design](../../workflow/specs/2026-10-20-remote-debug-tool-cells-design.md) lists what differs:
+
+- Every functional cell provisions `fedora-kdive-remote-base-43` and installs and boots the
+  `longterm` fixture in the guest. Remote-libvirt gives every System a gdbstub and pins
+  `nokaslr`, so the guest's `vfs_read` must equal the fixture's `System.map`.
+- After the body, the cell checks the gdb connection to the domain's `-gdb tcp:<addr>:<port>`
+  endpoint. It counts ESTABLISHED sockets on the provider host (`ss` over
+  `REMOTE_PROVIDER_SSH`) and on the control plane, whose MCP server holds the gdb session. Both
+  counts must reach 0, and every session row of the Run must read `detached`. A fresh attach must
+  then show one socket at each end, and none after it ends, so an observer that cannot see the
+  connection fails the cell. Run the tests on the control-plane host.
+- The `drgn-live` start cells stop `blocked` when the start reports `missing_debuginfo`. That
+  warning is the symptom of remote guests never receiving the uploaded vmlinux (#3124).
+- Rejection cells aim at one torn-down remote System per stack whose Run booted the fixture and
+  whose gdbstub session ended. That target proves its own connection released the same way. Its
+  protected state is the project's rows, the jobs naming the System or Run, and the domain's
+  definedness on the provider host.
+
+Prerequisites are §9's, plus §2's gdbstub ACL admitting the control plane to `gdbstub_range`.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix REMOTE_PROVIDER_SSH=<user>@<provider-host>
+export KDIVE_SYSTEMS_TOML=<the stack's systems.toml> KDIVE_S3_ENDPOINT_URL=<guest-reachable URL>
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
+examples/local-libvirt/demo-up.sh             # default configuration, on a wiped stack
+uv run python -m pytest -m live_stack -k remote-libvirt tests/integration/test_debug_tool_cells_live.py
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack -k remote-libvirt tests/integration/test_debug_tool_cells_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Each configuration records 220 cells, 44 functional and 176 rejection, and skips the other
+configuration's 220. While #3124 is open, expect 42 `success` and 2 `blocked` functional cells
+per configuration. `qualify` then qualifies 436 of the 440 and lists the 4 `drgn-live` cells,
+so it exits non-zero by design. After the run, `demo-down.sh --wipe --yes` clears the stack.
+Then check the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no
+`kdive-` overlay.
+
 ## SUSE native image proof
 
 On untouched first boot, record the completed JeOS marker, skipped wizard units,
