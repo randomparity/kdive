@@ -989,8 +989,9 @@ reading one in place.
 parameter for each `failure-resource/local-libvirt/x86_64/{worker-interruption,lost-response,backing-service}`
 cell. Each cell provisions the `rocky-kdive-ready-10` image at the default shape on the direct
 provision path (a stack with no installed authority) and binds the longterm fixture kernel's
-inputs without booting it. Every fault lands in the same window: the provision's first boot,
-while the domain is running and attempt 1 still holds the job. Each cell proves its recovery
+inputs without booting it. The worker pause and the Postgres outage land in the provision's
+first boot, while the domain is running and attempt 1 still holds the job; the lost-response
+replay runs while the provision job is running. Each cell proves its recovery
 outcome plus `no-duplicates`, `protected-state` and `cleanup`.
 
 - `worker-interruption` pauses the worker holding the job with `SIGSTOP`. It never restarts

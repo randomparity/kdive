@@ -3,8 +3,9 @@
 Each ``failure-resource/<provider>/x86_64/{worker-interruption,lost-response,backing-service}``
 cell proves its recovery outcome plus ``no-duplicates``, ``protected-state`` and ``cleanup`` on
 the managed host stack's direct provision path
-(``docs/workflow/specs/2026-10-20-orchestration-fault-proofs-design.md``). Every fault lands in
-the provision's first-boot window: the owned domain active and the job running at attempt 1.
+(``docs/workflow/specs/2026-10-20-orchestration-fault-proofs-design.md``). The worker and
+Postgres faults land in the provision's first-boot window (the owned domain active and the job
+running at attempt 1); the lost-response replay runs while the provision job is running.
 
 - ``worker-interruption`` pauses the exact job holder (SIGSTOP through a pidfd, never a systemd
   restart), waits for a real lease lapse and a reclaim by another worker, then resumes the stale

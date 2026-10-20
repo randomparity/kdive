@@ -101,7 +101,8 @@ locally, the enterprise representative remotely). Each cell binds the longterm f
 kernel inputs as its setup identity, the same way #3118 bound them for its non-booting
 insufficient-disk cell. On a remote cell, `observe_host` records the provider host.
 
-The in-flight window for all three faults is the provision's first-boot wait. That window
+The in-flight window for the worker and Postgres faults is the provision's first-boot wait
+(lost-response replays while the job is running). That window
 opens when the owned domain is active and the job is `running` at attempt 1. It closes when
 the job leaves `running`. `in_flight` polls libvirt and the job row every 0.5 s and returns the
 running claim (worker id, attempt, lease deadline). Locally the window is the readiness-marker
@@ -112,8 +113,9 @@ At the in-flight point, the carrier reads the domain XML and sets `Held.overlays
 `Held.disks`. `prove_held` and `release_and_verify` then check the real overlay. Without this,
 they would pass an empty list.
 
-The carrier checks these preconditions before `allocations.request` and before image
-acquisition, so nothing has been mutated yet. Each unmet one blocks the cell:
+The carrier checks these preconditions before `allocations.request`. The fixture is checked
+there too; the image is acquired on the held Allocation, and a failure there is released by
+`on_allocation`'s cleanup attempt. Each unmet one blocks the cell:
 
 - at least two running fixed worker slots (`KDIVE_WORKER_COUNT=2`);
 - no installed authority (`run_identity` reports no `authority` role), and a provision job
@@ -121,7 +123,8 @@ acquisition, so nothing has been mutated yet. Each unmet one blocks the cell:
   the direct path D1 selects.
 - the longterm fixture and the staged image;
 - for the remote cells, `REMOTE_PROVIDER_SSH`;
-- `sudo -n -l` lists the exact hold argv (`/usr/bin/python3 -c ...`);
+- `sudo -n /usr/bin/python3` with no prompt (probed with `sudo -n -l /usr/bin/python3`; the hold
+  runs that interpreter with `-c`);
 - the fixed workers' journal is readable (`systemd-journal` group);
 - for backing-service, exactly one container for the `postgres` service of the stack's compose project
   (`name: kdive`);
