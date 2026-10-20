@@ -245,7 +245,7 @@ Verification:
 
 Steps:
 
-1. Add to `test_power_snapshots.py`:
+1. Add to `test_power_snapshots.py` (new import: `import libvirt`):
 
    ```python
    class _Snap:
@@ -453,8 +453,11 @@ Verification:
 Steps:
 
 1. Add to `test_control_cells.py` (imports `asyncio`, `Path`, `capture_cells`, `CellRun`,
-   `EvidenceWriter` from `scripts.coverage_campaign.evidence`, `ScenarioStop`, `Outcome`,
-   `build_contract`, `cast`, `OidcIssuer`):
+   `EvidenceWriter` from `tests.integration.live_stack.evidence`, `ScenarioStop` from
+   `tests.integration.live_stack.scenario`, `Outcome` from `scripts.coverage_campaign.evidence`,
+   `Cell` from `scripts.coverage_campaign.contract`, `Guest` from
+   `tests.integration.live_stack.tool_cells`, `OidcIssuer` from `kdive.mcp.dev_harness`, and
+   `Any` beside `cast` from `typing`; `build_contract` is already imported):
 
    ```python
    def _functional_cell(provider: str) -> Cell:
@@ -510,6 +513,7 @@ Steps:
            ({"gateway": "192.168.122.1"}, True),
            ({"gateway": ""}, False),
            ({"gateway": "fe80::1"}, False),
+           ({"gateway": "10.0.2.2"}, False),
            ({}, False),
        ],
    )
@@ -517,7 +521,7 @@ Steps:
        if ok:
            assert control_cells.gateway_of(probe) == probe["gateway"]
        else:
-           with pytest.raises(AssertionError, match="IPv4 default gateway"):
+           with pytest.raises(AssertionError, match="libvirt-network gateway"):
                control_cells.gateway_of(probe)
 
 
@@ -530,9 +534,10 @@ Steps:
        calls: list[str] = []
        issuer = cast(OidcIssuer, object())
 
-       async def prepare(run: CellRun, *_: object) -> CaptureTarget:
+       async def prepare(run: CellRun, *rest: object) -> CaptureTarget:
            calls.append(run.cell.provider)
            if run.cell.provider == "local-libvirt":
+               cast(CellRun, rest[-1]).artifacts.append("b" * 64)  # the scratch record
                raise ScenarioStop(Outcome.BLOCKED, "no lane")
            return _RUN_TARGET
 
@@ -547,6 +552,7 @@ Steps:
            with pytest.raises(ScenarioStop):
                asyncio.run(control_cells.run_target(local, "u", issuer, "db", lambda: None))
        assert calls == ["remote-libvirt", "local-libvirt"]
+       assert local.artifacts.count("b" * 64) == 2
        assert remote.observed["host_os"] == "rocky:10.2"
 
 
@@ -604,19 +610,25 @@ Steps:
      ScenarioStop`; `from tests.integration.live_stack.tool_cells import Boundary, Guest,
      HttpCaller, Rejection, Snapshot, on_lane_system, project_state, settled`; drop `pcap_dir`
      and `worker_libvirt_uri`; `Connect = Callable[[], libvirt.virConnect]`.
-   - constants: `_ROUTE = "printf 'gateway=%s\\n' \"$(ip -4 route show default | awk '{print $3; exit}')\""`
+   - constants: `_ROUTE = "printf 'gateway=%s\\n' \"$(ip -4 route show default | awk '$3 !~ /^10[.]0[.]2[.]/ {print $3; exit}')\""`
+     (the first default route whose gateway is outside the user-mode subnet) and
+     `_SLIRP = ipaddress.ip_network("10.0.2.0/24")`
      and `_TARGET_KEYS = ("host_os", "host_arch", "guest_os", "guest_arch", "accelerator",
      "image_sha256")`.
    - functions:
 
      ```python
      def gateway_of(probe: Mapping[str, str]) -> str:
-         """The guest's IPv4 default-route gateway from ``_ROUTE``'s answer."""
+         """The guest's libvirt-network IPv4 default gateway from ``_ROUTE``'s answer.
+
+         The user-mode SSH NIC's gateway is refused: that NIC is not the captured netdev.
+         """
          value = probe.get("gateway", "")
          try:
-             assert ipaddress.ip_address(value).version == 4
+             address = ipaddress.ip_address(value)
+             assert address.version == 4 and address not in _SLIRP
          except AssertionError, ValueError:
-             raise AssertionError(f"the guest has no IPv4 default gateway ({value!r})") from None
+             raise AssertionError(f"the guest has no libvirt-network gateway ({value!r})") from None
          return value
 
 

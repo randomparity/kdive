@@ -57,8 +57,8 @@ filesystem, so they cannot run on a remote System:
    - the capture spool joins `owned` as `guest.lane.spool(system, job)` once the call returns the
      job id (locally the same directory as before);
    - the flow's destination is `10.0.2.2` on the local lane and, on the remote lane, the guest's
-     IPv4 default-route gateway read in the guest (`ip -4 route show default`), validated as an
-     IPv4 address; an empty or malformed answer fails the cell;
+     IPv4 default-route gateway outside the user-mode subnet `10.0.2.0/24`, read in the guest
+     (`ip -4 route show default`); an empty, non-IPv4 or user-mode answer fails the cell;
    - `run_target(run, base_url, issuer, db_url, fixture)` is the remote rejection target: one
      torn-down lane System per stack and provider whose Run booted the fixture (`boot`), no
      crash options, no debug session; it keeps the provider-host keys with the lane keys, and its
@@ -129,7 +129,7 @@ Considered and rejected:
 | remote pcap path | focused-test | `test_tool_cells.py`: pool target joined with the job's volume name; a pool without a target path fails |
 | native reads through `connect` | focused-test | `test_power_snapshots.py`: state, checkpoints and definedness read the given connection and close it |
 | kernel observer from the lane | focused-test | `test_power_snapshots.py`, `test_control_cells.py`: `functional`/`boot` hand `deep_body` the lane's observer |
-| remote flow gateway | focused-test | `test_control_cells.py`: IPv4 gateway accepted; empty or non-IPv4 refused |
+| remote flow gateway | focused-test | `test_control_cells.py`: libvirt-network IPv4 gateway accepted; empty, non-IPv4 or `10.0.2.2` refused |
 | run target | focused-test | `test_control_cells.py`: one preparation per stack and provider; a failure replayed with its artifacts; host keys kept, kernel keys dropped |
 | remote protected state | focused-test | `test_control_cells.py`: jobs of System and Run plus definedness through the lane |
 | carrier bindings | focused-test | `test_coverage_contract.py`: the 200 remote power and 120 remote control cells bind their carriers |
