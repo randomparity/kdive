@@ -1163,7 +1163,7 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Each pytest run reports 28 cells skipped for the other configuration: the second run must skip the
+Each pytest run reports 42 cells skipped for the other configuration: the second run must skip the
 `…/default/default/…` cells, not the `…/default/recovery/…` ones. Run the pytest commands with
 `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, the least-privilege harness login: the
 protected-state snapshot reads every table with a `project` column, some of which the server DSN
@@ -1174,9 +1174,10 @@ next role-bootstrap run.
 A functional cell compares the tool's answer with the token's own claims, the fixture catalog and `systems.toml`
 read by the test process, or, for `tools.search`, the operator-direct catalog. A rejection cell
 proves its boundary (HTTP 401 for a token signed by a foreign key, where the issued token is not
-refused; a schema-validation failure for invalid arguments) and that the cell's project rows did not change. The tools create nothing, so
+refused; a schema-validation failure for invalid arguments; on `cli`, the readings of
+[ADR-0795](../../adr/0795-cli-translation-exposure.md) decision 3) and that the cell's project rows did not change. The tools create nothing, so
 there is nothing to tear down beyond the stack itself. `qualify` exits 1 because other owners'
-cells have no result; read the 56 `tool/…` rows of these six tools.
+cells have no result; read the 84 `tool/…` rows of these six tools.
 
 Last run: candidate `e3354a190` (server, worker and reconciler at that SHA in both lanes), a
 disposable Fedora 44 x86_64 lab guest with SELinux enforcing; the same result held at `09a80767c`

@@ -47,7 +47,7 @@ The matrix digest moves because the cell set does; the contract version stays 1.
   again as many cells (908 to 1,362); each VM-backed core scenario provisions once more per
   configuration.
 - A verb that cannot express an operation's arguments, or that maps a category to the wrong exit,
-  fails its `cli` cell instead of being skipped. Six verbs are predicted to (see the spec).
+  fails its `cli` cell instead of being skipped. Eight verbs are predicted to (see the spec).
 - Operator and provider tools stay without `cli` cells; extending them needs a later decision.
 
 ## Considered & rejected
