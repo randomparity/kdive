@@ -16,6 +16,31 @@ Regression harnesses for role logic that no unit test in `tests/` can reach, all
 
 Each drives the **real** tasks — never a copy of the logic — in isolation.
 
+## Guest image console (#3236)
+
+`run-guest-image-console.py` checks the real serial task's family/architecture,
+staged/force guards and pre-stage ordering. On Linux it also executes the extracted
+shell with temporary guest paths and a harmless `grub2-mkconfig`, checking rewrite,
+idempotence, unrelated defaults, regeneration order and error propagation. Other
+hosts explicitly report this Linux script proof as **NOT RUN**; Linux CI runs it.
+Use `uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-guest-image-console.py`.
+
+The existing prerequisite role adds Fedora's `guestfs-tools` package for
+`virt-builder`, `virt-customize` and `virt-inspector`; the console harness also
+checks the actual prerequisite selection and preserves other distribution routes.
+These package-expression checks do not prove installation or command availability;
+record the installed package and all three commands during authorized live proof.
+
+The image role applies the same GRUB serial policy to Fedora and Rocky x86_64.
+Existing staged images are unchanged until `force_image_rebuild=true` (or per-image
+`force=true`) rebuilds them. Fedora POWER catalog images instead pass through
+`rootfs_build.py` to bootloader-less whole-disk ext4 for direct kernel boot
+(ADR-0272), with `console=hvc0` from `arch_traits.py`; this GRUB rewrite is not
+applicable to those products. This is a source-grounded reason, not native POWER
+boot qualification; #2818 owns that matrix. The harness does not build an image or
+prove boot. Rebuilt image identity, headless serial boot, authenticated guest
+OS/architecture, reboot and cleanup require separately authorized live evidence.
+
 ## `gdbstub_acl` ufw prune (#616)
 
 ### What it covers
