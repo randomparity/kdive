@@ -16,7 +16,7 @@ interval the shrink is missed and a crash in the new boot's head could be skippe
 gap that mainly affects auto-rebooting guests; the tool's target debug guests halt on panic
 (``panic=0``), preserving the console. A boot-identity check (``dev:ino:mtime``) is
 deliberately **not** used: serial-log mtime advances on every append
-(cf. ``console_rotate._boot_id``), so it would false-reset ``mark``
+(the defect #3254 removed from console rotation's identity), so it would false-reset ``mark``
 mid-boot and resurface a pre-watch panic as a false ``fired``.
 
 Because ``mark`` is snapshotted at worker pickup, a panic that landed before it (queue latency,

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import json
 import struct
 from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -20,6 +23,7 @@ from tests.integration.live_stack.capture_cells import (
     TOOLS,
     CaptureTarget,
     Session,
+    crash_evidence,
     crash_profile,
     kdump_armed,
     lane_keys,
@@ -220,6 +224,50 @@ def test_vmcore_fetch_rejection_names_the_cell_method() -> None:
     assert "method" not in rejection("postmortem.crash", "authorization", _TARGET).args
 
 
+def test_force_crash_accepts_the_crash_kernel_part(tmp_path: Path) -> None:
+    # The observer feeds the combined predicate, and the result names the form that matched.
+    from unittest.mock import AsyncMock
+
+    import tests.integration.live_stack.capture_cells as capture
+    from tests.integration.live_stack.evidence import EvidenceWriter
+
+    text = _console("kdump-crash-kernel-part.txt")
+    old = ToolResponse.success(
+        "old", "ready", refs={"object": "local/systems/system-1/console-part-1-000000"}
+    )
+    new = ToolResponse.success(
+        "new", "ready", refs={"object": "local/systems/system-1/console-part-1-000001"}
+    )
+    read = ToolResponse.success(
+        "new",
+        "ready",
+        data={"content": text, "content_truncated": False, "size_bytes": len(text.encode())},
+        refs={"object": new.refs["object"]},
+    )
+    responses = [
+        ToolResponse.collection("system-1", "ready", [old]),
+        ToolResponse.collection("system-1", "ready", [old, new]),
+        read,
+    ]
+    run = SimpleNamespace(
+        writer=EvidenceWriter(tmp_path), artifacts=[], cell=SimpleNamespace(id="force-crash")
+    )
+    session = SimpleNamespace(
+        armed=AsyncMock(),
+        crash=AsyncMock(),
+        guest=SimpleNamespace(
+            op=SimpleNamespace(call_tool=AsyncMock(side_effect=responses)), system_id="system-1"
+        ),
+        run=run,
+        manifest={**_MANIFEST, "release": _FIXTURE_RELEASE},
+    )
+
+    result = asyncio.run(capture.force_crash_body(cast(Session, session)))
+
+    assert result["crash_evidence"] == "crash_kernel"
+    assert result["console_part_sha256"] == hashlib.sha256(b"new").hexdigest()
+
+
 def test_panic_seen_needs_the_release_on_the_panic_record() -> None:
     line = f"{PANIC}: NMI: Not continuing\nCPU: 0 UID: 0 PID: 0 Comm: swapper Not tainted "
     assert panic_seen(line + "6.18.54-kdive #1", "6.18.54-kdive")
@@ -230,6 +278,61 @@ def test_panic_seen_needs_the_release_on_the_panic_record() -> None:
     assert not panic_seen(banner + line + "6.17.0 #1", "6.18.54-kdive")
     assert not panic_seen(line + "6.17.0 #1\n" + banner, "6.18.54-kdive")
     assert not panic_seen(line + "6.18.54-kdive.1 #1", "6.18.54-kdive")
+
+
+_CONSOLE_FIXTURES = Path(__file__).parent / "fixtures" / "console"
+# The fixture kernel the live runs booted; it also loads itself as its kdump crash kernel.
+_FIXTURE_RELEASE = "6.18.54-g1b357ecb3213"
+
+
+def _console(name: str) -> str:
+    """A sanitized excerpt of real console bytes; the serial stream ends lines in CRLF."""
+    return (_CONSOLE_FIXTURES / name).read_text().replace("\n", "\r\n")
+
+
+def test_crash_evidence_accepts_the_kdump_crash_kernel_boot() -> None:
+    # #3254: on a kdump-armed guest the crashing kernel's panic never reaches the serial
+    # console; the sealed post-crash part holds the crash kernel's banner and elfcorehdr= line.
+    part = _console("kdump-crash-kernel-part.txt")
+
+    assert not panic_seen(part, _FIXTURE_RELEASE)
+    assert crash_evidence(part, _FIXTURE_RELEASE) == "crash_kernel"
+
+
+def test_crash_evidence_rejects_a_normal_fixture_boot() -> None:
+    # The same fixture banner on a normal boot carries no elfcorehdr= on its command line.
+    assert crash_evidence(_console("fixture-boot-snapshot.txt"), _FIXTURE_RELEASE) is None
+
+
+def test_crash_evidence_prefers_the_console_panic() -> None:
+    panic = f"{PANIC}: sysrq triggered crash\r\nCPU: 0 PID: 1 Comm: sh {_FIXTURE_RELEASE} #1\r\n"
+    part = _console("kdump-crash-kernel-part.txt")
+
+    assert crash_evidence(panic + part, _FIXTURE_RELEASE) == "console_panic"
+
+
+def test_crash_evidence_fails_closed_on_incomplete_or_foreign_records() -> None:
+    part = _console("kdump-crash-kernel-part.txt")
+    banner_end = part.index("\r\n", part.index("Linux version")) + 2
+    record_end = part.index("\r\n", banner_end) + 2
+    banner, record = part[:banner_end], part[banner_end:record_end]
+
+    # A part sealed inside the crash kernel's command line record is not yet evidence.
+    assert crash_evidence(part[: part.index("elfcorehdr=") + 20], _FIXTURE_RELEASE) is None
+    # Another release, or the fixture release as a prefix of a longer one.
+    assert crash_evidence(part, "6.17.0") is None
+    assert (
+        crash_evidence(part.replace(_FIXTURE_RELEASE, f"{_FIXTURE_RELEASE}.1"), _FIXTURE_RELEASE)
+        is None
+    )
+    # A crash-kernel command line with no banner before it belongs to no bound boot.
+    assert crash_evidence(record + banner, _FIXTURE_RELEASE) is None
+    # The banner's next boot record must be the crash kernel's: a later boot does not count.
+    other = banner.replace(_FIXTURE_RELEASE, "6.17.0")
+    assert crash_evidence(banner + other + record, _FIXTURE_RELEASE) is None
+    # kdump service text alone is not a crash-kernel boot.
+    saved = "[    3.211476] kdump[408]: saving vmcore-dmesg.txt complete\r\n"
+    assert crash_evidence(saved, _FIXTURE_RELEASE) is None
 
 
 def test_transcript_names_whole_words_only() -> None:
@@ -320,3 +423,99 @@ def test_kdump_service_failure_blocks_instead_of_waiting() -> None:
     with pytest.raises(ScenarioStop) as stop:
         kdump_armed({"loaded": "0", "kdump": "failed"})
     assert stop.value.outcome is Outcome.BLOCKED
+
+
+@pytest.mark.parametrize("failure_stage", [None, "crash", "read"])
+@pytest.mark.parametrize("writer_fails", [False, True])
+def test_force_crash_preserves_evidence_and_original_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str | None,
+    writer_fails: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    import tests.integration.live_stack.capture_cells as capture
+    from tests.integration.live_stack.evidence import EvidenceWriter
+    from tests.integration.live_stack.spine import SpinePhaseError
+
+    events: list[str] = []
+    original = SpinePhaseError("crash-proof", "original failure")
+    part = ToolResponse.success(
+        "old", "ready", refs={"object": "local/systems/system-1/console-part-1-000008"}
+    )
+    new = ToolResponse.success(
+        "new", "ready", refs={"object": "local/systems/system-1/console-part-1-000009"}
+    )
+    text = PANIC + "\nCPU: 0 PID: 1 6.18.54-kdive #1\n"
+    responses: list[object] = [ToolResponse.collection("system-1", "ready", [part])]
+    if failure_stage != "crash":
+        responses += [ToolResponse.collection("system-1", "ready", [new])]
+        responses += [
+            original
+            if failure_stage == "read"
+            else ToolResponse.success(
+                "new",
+                "ready",
+                data={
+                    "content": text,
+                    "content_truncated": False,
+                    "size_bytes": len(text.encode()),
+                },
+                refs={
+                    "object": new.refs["object"],
+                    "download_uri": "https://example.invalid/private",
+                },
+            )
+        ]
+    writer = EvidenceWriter(tmp_path)
+    real_artifact = writer.artifact
+
+    def artifact(payload: object) -> str:
+        events.append("persist")
+        if writer_fails:
+            raise OSError("private path omitted from note")
+        return real_artifact(payload)
+
+    monkeypatch.setattr(writer, "artifact", artifact)
+    run = SimpleNamespace(writer=writer, artifacts=[], cell=SimpleNamespace(id="force-crash"))
+    session = SimpleNamespace(
+        armed=AsyncMock(),
+        crash=AsyncMock(side_effect=original if failure_stage == "crash" else None),
+        guest=SimpleNamespace(
+            op=SimpleNamespace(call_tool=AsyncMock(side_effect=responses)),
+            system_id="system-1",
+            key="do-not-copy-private-key",
+        ),
+        run=run,
+        manifest=_MANIFEST,
+    )
+
+    async def invoke() -> dict[str, object]:
+        try:
+            return await capture.force_crash_body(cast(Session, session))
+        finally:
+            events.append("cleanup")
+
+    if failure_stage is not None:
+        with pytest.raises(SpinePhaseError) as failure:
+            asyncio.run(invoke())
+        assert failure.value is original
+        if writer_fails:
+            assert original.__notes__ == ["console diagnostic persistence failed: OSError"]
+    elif writer_fails:
+        with pytest.raises(OSError):
+            asyncio.run(invoke())
+    else:
+        assert asyncio.run(invoke())["crash_evidence"] == "console_panic"
+    assert events == ["persist", "cleanup"]
+    if not writer_fails:
+        payload = json.loads((tmp_path / "artifacts" / run.artifacts[0]).read_text())
+        assert payload["complete"] is (failure_stage is None)
+        assert payload["console_observation"][0]["tool"] == "artifacts.list"
+        if failure_stage is None:
+            content = payload["console_observation"][-1]
+            assert content["data"]["content"] == text
+            assert content["content_sha256"] == hashlib.sha256(text.encode()).hexdigest()
+        assert "do-not-copy-private-key" not in json.dumps(payload)
+        assert "download_uri" not in json.dumps(payload)

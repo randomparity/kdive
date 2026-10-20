@@ -1635,10 +1635,18 @@ uv run python -m pytest -m live_stack tests/integration/test_capture_tool_cells_
   process named `kcov<hex>`. `kdump` cells add `crashkernel` and wait for
   `/sys/kernel/kexec_crash_loaded`; `host_dump` cells set `debug.preserve_on_crash` instead, so
   the crashed domain stays up for the memory dump.
-- `control.force_crash` (admin) drains to `succeeded`, reaches `crashed` and puts the fixture
-  kernel's panic in a new console part. `vmcore.fetch` drains the capture, checks the job, Run
-  and artifact refs, downloads the raw core twice through `artifacts.fetch_raw` (identical
-  bytes, advertised size) and requires its VMCOREINFO to name the fixture build ID and release.
+- `control.force_crash` (admin) drains to `succeeded`, reaches `crashed`, and shows the crash in
+  new console parts of the same generation. Those parts hold either the fixture kernel's panic
+  with its release on the `CPU:` record (`crash_evidence: console_panic`), or the kdump crash
+  kernel's `Linux version <release>` banner whose `Command line:` carries `elfcorehdr=`
+  (`crash_evidence: crash_kernel`). A kdump-armed guest normally shows only the second form,
+  because the crashing kernel enters the crash kernel before its panic reaches the serial
+  console (#3254). The panic text is then only in the dump. That applies outside the harness
+  too: console panic matching cannot see a crash on a kdump-armed guest. Check the System's
+  `crashed` state or the captured core instead. `vmcore.fetch` drains the capture, checks the
+  job, Run and artifact refs, downloads the raw core twice through `artifacts.fetch_raw`
+  (identical bytes, advertised size) and requires its VMCOREINFO to name the fixture build ID
+  and release.
 - `introspect.from_vmcore` and `postmortem.crash` run over a kdump core: the fixture release,
   the guest's node name, `loop` and, for crash(8), the sentinel. `introspect.run` and
   `introspect.script` use a drgn-live session, which they end: the helpers match the guest's

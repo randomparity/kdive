@@ -23,16 +23,19 @@ import base64
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, nullcontext
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Never
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -241,6 +244,145 @@ def console_part_ids(listing: ToolResponse) -> list[str]:
     ]
 
 
+@dataclass
+class ConsoleObservation:
+    """Bounded redacted evidence for one opt-in force-crash console observation."""
+
+    records: list[dict[str, object]] = field(default_factory=list)
+    incomplete: str | None = None
+    baseline: dict[tuple[int, int], ToolResponse] = field(default_factory=dict)
+    used_bytes: int = 0
+    inspected: set[str] = field(default_factory=set)
+    expires_at: float = 0.0
+
+    def fail(self, reason: str) -> Never:
+        self.incomplete = reason
+        raise SpinePhaseError("console-parts", f"incomplete console evidence: {reason}")
+
+    async def call(self, client: LiveStackClient, name: str, **args: object) -> ToolResponse:
+        remaining = self.expires_at - time.monotonic()
+        if remaining <= 0:
+            self.fail("deadline")
+        try:
+            async with asyncio.timeout(remaining):
+                env = await scalar(client, name, **args)
+        except TimeoutError:
+            self.fail("deadline")
+        record: dict[str, object] = {
+            "tool": name,
+            "id": env.object_id,
+            "status": env.status,
+            "object": env.refs.get("object"),
+            "data": env.data,
+            "error_category": env.error_category,
+            "request": args.get("request", {"cursor": args.get("cursor")}),
+            "items": [{"id": i.object_id, "object": i.refs.get("object")} for i in env.items],
+        }
+        content = env.data.get("content")
+        if isinstance(content, str):
+            record["content_sha256"] = hashlib.sha256(content.encode()).hexdigest()
+        size = len(json.dumps(record, sort_keys=True, separators=(",", ":")).encode())
+        if self.used_bytes + size > 16 * 1024 * 1024:
+            self.fail("diagnostic_byte_bound")
+        self.records.append(record)
+        self.used_bytes += size
+        if time.monotonic() >= self.expires_at:
+            self.fail("deadline")
+        if env.status in {"error", "failed"}:
+            self.incomplete = "acquisition_failure"
+        return ok(env, "console-parts")
+
+    async def parts(
+        self, client: LiveStackClient, system_id: str
+    ) -> dict[tuple[int, int], ToolResponse]:
+        result: dict[tuple[int, int], ToolResponse] = {}
+        ids: set[str] = set()
+        cursors: set[str] = set()
+        cursor: str | None = None
+        while True:
+            args: dict[str, object] = {"system_id": system_id}
+            if cursor is not None:
+                args["cursor"] = cursor
+            page = await self.call(client, "artifacts.list", **args)
+            for item in page.items:
+                key = item.refs.get("object", "")
+                if "console-part-" not in key:
+                    continue
+                match = re.fullmatch(
+                    rf"local/systems/{re.escape(system_id)}/console-part-(\d+)-(\d+)", key
+                )
+                if match is None:
+                    self.fail("invalid_part_key")
+                position = (int(match[1]), int(match[2]))
+                if position in result or item.object_id in ids:
+                    self.fail("duplicate_part")
+                result[position] = item
+                ids.add(item.object_id)
+            if not page.data.get("truncated", False):
+                return result
+            following = page.data.get("next_cursor")
+            if not isinstance(following, str) or not following or following in cursors:
+                self.fail("invalid_list_continuation")
+            cursors.add(following)
+            cursor = following
+
+    async def snapshot(self, client: LiveStackClient, system_id: str) -> set[str]:
+        self.expires_at = time.monotonic() + 600.0
+        self.baseline = await self.parts(client, system_id)
+        if not self.baseline:
+            self.fail("empty_baseline")
+        return {item.object_id for item in self.baseline.values()}
+
+    async def text(self, client: LiveStackClient, item: ToolResponse) -> str:
+        if len(self.inspected) >= 128:
+            self.fail("part_bound")
+        self.inspected.add(item.object_id)
+        chunks: list[str] = []
+        offset = 0
+        expected_size: int | None = None
+        while True:
+            env = await self.call(
+                client,
+                "artifacts.get",
+                request={
+                    "artifact_id": item.object_id,
+                    "byte_offset": offset,
+                },
+            )
+            if env.refs.get("object", item.refs.get("object")) != item.refs.get("object"):
+                self.fail("changed_part_ref")
+            content = env.data.get("content")
+            if (
+                not isinstance(content, str)
+                or env.data.get("content_unavailable")
+                or env.data.get("content_omitted")
+            ):
+                self.fail("unavailable_content")
+            size = env.data.get("size_bytes")
+            if (
+                type(size) is not int
+                or size < 0
+                or "\ufffd" in content
+                or (expected_size is not None and size != expected_size)
+            ):
+                self.fail("unverifiable_content_size")
+            expected_size = size
+            end = offset + len(content.encode("utf-8"))
+            if end > size:
+                self.fail("invalid_content_size")
+            truncated = env.data.get("content_truncated", False)
+            following = env.data.get("next_offset")
+            if truncated:
+                if type(following) is not int or following != end or not offset < end < size:
+                    self.fail("invalid_content_continuation")
+            elif end != size:
+                self.fail("incomplete_terminal_content")
+            chunks.append(content)
+            if not truncated:
+                return "".join(chunks)
+            offset = end
+
+
 async def poll_for_new_console_part(
     client: LiveStackClient,
     system_id: str,
@@ -249,35 +391,70 @@ async def poll_for_new_console_part(
     *,
     deadline_s: float,
     interval_s: float,
+    predicate: Callable[[str], bool] | None = None,
+    observation: ConsoleObservation | None = None,
 ) -> tuple[str, str]:
-    """Return a new immutable console part containing ``marker`` and its full plaintext."""
-    deadline = time.monotonic() + deadline_s
-    inspected_ids: set[str] = set()
-    current_ids: list[str] = []
-    while True:
-        listing = ok(
-            await scalar(client, "artifacts.list", system_id=system_id),
-            "poll-parts",
-        )
-        current_ids = console_part_ids(listing)
-        candidates = [
-            artifact_id
-            for artifact_id in current_ids
-            if artifact_id not in initial_ids and artifact_id not in inspected_ids
-        ]
-        for artifact_id in candidates:
-            text = await full_artifact_text(client, artifact_id, "read-new-part")
-            inspected_ids.add(artifact_id)
-            if marker in text:
-                return artifact_id, text
-        if time.monotonic() >= deadline:
-            raise SpinePhaseError(
-                "console-parts",
-                f"no marker-bearing console-part artifacts within {deadline_s:g}s "
-                f"(initial={len(initial_ids)}, current={len(current_ids)}, "
-                f"inspected={len(inspected_ids)})",
+    """Read a marker part, or an opt-in complete predicate stream with bounded evidence."""
+    if observation is None and predicate is None:
+        deadline = time.monotonic() + deadline_s
+        inspected_ids: set[str] = set()
+        current_ids: list[str] = []
+        while True:
+            listing = ok(
+                await scalar(client, "artifacts.list", system_id=system_id),
+                "poll-parts",
             )
-        await asyncio.sleep(interval_s)
+            current_ids = console_part_ids(listing)
+            candidates = [
+                artifact_id
+                for artifact_id in current_ids
+                if artifact_id not in initial_ids and artifact_id not in inspected_ids
+            ]
+            for artifact_id in candidates:
+                text = await full_artifact_text(client, artifact_id, "read-new-part")
+                inspected_ids.add(artifact_id)
+                if marker in text:
+                    return artifact_id, text
+            if time.monotonic() >= deadline:
+                raise SpinePhaseError(
+                    "console-parts",
+                    f"no marker-bearing console-part artifacts within {deadline_s:g}s "
+                    f"(initial={len(initial_ids)}, current={len(current_ids)}, "
+                    f"inspected={len(inspected_ids)})",
+                )
+            await asyncio.sleep(interval_s)
+    observed = observation or ConsoleObservation()
+    observed.expires_at = time.monotonic() + deadline_s
+    strict = predicate is not None
+    if strict and not observed.baseline:
+        observed.fail("missing_baseline")
+    baseline = max(observed.baseline) if observed.baseline else None
+    stream = ""
+    previous = baseline
+    while True:
+        parts = await observed.parts(client, system_id)
+        if strict and baseline is not None and any(p[0] > baseline[0] for p in parts):
+            observed.fail("generation_change")
+        for position, item in sorted(parts.items()):
+            if item.object_id in initial_ids or item.object_id in observed.inspected:
+                continue
+            if strict and baseline is not None:
+                if position <= baseline:
+                    continue
+                if previous is not None and position != (previous[0], previous[1] + 1):
+                    observed.fail("part_gap")
+            text = await observed.text(client, item)
+            stream = stream + text if strict else text
+            previous = position
+            closed_stream = stream[: stream.rfind("\n") + 1] if strict else stream
+            if predicate(closed_stream) if predicate is not None else marker in closed_stream:
+                if time.monotonic() >= observed.expires_at:
+                    observed.fail("deadline")
+                return item.object_id, stream
+        remaining = observed.expires_at - time.monotonic()
+        if remaining <= 0:
+            observed.fail("deadline")
+        await asyncio.sleep(min(interval_s, max(0.0, remaining)))
 
 
 # --- async-drain helpers (ADR-0045 §2) ------------------------------------------------------
