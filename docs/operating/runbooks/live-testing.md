@@ -1738,6 +1738,15 @@ server's `TMPDIR` on a tmpfs whose per-user quota was 1200 MB, below three stage
 recorded `success`; 11 staging directories came and went, never more than one at a time, and
 the temp directory was empty after the cells and after `demo-down.sh --wipe --yes`.
 
+A rerun at the #3242 candidate `424f2fb40` ran the four `debug.list_breakpoints` `gdbstub`
+functional cells (`default` and `recovery`, each `direct` and `gateway`) on the same kind of
+guest, with the server's `TMPDIR` on the same 1200 MB quota tmpfs; the `recovery` configuration
+came up after a plain `demo-down.sh` with `KDIVE_WORKER_DEATH_VERIFIER=docker`. All four recorded
+`success`, each listing its `vfs_read` and `vfs_write` breakpoints by the numbers they were set
+with, as `breakpoint` rows whose addresses fall inside those functions in `/proc/kallsyms`, and
+only the `vfs_write` row after the first was cleared. After `demo-down.sh --wipe --yes` no
+`kdive-` domain remained and the temp directory held no staging directory.
+
 #### Break-glass provider tool cells (#3112)
 
 `tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell` carries the 136
