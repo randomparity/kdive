@@ -12,20 +12,6 @@ from psycopg.rows import dict_row
 RUN_ARTIFACT_NAMES = frozenset({"effective_config", "kernel", "initrd", "vmlinux"})
 SYSTEM_ARTIFACT_NAMES = frozenset({"rootfs"})
 
-_RAW_VMCORE_KEY_SQL: LiteralString = (
-    "SELECT object_key FROM artifacts "
-    "WHERE owner_kind = 'runs' AND owner_id = %s "
-    "AND object_key LIKE %s AND object_key NOT LIKE %s"
-)
-_REDACTED_VMCORE_ID_SQL: LiteralString = (
-    "SELECT id FROM artifacts "
-    "WHERE owner_kind = 'runs' AND owner_id = %s "
-    "AND object_key LIKE %s AND object_key LIKE %s "
-    "ORDER BY created_at, id LIMIT 1"
-)
-_RAW_VMCORE_KEY_LIKE = "%/vmcore-%"
-_REDACTED_VMCORE_LIKE = "%-redacted"
-
 _RAW_PCAP_KEY_BY_ID_SQL: LiteralString = (
     "SELECT object_key FROM artifacts "
     "WHERE id = %s AND owner_kind = 'runs' AND owner_id = %s AND retention_class = 'pcap'"
@@ -112,25 +98,25 @@ async def system_project(conn: AsyncConnection, system_id: UUID) -> str | None:
 
 
 async def raw_vmcore_key(conn: AsyncConnection, run_id: UUID) -> str | None:
-    """Return a Run-owned raw vmcore key, excluding its ``-redacted`` sibling (ADR-0244)."""
-    async with conn.cursor(row_factory=dict_row) as cur:
+    async with conn.cursor() as cur:
         await cur.execute(
-            _RAW_VMCORE_KEY_SQL,
-            (run_id, _RAW_VMCORE_KEY_LIKE, _REDACTED_VMCORE_LIKE),
+            "SELECT raw_key FROM vmcore_capture_executions WHERE run_id=%s AND state='published'",
+            (run_id,),
         )
         row = await cur.fetchone()
-    return None if row is None else str(row["object_key"])
+    return None if row is None else row[0]
 
 
 async def redacted_vmcore_artifact_id(conn: AsyncConnection, run_id: UUID) -> str | None:
-    """Return a Run-owned redacted vmcore id, or ``None`` when its sibling is absent (ADR-0466)."""
-    async with conn.cursor(row_factory=dict_row) as cur:
+    async with conn.cursor() as cur:
         await cur.execute(
-            _REDACTED_VMCORE_ID_SQL,
-            (run_id, _RAW_VMCORE_KEY_LIKE, _REDACTED_VMCORE_LIKE),
+            "SELECT a.id FROM vmcore_capture_executions e JOIN artifacts a "
+            "ON a.object_key=e.redacted_key AND a.owner_kind='runs' AND a.owner_id=e.run_id "
+            "AND a.sensitivity='redacted' WHERE e.run_id=%s AND e.state='published'",
+            (run_id,),
         )
         row = await cur.fetchone()
-    return None if row is None else str(row["id"])
+    return None if row is None else str(row[0])
 
 
 async def raw_pcap_key(conn: AsyncConnection, run_id: UUID, artifact_id: UUID | None) -> str | None:

@@ -34,6 +34,7 @@ from pathlib import Path
 import boto3
 import psycopg
 import pytest
+from botocore import UNSIGNED
 from botocore.client import Config as BotoConfig
 from botocore.exceptions import ClientError
 
@@ -236,6 +237,15 @@ def _s3_when_ready(endpoint: str, *, deadline_s: float = 60.0):  # noqa: ANN202 
     while True:
         try:
             client.list_buckets()
+            anonymous = boto3.client(
+                "s3",
+                endpoint_url=endpoint,
+                region_name="us-east-1",
+                config=BotoConfig(signature_version=UNSIGNED),
+            )
+            with pytest.raises(ClientError) as denied:
+                anonymous.list_buckets()
+            assert denied.value.response["ResponseMetadata"]["HTTPStatusCode"] == 403
             return client
         except Exception:  # noqa: BLE001 - any startup error is retried until the deadline
             if time.monotonic() >= deadline:

@@ -80,6 +80,7 @@ class _Store:
         assert self.create_release.wait(timeout=5)
         if self.create_error is not None:
             raise self.create_error
+        assert isinstance(request.data, bytes)
         stored = StoredArtifact(
             request.key,
             hashlib.sha256(request.data).hexdigest(),

@@ -1056,3 +1056,71 @@ def test_get_find_store_outage_omits_match_found(migrated_url: str) -> None:
             assert "match_found" not in resp.data
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("large", [False, True])
+def test_run_vmcore_reads_protect_urls_and_reject_retired_ids(
+    migrated_url: str, large: bool
+) -> None:
+    from datetime import UTC, datetime
+
+    from kdive.domain.capture import CaptureMethod
+    from tests.capture_store import journal_existing_test_pair
+    from tests.mcp._seed import seed_run_on_system
+
+    class Store(_SearchStore):
+        def presign_get(self, key: str, *, expires_in: int) -> str:
+            super().presign_get(key, expires_in=expires_in)
+            date = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            return f"https://signed.example/read?X-Amz-Date={date}&X-Amz-Expires=900"
+
+    async def check() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await seed_crashed_system(pool)
+            run_id = await seed_run_on_system(pool, system_id, debuginfo_ref=None, build_id=None)
+            key = f"local/runs/{run_id}/vmcore-host_dump"
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO artifacts(owner_kind,owner_id,object_key,etag,"
+                    "sensitivity,retention_class) "
+                    "VALUES ('runs',%s,%s,'e','sensitive','vmcore')",
+                    (run_id, key),
+                )
+                await journal_existing_test_pair(conn, run_id, key, method=CaptureMethod.HOST_DUMP)
+                row = await (
+                    await conn.execute(
+                        "SELECT id FROM artifacts WHERE object_key=%s", (key + "-redacted",)
+                    )
+                ).fetchone()
+                assert row is not None
+                artifact_id = str(row[0])
+            store = Store(b"evidence", size=_MAX_WINDOWED_FETCH_BYTES + 1 if large else None)
+            response = await _get(
+                pool, _ctx(), artifact_id=artifact_id, store_factory=lambda: store
+            )
+            assert response.status == "available"
+            assert isinstance(response.data["vmcore_retention"], dict)
+            async with pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT vmcore_download_protected_until FROM runs WHERE id=%s", (run_id,)
+                    )
+                ).fetchone()
+                assert row is not None
+                assert "download_uri" in response.refs
+                assert row[0].isoformat() == response.data["download_expires_at"]
+                if not large:
+                    assert response.data["content"] == "evidence"
+                await conn.execute("UPDATE runs SET vmcore_retired_at=now() WHERE id=%s", (run_id,))
+            retired = await _get(pool, _ctx(), artifact_id=artifact_id, store_factory=lambda: store)
+            assert (
+                retired.error_category == "not_found" and retired.data["reason"] == "vmcore_retired"
+            )
+            async with pool.connection() as conn:
+                await conn.execute("DELETE FROM artifacts WHERE owner_id=%s", (run_id,))
+            historical = await _get(
+                pool, _ctx(), artifact_id=artifact_id, store_factory=lambda: store
+            )
+            assert historical.error_category == "not_found" and historical.refs == {}
+
+    asyncio.run(check())

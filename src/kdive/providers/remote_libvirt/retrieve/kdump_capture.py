@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from kdive.artifacts.storage import PresignPutRequest, StoredArtifact, artifact_key
+from kdive.artifacts.storage import PresignPutRequest, StoredArtifact
+from kdive.artifacts.vmcore_retention import capture_metadata, vmcore_keys
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -89,7 +90,7 @@ class KdumpCapturer:
         self._sleep = sleep
         self._monotonic = monotonic
 
-    def capture(self, system_id: UUID, run_id: UUID) -> CaptureOutput:
+    def capture(self, system_id: UUID, run_id: UUID, *, execution_id: UUID) -> CaptureOutput:
         """Inspect the guest's kdump core and upload it via a presigned PUT.
 
         ``system_id`` locates the live domain; ``run_id`` owns the stored core
@@ -104,7 +105,7 @@ class KdumpCapturer:
         config = self._config_factory()
         validate_guest_routable_endpoint()
         method = CaptureMethod.KDUMP
-        raw_key = artifact_key(TENANT, OWNER_KIND, str(run_id), f"vmcore-{method.value}")
+        raw_key, _ = vmcore_keys(TENANT, run_id, method, execution_id)
         with connection(
             config, self._secret_backend_factory, self._open_connection, self._pki_base_dir
         ) as conn:
@@ -118,12 +119,19 @@ class KdumpCapturer:
                     sensitivity=Sensitivity.SENSITIVE,
                     retention_class=RETENTION,
                     expires_in=self._put_expiry_s,
+                    if_absent=True,
+                    metadata=capture_metadata(execution_id),
                 )
             )
             self._upload(domain, system_id, run_id, upload)
         raw = self._reference(raw_key, info.sha256, system_id)
         redacted = persist_redacted(
-            self._store_factory, self._secret_registry, run_id, method, info.dmesg
+            self._store_factory,
+            self._secret_registry,
+            run_id,
+            method,
+            info.dmesg,
+            execution_id=execution_id,
         )
         return CaptureOutput(
             raw=raw,
