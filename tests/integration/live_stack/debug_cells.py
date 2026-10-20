@@ -115,6 +115,10 @@ _LIST = "debug.list_sessions"
 # The lowest x86_64 kernel-half address: a register or stack pointer in the kernel is above it.
 KERNEL_BASE = 0xFFFF800000000000
 BREAK_AT = "vfs_read"
+# vfs_read's parameters in the fixture's v6.18 fs/read_write.c, and the x86_64 SysV registers
+# holding them at its entry, where gdb places ``break vfs_read`` in the fixture (ADR-0781).
+_VFS_READ_ARGS = ("file", "buf", "count", "pos")
+_ARG_REGISTERS = ("rdi", "rsi", "rdx", "rcx")
 WATCH = "jiffies_64"
 BANNER = "linux_banner"
 # A [loop] text function in .text, which load_module_symbols relocates.
@@ -893,20 +897,36 @@ async def backtrace_body(s: Session) -> dict[str, object]:
     return {"frames": len(funcs), "frame0": BREAK_AT, "caller": caller}
 
 
+def _number(value: object, name: str) -> int:
+    token = str(value).split(" ", 1)[0]
+    assert re.fullmatch(r"0x[0-9a-f]+|[0-9]+", token), f"vfs_read's {name} reads {value!r}"
+    return int(token, 0)
+
+
+def _variables(frame: Mapping[str, object], key: str) -> list[dict[str, Any]]:
+    listed = frame.get(key)
+    assert isinstance(listed, list), f"the frame has no {key}"
+    return [cast(dict[str, Any], v) for v in listed]
+
+
 async def read_frame_body(s: Session) -> dict[str, object]:
-    """Frame 0 is ``vfs_read`` at the stop; its arguments and locals are not returned."""
+    """Frame 0 is ``vfs_read`` at its entry, its arguments the ABI registers and ``ret`` a local."""
     session_id = await s.start()
     rip = await s.stop_in_vfs_read(session_id)
+    assert rip == s.truth.at(BREAK_AT), "the stop is not at vfs_read's entry"
+    registers = [await s.register(session_id, name) for name in _ARG_REGISTERS]
     env = await s.exposed(session_id=session_id, level=0)
     await s.end(session_id)
     frame = env.data.get("frame")
     assert isinstance(frame, dict), "no frame returned"
     assert (frame.get("func"), hex_value(frame.get("addr"))) == (BREAK_AT, rip), "frame differs"
-    assert "args" in frame or "locals" in frame, (
-        "debug.read_frame returns no arguments or locals, so they cannot be compared with the "
-        "workload (known product gap)"
-    )
-    return {"frame0": BREAK_AT}
+    args = {str(v.get("name")): v.get("value") for v in _variables(frame, "args")}
+    assert tuple(args) == _VFS_READ_ARGS, f"vfs_read's arguments are {tuple(args)}"
+    for (name, value), register, reg in zip(args.items(), registers, _ARG_REGISTERS, strict=True):
+        assert _number(value, name) == register, f"{name} is not {reg}"
+    assert 0 < registers[1] < KERNEL_BASE, "buf is not a user pointer"
+    assert "ret" in [v.get("name") for v in _variables(frame, "locals")], "no ret local"
+    return {"frame0": BREAK_AT, "args": list(_VFS_READ_ARGS), "registers_match": True}
 
 
 def _module_row(env: ToolResponse) -> dict[str, Any]:
