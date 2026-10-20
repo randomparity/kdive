@@ -296,7 +296,9 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     local_capture = [c for c in capture if c.provider == "local-libvirt"]
     # As for power: the local ppc64le cells (#2818's) share the arch-free scenario ids.
     assert len(local_capture) == 324 and {c.node_id for c in local_capture} == {_CAPTURE_NODE}
-    assert {c.node_id for c in capture if c.provider == "remote-libvirt"} == {None}
+    remote_capture = [c for c in capture if c.provider == "remote-libvirt"]
+    # A remote scenario id names no architecture either: the ppc64le cells (#2818's) share it.
+    assert len(remote_capture) == 360 and {c.node_id for c in remote_capture} == {_CAPTURE_NODE}
     corpus = [c for c in contract.cells if c.operation == "kernel-corpus"]
     # As for power: the ppc64le corpus cells share the arch-free scenario ids.
     assert len(corpus) == 8 and {c.node_id for c in corpus} == {_CORPUS_NODE}
@@ -789,6 +791,11 @@ def test_capture_owners_follow_the_approved_split(inventory: Inventory) -> None:
     remote = [c for c in cells if c.owner == 3114]
     kinds = Counter(c.kind for c in remote)
     assert (len(remote), kinds["functional"], kinds["unsupported"]) == (180, 28, 8)
+
+
+def test_remote_capture_cells_bind_the_capture_carrier(inventory: Inventory) -> None:
+    cells = [c for c in build_contract(inventory=inventory).cells if c.owner == 3114]
+    assert len(cells) == 180 and {c.node_id for c in cells} == {_CAPTURE_NODE}
 
 
 def test_handler_refused_capture_variants_are_unsupported(inventory: Inventory) -> None:

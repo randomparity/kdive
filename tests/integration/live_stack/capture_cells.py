@@ -721,6 +721,34 @@ async def unsupported(
     return {"tool": run.cell.operation, "advertised": sorted(map(str, methods))}
 
 
+async def refused_method(
+    run: CellRun,
+    caller: HttpCaller,
+    tree: Path,
+    manifest: Mapping[str, Any],
+    db_url: str,
+    guest: Guest,
+) -> dict[str, object]:
+    """A crashed fixture System's Run refuses a non-core capture method, writing no job.
+
+    The handler checks the Run, role, binding and CRASHED state before the method, so the
+    System is booted and crashed first (ADR-0722, 2026-10-20). The fetch goes through the
+    cell's exposure as a contributor.
+    """
+    method = variant_of(run.cell)
+    run_id, endpoint = await boot(run, guest, tree, manifest)
+    role = grants(guest.project, GATES["vmcore.fetch"])
+    await Session(run, guest, caller, role, manifest, run_id, endpoint).crash()
+    jobs = partial(named_jobs, db_url, guest.system_id, run_id)
+    before = await jobs()
+    args = {"run_id": run_id, "method": method}
+    answer = await caller.call("vmcore.fetch", args, caller.token(role), discover=True)
+    refused = refusal_of(one(answer), method)
+    assert await jobs() == before, "the refused fetch changed the jobs of its System or Run"
+    await await_system_state(guest.op, "refused", guest.system_id, "crashed")
+    return {"tool": run.cell.operation, **refused, "jobs_unchanged": True, "system": "crashed"}
+
+
 # --- rejection cells ------------------------------------------------------------------------
 
 
