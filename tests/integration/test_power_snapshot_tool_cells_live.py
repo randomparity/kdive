@@ -1,11 +1,12 @@
-"""Prove the x86_64 local power and snapshot tool cells over HTTP (#2815).
+"""Prove the x86_64 power and snapshot tool cells over HTTP on both providers (#2815, #3116).
 
-``live_stack``-marked (ADR-0722). One parameter per native local-libvirt contract cell of
-``control.power``, ``systems.snapshot``, ``systems.restore``, ``systems.list_snapshots`` and
-``systems.delete_snapshot``, framed by
+``live_stack``-marked (ADR-0722). One parameter per native local-libvirt contract cell and per
+x86_64 remote-libvirt contract cell of ``control.power``, ``systems.snapshot``,
+``systems.restore``, ``systems.list_snapshots`` and ``systems.delete_snapshot``, framed by
 :func:`~tests.integration.live_stack.tool_cells.run_tool_cell`; the scenarios are in
-:mod:`tests.integration.live_stack.power_snapshots`. The remote cells are #3116's and the
-ppc64le cells #2818's. ``docs/operating/runbooks/live-testing.md`` covers the run.
+:mod:`tests.integration.live_stack.power_snapshots`, observed on the cell's provider. The ppc64le
+cells are #2818's. ``docs/operating/runbooks/live-testing.md`` covers the local run,
+``docs/operating/runbooks/remote-live-stack.md`` the remote one.
 """
 
 from __future__ import annotations
@@ -32,9 +33,11 @@ from tests.integration.live_stack.power_snapshots import (
 )
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.integration.live_stack.tool_cells import (
+    REMOTE_LANE_FAMILIES,
     Exposure,
     HttpCaller,
     boundary_of,
+    lane_for,
     lane_target,
     on_lane_system,
     prove_rejection,
@@ -49,7 +52,7 @@ pytestmark = pytest.mark.live_stack
 BASELINE = "longterm"
 
 
-def _fixture() -> tuple[Path, dict[str, Any]]:
+def _fixture(arch: str) -> tuple[Path, dict[str, Any]]:
     """The verified ``longterm`` fixture; ``blocked`` before any stack mutation when absent."""
     root = os.environ.get(FIXTURE_ROOT_ENV)
     if not root:
@@ -57,7 +60,7 @@ def _fixture() -> tuple[Path, dict[str, Any]]:
             Outcome.BLOCKED, f"{FIXTURE_ROOT_ENV} unset; build the {BASELINE} fixture"
         )
     try:
-        return load_fixture(Path(root), BASELINE, platform.machine())
+        return load_fixture(Path(root), BASELINE, arch)
     except ValueError as exc:
         raise ScenarioStop(Outcome.BLOCKED, f"{BASELINE} fixture: {exc}") from None
 
@@ -65,7 +68,7 @@ def _fixture() -> tuple[Path, dict[str, Any]]:
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> None:
     caller = HttpCaller(cast(Exposure, run.cell.exposure), base_url, issuer)
     if run.cell.kind == "functional":
-        tree, manifest = _fixture()
+        tree, manifest = _fixture(str(run.cell.guest_arch))
         project = f"cov-{secrets.token_hex(4)}"
         token = caller.token(grants(project, "contributor"))
         await on_lane_system(
@@ -84,7 +87,7 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
         caller,
         boundary,
         rejection(run.cell.operation, boundary, target),
-        snapshot_of(db_url, target),
+        snapshot_of(db_url, target, lane_for(run.cell).connect),
     )
 
 
@@ -92,11 +95,12 @@ def _cells() -> list[Cell]:
     return [
         c
         for c in tool_cells(TOOLS)
-        if c.provider == "local-libvirt" and c.guest_arch == platform.machine()
+        if (c.provider == "local-libvirt" and c.guest_arch == platform.machine())
+        or (c.provider == "remote-libvirt" and c.guest_arch in REMOTE_LANE_FAMILIES)
     ]
 
 
 @pytest.mark.parametrize("cell", _cells(), ids=lambda cell: cell.id)
 def test_power_snapshot_tool_cell(cell: Cell) -> None:
-    """Prove one configuration × exposure × kind cell of a local power or snapshot tool."""
+    """Prove one configuration × exposure × kind cell of a power or snapshot tool."""
     run_tool_cell(cell, _scenario)
