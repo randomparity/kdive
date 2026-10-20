@@ -18,6 +18,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import OrphanedCapture
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+from kdive.providers.remote_libvirt.connection.monitor import qemu_monitor_command
 from kdive.providers.remote_libvirt.connection.transport import (
     ClosableConn,
     open_libvirt_protocol,
@@ -45,6 +46,18 @@ def _open_test_driver[C: ClosableConn](uri: str) -> C:
     """The production opener, pointed at libvirt's built-in test driver."""
     del uri
     return open_libvirt_protocol("test:///default")
+
+
+def test_qemu_monitor_command_hands_the_domain_to_the_module_function() -> None:
+    conn = libvirt.open("test:///default")
+    try:
+        domain = conn.lookupByName(_TEST_DOMAIN)
+        with pytest.raises(libvirt.libvirtError) as exc:
+            qemu_monitor_command(domain, '{"execute": "query-status"}', 0)
+    finally:
+        conn.close()
+    # The test driver has no QEMU monitor: reaching it at all proves the call shape.
+    assert exc.value.get_error_code() == libvirt.VIR_ERR_NO_SUPPORT
 
 
 def test_capture_detach_reaches_the_monitor_on_a_real_domain(tmp_path: Path) -> None:
