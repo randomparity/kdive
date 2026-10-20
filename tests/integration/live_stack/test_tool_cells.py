@@ -1318,6 +1318,7 @@ def test_cli_validation_accepts_a_usage_refusal_only_on_cli() -> None:
     assert not rejected_by_validation("gateway", usage)
     assert rejected_by_validation("cli", _invoke_error(None))
     assert rejected_by_validation("cli", LiveStackToolError("t", "1 validation error for call"))
+    assert tool_cells._shape(usage) == {"usage_error": True, "refused": "--limit"}
 
 
 _AUTH = tool_cells.CliRun(1, "", "error: authentication failed; verify KDIVE_TOKEN\n")

@@ -616,6 +616,9 @@ def refused_for_capability(result: Result) -> TypeIs[ToolResponse]:
 
 def _shape(result: Result) -> dict[str, object]:
     """A message-free description of ``result`` for evidence."""
+    if isinstance(result, CliUsageError):
+        # Option names only: which declared option kdivectl refused, never its value.
+        return {"usage_error": True, "refused": result.message.rsplit(": ", 1)[-1]}
     if isinstance(result, LiveStackToolError):
         return {
             "tool_error": True,
