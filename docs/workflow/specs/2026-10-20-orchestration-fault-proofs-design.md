@@ -122,14 +122,16 @@ acquisition, so nothing has been mutated yet. Each unmet one blocks the cell:
 - the longterm fixture and the staged image;
 - for the remote cells, `REMOTE_PROVIDER_SSH`;
 - `sudo -n -l` lists the exact hold argv (`/usr/bin/python3 -c ...`);
-- for backing-service, the compose `postgres` container that serves `KDIVE_DATABASE_URL`.
+- the fixed workers' journal is readable (`systemd-journal` group);
+- for backing-service, exactly one container for the `postgres` service of the stack's compose project
+  (`name: kdive`);
 
 Every wait has a bound:
 
 - the in-flight window: one boot window;
 - reclaim: the lease remainder plus 120 s, and at most 8 minutes;
 - terminal job: 3 attempts times one boot window, plus the lease (5 minutes), plus 120 s;
-- stale journal: one boot window;
+- stale journal: one first-boot window plus 60 s;
 - readyz: 120 s.
 
 An expired bound records the cell as an incomplete failure.
@@ -143,7 +145,7 @@ An expired bound records the cell as an incomplete failure.
    Sampler runs every 15 s while waiting.
 4. Wait until the job is terminal. The cell requires `succeeded` at the replacement's attempt
    by the replacement worker, and the System `ready`.
-5. Resume with `"continue"`. Wait at most one boot window (900 s locally, 300 s remotely) for
+5. Resume with `"continue"`. Wait at most one first-boot window plus 60 s (900 s locally, 180 s remotely) for
    the stale invocation's journal to show one of two lines for this job:
    - `completed but was reclaimed; result dropped`, or
    - a provision failure line.
@@ -153,7 +155,7 @@ An expired bound records the cell as an incomplete failure.
    - the System is still `ready`;
    - the owned domain is still active with the same UUID;
    - the overlay recorded at the in-flight point still exists.
-6. Prove `worker-interruption` with the original and replacement claims, both invocation ids,
+6. Prove `worker-interruption` with the original and replacement claims, the paused invocation id,
    the stale outcome and the final job row. Prove `no-duplicates`: one System under the
    Allocation, one added domain named `kdive-<system_id>`, and one overlay equal to the one
    observed at the in-flight point. Prove `protected-state` from the samples.
