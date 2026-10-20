@@ -1,12 +1,13 @@
 """Tool-cell frame of the live coverage carriers (#2811, ADR-0722).
 
 A tool cell is one contract cell of a registered MCP tool: a configuration (``default`` or
-``recovery``), an exposure (``direct`` or ``gateway``) and a kind (``functional`` or one rejection
-boundary). :func:`run_tool_cell` proves the server's configuration from its operator catalog,
-skips a cell of the other configuration without writing a record, and otherwise runs the cell
-through :func:`~tests.integration.live_stack.scenario.run_cell`. :class:`HttpCaller` reaches a tool
-in the cell's exposure; :func:`prove_functional` and :func:`prove_rejection` prove the cell's
-assertions, with :func:`project_state` as the default protected-state snapshot.
+``recovery``), an exposure (``direct``, ``gateway`` or ``cli``) and a kind (``functional`` or one
+rejection boundary). :func:`run_tool_cell` proves the server's configuration from its operator
+catalog, skips a cell of the other configuration without writing a record, and otherwise runs the
+cell through :func:`~tests.integration.live_stack.scenario.run_cell`. :class:`HttpCaller` reaches a
+tool over HTTP and :class:`CliCaller` through its generated ``kdivectl`` verb (ADR-0795);
+:func:`caller_for` picks the cell's. :func:`prove_functional` and :func:`prove_rejection` prove the
+cell's assertions, with :func:`project_state` as the default protected-state snapshot.
 
 A provider cell runs on its provider's :class:`Lane`: a local-libvirt cell on the catalog lane
 image (:data:`LANE_IMAGES`) of this host's architecture, a remote-libvirt cell on the remote
@@ -32,13 +33,16 @@ import argparse
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import os
 import platform
+import re
 import secrets
+import sys
 import tempfile
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, nullcontext
+from contextlib import AbstractAsyncContextManager, nullcontext, redirect_stderr
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -52,6 +56,11 @@ from fastmcp.client.transports import StreamableHttpTransport
 from psycopg import sql
 
 import kdive.config as config
+from kdive.cli.__main__ import build_parser
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.generated_args import assemble_generated_payload
+from kdive.cli.commands.verb_spec import GeneratedVerb
+from kdive.cli.reserved_flags import derive_cli_flag
 from kdive.config.cli_settings import CLI_CLIENT_ID
 from kdive.domain.errors import ErrorCategory
 from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
@@ -109,7 +118,7 @@ from tests.integration.live_stack.scenario import (
     ssh_probe,
 )
 
-Exposure = Literal["direct", "gateway"]
+Exposure = Literal["direct", "gateway", "cli"]
 Boundary = Literal[
     "authentication", "authorization", "project-isolation", "validation", "capability"
 ]
@@ -226,8 +235,14 @@ class HttpCaller:
     base_url: str
     issuer: OidcIssuer
 
+    def __post_init__(self) -> None:
+        # Over HTTP a `cli` exposure would route through the gateway and record it as `cli`.
+        assert (self.exposure == "cli") == isinstance(self, CliCaller), (
+            f"exposure {self.exposure!r} needs a CliCaller exactly when it is `cli`"
+        )
+
     def token(self, grants: Grants) -> str:
-        """A real-issuer token for ``grants``; ``direct`` carries the ``kdivectl`` client id."""
+        """A real-issuer token for ``grants``; all but ``gateway`` carry the ``kdivectl`` id."""
         return mint_token(
             self.issuer,
             subject=grants.subject,
@@ -235,7 +250,7 @@ class HttpCaller:
             roles=dict(grants.roles),
             platform_roles=list(grants.platform_roles),
             agent_session=f"{grants.subject}-sess",
-            client_id=config.require(CLI_CLIENT_ID) if self.exposure == "direct" else None,
+            client_id=config.require(CLI_CLIENT_ID) if self.exposure != "gateway" else None,
         )
 
     def _route(self, tool: str, args: Mapping[str, object]) -> tuple[str, dict[str, object]]:
@@ -271,6 +286,239 @@ class HttpCaller:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http:
             response = await http.post(self.base_url, json=body, headers=headers)
         return response.status_code
+
+
+_EXIT_CODES = {  # ADR-0089: the CLI's exit code per error category; any other category is 1.
+    "configuration_error": 2,
+    "authorization_denied": 3,
+    "not_found": 4,
+    "conflict": 5,
+    "capacity_exhausted": 6,
+}
+_AUTH_FAILED = "error: authentication failed"
+_TIER_REFUSED = "is not positively classified"
+_CLI_TIMEOUT_S = 900.0
+_VERBS = {verb.tool: verb for verb in GENERATED_VERBS}
+
+
+class CliUsageError(LiveStackToolError):
+    """kdivectl refused the command line itself (exit 2, no envelope): no call was made."""
+
+
+class CliTierRefusal(LiveStackToolError):
+    """kdivectl refused a verb whose tool the caller's catalog hides (exit 3, no call)."""
+
+
+class CliTranslationGap(AssertionError):
+    """The call cannot be expressed as this tool's kdivectl command line."""
+
+
+@dataclass(frozen=True)
+class CliRun:
+    code: int
+    stdout: str
+    stderr: str
+
+
+async def run_kdivectl(argv: list[str], *, token: str, base_url: str) -> CliRun:
+    """Run the real ``kdivectl`` entry point as a subprocess, stdin closed."""
+    env = {**os.environ, "KDIVE_TOKEN": token, "KDIVE_SERVER_URL": base_url}
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "kdive.cli",
+        *argv,
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), _CLI_TIMEOUT_S)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise AssertionError(f"kdivectl {argv[0]} {argv[1]} ran past {_CLI_TIMEOUT_S}s") from None
+    assert proc.returncode is not None
+    return CliRun(proc.returncode, out.decode(), err.decode(errors="replace"))
+
+
+def _auth_failed(done: CliRun) -> bool:
+    return any(line.startswith(_AUTH_FAILED) for line in done.stderr.splitlines())
+
+
+def _refused_flags(done: CliRun) -> str:
+    """The option names argparse's last diagnostic line cites; never their values."""
+    last = done.stderr.strip().splitlines()[-1:] or [""]
+    return " ".join(re.findall(r"--[a-z0-9-]+", last[0])) or "no option named"
+
+
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def _usage_body(args: Mapping[str, object]) -> dict[str, object]:
+    target = args.get("target")
+    if set(args) == {"target"} and isinstance(target, Mapping):
+        return {str(k): v for k, v in target.items() if k != "kind"}
+    return dict(args)
+
+
+def _report_body(args: Mapping[str, object]) -> dict[str, object]:
+    request = args.get("request")
+    if set(args) != {"request"} or not isinstance(request, Mapping):
+        return dict(args)
+    body = {str(k): v for k, v in request.items()}
+    if isinstance(projects := body.get("projects"), list):
+        body["projects"] = ",".join(str(p) for p in projects)
+    if isinstance(window := body.get("window"), list) and len(window) == 2:
+        del body["window"]
+        body["since"], body["until"] = window
+    return body
+
+
+# These handlers reshape the payload, so their command line is not the payload's.
+_INVERSES = {"accounting.usage": _usage_body, "accounting.report": _report_body}
+
+
+def _body(verb: GeneratedVerb, args: Mapping[str, object]) -> dict[str, object]:
+    request = args.get("request")
+    if verb.unwrap_request and set(args) == {"request"} and isinstance(request, Mapping):
+        return {str(k): v for k, v in request.items()}
+    return dict(args)
+
+
+def _flag(verb: GeneratedVerb, key: str, value: object) -> list[str]:
+    if value is None:
+        return []
+    if key in verb.json_params:
+        return [f"{derive_cli_flag(key)}-json", json.dumps(value)]
+    flag = next((f for f in verb.flags if f.dest == key), None)
+    if flag is None:
+        raise CliTranslationGap(f"kdivectl {verb.group} {verb.sub} has no option for {key!r}")
+    if flag.action == "store_true" and isinstance(value, bool):
+        return [flag.name] if value else []
+    if flag.action == "bool_optional" and isinstance(value, bool):
+        return [flag.name if value else "--no-" + flag.name.removeprefix("--")]
+    if flag.action == "append" and isinstance(value, list):
+        return [token for item in value for token in (flag.name, _text(item))]
+    return [flag.name, _text(value)]
+
+
+def cli_argv(tool: str, args: Mapping[str, object]) -> list[str]:
+    """The ``kdivectl`` command line that makes ``tool``'s call with ``args`` (ADR-0795)."""
+    verb = _VERBS[tool]
+    inverse = _INVERSES.get(tool)
+    body = inverse(args) if inverse else _body(verb, args)
+    argv = [verb.group, verb.sub]
+    argv += [_text(body.pop(name)) for name in verb.positionals if body.get(name) is not None]
+    for key, value in body.items():
+        argv += _flag(verb, key, value)
+    return [*argv, *(["--yes"] if verb.confirm_destructive else []), "--json"]
+
+
+def _check_exact(tool: str, argv: list[str], args: Mapping[str, object]) -> None:
+    """A parsed command line reassembles exactly ``args`` (the two reshaping verbs excepted)."""
+    verb = _VERBS[tool]
+    if tool in _INVERSES:
+        return
+    try:
+        with redirect_stderr(io.StringIO()):
+            namespace = build_parser().parse_args(argv)
+    except SystemExit:
+        return  # The subprocess reports the same refusal as a usage error.
+    bools = {f.dest for f in verb.flags if f.action == "store_true"}
+    body = {
+        k: v
+        for k, v in _body(verb, args).items()
+        if v is not None and not (k in bools and v is False)
+    }
+    expected = ({"request": body} if body else {}) if verb.unwrap_request else body
+    got = assemble_generated_payload(verb, namespace)
+    differs = sorted(k for k in expected.keys() | got.keys() if expected.get(k) != got.get(k))
+    if differs:
+        raise CliTranslationGap(f"kdivectl {verb.group} {verb.sub} cannot carry {differs}")
+
+
+def _result(tool: str, argv: list[str], done: CliRun) -> ToolResponse | list[ToolResponse]:
+    verb = f"kdivectl {argv[0]} {argv[1]}"
+    if done.stdout.strip().startswith("{"):
+        payload = json.loads(done.stdout)
+        category = payload.get("error_category")
+        expected = 0 if category is None else _EXIT_CODES.get(category, 1)
+        assert done.code == expected, f"{verb} exited {done.code} for {category!r}, not {expected}"
+        inner = payload.get("result")
+        if list(payload) == ["result"] and isinstance(inner, list):
+            return [ToolResponse.model_validate(item) for item in inner]
+        return ToolResponse.model_validate(payload)
+    if done.code == 2:
+        raise CliUsageError(tool, f"{verb} refused the command line: {_refused_flags(done)}")
+    if done.code == 3 and _TIER_REFUSED in done.stdout:
+        raise CliTierRefusal(tool, f"{verb}: the caller's catalog hides {tool}")
+    errors = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+    if done.code == 1 and errors:
+        raise LiveStackToolError(tool, errors[0].removeprefix("error: "))
+    first = done.stdout.strip().splitlines()[:1]
+    raise AssertionError(f"{verb} exited {done.code} with no envelope: {first}")
+
+
+@dataclass(frozen=True)
+class CliCaller(HttpCaller):
+    """Reach a tool through its generated ``kdivectl`` verb (ADR-0795)."""
+
+    async def call(
+        self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
+    ) -> ToolResponse | list[ToolResponse]:
+        argv = cli_argv(tool, args)
+        _check_exact(tool, argv, args)
+        done = await run_kdivectl(argv, token=token, base_url=self.base_url)
+        try:
+            return _result(tool, argv, done)
+        except CliTierRefusal:
+            # UNKNOWN also answers a listed tool with bad annotations; only a hidden one is denied.
+            assert tool not in await _catalog(self.base_url, token), (
+                f"kdivectl refused listed {tool}"
+            )
+            raise
+
+    async def authenticate(
+        self, tool: str, args: Mapping[str, object], genuine: str
+    ) -> dict[str, object]:
+        argv = cli_argv(tool, args)
+        forged = await run_kdivectl(argv, token=forge(genuine), base_url=self.base_url)
+        if forged.code == 2:
+            raise CliTranslationGap(f"kdivectl {argv[0]} {argv[1]}: {_refused_flags(forged)}")
+        assert forged.code == 1 and _auth_failed(forged), (
+            f"forged-token kdivectl {argv[0]} {argv[1]} exited {forged.code} without the diagnostic"
+        )
+        control = await run_kdivectl(argv, token=genuine, base_url=self.base_url)
+        assert not _auth_failed(control), f"the issued token's kdivectl {argv[1]} also failed"
+        return {
+            "exit": 1,
+            "diagnostic": "authentication-failed",
+            "token": "foreign-signature",
+            "issued_token_exit": control.code,
+        }
+
+
+async def _catalog(base_url: str, token: str) -> set[str]:
+    transport = StreamableHttpTransport(url=base_url, headers={"Authorization": f"Bearer {token}"})
+    async with Client(transport) as client:
+        return {tool.name for tool in await client.list_tools()}
+
+
+def caller_for(exposure: str, base_url: str, issuer: OidcIssuer) -> HttpCaller:
+    """The caller of a cell's exposure: ``cli`` drives kdivectl, the others call over HTTP."""
+    if exposure == "cli":
+        return CliCaller("cli", base_url, issuer)
+    return HttpCaller(cast(Exposure, exposure), base_url, issuer)
+
+
+def http_caller(caller: HttpCaller) -> HttpCaller:
+    """``caller``, or a ``direct`` one for a CLI cell's owned-state cleanup."""
+    if isinstance(caller, CliCaller):
+        return HttpCaller("direct", caller.base_url, caller.issuer)
+    return caller
 
 
 async def operator_catalog(base_url: str, issuer: OidcIssuer, grants: Grants) -> dict[str, object]:
@@ -333,15 +581,19 @@ def rejected_by_validation(exposure: str, result: Result) -> bool:
     (``src/kdive/mcp/tools/gateway.py``). A tool whose binding failure ``BindingErrorMiddleware``
     re-envelopes (``src/kdive/mcp/middleware/binding_errors.py``) never reaches that branch, so
     its ``gateway`` validation cell fails here rather than recording ambiguous evidence.
+    ``cli`` follows ``direct`` and also accepts ``kdivectl`` refusing a declared option's value
+    before any call (ADR-0795).
     """
+    if isinstance(result, CliUsageError):
+        return exposure == "cli"
     if isinstance(result, LiveStackToolError):
-        return exposure == "direct" and "validation error" in result.message.lower()
+        return exposure in ("direct", "cli") and "validation error" in result.message.lower()
     if not (
         isinstance(result, ToolResponse)
         and result.error_category == ErrorCategory.CONFIGURATION_ERROR.value
     ):
         return False
-    if exposure == "direct":
+    if exposure in ("direct", "cli"):
         return True
     return bool(result.data.get("field_errors")) and "failed schema validation" in (
         result.detail or ""
@@ -483,6 +735,8 @@ async def _observe(
         return await _observe_filtered(caller, tool, rejection, rejection.filtered)
     if boundary == "authentication":
         genuine = caller.token(rejection.grants)
+        if isinstance(caller, CliCaller):
+            return await caller.authenticate(tool, rejection.args, genuine)
         status = await caller.post(tool, rejection.args, forge(genuine))
         assert status == 401, f"forged-signature call to {tool} answered HTTP {status}, not 401"
         # The same request with the issued token must pass authentication, so the 401 above is
@@ -501,7 +755,14 @@ async def _observe(
             f"{tool} was not rejected by argument validation: {_shape(result)}"
         )
         return {"rejected": _shape(result)}
-    category = result.error_category if isinstance(result, ToolResponse) else None
+    # kdivectl's refusal of a tool the server hid from the caller's catalog (ADR-0795).
+    category = (
+        ErrorCategory.AUTHORIZATION_DENIED.value
+        if isinstance(result, CliTierRefusal)
+        else result.error_category
+        if isinstance(result, ToolResponse)
+        else None
+    )
     assert category is not None, f"{tool} was not rejected: {_shape(result)}"
     assert category in rejection.categories, (
         f"{tool} rejected with {category}, not one of {sorted(rejection.categories)}"
