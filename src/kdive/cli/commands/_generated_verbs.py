@@ -1104,7 +1104,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="debug.end_session",
         read_only=False,
         destructive=False,
-        help="Drive a live DebugSession to detached; close its transport. Requires contributor.",
+        help="Detach the session and clean up its local GDB process/symbol files. Contributor.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
@@ -4462,7 +4462,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                 name="--idempotency-key",
                 dest="idempotency_key",
                 required=False,
-                help="Replay-safe key; a repeated key returns the prior envelope.",
+                help="Replay-safe key; repeats return the prior envelope unless the vmcore has retired.",
                 arg_type="str",
                 action=None,
                 choices=(),

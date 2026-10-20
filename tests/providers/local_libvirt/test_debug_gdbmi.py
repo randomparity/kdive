@@ -20,6 +20,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.tools.debug.sessions.registry import GdbMiSessionRegistry
 from kdive.providers.ports.debug import (
     GdbFrame,
+    GdbMiAttachFailure,
     GdbMiAttachment,
     GdbModule,
     GdbStopRecord,
@@ -2773,7 +2774,7 @@ def _srcversion_cmd(ptr: str) -> str:
 
 
 def _engine_with_resolver(info: ModuleDebuginfo | CategorizedError) -> GdbMiEngine:
-    def resolver(run_id: str, module: str) -> ModuleDebuginfo:
+    def resolver(attachment: GdbMiAttachment, module: str) -> ModuleDebuginfo:
         if isinstance(info, CategorizedError):
             raise info
         return info
@@ -2917,15 +2918,20 @@ def test_actual_attach_validates_target_and_cleans_up_failure(
     symbols = tmp_path / "vmlinux"
     symbols.write_bytes(b"test symbols")
     if connect_error:
-        with pytest.raises(CategorizedError, match="target-select remote") as error:
+        with pytest.raises(GdbMiAttachFailure) as failure:
             engine.attach(
                 host="127.0.0.1",
                 port=4242,
                 vmlinux_path=symbols,
                 transcript_path=tmp_path / "transcript.jsonl",
             )
-        assert error.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
-        assert controller.exited
+        cause = failure.value.cause
+        assert isinstance(cause, CategorizedError) and "target-select remote" in str(cause)
+        assert cause.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+        # The attachment's owner, not the engine, exits gdb before removing its symbols (ADR-0799).
+        assert failure.value.attachment is not None
+        assert failure.value.attachment.controller is controller
+        assert not controller.exited
     else:
         attachment = engine.attach(
             host="127.0.0.1",

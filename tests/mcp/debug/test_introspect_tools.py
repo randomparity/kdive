@@ -19,6 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import DEBUG_SESSIONS
 from kdive.domain.capacity.state import DebugSessionState
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import DebugSession
@@ -38,6 +39,7 @@ from kdive.providers.ports.retrieve import (
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
+from tests.capture_store import journal_existing_test_pair
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.json_data import data_mapping, json_mapping, json_sequence
 
@@ -113,6 +115,9 @@ async def _seed_vmcore_row(pool: AsyncConnectionPool, run_id: str) -> None:
             "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
             "retention_class) VALUES ('runs', %s, %s, 'e', 'sensitive', 'vmcore')",
             (run_id, f"local/runs/{run_id}/vmcore-host_dump"),
+        )
+        await journal_existing_test_pair(
+            conn, run_id, f"local/runs/{run_id}/vmcore-host_dump", method=CaptureMethod.HOST_DUMP
         )
 
 

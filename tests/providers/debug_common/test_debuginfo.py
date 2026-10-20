@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 
@@ -17,7 +18,7 @@ from kdive.artifacts.catalog.read_model import ArtifactReadRef
 from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.debug import GdbMiAttachment
+from kdive.providers.ports.debug import GdbController, GdbMiAttachFailure, GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi.policy import debuginfo
 from kdive.store.objectstore import ObjectStore
 
@@ -125,10 +126,13 @@ def test_resolve_writes_to_dest_not_run_id_derived_path(tmp_path: Path) -> None:
 
 
 def _fake_attachment() -> GdbMiAttachment:
-    return cast(GdbMiAttachment, object())
+    return GdbMiAttachment(cast(GdbController, Mock()), "127.0.0.1", 1, Path("unused"))
 
 
-def test_stage_and_attach_stages_into_private_dir_and_attaches(tmp_path: Path) -> None:
+def test_stage_and_attach_stages_into_private_dir_and_attaches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(debuginfo.tempfile, "tempdir", str(tmp_path))
     fetch = _RecordingFetch(data=b"ELF")
     resolver = debuginfo.DebuginfoResolver(
         read_debuginfo_ref=lambda run_id: ArtifactReadRef("key", None), fetch_object=fetch
@@ -189,6 +193,41 @@ def test_stage_and_attach_removes_staging_dir_on_attach_failure(
     assert exc.value is boom
     # The staging dir was reclaimed on attach failure: nothing is left under the temp root.
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("exit_fails", [False, True])
+def test_stage_and_attach_exits_a_partial_attachment_before_removing_symbols(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exit_fails: bool
+) -> None:
+    monkeypatch.setattr(debuginfo.tempfile, "tempdir", str(tmp_path))
+    resolver = debuginfo.DebuginfoResolver(
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("key", None),
+        fetch_object=_RecordingFetch(data=b"ELF"),
+    )
+    partial = _fake_attachment()
+    controller = cast(Mock, partial.controller)
+    staged: list[Path] = []
+    # The symbols must still exist while gdb exits; a failed exit keeps them for the owner.
+    controller.exit.side_effect = (
+        OSError("synthetic exit") if exit_fails else lambda: staged[0].read_bytes()
+    )
+    cause = CategorizedError("target-select remote", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+
+    def attach(vmlinux_path: Path) -> GdbMiAttachment:
+        staged.append(vmlinux_path)
+        raise GdbMiAttachFailure(partial, cause)
+
+    if exit_fails:
+        with pytest.raises(GdbMiAttachFailure) as failure:
+            debuginfo.stage_and_attach(run_id="r1", attach=attach, resolver=resolver)
+        assert failure.value.attachment is partial and partial.cleanup_pending
+        assert partial.staging_dir is not None and partial.staging_dir.exists()
+    else:
+        with pytest.raises(CategorizedError) as error:
+            debuginfo.stage_and_attach(run_id="r1", attach=attach, resolver=resolver)
+        assert error.value is cause
+        assert list(tmp_path.iterdir()) == []
+    controller.exit.assert_called_once()
 
 
 def test_gdb_attach_seam_uses_engine_factory_with_staged_vmlinux(
@@ -253,7 +292,7 @@ def _make_modules_tar(entries: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
-def test_module_resolve_returns_path_and_identity() -> None:
+def test_module_resolve_returns_path_and_identity(tmp_path: Path) -> None:
     tar = _make_modules_tar({"lib/modules/6.0/kernel/fs/foo.ko": b"ELF-foo"})
     fetch = _RecordingFetch(data=tar)
     resolver = debuginfo.ModuleDebuginfoResolver(
@@ -261,14 +300,14 @@ def test_module_resolve_returns_path_and_identity() -> None:
         fetch_object=fetch,
         read_identity=lambda path: ("SRC123", "BID456"),
     )
-    result = resolver.resolve("r1", "foo")
+    result = resolver.resolve(_owned_attachment(tmp_path), "foo")
     assert result.path.read_bytes() == b"ELF-foo"
     assert result.srcversion == "SRC123"
     assert result.build_id == "BID456"
     assert fetch.refs == ["runs/r1/kernel.tar"]
 
 
-def test_module_resolve_reusable_kernel_fetches_exact_version() -> None:
+def test_module_resolve_reusable_kernel_fetches_exact_version(tmp_path: Path) -> None:
     tar = _make_modules_tar({"lib/modules/6.0/foo.ko": b"ELF"})
     seen: list[tuple[str, str]] = []
     resolver = debuginfo.ModuleDebuginfoResolver(
@@ -278,11 +317,11 @@ def test_module_resolve_reusable_kernel_fetches_exact_version() -> None:
         read_identity=lambda path: (None, None),
     )
 
-    assert resolver.resolve("r1", "foo").path.read_bytes() == b"ELF"
+    assert resolver.resolve(_owned_attachment(tmp_path), "foo").path.read_bytes() == b"ELF"
     assert seen == [("build/kernel", "version-9")]
 
 
-def test_module_resolve_absent_ko_raises_no_module_debuginfo() -> None:
+def test_module_resolve_absent_ko_raises_no_module_debuginfo(tmp_path: Path) -> None:
     tar = _make_modules_tar({"lib/modules/6.0/kernel/fs/other.ko": b"x"})
     resolver = debuginfo.ModuleDebuginfoResolver(
         read_kernel_ref=lambda run_id: ArtifactReadRef("runs/r1/kernel.tar", None),
@@ -290,7 +329,7 @@ def test_module_resolve_absent_ko_raises_no_module_debuginfo() -> None:
         read_identity=lambda path: (None, None),
     )
     with pytest.raises(CategorizedError) as exc:
-        resolver.resolve("r1", "foo")
+        resolver.resolve(_owned_attachment(tmp_path), "foo")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["reason"] == "no_module_debuginfo"
     assert exc.value.details["module"] == "foo"
@@ -299,18 +338,18 @@ def test_module_resolve_absent_ko_raises_no_module_debuginfo() -> None:
     assert "CONFIG_DEBUG_INFO=y" not in str(exc.value)
 
 
-def test_module_resolve_matches_dash_underscore_variant() -> None:
+def test_module_resolve_matches_dash_underscore_variant(tmp_path: Path) -> None:
     tar = _make_modules_tar({"lib/modules/6.0/kernel/foo-bar.ko": b"FB"})
     resolver = debuginfo.ModuleDebuginfoResolver(
         read_kernel_ref=lambda run_id: ArtifactReadRef("k", None),
         fetch_object=_RecordingFetch(data=tar),
         read_identity=lambda path: (None, None),
     )
-    result = resolver.resolve("r1", "foo_bar")
+    result = resolver.resolve(_owned_attachment(tmp_path), "foo_bar")
     assert result.path.read_bytes() == b"FB"
 
 
-def test_module_resolve_caches_fetch_per_run() -> None:
+def test_module_resolve_caches_fetch_per_attachment(tmp_path: Path) -> None:
     tar = _make_modules_tar({"lib/modules/6.0/foo.ko": b"f"})
     fetch = _RecordingFetch(data=tar)
     resolver = debuginfo.ModuleDebuginfoResolver(
@@ -318,24 +357,26 @@ def test_module_resolve_caches_fetch_per_run() -> None:
         fetch_object=fetch,
         read_identity=lambda path: (None, None),
     )
-    resolver.resolve("r1", "foo")
-    resolver.resolve("r1", "foo")
+    attachment = _owned_attachment(tmp_path)
+    resolver.resolve(attachment, "foo")
+    resolver.resolve(attachment, "foo")
     assert len(fetch.refs) == 1
 
 
-def test_module_resolve_no_kernel_ref_raises_no_module_debuginfo() -> None:
+def test_module_resolve_no_kernel_ref_raises_no_module_debuginfo(tmp_path: Path) -> None:
     resolver = debuginfo.ModuleDebuginfoResolver(
         read_kernel_ref=lambda run_id: None,
         fetch_object=_RecordingFetch(data=b"unused"),
         read_identity=lambda path: (None, None),
     )
     with pytest.raises(CategorizedError) as exc:
-        resolver.resolve("r1", "foo")
+        resolver.resolve(_owned_attachment(tmp_path), "foo")
     assert exc.value.details["reason"] == "no_module_debuginfo"
 
 
 def test_real_module_resolver_fetches_unversioned_and_versioned_artifacts_from_its_store(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     tar = _make_modules_tar({"lib/modules/6.0/foo.ko": b"ELF"})
     store = _RecordingStore(tar)
@@ -347,8 +388,14 @@ def test_real_module_resolver_fetches_unversioned_and_versioned_artifacts_from_i
 
     resolver = debuginfo.real_module_debuginfo_resolver(cast(ObjectStore, store))
 
-    assert resolver("unversioned", "foo").path.read_bytes() == b"ELF"
-    assert resolver("versioned", "foo").path.read_bytes() == b"ELF"
+    assert (
+        resolver(_owned_attachment(tmp_path / "first", "unversioned"), "foo").path.read_bytes()
+        == b"ELF"
+    )
+    assert (
+        resolver(_owned_attachment(tmp_path / "second", "versioned"), "foo").path.read_bytes()
+        == b"ELF"
+    )
     assert store.calls == [
         ("runs/r1/kernel.tar", None, None),
         ("builds/kernel.tar", None, "version-9"),
@@ -404,3 +451,70 @@ def test_parse_module_identity_missing_build_id_returns_none() -> None:
 
 def test_parse_module_identity_non_elf_returns_none() -> None:
     assert debuginfo.parse_module_identity(b"not an elf file at all") == (None, None)
+
+
+def _owned_attachment(root: Path, run_id: str = "r1") -> GdbMiAttachment:
+    root.mkdir(parents=True, exist_ok=True)
+    result = _fake_attachment()
+    result.run_id = run_id
+    result.staging_dir = root
+    return result
+
+
+@pytest.mark.parametrize("invalid_tar", [False, True])
+def test_module_failed_stage_removes_partial_tree(tmp_path: Path, invalid_tar: bool) -> None:
+    owner = _owned_attachment(tmp_path)
+    fetch = _RecordingFetch(
+        data=b"bad-tar" if invalid_tar else b"",
+        error=None
+        if invalid_tar
+        else CategorizedError("synthetic", category=ErrorCategory.INFRASTRUCTURE_FAILURE),
+    )
+    resolver = debuginfo.ModuleDebuginfoResolver(
+        read_kernel_ref=lambda _: ArtifactReadRef("k", None),
+        fetch_object=fetch,
+        read_identity=lambda _: (None, None),
+    )
+    with pytest.raises((CategorizedError, tarfile.ReadError)):
+        resolver.resolve(owner, "foo")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_same_run_module_owners_are_independent(tmp_path: Path) -> None:
+    resolver = debuginfo.ModuleDebuginfoResolver(
+        read_kernel_ref=lambda _: ArtifactReadRef("k", None),
+        fetch_object=lambda _: _make_modules_tar({"lib/modules/foo.ko": b"module"}),
+        read_identity=lambda _: (None, None),
+    )
+    first, second = [_owned_attachment(tmp_path / name) for name in ("first", "second")]
+    first_path, second_path = [resolver.resolve(owner, "foo").path for owner in (first, second)]
+    debuginfo.close_attachment(first)
+    assert not first_path.exists() and second_path.read_bytes() == b"module"
+
+
+def test_resolve_failure_preserves_root_when_removal_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kdive.providers.ports.debug import GdbMiAttachFailure
+
+    monkeypatch.setattr(debuginfo.tempfile, "tempdir", str(tmp_path))
+    resolver = debuginfo.DebuginfoResolver(
+        read_debuginfo_ref=lambda _: None, fetch_object=lambda _: b""
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(debuginfo.shutil, "rmtree", Mock(side_effect=OSError("synthetic")))
+        with pytest.raises(GdbMiAttachFailure) as failure:
+            debuginfo.stage_and_attach(run_id="r", attach=Mock(), resolver=resolver)
+    assert failure.value.attachment is None
+    assert failure.value.staging_dir is not None and failure.value.staging_dir.exists()
+
+
+def test_module_archive_cannot_escape_owner_root(tmp_path: Path) -> None:
+    resolver = debuginfo.ModuleDebuginfoResolver(
+        read_kernel_ref=lambda _: ArtifactReadRef("k", None),
+        fetch_object=lambda _: _make_modules_tar({"../../lib/modules/escape.ko": b"unsafe"}),
+        read_identity=lambda _: (None, None),
+    )
+    with pytest.raises(tarfile.OutsideDestinationError):
+        resolver.resolve(_owned_attachment(tmp_path), "escape")
+    assert list(tmp_path.iterdir()) == []

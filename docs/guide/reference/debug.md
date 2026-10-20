@@ -108,10 +108,18 @@ Requires contributor.
 
 `implemented`
 
-Drive a live DebugSession to detached; close its transport. Requires contributor.
+Detach the session and clean up its local GDB process/symbol files. Contributor.
+
 A guest left running by debug.continue with wait=False is halted first so the detach
 resumes it as usual, which can add up to 20 seconds; if that halt fails the reply
 still reports 'detached' and adds data.guest_execution='unknown'.
+
+infrastructure_failure with reason=debug_cleanup_pending means the durable session may
+already be detached but local cleanup is incomplete. Retry debug.end_session after the
+host failure clears; debug.get_session reports durable state. Background cleanup retries
+every 30 monotonic seconds after a completed owner sweep; DB failures/active operations
+can defer cleanup, so this is not a completion deadline. Abrupt owner death has no
+automatic orphan-recovery guarantee.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
