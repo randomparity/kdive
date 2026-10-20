@@ -1,4 +1,4 @@
-"""Local GDB debug tool cells over HTTP (#2813, ADR-0722).
+"""Local and remote GDB debug tool cells over HTTP (#2813, #3113, ADR-0722).
 
 A functional cell provisions the lane image with a gdbstub through
 :func:`~tests.integration.live_stack.tool_cells.on_lane_system`, boots the verified ``longterm``
@@ -14,6 +14,13 @@ an ended gdbstub session. ``debug.list_sessions`` filters a denied caller's view
 authorization and project-isolation cells prove denied visibility against a viewer who sees the
 target session (ADR-0756, amended 2026-10-14). No rejection record carries a kernel field, since
 no rejection cell declares kernel inputs.
+
+A remote cell runs the same bodies on #3116's remote lane: remote-libvirt provisions a gdbstub on
+every System and pins ``nokaslr``, and the fixture is installed in the guest's own ``/boot``. Its
+functional cells then prove the gdb transport released at both ends of the domain's ``-gdb``
+endpoint, on the provider host and at this host's MCP server, which holds the gdb subprocess;
+its rejection target proves the same for its own session (:func:`released`). A remote drgn-live
+start stops ``blocked`` on #3124's own symptom, a ``missing_debuginfo`` warning.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET  # noqa: S405 - the provider's own domain XML  # nosec B405
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
@@ -38,16 +46,19 @@ import psycopg
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
+from kdive.providers.shared.libvirt_xml import QEMU_NS
+from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.capture_cells import (
     boot,
     lane_keys,
-    protected_state,
+    named_jobs,
     require_tool,
     section,
 )
 from tests.integration.live_stack.image_smoke import Endpoint, ssh
-from tests.integration.live_stack.power_snapshots import grants
+from tests.integration.live_stack.power_snapshots import domain_defined, grants
+from tests.integration.live_stack.remote_lifecycle import HOST_SSH_ENV, destination, host_ssh
 from tests.integration.live_stack.scenario import (
     CellRun,
     ScenarioStop,
@@ -56,6 +67,7 @@ from tests.integration.live_stack.scenario import (
 from tests.integration.live_stack.spine import ok, scalar
 from tests.integration.live_stack.tool_cells import (
     Boundary,
+    Connect,
     FilteredListControl,
     Grants,
     Guest,
@@ -64,6 +76,7 @@ from tests.integration.live_stack.tool_cells import (
     Snapshot,
     on_lane_system,
     one,
+    project_state,
     settled,
 )
 
@@ -133,6 +146,19 @@ _NO_STOP_WAIT_S = 5.0
 _ANSWER_S = 5.0
 _RESUME_LEAD_S = 1.0
 _REANSWER_S = 60.0
+REMOTE = "remote-libvirt"
+# drgn-live runs kdive-drgn in a remote guest, which never receives the Run's vmlinux; the start
+# envelope's missing_debuginfo warning is that defect's symptom (#3124, blocked by #3121).
+REMOTE_DRGN_BLOCKED = "remote guests do not receive the uploaded vmlinux (#3124)"
+_HOST_KEYS = ("host_os", "host_arch")
+_GDB_TCP = re.compile(r"tcp:(?P<addr>[^:\s]+):(?P<port>\d+)")
+_SETTLE_POLLS = 10
+_SETTLE_DELAY_S = 1.0
+
+
+def variant_of(cell: Cell) -> str:
+    """The tool variant of a local (``tool/<t>/<v>/<k>``) or remote scenario id."""
+    return cell.scenario_id.split("/")[-2]
 
 
 # --- ground truth -------------------------------------------------------------------------
@@ -352,10 +378,16 @@ async def answers_again(endpoint: Endpoint) -> bool:
 def gdbstub_profile(profile: Mapping[str, object]) -> dict[str, object]:
     """``profile`` with the local-libvirt gdbstub on and nothing else; the input is unchanged.
 
-    No ``crashkernel``: that would resolve the capture method to kdump and drop ``nokaslr``.
+    No ``crashkernel``: that would resolve the capture method to kdump and drop ``nokaslr``. A
+    remote-libvirt profile is returned as a copy.
     """
     edited = copy.deepcopy(dict(profile))
-    local = cast(dict[str, Any], edited["provider"])["local-libvirt"]
+    sections = cast(dict[str, Any], edited["provider"])
+    if REMOTE in sections:
+        # Remote provisions a gdbstub on every System and resolves GDBSTUB, so the install pins
+        # nokaslr (ADR-0083).
+        return edited
+    local = sections["local-libvirt"]
     local["debug"] = {**local.get("debug", {}), "gdbstub": True}
     return edited
 
@@ -375,6 +407,68 @@ def checked(env: ToolResponse, phase: str) -> ToolResponse:
     ).startswith(_MISSING_GDB):
         raise ScenarioStop(Outcome.BLOCKED, f"{phase}: the server host lacks a debugger")
     return require_tool(env, phase)
+
+
+# --- remote transport -----------------------------------------------------------------------
+
+
+def gdbstub_endpoint(xml: str) -> tuple[str, int]:
+    """The ``-gdb tcp:<addr>:<port>`` endpoint a domain's qemu command line records."""
+    root = ET.fromstring(xml)  # noqa: S314 - the provider's own domain XML  # nosec B314
+    args = [arg.get("value") for arg in root.iter(f"{{{QEMU_NS}}}arg")]
+    for flag, value in zip(args, args[1:], strict=False):
+        found = _GDB_TCP.fullmatch(value or "") if flag == "-gdb" else None
+        if found is not None:
+            return found["addr"], int(found["port"])
+    raise AssertionError("the domain records no -gdb tcp:<addr>:<port> argument")
+
+
+@dataclass(frozen=True)
+class Transport:
+    """A remote System's gdbstub: the provider host (``dest``) and the endpoint gdb dials."""
+
+    dest: str
+    addr: str
+    port: int
+
+
+def _lines(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.strip())
+
+
+def sockets(t: Transport) -> dict[str, int]:
+    """ESTABLISHED sockets on the gdbstub port at the provider host and at this host's server."""
+    command = f"ss -Htn state established '( sport = :{t.port} )'"
+    provider = host_ssh(t.dest, command, 60.0)
+    assert provider.returncode == 0, f"provider-host ss exited {provider.returncode}"
+    local = subprocess.run(  # noqa: S603,S607 - fixed argv  # nosec B603 B607
+        ["ss", "-Htn", "state", "established", "dst", f"{t.addr}:{t.port}"],
+        capture_output=True,
+        text=True,
+        timeout=30.0,
+        check=False,
+    )
+    assert local.returncode == 0, f"ss exited {local.returncode}"
+    return {"provider": _lines(provider.stdout), "server": _lines(local.stdout)}
+
+
+async def settle(t: Transport, expected: int) -> dict[str, int]:
+    """Poll until both ends count ``expected`` sockets; fail after ``_SETTLE_POLLS`` reads."""
+    seen: dict[str, int] = {}
+    for _ in range(_SETTLE_POLLS):
+        seen = await asyncio.to_thread(sockets, t)
+        if set(seen.values()) == {expected}:
+            return seen
+        await asyncio.sleep(_SETTLE_DELAY_S)
+    raise AssertionError(f"gdbstub sockets read {seen}, expected {expected} at each end")
+
+
+def transport_of(guest: Guest) -> Transport:
+    """The remote System's gdbstub, from its domain XML on the provider host."""
+    dest = destination()
+    assert dest, f"{HOST_SSH_ENV} is unset on a remote cell"
+    addr, port = gdbstub_endpoint(guest.lane.xml(guest.system_id))
+    return Transport(dest, addr, port)
 
 
 # --- functional cells -----------------------------------------------------------------------
@@ -398,7 +492,7 @@ class Session:
 
     @property
     def variant(self) -> str:
-        return self.run.cell.scenario_id.split("/")[2]
+        return variant_of(self.run.cell)
 
     async def exposed(self, **args: object) -> ToolResponse:
         """The tool under test, through the cell's exposure and token."""
@@ -531,7 +625,11 @@ async def start_body(s: Session) -> dict[str, object]:
     if transport == "gdbstub":
         usable = {"registers_read": await s.register(env.object_id) > 0}
     else:
-        assert "missing_debuginfo" not in env.data, "drgn-live attached without debuginfo"
+        warning = env.data.get("missing_debuginfo")
+        if warning is not None and s.run.cell.provider == REMOTE:
+            reason = cast(dict[str, Any], warning).get("reason")
+            raise ScenarioStop(Outcome.BLOCKED, f"{REMOTE_DRGN_BLOCKED}: {reason}")
+        assert warning is None, "drgn-live attached without debuginfo"
         report = await s.op("introspect.run", session_id=env.object_id, helper="sysinfo")
         release = section(report.data.get("report"), "sysinfo")["release"]
         usable = {"release_matches": release == s.manifest["release"]}
@@ -589,6 +687,29 @@ async def _records(db_url: str, run_id: str) -> list[tuple[str, str]]:
             (run_id,),
         )
         return [(str(row[0]), str(row[1])) for row in await cursor.fetchall()]
+
+
+async def _all_detached(s: Session) -> None:
+    rows = await _records(s.db_url, s.run_id)
+    left = [row for row in rows if row[1] != "detached"]
+    assert rows and not left, f"session rows still open: {left}"
+
+
+async def released(s: Session, t: Transport) -> dict[str, object]:
+    """The body's sessions are closed at both ends; a fresh attach is then seen and released.
+
+    The attach comes after the body, so a listing body sees only its own rows. It proves the
+    observer sees this System's transport: a server on another host fails it.
+    """
+    after = await settle(t, 0)
+    await _all_detached(s)
+    session_id = await s.start()
+    await s.register(session_id)
+    attached = await settle(t, 1)
+    await s.end(session_id)
+    await settle(t, 0)
+    await _all_detached(s)
+    return {"after": after, "attached": attached, "sessions_open": 0}
 
 
 async def list_body(s: Session) -> dict[str, object]:
@@ -1017,7 +1138,8 @@ async def functional(
     """Boot the fixture, read the guest's truth, then run the tool's sequence as its gate role.
 
     Every session the body started and still holds is ended, also on failure, before the
-    frame's cleanup probes the System.
+    frame's cleanup probes the System. A remote cell then proves the gdbstub transport released
+    at both ends.
     """
     run_id, endpoint = await boot(run, guest, tree, manifest)
     truth = await read_truth(endpoint, guest.key, tree)
@@ -1025,6 +1147,10 @@ async def functional(
     session = Session(run, guest, caller, role, manifest, run_id, endpoint, truth, db_url, tree)
     try:
         observed = await BODIES[run.cell.operation](session)
+        if guest.lane.provider == REMOTE:
+            await session.end_all()
+            transport = await asyncio.to_thread(transport_of, guest)
+            observed["transport"] = await released(session, transport)
     finally:
         await session.end_all()
     return {"tool": run.cell.operation, **observed}
@@ -1051,7 +1177,7 @@ class _Failed:
     artifacts: tuple[str, ...]
 
 
-_TARGETS: dict[str, DebugTarget | _Failed] = {}
+_TARGETS: dict[tuple[str, str], DebugTarget | _Failed] = {}
 
 
 async def _prepare_target(
@@ -1065,9 +1191,12 @@ async def _prepare_target(
     tree, manifest = fixture()
     project = f"cov-{secrets.token_hex(4)}"
     ids: dict[str, str] = {}
+    proof: dict[str, object] = {}
 
     async def body(guest: Guest) -> dict[str, object]:
         run_id, _endpoint = await boot(scratch, guest, tree, manifest)
+        remote = guest.lane.provider == REMOTE
+        transport = await asyncio.to_thread(transport_of, guest) if remote else None
         started = checked(
             await scalar(guest.op, "debug.start_session", run_id=run_id, transport="gdbstub"),
             "target-start",
@@ -1082,12 +1211,16 @@ async def _prepare_target(
                 ),
                 "target-attach",
             )
+            if transport is not None:
+                proof["attached"] = await settle(transport, 1)
         finally:
             ended = ok(
                 await scalar(guest.op, "debug.end_session", session_id=started.object_id),
                 "target-end",
             )
         assert ended.status == "detached", f"the target session ended {ended.status}"
+        if transport is not None:
+            proof["after"] = await settle(transport, 0)
         ids.update(system=guest.system_id, run=run_id, session=started.object_id)
         return {"debug_target": "prepared"}
 
@@ -1101,18 +1234,22 @@ async def _prepare_target(
         provision=provision_gdbstub,
     )
     await settled(db_url, project)
+    target = {"system": "torn_down", "run": "booted", "session": "detached"}
     summary = run.writer.artifact(
         {
-            "debug_target": {"system": "torn_down", "run": "booted", "session": "detached"},
+            "debug_target": target | ({"transport": proof} if proof else {}),
             "cleanup": scratch.assertions["cleanup"],
         }
     )
+    observed = lane_keys(scratch.observed)
+    if run.cell.provider == REMOTE:
+        observed |= {key: scratch.observed[key] for key in _HOST_KEYS if key in scratch.observed}
     return DebugTarget(
         project,
         ids["system"],
         ids["run"],
         ids["session"],
-        lane_keys(scratch.observed),
+        observed,
         (*scratch.artifacts, *scratch.assertions.values(), summary),
     )
 
@@ -1126,16 +1263,18 @@ async def debug_target(
 ) -> DebugTarget:
     """The stack's rejection target, prepared on first use; a failure is replayed, not retried.
 
-    The fixture boot runs on a scratch record, so the cached context keeps only the lane keys.
+    The fixture boot runs on a scratch record, so the cached context keeps only the lane keys,
+    with the provider host's on the remote lane. Each provider of a stack has its own target.
     """
-    cached = _TARGETS.get(base_url)
+    key = (base_url, run.cell.provider)
+    cached = _TARGETS.get(key)
     if cached is None:
         scratch = CellRun(run.cell, run.writer)
         try:
             cached = await _prepare_target(run, base_url, issuer, db_url, fixture, scratch)
         except Exception as exc:  # noqa: BLE001 - remembered and replayed for every cell
             cached = _Failed(exc, (*scratch.artifacts, *scratch.assertions.values()))
-        _TARGETS[base_url] = cached
+        _TARGETS[key] = cached
     if isinstance(cached, _Failed):
         run.artifacts.extend(cached.artifacts)
         if isinstance(cached.error, ScenarioStop):
@@ -1195,5 +1334,14 @@ async def _known(target: DebugTarget) -> str:
     return target.session_id
 
 
-def snapshot_of(db_url: str, target: DebugTarget) -> Snapshot:
-    return partial(protected_state, db_url, target.project, target.system_id, target.run_id)
+async def protected_state(db_url: str, target: DebugTarget, connect: Connect) -> dict[str, object]:
+    """The target project's rows, its System and Run jobs, and whether its provider defines it."""
+    return {
+        "project": await project_state(db_url, target.project),
+        "jobs": await named_jobs(db_url, target.system_id, target.run_id),
+        "domain_defined": await asyncio.to_thread(domain_defined, target.system_id, connect),
+    }
+
+
+def snapshot_of(db_url: str, target: DebugTarget, connect: Connect) -> Snapshot:
+    return partial(protected_state, db_url, target, connect)
