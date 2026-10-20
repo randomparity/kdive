@@ -25,7 +25,8 @@ ADR-0212 report retention, ADR-0715 evidence). Reserved ADR 0790 is unused.
 - `tests/integration/live_stack/test_allocation_accounting_cells.py` — focused tests that
   inject faults into the carrier's assertion predicates.
 - `scripts/coverage_campaign/obligations.toml` — 55 `tool/<name>/default/<scenario>` bindings.
-- `tests/integration/live_stack/tool_cells.py` — `_empty_page` gains `allocations.list`.
+- `tests/integration/live_stack/tool_cells.py` — `_empty_page` gains `allocations.list`;
+  `test_tool_cells.py` gains its test and moves the unconfigured-page case to a synthetic tool.
 - `tests/integration/live_stack/cleanup.py` — `release_and_verify` accepts an allocation
   the body already released (release cell only; see Release). This replaces the
   `authority_lane.py` frame change first scoped (scope amendment, D1).
@@ -130,7 +131,8 @@ the `reconciled` row equal to the reconciliation formula above (active seconds f
 the resource's capacity back at its pre-allocation value. The authority daemon takes no
 part in a local release (neither a lane System nor a fixture-mode authority System is
 torn down through it); the authority role is satisfied by the matching installed revision
-in the cell's identity.
+in the cell's identity, and the release cell's effect evidence says so
+(`authority_role: "installed-revision-only"`).
 
 `release_and_verify` gains one branch keyed on the allocation alone: when
 `allocations.wait(timeout_s=0)` already reports `released`, it skips its release call and
@@ -138,6 +140,8 @@ its "capacity held" precondition, then proves `torn_down`, domain/disk absence a
 exactly as today (the frame's `systems.teardown` before it is idempotent on `torn_down`).
 A body that fails after release with the System not yet torn down takes the same branch,
 which still waits for `torn_down`. Callers whose allocation is still held are unchanged.
+The result carries `released_by: "body" | "frame"`; the release cell requires `"body"`, and
+every caller's cleanup evidence records it.
 
 ## Rejections
 
@@ -180,7 +184,10 @@ ledger history of throwaway projects are retained.
 - Accepted: concurrent foreign traffic on the stack would perturb capacity and
   all-projects totals — the lane is exclusive by the operation plan; report artifacts
   live until the retention sweep; budget/quota rows and ledger history of throwaway
-  projects persist; promotion is not attributed to the reconciler by a durable row.
+  projects persist; promotion is not attributed to the reconciler by a durable row; a
+  product that released an allocation early would make another frame's cleanup take the
+  already-released branch and skip its "capacity held" precondition — visible only as
+  `released_by: "body"` in that frame's cleanup evidence.
 - Covered elsewhere: production utilization reports (#2720/#2725); authority recovery
   orphans (#3185); remote-authority teardown and POWER lanes (#3152, #2818); CLI (#3099).
 
