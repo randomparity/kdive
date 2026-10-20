@@ -239,10 +239,33 @@ class _Domain:
         )
         for tag in ("emulator", "controller", "input", "audio", "watchdog", "memballoon"):
             ET.SubElement(devices, tag)
+        _fill_libvirt_defaults(root, live=flags == 0 and self.active)
         transform = self.connection.xml_transforms.get(flags)
         if transform is not None:
             transform(root)
         return ET.tostring(root, encoding="unicode")
+
+
+def _fill_libvirt_defaults(root: ET.Element[str], *, live: bool) -> None:
+    """Apply the readback changes libvirt 12.0.0 makes to the rendered intent (#3296)."""
+    os_type = root.find("./os/type")
+    assert os_type is not None
+    serial_type = {"x86_64": "isa-serial", "ppc64le": "spapr-vio-serial"}[os_type.get("arch", "")]
+    serial_target = root.find("./devices/serial/target")
+    assert serial_target is not None
+    if serial_target.get("type") is None:
+        serial_target.set("type", serial_type)
+        ET.SubElement(serial_target, "model", name=serial_type)
+    if not live:
+        return
+    cpu = root.find("./cpu")
+    assert cpu is not None
+    if cpu.get("mode") == "host-model":
+        cpu.attrib.update({"mode": "custom", "match": "exact", "check": "full"})
+        ET.SubElement(cpu, "model", fallback="forbid").text = "SapphireRapids"
+    source = root.find("./devices/interface[@type='network']/source")
+    assert source is not None
+    source.set("bridge", "virbr0")
 
 
 class _Pool(FakeStoragePool):
@@ -753,6 +776,77 @@ async def test_live_and_inactive_domain_mismatch_fail_closed(
 
     assert caught.value.category is ErrorCategory.CONFLICT
     assert connection.mutations == before
+
+
+def _set_attribute(path: str, name: str, value: str) -> Callable[[ET.Element[str]], None]:
+    def change(root: ET.Element[str]) -> None:
+        element = root.find(path)
+        assert element is not None
+        element.set(name, value)
+
+    return change
+
+
+_LIVE = 0
+_INACTIVE = libvirt.VIR_DOMAIN_XML_INACTIVE
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("xml_flags", "tamper"),
+    (
+        *(
+            (flags, tamper)
+            for flags in (_LIVE, _INACTIVE)
+            for tamper in (
+                _set_attribute("./devices/serial/target", "type", "pci-serial"),
+                _set_attribute("./devices/serial/target", "type", "spapr-vio-serial"),
+                _set_attribute("./devices/serial/target", "port", "1"),
+            )
+        ),
+        (_INACTIVE, _set_attribute("./devices/interface/source", "bridge", "foreign-br")),
+    ),
+    ids=(
+        *(
+            f"{document}-{case}"
+            for document in ("live", "inactive")
+            for case in ("serial-type", "serial-foreign-arch-type", "serial-port")
+        ),
+        "inactive-network-bridge",
+    ),
+)
+async def test_libvirt_defaults_do_not_mask_device_tampering(
+    tmp_path: Path, xml_flags: int, tamper: Callable[[ET.Element[str]], None]
+) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        before = list(connection.mutations)
+        connection.xml_transforms[xml_flags] = tamper
+        with pytest.raises(CategorizedError, match="differs from private intent") as caught:
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert connection.mutations == before
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ("custom", "host-passthrough"))
+async def test_inactive_cpu_mode_change_fails_closed(tmp_path: Path, mode: str) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        connection.xml_transforms[libvirt.VIR_DOMAIN_XML_INACTIVE] = _set_attribute(
+            "./cpu", "mode", mode
+        )
+        with pytest.raises(CategorizedError, match="differs from private intent"):
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
 
 
 @pytest.mark.anyio
