@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import subprocess  # noqa: S404 - fixed argv, no shell  # nosec B404
 import time
+import xml.etree.ElementTree as ET  # noqa: S405 - the provider's own domain XML  # nosec B405
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,7 +59,12 @@ from tests.integration.live_stack.resource_limits import (
     wait_terminal,
     worker_journal,
 )
-from tests.integration.live_stack.scenario import DEFAULT_SIZING, CellRun, ScenarioStop
+from tests.integration.live_stack.scenario import (
+    ACCELERATORS,
+    DEFAULT_SIZING,
+    CellRun,
+    ScenarioStop,
+)
 from tests.integration.live_stack.skew import readyz_urls
 from tests.integration.live_stack.spine import mint_role_token, ok, scalar
 from tests.live_vm.installed_local_authority_support import (
@@ -393,6 +399,14 @@ def _domain(provider: Provider, system_id: str) -> tuple[bool, str | None]:
         conn.close()
 
 
+def record_domain(held: Held, xml: str) -> None:
+    """Keep the System's overlay for the frame's proofs and its accelerator for the cell context."""
+    held.overlays = domain_disks(xml)
+    held.disks = list(held.overlays)
+    accelerator = ET.fromstring(xml).get("type", "")  # noqa: S314  # nosec B314
+    held.run.observed["accelerator"] = ACCELERATORS.get(accelerator, "none")
+
+
 async def in_flight(
     held: Held, db_url: str, job_id: str, deadline_s: float
 ) -> tuple[RunningJobClaim, str]:
@@ -408,9 +422,7 @@ async def in_flight(
                 raise _fail(
                     f"fault point not reached (incomplete): claim at attempt {claim.attempt}"
                 )
-            xml = await asyncio.to_thread(held.provider.xml, held.system_id)
-            held.overlays = domain_disks(xml)
-            held.disks = list(held.overlays)
+            record_domain(held, await asyncio.to_thread(held.provider.xml, held.system_id))
             return claim, uuid
         if window_missed(row) or time.monotonic() >= deadline:
             raise _fail(f"fault point not reached (incomplete): job {row}")
@@ -651,9 +663,7 @@ async def lost_response(
             raise _fail(f"provision left running during the in-flight replay: {after} (incomplete)")
         await wait_terminal(held.op, job_id, held.sampler, deadline_s=terminal_s(window_s))
         done = await replay(held.allocation, profile, key)
-        xml = await asyncio.to_thread(held.provider.xml, provisioned)
-        held.overlays = domain_disks(xml)
-        held.disks = list(held.overlays)
+        record_domain(held, await asyncio.to_thread(held.provider.xml, provisioned))
         seen = LostResponse(
             stored=stored,
             provisioned_system=provisioned,

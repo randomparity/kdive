@@ -324,7 +324,7 @@ def test_ready_urls_probe_every_running_slot_and_no_witness() -> None:
 # --- the in-flight probe ---------------------------------------------------------------
 
 _XML = (
-    f"<domain><uuid>{_UUID}</uuid><devices><disk><source file='/var/lib/kdive/o.qcow2'/>"
+    f"<domain type='kvm'><uuid>{_UUID}</uuid><devices><disk><source file='/var/lib/kdive/o.qcow2'/>"
     "</disk></devices></domain>"
 )
 
@@ -369,6 +369,7 @@ def test_in_flight_waits_for_attempt_one_on_an_active_domain(
     found, uuid = asyncio.run(of.in_flight(held, "db", _JOB, 60.0))
     assert (found.worker_id, uuid) == (_W1, _UUID)
     assert held.overlays == held.disks == ["/var/lib/kdive/o.qcow2"]
+    assert held.run.observed["accelerator"] == "kvm"
 
 
 @pytest.mark.parametrize(
