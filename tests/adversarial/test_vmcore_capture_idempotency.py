@@ -39,6 +39,7 @@ from kdive.security.audit import args_digest
 from tests.capture_store import WrittenObjects
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.systems_support import provider_resolver
+from tests.support.worker_fence import dequeue_as_current_worker
 
 _AUTH = Authorizing(principal="alice", agent_session="s", project="proj")
 
@@ -58,16 +59,16 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
         await pool.close()
 
 
-def _core(run_id: str, method: CaptureMethod = CaptureMethod.HOST_DUMP) -> CaptureOutput:
+def _core(run_id: str, method: CaptureMethod, execution_id: UUID) -> CaptureOutput:
     raw = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{method.value}",
+        f"local/runs/{run_id}/vmcore-{method.value}-{execution_id}",
         "e1",
         Sensitivity.SENSITIVE,
         "vmcore",
         version_id="test-version",
     )
     red = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{method.value}-redacted",
+        f"local/runs/{run_id}/vmcore-{method.value}-{execution_id}-redacted",
         "e2",
         Sensitivity.REDACTED,
         "vmcore",
@@ -88,8 +89,10 @@ class _CaptureDouble:
         self._run_id = run_id
         self._objects = WrittenObjects()
 
-    def _output(self, method: CaptureMethod) -> CaptureOutput:
-        return self._objects.record(_core(self._run_id, method))
+    def _output(self, method: CaptureMethod, execution_id: UUID) -> CaptureOutput:
+        return self._objects.record(
+            _core(self._run_id, method, execution_id), execution_id=execution_id
+        )
 
     def head(self, key: str) -> HeadResult | None:
         return self._objects.head(key)
@@ -104,11 +107,13 @@ class _BarrierRetriever(_CaptureDouble):
         self._lock = threading.Lock()
         self.calls = 0
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
         with self._lock:
             self.calls += 1
         self._barrier.wait()  # both handlers reach here only after both passed precheck
-        return self._output(method)
+        return self._output(method, execution_id)
 
 
 async def _raw_core_count(pool: AsyncConnectionPool, run_id: str) -> int:
@@ -135,6 +140,10 @@ def test_concurrent_same_run_capture_writes_one_core(migrated_url: str) -> None:
                     _AUTH,
                     f"{run_id}:capture_vmcore:host_dump",
                 )
+                if job.state.value == "queued":
+                    claimed = await dequeue_as_current_worker(conn, "vmcore-test-worker")
+                    assert claimed is not None and claimed.id == job.id
+                    job = claimed
             barrier = threading.Barrier(2, timeout=15)
             retriever = _BarrierRetriever(run_id, barrier)
             resolver = provider_resolver(retriever=retriever)
@@ -176,6 +185,10 @@ def test_two_runs_on_one_system_retain_distinct_cores(migrated_url: str) -> None
                         _AUTH,
                         f"{run_id}:capture_vmcore:host_dump",
                     )
+                    if job.state.value == "queued":
+                        claimed = await dequeue_as_current_worker(conn, "vmcore-test-worker")
+                        assert claimed is not None and claimed.id == job.id
+                        job = claimed
                 retriever = _PlainRetriever(run_id)
                 resolver = provider_resolver(retriever=retriever)
                 async with pool.connection() as conn:
@@ -194,32 +207,10 @@ def test_two_runs_on_one_system_retain_distinct_cores(migrated_url: str) -> None
 class _PlainRetriever(_CaptureDouble):
     """A retriever that returns a deterministic Run-owned core with no rendezvous."""
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        return self._output(method)
-
-
-# --- captured_method / method-suffix parsing (pure) ------------------------------------------
-
-
-def test_captured_method_extracts_trailing_method() -> None:
-    assert vmcore_plane.captured_method("local/runs/r/vmcore-host_dump") == "host_dump"
-
-
-def test_captured_method_resolves_the_last_vmcore_segment() -> None:
-    # rpartition, not partition: an earlier "/vmcore-" in the path must not shadow the trailing
-    # method segment (a leading match would return the whole remainder, not the method).
-    assert vmcore_plane.captured_method("a/vmcore-x/runs/r/vmcore-kdump") == "kdump"
-
-
-def test_captured_method_rejects_empty_method_suffix() -> None:
-    # Separator present but method empty must raise (the `or` guard), never return "".
-    with pytest.raises(CategorizedError):
-        vmcore_plane.captured_method("local/runs/r/vmcore-")
-
-
-def test_captured_method_rejects_missing_suffix() -> None:
-    with pytest.raises(CategorizedError):
-        vmcore_plane.captured_method("local/runs/r/core.raw")
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
+        return self._output(method, execution_id)
 
 
 # --- handler collaborator args / audit / telemetry -------------------------------------------
@@ -232,9 +223,11 @@ class _RecordingRetriever(_CaptureDouble):
         super().__init__(run_id)
         self.calls: list[tuple[UUID, UUID, CaptureMethod]] = []
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
         self.calls.append((system_id, run_id, method))
-        return self._output(method)
+        return self._output(method, execution_id)
 
 
 async def _audit_rows(pool: AsyncConnectionPool, run_id: str) -> list[dict[str, Any]]:
@@ -294,6 +287,10 @@ def test_capture_handler_threads_args_records_audit_and_telemetry(migrated_url: 
                     _AUTH,
                     f"{run_id}:capture_vmcore:host_dump",
                 )
+                if job.state.value == "queued":
+                    claimed = await dequeue_as_current_worker(conn, "vmcore-test-worker")
+                    assert claimed is not None and claimed.id == job.id
+                    job = claimed
             retriever = _RecordingRetriever(run_id)
             resolver = provider_resolver(retriever=retriever)
             reader = InMemoryMetricReader()
@@ -364,6 +361,10 @@ def test_capture_handler_missing_run_fails_closed(migrated_url: str) -> None:
                     _AUTH,
                     f"{missing_run_id}:capture_vmcore:host_dump",
                 )
+                if job.state.value == "queued":
+                    claimed = await dequeue_as_current_worker(conn, "vmcore-test-worker")
+                    assert claimed is not None and claimed.id == job.id
+                    job = claimed
             retriever = _PlainRetriever(missing_run_id)
             resolver = provider_resolver(retriever=retriever)
             async with pool.connection() as conn:
@@ -393,6 +394,10 @@ def test_capture_handler_idempotent_recapture_returns_existing_core(migrated_url
                         _AUTH,
                         f"{run_id}:capture_vmcore:host_dump",
                     )
+                    if job.state.value == "queued":
+                        claimed = await dequeue_as_current_worker(conn, "vmcore-test-worker")
+                        assert claimed is not None and claimed.id == job.id
+                        job = claimed
                 retriever = _RecordingRetriever(run_id)
                 resolver = provider_resolver(retriever=retriever)
                 async with pool.connection() as conn:
@@ -414,3 +419,88 @@ def test_capture_handler_idempotent_recapture_returns_existing_core(migrated_url
     assert first_calls == 1, "the first capture drives the retriever"
     assert second_calls == 0, "the idempotent re-capture short-circuits before the retriever"
     assert count == 1, "no duplicate core row"
+
+
+@pytest.mark.parametrize("lost_authority", ["lease", "attempt", "retired"])
+def test_late_capture_cannot_publish_after_authority_loss(
+    migrated_url: str, lost_authority: str
+) -> None:
+    import psycopg
+
+    async def check() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await seed_crashed_system(pool)
+            run_id = await seed_run_on_system(pool, system_id, debuginfo_ref=None, build_id=None)
+            async with pool.connection() as conn:
+                await queue.enqueue(
+                    conn,
+                    JobKind.CAPTURE_VMCORE,
+                    CaptureVmcorePayload(run_id=run_id, method=CaptureMethod.HOST_DUMP),
+                    _AUTH,
+                    f"{run_id}:capture_vmcore:host_dump",
+                )
+                job = await dequeue_as_current_worker(conn, "late-capture-worker")
+                assert job is not None
+
+            class LoseAuthority(_PlainRetriever):
+                def capture(
+                    self,
+                    system_id: UUID,
+                    run_id: UUID,
+                    method: CaptureMethod,
+                    *,
+                    execution_id: UUID,
+                ) -> CaptureOutput:
+                    output = super().capture(system_id, run_id, method, execution_id=execution_id)
+                    with psycopg.connect(migrated_url) as outside:
+                        if lost_authority == "retired":
+                            outside.execute(
+                                "UPDATE runs SET vmcore_retired_at=now() WHERE id=%s", (run_id,)
+                            )
+                        elif lost_authority == "attempt":
+                            outside.execute(
+                                "UPDATE jobs SET attempt=attempt+1 WHERE id=%s", (job.id,)
+                            )
+                        else:
+                            outside.execute(
+                                "UPDATE jobs SET lease_expires_at=now()-interval '1 second' "
+                                "WHERE id=%s",
+                                (job.id,),
+                            )
+                    return output
+
+            retriever = LoseAuthority(run_id)
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as caught:
+                    await vmcore_plane.capture_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(retriever=retriever),
+                        artifact_store=retriever,
+                    )
+                assert caught.value.details["reason"] == (
+                    "vmcore_retired" if lost_authority == "retired" else "vmcore_attempt_expired"
+                )
+            assert await _raw_core_count(pool, run_id) == 0
+            if lost_authority == "lease":
+                async with pool.connection() as conn:
+                    retry = await dequeue_as_current_worker(conn, "late-capture-worker")
+                    assert retry is not None and retry.attempt == job.attempt + 1
+                fresh = _PlainRetriever(run_id)
+                async with pool.connection() as conn:
+                    await vmcore_plane.capture_handler(
+                        conn,
+                        retry,
+                        resolver=provider_resolver(retriever=fresh),
+                        artifact_store=fresh,
+                    )
+                    rows = await (
+                        await conn.execute(
+                            "SELECT raw_key,state FROM vmcore_capture_executions WHERE run_id=%s",
+                            (run_id,),
+                        )
+                    ).fetchall()
+                assert len(rows) == 2 and len({row[0] for row in rows}) == 2
+                assert {row[1] for row in rows} == {"capturing", "published"}
+
+    asyncio.run(check())

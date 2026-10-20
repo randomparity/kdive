@@ -102,3 +102,34 @@ def test_upload_requires_url() -> None:
         [BASH, str(HELPER), "upload"], capture_output=True, text=True, check=False
     )
     assert proc.returncode != 0
+
+
+def test_upload_forwards_signed_conditional_header(tmp_path: Path) -> None:
+    assert BASH is not None
+    core = tmp_path / "vmcore"
+    core.write_bytes(b"test")
+    curl = tmp_path / "curl"
+    curl.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    curl.chmod(0o700)
+    result = subprocess.run(
+        [
+            BASH,
+            str(HELPER),
+            "upload",
+            "--url",
+            "https://signed.example/test",
+            "--header",
+            "if-none-match:*",
+            "--header",
+            "x-amz-meta-vmcore-kind:capture",
+        ],
+        env={"PATH": str(tmp_path) + ":/usr/bin:/bin", "KDIVE_VMCORE_PATH": str(core)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    args = result.stdout.splitlines()
+    assert args[args.index("-H") + 1] == "if-none-match:*"
+    assert "x-amz-meta-vmcore-kind:capture" in args
+    assert args[args.index("--upload-file") + 1] == str(core)

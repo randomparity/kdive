@@ -21,12 +21,17 @@ from kdive.jobs.capture_operations import launcher as launcher_module
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher, LaunchedCapture
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
 from kdive.jobs.capture_operations.storage.repository import CaptureOperation
+from kdive.providers.local_libvirt.lifecycle.traffic_capture import LocalLibvirtTrafficCapture
 from kdive.providers.ports.traffic import (
     CaptureExecutionResult,
     LocalCaptureConfiguration,
     RemoteCaptureConfiguration,
 )
-from kdive.providers.shared.runtime_paths import WORKER_READABILITY_REMEDIATION, read_pcap_bytes
+from kdive.providers.shared.runtime_paths import (
+    PCAP_HYPERVISOR_WRITE_REMEDIATION,
+    WORKER_READABILITY_REMEDIATION,
+    read_pcap_bytes,
+)
 
 _PCAP_HEADER = b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00" + b"\x00" * 16
 _PRIVATE_PROVIDER_VALUE = b"qemu+tls://secret-host/system"
@@ -486,6 +491,44 @@ def test_child_forwards_distinct_provider_causes_for_readback_and_missing_pcap(
     }
     assert readback_result.error_category is missing_result.error_category
     assert readback_result.details != missing_result.details
+
+
+def test_child_forwards_a_refused_pcap_open_without_the_qemu_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
+) -> None:
+    """The attach-time EACCES refusal reaches the job record whole, path-free (#3270)."""
+    path = "/var/lib/kdive/pcap/S/J.pcap"
+
+    def monitor(domain: object, raw: str, flags: int) -> str:
+        del domain, flags
+        if json.loads(raw)["execute"] == "object-del":
+            return json.dumps({"error": {"class": "GenericError", "desc": "x not found"}})
+        desc = f"net dump: can't open {path}: Permission denied"
+        return json.dumps({"error": {"class": "GenericError", "desc": desc}})
+
+    capturer = LocalLibvirtTrafficCapture(connect=_FakeLibvirtConnection, monitor=monitor)
+    with pytest.raises(CategorizedError) as refused:
+        capturer.attach("kdive-x", qom_id="kdive-dump-J", dest_path=path, snaplen=128)
+
+    result, raw_result = _run_child_with_failure(tmp_path, monkeypatch, launch_token, refused.value)
+
+    assert result.error_category is ErrorCategory.CONFIGURATION_ERROR
+    assert result.details == {
+        "phase": "provider_execution",
+        "reason": "pcap_open_denied",
+        "operation": "object_add",
+        "error": "GenericError",
+        "remediation": PCAP_HYPERVISOR_WRITE_REMEDIATION,
+    }
+    assert path.encode() not in raw_result
+
+
+class _FakeLibvirtConnection:
+    def lookupByName(self, name: str) -> object:  # noqa: N802 - libvirt binding name
+        return object()
+
+    def close(self) -> int:
+        return 0
 
 
 @pytest.mark.parametrize(

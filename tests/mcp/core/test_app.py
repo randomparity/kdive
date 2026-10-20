@@ -355,6 +355,7 @@ def test_debug_tools_registrar_wires_enabled_telemetry(
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = FastMCP("probe")
     expected_resolver = object()
+    expected_runtime = object()
     expected_secret_registry = SecretRegistry()
     expected_telemetry = DebugSessionTelemetry(meter=metrics.get_meter("test.mcp"))
     captured: dict[str, object] = {}
@@ -364,25 +365,31 @@ def test_debug_tools_registrar_wires_enabled_telemetry(
         registered_pool: AsyncConnectionPool,
         *,
         resolver: object,
+        runtime: object,
         secret_registry: object,
         telemetry: object | None = None,
     ) -> None:
         captured["app"] = registered_app
         captured["pool"] = registered_pool
         captured["resolver"] = resolver
+        captured["runtime"] = runtime
         captured["secret_registry"] = secret_registry
         captured["telemetry"] = telemetry
 
     monkeypatch.setattr(tool_module.debug_tools, "register", _register)
 
     registrar = tool_module._debug_tools_registrar(
-        cast(Any, expected_resolver), expected_secret_registry, expected_telemetry
+        cast(Any, expected_resolver),
+        cast(Any, expected_runtime),
+        expected_secret_registry,
+        expected_telemetry,
     )
     registrar(app, pool)
 
     assert captured["app"] is app
     assert captured["pool"] is pool
     assert captured["resolver"] is expected_resolver
+    assert captured["runtime"] is expected_runtime
     assert captured["secret_registry"] is expected_secret_registry
     telemetry = captured["telemetry"]
     assert telemetry is expected_telemetry

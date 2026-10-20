@@ -1280,10 +1280,14 @@ def test_provider_debug_runtime_fails_when_debug_capability_absent() -> None:
     assert response.data["reason"] == "provider_debug_unavailable"
 
 
-def test_end_session_reaps_engine(migrated_url: str) -> None:
+@pytest.mark.parametrize("variant", ["upper", "hex"])
+def test_end_session_reaps_engine(migrated_url: str, variant: str) -> None:
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
             session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            from uuid import UUID
+
+            session_id = session_id.upper() if variant == "upper" else UUID(session_id).hex
             attach = _CountingAttach()
             runtime = _runtime(attach)
             await run_engine_op_with_runtime(
@@ -1360,7 +1364,7 @@ def _module_walk_responses() -> dict[str, list[dict[str, object]]]:
 
 
 def _runtime_with_resolver(attach: Any, info: ModuleDebuginfo) -> DebugEngineRuntime:
-    def resolver(run_id: str, module: str) -> ModuleDebuginfo:
+    def resolver(attachment: GdbMiAttachment, module: str) -> ModuleDebuginfo:
         return info
 
     return DebugEngineRuntime(
@@ -1591,6 +1595,82 @@ def test_capability_allows_watchpoint_on_x86_64_kvm(
         assert controller.written == [command]
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("denied", [False, True])
+def test_end_session_preserves_or_retries_cleanup(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, denied: bool
+) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from kdive.domain.errors import ErrorCategory
+    from kdive.providers.ports.debug import GdbController
+
+    async def check() -> None:
+        async with open_pool(migrated_url) as pool:
+            sid = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            root = tmp_path / "symbols"
+            root.mkdir()
+            controller = Mock(spec=GdbController)
+            attachment = GdbMiAttachment(
+                controller, "127.0.0.1", 1, tmp_path / "transcript", staging_dir=root
+            )
+            runtime = DebugEngineRuntime(
+                engine=GdbMiEngine(), attach=_CountingAttach(), transcript_dir=tmp_path
+            )
+            runtime._registry.register(sid, attachment)
+            if denied:
+                monkeypatch.setattr(
+                    debug_tools,
+                    "_detach_locked",
+                    AsyncMock(
+                        return_value=ToolResponse.failure(sid, ErrorCategory.CONFIGURATION_ERROR)
+                    ),
+                )
+            else:
+                controller.exit.side_effect = [OSError("synthetic"), None]
+            handlers = _session_handlers(runtime)
+            result = await handlers.end_session(pool, request_context(), sid.upper())
+            assert root.exists() and runtime._registry.get(sid) is attachment
+            if denied:
+                controller.exit.assert_not_called()
+            else:
+                assert result.data["reason"] == "debug_cleanup_pending"
+                assert result.suggested_next_actions == ["debug.end_session", "debug.get_session"]
+                assert (
+                    await handlers.end_session(pool, request_context(), sid)
+                ).status == "detached"
+                assert not root.exists() and runtime._registry.get(sid) is None
+
+    asyncio.run(check())
+
+
+def test_end_session_reports_a_failed_halt_with_pending_cleanup(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    from kdive.providers.ports.debug import GdbController
+
+    async def check() -> None:
+        async with open_pool(migrated_url) as pool:
+            sid = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = Mock(spec=GdbController)
+            controller.exit.side_effect = OSError("synthetic exit")
+            attachment = GdbMiAttachment(controller, "127.0.0.1", 1, tmp_path / "transcript")
+            attachment.execution = "running"
+            engine = GdbMiEngine()
+            monkeypatch.setattr(engine, "interrupt", Mock(side_effect=OSError("synthetic halt")))
+            runtime = DebugEngineRuntime(
+                engine=engine, attach=_CountingAttach(), transcript_dir=tmp_path
+            )
+            runtime._registry.register(sid, attachment)
+            result = await _session_handlers(runtime).end_session(pool, request_context(), sid)
+            assert result.data["reason"] == "debug_cleanup_pending"
+            assert result.data["guest_execution"] == "unknown"
+            assert runtime._registry.get(sid) is attachment
+
+    asyncio.run(check())
 
 
 # --- a guest left running between calls (#3244) ----------------------------------------------
