@@ -533,6 +533,7 @@ def test_live_authority_local_mutation_is_closed_and_owner_only() -> None:
     assert "AWS_SHARED_CREDENTIALS_FILE" in tasks
 
     environment = _text(AUTHORITY_ENV_TEMPLATE)
+    assert environment.splitlines()[2] == "LIBGUESTFS_BACKEND=direct"
     assert "KDIVE_LIBVIRT_RECOVERY_ROOT={{ live_vm_host_authority_recovery_root }}" in environment
     assert "KDIVE_LIBVIRT_ROOTFS_ROOT={{ live_vm_host_authority_rootfs_root }}" in environment
     assert "KDIVE_LIBVIRT_CONSOLE_ROOT={{ live_vm_host_authority_console_root }}" in environment
