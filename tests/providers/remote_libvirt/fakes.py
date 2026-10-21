@@ -101,9 +101,10 @@ class FakeDomain:
         self._maybe_raise("sendKey")
         return 0
 
-    def qemuMonitorCommand(self, cmd: str, flags: int) -> str:  # noqa: N802 - libvirt binding name
+    def monitor(self, cmd: str, flags: int) -> str:
+        """Reached only through the patched ``libvirt_qemu`` passthrough (#3294)."""
         self.calls.append(f"monitor:{cmd}")
-        self._maybe_raise("qemuMonitorCommand")
+        self._maybe_raise("monitor")
         return ""
 
 

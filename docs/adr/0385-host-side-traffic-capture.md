@@ -197,6 +197,17 @@ The local provider therefore parses every passthrough reply in one place
 Only the QMP class token reaches failure details, because the description names a host path. A
 raised `libvirtError` stays the transport-failure path.
 
+### Amendment (2026-10-20): remote passthrough replies are parsed too (#3294)
+
+This qualifies the #3270 amendment above, which scoped reply parsing to the local provider and
+named its module `local_libvirt/lifecycle/qmp_reply.py`. The remote-libvirt capturer and capture
+reaper sent QMP through the same libvirt passthrough but ignored the reply, so a refused remote
+`object-add` passed as attached and a refused reaper `object-del` counted as detached. The parser
+now lives at `providers/shared/qmp_reply.py`, and both providers apply the rules above, with the
+remote `pcap_open_denied` failure carrying the remote storage-pool remediation. The parser treats
+an error class that is not a short alphabetic token as a malformed reply, since the class is the
+one QEMU string that reaches failure details.
+
 ## Considered & rejected
 
 - **Real `tcpdump -i <tap>` on local-libvirt** — rejected: SLIRP user-mode networking exposes
