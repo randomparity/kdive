@@ -468,9 +468,9 @@ def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, obje
     default projects as omitted. A ``live`` document also reports runtime state in place of
     configuration: a started ``host-model`` CPU reads back expanded to ``custom`` with
     ``match='exact' check='full'``. The inactive document is always compared without that
-    allowance. The live CPU model
-    is not compared: a running CPU defined as ``custom`` with those attributes and then redefined
-    back to ``host-model`` is not detected until the next start applies the inactive definition.
+    allowance. The live CPU model is not compared: a running CPU defined as ``custom`` with those
+    attributes and then redefined back to ``host-model`` is not detected until the next start
+    applies the inactive definition.
     """
     root = parse_domain_xml(domain_xml)
     os_element = _one(root, "./os", "operating system")

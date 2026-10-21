@@ -190,12 +190,14 @@ def _append_ssh_forward(
     ``restrict=on`` isolates the slirp NIC to the inbound forward only (no guest-initiated
     outbound on it); ``hostfwd`` forwards ``ssh_addr:ssh_port`` to the guest sshd on ``:22``.
     Unlike local-libvirt's loopback forward (ADR-0218), the bind address is routable, so slirp
-    delivers the connection with the client's own source address and the guest's default route
-    is on the libvirt NIC. The reply returns through slirp only because the base image routes
-    traffic sourced from the slirp lease back through slirp's gateway (ADR-0721); the forward
-    keeps slirp's default subnet, which that route matches. ``addr=0x10`` pins the PCI slot so
-    it does not collide with the disk/bridge/agent virtio devices. ``guest_egress`` (an operator
-    opt-in, ADR-0313) renders ``restrict=off`` so the NIC also carries guest-initiated NAT traffic.
+    delivers the connection with the client's own source address. When the domain also has a
+    libvirt NIC, the guest's default route is there, and the reply returns through slirp only
+    because the base image routes traffic sourced from the slirp lease back through slirp's
+    gateway (ADR-0721); the forward keeps slirp's default subnet, which that route matches.
+    Without one (ADR-0804) the forward NIC carries the default route itself. ``addr=0x10`` pins
+    the PCI slot so it does not collide with the disk/bridge/agent virtio devices.
+    ``guest_egress`` (an operator opt-in, ADR-0313) renders ``restrict=off`` so the NIC also
+    carries guest-initiated NAT traffic.
     """
     restrict = "off" if guest_egress else "on"
     netdev = f"user,id=kdivessh,restrict={restrict},hostfwd=tcp:{ssh_addr}:{ssh_port}-:22"
