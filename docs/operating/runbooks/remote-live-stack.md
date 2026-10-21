@@ -739,6 +739,14 @@ so did the 4 crash-watch functional cells. The 8 others recorded `failure` and a
 No record or artifact carried a host name or address. After the run, `demo-down.sh --wipe --yes`
 cleared the stack, the provider defined no `kdive-` domain and its pool held only the base volumes.
 
+A later run of the 2 default-configuration `control.capture_traffic` functional cells, at candidate
+`89067afb1` (#3294) on the same kind of hosts with the base image rebuilt, no longer failed with an
+`AttributeError`. Both failed `control_failure` with `capture_filter_rejected` on `object_add`:
+QEMU refuses the `filter-dump` with "Vhost is not supported", because libvirt enables vhost-net on
+the provider NIC that the capture taps. With vhost disabled by hand, QEMU then could not create the
+pcap in the storage pool (SELinux enforcing): "Permission denied". Both are #3316's, which owns
+these cells' success; the recovery configuration was not run.
+
 ## 13. Remote GDB debug tool cells (#3113)
 
 `tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell` also carries the 440
