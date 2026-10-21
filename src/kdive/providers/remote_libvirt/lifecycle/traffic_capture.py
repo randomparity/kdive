@@ -7,9 +7,9 @@ things differ, exactly as ADR-0385 anticipated:
 
 - **Netdev discovery.** Local hardcodes its SSH-forward netdev id; remote discovers libvirt's
   auto-generated netdev id (``hostnetN``) from the running domain's XML interface alias at runtime.
-- **Write location.** The pcap is written on the *remote* host, into the operator ``storage_pool``
-  directory (already QEMU-writable — it holds the domain's disk images), under a deterministic
-  per-job volume name.
+- **Write location.** The pcap is written on the *remote* host, into the dedicated ``pcap_pool``
+  directory that ``site.yml`` provisions writable and labelled for the confined QEMU (ADR-0432
+  amendment, #3316), under a deterministic per-job volume name.
 - **Fetch-back.** After the capture window the pcap is streamed back to the worker over the same
   ``qemu+tls`` connection via ``volume.download`` + ``stream.recvAll`` — the mechanism remote
   host_dump already uses — bounded so a runaway file cannot exhaust worker memory.
@@ -21,7 +21,7 @@ the bounded sink are unit-tested with fakes. Reclaim is guaranteed on every work
 the handler's ``finally``; :meth:`prepare` additionally pre-deletes *this job's own* stale volume
 (concurrency-safe, unlike a whole-System sweep), so an at-least-once retry of a job that died
 mid-capture starts clean. A pcap orphaned by a job that exhausts its retries is reclaimed by the
-reconciler's volume reaper (a noted follow-up).
+reconciler's capture reaper (ADR-0556).
 """
 
 from __future__ import annotations
@@ -55,19 +55,26 @@ _log = logging.getLogger(__name__)
 # QEMU-controlled text reaches operator logs only, bounded and repr-quoted.
 _LOGGED_DESCRIPTION_CHARS = 256
 
-# A remote System's traffic rides a libvirt-managed dir/fs storage pool; only those pool types
-# expose a host directory the filter-dump can write into and libvirt can then list as a volume.
+# The pcap pool must be a libvirt-managed dir/fs pool; only those pool types expose a host
+# directory the filter-dump can write into and libvirt can then list as a volume.
 _DIR_POOL_TYPES = frozenset({"dir", "fs", "netfs"})
 # The deterministic per-job pcap volume name convention lives in providers.ports.traffic beside
 # capture_qom_id: the capturer and the ADR-0556 reaper must spell the destination identically,
 # and the gated-child overlay shadows this module, so the shared convention cannot live here.
 
-# Operator guidance when the remote hypervisor could not write the capture pcap into the pool.
+# Operator guidance when the remote hypervisor has no pcap pool or could not create the pcap in it.
 REMOTE_PCAP_WRITE_REMEDIATION = (
-    "the remote qemu:///system hypervisor could not write the capture pcap into the operator "
-    "storage_pool; ensure the pool is a filesystem/dir pool whose directory the remote QEMU "
-    "runtime user can create files in: check the directory's ownership and its SELinux/AppArmor "
-    "label for the QEMU process, and that the pool filesystem is neither full nor read-only"
+    "remote traffic capture writes into the dedicated dir pool named by "
+    "KDIVE_REMOTE_LIBVIRT_PCAP_POOL (default kdive-pcap), which deploy/ansible site.yml "
+    "provisions on the provider host: rerun site.yml there. The pool directory must be owned by "
+    "the QEMU runtime user with mode 0770, labelled svirt_image_t on an SELinux-enforcing host, "
+    "and allowed by the libvirt-qemu.d AppArmor drop-in on an AppArmor host; also check that its "
+    "filesystem is neither full nor read-only"
+)
+# Operator guidance when the System's data NIC was defined with vhost-net, which QEMU never filters.
+REMOTE_PCAP_VHOST_REMEDIATION = (
+    "this System's data NIC was defined with vhost-net, on which QEMU refuses every capture "
+    "filter; reprovision the System so its NIC renders without vhost"
 )
 
 
@@ -200,8 +207,7 @@ class RemoteLibvirtTrafficCapture:
         sweep, which would nuke a concurrent capture on the same System), so an at-least-once retry
         of a job whose prior attempt died mid-capture starts from a clean volume. The returned path
         is the ``filter-dump`` ``file=`` target on the remote host. A pcap orphaned by a job that
-        exhausts its retries is reclaimed by the reconciler's volume reaper (a noted follow-up), not
-        here.
+        exhausts its retries is reclaimed by the reconciler's capture reaper (ADR-0556), not here.
         """
         vol_name = pcap_volume_name(system_id, job_id)
         with self._connection() as conn:
@@ -281,11 +287,11 @@ class RemoteLibvirtTrafficCapture:
         try:
             pool_xml = pool.XMLDesc(0)
         except libvirt.libvirtError as exc:
-            raise self._infra("reading storage-pool XML for") from exc
+            raise self._infra("reading pcap pool XML for") from exc
         pool_type, target = _pool_type_and_target(pool_xml)
         if pool_type not in _DIR_POOL_TYPES or target is None:
             raise CategorizedError(
-                "remote storage_pool is not a filesystem/dir pool; traffic capture requires one",
+                "remote pcap pool is not a filesystem/dir pool; traffic capture requires one",
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"pool_type": pool_type or "unknown"},
             )
@@ -300,14 +306,24 @@ class RemoteLibvirtTrafficCapture:
             _delete_volume(volume)
 
     def _lookup_pool(self, conn: _CaptureConn) -> _CapturePool:
-        pool_name = self._config_factory().storage_pool
+        pool_name = self._config_factory().pcap_pool
         try:
             return conn.storagePoolLookupByName(pool_name)
         except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_POOL:
+                raise CategorizedError(
+                    "the remote host has no traffic-capture pcap pool",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    details={
+                        "reason": "pcap_pool_missing",
+                        "pcap_pool": pool_name,
+                        "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
+                    },
+                ) from exc
             raise CategorizedError(
-                "remote storage-pool lookup failed for traffic capture",
+                "remote pcap pool lookup failed for traffic capture",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"storage_pool": pool_name},
+                details={"pcap_pool": pool_name},
             ) from exc
 
     @staticmethod
@@ -316,7 +332,7 @@ class RemoteLibvirtTrafficCapture:
             pool.refresh(0)
         except libvirt.libvirtError as exc:
             raise CategorizedError(
-                "remote storage-pool refresh failed for traffic capture",
+                "remote pcap pool refresh failed for traffic capture",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             ) from exc
 
@@ -385,16 +401,20 @@ class RemoteLibvirtTrafficCapture:
         cmd = {"execute": "object-add", "arguments": arguments}
         reply = self._send(domain, domain_name, cmd, "object_add", verb="adding capture filter on")
         if reply.pcap_open_denied:
-            _log_refusal(reply, "object_add", domain_name)
-            raise CategorizedError(
+            raise _configuration_refusal(
+                reply,
+                domain_name,
                 "the remote hypervisor was denied creating the capture pcap",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={
-                    "reason": "pcap_open_denied",
-                    "operation": "object_add",
-                    "error": str(reply.error_class),
-                    "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
-                },
+                reason="pcap_open_denied",
+                remediation=REMOTE_PCAP_WRITE_REMEDIATION,
+            )
+        if reply.vhost_refused:
+            raise _configuration_refusal(
+                reply,
+                domain_name,
+                "the System's data NIC is vhost-backed and cannot be captured",
+                reason="capture_netdev_vhost",
+                remediation=REMOTE_PCAP_VHOST_REMEDIATION,
             )
         if reply.error_class is not None:
             raise _refused(reply, "object_add", domain_name)
@@ -449,7 +469,7 @@ class RemoteLibvirtTrafficCapture:
         return CategorizedError(
             f"remote libvirt error {verb} traffic capture",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"storage_pool": self._config_factory().storage_pool},
+            details={"pcap_pool": self._config_factory().pcap_pool},
         )
 
 
@@ -460,6 +480,23 @@ def _log_refusal(reply: QmpReply, operation: str, domain_name: str) -> None:
         domain_name,
         reply.error_class,
         reply.description[:_LOGGED_DESCRIPTION_CHARS],
+    )
+
+
+def _configuration_refusal(
+    reply: QmpReply, domain_name: str, message: str, *, reason: str, remediation: str
+) -> CategorizedError:
+    """A refused ``object-add`` no retry can fix; only the class and reason reach details."""
+    _log_refusal(reply, "object_add", domain_name)
+    return CategorizedError(
+        message,
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "reason": reason,
+            "operation": "object_add",
+            "error": str(reply.error_class),
+            "remediation": remediation,
+        },
     )
 
 
@@ -492,6 +529,7 @@ def _pool_type_and_target(pool_xml: str) -> tuple[str | None, str | None]:
 
 __all__ = [
     "RemoteLibvirtTrafficCapture",
+    "REMOTE_PCAP_VHOST_REMEDIATION",
     "REMOTE_PCAP_WRITE_REMEDIATION",
     "discover_netdev_id",
 ]

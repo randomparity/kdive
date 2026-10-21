@@ -20,6 +20,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.traffic import pcap_volume_name
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.lifecycle.traffic_capture import (
+    REMOTE_PCAP_VHOST_REMEDIATION,
     REMOTE_PCAP_WRITE_REMEDIATION,
     RemoteLibvirtTrafficCapture,
     discover_netdev_id,
@@ -31,6 +32,8 @@ _DOMAIN = "kdive-sys-remote"
 
 pytestmark = pytest.mark.usefixtures("fake_domain_monitor")
 _POOL = "kdivepool"
+# Captures go to the dedicated pcap pool, never the disk pool (#3316); the fake serves only it.
+_PCAP_POOL = "kdive-pcap-test"
 _POOL_XML = "<pool type='dir'><target><path>/var/lib/libvirt/images</path></target></pool>"
 _IFACE_XML = (
     "<domain><devices>"
@@ -140,7 +143,7 @@ class _FakeConn:
         return self._domain
 
     def storagePoolLookupByName(self, name: str) -> _FakePool:  # noqa: N802
-        if self._pool is None:
+        if self._pool is None or name != _PCAP_POOL:
             raise libvirt_error(libvirt.VIR_ERR_NO_STORAGE_POOL)
         return self._pool
 
@@ -157,6 +160,7 @@ def _config() -> RemoteLibvirtConfig:
         cert_refs=TlsCertRefs("c", "k", "a"),
         concurrent_allocation_cap=1,
         storage_pool=_POOL,
+        pcap_pool=_PCAP_POOL,
     )
 
 
@@ -280,6 +284,50 @@ def test_a_malformed_filter_reply_is_a_control_failure(tmp_path: Path, reply: st
         "reason": "qmp_reply_malformed",
         "operation": "object_del",
     }
+
+
+def test_a_vhost_refusal_is_a_configuration_error_to_reprovision(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A System defined with vhost-net can never capture; retrying cannot help (#3316)."""
+    domain = _FakeDomain()
+    domain.replies["object-add"] = _error_reply("GenericError", "Vhost is not supported")
+    cap = _capturer(_FakeConn(domain=domain), tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        cap.attach(_DOMAIN, qom_id="kdive-dump-J", dest_path="/pool/cap.pcap", snaplen=128)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {
+        "reason": "capture_netdev_vhost",
+        "operation": "object_add",
+        "error": "GenericError",
+        "remediation": REMOTE_PCAP_VHOST_REMEDIATION,
+    }
+    assert "Vhost is not supported" in caplog.text
+
+
+@pytest.mark.parametrize("operation", ["prepare", "captured_size", "fetch"])
+def test_a_missing_pcap_pool_is_a_configuration_error(tmp_path: Path, operation: str) -> None:
+    """An unprovisioned host names the setup step instead of failing as infrastructure."""
+    cap = _capturer(_FakeConn(), tmp_path)
+    calls = {
+        "prepare": lambda: cap.prepare(uuid4(), uuid4()),
+        "captured_size": lambda: cap.captured_size("/pool/cap.pcap"),
+        "fetch": lambda: cap.fetch("/pool/cap.pcap", max_bytes=1024),
+    }
+    with pytest.raises(CategorizedError) as exc:
+        calls[operation]()
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {
+        "reason": "pcap_pool_missing",
+        "pcap_pool": _PCAP_POOL,
+        "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
+    }
+
+
+def test_the_write_remediation_names_the_provisioned_pool() -> None:
+    assert "KDIVE_REMOTE_LIBVIRT_PCAP_POOL" in REMOTE_PCAP_WRITE_REMEDIATION
+    assert "site.yml" in REMOTE_PCAP_WRITE_REMEDIATION
+    assert "svirt_image_t" in REMOTE_PCAP_WRITE_REMEDIATION
 
 
 def test_attach_reraises_other_monitor_error_as_control_failure(tmp_path: Path) -> None:
