@@ -13,6 +13,7 @@ from kdive.profiles.provisioning import ProvisioningProfile, require_concrete_si
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     QEMU_NS,
+    append_qcow2_backing_store,
     recorded_gdb_port_from_root,
     register_kdive_namespace,
     register_qemu_namespace,
@@ -115,6 +116,7 @@ def render_domain_xml(
     ssh_addr: str | None = None,
     ssh_port: int | None = None,
     guest_egress: bool = False,
+    relabel_base: bool = True,
 ) -> str:
     """Render the tagged remote domain XML (ADR-0080 §2/§4).
 
@@ -124,6 +126,9 @@ def render_domain_xml(
     ``network=None`` renders no libvirt ``<interface>``: an unprivileged session daemon has no
     network to attach it to, so the forward NIC is the guest's only NIC (ADR-0804), and
     ``guest_egress`` renders it ``restrict=off`` (ADR-0313).
+    ``relabel_base=False`` is the authority-owned System's staged-base contract (ADR-0623
+    amendment): the backing base carries a ``relabel='no'`` seclabel so a domain start leaves its
+    metadata unchanged. Every ordinary render keeps libvirt's relabel.
     """
     _ensure_namespaces_registered()
     if profile.provider.remote_libvirt_section is None:
@@ -155,10 +160,7 @@ def render_domain_xml(
     disk = ET.SubElement(devices, "disk", type="file", device="disk")
     ET.SubElement(disk, "driver", name="qemu", type="qcow2")
     ET.SubElement(disk, "source", file=overlay_path)
-    backing = ET.SubElement(disk, "backingStore", type="file")
-    ET.SubElement(backing, "format", type="qcow2")
-    ET.SubElement(backing, "source", file=backing_path)
-    ET.SubElement(backing, "backingStore")
+    append_qcow2_backing_store(disk, backing_path, relabel=relabel_base)
     ET.SubElement(disk, "target", dev="vda", bus="virtio")
     if network is not None:
         interface = ET.SubElement(devices, "interface", type="network")
