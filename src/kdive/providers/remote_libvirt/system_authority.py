@@ -55,6 +55,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     volume_backing_path,
 )
 from kdive.providers.shared.libvirt_xml import (
+    backing_store_projection,
     remote_metadata_storage_identity,
     remote_metadata_system_id,
 )
@@ -524,6 +525,7 @@ def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, obje
             "source": source.get("file"),
             "target": (target.get("dev"), target.get("bus")),
             "backing": (backing_source.get("file"), backing_format.get("type")),
+            "backing_store": backing_store_projection(disk),
         },
         "networks": networks,
         "channels": _target_devices(root, "channel"),
@@ -1001,6 +1003,7 @@ class RemoteAuthoritySystemProvider:
             ssh_addr=entry.ssh_addr,
             ssh_port=ssh,
             guest_egress=entry.guest_egress,
+            relabel_base=False,
         )
         values: dict[str, Any] = {
             "system_id": request.system_id,
