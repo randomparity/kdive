@@ -29,7 +29,7 @@ def test_read_vmcoreinfo_build_id_parses_the_note_line() -> None:
 
 def _vmcoreinfo_note(vmcoreinfo: bytes) -> bytes:
     desc = vmcoreinfo + b"\x00" * (-len(vmcoreinfo) % 4)
-    return struct.pack("<III", 11, len(vmcoreinfo), 0) + b"VMCOREINFO\x00\x00\x00" + desc
+    return struct.pack("<III", 11, len(vmcoreinfo), 0) + b"VMCOREINFO\x00\x00" + desc
 
 
 def _elf_core(vmcoreinfo: bytes) -> bytes:
