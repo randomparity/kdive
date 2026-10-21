@@ -764,7 +764,9 @@ def test_local_lane_observes_the_worker(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_remote_lane_observes_the_provider_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = RemoteHost("op@provider.example", "kdive", "rocky:10.2", "x86_64", "kvm")
+    host = RemoteHost(
+        "op@provider.example", "kdive", "rocky:10.2", "x86_64", "kvm", pcap_pool="lab-pcap"
+    )
     monkeypatch.setattr(tool_cells, "remote_host", lambda: host)
     monkeypatch.setattr(tool_cells, "staged_base_volume", lambda _image: "base.qcow2")
     seen: list[str] = []
@@ -773,7 +775,8 @@ def test_remote_lane_observes_the_provider_host(monkeypatch: pytest.MonkeyPatch)
     assert lane.connect() == "conn" and seen == ["op@provider.example"]
     spool = lane.spool
     assert isinstance(spool, partial) and spool.func is tool_cells.remote_pcap_spool
-    assert spool.args == ("op@provider.example", "kdive")
+    # The capturer writes pcaps into the dedicated pcap pool, not the disk pool (#3316).
+    assert spool.args == ("op@provider.example", "lab-pcap")
     kernel = lane.installed_kernel
     assert isinstance(kernel, partial) and kernel.func is guest_boot_kernel
     assert kernel.keywords == {"family": "fedora"}

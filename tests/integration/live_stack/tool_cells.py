@@ -1141,7 +1141,7 @@ def _local_spool(system_id: str) -> Callable[[str], str]:
 def remote_pcap_spool(dest: str, pool: str, system_id: str) -> Callable[[str], str]:
     """Name the provider-host pcap volume a capture job of ``system_id`` writes into ``pool``.
 
-    The remote capturer writes a per-job volume into the configured storage pool (ADR-0432), so
+    The remote capturer writes a per-job volume into the configured pcap pool (ADR-0432), so
     the System owns it until the job reclaims it. The pool's target is read here, before any job
     exists; the returned namer does no I/O.
     """
@@ -1230,7 +1230,7 @@ def _remote_lane(arch: str) -> Lane:
         partial(remote_volume_absent, host.dest),
         partial(on_remote_system, family=family),
         partial(observer, host.dest),
-        partial(remote_pcap_spool, host.dest, host.pool),
+        partial(remote_pcap_spool, host.dest, host.pcap_pool),
         partial(guest_boot_kernel, family=family),
     )
 
