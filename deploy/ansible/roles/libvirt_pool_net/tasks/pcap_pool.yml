@@ -121,7 +121,7 @@
     path: "{{ libvirt_pool_net_pcap_pool_target }}"
   register: libvirt_pool_net_pcap_pool_stat
 
-- name: Assert the pcap pool directory is writable by QEMU only
+- name: Assert the pcap pool directory is owned by the QEMU runtime user
   ansible.builtin.assert:
     that:
       - libvirt_pool_net_pcap_pool_stat.stat.isdir

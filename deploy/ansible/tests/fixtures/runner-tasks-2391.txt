@@ -43,7 +43,7 @@ libvirt_pool_net : Require the abstraction to include its libvirt-qemu.d drop-in
 libvirt_pool_net : Create the libvirt-qemu.d AppArmor drop-in directory	TAGS: []
 libvirt_pool_net : Allow the confined QEMU to write capture pcaps	TAGS: []
 libvirt_pool_net : Verify the pcap pool directory ownership and mode	TAGS: []
-libvirt_pool_net : Assert the pcap pool directory is writable by QEMU only	TAGS: []
+libvirt_pool_net : Assert the pcap pool directory is owned by the QEMU runtime user	TAGS: []
 libvirt_pool_net : Ensure the default network is active	TAGS: []
 libvirt_pool_net : Autostart the default network	TAGS: []
 live_vm_host : Require the complete fixed-worker authority client contract	TAGS: []
