@@ -861,10 +861,38 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Each configuration records 90 cells and skips the other configuration's 90. A remote kdump,
-console or dump-volume failure is a failing cell, not a skipped one. After the run,
-`demo-down.sh --wipe --yes` clears the stack. Then check the provider: `virsh list --all` shows no
-`kdive-` domain, and the pool holds no `kdive-` overlay or `kdive-host-dump-` volume.
+Each configuration records 90 cells and skips the other configuration's 90. While #3124 is open,
+expect 14 `success`, 4 `unsupported` and 4 `blocked` System cells per configuration. `qualify`
+then qualifies 172 of the 180 and lists the 8 `introspect.run` and `introspect.script` cells, so it
+exits non-zero by design. A remote kdump, console or dump-volume failure is a failing cell, not a
+skipped one. After the run, `demo-down.sh --wipe --yes` clears the stack. Then check the provider:
+`virsh list --all` shows no `kdive-` domain, and the pool holds no `kdive-` overlay or
+`kdive-host-dump-` volume.
+
+Deploy a new candidate with `deploy.sh` or its full equivalent: `uv sync --locked --group live` in
+the checkout and `just prepare-local-libvirt-host`, then rebuild the bootstrap manifest. A bare
+`uv sync --locked` drops `drgn`, and the worker lifecycle venv keeps the previous build while
+`/readyz` already reports the new commit. Check that both venvs import `drgn` before a run.
+
+Last run: candidate `350d3ae2b` (server, worker and reconciler at that SHA in both configurations;
+later commits change only this record and merge `main`). The control plane was a disposable
+Fedora 44 x86_64 lab guest with the verified `longterm` fixture (6.18.54). The provider was a
+separate disposable Rocky Linux 10.2 x86_64 host, itself a KVM guest whose domains ran with the
+`kvm` accelerator (nested). It was prepared with `site.yml` (a fresh PKI from `playbooks/pki.yml`),
+§7's `DOCKER-USER` rule, and `image.yml -e force_image_rebuild=true`, so the staged
+`fedora-kdive-remote-base-43` carried the ADR-0721 return route and the serial console. The
+default configuration's first attempt was stopped and is not coverage: a bare `uv sync` had left
+the stack without `drgn` and the worker on the previous build. Its second attempt and one
+`recovery` attempt each recorded 90 cells in about 36 minutes.
+
+`qualify` qualified 172 of the 180 cells: 20 `success`, all 144 `rejection` and 8 `unsupported`,
+each record carrying the provider host as `rocky:10.2` and the guest as `fedora:43`. The
+`success` cells are both exposures and configurations of `control.force_crash` (console panic or
+crash-kernel boot), `introspect.from_vmcore`, `postmortem.crash`, and `vmcore.fetch` with
+`host_dump` and `kdump`. The `unsupported` cells are the `console` and `gdbstub` refusals. The 8
+`introspect.run` and `introspect.script` cells recorded `blocked` on #3124. No record or artifact
+carried a host name or address. After the run, `demo-down.sh --wipe --yes` cleared the stack, the
+provider defined no `kdive-` domain, and its pool held only the base volumes.
 
 ## SUSE native image proof
 
