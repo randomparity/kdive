@@ -293,6 +293,11 @@ def test_success_orders_effects_and_proves_cleanup(
     assert set(run.assertions) == {"effect", "cleanup"}
     assert run.observed["accelerator"] == "kvm"
     assert run.observed["image_sha256"] == "b" * 64
+    # Operator decision D1 (#3186): every local record discloses the fixture-mode System.
+    effect = json.loads((tmp_path / "artifacts" / run.assertions["effect"]).read_text())
+    assert effect["system_provenance"] == authority_lane.FIXTURE_PROVENANCE
+    assert "#3144" in effect["system_provenance"]
+    assert "real authority" in effect["system_provenance"]
 
 
 def test_routed_resource_is_blocked_and_released(
