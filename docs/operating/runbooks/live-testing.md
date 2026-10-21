@@ -2121,8 +2121,9 @@ no kernel.
 
 A remote arm also uploads an initrd, because remote external boot refuses a build without one
 (`remote_external_boot_initrd_required`). The arm builds it on the test client with `dracut`,
-which Ubuntu 26.04, Fedora and Rocky install by default. It runs unprivileged and ignores the
-host's dracut configuration. The tree's `.config` must also set `CONFIG_BLK_DEV_INITRD=y` and
+which Ubuntu 26.04, Fedora and Rocky install by default. It runs unprivileged and skips
+`/etc/dracut.conf` and `/etc/dracut.conf.d`. The distro's `/usr/lib/dracut/dracut.conf.d` drop-ins
+still apply and can add dracut modules or files; no dracut option turns them off. The tree's `.config` must also set `CONFIG_BLK_DEV_INITRD=y` and
 `CONFIG_RD_GZIP=y`. The initrd holds userspace only (it resolves `root=UUID=`), so the tree's
 virtio and root-filesystem drivers must be built in, as every spine already requires. To build the
 same initrd by hand, with `<scratch>` a new directory and `<scratch>/dracut.conf.d` an empty one:

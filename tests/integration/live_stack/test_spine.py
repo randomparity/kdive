@@ -297,6 +297,7 @@ def test_spine_initrd_runs_dracut_isolated_from_the_host(
     initrd = spine.spine_initrd(tree, scratch, "upload-build")
 
     assert initrd == scratch / "initrd"
+    assert "DRACUT_INSTALL" not in cast(dict[str, str], calls[0][1])
     assert calls == [
         (
             [
@@ -332,6 +333,19 @@ def test_spine_initrd_requires_dracut(monkeypatch: pytest.MonkeyPatch, tmp_path:
     monkeypatch.setattr(spine.shutil, "which", lambda _name: None)
     monkeypatch.setattr(spine.subprocess, "run", Mock(side_effect=AssertionError("ran")))
     with pytest.raises(SpinePhaseError, match="install the dracut package"):
+        spine.spine_initrd(_kernel_tree(tmp_path), tmp_path, "upload-build")
+
+
+def test_spine_initrd_names_the_phase_when_dracut_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(spine.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        spine.subprocess,
+        "run",
+        Mock(side_effect=spine.subprocess.CalledProcessError(1, ["dracut"])),
+    )
+    with pytest.raises(SpinePhaseError, match="phase 'upload-build' failed: dracut exited 1"):
         spine.spine_initrd(_kernel_tree(tmp_path), tmp_path, "upload-build")
 
 

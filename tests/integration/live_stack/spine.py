@@ -808,10 +808,12 @@ _INITRD_DRACUT_MODULES = "base rootfs-block udev-rules systemd systemd-initrd dr
 def spine_initrd(kernel_src: Path, dest_dir: Path, phase_name: str) -> Path:
     """Build the userspace-only gzip initrd a remote external boot needs (#3323).
 
-    dracut packs this host's userspace, runs unprivileged, and reads none of the host's dracut
-    configuration. ``--no-kernel`` adds no modules, so the initrd pairs with any kernel whose
-    boot drivers are built in. Without root, dracut logs that ldconfig needs uid 0 and writes no
-    ``ld.so.cache``; glibc's built-in search path still covers the distro library directories.
+    dracut packs this host's userspace and runs unprivileged. It skips ``/etc/dracut.conf`` and
+    ``/etc/dracut.conf.d``, but always sources the distro's ``/usr/lib/dracut/dracut.conf.d``,
+    whose drop-ins can still add dracut modules or files. ``--no-kernel`` adds no kernel modules,
+    so the initrd pairs with any kernel whose boot drivers are built in. Without root, dracut logs
+    that ldconfig needs uid 0 and writes no ``ld.so.cache``; glibc's built-in search path still
+    covers the distro library directories.
     """
     if shutil.which("dracut") is None:
         raise SpinePhaseError(phase_name, "dracut not on PATH; install the dracut package")
@@ -825,30 +827,33 @@ def spine_initrd(kernel_src: Path, dest_dir: Path, phase_name: str) -> Path:
     confdir = dest_dir / "dracut.conf.d"
     confdir.mkdir()
     initrd = dest_dir / "initrd"
-    subprocess.run(
-        [
-            "dracut",
-            "--conf",
-            "/dev/null",
-            "--confdir",
-            str(confdir),
-            "--no-kernel",
-            "--no-hostonly",
-            "--no-hostonly-cmdline",
-            "--no-early-microcode",
-            "--kver",
-            release,
-            "--modules",
-            _INITRD_DRACUT_MODULES,
-            "--gzip",
-            "--force",
-            "--tmpdir",
-            str(dest_dir),
-            str(initrd),
-        ],
-        check=True,
-        env=_host_tool_env(),
-    )
+    try:
+        subprocess.run(
+            [
+                "dracut",
+                "--conf",
+                "/dev/null",
+                "--confdir",
+                str(confdir),
+                "--no-kernel",
+                "--no-hostonly",
+                "--no-hostonly-cmdline",
+                "--no-early-microcode",
+                "--kver",
+                release,
+                "--modules",
+                _INITRD_DRACUT_MODULES,
+                "--gzip",
+                "--force",
+                "--tmpdir",
+                str(dest_dir),
+                str(initrd),
+            ],
+            check=True,
+            env=_host_tool_env(),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SpinePhaseError(phase_name, f"dracut exited {exc.returncode}") from exc
     return initrd
 
 
