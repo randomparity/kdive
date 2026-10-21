@@ -496,6 +496,10 @@ a label. The authority domain tells libvirt not to relabel the base, so the labe
 place: a base relabelled out of band fails its next domain start with a qemu permission error.
 Any relabel also changes the base's ctime, so the authority exits and must be restarted
 ([ADR-0623 amendment](../../adr/0623-authority-owned-system-provisioning.md)).
+Deploying this contract over an authority that already holds Systems strands them. Their
+recorded domain identities predate the base's `<backingStore>` element and no longer match, so
+deploy it only to an authority host with no live authority Systems and no stored provision
+intents.
 
 Remote System bases also require `provider_authority_host_remote_module_enabled: true` and
 `provider_authority_host_remote_module_architectures` containing the selected supported

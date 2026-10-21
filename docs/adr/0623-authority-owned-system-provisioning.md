@@ -83,6 +83,11 @@ The contract is now:
   explicit `<backingStore>` whose source carries `<seclabel model='selinux' relabel='no'/>`. The
   overlay keeps libvirt's dynamic label. The authority's retained-domain identities include that
   seclabel, so a definition without it, or with `relabel='yes'`, reads as drift.
+- libguestfs reads of the base use the direct backend. The local authority mounts the base
+  read-only through libguestfs to extract its baseline kernel. Fedora and EL default libguestfs
+  to its libvirt backend, which runs the base through libvirt's relabel as a backing image, so
+  the authority environment pins `LIBGUESTFS_BACKEND=direct`. The direct backend changes no file
+  metadata.
 - The seclabel is inert on AppArmor and unconfined hosts. libvirt ignores a `relabel='no'`
   seclabel for a security model it has not loaded, and its AppArmor driver changes no file
   metadata.
