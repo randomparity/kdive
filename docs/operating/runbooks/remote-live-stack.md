@@ -62,7 +62,19 @@ memory_mb = 65536
 ```
 
 The libvirt storage pool / network / machine knobs that the inventory model does not carry stay
-operational env settings (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `_NETWORK`, `_MACHINE`).
+operational env settings (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `_NETWORK`, `_MACHINE`,
+`_PCAP_POOL`).
+
+`control.capture_traffic` writes into a dedicated `kdive-pcap` dir pool at
+`/var/lib/libvirt/kdive/pcap`, which `site.yml` provisions
+([ADR-0432](../../adr/0432-remote-libvirt-traffic-capturer.md) amendment): owned by the QEMU
+runtime user, labelled `svirt_image_t` on an SELinux-enforcing host, and allowed through a
+`libvirt-qemu.d` drop-in on an AppArmor host. On an AppArmor host any domain's QEMU may write any
+pcap in that directory; AppArmor has no per-domain categories. The remote data NIC renders without
+vhost-net, because QEMU refuses a capture filter on a vhost netdev. After upgrading, rerun
+`site.yml` on each provider host and reprovision existing remote Systems: a capture on an
+unprovisioned host fails `pcap_pool_missing`, and one on a System defined with vhost fails
+`capture_netdev_vhost`.
 
 ### Delivering the inventory and TLS refs to the fixed workers
 
@@ -655,7 +667,7 @@ what differs:
 - Domain state, native checkpoints, the QMP capture-filter list and domain definedness are read
   on the provider host through §7's observer. The QMP read is a monitor command, so the observer
   account needs read-write libvirt access, not a read-only connection.
-- A remote capture writes `kdive-pcap-<system>-<job>.pcap` into the provider's storage pool;
+- A remote capture writes `kdive-pcap-<system>-<job>.pcap` into the provider's pcap pool;
   the cell owns that volume and the cleanup proves it absent. The cell derives the name from the
   job id the way the capturer does and never sees the volume present, so a capturer that named
   it differently would pass that check vacuously: the provider check after the run is the
@@ -697,8 +709,8 @@ uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --result
 Each configuration records 80 cells, 16 functional and 64 rejection, and skips the other
 configuration's 80. A remote disk-only revert, memory-snapshot or pcap fetch-back failure is a
 failing cell, not a skipped one. After the run, `demo-down.sh --wipe --yes` clears the stack.
-Then check the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no
-`kdive-` overlay, snapshot overlay or `kdive-pcap-` volume.
+Then check the provider: `virsh list --all` shows no `kdive-` domain, the storage pool holds no
+`kdive-` overlay or snapshot overlay, and the `kdive-pcap` pool holds no `kdive-pcap-` volume.
 
 Last run: candidate `88b339b16` (server, worker and reconciler at that SHA in both configurations;
 later commits change only this record). The control plane was a disposable Fedora 44 x86_64 lab
