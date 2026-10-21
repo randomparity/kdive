@@ -5,8 +5,8 @@ Design proposal for issue #3186 (parent #3152, epic #2803), on source baseline `
 - Frozen scope: [WORK:SCOPE](https://github.com/randomparity/kdive/issues/3186#issuecomment-6318748334),
   token `q3186-d79f717c`. The operator approved the scope and its exclusion owners on 2026-10-16.
 - Decision record: [ADR-0788](../../adr/0788-authority-tool-cells-bind-the-serving-authority.md)
-  (Proposed).
-- Status: awaiting the operator's design decision. Nothing is implemented.
+  (Accepted with this change).
+- Status: approved by the operator on 2026-10-21 (decisions below) and implemented.
 
 ## Problem
 
@@ -56,8 +56,7 @@ Surface note for the operator: items 3 and 4 touch two `tests/live_vm/` files
 outside the WORK:SCOPE surface's literal paths. Item 2 also changes the shared identity seams
 `tests/integration/live_stack/evidence.py` (`run_identity`) and `scenario.py` (`run_cell`), which
 every live cell uses; the change applies only to remote-libvirt cells that require `authority`.
-All four are test-only and follow from criteria 1 and 4. They need the operator's approval at this
-gate.
+All four are test-only and follow from criteria 1 and 4. The operator approved them (D2).
 
 ## Design
 
@@ -141,7 +140,7 @@ reason. It is never a pass.
      activation `recovered` with cleanup complete, the consumed cleanup receipt, the retired
      root, the terminal journal head and the reservation credit;
    - local: the private cleanup receipt is absent (`receipt_state`). The authority daemon still
-     defines the System's domain. The two private roots list exactly what they listed in step 2;
+     defines the System's domain. The private rootfs root lists exactly what it listed in step 2;
    - remote: the authority pool's volumes containing the System id equal the step-2 set, and the
      daemon still defines the domain.
 7. Record the kernel inputs from the upload record and the fixture manifest, as `_cancel` does
@@ -216,45 +215,60 @@ row covers both configurations and both exposures, so four cells. Owners are unc
 
 | Tool | Provider | Owner | Body / fixture | Gating prerequisites | Qualifying terminal effect |
 |---|---|---|---|---|---|
-| `runs.release_external_boot` | local | 3119 | `_release`; fixture frame | #3321 (frame teardown after a released activation); `longterm` fixture; D1 | release job `succeeded`; root-release completion; receipt absent; domain kept; private roots back to the pre-activation listing; frame cleanup |
+| `runs.release_external_boot` | local | 3119 | `_release`; fixture frame | #3321 (frame teardown after a released activation); `longterm` fixture; D1 | release job `succeeded`; root-release completion; receipt absent; domain kept; private rootfs root back to the pre-activation listing; frame cleanup |
 | `runs.release_external_boot` | remote | 3120 | `_release`; remote frame | #3323 (initrd); remote teardown after release (expected from #3321, unproven); representative staged | release job `succeeded`; root-release completion; System-named pool volumes back to the pre-activation set; domain kept; frame cleanup |
 | `ops.force_release` | local | 3112 | `held_teardown_release`; barrier `teardown`/`after-provider` | #3321; D1 | refusal `external_boot_system_teardown_required` while held, with the allocation `active`, the head `mutation-started` and the domain gone; then, after `torn_down` and the head `terminal`, the allocation read `released` and capacity lower than while held; frame cleanup |
 | `ops.force_release` | remote | 3112 | `held_teardown_release`; remote barrier | #3323; remote teardown after release (expected from #3321, unproven) | as local, on the remote daemon |
 | `ops.resolve_recovery_orphan` | local | 3112 | `quarantined_orphan`; barrier `cleanup`/`before-finalize`, abort | #3322 (row-lock privilege); #3321; D1 | one new `quarantined` row naming the observed receipt; release `succeeded` at attempt 2; then that row `deleted` by the cell's job, with every other row unchanged; frame cleanup |
-| `ops.resolve_recovery_orphan` | remote | 3112 | blocked after the gates | product gap: the remote authority publishes no quarantine (no owner yet, F1) | none: stays `blocked` |
-| `systems.resolve_external_boot_conflict` | local | 3112 | blocked after the gates | product gap: no production path enters `recovery_conflict` (no owner yet, F2) | none: stays `blocked` |
-| `systems.resolve_external_boot_conflict` | remote | 3112 | blocked after the gates | same as local (F2) | none: stays `blocked` |
+| `ops.resolve_recovery_orphan` | remote | 3112 | blocked after the gates | product gap: the remote authority publishes no quarantine (#3326) | none: stays `blocked` |
+| `systems.resolve_external_boot_conflict` | local | 3112 | blocked after the gates | product gap: no production path enters `recovery_conflict` (#3327) | none: stays `blocked` |
+| `systems.resolve_external_boot_conflict` | remote | 3112 | blocked after the gates | same as local (#3327) | none: stays `blocked` |
 
 The ceiling is 20 qualified and 12 blocked:
 
-- 12 local cells can qualify after #3324 and #3325 merge, if D1 is accepted;
+- 12 local cells can qualify after #3324 and #3325 merge (D1 accepted);
 - 8 remote cells can qualify only after #3323 merges, and only if the remote teardown after a
   released activation works. PR #3325 fixes #3321 in the provider-independent job handlers
   (`src/kdive/jobs/handlers/external_boot/evidence.py` and `lifecycle.py`), so the remote path is
   expected to be covered, but no live run has shown it. If the remote teardown still fails after
   #3325 merges, that failure becomes routing item F3;
-- 12 cells stay `blocked` until product changes outside this scope give them owners.
+- 12 cells stay `blocked` until #3326 (4) and #3327 (8) land. The ceiling rises if they land
+  before the live run and add a construction path.
 
 A local cell also depends on #3138 not adopting a durable-binding ownership rule. If #3138 adopts
 one, the authority refuses fixture-mode bodies, and the 12 local cells move to `blocked` under
 #3144/#3148.
 
-### Operator decisions requested
+### Operator decisions (2026-10-21)
 
-- **D1. Fixture-mode framing.** The local System is provisioned through the worker and then moved
-  onto the authority's private daemon, because public local authority provisioning is blocked by
-  #3144/#3148. Provisioning is not the tool under test, and the tool's effect is observed on the
-  real authority. Recommendation: accept fixture-mode framing for the 12 local cells, with the
-  disclosure carried in every record's `effect`. Otherwise those 12 cells stay `blocked` under
-  #3144/#3148.
-- **D2. Surface.** Approve the two `tests/live_vm/` pass-throughs above.
-- **D3. Sequencing.** Recommendation: implement now; run the live session after #3324 and #3325
-  merge; include the remote cells if #3323 has merged by then. If #3323 has not merged, the 8
-  remote cells run and record `blocked` from the observed initrd refusal.
-- **F1 and F2 (routing, not filed here).** The remote quarantine publication gap and the missing
-  `recovery_conflict` entry need owners. The 12 cells otherwise carry reasons that name no issue.
+- **D1. Fixture-mode framing: accepted, with disclosure.** The local System is provisioned through
+  the worker and then moved onto the authority's private daemon, because public local authority
+  provisioning is blocked by #3144/#3148. The local frame adds `system_provenance`
+  (`authority_lane.FIXTURE_PROVENANCE`) to every local record's `effect`: the System's provenance,
+  and that every operation under test runs against the real authority. WORK:REVIEW repeats it.
+- **D2. Surface: approved.** The two `tests/live_vm/` pass-throughs, `run_identity`, `run_cell`
+  and ADR-0788.
+- **D3. Sequencing: approved.** Implement now. The live session follows #3324 and #3325. If
+  #3323 has not merged by then, the 8 remote cells run and record `blocked` from the observed
+  initrd refusal.
+- **Owners.** The remote quarantine publication gap is #3326 and the `recovery_conflict` entry gap
+  is #3327; the blocked reasons cite them. The 12 cells are wired through the same entry point as
+  the runnable ones, so only the product reason (`authority_cells.PRODUCT_BLOCKERS`) holds them.
   F3 exists only if the remote teardown after a released activation still fails once #3325 has
   merged.
+
+### Implementation notes
+
+- The shared framing lives in `tests/integration/live_stack/authority_cells.py`:
+  `PRODUCT_BLOCKERS`, `exposed` (the `ToolCall` above), `run_authority_cell` (blocker, then
+  fixture, `observe_remote_authority` on remote, then the frame) and the release body
+  `released_external_boot` with its database-driven `settle_release`. The carriers only choose
+  the caller's grants and the body.
+- The local release comparison covers the private rootfs root and the domain. The console root
+  is left to the frame, which compares the whole lane inventory after teardown, because console
+  rotation may legitimately add entries while the System lives.
+- `uploaded_kernel_inputs` (`deep_lifecycle.py`) replaces `_cancel`'s inline kernel fields and
+  serves the release cell.
 
 ## Failure model
 
@@ -292,7 +306,7 @@ one, the authority refuses fixture-mode bodies, and the 12 local cells move to `
      privilege: #3322. The remote initrd: #3323.
    - Public provisioning: #3144/#3148. Ownership admission: #3138. vmlinux: #3130/#3131/#3135.
    - Native POWER: #2818. Publication: #2819.
-   - Remote quarantine and conflict entry: F1/F2, routed by the campaign root.
+   - Remote quarantine publication: #3326. Conflict entry: #3327.
 
 There is no threat model. The change adds no entry point and no trust boundary. The remote
 revision read reuses the proof config's existing SSH seam and its fixed command.
