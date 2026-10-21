@@ -96,8 +96,9 @@ listing. The ADR records the refuted QEMU-owned-directory shape and this residua
 
 - New setting `KDIVE_REMOTE_LIBVIRT_PCAP_POOL` (`remote-libvirt` group, worker and reconciler),
   `RemoteLibvirtConfig.pcap_pool`; generated config reference regenerated.
-- New error reasons `capture_netdev_vhost`, `pcap_pool_missing`, `pcap_pool_inactive` and
-  `dac_seclabel_unusable`, all `CONFIGURATION_ERROR`.
+- New error reasons `capture_netdev_vhost`, `pcap_pool_missing`, `pcap_pool_inactive`,
+  `pcap_pool_unsafe`, `dac_seclabel_unusable` and `pcap_volume_create_denied`, all
+  `CONFIGURATION_ERROR`.
 - Rendered remote domain XML gains the interface driver element.
 - `libvirt_pool_net` gains a pool, and its variables `libvirt_pool_net_pcap_pool_*`.
 - No migration, no agent-facing tool change.
@@ -114,7 +115,11 @@ configuration error and remediation.
   command.
 - No usable DAC seclabel on the running domain: `CONFIGURATION_ERROR` `dac_seclabel_unusable`
   before any volume is created or QMP command sent.
-- Volume creation refused by the storage daemon: `INFRASTRUCTURE_FAILURE`; no filter is added.
+- Pool directory not root-owned, or group/other-writable, per the pool XML `<permissions>`:
+  `CONFIGURATION_ERROR` `pcap_pool_unsafe` before any volume is created.
+- Volume creation refused by the storage daemon with EPERM or EACCES (no `chown`/`fowner` under its
+  policy): `CONFIGURATION_ERROR` `pcap_volume_create_denied`; any other refusal:
+  `INFRASTRUCTURE_FAILURE`. No filter is added either way.
 - `object-add` refused or failing after the volume exists: the volume is deleted, then the error
   propagates.
 - Old System with vhost: `CONFIGURATION_ERROR` `capture_netdev_vhost` at `object-add`; nothing

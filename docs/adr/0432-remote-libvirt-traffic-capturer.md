@@ -150,7 +150,10 @@ provider showed both refusals once #3294 let QEMU's reply reach the capturer.
   `filter-dump` opens that existing file. A missing, malformed or root seclabel fails
   `CONFIGURATION_ERROR` `reason=dac_seclabel_unusable`; the owner is never guessed. A failed
   `object-add` deletes the volume again. The role checks, as the QEMU runtime user, that the
-  directory is searchable and not writable.
+  directory is searchable and not writable, and the capturer refuses a pool whose XML reports a
+  directory that is not root-owned or is group- or other-writable (`pcap_pool_unsafe`). Creating
+  the volume needs the storage daemon to `chown` it; a policy that denies that fails
+  `CONFIGURATION_ERROR` `pcap_volume_create_denied` with a remediation, not a retryable error.
 
   A QEMU-owned directory was the first shape of this amendment, and a security review refuted it.
   Owning the directory, a QEMU that a guest escaped into could replace its own pcap with a symlink
