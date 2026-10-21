@@ -348,10 +348,25 @@ def test_a_denied_volume_create_is_a_configuration_error(tmp_path: Path, err: in
     assert "object-add" not in [c["execute"] for c in domain.commands]
 
 
-def test_another_system_error_on_volume_create_stays_infrastructure(tmp_path: Path) -> None:
+def _non_system_error(err: int) -> libvirt.libvirtError:
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    error.err = (libvirt.VIR_ERR_INTERNAL_ERROR, 0, "synthetic", 0, "", None, None, err, 0)
+    return error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [_system_error(errno.ENOSPC), _non_system_error(errno.EACCES)],
+    ids=["enospc", "eacces-non-system"],
+)
+def test_another_volume_create_error_stays_infrastructure(
+    tmp_path: Path, error: libvirt.libvirtError
+) -> None:
+    """Only a system error carrying EPERM or EACCES is the policy denial; int1 alone is not."""
+
     class _FullPool(_FakePool):
         def createXML(self, xml: str, flags: int = 0) -> _FakeVolume:  # noqa: N802
-            raise _system_error(errno.ENOSPC)
+            raise error
 
     cap = _capturer(_FakeConn(domain=_FakeDomain(), pool=_FullPool()), tmp_path)
     with pytest.raises(CategorizedError) as exc:
