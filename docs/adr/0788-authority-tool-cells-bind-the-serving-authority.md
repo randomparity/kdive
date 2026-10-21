@@ -35,15 +35,17 @@ that served it.
   keep their roles.
 - For a `remote-libvirt` cell that requires `authority`, `run_identity` also reads the remote
   authority's revision file. It reads it through the proof config's SSH seam, as the authority
-  account, the same way `require_installed_authority` does. The cell records that revision as
-  `authority`.
-  - When the test host also has an authority installed, both revisions are read. If they differ,
-    the one that is not the candidate is recorded, following the existing worker-slot rule. A stale
-    authority on either host then fails `deployed-revision-mismatch`.
-  - When the proof config is unset, the remote revision is unknown and is not recorded. The cell
-    then fails `deployed-role-missing`.
+  account, the same way `require_installed_authority` does. The test host's revision is read as
+  today when an authority is installed there. The cell then records `authority` as follows:
+  - if either revision is not the candidate, the non-candidate one, following the existing
+    worker-slot rule; a stale authority on either host then fails `deployed-revision-mismatch`;
+  - otherwise the remote revision, when it was read;
+  - otherwise nothing. When the proof config is unset the remote revision is unknown, and a
+    current test-host authority is never recorded in its place. The cell then fails
+    `deployed-role-missing`.
   - If the config is set but the read fails or does not resolve, the identity read raises and the
     cell records nothing, as the ADR-0715 amendment does for an unreadable local authority.
+    `qualify` reports that cell not-run.
 - The `Role` vocabulary and the evidence record version stay as they are.
 
 ## Consequences
@@ -60,7 +62,8 @@ that served it.
 
 - **Leave `force_release` without `authority` and rely on the frame's revision gate.** judgment:
   the gate refuses a stale lane but leaves no record, so `qualify` cannot tell a gated run from an
-  ungated one. Issue #3186 asks for a recorded identity.
+  ungated one. Issue #3186 asks for a recorded identity. Doing nothing at all also leaves the
+  remote records naming the test host's authority.
 - **Add a `remote-authority` role.** verified: `Role` is a closed `Literal` in
   `scripts/coverage_campaign/evidence.py:37` and is part of the version-1 record. A new role
   changes the record schema and every `Evidence` consumer, for a fact that the existing role name
@@ -68,6 +71,11 @@ that served it.
 - **Record the remote revision only when no local authority is installed.** judgment: the lane
   runs both. The local one is involved in neither the remote frame nor the remote tools, so
   recording it alone mislabels the cell.
-- **Bind the remote revision from the proof config's `installed_revision`.** judgment: that is
-  the operator's claim, not an observation. ADR-0715 records what is deployed, not what was
-  configured.
+- **Stamp the revision that the remote frame's gate observes.** verified: `require_installed_authority`
+  (`tests/live_vm/installed_remote_authority_support.py:424-430`) does read the remote file and
+  compares it with the config's `installed_revision`. But it runs inside the scenario
+  (`authority_lane.py` `_on_remote_authority_system` → `require_remote_lane`), after `run_cell` has
+  fixed `RunIdentity` and computed `identity_problems` (`tests/integration/live_stack/scenario.py:
+  144-145`, at `a0d041a85`). Stamping it there means changing the identity after it was judged.
+  A cell that stops before the gate would also carry no observed value. Reading in `run_identity`
+  costs one more SSH round trip per remote authority cell.

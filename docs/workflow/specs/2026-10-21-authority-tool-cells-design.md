@@ -33,10 +33,13 @@ In scope, all test harness and coverage contract:
    both carriers, are unchanged.
 2. ADR-0788: add `ops.force_release` to `role_overrides` with the `authority` role, and read the
    remote authority's revision in `run_identity` for remote authority cells.
-3. Two small pass-through extensions. `start_external_boot_activation`
+3. Kernel and arm extensions. `start_external_boot_activation`
    (`tests/live_vm/installed_local_authority_support.py`) gains optional `kernel_tree` and
    `evidence_dir`, which it forwards to `build_and_upload_kernel`. The private `_activate` in
    `authority_faults.py` becomes public `activate`, with the same two parameters.
+   `held_teardown_release` and `quarantined_orphan` gain `kernel_tree` and pass it to `activate`.
+   `held_teardown_release` also gains an independent release observation (below). With
+   `kernel_tree=None` the #3185 live module behaves exactly as it does today.
 4. A remote revision reader beside `require_installed_authority`
    (`tests/live_vm/installed_remote_authority_support.py`).
 5. Unit tests, carrier docstrings, and the runbook sections for the run, break-glass and
@@ -90,27 +93,45 @@ async def call(tool: str, args: dict[str, object]) -> ToolResponse:
 It returns error envelopes unchanged, because the held arm must observe a refusal. Under
 `gateway`, `discover=True` proves `tools.search` finds the tool before `tools.invoke` calls it.
 
-A blocked body runs `blocked_after_gates`. For a remote cell it also runs `observe_host` first,
-so the blocked record carries the provider host. A blocked cell records `blocked` with its
-narrower reason. It is never a pass.
+Every runnable remote functional body first runs one new helper in
+`authority_lane.py`, `observe_remote_authority(run, system, db_url)`. It runs
+`observe_host(run, remote_host())`, so the record's `host_os` and `host_arch` are the provider
+host's. It reads the frame's root image again with `remote_root`, and requires that image to be
+`REMOTE_REPRESENTATIVES["fedora"]`; otherwise it stops `blocked` and names the mismatch. It then
+records `guest_os` from that representative. The remote frame records only `image_sha256` and
+`guest_arch` (`authority_lane.py`, `_on_remote_authority_system`). Without this helper, every
+remote record would fail `input-context-mismatch` against its binding. A blocked remote body runs
+`observe_host` and the lane gates without a frame.
+
+A blocked body runs `blocked_after_gates`. A blocked cell records `blocked` with its narrower
+reason. It is never a pass.
 
 ### `runs.release_external_boot` body (`_release`)
 
 1. Load the bound `longterm` fixture with `_fixture()`. It stops `blocked` when the fixture is
-   absent. On a remote cell, run `observe_host(run, remote_host())`.
+   absent. On a remote cell, run `observe_remote_authority` first.
 2. List the authority's state:
    - local: `authority_inventory(system_id)` roots and domain facts;
    - remote: `remote_authority_inventory(config, system_id)` volumes and domain.
-3. Call `activate(system, kernel_tree=tree, evidence_dir=<scratch>)`. It runs the admin `op`
-   through create, upload (no `vmlinux`), install and boot, then drains the activation. A remote
+3. Inside one `try`/`finally` that starts here, call
+   `activate(system, kernel_tree=tree, evidence_dir=<scratch>)`. It runs the admin `op` through
+   create, upload (no `vmlinux`), install and boot, then drains the activation. A remote
    activation failure stops `blocked` with the job's category and reason. Today that is
    `remote_external_boot_initrd_required` (#3323).
-4. In a `try`/`finally`, call `runs.release_external_boot` through the cell's `ToolCall` with
-   `{"run_id": ...}`. Answer a `system_job_active` refusal the same way the support helper
-   `release_external_boot` does: drain the named jobs, then retry within the same bound. Then
-   drain the release job. The `finally` calls the support helper's admin release only when the
-   tool call was never admitted, so the frame never meets a held activation.
-5. Effect evidence. Each item is observed outside the tool's own envelope:
+4. Call `runs.release_external_boot` through the cell's `ToolCall` with `{"run_id": ...}`.
+   Answer a `system_job_active` refusal the same way the support helper `release_external_boot`
+   does: drain the named jobs, then retry within the same bound. Then drain the release job.
+5. The `finally` decides from the database, never from what the client saw. A call can raise
+   after the server admitted it, and `activate` can raise after `runs.boot` was admitted.
+   - If the Run has no activation, it does nothing.
+   - If the Run has a release job, it drains that job.
+   - If the activation exists and no release job does, it calls the support helper's admin
+     release and drains it.
+
+   A failure inside the `finally` is attached to the primary failure as a note, so the record's
+   reason still names the first fault. The frame never meets a held activation that this body
+   could have released.
+6. Effect evidence. Each item is observed outside the tool's own envelope:
    - the release job is `succeeded` (`job_claim`);
    - `assert_root_release_completion` passes for the activate and release jobs. This covers the
      activation `recovered` with cleanup complete, the consumed cleanup receipt, the retired
@@ -119,16 +140,26 @@ narrower reason. It is never a pass.
      defines the System's domain. The two private roots list exactly what they listed in step 2;
    - remote: the authority pool's volumes containing the System id equal the step-2 set, and the
      daemon still defines the domain.
-6. Record the kernel inputs from the upload record and the fixture manifest, as `_cancel` does
+7. Record the kernel inputs from the upload record and the fixture manifest, as `_cancel` does
    today. Extract the shared lines into one helper used by both.
 
 ### `ops.force_release` and `ops.resolve_recovery_orphan` bodies
 
-These reuse `held_teardown_release` and `quarantined_orphan` unchanged, with the cell's `ToolCall`
-in place of the #3185 module's fixed `direct` platform-admin caller. Both arms keep their own
-barrier holds, budget checks, independent observations and failure cleanup (#3185 spec, Arms A
-and B). The carrier exports `KDIVE_KERNEL_SRC` to the same `longterm` tree, so every authority
-cell uploads one kernel.
+These reuse `held_teardown_release` and `quarantined_orphan`, with the cell's `ToolCall` in place
+of the #3185 module's fixed `direct` platform-admin caller, and with `kernel_tree` set to the
+bound `longterm` tree. Every authority cell therefore uploads one kernel, by one mechanism; the
+carriers never read `KDIVE_KERNEL_SRC`. Both arms keep their own barrier holds, budget checks,
+independent observations and failure cleanup (#3185 spec, Arms A and B).
+
+`held_teardown_release` today proves the final release only from the tool's own envelope
+(`released.status == "released"`), and the frame's cleanup would release the allocation itself if
+that release had not happened. So the arm gains two observations after the release, both read
+outside the tool's envelope:
+
+- `allocations.wait` with `timeout_s=0`, through the frame's own `op`, reads `released`;
+- `capacity_in_use(op)` is lower than the value the arm read while the effect was held.
+
+Both go into the `effect`.
 
 The orphan cell proves this: an authority publication of a real quarantine; then an exact-set
 `delete` disposition, by the cell's caller, of a receipt that a retry had already removed. The
@@ -141,14 +172,22 @@ discloses that in its `effect`.
   `[groups.role_overrides] "ops.force_release" = ["server", "worker", "reconciler", "authority"]`.
 - `run_identity(base_url, *, remote_authority=None)`. `run_cell` passes a reader only for a
   `remote-libvirt` cell whose `roles` include `authority`.
-  - The reader loads the remote proof config. If the config is unset it returns `None`, so the
-    revision is not recorded.
+  - The reader loads the remote proof config. If the config is unset it returns `None`: the
+    remote revision is unknown.
   - Otherwise it reads the remote revision file as the authority account and resolves it in the
     checkout. A failed read or resolve raises.
-  - A test-host authority revision, when present, is also read. The recorded `authority` is the
-    non-candidate revision when the two differ, and the shared value otherwise.
-- `identity_problems`, `build_record` and `qualify` are unchanged. A missing role fails
-  `deployed-role-missing`; a stale one fails `deployed-revision-mismatch`.
+- For such a cell, `authority` is chosen from the revisions that were read: the remote one, and
+  the test host's one when an authority is installed there.
+  - If either is not the candidate, the non-candidate one is recorded. A stale authority on
+    either host then fails `deployed-revision-mismatch`.
+  - Otherwise, if the remote revision was read, it is recorded.
+  - Otherwise (remote unknown, test-host authority current or absent) no `authority` is
+    recorded, and the cell fails `deployed-role-missing`. The test host's authority is never
+    recorded as the remote cell's serving authority.
+- Every other cell keeps today's rule unchanged.
+- `identity_problems`, `build_record` and `qualify` are unchanged.
+- A raised identity read happens before `run_cell`'s `try`, so that cell writes no record, and
+  `qualify` reports it not-run with `missing-result`.
 
 ### Input bindings
 
@@ -162,9 +201,9 @@ Bindings are unchanged in code.
   bytes.
 - The release cells bind the `longterm` kernel fields (`--kernel-baseline longterm`).
 
-The remote body adds a guard: when the frame's root image is not that representative, it stops
-`blocked` and names the mismatch. This keeps a wrong image from reaching `input-context-mismatch`
-at `qualify`.
+`observe_remote_authority` (above) supplies the remote record's `host_os`, `host_arch` and
+`guest_os`. The frame supplies `image_sha256`, `guest_arch` and the accelerator. Together they
+form the full context that `_lane_contexts` binds.
 
 ## Cell map
 
@@ -174,9 +213,9 @@ row covers both configurations and both exposures, so four cells. Owners are unc
 | Tool | Provider | Owner | Body / fixture | Gating prerequisites | Qualifying terminal effect |
 |---|---|---|---|---|---|
 | `runs.release_external_boot` | local | 3119 | `_release`; fixture frame | #3321 (frame teardown after a released activation); `longterm` fixture; D1 | release job `succeeded`; root-release completion; receipt absent; domain kept; private roots back to the pre-activation listing; frame cleanup |
-| `runs.release_external_boot` | remote | 3120 | `_release`; remote frame | #3323 (initrd); remote teardown after release (unproven; #3321 or a sibling); representative staged | release job `succeeded`; root-release completion; System-named pool volumes back to the pre-activation set; domain kept; frame cleanup |
-| `ops.force_release` | local | 3112 | `held_teardown_release`; barrier `teardown`/`after-provider` | #3321; D1 | refusal `external_boot_system_teardown_required` while held, with the allocation `active`, the head `mutation-started` and the domain gone; then `released` after `torn_down` and the head `terminal`; frame cleanup |
-| `ops.force_release` | remote | 3112 | `held_teardown_release`; remote barrier | #3323; remote teardown after release | as local, on the remote daemon |
+| `runs.release_external_boot` | remote | 3120 | `_release`; remote frame | #3323 (initrd); remote teardown after release (expected from #3321, unproven); representative staged | release job `succeeded`; root-release completion; System-named pool volumes back to the pre-activation set; domain kept; frame cleanup |
+| `ops.force_release` | local | 3112 | `held_teardown_release`; barrier `teardown`/`after-provider` | #3321; D1 | refusal `external_boot_system_teardown_required` while held, with the allocation `active`, the head `mutation-started` and the domain gone; then, after `torn_down` and the head `terminal`, the allocation read `released` and capacity lower than while held; frame cleanup |
+| `ops.force_release` | remote | 3112 | `held_teardown_release`; remote barrier | #3323; remote teardown after release (expected from #3321, unproven) | as local, on the remote daemon |
 | `ops.resolve_recovery_orphan` | local | 3112 | `quarantined_orphan`; barrier `cleanup`/`before-finalize`, abort | #3322 (row-lock privilege); #3321; D1 | one new `quarantined` row naming the observed receipt; release `succeeded` at attempt 2; then that row `deleted` by the cell's job, with every other row unchanged; frame cleanup |
 | `ops.resolve_recovery_orphan` | remote | 3112 | blocked after the gates | product gap: the remote authority publishes no quarantine (no owner yet, F1) | none: stays `blocked` |
 | `systems.resolve_external_boot_conflict` | local | 3112 | blocked after the gates | product gap: no production path enters `recovery_conflict` (no owner yet, F2) | none: stays `blocked` |
@@ -186,7 +225,10 @@ The ceiling is 20 qualified and 12 blocked:
 
 - 12 local cells can qualify after #3324 and #3325 merge, if D1 is accepted;
 - 8 remote cells can qualify only after #3323 merges, and only if the remote teardown after a
-  released activation works;
+  released activation works. PR #3325 fixes #3321 in the provider-independent job handlers
+  (`src/kdive/jobs/handlers/external_boot/evidence.py` and `lifecycle.py`), so the remote path is
+  expected to be covered, but no live run has shown it. If the remote teardown still fails after
+  #3325 merges, that failure becomes routing item F3;
 - 12 cells stay `blocked` until product changes outside this scope give them owners.
 
 A local cell also depends on #3138 not adopting a durable-binding ownership rule. If #3138 adopts
@@ -207,6 +249,8 @@ one, the authority refuses fixture-mode bodies, and the 12 local cells move to `
   remote cells run and record `blocked` from the observed initrd refusal.
 - **F1 and F2 (routing, not filed here).** The remote quarantine publication gap and the missing
   `recovery_conflict` entry need owners. The 12 cells otherwise carry reasons that name no issue.
+  F3 exists only if the remote teardown after a released activation still fails once #3325 has
+  merged.
 
 ## Failure model
 
@@ -218,21 +262,30 @@ one, the authority refuses fixture-mode bodies, and the 12 local cells move to `
      Both run under ADR-0715/ADR-0788 identity, with the ADR-0622/0787 proof barrier enabled.
    - CI runs the unit tests only.
 2. **Invariants and assets**
-   - Every recorded cell names the deployed server, worker, reconciler and serving authority.
-     A cell whose identity is missing or mismatched cannot qualify.
+   - Every recorded functional cell of the four tools names the deployed server, worker,
+     reconciler and serving authority. A cell whose identity is missing or mismatched cannot
+     qualify. Rejection cells keep `server` alone.
    - The frame's lane inventory, quarantine rows other than the cell's own, and the capacity in
      use return to baseline after every cell.
    - No record or artifact carries a host name, address or private path (ADR-0715).
    - The rejection cells and the other tools' cells are unchanged.
 3. **Accepted failure classes**
-   - A killed run leaves one barrier arm or one framed System. The recovery is the runbook's
-     stale-arm restart and killed-run cleanup. The cost is one restart in the unit's start budget.
+   - A killed run can leave one barrier arm, one framed System, one unreleased external boot,
+     or one published quarantine row. The recovery is the runbook's stale-arm restart and
+     killed-run cleanup. This change adds two steps to that cleanup: release the Run's external
+     boot (admin `runs.release_external_boot`, drained) before `systems.teardown`, and resolve
+     any `quarantined` row naming the System with `ops.resolve_recovery_orphan`. Until #3325 and
+     #3324 merge, those steps fail in the same way the cells do, and the recovery is the lab
+     snapshot rollback in the live plan. The cost is one restart in the unit's start budget.
    - A cell blocked by an open prerequisite records `blocked` and does not qualify. That is the
      honest inventory the issue requires.
    - When the two hosts' revisions differ, the record keeps only the non-candidate one (ADR-0788).
+   - A remote identity read that raises (for example an SSH timeout) leaves that cell with no
+     record. `qualify` reports it not-run, and a rerun of that cell is the recovery.
 4. **Covered elsewhere**
-   - Authority teardown after a released activation: #3321. The resolver privilege: #3322.
-     The remote initrd: #3323.
+   - Authority teardown after a released activation: #3321 (observed locally; its fix is
+     provider-independent, and a remote failure after it merges becomes F3). The resolver
+     privilege: #3322. The remote initrd: #3323.
    - Public provisioning: #3144/#3148. Ownership admission: #3138. vmlinux: #3130/#3131/#3135.
    - Native POWER: #2818. Publication: #2819.
    - Remote quarantine and conflict entry: F1/F2, routed by the campaign root.
@@ -242,9 +295,9 @@ revision read reuses the proof config's existing SSH seam and its fixed command.
 
 ## Success
 
-- The 32 cells in the map record one result each per run, under the map's bodies. Every record
-  that qualifies has a functional terminal effect observed outside the tool's envelope, and a
-  frame cleanup.
+- Each of the 32 cells whose identity read completes records exactly one result per run, under
+  the map's bodies. A cell whose identity read raises records none. Every record that qualifies
+  has a functional terminal effect observed outside the tool's envelope, and a frame cleanup.
 - `qualify` over the session's results reports every one of the 32 cells as qualified, `blocked`,
   `failure` or not-run. The report gives each non-qualified cell its reason.
 - The contract tests show `ops.force_release` with `authority` and `ops.force_teardown` without
@@ -265,16 +318,24 @@ Unit tests, all offline with fakes:
 - **Identity.**
   - Remote equal to local is recorded.
   - A stale local authority with a current remote one records the stale one.
-  - An unset config records no `authority`.
+  - An unset config with a current local authority records no `authority`.
+  - An unset config with a stale local authority records the stale one.
   - An unreadable remote revision raises.
   - A non-authority or local cell passes no reader.
 - **Dispatch.** Each of the 8 tool and provider pairs selects the body in the table. The caller's
   grants are `contributor` for the release and `platform_admin` with no project role for the ops
   tools. A `ToolCall` returns error envelopes unchanged under both exposures. The blocked bodies
-  raise their named reasons only after the lane gates.
+  raise their named reasons only after the lane gates, which a fake gate that records its call
+  order proves.
+- **Remote context.** For each remote functional body, the `Context` built from a fake run equals
+  `_lane_contexts`' binding for that cell. A frame root image other than the representative stops
+  `blocked`.
 - **Release body.** It fails when the release job did not succeed, when a private root entry is
-  left over, or when the receipt is still present. A tool call that is never admitted triggers the
-  admin release in the `finally`.
+  left over, or when the receipt is still present. The `finally` follows the database. It does
+  nothing with no activation. It drains the cell's job when the call was admitted and then
+  raised. It admin-releases when activation succeeded and no release job exists.
+- **Force-release arm.** A fake that answers `released` while the allocation stays `active` fails.
+  So does a fake whose capacity does not drop.
 - Each new negative test is checked red under a controlled fault, which is then reverted.
 
 Guardrails: `just lint`, `just type`, and the focused pytest. A live session runs only after the
