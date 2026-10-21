@@ -65,7 +65,6 @@ from tests.integration.live_stack.service_cells import (
 from tests.integration.live_stack.spine import LOCAL_ALLOCATION_DISK_GB, provision_to_ready
 from tests.integration.live_stack.tool_cells import (
     Boundary,
-    Exposure,
     FilteredListControl,
     Functional,
     Grants,
@@ -73,6 +72,7 @@ from tests.integration.live_stack.tool_cells import (
     Rejection,
     Snapshot,
     boundary_of,
+    caller_for,
     one,
     prove_functional,
     prove_rejection,
@@ -745,7 +745,7 @@ async def _filtered_control(
 
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> None:
     cell, tool = run.cell, run.cell.operation
-    caller = HttpCaller(cast(Exposure, cell.exposure), base_url, issuer)
+    caller = caller_for(cell.exposure, base_url, issuer)
     project = f"cov-{secrets.token_hex(4)}"
     targeted = cell.kind == "functional" or boundary_of(cell) in (
         "authorization",
