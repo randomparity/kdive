@@ -101,6 +101,23 @@ def test_enabled_environment_contains_complete_mutation_configuration() -> None:
     assert "KDIVE_REMOTE_LIBVIRT_STORAGE_POOL=authority-systems\n" in rendered
 
 
+def test_authority_environment_pins_the_direct_libguestfs_backend() -> None:
+    template = Environment(undefined=StrictUndefined).from_string(
+        (ROLE / "templates" / "environment.j2").read_text(encoding="utf-8")
+    )
+    rendered = template.render(
+        provider_authority_host_instance="authority-test",
+        provider_authority_host_uid=991,
+        provider_authority_host_gid=992,
+        provider_authority_host_client_gid=993,
+        provider_authority_host_network_address="",
+        provider_authority_host_denied_identities=["operator"],
+        provider_authority_host_fault_proof_enabled=False,
+    )
+
+    assert "LIBGUESTFS_BACKEND=direct" in rendered.splitlines()
+
+
 def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() -> None:
     tasks = yaml.safe_load((ROLE / "tasks" / "preflight.yml").read_text(encoding="utf-8"))
     validation = next(
