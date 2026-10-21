@@ -51,9 +51,13 @@ are also out of scope: #3321 (PR #3325), #3322 (PR #3324) and #3323. This change
 and does not implement them. There is no production API, schema, migration, provider-family,
 architecture or scheduler change.
 
-Surface note for the operator: items 3 and 4 touch `tests/live_vm/`, which is outside the
-WORK:SCOPE surface's literal paths. Both are test-only and follow from criteria 1 and 4. They need
-the operator's approval at this gate.
+Surface note for the operator: items 3 and 4 touch two `tests/live_vm/` files
+(`installed_local_authority_support.py`, `installed_remote_authority_support.py`), which are
+outside the WORK:SCOPE surface's literal paths. Item 2 also changes the shared identity seams
+`tests/integration/live_stack/evidence.py` (`run_identity`) and `scenario.py` (`run_cell`), which
+every live cell uses; the change applies only to remote-libvirt cells that require `authority`.
+All four are test-only and follow from criteria 1 and 4. They need the operator's approval at this
+gate.
 
 ## Design
 
