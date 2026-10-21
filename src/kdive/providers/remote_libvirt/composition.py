@@ -110,6 +110,7 @@ from kdive.providers.remote_libvirt.resource_details import project_resource_det
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
 from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
+from kdive.providers.shared.debug_common.drgn_program import read_vmcoreinfo_build_id
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
@@ -479,6 +480,7 @@ def build_runtime(
         fetch_versioned_object=lambda ref, version_id: (
             store.get_artifact(ref, None, version_id=version_id).data
         ),
+        read_build_id=read_vmcoreinfo_build_id,
     )
     vmcore_introspector = RemoteLibvirtVmcoreIntrospect.from_env(
         secret_registry=secret_registry, store=store

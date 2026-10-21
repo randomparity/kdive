@@ -30,13 +30,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import OrphanedCapture, OwnedDomain
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
-from kdive.providers.local_libvirt.lifecycle.qmp_reply import (
-    MalformedQmpReplyError,
-    parse_qmp_reply,
-)
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.handles import OwnedInfra
 from kdive.providers.ports.traffic import capture_qom_id
+from kdive.providers.shared.qmp_reply import (
+    MalformedQmpReplyError,
+    parse_qmp_reply,
+)
 from kdive.providers.shared.runtime_paths import pcap_path
 
 
