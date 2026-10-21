@@ -47,13 +47,13 @@ from tests.integration.live_stack.spine import (
 )
 from tests.integration.live_stack.tool_cells import (
     Boundary,
-    Exposure,
     FilteredListControl,
     Grants,
     Guest,
     HttpCaller,
     Rejection,
     boundary_of,
+    caller_for,
     lane_image,
     on_lane_system,
     project_state,
@@ -998,7 +998,7 @@ async def _denied(run: CellRun, c: HttpCaller, project: str, db: str) -> None:
 
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db: str) -> None:
     cell, tool = run.cell, run.cell.operation
-    c = HttpCaller(cast(Exposure, cell.exposure), base_url, issuer)
+    c = caller_for(cell.exposure, base_url, issuer)
     project = "cov-" + secrets.token_hex(4)
     run.artifacts.append(run.writer.artifact({"fixture_project": project, "operation": tool}))
     try:
