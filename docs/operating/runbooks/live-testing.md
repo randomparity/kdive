@@ -246,11 +246,15 @@ audit/history records; do not run a prefix-wide or host-wide reaper.
 Set `live_vm_host_authority_fault_proof_enabled: true` only for a disposable native proof host to
 install the disabled-by-default authority-owned socket at
 `/run/kdive/provider-authority/proof-control/control.sock`. Put that exact absolute path in the
-carrier's optional `barrier_socket`. Root may then send only bounded `arm`, `status`, and `release`
-requests. An arm binds the configured System and exact Run, one existing operation, and the fixed
-`before-provider` or `after-provider` checkpoint. It is root-only by `SO_PEERCRED`, permits one
-arm, and never selects or executes a provider action. Shutdown aborts a wait rather than releasing
-it. The fault carrier uses `after-provider` to restart the authority before it can record
+carrier's optional `barrier_socket`. Root may then send only bounded `arm`, `status`, `release`
+and `abort` requests. An arm binds the configured System and exact Run, one existing operation, and
+the fixed `before-provider` or `after-provider` checkpoint, or `before-finalize` for the `cleanup`
+operation only ([ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md)). `abort` is
+accepted only while that `before-finalize` arm is reached: it fails that one cleanup finalization,
+which the authority then publishes as a real recovery quarantine. It is root-only by
+`SO_PEERCRED`, permits one arm, and never selects or executes a provider action. Releasing an arm
+that was never reached clears it. Shutdown aborts a wait rather than releasing it, and a shutdown at
+`before-finalize` publishes nothing. The fault carrier uses `after-provider` to restart the authority before it can record
 `provider-returned`, then requires the real job's ordinary recovery path to finish.
 
 The barrier does not support journal deletion or synthetic stale database writes. Those #2151
@@ -2103,6 +2107,48 @@ daemon, remove it as the authority account, never root (`sudo -n -u kdive-provid
 virsh -c` on the authority host), through
 `qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock`:
 `virsh destroy`, then `virsh undefine` the domain, then `virsh vol-delete --pool <pool>` the volume.
+
+##### Authority recovery faults (#3185)
+
+`tests/integration/test_authority_faults_live.py` runs fault arms inside this frame. Each arm binds
+its fault to the frame's System, the Run it activates and one authority operation, and reads the
+job, journal head, quarantine rows and the authority's own daemon or receipt before it calls a
+recovery tool. A platform admin with no role in the frame's project calls the tools. Enable the
+barrier on each authority (above) and add `"barrier_socket":
+"/run/kdive/provider-authority/proof-control/control.sock"` to the local lane config. Export
+`KDIVE_KERNEL_SRC` naming a pre-built x86_64 tree: the arms upload it without a `vmlinux` and build
+nothing.
+
+- **Held teardown (local and remote).** The arm activates and releases one external boot, arms
+  `teardown`/`after-provider`, and calls `systems.teardown`. While the effect is held it requires
+  the journal head `mutation-started`, the domain gone from the authority daemon, the allocation
+  `active`, and `ops.force_release` refused with `external_boot_system_teardown_required`. After
+  the barrier is released and the System is `torn_down`, `ops.force_release` must release. A
+  remote activation that fails stops the arm `blocked` with the job's phase.
+- **Recovery orphan (local).** The arm activates, arms `cleanup`/`before-finalize`, and calls
+  `runs.release_external_boot`. While held it requires the head `terminal` for the cleanup, the
+  private `cleanup-quarantine.json` present (a fixed read-only root program under
+  `/var/lib/kdive/provider-authority/recovery`), and no quarantine row. It then aborts and requires
+  exactly one new `quarantined` `recovery-record` row naming that receipt. The release job's next
+  attempt finalizes and removes the receipt, so `ops.resolve_recovery_orphan` (`delete`) commits
+  the disposition of an already-absent object; the arm requires that row `deleted` by that job and
+  every other quarantine row unchanged. If the arm fails after the abort it resolves the rows it
+  published before the frame tears down, and names any it could not as residue on the failure.
+- **Blocked arms.** These pass the lane gates and skip with `blocked:` and the reason, before any
+  mutation. They are narrower blockers, not passes:
+  - the remote orphan: the remote-libvirt authority publishes no cleanup quarantine;
+  - the recovery conflict, local and remote: no production path enters `recovery_conflict`.
+
+  The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
+  a receipt survives to resolution only if the release job ends terminally, whose recovery is
+  #3143.
+
+Every hold waits at most 120 s and checks that the held job is still `running` at the same attempt
+with a live lease before the fault, because the worker's authority deadline is five minutes per
+attempt. No arm restarts the authority. A killed run can leave one arm, and the next arm then
+fails with a stale-arm message: restart the authority once (`sudo systemctl restart` the unit),
+which counts against its five starts in 600 s, then run the killed-run cleanup above. Add
+`tests/integration/test_authority_faults_live.py` to the command above in place of the frame test.
 
 ### `live_vm` (native) — a real kernel on real silicon
 

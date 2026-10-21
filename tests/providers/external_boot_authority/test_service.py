@@ -18,6 +18,10 @@ from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptPreparationRequestV1,
 )
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.proof_barrier import (
+    ProofBarrierAbort,
+    ProofBarrierShutdown,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
     AuthorityMutationRequestV1,
@@ -40,6 +44,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootPreparationObservation,
     OpaqueProviderRef,
+    RecoveryObjectObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleLifecycleRequestV1,
@@ -123,7 +128,7 @@ class _RecordingProofCheckpoint:
         system_id: UUID,
         run_id: UUID,
         operation: AuthorityOperation,
-        checkpoint: Literal["before-provider", "after-provider"],
+        checkpoint: Literal["before-provider", "after-provider", "before-finalize"],
     ) -> None:
         self.identities.append((system_id, run_id, operation))
         self.calls.append(checkpoint)
@@ -158,6 +163,89 @@ async def test_proof_checkpoints_wrap_provider_commit_before_provider_returned(
         JournalPhase.OBSERVED,
         JournalPhase.TERMINAL,
     ]
+
+
+class _FinalizingAdapter(_Adapter):
+    """A finalizer whose private receipt survives a failed finalize (ADR-0615)."""
+
+    receipt = cast(RecoveryObjectObservation, object())
+
+    async def finalize(self, request: object, context: object) -> None:
+        self.calls.append("finalize")
+
+    async def cleanup_quarantine_inventory(
+        self, request: object
+    ) -> tuple[RecoveryObjectObservation, ...]:
+        return (self.receipt,)
+
+
+class _FinalizeFault(_RecordingProofCheckpoint):
+    def __init__(self, calls: list[str], fault: Exception) -> None:
+        super().__init__(calls)
+        self.fault: Exception | None = fault
+
+    async def checkpoint(
+        self,
+        system_id: UUID,
+        run_id: UUID,
+        operation: AuthorityOperation,
+        checkpoint: Literal["before-provider", "after-provider", "before-finalize"],
+    ) -> None:
+        await super().checkpoint(system_id, run_id, operation, checkpoint)
+        if checkpoint == "before-finalize" and self.fault is not None:
+            fault, self.fault = self.fault, None
+            raise fault
+
+
+async def _finalize_fault_service(
+    tmp_path: Path, fault: Exception
+) -> tuple[ExternalBootAuthorityService, _Repository, _FinalizingAdapter, AuthenticatedPeer, Any]:
+    _unused, repository, _plain, peer, takeover = _service(tmp_path)
+    adapter = _FinalizingAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+        proof_checkpoint=_FinalizeFault(adapter.calls, fault),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    return service, repository, adapter, peer, _mutation(takeover)
+
+
+@pytest.mark.anyio
+async def test_before_finalize_abort_publishes_then_replay_finalizes(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = await _finalize_fault_service(
+        tmp_path, ProofBarrierAbort("aborted")
+    )
+
+    with pytest.raises(AuthorityServiceError) as raised:
+        await service.execute_mutation(peer, request)
+
+    assert raised.value.category == "provider_conflict"
+    assert adapter.calls[-2:] == ["observe", "before-finalize"]
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert [args[-1] for args in repository.published_cleanup_quarantines] == [(adapter.receipt,)]
+
+    observation = await service.execute_mutation(peer, request)
+
+    assert observation == repository.records[-1].observation
+    assert adapter.calls[-2:] == ["before-finalize", "finalize"]
+    assert adapter.calls.count("finalize") == 1
+    assert len(repository.published_cleanup_quarantines) == 1
+
+
+@pytest.mark.anyio
+async def test_shutdown_at_before_finalize_publishes_nothing(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = await _finalize_fault_service(
+        tmp_path, ProofBarrierShutdown("shutdown")
+    )
+
+    with pytest.raises(ProofBarrierShutdown):
+        await service.execute_mutation(peer, request)
+
+    assert "finalize" not in adapter.calls
+    assert repository.published_cleanup_quarantines == []
 
 
 @pytest.mark.anyio
