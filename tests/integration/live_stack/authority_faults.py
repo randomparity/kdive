@@ -24,6 +24,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Literal, LiteralString, NoReturn
 from uuid import UUID
 
@@ -56,11 +57,11 @@ from tests.live_vm.installed_remote_authority_support import RemoteAuthorityProo
 
 REMOTE_ORPHAN_BLOCKED = (
     "the remote-libvirt authority publishes no cleanup quarantine: no finalizer, quarantine "
-    "inventory or remote recovery-object port"
+    "inventory or remote recovery-object port (#3326)"
 )
 CONFLICT_BLOCKED = (
     "no production path enters recovery_conflict: record_conflict has no caller and an authority "
-    "conflict observation fails the job"
+    "conflict observation fails the job (#3327)"
 )
 LOCAL_PRESENT_ORPHAN_BLOCKED = (
     "a quarantined receipt survives to resolution only if the release job ends terminally "
@@ -326,8 +327,16 @@ async def _allocation_state(system: AuthoritySystem) -> str:
     return env.status
 
 
-async def _activate(system: AuthoritySystem) -> ActivationJob:
-    """Start one external boot; a remote one that fails is a recorded blocker, not a pass."""
+async def activate(
+    system: AuthoritySystem,
+    *,
+    kernel_tree: Path | None = None,
+    evidence_dir: Path | None = None,
+) -> ActivationJob:
+    """Start one external boot; a remote one that fails is a recorded blocker, not a pass.
+
+    ``kernel_tree`` defaults to ``KDIVE_KERNEL_SRC``; ``evidence_dir`` retains the upload record.
+    """
     remote = isinstance(system.config, RemoteAuthorityProofConfig)
     try:
         activation = await start_external_boot_activation(
@@ -338,6 +347,8 @@ async def _activate(system: AuthoritySystem) -> ActivationJob:
             label=system.config.ownership_prefix,
             # Only the local fixture profile carries a crashkernel.
             require_kdump=not remote,
+            kernel_tree=kernel_tree,
+            evidence_dir=evidence_dir,
         )
         await drain_job(system.op, "activate", activation.activate_job_id)
     except SpinePhaseError as failed:
@@ -356,12 +367,20 @@ def _cause(failed: SpinePhaseError) -> str:
 
 
 async def held_teardown_release(
-    system: AuthoritySystem, db_url: str, force_release: ToolCall
+    system: AuthoritySystem,
+    db_url: str,
+    force_release: ToolCall,
+    *,
+    kernel_tree: Path | None = None,
 ) -> dict[str, object]:
-    """``ops.force_release`` refuses while a teardown effect is held, then releases."""
+    """``ops.force_release`` refuses while a teardown effect is held, then releases.
+
+    The release is observed outside the tool's envelope: the allocation reads ``released`` and
+    the capacity in use drops (#3186).
+    """
     op, system_id = system.op, system.system_id
     await require_evidence_read_access(db_url, FAULT_READ_TABLES)
-    activation = await _activate(system)
+    activation = await activate(system, kernel_tree=kernel_tree)
     release = await release_external_boot(op, activation.run_id)
     await drain_job(op, "release", release.object_id)
     await assert_root_release_completion(
@@ -401,10 +420,16 @@ async def held_teardown_release(
     assert await journal_head(db_url, system_id) == ("terminal", "teardown")
     released = await force_release("ops.force_release", args)
     assert released.status == "released", f"force_release answered {released.status}"
+    allocation = await _allocation_state(system)
+    assert allocation == "released", f"after force_release the allocation is {allocation}"
+    freed = in_use - await capacity_in_use(op)
+    assert freed > 0, "capacity in use did not drop after force_release"
     return {
         "held_effect": "teardown after-provider",
         "refusal": TEARDOWN_REQUIRED,
         "release_after_quiescence": released.status,
+        "allocation_after_release": allocation,
+        "capacity_freed": freed,
         "held_seconds": held_s,
     }
 
@@ -472,14 +497,18 @@ async def _resolve_published(
 
 
 async def quarantined_orphan(
-    system: AuthoritySystem, db_url: str, resolve: ToolCall
+    system: AuthoritySystem,
+    db_url: str,
+    resolve: ToolCall,
+    *,
+    kernel_tree: Path | None = None,
 ) -> dict[str, object]:
     """Publish one real quarantine by an aborted finalize, then resolve exactly that row."""
     if isinstance(system.config, RemoteAuthorityProofConfig):
         raise ScenarioStop(Outcome.BLOCKED, REMOTE_ORPHAN_BLOCKED)
     op, system_id = system.op, system.system_id
     await require_evidence_read_access(db_url, FAULT_READ_TABLES)
-    activation = await _activate(system)
+    activation = await activate(system, kernel_tree=kernel_tree)
     activation_id = await activation_of(db_url, activation.run_id)
     before = await quarantine_rows(db_url)
     aborted = False

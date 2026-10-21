@@ -53,6 +53,11 @@ from tests.integration.live_stack.cleanup import (
     domain_disks,
     release_and_verify,
 )
+from tests.integration.live_stack.remote_lifecycle import (
+    REMOTE_REPRESENTATIVES,
+    observe_host,
+    remote_host,
+)
 from tests.integration.live_stack.scenario import (
     ACCELERATORS,
     CellRun,
@@ -72,7 +77,7 @@ from tests.integration.live_stack.spine import (
     seed_metering,
     worker_libvirt_uri,
 )
-from tests.integration.live_stack.tool_cells import lane_image
+from tests.integration.live_stack.tool_cells import REMOTE_LANE_FAMILIES, lane_image
 from tests.live_vm.installed_local_authority_support import (
     NativeAuthorityConfig,
     OwnedResource,
@@ -381,6 +386,27 @@ async def remote_root(db_url: str, resource: str, arch: str) -> tuple[str, str, 
             f"catalog image for {arch} with a digest and an inspected root; found {len(images)}",
         )
     return str(found[0]), str(images[0][0]), str(images[0][1])
+
+
+async def observe_remote_authority(run: CellRun, system: AuthoritySystem, db_url: str) -> None:
+    """Record the provider host and the guest a remote authority cell's binding names (#3186).
+
+    The remote frame records the image digest and the accelerator; the binding also names the
+    provider host and the family representative, which must be the frame's root image.
+    """
+    assert isinstance(system.config, RemoteAuthorityProofConfig)
+    arch = str(run.cell.guest_arch)
+    observe_host(run, await asyncio.to_thread(remote_host))
+    representative = REMOTE_REPRESENTATIVES[REMOTE_LANE_FAMILIES[arch]]
+    _, image, _ = await remote_root(db_url, system.config.resource_name, arch)
+    if image != representative.name:
+        # The lane's image name stays out of the reason: it comes from private lane inputs.
+        raise ScenarioStop(
+            Outcome.BLOCKED,
+            f"the remote authority's root image is not {representative.name}, the image its "
+            "cells bind; stage that representative as the lane's one registered remote image",
+        )
+    run.observed["guest_os"] = f"{representative.distro}:{representative.version}"
 
 
 async def require_root_provenance(db_url: str, system_id: str, digest: str, arch: str) -> None:

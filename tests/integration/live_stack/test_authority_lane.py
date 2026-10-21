@@ -26,8 +26,10 @@ from scripts.coverage_campaign.evidence import Outcome
 from tests.integration._seed import seed_granted_allocation, seed_running_run, seed_system
 from tests.integration.conftest import open_pool
 from tests.integration.live_stack import authority_lane
-from tests.integration.live_stack.evidence import EvidenceWriter
+from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
+from tests.integration.live_stack.remote_lifecycle import REMOTE_REPRESENTATIVES, RemoteHost
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.tool_cells import _lane_contexts, tool_cells
 from tests.live_vm.installed_remote_authority_support import (
     RemoteAuthorityInventory,
     RemoteAuthorityProofConfig,
@@ -1005,3 +1007,54 @@ def test_fixture_names_match_the_fixture_script(monkeypatch: pytest.MonkeyPatch)
     # names and their order: the frame must expect every artifact the script reports.
     expected = [Path(name).name for name in script._fixture_artifacts(UUID(_SYSTEM))]
     assert [Path(name).name for name in authority_lane.fixture_names(_SYSTEM)] == expected
+
+
+def _remote_authority_cell() -> Cell:
+    return next(
+        c
+        for c in tool_cells(("ops.force_release",))
+        if c.kind == "functional" and c.provider == "remote-libvirt" and c.guest_arch == "x86_64"
+    )
+
+
+def _observe_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, image: str
+) -> tuple[CellRun, Cell]:
+    cell = _remote_authority_cell()
+    run = CellRun(cell, EvidenceWriter(tmp_path))
+    host = RemoteHost("operator@provider", "pool", "fedora:44", "x86_64", "kvm")
+    monkeypatch.setattr(authority_lane, "remote_host", lambda: host)
+
+    async def root(_db: str, resource: str, arch: str) -> tuple[str, str, str]:
+        assert (resource, arch) == ("remote-proof-x86", "x86_64")
+        return "resource-id", image, "sha256:" + "c" * 64
+
+    monkeypatch.setattr(authority_lane, "remote_root", root)
+    config = RemoteAuthorityProofConfig.model_construct(resource_name="remote-proof-x86")
+    system = authority_lane.AuthoritySystem(
+        cast(Any, object()), "cov-t", "alloc", _SYSTEM, config, cast(Any, object())
+    )
+    # What the remote frame itself records before it runs the body.
+    run.observed |= {"image_sha256": "c" * 64, "guest_arch": "x86_64", "accelerator": "kvm"}
+    asyncio.run(authority_lane.observe_remote_authority(run, system, "db"))
+    return run, cell
+
+
+def test_a_remote_authority_record_matches_its_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #3186: qualify compares the whole context, so the provider host and guest must be observed.
+    representative = REMOTE_REPRESENTATIVES["fedora"]
+    run, cell = _observe_remote(tmp_path, monkeypatch, representative.name)
+    identity = RunIdentity(_REVISION, "b" * 64, "ubuntu:26.04", "x86_64", True, {})
+    bound = _lane_contexts([cell], "fedora:44", "x86_64", representative, "c" * 64, kernel=None)
+    assert run.context(identity) == bound[cell.id]
+
+
+def test_another_remote_root_image_stops_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(ScenarioStop) as stop:
+        _observe_remote(tmp_path, monkeypatch, "lane-private-image")
+    assert stop.value.outcome is Outcome.BLOCKED
+    assert "lane-private-image" not in str(stop.value)
