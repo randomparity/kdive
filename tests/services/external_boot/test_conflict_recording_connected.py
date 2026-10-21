@@ -348,6 +348,7 @@ def test_conflict_is_recorded_only_from_the_authority_head(
                 forged = [
                     {**evidence, "composite_state": "sha256:" + "d" * 64},
                     {**evidence, "observation_id": str(uuid5(NAMESPACE_URL, "other"))},
+                    {**evidence, "objects": [{"ref": "objects/not-this-activation"}]},
                 ]
                 for document in forged:
                     carrier = ExternalBootAuthorityConflictV1.model_validate(

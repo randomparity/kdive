@@ -91,6 +91,19 @@ BEGIN
             'composite_state', v_head.head_record #>> '{observation,composite_state}',
             'objects', p_evidence -> 'objects',
             'observed_at', p_evidence -> 'observed_at')
+        -- Every object is a reference the activation's own evidence already names.
+        AND NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements(p_evidence -> 'objects') AS item(value)
+            WHERE jsonb_typeof(item.value) IS DISTINCT FROM 'object'
+               OR item.value - 'ref' <> '{}'::jsonb
+               OR jsonb_typeof(item.value -> 'ref') IS DISTINCT FROM 'string'
+               OR NOT (item.value ->> 'ref' = ANY (array_remove(ARRAY[
+                   v_activation.materialization #>> '{artifacts,kernel,ref}',
+                   v_activation.materialization #>> '{artifacts,modules,ref}',
+                   v_activation.materialization #>> '{artifacts,initrd,ref}',
+                   v_activation.recovery_point #>> '{recovery_ref,ref}'
+               ], NULL)))
+        )
     ) IS NOT TRUE THEN
         RETURN 'superseded';
     END IF;
