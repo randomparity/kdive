@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import create_autospec
 from uuid import UUID, uuid4
@@ -444,6 +445,7 @@ def test_remote_composition_snapshots_exact_resource_tls_without_database(
             cert_refs=TlsCertRefs("host-b.crt", "host-b.key", "host-b-ca.crt"),
             concurrent_allocation_cap=2,
             storage_pool="host-b-pool",
+            pcap_pool="host-b-pcap",
         )
 
     monkeypatch.setattr(composition, "remote_config_for_resource", config_for_resource)
@@ -463,3 +465,29 @@ def test_remote_composition_snapshots_exact_resource_tls_without_database(
     assert configuration.client_key_ref == "host-b.key"  # pragma: allowlist secret
     assert configuration.secrets_root == str(tmp_path)
     assert b"postgres" not in encoded
+    # The gated child rebuilds its capturer from these bytes alone, so the configured pcap pool
+    # must travel in them or the child writes into the default pool (#3316).
+    built: list[RemoteLibvirtConfig] = []
+
+    def capturer(*, config_factory: Callable[[], RemoteLibvirtConfig], **_: object) -> object:
+        built.append(config_factory())
+        return create_autospec(composition.RemoteLibvirtTrafficCapture, instance=True)
+
+    monkeypatch.setattr(composition, "RemoteLibvirtTrafficCapture", capturer)
+    composition.build_capture_executor(configuration)
+    assert [config.pcap_pool for config in built] == ["host-b-pcap"]
+
+
+def test_remote_capture_configuration_without_pcap_pool_reads_the_default(tmp_path: Path) -> None:
+    """Bytes staged before the pcap pool existed still parse, naming the provisioned default."""
+    staged = RemoteCaptureConfiguration(
+        resource_id=uuid4(),
+        uri="qemu+tls://host-b.example/system",
+        client_cert_ref="c",
+        client_key_ref="k",  # pragma: allowlist secret
+        ca_cert_ref="a",
+        secrets_root=str(tmp_path),
+        storage_pool="default",
+    ).model_dump(mode="json", exclude={"pcap_pool"})
+    configuration = RemoteCaptureConfiguration.from_canonical_json(json.dumps(staged).encode())
+    assert configuration.pcap_pool == "kdive-pcap"

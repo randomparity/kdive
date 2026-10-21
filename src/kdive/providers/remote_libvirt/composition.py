@@ -147,6 +147,7 @@ def _capture_operation_configuration(resource_id: UUID, resolved: RemoteLibvirtC
         ca_cert_ref=resolved.cert_refs.ca_cert_ref,
         secrets_root=str(secrets_root_from_env()),
         storage_pool=resolved.storage_pool,
+        pcap_pool=resolved.pcap_pool,
     ).to_canonical_json()
 
 
@@ -160,6 +161,7 @@ def _capture_remote_config(configuration: RemoteCaptureConfiguration) -> RemoteL
         ),
         concurrent_allocation_cap=1,
         storage_pool=configuration.storage_pool,
+        pcap_pool=configuration.pcap_pool,
     )
 
 
