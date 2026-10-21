@@ -148,7 +148,7 @@ require(
 include_assert = pcap_by_name["Require the abstraction to include its libvirt-qemu.d drop-ins"]
 require(
     any(
-        "'abstractions/libvirt-qemu.d'" in c
+        "'abstractions/libvirt-qemu.d'" in str(c)
         for c in include_assert["ansible.builtin.assert"]["that"]
     ),
     "the AppArmor probe must look for the libvirt-qemu.d include, not the abstraction's own name",
@@ -160,7 +160,7 @@ require(
         "owner"
     ]
     and any(
-        "pw_name" in c and QEMU_OWNER in c
+        "pw_name" in str(c) and QEMU_OWNER in str(c)
         for c in pcap_by_name["Assert the pcap pool directory is owned by the QEMU runtime user"][
             "ansible.builtin.assert"
         ]["that"]
@@ -170,7 +170,7 @@ require(
 target_check = pcap_by_name["Require the pcap pool to target the provisioned directory"]
 require(
     any(
-        "libvirt_pool_net_pcap_pool_target" in c and "get_xml" in c
+        "libvirt_pool_net_pcap_pool_target" in str(c) and "get_xml" in str(c)
         for c in target_check["ansible.builtin.assert"]["that"]
     ),
     "an existing pcap pool definition must be checked against the provisioned target",
