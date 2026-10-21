@@ -84,7 +84,7 @@ pcap_fcontext = pcap_by_module["community.general.sefcontext"]
 require(
     len(pcap_fcontext) == 1
     and pcap_fcontext[0]["community.general.sefcontext"]["setype"] == "svirt_image_t"
-    and "== 'Enforcing'" in pcap_fcontext[0]["when"],
+    and "== 'Enforcing'" in str(pcap_fcontext[0].get("when", "")),
     "pcap pool fcontext must be svirt_image_t and gated on Enforcing",
 )
 pcap_relabel = [
