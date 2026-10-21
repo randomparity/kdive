@@ -224,7 +224,6 @@ def _install_remote_system_manifest(config: AuthorityHostConfig) -> None:
                         "root_identity": "sha256:" + hashlib.sha256(b"base").hexdigest(),
                         "architecture": "x86_64",
                         "base_volume": base.name,
-                        "network": "provider-net",
                         "machine": "pc-q35-9.2",
                         "gdb_addr": "127.0.0.1",
                         "gdb_port_min": 31000,
