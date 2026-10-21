@@ -1194,7 +1194,6 @@ def test_native_carriers_supply_the_required_cleanup_summary(
 
     async def activation(
         _client: object,
-        _config: NativeAuthorityConfig,
         ledger: ResourceLedger,
         **_kwargs: object,
     ) -> carrier.ActivationJob:

@@ -36,7 +36,7 @@ from uuid import UUID
 
 import libvirt
 import psycopg
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kdive.domain.errors import CategorizedError
 from kdive.inventory.errors import InventoryError
@@ -150,6 +150,13 @@ class AuthorityLaneConfig(BaseModel):
     installed_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
     authority_service: Literal["kdive-external-boot-authority.service"]
     system_mode: Literal["fixture", "public"]
+    barrier_socket: Path | None = None
+
+    @field_validator("barrier_socket")
+    @classmethod
+    def validate_barrier(cls, value: Path | None) -> Path | None:
+        """Admit only the fixed authority proof socket (ADR-0622)."""
+        return NativeAuthorityConfig.validate_barrier(value)
 
 
 def load_lane_config(environment: Mapping[str, str] | None = None) -> AuthorityLaneConfig | None:
@@ -738,6 +745,7 @@ async def _create_and_run(
         project=frame.project,
         ownership_prefix=prefix,
         authority_service=lane.authority_service,
+        barrier_socket=lane.barrier_socket,
     )
     frame.fixture, frame.ledger = config, ResourceLedger(prefix, fixture_system=config.system_id)
     await _move_to_authority(frame, config)
@@ -772,10 +780,24 @@ async def _close_investigations(op: LiveStackClient, ledger: ResourceLedger) -> 
         )
 
 
+async def _allocation_released(op: LiveStackClient, allocation_id: str) -> bool:
+    env = await scalar(op, "allocations.wait", allocation_id=allocation_id, timeout_s=0)
+    return env.status == "released"
+
+
+async def _teardown(op: LiveStackClient, system_id: str) -> None:
+    """Tear the System down unless the body already did (the #3185 force-release proof)."""
+    current = await scalar(op, "systems.get", system_id=system_id)
+    if current.status != "torn_down":
+        ok(await scalar(op, "systems.teardown", system_id=system_id), "teardown")
+        await await_system_state(op, "teardown", system_id, "torn_down")
+
+
 async def _release(frame: _Frame) -> dict[str, object]:
     """Release the allocation and require the capacity in use back where it was."""
     op = frame.op
-    ok(await scalar(op, "allocations.release", allocation_id=frame.allocation), "release")
+    if not await _allocation_released(op, frame.allocation):
+        ok(await scalar(op, "allocations.release", allocation_id=frame.allocation), "release")
     await _await_released(op, frame.allocation, DRAIN_DEADLINE_S, POLL_INTERVAL_S)
     in_use = await capacity_in_use(op)
     assert in_use == frame.in_use, f"capacity in use is {in_use}, not {frame.in_use}"
@@ -803,8 +825,7 @@ async def _cleanup(frame: _Frame) -> dict[str, object]:
             owned += [r.identity for r in frame.ledger.resources if r.kind == "authority-fixture"]
             await asyncio.to_thread(remove_authority_fixture, frame.fixture, frame.ledger)
         owned.append(frame.system_id)
-        ok(await scalar(op, "systems.teardown", system_id=frame.system_id), "teardown")
-        await await_system_state(op, "teardown", frame.system_id, "torn_down")
+        await _teardown(op, frame.system_id)
         released = await release_and_verify(
             op,
             allocation_id=frame.allocation,
@@ -832,8 +853,7 @@ async def _remote_cleanup(frame: _Frame, config: RemoteAuthorityProofConfig) -> 
         drained = await drain_system_jobs(op, frame.db_url, frame.system_id)
         if frame.ledger is not None:
             await _close_investigations(op, frame.ledger)
-        ok(await scalar(op, "systems.teardown", system_id=frame.system_id), "teardown")
-        await await_system_state(op, "teardown", frame.system_id, "torn_down")
+        await _teardown(op, frame.system_id)
         left = await asyncio.to_thread(remote_authority_inventory, config, frame.system_id)
         assert left.system is None, "the System's domain remains on the remote authority daemon"
         stranded = [volume for volume in left.volumes if frame.system_id in volume]
