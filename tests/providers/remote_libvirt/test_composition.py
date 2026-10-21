@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
@@ -204,6 +205,32 @@ def test_build_runtime_wires_each_port_to_its_remote_adapter() -> None:
     assert isinstance(runtime.live_introspector, RemoteLibvirtLiveIntrospect)
     assert runtime.rootfs is not None
     assert isinstance(runtime.rootfs.build_plane, RemoteLibvirtRootfsBuildPlane)
+
+
+def test_build_runtime_crash_postmortem_reads_the_vmcore_build_id() -> None:
+    # #3317: the composed postmortem port must read the build-id from the vmcore's VMCOREINFO,
+    # not fall back to the always-raising stub. A matching build-id passes provenance and only
+    # then reaches the debuginfo fetch, so the sentinel proves the real reader ran.
+    build_id = "ab" * 20
+
+    class _Store:
+        def get_artifact(self, ref: str, _etag: object, **_kw: object) -> SimpleNamespace:
+            if ref == "vmcore-ref":
+                return SimpleNamespace(data=b"VMCOREINFO\nBUILD-ID=" + build_id.encode() + b"\n")
+            raise LookupError("debuginfo fetched")
+
+    runtime = composition.build_runtime(
+        secret_registry=SecretRegistry(), store=cast(ObjectStore, _Store())
+    )
+    assert runtime.crash_postmortem is not None
+
+    with pytest.raises(LookupError, match="debuginfo fetched"):
+        runtime.crash_postmortem.run_crash_postmortem(
+            vmcore_ref="vmcore-ref",
+            debuginfo_ref="vmlinux-ref",
+            expected_build_id=build_id,
+            commands=["bt"],
+        )
 
 
 def test_build_runtime_supported_capture_methods() -> None:
