@@ -147,6 +147,10 @@ execution = "provider"
 "ops.force_release" = "Observe terminal release only after protected provider effects are quiescent."
 "ops.force_teardown" = "Verify forced teardown removes owned domain/storage and preserves unrelated resources."
 
+[groups.role_overrides]
+# ADR-0788: the observed ordering exists only on an authority-owned System.
+"ops.force_release" = ["server", "worker", "reconciler", "authority"]
+
 [[groups]]
 owner = 3112
 execution = "provider"

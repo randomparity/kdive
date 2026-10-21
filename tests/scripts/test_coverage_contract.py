@@ -570,15 +570,17 @@ def test_operator_tools_follow_the_approved_split(inventory: Inventory) -> None:
         ("ops.recover_build_use", ("server", "worker")),
     }
     assert len([c for c in cells if c.owner == 3112]) == 136
-    # Operator option A (#3112, 2026-10-07): only the resolve tools need the authority.
+    # Operator option A (#3112, 2026-10-07), amended by ADR-0788 (#3186): force_teardown alone
+    # needs no authority; force_release's observed ordering is the authority's.
     base = ("server", "worker", "reconciler")
     roles = {(c.operation, c.roles) for c in glass if c.kind == "functional"}
     assert roles == {
-        ("ops.force_release", base),
+        ("ops.force_release", (*base, "authority")),
         ("ops.force_teardown", base),
         ("ops.resolve_recovery_orphan", (*base, "authority")),
         ("systems.resolve_external_boot_conflict", (*base, "authority")),
     }
+    assert {c.roles for c in glass if c.kind == "rejection"} == {("server",)}
 
 
 def _tool_prefix(provider: str) -> str:
