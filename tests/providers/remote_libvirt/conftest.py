@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import libvirt
+import libvirt_qemu
+import pytest
 
 # Re-export the disposable-Postgres fixtures so console-wiring tests can register an
 # artifacts row against a migrated schema (ADR-0095 part-store assembly).
@@ -21,6 +23,18 @@ def libvirt_error(code: int) -> libvirt.libvirtError:
     # get_error_code() reads self.err[0]; libvirtError leaves err=None with no live error.
     err.err = (code, 0, "synthetic", 0, "", None, None, 0, 0)
     return err
+
+
+@pytest.fixture
+def fake_domain_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the ``libvirt_qemu`` monitor passthrough to the fake domain's ``monitor`` method.
+
+    Real ``virDomain`` objects have no monitor method (#3294); fakes must not either, so a caller
+    that invokes one on the domain fails here exactly as it does against libvirt.
+    """
+    monkeypatch.setattr(
+        libvirt_qemu, "qemuMonitorCommand", lambda domain, cmd, flags: domain.monitor(cmd, flags)
+    )
 
 
 class RecordingBackend:
