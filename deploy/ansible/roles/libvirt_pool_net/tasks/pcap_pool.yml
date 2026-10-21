@@ -1,0 +1,133 @@
+---
+# The remote capturer's filter-dump makes the confined QEMU create kdive-pcap-<system>-<job>.pcap
+# here, and the worker fetches it back as a volume of this pool (ADR-0432 amendment, #3316).
+- name: Resolve the QEMU runtime user that creates capture pcaps
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family] }}"
+
+- name: Create the traffic-capture pcap pool directory
+  ansible.builtin.file:
+    path: "{{ libvirt_pool_net_pcap_pool_target }}"
+    state: directory
+    owner: "{{ libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family] }}"
+    group: "{{ libvirt_pool_net_pcap_pool_gid }}"
+    mode: "{{ libvirt_pool_net_pcap_pool_mode }}"
+  vars:
+    libvirt_pool_net_pcap_pool_gid: "{{ ansible_facts.getent_passwd[libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family]][2] }}"
+
+# libvirt resets a built dir pool to its 0711 root default unless the XML names the permissions.
+- name: Define the traffic-capture pcap storage pool
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_pcap_pool_name }}"
+    command: define
+    xml: |
+      <pool type='dir'>
+        <name>{{ libvirt_pool_net_pcap_pool_name }}</name>
+        <target>
+          <path>{{ libvirt_pool_net_pcap_pool_target }}</path>
+          <permissions>
+            <mode>{{ libvirt_pool_net_pcap_pool_mode }}</mode>
+            <owner>{{ libvirt_pool_net_pcap_pool_passwd[1] }}</owner>
+            <group>{{ libvirt_pool_net_pcap_pool_passwd[2] }}</group>
+          </permissions>
+        </target>
+      </pool>
+  vars:
+    libvirt_pool_net_pcap_pool_passwd: "{{ ansible_facts.getent_passwd[libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family]] }}"
+
+- name: Build the traffic-capture pcap storage pool
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_pcap_pool_name }}"
+    state: active
+
+- name: Autostart the traffic-capture pcap storage pool
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_pcap_pool_name }}"
+    autostart: true
+
+# getenforce, not the selinux fact, decides, as ADR-0640 does locally: the fact needs the libselinux
+# Python binding, and a host missing it would silently skip the label.
+- name: Read the SELinux mode for the pcap pool label
+  ansible.builtin.command:
+    argv: [getenforce]
+  register: libvirt_pool_net_selinux_mode
+  changed_when: false
+  failed_when: false
+
+# svirt_image_t:s0 is reachable by every domain through MCS dominance; the pcap QEMU creates
+# inherits svirt_image_t at that domain's own categories, so no other domain can read it.
+- name: Install the pcap pool svirt_image_t fcontext rule
+  community.general.sefcontext:
+    target: "{{ libvirt_pool_net_pcap_pool_target }}(/.*)?"
+    setype: svirt_image_t
+    state: present
+  when: libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
+
+# Plain restorecon, not -F: -F would also reset the categories of a capture still being written.
+- name: Relabel the pcap pool directory
+  ansible.builtin.command:
+    argv: [restorecon, -R, -v, "{{ libvirt_pool_net_pcap_pool_target }}"]
+  register: libvirt_pool_net_pcap_relabel
+  changed_when: "'Relabeled' in libvirt_pool_net_pcap_relabel.stdout"
+  when: libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
+
+- name: Check for libvirt's AppArmor QEMU abstraction
+  ansible.builtin.stat:
+    path: /etc/apparmor.d/abstractions/libvirt-qemu
+  register: libvirt_pool_net_apparmor_abstraction
+
+- name: Read libvirt's AppArmor QEMU abstraction
+  ansible.builtin.slurp:
+    src: /etc/apparmor.d/abstractions/libvirt-qemu
+  register: libvirt_pool_net_apparmor_abstraction_text
+  when: libvirt_pool_net_apparmor_abstraction.stat.exists
+
+# A drop-in nothing includes would leave every capture denied with no provisioning error.
+- name: Require the abstraction to include its libvirt-qemu.d drop-ins
+  ansible.builtin.assert:
+    that:
+      - "'abstractions/libvirt-qemu.d' in (libvirt_pool_net_apparmor_abstraction_text.content | b64decode)"
+    fail_msg: >-
+      /etc/apparmor.d/abstractions/libvirt-qemu does not include <abstractions/libvirt-qemu.d>, so
+      the kdive-pcap rule would never load. Upgrade libvirt, or add
+      '{{ libvirt_pool_net_pcap_pool_target }}/kdive-pcap-*.pcap rw,' to the QEMU profile by hand.
+  when: libvirt_pool_net_apparmor_abstraction.stat.exists
+
+- name: Create the libvirt-qemu.d AppArmor drop-in directory
+  ansible.builtin.file:
+    path: /etc/apparmor.d/abstractions/libvirt-qemu.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: libvirt_pool_net_apparmor_abstraction.stat.exists
+
+# AppArmor has no MCS: on this host any domain's QEMU may write any matching pcap. Domains read the
+# rule when libvirt generates their profile, so it applies to domains started after this task.
+- name: Allow the confined QEMU to write capture pcaps
+  ansible.builtin.copy:
+    dest: /etc/apparmor.d/abstractions/libvirt-qemu.d/kdive-pcap
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by kdive libvirt_pool_net (#3316): remote traffic-capture pcaps.
+      {{ libvirt_pool_net_pcap_pool_target }}/kdive-pcap-*.pcap rw,
+  when: libvirt_pool_net_apparmor_abstraction.stat.exists
+
+- name: Verify the pcap pool directory ownership and mode
+  ansible.builtin.stat:
+    path: "{{ libvirt_pool_net_pcap_pool_target }}"
+  register: libvirt_pool_net_pcap_pool_stat
+
+- name: Assert the pcap pool directory is writable by QEMU only
+  ansible.builtin.assert:
+    that:
+      - libvirt_pool_net_pcap_pool_stat.stat.isdir
+      - libvirt_pool_net_pcap_pool_stat.stat.mode == libvirt_pool_net_pcap_pool_mode
+      - libvirt_pool_net_pcap_pool_stat.stat.pw_name == libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family]
+    fail_msg: >-
+      pcap pool {{ libvirt_pool_net_pcap_pool_target }} is not a {{ libvirt_pool_net_pcap_pool_mode }}
+      directory owned by {{ libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family] }}:
+      {{ libvirt_pool_net_pcap_pool_stat.stat | default({}) }}

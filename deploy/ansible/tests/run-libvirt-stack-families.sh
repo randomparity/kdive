@@ -70,7 +70,7 @@ expected = {
     "RedHat": [
         "libvirt", "libvirt-client", "qemu-img", "libguestfs-tools-c", "e2fsprogs",
         "virt-install", "gnutls-utils", "libseccomp", "python3-libvirt", "python3-lxml",
-        "make", "tar",
+        "policycoreutils-python-utils", "make", "tar",
         "gcc", "binutils", "bison", "flex", "bc", "perl",
         "elfutils-libelf-devel", "openssl-devel", "dwarves",
     ],

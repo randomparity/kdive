@@ -33,9 +33,20 @@ require(
 # community.libvirt virt_pool/virt_net ignore `autostart` in a task that also sets `state`
 # (#3203), so each object libvirt_pool_net activates needs its own autostart-only task.
 pool_net_tasks = yaml.safe_load((ANSIBLE / "roles/libvirt_pool_net/tasks/main.yml").read_text())
+pcap_pool_tasks = yaml.safe_load(
+    (ANSIBLE / "roles/libvirt_pool_net/tasks/pcap_pool.yml").read_text()
+)
+require(
+    {
+        "name": "Provision the traffic-capture pcap pool",
+        "ansible.builtin.import_tasks": "pcap_pool.yml",
+    }
+    in pool_net_tasks,
+    "libvirt_pool_net must import the pcap pool tasks (#3316)",
+)
 libvirt_args = [
     (module, task[module])
-    for task in pool_net_tasks
+    for task in pool_net_tasks + pcap_pool_tasks
     for module in ("community.libvirt.virt_pool", "community.libvirt.virt_net")
     if module in task
 ]
@@ -46,6 +57,7 @@ require(
 for module, name in (
     ("community.libvirt.virt_pool", "default"),
     ("community.libvirt.virt_pool", "{{ libvirt_pool_net_boot_artifact_pool_name }}"),
+    ("community.libvirt.virt_pool", "{{ libvirt_pool_net_pcap_pool_name }}"),
     ("community.libvirt.virt_net", "{{ libvirt_network }}"),
 ):
     require(
@@ -53,6 +65,46 @@ for module, name in (
         and (module, {"name": name, "autostart": True}) in libvirt_args,
         f"{module} {name} must be activated and autostarted by separate tasks",
     )
+
+# The confined QEMU creates each capture pcap in this pool (#3316, ADR-0432). A pool build resets a
+# directory to libvirt's 0711 default unless the pool XML carries the permissions, and only an
+# svirt_image_t label (SELinux) or the libvirt-qemu.d drop-in (AppArmor) lets the domain create it.
+pcap_by_module: dict[str, list[dict]] = {}
+for task in pcap_pool_tasks:
+    for module in task:
+        pcap_by_module.setdefault(module, []).append(task)
+pcap_define = next(
+    t["community.libvirt.virt_pool"]
+    for t in pcap_by_module["community.libvirt.virt_pool"]
+    if t["community.libvirt.virt_pool"].get("command") == "define"
+)
+for element in ("<mode>", "<owner>", "<group>"):
+    require(element in pcap_define["xml"], f"pcap pool XML must carry {element} permissions")
+pcap_fcontext = pcap_by_module["community.general.sefcontext"]
+require(
+    len(pcap_fcontext) == 1
+    and pcap_fcontext[0]["community.general.sefcontext"]["setype"] == "svirt_image_t"
+    and "== 'Enforcing'" in pcap_fcontext[0]["when"],
+    "pcap pool fcontext must be svirt_image_t and gated on Enforcing",
+)
+pcap_relabel = [
+    t
+    for t in pcap_by_module["ansible.builtin.command"]
+    if "restorecon" in t["ansible.builtin.command"]["argv"]
+]
+require(
+    len(pcap_relabel) == 1 and "-F" not in pcap_relabel[0]["ansible.builtin.command"]["argv"],
+    "pcap pool relabel must be one plain restorecon, never -F (ADR-0640)",
+)
+pcap_dropin = [
+    t["ansible.builtin.copy"]
+    for t in pcap_by_module["ansible.builtin.copy"]
+    if "libvirt-qemu.d" in t["ansible.builtin.copy"]["dest"]
+]
+require(
+    len(pcap_dropin) == 1 and "kdive-pcap-*.pcap rw," in pcap_dropin[0]["content"],
+    "pcap pool must install the libvirt-qemu.d AppArmor drop-in for kdive-pcap-*.pcap",
+)
 
 # The lifecycle installer below (deploy/systemd/install-live-worker-lifecycle.sh) runs as root
 # through this play's `become: true` and resolves `uv` with a bare `command -v uv`; a host
