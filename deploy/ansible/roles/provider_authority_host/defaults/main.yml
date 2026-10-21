@@ -50,7 +50,8 @@ provider_authority_host_packages:
   # libssl-dev/zlib1g-dev and openssl-devel/zlib-devel: grpcio (core dependency via
   # opentelemetry-exporter-otlp-proto-grpc) has no ppc64le wheel and its vendored BoringSSL has
   # no ppc64le target, so the root `uv sync` below (tasks/install.yml) source-builds it against
-  # the system OpenSSL/zlib (#2666).
+  # the system OpenSSL/zlib (#2666). policycoreutils-python-utils supplies the semanage bindings
+  # the staged-base fcontext rules need (tasks/install.yml, ADR-0623 amendment).
   Debian: [
     acl, git, build-essential, pkg-config, python3-dev, libvirt-dev, libelf-dev, libdw-dev,
     libkdumpfile-dev, e2fsprogs, libssl-dev, zlib1g-dev,
@@ -58,7 +59,7 @@ provider_authority_host_packages:
   RedHat: [
     acl, git, gcc, make, pkgconf-pkg-config, python3-devel, libvirt-devel,
     elfutils-libelf-devel, elfutils-devel, libkdumpfile-devel, e2fsprogs, openssl-devel,
-    zlib-devel,
+    zlib-devel, policycoreutils-python-utils,
   ]
 provider_authority_host_local_packages:
   Debian: [libguestfs-tools, python3-guestfs]

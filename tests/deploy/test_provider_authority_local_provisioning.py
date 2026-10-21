@@ -644,6 +644,49 @@ def test_authority_system_installation_is_opt_in_and_keeps_bases_read_only() -> 
     assert "system-provisioning/local/rootfs" not in remote
 
 
+def test_authority_system_bases_carry_a_static_virt_content_label() -> None:
+    defaults = _yaml(ROLE / "defaults" / "main.yml")
+    packages = cast(dict[str, list[str]], defaults["provider_authority_host_packages"])
+    assert "policycoreutils-python-utils" in packages["RedHat"]
+    tasks = yaml.safe_load((ROLE / "tasks" / "install.yml").read_text(encoding="utf-8"))
+    names = [task["name"] for task in tasks]
+    by_name = {task["name"]: task for task in tasks}
+    probe = by_name["Read the SELinux mode for the authority System bases"]
+    rules = by_name["Install the authority System base virt_content_t fcontext rules"]
+    relabel = by_name["Relabel the authority System bases"]
+    destinations = (
+        "{{ provider_authority_host_system_base_destinations.results | default([])\n"
+        "   | map(attribute='item') | list }}"
+    )
+    selinux_enabled = (
+        "provider_authority_host_selinux_mode.stdout | default('') in ['Enforcing', 'Permissive']"
+    )
+
+    assert probe["ansible.builtin.command"]["argv"] == ["getenforce"]
+    assert probe["changed_when"] is False
+    assert probe["failed_when"] is False
+    assert rules["community.general.sefcontext"] == {
+        "target": "{{ item | regex_escape }}",
+        "setype": "virt_content_t",
+        "state": "present",
+    }
+    assert relabel["ansible.builtin.command"]["argv"] == ["restorecon", "-v", "{{ item }}"]
+    assert "Relabeled" in relabel["changed_when"]
+    assert relabel["notify"] == "Restart provider authority after deployed changes"
+    for task in (rules, relabel):
+        assert task["loop"] == destinations
+        assert selinux_enabled in task["when"]
+    assert (
+        names.index("Inspect authority System base destinations without following links")
+        < names.index(probe["name"])
+        < names.index(rules["name"])
+        < names.index("Install owner-only local authority System bases")
+        < names.index("Install owner-only remote authority System bases")
+        < names.index(relabel["name"])
+        < names.index("Start the configured authority after firewall and protected inputs converge")
+    )
+
+
 def test_remote_module_private_pool_uses_the_authority_session_daemon() -> None:
     tasks = (ROLE / "tasks" / "libvirt.yml").read_text(encoding="utf-8")
     assert "/var/lib/kdive/provider-authority/remote-libvirt-pool" in tasks
