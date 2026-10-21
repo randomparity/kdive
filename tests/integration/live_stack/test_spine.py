@@ -277,7 +277,7 @@ def _kernel_tree(tmp_path: Path, config: bytes = _BOOT_CONFIG) -> Path:
     return tree
 
 
-def test_spine_initrd_runs_dracut_isolated_from_the_host(
+def test_spine_initrd_runs_dracut_without_host_etc_config_or_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     tree = _kernel_tree(tmp_path)

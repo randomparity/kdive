@@ -2123,14 +2123,16 @@ A remote arm also uploads an initrd, because remote external boot refuses a buil
 (`remote_external_boot_initrd_required`). The arm builds it on the test client with `dracut`,
 which Ubuntu 26.04, Fedora and Rocky install by default. It runs unprivileged and skips
 `/etc/dracut.conf` and `/etc/dracut.conf.d`. The distro's `/usr/lib/dracut/dracut.conf.d` drop-ins
-still apply and can add dracut modules or files; no dracut option turns them off. The tree's `.config` must also set `CONFIG_BLK_DEV_INITRD=y` and
-`CONFIG_RD_GZIP=y`. The initrd holds userspace only (it resolves `root=UUID=`), so the tree's
-virtio and root-filesystem drivers must be built in, as every spine already requires. To build the
-same initrd by hand, with `<scratch>` a new directory and `<scratch>/dracut.conf.d` an empty one:
+still apply and can add dracut modules or files; no dracut option turns them off.
+The tree's `.config` must also set `CONFIG_BLK_DEV_INITRD=y` and `CONFIG_RD_GZIP=y`. The initrd
+holds userspace only (it resolves `root=UUID=`), so the tree's virtio and root-filesystem drivers
+must be built in, as every spine already requires. To build the same initrd by hand, with
+`<scratch>` a new directory and `<scratch>/dracut.conf.d` an empty one:
 
 ```bash
 dracut --conf /dev/null --confdir <scratch>/dracut.conf.d --no-kernel --no-hostonly \
-  --no-hostonly-cmdline --no-early-microcode --kver "$(cat "$KDIVE_KERNEL_SRC/include/config/kernel.release")" \
+  --no-hostonly-cmdline --no-early-microcode \
+  --kver "$(cat "$KDIVE_KERNEL_SRC/include/config/kernel.release")" \
   --modules "base rootfs-block udev-rules systemd systemd-initrd dracut-systemd fs-lib" \
   --gzip --force --tmpdir <scratch> <scratch>/initrd
 ```
