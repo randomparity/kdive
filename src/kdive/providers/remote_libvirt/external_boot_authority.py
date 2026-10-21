@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import stat
 import time
@@ -28,6 +29,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityTeardownMutationRequestV1,
+    ObservationCategory,
+    operation_is_permitted,
 )
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
@@ -64,6 +67,8 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     render_module_volume_name,
 )
 
+logger = logging.getLogger(__name__)
+
 _MAX_RECORD_BYTES = 1_048_576
 _MAX_PREPARATION_BYTES = 1_048_576
 _OBSERVATION_NAMESPACE = UUID("9cf0fa94-f250-4e5f-a950-155e7860b692")
@@ -85,6 +90,28 @@ def _canonical_model_bytes(value: BaseModel) -> bytes:
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode()
+
+
+type _AuthorityRequest = (
+    AuthorityMutationRequestV1
+    | AuthorityPreparationMutationRequestV1
+    | AuthorityTeardownMutationRequestV1
+)
+
+
+def authority_reference(request: _AuthorityRequest) -> OpaqueProviderRef:
+    """The opaque provider reference minted for one exact authority attempt."""
+    return OpaqueProviderRef(
+        ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+    )
+
+
+def _activation_binding(request: _AuthorityRequest) -> ExternalBootActivationBinding:
+    return ExternalBootActivationBinding(
+        system_id=str(request.system_id),
+        run_id=str(request.run_id),
+        activation_id=str(request.activation_id),
+    )
 
 
 class RemoteSystemTeardownAnchorV1(BaseModel):
@@ -196,6 +223,22 @@ class RemoteSystemTeardownState:
     terminal: RemoteModuleTerminalRecord | None
     materialization: RemoteExternalBootMaterializationRecord | None
     recovery: RemoteExternalBootRecoveryRecord | None
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteExternalBootObservedState:
+    """One live read of a remote activation's definition, power, and owned volumes.
+
+    ``definition`` names which recorded side the inactive definition is: ``source``,
+    ``target`` or ``other``. ``recovery_objects_absent`` is true only when every boot
+    artifact and module volume the recovery record owns reads absent.
+    """
+
+    definition: str
+    preserved: str
+    boot: str
+    active: bool
+    recovery_objects_absent: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,9 +445,7 @@ class RemoteModuleTerminalPreparationResponseV1(RemoteModuleVolumePreparationRes
     ) -> None:
         super().validate_for(operation)
         self.result.validate_for(operation)
-        exact_authority = OpaqueProviderRef(
-            ref=f"authority/{authority.authority_id}/{authority.generation}/{authority.attempt_id}"
-        )
+        exact_authority = authority_reference(authority)
         recovery = self.recovery
         if (
             recovery.system_id != operation.system_id
@@ -1092,6 +1133,19 @@ class RemoteModuleVolumePreparationStore:
             raise ValueError("remote module terminal preparation binding differs")
         return record
 
+    def preparation_authority(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> OpaqueProviderRef:
+        """The exact PREPARE authority a module recovery reference was minted under.
+
+        ``RemoteModuleRecoveryRefV2.validate_authority`` binds the reference to that one
+        attempt. A later release or teardown attempt carries its own authority, which the
+        service journal and cleanup-evidence gate fence; checking the reference against this
+        value instead proves the durable record was not re-presented under another
+        preparation.
+        """
+        return authority_reference(self.reopen_terminal(binding, plan_identity).request.authority)
+
     def teardown_preparation(
         self, binding: ExternalBootActivationBinding, plan_identity: str
     ) -> RemoteModuleVolumePreparationRequestV1 | None:
@@ -1395,16 +1449,6 @@ class RemoteModulePreparationOperation(Protocol):
         terminal: RemoteModuleTerminalRecord,
         deadline: float,
     ) -> RemoteModuleLifecycleResponseV1: ...
-
-
-class RemoteAuthorityMutationDelegate(Protocol):
-    """Remote mutation implementation decorated with durable running reads."""
-
-    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1: ...
-
-    async def commit(
-        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
-    ) -> AuthorityObservationV1: ...
 
 
 async def _wait_for_owned_child(
@@ -1788,6 +1832,14 @@ class RemoteSystemTeardownOperations(Protocol):
     def unfinished_preparation_absent(self, state: RemoteSystemTeardownState) -> bool: ...
 
 
+class RemoteExternalBootObservationOperations(Protocol):
+    """Read-only categorized observation outside the six external-boot operations."""
+
+    def observe_state(
+        self, recovery: RemoteExternalBootRecoveryRecord, deadline: float
+    ) -> RemoteExternalBootObservedState: ...
+
+
 class RemoteExternalBootCoordinator:
     """Six-operation public adapter over exact durable provider-host recovery."""
 
@@ -1921,8 +1973,19 @@ class RemoteExternalBootCoordinator:
     def recover(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
         self._operations.recover(self._store.reopen_recovery(recovery), authority, self._deadline())
 
-    def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        self._operations.cleanup(self._store.reopen_recovery(recovery), authority, self._deadline())
+    def cleanup(self, recovery: RecoveryPoint) -> None:
+        """Delete owned boot artifacts, fencing the record by its own PREPARE authority."""
+        record = self._store.reopen_recovery(recovery)
+        authority = self._store.preparation_authority(recovery.binding, recovery.plan_identity)
+        self._operations.cleanup(record, authority, self._deadline())
+
+    def observe_state(self, recovery: RecoveryPoint) -> RemoteExternalBootObservedState:
+        operations = cast(RemoteExternalBootObservationOperations, self._operations)
+        return operations.observe_state(self._store.reopen_recovery(recovery), self._deadline())
+
+    def modules_restored(self, binding: ExternalBootActivationBinding, plan_identity: str) -> bool:
+        """Whether durable restore evidence exists for this activation's module tree."""
+        return self._store.reopen_restored(binding, plan_identity) is not None
 
     def system_teardown_state(
         self, binding: ExternalBootActivationBinding, plan_identity: str
@@ -1985,18 +2048,35 @@ class RemoteExternalBootCoordinator:
 
 
 class RemoteExternalBootAuthorityAdapter:
-    """Decorate remote mutations with completion-owned durable kernel observation."""
+    """``AuthorityMutationAdapter`` over the remote coordinator and provider-private store.
+
+    Every commit and observation reaches provider state only through the remote coordinator,
+    which reopens the exact durable recovery record for the request's activation binding and
+    plan. Release cleanup reaches deletion only through ``commit_cleanup``, behind the
+    service's cleanup-evidence gate.
+
+    Categorized observation reads the definition half live: which recorded side the inactive
+    definition is, power, and whether every owned boot artifact and module volume is absent.
+    The module half is durable evidence, never a live appliance read: the remote module tree
+    is installed into the shared System overlay at PREPARE (ADR-0585), so the installed tree
+    is present under both recorded definitions until restore evidence exists. Hence:
+
+    - every owned object absent on the source definition is ``absent``;
+    - the source definition is ``source``, with or without restore evidence, which makes the
+      prepared, not-yet-activated state ``source`` rather than ``mixed``;
+    - the target definition is ``target`` before restore evidence and ``mixed`` after it;
+    - any other definition is ``conflict``, and an unreadable record or read is
+      ``unreadable``.
+    """
 
     def __init__(
         self,
-        delegate: RemoteAuthorityMutationDelegate,
         coordinator: RemoteExternalBootCoordinator,
         executor: RemoteModulePreparationExecutor,
         remote_module_host: DurableRemoteModuleVolumePreparationHost | None = None,
         close: Callable[[], None] | None = None,
         teardown_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        self._delegate = delegate
         self._coordinator = coordinator
         self._executor = executor
         self._remote_module_host = remote_module_host
@@ -2020,14 +2100,8 @@ class RemoteExternalBootAuthorityAdapter:
         return ExternalBootPreparationRequest(
             phase=phase,
             plan=request.plan,
-            binding=ExternalBootActivationBinding(
-                system_id=str(request.system_id),
-                run_id=str(request.run_id),
-                activation_id=str(request.activation_id),
-            ),
-            authority=OpaqueProviderRef(
-                ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
-            ),
+            binding=_activation_binding(request),
+            authority=authority_reference(request),
             operation_identity=request.operation_identity,
         )
 
@@ -2049,7 +2123,7 @@ class RemoteExternalBootAuthorityAdapter:
                 lambda: self._coordinator.observe_preparation(self._preparation_request(request))
             )
             return self._preparation_observation(receipt)
-        return await self._delegate.observe(request)
+        return await self._executor.run(lambda: self._observe(request))
 
     async def commit(
         self,
@@ -2066,7 +2140,100 @@ class RemoteExternalBootAuthorityAdapter:
                 lambda: self._coordinator.execute_preparation(self._preparation_request(request))
             )
             return self._preparation_observation(receipt)
-        return await self._delegate.commit(request, context)
+        operation = self._require_commit_point(request, context)
+        mutation: Callable[[RecoveryPoint, OpaqueProviderRef], None] | None
+        if operation is AuthorityOperation.ACTIVATE:
+            mutation = self._coordinator.activate
+        elif operation is AuthorityOperation.RECOVER and request.purpose == "release":
+            mutation = self._coordinator.recover
+        elif operation in _BOOKKEEPING_COMMITS:
+            mutation = None
+        else:
+            # Deleting and recovery commit points reach the provider only through
+            # commit_cleanup, behind the service's cleanup-evidence gate.
+            raise ValueError(f"remote external-boot commit point {operation.value} is not admitted")
+        authority = authority_reference(request)
+
+        def apply() -> None:
+            point = self._matched_point(request)
+            if mutation is not None:
+                mutation(point, authority)
+
+        await self._executor.run(apply)
+        return await self.observe(request)
+
+    @staticmethod
+    def _require_commit_point(
+        request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> AuthorityOperation:
+        operation = context.commit_point
+        if (
+            not operation_is_permitted(request.purpose, operation)
+            or operation is not request.operation
+            or context.operation_identity != request.operation_identity
+            or context.attempt_id != request.attempt_id
+        ):
+            raise ValueError("remote external-boot commit context differs from request")
+        return operation
+
+    def _matched_point(self, request: AuthorityMutationRequestV1) -> RecoveryPoint:
+        """Reopen this activation's exact recovery point and prove the request names it.
+
+        Deletion must name the recovery object it destroys; no commit may name another.
+        """
+        point = self._coordinator.recovery_point(
+            _activation_binding(request), request.plan_identity
+        )
+        if (
+            point.source_state.definition != request.expected_source_identity
+            or point.target_state.definition != request.intended_target_identity
+        ):
+            raise ValueError("remote external-boot identities differ from request")
+        named = request.recovery_objects
+        if any(
+            item.reference != point.recovery_ref.ref
+            or str(item.system_id) != point.binding.system_id
+            or str(item.activation_id) != point.binding.activation_id
+            for item in named
+        ) or (request.operation is AuthorityOperation.CLEANUP and not named):
+            raise ValueError("remote external-boot recovery objects are not this activation's")
+        return point
+
+    def _observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        binding = _activation_binding(request)
+        state: RemoteExternalBootObservedState | None = None
+        restored: bool | None = None
+        category: ObservationCategory = "unreadable"
+        try:
+            point = self._coordinator.recovery_point(binding, request.plan_identity)
+            restored = self._coordinator.modules_restored(binding, request.plan_identity)
+            state = self._coordinator.observe_state(point)
+        except Exception:  # noqa: BLE001 - a failed read is the unreadable classification
+            logger.exception("remote external-boot provider state is unreadable")
+        else:
+            category = (
+                "conflict"
+                if point.source_state.definition != request.expected_source_identity
+                or point.target_state.definition != request.intended_target_identity
+                else _categorize(state, restored=restored)
+            )
+        composite = _composite_state(request, state, restored)
+        return AuthorityObservationV1(
+            observation_id=uuid5(
+                _OBSERVATION_NAMESPACE,
+                "\0".join(
+                    (
+                        str(request.attempt_id),
+                        str(request.generation),
+                        request.operation.value,
+                        category,
+                        composite,
+                    )
+                ),
+            ),
+            category=category,
+            composite_state=composite,
+        )
 
     @staticmethod
     def _teardown_anchor(
@@ -2249,11 +2416,7 @@ class RemoteExternalBootAuthorityAdapter:
         )
 
     async def cleanup_subject(self, request: AuthorityMutationRequestV1) -> str:
-        binding = ExternalBootActivationBinding(
-            system_id=str(request.system_id),
-            run_id=str(request.run_id),
-            activation_id=str(request.activation_id),
-        )
+        binding = _activation_binding(request)
 
         def reopen() -> RemoteExternalBootRecoveryRecord:
             point = self._coordinator.recovery_point(binding, request.plan_identity)
@@ -2275,14 +2438,9 @@ class RemoteExternalBootAuthorityAdapter:
             or context.attempt_id != request.attempt_id
         ):
             raise ValueError("remote cleanup evidence differs from exact request")
-        binding = ExternalBootActivationBinding(
-            system_id=str(request.system_id),
-            run_id=str(request.run_id),
-            activation_id=str(request.activation_id),
-        )
 
         def reopen() -> tuple[RecoveryPoint, RemoteExternalBootRecoveryRecord]:
-            point = self._coordinator.recovery_point(binding, request.plan_identity)
+            point = self._matched_point(request)
             return point, self._coordinator.recovery_record(point)
 
         point, record = await self._executor.run(reopen)
@@ -2292,24 +2450,16 @@ class RemoteExternalBootAuthorityAdapter:
             or evidence.operation_nonce != reference.operation_nonce
         ):
             raise ValueError("remote cleanup evidence changed before provider deletion")
-        authority = OpaqueProviderRef(
-            ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
-        )
+        authority = authority_reference(request)
         await self._executor.run(lambda: self._coordinator.recover(point, authority))
-        await self._executor.run(lambda: self._coordinator.cleanup(point, authority))
+        await self._executor.run(lambda: self._coordinator.cleanup(point))
         return await self.observe(request)
 
     async def observe_running(
         self, request: AuthorityMutationRequestV1
     ) -> RunningKernelObservation:
-        binding = ExternalBootActivationBinding(
-            system_id=str(request.system_id),
-            run_id=str(request.run_id),
-            activation_id=str(request.activation_id),
-        )
-        authority = OpaqueProviderRef(
-            ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
-        )
+        binding = _activation_binding(request)
+        authority = authority_reference(request)
 
         def read() -> RunningKernelObservation:
             point = self._coordinator.recovery_point(binding, request.plan_identity)
@@ -2321,3 +2471,49 @@ class RemoteExternalBootAuthorityAdapter:
             return self._coordinator.observe(point, authority)
 
         return await self._executor.run(read)
+
+
+# Commit points whose provider effect is exactly one observation (ADR-0584).
+_BOOKKEEPING_COMMITS = frozenset(
+    {AuthorityOperation.DEADLINE, AuthorityOperation.FAIL, AuthorityOperation.RELEASE}
+)
+
+
+def _categorize(state: RemoteExternalBootObservedState, *, restored: bool) -> ObservationCategory:
+    """Apply the adapter's documented module-half rule to one live read."""
+    if state.definition == "source":
+        return "absent" if state.recovery_objects_absent else "source"
+    if state.definition == "target" and not state.recovery_objects_absent:
+        return "mixed" if restored else "target"
+    return "conflict"
+
+
+def _composite_state(
+    request: AuthorityMutationRequestV1,
+    state: RemoteExternalBootObservedState | None,
+    restored: bool | None,
+) -> str:
+    """Digest the observed state together with the activation it was observed on.
+
+    A proof-of-observation token, as for local: it names the System, activation, Run and plan
+    so two identically provisioned Systems never mint interchangeable tokens, and it carries
+    only closed identifiers and digests, never provider output.
+    """
+    payload = json.dumps(
+        {
+            "system_id": str(request.system_id),
+            "activation_id": str(request.activation_id),
+            "run_id": str(request.run_id),
+            "plan_identity": request.plan_identity,
+            "observed": None if state is None else asdict(state),
+            "modules_restored": restored,
+            "expected_source_identity": request.expected_source_identity,
+            "intended_target_identity": request.intended_target_identity,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return (
+        "sha256:"
+        + hashlib.sha256(b"kdive-remote-external-boot-composite-v1\0" + payload).hexdigest()
+    )

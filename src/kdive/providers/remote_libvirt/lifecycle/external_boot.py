@@ -440,7 +440,7 @@ class ExternalBootConn(Protocol):
     def defineXML(self, xml: str) -> ExternalBootDomain: ...  # noqa: N802 - binding name
 
 
-type _Subject = Literal["activation", "recovery"]
+type _Subject = Literal["activation", "recovery", "observation"]
 
 
 def _refused(
@@ -531,6 +531,18 @@ def _observed_state(
     if preserved == definition.target_definition and boot == definition.target_boot:
         return "target", preserved, boot
     return "other", preserved, boot
+
+
+def observe_definition(
+    conn: ExternalBootConn, definition: RemoteExternalBootDefinition
+) -> tuple[str, str, str, bool]:
+    """Read which recorded side the inactive definition is, its digest pair, and power.
+
+    Read-only: the same classification ``activate_definition`` and recovery gate their writes on.
+    """
+    domain = _lookup(conn, definition, subject="observation")
+    which, preserved, boot = _observed_state(domain, definition, subject="observation")
+    return which, preserved, boot, _is_active(domain, definition, subject="observation")
 
 
 def activate_definition(
