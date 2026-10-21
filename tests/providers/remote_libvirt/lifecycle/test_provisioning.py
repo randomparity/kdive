@@ -119,6 +119,8 @@ def test_render_domain_xml_carries_agent_channel_gdb_and_metadata() -> None:
     assert backing.find("./format").get("type") == "qcow2"  # type: ignore[union-attr]
     assert backing.find("./source").get("file") == "/srv/libvirt/images/catalog.qcow2"  # type: ignore[union-attr]
     assert backing.find("./backingStore") is not None
+    # Only an authority-owned System pins its base's label (ADR-0623 amendment).
+    assert backing.find("./source/seclabel") is None
     driver = root.find("./devices/disk/driver")
     assert driver is not None
     assert driver.get("type") == "qcow2"

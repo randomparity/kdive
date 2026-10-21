@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 
 from kdive.domain.errors import ErrorCategory
+from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug.operations.runtime import _op_failure
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
@@ -21,23 +22,30 @@ from tests.integration.live_stack import debug_cells
 from tests.integration.live_stack.debug_cells import (
     BODIES,
     BREAK_AT,
+    REMOTE,
     TOOLS,
     DebugTarget,
     Instruction,
     Session,
+    Transport,
     Truth,
     checked,
+    debug_target,
+    gdbstub_endpoint,
     gdbstub_profile,
     hex_value,
     next_pcs,
     parse_kallsyms,
     parse_objdump,
     rejection,
+    released,
+    snapshot_of,
     system_map_address,
+    variant_of,
 )
 from tests.integration.live_stack.image_smoke import Endpoint
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
-from tests.integration.live_stack.tool_cells import Grants, Guest, HttpCaller, boundary_of
+from tests.integration.live_stack.tool_cells import Connect, Grants, Guest, HttpCaller, boundary_of
 
 _TARGET = DebugTarget("cov-t", "sys-1", "run-1", "ses-1", {}, ())
 _KALLSYMS = """\
@@ -111,18 +119,20 @@ def test_a_missing_debugger_or_dependency_blocks(cross: bool) -> None:
         checked(ToolResponse.failure("s", ErrorCategory.DEBUG_ATTACH_FAILURE, detail="x"), "a")
 
 
-def _cells() -> list[Cell]:
+def _cells(provider: str = "local-libvirt") -> list[Cell]:
     return [
         c
         for c in build_contract().cells
-        if c.operation in TOOLS and c.provider == "local-libvirt" and c.guest_arch == "x86_64"
+        if c.operation in TOOLS and c.provider == provider and c.guest_arch == "x86_64"
     ]
 
 
-def test_rejection_covers_every_boundary_of_every_tool() -> None:
-    cells = [c for c in _cells() if c.kind == "rejection"]
+@pytest.mark.parametrize("provider", ["local-libvirt", REMOTE])
+def test_rejection_covers_every_boundary_of_every_tool(provider: str) -> None:
+    cells = [c for c in _cells(provider) if c.kind == "rejection"]
+    assert len(cells) == 352
     assert not [c for c in cells if c.id.endswith("/capability")]
-    pairs = {(c.operation, boundary_of(c), c.scenario_id.split("/")[2]) for c in cells}
+    pairs = {(c.operation, boundary_of(c), variant_of(c)) for c in cells}
     assert {tool for tool, _, _ in pairs} == set(TOOLS)
     for tool, boundary, variant in pairs:
         call = rejection(tool, boundary, _TARGET, variant)
@@ -134,6 +144,7 @@ def test_rejection_covers_every_boundary_of_every_tool() -> None:
         assert ident == (7 if boundary == "validation" else own)
         if tool == "debug.start_session":
             assert call.args["transport"] == variant
+            assert variant in {"gdbstub", "drgn-live"}
         role = call.grants.roles.get("cov-t")
         filtered = (tool, boundary) in FILTERED_LIST_BOUNDARIES
         assert (call.filtered is not None) == filtered
@@ -178,12 +189,18 @@ class _Debugger:
     answers: dict[str, _Answer]
     calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
     started: int = 0
+    start_data: dict[str, object] = field(default_factory=dict)
+    second_start: ToolResponse | None = None
 
     def answer(self, tool: str, args: Mapping[str, object]) -> ToolResponse:
         self.calls.append((tool, dict(args)))
+        if tool == "debug.start_session" and self.started and self.second_start:
+            return self.second_start
         if tool == "debug.start_session":
             self.started += 1
-            return ToolResponse.success(f"ses-{self.started}", "live")
+            return ToolResponse.success(
+                f"ses-{self.started}", "live", data=cast(Any, self.start_data)
+            )
         if tool == "debug.end_session":
             return ToolResponse.success(str(args["session_id"]), "detached")
         return self.answers[tool](args)
@@ -200,10 +217,21 @@ class _Debugger:
         return self.answer(tool, args)
 
 
-def _session(tool: str, debugger: _Debugger) -> Session:
-    cell = SimpleNamespace(operation=tool, scenario_id=f"tool/{tool}/gdbstub/functional")
+def _session(
+    tool: str,
+    debugger: _Debugger,
+    *,
+    scenario_id: str | None = None,
+    provider: str = "local-libvirt",
+    lane: object = None,
+) -> Session:
+    scenario_id = scenario_id or f"tool/{tool}/gdbstub/functional"
+    cell = SimpleNamespace(operation=tool, scenario_id=scenario_id, provider=provider)
     run = cast(CellRun, SimpleNamespace(cell=cell))
-    guest = cast(Guest, SimpleNamespace(op=debugger, project="p", system_id="sys-1"))
+    guest = cast(
+        Guest,
+        SimpleNamespace(op=debugger, project="p", system_id="sys-1", lane=lane, key=Path("/k")),
+    )
     return Session(
         run,
         guest,
@@ -714,3 +742,360 @@ def test_set_watchpoint_must_watch_the_kallsyms_address(monkeypatch: pytest.Monk
     ticks = iter((10, 11))
     with pytest.raises(AssertionError, match="not on jiffies_64"):
         _run("debug.set_watchpoint", _Debugger(answers("*(char(*)[8])0x1000")), monkeypatch)
+
+
+# --- the remote lane (#3113) ----------------------------------------------------------------
+
+_REMOTE_START = "tool/remote-libvirt/debug.start_session/drgn-live/functional"
+
+
+def test_gdbstub_profile_leaves_a_remote_profile_alone() -> None:
+    profile = {"arch": "x86_64", "provider": {REMOTE: {"base_image_volume": "v"}}}
+    edited = gdbstub_profile(profile)
+    assert edited == profile and edited is not profile
+    assert edited["provider"] is not profile["provider"]
+
+
+def test_variant_reads_local_and_remote_ids() -> None:
+    starts = [
+        c
+        for c in build_contract().cells
+        if c.operation == "debug.start_session" and c.guest_arch == "x86_64"
+    ]
+    assert {c.provider for c in starts} == {"local-libvirt", REMOTE}
+    assert {variant_of(c) for c in starts} == {"gdbstub", "drgn-live"}
+    session = _session(
+        "debug.start_session", _Debugger({}), scenario_id=_REMOTE_START, provider=REMOTE
+    )
+    assert session.variant == "drgn-live"
+
+
+def _drgn_session(debugger: _Debugger, provider: str) -> Session:
+    scenario = _REMOTE_START if provider == REMOTE else None
+    scenario = scenario or "tool/debug.start_session/drgn-live/functional"
+    return _session("debug.start_session", debugger, scenario_id=scenario, provider=provider)
+
+
+def _run_session(session: Session) -> dict[str, object]:
+    async def body() -> dict[str, object]:
+        try:
+            return await BODIES["debug.start_session"](session)
+        finally:
+            await session.end_all()
+
+    return asyncio.run(body())
+
+
+_UNLOADABLE = {"missing_debuginfo": {"reason": "debuginfo_unloadable", "missing": ["vmlinux"]}}
+
+
+def _drgn_record(_args: Mapping[str, object]) -> ToolResponse:
+    data = {"transport": "drgn-live", "run_id": "run-1", "system_id": "sys-1"}
+    return ToolResponse.success("ses-1", "live", data=cast(Any, data))
+
+
+def test_remote_drgn_live_stops_blocked_on_its_symptom() -> None:
+    debugger = _Debugger({"debug.get_session": _drgn_record}, start_data=dict(_UNLOADABLE))
+    with pytest.raises(ScenarioStop, match=r"#3124.*debuginfo_unloadable") as stop:
+        _run_session(_drgn_session(debugger, REMOTE))
+    assert stop.value.outcome is Outcome.BLOCKED
+    ended = [args["session_id"] for tool, args in debugger.calls if tool == "debug.end_session"]
+    assert ended == ["ses-1"]
+
+
+def test_remote_drgn_live_without_an_upload_still_fails() -> None:
+    warning = {"reason": "missing_debuginfo", "missing": ["vmlinux"]}
+    debugger = _Debugger(
+        {"debug.get_session": _drgn_record}, start_data={"missing_debuginfo": warning}
+    )
+    with pytest.raises(AssertionError, match="without debuginfo"):
+        _run_session(_drgn_session(debugger, REMOTE))
+
+
+def test_local_drgn_live_warning_still_fails() -> None:
+    debugger = _Debugger({"debug.get_session": _drgn_record}, start_data=dict(_UNLOADABLE))
+    with pytest.raises(AssertionError, match="without debuginfo"):
+        _run_session(_drgn_session(debugger, "local-libvirt"))
+
+
+def test_remote_drgn_live_without_warning_runs_the_assertions() -> None:
+    report = {"report": {"sysinfo": {"release": "6.18.54-kdive"}}}
+    second = ToolResponse.failure("x", ErrorCategory.TRANSPORT_CONFLICT, detail="busy")
+    debugger = _Debugger(
+        {"debug.get_session": _drgn_record, "introspect.run": _ok("ran", **report)},
+        second_start=second,
+    )
+    observed = _run_session(_drgn_session(debugger, REMOTE))
+    assert observed["release_matches"] is True
+    assert ("introspect.run", {"session_id": "ses-1", "helper": "sysinfo"}) in debugger.calls
+
+
+_DOMAIN = (
+    '<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0"><qemu:commandline>'
+    '<qemu:arg value="-S"/><qemu:arg value="-gdb"/><qemu:arg value="tcp:192.0.2.10:5901"/>'
+    "</qemu:commandline></domain>"
+)
+
+
+def test_gdbstub_endpoint_reads_the_qemu_argument() -> None:
+    assert gdbstub_endpoint(_DOMAIN) == ("192.0.2.10", 5901)
+    for xml in (
+        "<domain/>",
+        _DOMAIN.replace("tcp:192.0.2.10:5901", "unix:/run/gdb.sock"),
+        _DOMAIN.replace('value="-gdb"', 'value="-s"'),
+    ):
+        with pytest.raises(AssertionError, match="no -gdb tcp"):
+            gdbstub_endpoint(xml)
+
+
+_TRANSPORT = Transport("op@provider", "192.0.2.10", 5901)
+
+
+def _scripted_sockets(
+    monkeypatch: pytest.MonkeyPatch, *reads: dict[str, int]
+) -> list[dict[str, int]]:
+    """``sockets`` answering ``reads`` in order (the last one repeats); returns the reads seen."""
+    seen: list[dict[str, int]] = []
+    queue = list(reads)
+
+    def sockets(t: Transport) -> dict[str, int]:
+        assert t is _TRANSPORT
+        read = queue.pop(0) if len(queue) > 1 else queue[0]
+        seen.append(read)
+        return read
+
+    monkeypatch.setattr(debug_cells, "sockets", sockets)
+    monkeypatch.setattr(debug_cells, "_SETTLE_DELAY_S", 0.0)
+    return seen
+
+
+def _scripted_rows(monkeypatch: pytest.MonkeyPatch, *rows: list[tuple[str, str]]) -> None:
+    queue = list(rows)
+
+    async def records(_db_url: str, run_id: str) -> list[tuple[str, str]]:
+        assert run_id == "run-1"
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    monkeypatch.setattr(debug_cells, "_records", records)
+
+
+_NONE = {"provider": 0, "server": 0}
+_ONE = {"provider": 1, "server": 1}
+_DETACHED = [("ses-1", "detached")]
+
+
+def _released(debugger: _Debugger) -> dict[str, object]:
+    session = _session("debug.get_session", debugger, provider=REMOTE)
+    return asyncio.run(released(session, _TRANSPORT))
+
+
+def test_released_sees_the_calibration_attach_and_its_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _scripted_sockets(monkeypatch, _NONE, _ONE, _NONE)
+    _scripted_rows(monkeypatch, _DETACHED)
+    debugger = _Debugger({"debug.read_registers": _ok("read", rip=_RIP)})
+    assert _released(debugger) == {"after": _NONE, "attached": _ONE, "sessions_open": 0}
+    assert seen == [_NONE, _ONE, _NONE]
+    assert [tool for tool, _ in debugger.calls if tool.endswith("_session")] == [
+        "debug.start_session",
+        "debug.end_session",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("reads", "rows", "message"),
+    [
+        ((_ONE,), [_DETACHED], "expected 0"),
+        (({"provider": 0, "server": 1},), [_DETACHED], "expected 0"),
+        ((_NONE, {"provider": 1, "server": 0}), [_DETACHED], "expected 1"),
+        ((_NONE,), [[("ses-1", "live")]], "still open"),
+        ((_NONE,), [[]], "still open"),
+    ],
+    ids=["leftover", "leftover-server", "server-elsewhere", "open-row", "no-rows"],
+)
+def test_released_fails_on_a_live_or_unseen_transport(
+    reads: tuple[dict[str, int], ...],
+    rows: list[list[tuple[str, str]]],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _scripted_sockets(monkeypatch, *reads)
+    _scripted_rows(monkeypatch, *rows)
+    debugger = _Debugger({"debug.read_registers": _ok("read", rip=_RIP)})
+    with pytest.raises(AssertionError, match=message):
+        _released(debugger)
+
+
+def test_functional_ends_the_calibration_session_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _scripted_sockets(monkeypatch, _NONE, {"provider": 1, "server": 0})
+    _scripted_rows(monkeypatch, _DETACHED)
+    debugger = _Debugger({"debug.read_registers": _ok("read", rip=_RIP)})
+    lane = SimpleNamespace(provider=REMOTE, xml=lambda _system: _DOMAIN)
+    session = _session("debug.get_session", debugger, provider=REMOTE, lane=lane)
+
+    async def body(s: Session) -> dict[str, object]:
+        return {"body": True}
+
+    async def boot(*_args: object) -> tuple[str, Endpoint]:
+        return "run-1", Endpoint("127.0.0.1", 1)
+
+    async def truth(*_args: object) -> Truth:
+        return _truth()
+
+    monkeypatch.setitem(BODIES, "debug.get_session", body)
+    monkeypatch.setattr(debug_cells, "boot", boot)
+    monkeypatch.setattr(debug_cells, "read_truth", truth)
+    monkeypatch.setattr(debug_cells, "transport_of", lambda _guest: _TRANSPORT)
+    with pytest.raises(AssertionError, match="expected 1"):
+        asyncio.run(
+            debug_cells.functional(
+                session.run,
+                cast(HttpCaller, debugger),
+                Path("/fixture"),
+                {"release": "6.18.54-kdive"},
+                "postgresql://unused",
+                session.guest,
+            )
+        )
+    started = [tool for tool, _ in debugger.calls if tool == "debug.start_session"]
+    ended = [args["session_id"] for tool, args in debugger.calls if tool == "debug.end_session"]
+    assert started and ended == ["ses-1"]
+
+
+def test_snapshot_reads_the_lane_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[object] = []
+
+    def defined(system_id: str, connect: object) -> bool:
+        seen.append((system_id, connect))
+        return False
+
+    async def project(_db_url: str, project: str) -> dict[str, list[object]]:
+        return {"p": [project]}
+
+    async def jobs(_db_url: str, *ids: str) -> list[object]:
+        return list(ids)
+
+    monkeypatch.setattr(debug_cells, "domain_defined", defined)
+    monkeypatch.setattr(debug_cells, "project_state", project)
+    monkeypatch.setattr(debug_cells, "named_jobs", jobs)
+    connect = object()
+    state = asyncio.run(snapshot_of("db", _TARGET, cast(Connect, connect))())
+    expected = {"project": {"p": ["cov-t"]}, "jobs": ["sys-1", "run-1"], "domain_defined": False}
+    assert state == expected
+    assert seen == [("sys-1", connect)]
+
+
+def test_debug_target_is_cached_per_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    prepared: list[str] = []
+
+    async def prepare(run: CellRun, *_args: object) -> DebugTarget:
+        prepared.append(run.cell.provider)
+        return DebugTarget("cov-t", f"sys-{run.cell.provider}", "run-1", "ses-1", {}, ())
+
+    monkeypatch.setattr(debug_cells, "_prepare_target", prepare)
+    monkeypatch.setattr(debug_cells, "_TARGETS", {})
+
+    def target(provider: str) -> DebugTarget:
+        cell = SimpleNamespace(provider=provider)
+        run = cast(CellRun, SimpleNamespace(cell=cell, writer=None, observed={}, artifacts=[]))
+        issuer = cast(OidcIssuer, None)
+        return asyncio.run(debug_target(run, "http://stack", issuer, "db", lambda: (Path(), {})))
+
+    local, remote, again = target("local-libvirt"), target(REMOTE), target(REMOTE)
+    assert (local.system_id, remote.system_id) == ("sys-local-libvirt", f"sys-{REMOTE}")
+    assert again is remote and prepared == ["local-libvirt", REMOTE]
+
+
+@dataclass
+class _Writer:
+    """An evidence writer that keeps each artifact payload in memory."""
+
+    written: list[dict[str, object]] = field(default_factory=list)
+
+    def artifact(self, payload: dict[str, object]) -> str:
+        self.written.append(payload)
+        return f"artifact-{len(self.written)}"
+
+
+def test_remote_target_records_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected: list[int] = []
+
+    async def settle(t: Transport, count: int) -> dict[str, int]:
+        assert t is _TRANSPORT
+        expected.append(count)
+        return {"provider": count, "server": count}
+
+    async def boot(*_args: object) -> tuple[str, Endpoint]:
+        return "run-1", Endpoint("127.0.0.1", 1)
+
+    debugger = _Debugger({"debug.read_registers": _ok("read", rip=_RIP)})
+    lane = SimpleNamespace(provider=REMOTE, xml=lambda _system: _DOMAIN)
+    guest = SimpleNamespace(op=debugger, project="p", system_id="sys-1", lane=lane)
+    host = {"host_os": "rocky:10.2", "host_arch": "x86_64"}
+
+    async def frame(scratch: CellRun, *_args: object, body: Any, **_kw: object) -> None:
+        scratch.observed |= {**host, "guest_os": "fedora:43", "kernel_build_id": "k"}
+        scratch.assertions["cleanup"] = "cleanup-artifact"
+        await body(guest)
+
+    async def settled(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(debug_cells, "settle", settle)
+    monkeypatch.setattr(debug_cells, "boot", boot)
+    monkeypatch.setattr(debug_cells, "transport_of", lambda _guest: _TRANSPORT)
+    monkeypatch.setattr(debug_cells, "on_lane_system", frame)
+    monkeypatch.setattr(debug_cells, "settled", settled)
+    writer = _Writer()
+    cell = SimpleNamespace(provider=REMOTE, id="c")
+    run = cast(CellRun, SimpleNamespace(cell=cell, writer=writer))
+    scratch = CellRun(cast(Cell, cell), cast(Any, writer))
+    issuer = cast(OidcIssuer, None)
+    target = asyncio.run(
+        debug_cells._prepare_target(
+            run, "http://stack", issuer, "db", lambda: (Path(), {}), scratch
+        )
+    )
+    assert expected == [1, 0]
+    transport = cast(dict[str, Any], writer.written[-1]["debug_target"])["transport"]
+    assert transport == {"attached": {"provider": 1, "server": 1}, "after": _NONE}
+    assert target.observed == {"accelerator": "none", "guest_os": "fedora:43", **host}
+
+
+def test_functional_keeps_the_body_record_beside_the_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _scripted_sockets(monkeypatch, _NONE, _ONE, _NONE)
+    _scripted_rows(monkeypatch, _DETACHED)
+    debugger = _Debugger({"debug.read_registers": _ok("read", rip=_RIP)})
+    lane = SimpleNamespace(provider=REMOTE, xml=lambda _system: _DOMAIN)
+    session = _session("debug.get_session", debugger, provider=REMOTE, lane=lane)
+
+    async def body(s: Session) -> dict[str, object]:
+        return {"transport": "gdbstub"}
+
+    async def boot(*_args: object) -> tuple[str, Endpoint]:
+        return "run-1", Endpoint("127.0.0.1", 1)
+
+    async def truth(*_args: object) -> Truth:
+        return _truth()
+
+    monkeypatch.setitem(BODIES, "debug.get_session", body)
+    monkeypatch.setattr(debug_cells, "boot", boot)
+    monkeypatch.setattr(debug_cells, "read_truth", truth)
+    monkeypatch.setattr(debug_cells, "transport_of", lambda _guest: _TRANSPORT)
+    observed = asyncio.run(
+        debug_cells.functional(
+            session.run,
+            cast(HttpCaller, debugger),
+            Path("/fixture"),
+            {"release": "6.18.54-kdive"},
+            "postgresql://unused",
+            session.guest,
+        )
+    )
+    assert observed["transport"] == "gdbstub"
+    assert observed["transport_release"] == {"after": _NONE, "attached": _ONE, "sessions_open": 0}

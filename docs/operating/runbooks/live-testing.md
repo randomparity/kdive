@@ -491,8 +491,25 @@ Set `provider_authority_host_source_root` to that checkout, enable the authority
 mode, and provide its existing seven protected credential-source inputs, S3 credential source,
 canonical `provider_authority_host_system_manifest_source` and
 `provider_authority_host_system_remote_bases`. The manifest binds the selected resource,
-instance, immutable base, machine/network and fixed port ranges; validate it with the existing
+instance, immutable base, machine and fixed port ranges; validate it with the existing
 `validate_authority_system_provisioning.py` through role preflight, not an ad hoc format.
+An entry has no `network` field: an authority System's only NIC is its user-mode SSH forward
+([ADR-0804](../../adr/0804-remote-authority-systems-have-only-the-forward-nic.md)), and the
+preflight rejects a manifest that still names one. The entry's optional `guest_egress` (default
+`false`) opts the guest into outbound NAT through that NIC. Before deploying this manifest shape
+over an earlier one, confirm that `system-provisioning/remote/` under the authority's state
+directory holds no `*.provision.json` intent; the authority refuses an intent of the old shape.
+
+On a host where SELinux is enabled, the role labels each staged authority base `virt_content_t`
+through an exact-path fcontext rule and `restorecon -F`. It restarts the authority when that
+changes a label. The authority domain tells libvirt not to relabel the base, so the label must
+stay in place: on an enforcing host a base relabelled out of band fails its next domain start
+with a qemu permission error. Any relabel also changes the base's ctime, so the authority exits
+and must be restarted ([ADR-0623 amendment](../../adr/0623-authority-owned-system-provisioning.md)).
+Deploying this contract over an authority that already holds Systems strands them: a local
+System's recorded domain identity no longer matches, and a stored remote provision intent no
+longer loads. Deploy it only to an authority host with no live authority Systems and no stored
+provision intents.
 
 Remote System bases also require `provider_authority_host_remote_module_enabled: true` and
 `provider_authority_host_remote_module_architectures` containing the selected supported
@@ -1137,8 +1154,10 @@ in the [remote runbook](remote-live-stack.md#11-remote-orchestration-fault-cells
 
 `tests/integration/test_core_tool_cells_live.py::test_core_tool_cell` has one parameter for each
 contract cell of `session.whoami`, `projects.list`, `tools.search`, `tools.invoke`,
-`fixtures.validate` and `systems.profile_examples`: 56 cells, each a configuration (`default` or
-`recovery`), an exposure (`direct` or `gateway`) and a kind (`functional`, `authentication` or
+`fixtures.validate` and `systems.profile_examples`: 84 cells, each a configuration (`default` or
+`recovery`), an exposure (`direct` or `gateway`, or `cli` for the core service tools, which drives
+the tool's generated `kdivectl` verb per
+[ADR-0795](../../adr/0795-cli-translation-exposure.md)) and a kind (`functional`, `authentication` or
 `validation`). [ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md)
 defines what each of those means. The harness in `tests/integration/live_stack/tool_cells.py` is
 shared by the later tool-cell carriers.
@@ -1167,7 +1186,7 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Each pytest run reports 28 cells skipped for the other configuration: the second run must skip the
+Each pytest run reports 42 cells skipped for the other configuration: the second run must skip the
 `…/default/default/…` cells, not the `…/default/recovery/…` ones. Run the pytest commands with
 `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, the least-privilege harness login: the
 protected-state snapshot reads every table with a `project` column, some of which the server DSN
@@ -1178,9 +1197,10 @@ next role-bootstrap run.
 A functional cell compares the tool's answer with the token's own claims, the fixture catalog and `systems.toml`
 read by the test process, or, for `tools.search`, the operator-direct catalog. A rejection cell
 proves its boundary (HTTP 401 for a token signed by a foreign key, where the issued token is not
-refused; a schema-validation failure for invalid arguments) and that the cell's project rows did not change. The tools create nothing, so
+refused; a schema-validation failure for invalid arguments; on `cli`, the readings of
+[ADR-0795](../../adr/0795-cli-translation-exposure.md) decision 3) and that the cell's project rows did not change. The tools create nothing, so
 there is nothing to tear down beyond the stack itself. `qualify` exits 1 because other owners'
-cells have no result; read the 56 `tool/…` rows of these six tools.
+cells have no result; read the 84 `tool/…` rows of these six tools.
 
 Last run: candidate `e3354a190` (server, worker and reconciler at that SHA in both lanes), a
 disposable Fedora 44 x86_64 lab guest with SELinux enforcing; the same result held at `09a80767c`
@@ -1193,7 +1213,7 @@ recovery lane started with `local` proved `default` again, which is why the lane
 
 #### Catalog and configuration tool cells (#3095)
 
-`tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell` carries the 152 cells
+`tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell` carries the 228 cells
 of `images.{delete,describe,kernel_config,list,upload}`, `shapes.{delete,list,set}` and
 `resources.{availability,describe,list}` on the same harness, lanes, bindings and assembly as the
 core cells above; run both files in each lane's pytest command. The
@@ -1236,7 +1256,7 @@ A cell killed mid-run can leave any of these behind; `demo-down.sh --wipe --yes`
 #### Investigation and artifact tool cells (#3096)
 
 `tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell` carries the
-260 cells of `investigations.{open,get,list,set,link,unlink,close,complete_rootfs_upload}` and
+390 cells of `investigations.{open,get,list,set,link,unlink,close,complete_rootfs_upload}` and
 `artifacts.{create_investigation_upload,create_run_upload,fetch_raw,get,list}` on the same harness,
 lanes, bindings and assembly; run all three carriers in each lane's pytest command. The
 [design](../../workflow/specs/2026-10-02-investigation-tool-cells-design.md) lists what each

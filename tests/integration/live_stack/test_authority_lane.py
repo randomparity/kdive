@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import subprocess
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -991,11 +992,14 @@ def test_observer_failure_prevents_allocation(monkeypatch, tmp_path):
     assert "allocations.request" not in calls
 
 
-def test_fixture_names_match_the_fixture_script() -> None:
+def test_fixture_names_match_the_fixture_script(monkeypatch: pytest.MonkeyPatch) -> None:
     path = Path(__file__).resolve().parents[3] / "scripts/live-vm/provision-authority-fixture.py"
     spec = importlib.util.spec_from_file_location("provision_authority_fixture", path)
     assert spec is not None and spec.loader is not None
     script = importlib.util.module_from_spec(spec)
+    # The script points the libvirt roots at the authority daemon at import; keep that out of
+    # every later test on this worker.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     spec.loader.exec_module(script)
     # The script's private roots come from the authority's environment, so compare the entry
     # names and their order: the frame must expect every artifact the script reports.

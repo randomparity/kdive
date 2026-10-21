@@ -250,7 +250,7 @@ class _Domain:
         self.members = members
         self.commands: list[dict[str, object]] = []
 
-    def qemuMonitorCommand(self, raw: str, flags: int) -> str:  # noqa: N802
+    def monitor(self, raw: str, flags: int) -> str:
         del flags
         command = json.loads(raw)
         self.commands.append(command)
@@ -277,7 +277,7 @@ class _Domain:
 
 def _monitor(domain: object, raw: str, flags: int) -> str:
     assert isinstance(domain, _Domain)
-    return domain.qemuMonitorCommand(raw, flags)
+    return domain.monitor(raw, flags)
 
 
 class _Connection:
@@ -366,7 +366,7 @@ def test_remote_fresh_probe_waits_for_prior_accepted_monitor_mutation() -> None:
     probe_finished = threading.Event()
 
     class OrderedDomain(_Domain):
-        def qemuMonitorCommand(self, raw: str, flags: int) -> str:  # noqa: N802
+        def monitor(self, raw: str, flags: int) -> str:
             command = json.loads(raw)
             if command["execute"] == "object-del":
                 return json.dumps(

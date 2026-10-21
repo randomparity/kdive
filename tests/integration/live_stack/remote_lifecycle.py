@@ -123,7 +123,7 @@ def destination() -> str | None:
     return value
 
 
-def _host_ssh(dest: str, command: str, timeout: float) -> subprocess.CompletedProcess[str]:
+def host_ssh(dest: str, command: str, timeout: float) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603,S607 - fixed argv, validated destination  # nosec B603 B607
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", dest, command],
         capture_output=True,
@@ -135,7 +135,7 @@ def _host_ssh(dest: str, command: str, timeout: float) -> subprocess.CompletedPr
 
 def host_probe(dest: str) -> dict[str, str]:
     """The provider host's ``ID:VERSION_ID``, ``uname -m`` and ``systemd-detect-virt``."""
-    result = _host_ssh(dest, HOST_PROBE, 60.0)
+    result = host_ssh(dest, HOST_PROBE, 60.0)
     assert result.returncode == 0, f"provider-host probe exited {result.returncode}"
     fields = key_values(result.stdout)
     return {
@@ -187,7 +187,7 @@ def volume_sha256(dest: str, pool: str, volume: str) -> str:
         "set -o pipefail; virsh -q -c qemu:///system vol-download "
         f"--pool {shlex.quote(pool)} {shlex.quote(volume)} /dev/stdout | sha256sum"
     )
-    result = _host_ssh(dest, command, 1800.0)
+    result = host_ssh(dest, command, 1800.0)
     assert result.returncode == 0, f"volume digest exited {result.returncode}"
     digest = result.stdout.split()[0]
     assert re.fullmatch(r"[0-9a-f]{64}", digest), "volume digest is not a SHA-256"

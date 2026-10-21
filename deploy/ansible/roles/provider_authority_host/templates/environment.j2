@@ -1,3 +1,7 @@
+{# libguestfs's libvirt backend, the Fedora/EL default, cannot create its cache under this
+   sandboxed account and would relabel the staged base, changing the ctime the authority pins
+   (ADR-0623 amendment). The direct backend changes no file metadata. #}
+LIBGUESTFS_BACKEND=direct
 KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE={{ provider_authority_host_instance }}
 KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES={{ provider_authority_host_denied_identities | join(',') }}
 KDIVE_EXTERNAL_BOOT_AUTHORITY_UID={{ provider_authority_host_uid }}

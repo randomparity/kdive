@@ -162,7 +162,6 @@ def _manifest_identities(document: dict[str, Any], provider_kind: str) -> set[st
                     "root_identity",
                     "architecture",
                     "base_volume",
-                    "network",
                     "machine",
                     "gdb_addr",
                     "gdb_port_min",
@@ -171,10 +170,13 @@ def _manifest_identities(document: dict[str, Any], provider_kind: str) -> set[st
                     "ssh_port_min",
                     "ssh_port_max",
                 },
+                {"guest_egress"},
             )
             if entry["architecture"] not in {"x86_64", "ppc64le"}:
                 _fail()
-            for field in ("base_volume", "network", "machine"):
+            if "guest_egress" in entry and type(entry["guest_egress"]) is not bool:
+                _fail()
+            for field in ("base_volume", "machine"):
                 _name(entry[field])
             for field in ("gdb_addr", "ssh_addr"):
                 _address(entry[field])
