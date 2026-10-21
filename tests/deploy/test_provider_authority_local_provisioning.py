@@ -392,9 +392,7 @@ def test_system_provisioning_validator_accepts_supported_accelerators(
     assert (_run_system_provisioning_validator(value).returncode == 0) is accepted
 
 
-def test_system_provisioning_validator_rejects_wrong_kind_and_accepts_remote_mapping(
-    tmp_path: Path,
-) -> None:
+def _remote_validator_input(tmp_path: Path, **entry_fields: object) -> dict[str, object]:
     base = tmp_path / "remote-base.qcow2"
     base.write_bytes(b"remote-base")
     base.chmod(0o600)
@@ -412,7 +410,6 @@ def test_system_provisioning_validator_rejects_wrong_kind_and_accepts_remote_map
                         "root_identity": f"sha256:{digest}",
                         "architecture": "x86_64",
                         "base_volume": "remote-base.qcow2",
-                        "network": "provider-net",
                         "machine": "pc-q35-9.2",
                         "gdb_addr": "127.0.0.1",
                         "gdb_port_min": 31000,
@@ -420,24 +417,50 @@ def test_system_provisioning_validator_rejects_wrong_kind_and_accepts_remote_map
                         "ssh_addr": "127.0.0.1",
                         "ssh_port_min": 32000,
                         "ssh_port_max": 32002,
+                        **entry_fields,
                     }
                 ],
             }
         )
     )
     manifest.chmod(0o600)
-    value: dict[str, object] = {
+    return {
         "manifest": str(manifest),
         "authority_instance": "authority-test",
-        "expected_provider_kind": "local-libvirt",
+        "expected_provider_kind": "remote-libvirt",
         "local_bases": [],
         "remote_bases": [{"source": str(base), "name": "remote-base.qcow2"}],
     }
+
+
+def test_system_provisioning_validator_rejects_wrong_kind_and_accepts_remote_mapping(
+    tmp_path: Path,
+) -> None:
+    value = _remote_validator_input(tmp_path)
+    value["expected_provider_kind"] = "local-libvirt"
 
     assert _run_system_provisioning_validator(value).returncode != 0
 
     value["expected_provider_kind"] = "remote-libvirt"
     assert _run_system_provisioning_validator(value).returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("entry_fields", "accepted"),
+    (
+        ({"guest_egress": True}, True),
+        ({"guest_egress": False}, True),
+        ({"guest_egress": "true"}, False),
+        ({"network": "default"}, False),
+    ),
+    ids=("egress-on", "egress-off", "egress-not-bool", "network"),
+)
+def test_system_provisioning_validator_gates_remote_entry_egress_and_network(
+    tmp_path: Path, entry_fields: dict[str, object], accepted: bool
+) -> None:
+    value = _remote_validator_input(tmp_path, **entry_fields)
+
+    assert (_run_system_provisioning_validator(value).returncode == 0) is accepted
 
 
 def test_local_mutation_installs_owner_only_root_tools_and_s3_credentials() -> None:

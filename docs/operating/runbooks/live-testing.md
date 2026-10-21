@@ -487,8 +487,14 @@ Set `provider_authority_host_source_root` to that checkout, enable the authority
 mode, and provide its existing seven protected credential-source inputs, S3 credential source,
 canonical `provider_authority_host_system_manifest_source` and
 `provider_authority_host_system_remote_bases`. The manifest binds the selected resource,
-instance, immutable base, machine/network and fixed port ranges; validate it with the existing
+instance, immutable base, machine and fixed port ranges; validate it with the existing
 `validate_authority_system_provisioning.py` through role preflight, not an ad hoc format.
+An entry has no `network` field: an authority System's only NIC is its user-mode SSH forward
+([ADR-0804](../../adr/0804-remote-authority-systems-have-only-the-forward-nic.md)), and the
+preflight rejects a manifest that still names one. The entry's optional `guest_egress` (default
+`false`) opts the guest into outbound NAT through that NIC. Before deploying this manifest shape
+over an earlier one, confirm that `system-provisioning/remote/` under the authority's state
+directory holds no `*.provision.json` intent; the authority refuses an intent of the old shape.
 
 Remote System bases also require `provider_authority_host_remote_module_enabled: true` and
 `provider_authority_host_remote_module_architectures` containing the selected supported

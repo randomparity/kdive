@@ -134,7 +134,6 @@ class RemoteAuthoritySystemManifestEntry:
     root_identity: str
     architecture: Literal["x86_64", "ppc64le"]
     base_volume: str
-    network: str
     machine: str
     gdb_addr: str
     gdb_port_min: int
@@ -142,12 +141,15 @@ class RemoteAuthoritySystemManifestEntry:
     ssh_addr: str
     ssh_port_min: int
     ssh_port_max: int
+    guest_egress: bool
 
     def __post_init__(self) -> None:
         for value in (self.resource_name, self.authority_instance):
             _bounded_binding(value)
-        for value in (self.base_volume, self.network, self.machine):
+        for value in (self.base_volume, self.machine):
             _bounded_name(value)
+        if type(self.guest_egress) is not bool:
+            raise ValueError("authority guest egress must be a boolean")
         _concrete_machine(self.architecture, self.machine)
         if _DIGEST.fullmatch(self.root_identity) is None:
             raise ValueError("authority base volume identity must be a lowercase SHA-256 digest")
@@ -202,7 +204,7 @@ class _ProvisionIntentV1(_ClosedValue):
     base_path: str
     overlay_volume: str
     overlay_path: str
-    network: str
+    guest_egress: bool
     machine: str
     gdb_addr: str
     gdb_port: Annotated[int, Field(ge=1, le=65535)]
@@ -228,7 +230,7 @@ class _ProvisionIntentV1(_ClosedValue):
     def _bindings_are_bounded(cls, value: str) -> str:
         return _bounded_binding(value)
 
-    @field_validator("pool", "base_volume", "network", "machine")
+    @field_validator("pool", "base_volume", "machine")
     @classmethod
     def _topology_names_are_safe(cls, value: str) -> str:
         return _bounded_name(value)
@@ -368,7 +370,7 @@ def _intent_identity(intent: _ProvisionIntentV1) -> str:
             "base_path": intent.base_path,
             "overlay_volume": intent.overlay_volume,
             "overlay_path": intent.overlay_path,
-            "network": intent.network,
+            "guest_egress": intent.guest_egress,
             "machine": intent.machine,
             "gdb_addr": intent.gdb_addr,
             "gdb_port": intent.gdb_port,
@@ -465,10 +467,10 @@ def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, obje
     libvirt stores the architecture's default serial target type the intent omits, so that
     default projects as omitted. A ``live`` document also reports runtime state in place of
     configuration: a started ``host-model`` CPU reads back expanded to ``custom`` with
-    ``match='exact' check='full'``, and a ``network`` interface reads back its network's bridge.
-    The inactive document is always compared without those two allowances. The live CPU model
-    is not compared: a running CPU defined as ``custom`` with those attributes and then redefined
-    back to ``host-model`` is not detected until the next start applies the inactive definition.
+    ``match='exact' check='full'``. The inactive document is always compared without that
+    allowance. The live CPU model is not compared: a running CPU defined as ``custom`` with those
+    attributes and then redefined back to ``host-model`` is not detected until the next start
+    applies the inactive definition.
     """
     root = parse_domain_xml(domain_xml)
     os_element = _one(root, "./os", "operating system")
@@ -496,9 +498,7 @@ def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, obje
             (
                 interface.get("type"),
                 network_source.get("network") if network_source is not None else None,
-                network_source.get("bridge")
-                if network_source is not None and not (live and interface.get("type") == "network")
-                else None,
+                network_source.get("bridge") if network_source is not None else None,
                 network_source.get("dev") if network_source is not None else None,
                 model.get("type") if model is not None else None,
             )
@@ -996,10 +996,11 @@ class RemoteAuthoritySystemProvider:
             backing_path=base_path,
             gdb_addr=entry.gdb_addr,
             gdb_port=gdb,
-            network=entry.network,
+            network=None,
             machine=entry.machine,
             ssh_addr=entry.ssh_addr,
             ssh_port=ssh,
+            guest_egress=entry.guest_egress,
         )
         values: dict[str, Any] = {
             "system_id": request.system_id,
@@ -1018,7 +1019,7 @@ class RemoteAuthoritySystemProvider:
             "base_path": base_path,
             "overlay_volume": overlay,
             "overlay_path": overlay_path,
-            "network": entry.network,
+            "guest_egress": entry.guest_egress,
             "machine": entry.machine,
             "gdb_addr": entry.gdb_addr,
             "gdb_port": gdb,
@@ -1053,7 +1054,7 @@ class RemoteAuthoritySystemProvider:
             and intent.architecture == entry.architecture
             and intent.pool == self._pool_name
             and intent.base_volume == entry.base_volume
-            and intent.network == entry.network
+            and intent.guest_egress == entry.guest_egress
             and intent.machine == entry.machine
             and intent.gdb_addr == entry.gdb_addr
             and entry.gdb_port_min < intent.gdb_port <= entry.gdb_port_max
