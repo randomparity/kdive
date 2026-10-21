@@ -755,12 +755,29 @@ def test_remote_pcap_spool_needs_a_pool_target(monkeypatch: pytest.MonkeyPatch) 
     assert conn.closed
 
 
+def test_pool_volume_path_joins_the_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _PoolConn("<pool><target><path>/srv/pool</path></target></pool>")
+    monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
+    path = tool_cells.pool_volume_path("op@provider.example", "kdive", "kdive-host-dump-x.kdump")
+    assert path == "/srv/pool/kdive-host-dump-x.kdump"
+    assert (conn.named, conn.closed) == ("kdive", True)
+
+
+def test_pool_volume_path_needs_a_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _PoolConn("<pool><target/></pool>")
+    monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
+    with pytest.raises(AssertionError, match="no target path"):
+        tool_cells.pool_volume_path("op@provider.example", "kdive", "v")
+    assert conn.closed
+
+
 def test_local_lane_observes_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
     lane = tool_cells.lane_for(_cell("control.power", "local-libvirt", "x86_64"))
     assert lane.connect is tool_cells.worker_connect
     assert lane.spool(_SYSTEM)(_JOB) == str(pcap_dir(UUID(_SYSTEM)))
     assert lane.installed_kernel is tool_cells.domain_kernel
+    assert lane.pool_volume is None
 
 
 def test_remote_lane_observes_the_provider_host(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -780,6 +797,9 @@ def test_remote_lane_observes_the_provider_host(monkeypatch: pytest.MonkeyPatch)
     kernel = lane.installed_kernel
     assert isinstance(kernel, partial) and kernel.func is guest_boot_kernel
     assert kernel.keywords == {"family": "fedora"}
+    volume = lane.pool_volume
+    assert isinstance(volume, partial) and volume.func is tool_cells.pool_volume_path
+    assert volume.args == ("op@provider.example", "kdive")
 
 
 def test_remote_cell_is_not_skipped_by_control_plane_arch(

@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
+from kdive.mcp.tools.lifecycle.vmcore.handlers import VMCORE_METHODS
 from kdive.providers.core.runtime import ProviderSupport
 from kdive.providers.local_libvirt.composition import build_runtime as build_local_runtime
 from kdive.providers.remote_libvirt.composition import build_runtime as build_remote_runtime
@@ -65,6 +66,10 @@ _ADMISSION_REFUSALS = {
         "ADR-0759: images.publish refuses remote-libvirt with not_implemented before enqueue"
     ),
 }
+# vmcore.fetch admits only core-producing methods; it refuses any other advertised method itself,
+# on every lane, with no capability_unsupported envelope (ADR-0722, 2026-10-20 amendment).
+_CORE_METHODS = frozenset(method.value for method in VMCORE_METHODS)
+HANDLER_REFUSAL = "vmcore.fetch handler: method does not produce a vmcore"
 # #3099 owns the kdivectl translation cells of the core service tools (ADR-0795).
 _CLI_OWNER = 3099
 
@@ -232,6 +237,9 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
             accelerator = "none" if arch is None else ("kvm" if arch == "x86_64" else "kvm-hv")
             if variant == "fadump" and arch is not None and not arch_traits(arch).fadump_capture:
                 supported, source = False, "ArchTraits.fadump_capture; native ppc64le/KVM-HV only"
+            refused = row.tool == "vmcore.fetch" and supported and variant not in _CORE_METHODS
+            if refused:
+                supported, source = False, HANDLER_REFUSAL
             for configuration in row.configurations:
                 for exposure in (
                     ("direct", "gateway", "cli") if group.cli else ("direct", "gateway")
@@ -300,7 +308,7 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         boundaries.append("validation")
                     # A supported capability's functional cell is its proof; only an
                     # unsupported verdict has a refusal to prove (ADR-0722, 2026-10-13).
-                    if group.capabilities.get(row.tool) and not supported:
+                    if group.capabilities.get(row.tool) and not supported and not refused:
                         boundaries.append("capability")
                     cells.extend(
                         replace(

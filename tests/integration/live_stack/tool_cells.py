@@ -1138,13 +1138,8 @@ def _local_spool(system_id: str) -> Callable[[str], str]:
     return lambda _job_id: path
 
 
-def remote_pcap_spool(dest: str, pool: str, system_id: str) -> Callable[[str], str]:
-    """Name the provider-host pcap volume a capture job of ``system_id`` writes into ``pool``.
-
-    The remote capturer writes a per-job volume into the configured pcap pool (ADR-0432), so
-    the System owns it until the job reclaims it. The pool's target is read here, before any job
-    exists; the returned namer does no I/O.
-    """
+def pool_target(dest: str, pool: str) -> PurePosixPath:
+    """The target directory of storage pool ``pool``, read through the operator's observer."""
     conn = observer(dest)
     try:
         xml = conn.storagePoolLookupByName(pool).XMLDesc(0)
@@ -1152,8 +1147,23 @@ def remote_pcap_spool(dest: str, pool: str, system_id: str) -> Callable[[str], s
         conn.close()
     target = ET.fromstring(xml).findtext("./target/path")  # noqa: S314  # nosec B314
     assert target, f"storage pool {pool} has no target path"
-    directory = PurePosixPath(target)
+    return PurePosixPath(target)
+
+
+def remote_pcap_spool(dest: str, pool: str, system_id: str) -> Callable[[str], str]:
+    """Name the provider-host pcap volume a capture job of ``system_id`` writes into ``pool``.
+
+    The remote capturer writes a per-job volume into the configured pcap pool (ADR-0432), so
+    the System owns it until the job reclaims it. The pool's target is read here, before any job
+    exists; the returned namer does no I/O.
+    """
+    directory = pool_target(dest, pool)
     return lambda job_id: str(directory / pcap_volume_name(UUID(system_id), UUID(job_id)))
+
+
+def pool_volume_path(dest: str, pool: str, name: str) -> str:
+    """The provider-host path of volume ``name`` in storage pool ``pool``."""
+    return str(pool_target(dest, pool) / name)
 
 
 class LaneFrame(Protocol):
@@ -1182,7 +1192,9 @@ class Lane:
     ``spool(system)`` names the provider-host path each capture job of the System writes (the
     System's directory locally, the job's pool volume remotely), reading any provider state
     before a job exists. ``installed_kernel`` observes the kernel an install put in place (the
-    domain's direct kernel locally, the guest's own ``/boot`` remotely).
+    domain's direct kernel locally, the guest's own ``/boot`` remotely). ``pool_volume(name)`` is
+    the provider-host path of a named pool volume, ``None`` where the provider has no storage
+    pool.
     """
 
     provider: str
@@ -1194,6 +1206,7 @@ class Lane:
     connect: Connect
     spool: Callable[[str], Callable[[str], str]]
     installed_kernel: InstalledKernel
+    pool_volume: Callable[[str], str] | None
 
 
 def _local_lane() -> Lane:
@@ -1208,6 +1221,7 @@ def _local_lane() -> Lane:
         worker_connect,
         _local_spool,
         domain_kernel,
+        None,
     )
 
 
@@ -1232,6 +1246,7 @@ def _remote_lane(arch: str) -> Lane:
         partial(observer, host.dest),
         partial(remote_pcap_spool, host.dest, host.pcap_pool),
         partial(guest_boot_kernel, family=family),
+        partial(pool_volume_path, host.dest, host.pool),
     )
 
 
