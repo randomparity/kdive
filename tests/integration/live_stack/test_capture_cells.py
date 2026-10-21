@@ -772,3 +772,37 @@ def test_target_session_tolerates_missing_debuginfo(monkeypatch: pytest.MonkeyPa
     with pytest.raises(AssertionError, match="without debuginfo"):
         asyncio.run(s.drgn_session())
     assert asyncio.run(s.drgn_session(require_debuginfo=False)) == "ses-1"
+
+
+def test_refused_method_records_the_handler_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def booted(*_a: object) -> tuple[str, Endpoint]:
+        return "run-1", Endpoint("h", 22)
+
+    async def nothing(*_a: object, **_k: object) -> None:
+        return None
+
+    async def jobs(*_a: object) -> list[object]:
+        return [1, "digest"]
+
+    monkeypatch.setattr(capture_cells, "boot", booted)
+    monkeypatch.setattr(Session, "crash", nothing)
+    monkeypatch.setattr(capture_cells, "named_jobs", jobs)
+    monkeypatch.setattr(capture_cells, "await_system_state", nothing)
+    refusal = ToolResponse.failure(
+        "run-1",
+        ErrorCategory.CONFIGURATION_ERROR,
+        data={"method": "console", "reason": REFUSED_REASON},
+    )
+    cell = next(
+        c
+        for c in _remote_cells()
+        if c.operation == "vmcore.fetch" and variant_of(c) == "console" and c.kind != "rejection"
+    )
+    run = cast(CellRun, SimpleNamespace(cell=cell))
+    guest = cast(Guest, SimpleNamespace(project="p", system_id=_SYS, op=None))
+    observed = asyncio.run(
+        capture_cells.refused_method(
+            run, cast(HttpCaller, _Caller(refusal)), Path(), _MANIFEST, "db", guest
+        )
+    )
+    assert observed["reason"] == REFUSED_REASON and observed["jobs_unchanged"] is True

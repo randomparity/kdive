@@ -767,7 +767,10 @@ async def refused_method(
     before = await jobs()
     args = {"run_id": run_id, "method": method}
     answer = await caller.call("vmcore.fetch", args, caller.token(role), discover=True)
-    refused = refusal_of(one(answer), method)
+    assert isinstance(answer, ToolResponse), (
+        f"vmcore.fetch({method}) answered {len(answer)} envelopes"
+    )
+    refused = refusal_of(answer, method)
     assert await jobs() == before, "the refused fetch changed the jobs of its System or Run"
     await await_system_state(guest.op, "refused", guest.system_id, "crashed")
     return {"tool": run.cell.operation, **refused, "jobs_unchanged": True, "system": "crashed"}
