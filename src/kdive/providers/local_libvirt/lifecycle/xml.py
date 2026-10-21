@@ -13,6 +13,7 @@ from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePoli
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     QEMU_NS,
+    append_qcow2_backing_store,
     register_kdive_namespace,
     register_qemu_namespace,
 )
@@ -60,6 +61,7 @@ def render_domain_xml(
     guest_egress: bool = False,
     accel: str = "kvm",
     emulator: str | None = None,
+    authority_base_path: str | None = None,
 ) -> str:
     """Render the tagged libvirt domain XML for a System (ADR-0025 §3, ADR-0272).
 
@@ -99,6 +101,11 @@ def render_domain_xml(
     an x86_64-under-KVM domain is byte-identical to the pre-ADR-0340 output. The defaults
     ``("kvm", None)`` are exactly that legacy path. A TCG domain requires an ``emulator``.
 
+    ``authority_base_path`` is set only by the authority-owned provisioner (ADR-0623). It renders
+    the overlay's staged base as an explicit ``<backingStore>`` that libvirt must not relabel, so
+    a domain start leaves the base's metadata unchanged. Every other caller leaves it ``None`` and
+    renders the bare overlay disk, whose backing chain libvirt probes and relabels itself.
+
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` for an invalid profile, a gdbstub-flagged
             profile rendered without ``gdb_port``, any domain rendered without ``ssh_port``, or a
@@ -123,6 +130,7 @@ def render_domain_xml(
         kernel_path=kernel_path,
         initrd_path=initrd_path,
         cpu_model=cpu_model,
+        authority_base_path=authority_base_path,
     )
 
     if section.debug.preserve_on_crash:
@@ -152,6 +160,7 @@ def _build_baseline_domain(
     kernel_path: Path | None,
     initrd_path: Path | None,
     cpu_model: str | None = None,
+    authority_base_path: str | None = None,
 ) -> tuple[ET.Element, ET.Element]:
     """Build the always-present local-libvirt domain skeleton (ADR-0340, ADR-0369).
 
@@ -182,7 +191,7 @@ def _build_baseline_domain(
     devices = ET.SubElement(domain, "devices")
     if not is_kvm:
         _append_emulator(devices, emulator)
-    _append_root_disk(devices, disk_path)
+    _append_root_disk(devices, disk_path, authority_base_path)
     _append_serial_console(devices, system_id)
     _append_guest_agent_channel(devices)
     _append_metadata(domain, system_id)
@@ -273,11 +282,15 @@ def _append_crash_capture_features(domain: ET.Element) -> None:
     ET.SubElement(features, "vmcoreinfo", state="on")
 
 
-def _append_root_disk(devices: ET.Element, disk_path: str) -> None:
-    """Append the rootfs disk as the lone virtio disk."""
+def _append_root_disk(
+    devices: ET.Element, disk_path: str, authority_base_path: str | None = None
+) -> None:
+    """Append the rootfs disk as the lone virtio disk, with an authority base when given."""
     disk = ET.SubElement(devices, "disk", type="file", device="disk")
     ET.SubElement(disk, "driver", name="qemu", type="qcow2")
     ET.SubElement(disk, "source", file=disk_path)
+    if authority_base_path is not None:
+        append_qcow2_backing_store(disk, authority_base_path, relabel=False)
     ET.SubElement(disk, "target", dev="vda", bus="virtio")
 
 

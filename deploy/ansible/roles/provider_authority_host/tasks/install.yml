@@ -259,6 +259,34 @@
   loop: "{{ provider_authority_host_system_base_destinations.results | default([]) }}"
   when: provider_authority_host_system_manifest_source | length > 0
 
+# ADR-0623 amendment: the authority domain renders its staged base with a relabel='no' seclabel,
+# because libvirt's sVirt relabel at every start changes the base's ctime and the authority's
+# staged-base check treats that as tampering. The base must therefore already carry
+# virt_content_t, which a confined svirt_t domain may read and map but not write. getenforce,
+# not the selinux fact, decides, as in local_worker_host (ADR-0640). Unlike that role, a
+# permissive host also gets the label, so a later switch to enforcing does not strand its bases.
+- name: Read the SELinux mode for the authority System bases
+  ansible.builtin.command:
+    argv: [getenforce]
+  register: provider_authority_host_selinux_mode
+  changed_when: false
+  failed_when: false
+  when: provider_authority_host_system_manifest_source | length > 0
+
+# Written before the copies, so a newly copied base already takes its default context from the
+# rule. A rule per exact base path leaves the overlays beside the remote bases to libvirt.
+- name: Install the authority System base virt_content_t fcontext rules
+  community.general.sefcontext:
+    target: "{{ item | regex_escape }}"
+    setype: virt_content_t
+    state: present
+  loop: >-
+    {{ provider_authority_host_system_base_destinations.results | default([])
+       | map(attribute='item') | list }}
+  when:
+    - provider_authority_host_system_manifest_source | length > 0
+    - provider_authority_host_selinux_mode.stdout | default('') in ['Enforcing', 'Permissive']
+
 - name: Install owner-only local authority System bases
   ansible.builtin.copy:
     src: "{{ item.source }}"
@@ -284,6 +312,23 @@
   loop: "{{ provider_authority_host_system_remote_bases }}"
   no_log: true
   when: provider_authority_host_system_manifest_source | length > 0
+  notify: Restart provider authority after deployed changes
+
+# -F, unlike local_worker_host: virt_content_t and other types a base might carry are
+# customizable, which a plain restorecon leaves alone, and a base wants its exact context, not a
+# running domain's MCS categories. A relabel changes the base's ctime, which the running authority
+# recorded at startup, so it restarts the authority like any other deployed base change.
+- name: Relabel the authority System bases
+  ansible.builtin.command:
+    argv: [restorecon, -F, -v, "{{ item }}"]
+  loop: >-
+    {{ provider_authority_host_system_base_destinations.results | default([])
+       | map(attribute='item') | list }}
+  register: provider_authority_host_system_base_relabel
+  changed_when: "'Relabeled' in provider_authority_host_system_base_relabel.stdout"
+  when:
+    - provider_authority_host_system_manifest_source | length > 0
+    - provider_authority_host_selinux_mode.stdout | default('') in ['Enforcing', 'Permissive']
   notify: Restart provider authority after deployed changes
 
 - name: Install the canonical authority System manifest
