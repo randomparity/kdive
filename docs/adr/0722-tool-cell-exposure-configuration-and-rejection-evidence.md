@@ -161,6 +161,15 @@ exposure must receive exactly that envelope. The System must stay `crashed`, and
 the System or Run must be unchanged. Cell identities, owners and the other boundaries are
 unchanged. A change to `VMCORE_METHODS` moves the cell set and the contract digest.
 
+### Amendment (2026-10-20): a `cli` exposure for the core service tools (#3099)
+
+This amends the two exposures of the Context and decision 1, by operator decision at the #3099
+design gate (2026-10-20). [ADR-0795](0795-cli-translation-exposure.md) adds a third exposure,
+`cli`, to the tools of the core service groups: every `direct` cell of them gains a `cli` twin on
+the same scenario and node, whose caller drives the tool's generated `kdivectl` verb. Decision 3
+holds for `cli` with the rejection readings ADR-0795 states. Every other tool keeps `direct` and
+`gateway` only.
+
 ## Consequences
 
 - Recovery-configuration evidence exists only from a run whose catalog proved it. A carrier of

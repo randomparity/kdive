@@ -1192,3 +1192,301 @@ def test_refusal_fails_when_state_changed(tmp_path: Path) -> None:
     with pytest.raises(AssertionError, match="changed protected state"):
         asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "t")))
     assert not run.assertions
+
+
+# --- the kdivectl caller of `cli` cells (ADR-0795) ---
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "argv"),
+    [
+        (
+            "investigations.list",
+            {"request": {"project": "p", "limit": 5}},
+            ["investigations", "list", "--project", "p", "--limit", "5"],
+        ),
+        ("jobs.wait", {"job_id": "j", "timeout_s": 0}, ["jobs", "wait", "j", "--timeout-s", "0"]),
+        (
+            "investigations.link",
+            {"investigation_id": "i", "ref": {"k": 1}},
+            ["investigations", "link", "--investigation-id", "i", "--ref-json", '{"k": 1}'],
+        ),
+        (
+            "tools.search",
+            {"names": ["a", "b"]},
+            ["tools", "search", "--names", "a", "--names", "b"],
+        ),
+        (
+            "tools.invoke",
+            {"name": "x", "arguments": {}},
+            ["tools", "invoke", "--name", "x", "--arguments-json", "{}", "--yes"],
+        ),
+        (
+            "accounting.usage",
+            {"target": {"kind": "project", "project": "p"}},
+            ["accounting", "usage", "--project", "p"],
+        ),
+        (
+            "accounting.report",
+            {"request": {"scope": "granted-set", "projects": ["a", "b"], "window": ["s", None]}},
+            ["accounting", "report", "--scope", "granted-set", "--projects", "a,b", "--since", "s"],
+        ),
+        (
+            "resources.availability",
+            {"request": {"include_devices": "maybe"}},
+            ["resources", "availability", "--include-devices", "maybe"],
+        ),
+        (
+            "investigations.close",
+            {"investigation_id": "i", "summary": "s", "force": False},
+            ["investigations", "close", "--investigation-id", "i", "--summary", "s"],
+        ),
+    ],
+)
+def test_cli_argv_follows_the_descriptor(
+    tool: str, args: Mapping[str, object], argv: list[str]
+) -> None:
+    assert tool_cells.cli_argv(tool, args) == [*argv, "--json"]
+
+
+def test_cli_argv_names_a_field_the_verb_cannot_carry() -> None:
+    with pytest.raises(tool_cells.CliTranslationGap, match="'limit'"):
+        tool_cells.cli_argv("allocations.list", {"request": {"limit": "many"}})
+
+
+def test_cli_exactness_compares_the_parsed_payload() -> None:
+    args = {"request": {"project": "p", "limit": 5}}
+    tool_cells._check_exact(
+        "investigations.list", tool_cells.cli_argv("investigations.list", args), args
+    )
+    with pytest.raises(tool_cells.CliTranslationGap, match=r"\['request'\]"):
+        tool_cells._check_exact(
+            "investigations.list", ["investigations", "list", "--project", "q", "--json"], args
+        )
+    # A command line the parser refuses is left to the subprocess's usage error.
+    tool_cells._check_exact("investigations.list", ["investigations", "list", "--bogus"], args)
+
+
+_CLI_ISSUER = OidcIssuer("https://issuer.test")
+
+
+@dataclass(frozen=True)
+class _Cli(tool_cells.CliCaller):
+    """A ``CliCaller`` minting stand-in tokens, so no issuer is reached."""
+
+    def token(self, grants: Grants) -> str:
+        return forge_source(grants)
+
+
+def _runner(
+    monkeypatch: pytest.MonkeyPatch, *runs: tool_cells.CliRun
+) -> list[tuple[list[str], str]]:
+    answers = iter(runs)
+    seen: list[tuple[list[str], str]] = []
+
+    async def run(argv: list[str], *, token: str, base_url: str) -> tool_cells.CliRun:
+        seen.append((argv, token))
+        return next(answers)
+
+    monkeypatch.setattr(tool_cells, "run_kdivectl", run)
+    return seen
+
+
+def _cli_call(tool: str = "session.whoami", args: Mapping[str, object] | None = None) -> object:
+    caller = _Cli("cli", "http://stack.test", _CLI_ISSUER)
+    return asyncio.run(caller.call(tool, args or {}, "tok"))
+
+
+def _printed(envelope: ToolResponse | dict[str, object]) -> str:
+    body = envelope.model_dump() if isinstance(envelope, ToolResponse) else envelope
+    return json.dumps(body, default=str)
+
+
+def test_cli_call_returns_the_printed_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _runner(
+        monkeypatch,
+        tool_cells.CliRun(0, _printed(_OK), ""),
+        tool_cells.CliRun(0, _printed({"result": [_OK.model_dump()]}), ""),
+    )
+    assert _cli_call() == _OK
+    assert _cli_call() == [_OK]
+    assert seen[0] == (["session", "whoami", "--json"], "tok")
+
+
+def test_cli_call_requires_the_category_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    denied = ToolResponse.failure("x", ErrorCategory.AUTHORIZATION_DENIED, detail="no")
+    _runner(
+        monkeypatch,
+        tool_cells.CliRun(1, _printed(denied), ""),
+        tool_cells.CliRun(3, _printed(denied), ""),
+    )
+    with pytest.raises(AssertionError, match="exited 1 for 'authorization_denied', not 3"):
+        _cli_call()
+    assert _cli_call() == denied
+
+
+@pytest.mark.parametrize(
+    ("run", "error", "message"),
+    [
+        (
+            tool_cells.CliRun(
+                2, "", "usage: kdivectl\nkdivectl: error: unrecognized arguments: --kind x\n"
+            ),
+            tool_cells.CliUsageError,
+            "refused the command line (unrecognized): --kind",
+        ),
+        (
+            tool_cells.CliRun(1, "", "error: boom\n"),
+            LiveStackToolError,
+            "boom",
+        ),
+    ],
+)
+def test_cli_call_types_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, run: tool_cells.CliRun, error: type[Exception], message: str
+) -> None:
+    _runner(monkeypatch, run)
+    with pytest.raises(error) as raised:
+        _cli_call()
+    assert message in cast(LiveStackToolError, raised.value).message
+
+
+def test_cli_call_without_an_envelope_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    _runner(monkeypatch, tool_cells.CliRun(3, "destructive call needs confirmation\n", ""))
+    with pytest.raises(AssertionError, match="exited 3 with no envelope"):
+        _cli_call()
+
+
+_TIER = tool_cells.CliRun(
+    3, "'session.whoami' is not positively classified; it is unreachable\n", ""
+)
+
+
+def _catalog(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    async def catalog(base_url: str, token: str) -> set[str]:
+        return set(names)
+
+    monkeypatch.setattr(tool_cells, "_catalog", catalog)
+
+
+def test_cli_tier_refusal_needs_the_tool_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    _runner(monkeypatch, _TIER, _TIER)
+    _catalog(monkeypatch, "tools.search")
+    with pytest.raises(tool_cells.CliTierRefusal):
+        _cli_call()
+    _catalog(monkeypatch, "session.whoami")
+    with pytest.raises(AssertionError, match="refused listed session.whoami"):
+        _cli_call()
+
+
+def _cli_cell_run(tmp_path: Path, operation: str, boundary: str) -> CellRun:
+    cell = next(
+        c
+        for c in build_contract().cells
+        if c.operation == operation and c.scenario_id.endswith("/" + boundary)
+    )
+    return CellRun(replace(cell, exposure="cli"), EvidenceWriter(tmp_path))
+
+
+def test_cli_tier_refusal_is_an_authorization_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _runner(monkeypatch, _TIER)
+    _catalog(monkeypatch)
+    run = _cli_cell_run(tmp_path, "investigations.get", "authorization")
+    caller = _Cli("cli", "http://stack.test", _CLI_ISSUER)
+    rejection = Rejection({"investigation_id": "i"}, _GRANTS)
+    asyncio.run(prove_rejection(run, caller, "authorization", rejection, _snapshot(1, 1)))
+    assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
+    proof = json.loads(
+        (run.writer.root / "artifacts" / run.assertions["authorization"]).read_bytes()
+    )
+    assert proof["rejected"] == {"catalog_hidden": True, "error_category": "authorization_denied"}
+
+
+def test_cli_validation_accepts_a_usage_refusal_only_on_cli() -> None:
+    usage = tool_cells.CliUsageError("t", "invalid-value", "--limit")
+    assert rejected_by_validation("cli", usage)
+    assert not rejected_by_validation("direct", usage)
+    assert not rejected_by_validation("gateway", usage)
+    assert rejected_by_validation("cli", _invoke_error(None))
+    assert rejected_by_validation("cli", LiveStackToolError("t", "1 validation error for call"))
+    assert tool_cells._shape(usage) == {"usage_error": "invalid-value", "refused": "--limit"}
+
+
+_AUTH = tool_cells.CliRun(1, "", "error: authentication failed; verify KDIVE_TOKEN\n")
+
+
+def test_cli_authentication_needs_the_fixed_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caller = _Cli("cli", "http://stack.test", _CLI_ISSUER)
+    rejection = Rejection({}, _GRANTS)
+    seen = _runner(monkeypatch, _AUTH, tool_cells.CliRun(0, _printed(_OK), ""))
+    run = _run(tmp_path, "authentication")
+    asyncio.run(prove_rejection(run, caller, "authentication", rejection, _snapshot(1, 1)))
+    assert set(run.assertions) == {"authentication", "unchanged-state", "cleanup"}
+    assert seen[0][1] != seen[1][1]  # the forged token, then the issued one
+    _runner(monkeypatch, _AUTH, _AUTH)
+    with pytest.raises(AssertionError, match="also failed"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "authentication"), caller, "authentication", rejection, _snapshot(1)
+            )
+        )
+    _runner(
+        monkeypatch,
+        tool_cells.CliRun(2, "", "kdivectl: error: the following arguments are required: --name\n"),
+    )
+    with pytest.raises(tool_cells.CliTranslationGap, match="--name"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "authentication"), caller, "authentication", rejection, _snapshot(1)
+            )
+        )
+
+
+def test_caller_for_selects_the_exposure(monkeypatch: pytest.MonkeyPatch) -> None:
+    minted: list[object] = []
+    monkeypatch.setattr(tool_cells, "mint_token", lambda *_, **kw: minted.append(kw) or "t")
+    monkeypatch.setattr(tool_cells.config, "require", lambda _key: "kdivectl-id")
+    cli = tool_cells.caller_for("cli", "http://stack.test", _CLI_ISSUER)
+    assert isinstance(cli, tool_cells.CliCaller)
+    cli.token(_GRANTS)
+    tool_cells.caller_for("gateway", "http://stack.test", _CLI_ISSUER).token(_GRANTS)
+    assert [cast(dict[str, object], kw)["client_id"] for kw in minted] == ["kdivectl-id", None]
+    direct = tool_cells.http_caller(cli)
+    assert type(direct) is HttpCaller and direct.exposure == "direct"
+    gateway = tool_cells.caller_for("gateway", "http://stack.test", _CLI_ISSUER)
+    assert tool_cells.http_caller(gateway) is gateway
+    with pytest.raises(AssertionError, match="CliCaller"):
+        HttpCaller("cli", "http://stack.test", _CLI_ISSUER)
+
+
+def test_run_kdivectl_drives_the_entry_point() -> None:
+    done = asyncio.run(
+        tool_cells.run_kdivectl(
+            ["session", "whoami", "--json"], token="t", base_url="http://127.0.0.1:9"
+        )
+    )
+    assert done.code == 1
+    assert "error: connection failed" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("stderr", "kind"),
+    [
+        ("kdivectl resources availability: error: unrecognized arguments: maybe\n", "unrecognized"),
+        (
+            "kdivectl images describe: error: the following arguments are required: image_id\n",
+            "required",
+        ),
+        (
+            "kdivectl jobs wait: error: argument --timeout-s: must be a finite number, not 'inf'\n",
+            "invalid-value",
+        ),
+        ("error: give exactly one of --project or --investigation-id\n", "handler"),
+    ],
+)
+def test_cli_usage_refusal_records_its_class(stderr: str, kind: str) -> None:
+    assert tool_cells._refusal_kind(tool_cells.CliRun(2, "", stderr)) == kind

@@ -51,12 +51,13 @@ from tests.integration.live_stack.service_cells import (
 from tests.integration.live_stack.spine import build_and_upload_kernel, ok, scalar
 from tests.integration.live_stack.tool_cells import (
     Boundary,
-    Exposure,
     FilteredListControl,
     Grants,
     HttpCaller,
     Rejection,
     boundary_of,
+    caller_for,
+    http_caller,
     one,
     prove_functional,
     prove_rejection,
@@ -760,7 +761,7 @@ async def _scenario_body(run: CellRun, base_url: str, issuer: OidcIssuer, db: st
     from tests.integration.live_stack.tool_cells import on_lane_system
 
     cell, tool = run.cell, run.cell.operation
-    c = HttpCaller(cast(Exposure, cell.exposure), base_url, issuer)
+    c = caller_for(cell.exposure, base_url, issuer)
     project = "cov-" + secrets.token_hex(4)
     run.artifacts.append(run.writer.artifact({"fixture_project": project, "operation": tool}))
     functional = cell.kind == "functional"
@@ -919,7 +920,7 @@ async def _owned(c: HttpCaller, project: str, db: str) -> AsyncIterator[_Investi
         primary = exc
     if inv is not None:
         try:
-            await _end_runs(c, project, db, inv.id)
+            await _end_runs(http_caller(c), project, db, inv.id)
             await _reconcile_uploads(db, inv)
             await _gc_handoff(db, inv)
         except BaseException:

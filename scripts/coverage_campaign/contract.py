@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
 from kdive.mcp.tools.lifecycle.vmcore.handlers import VMCORE_METHODS
@@ -69,6 +70,8 @@ _ADMISSION_REFUSALS = {
 # on every lane, with no capability_unsupported envelope (ADR-0722, 2026-10-20 amendment).
 _CORE_METHODS = frozenset(method.value for method in VMCORE_METHODS)
 HANDLER_REFUSAL = "vmcore.fetch handler: method does not produce a vmcore"
+# #3099 owns the kdivectl translation cells of the core service tools (ADR-0795).
+_CLI_OWNER = 3099
 
 
 class OperationGroup(BaseModel):
@@ -77,6 +80,7 @@ class OperationGroup(BaseModel):
     execution: Literal["service", "provider"]
     kernel: bool = False
     authority: bool = False
+    cli: bool = False
     tools: dict[str, str]
     capabilities: dict[str, str] = Field(default_factory=dict)
     role_overrides: dict[str, list[Literal["server", "worker", "reconciler", "authority"]]] = Field(
@@ -185,6 +189,10 @@ def _validate_mapping(mapping: ContractMapping, inventory: Inventory) -> None:
             raise ValueError("capability mapping names an unknown tool")
         if any(name.split(".")[0] not in support_fields for name in group.capabilities.values()):
             raise ValueError("unknown provider capability owner")
+        if group.cli and group.execution != "service":
+            raise ValueError("cli exposure covers service tools only; remove cli from the group")
+        if group.cli and set(group.tools) - {verb.tool for verb in GENERATED_VERBS}:
+            raise ValueError("cli tool has no generated kdivectl verb; run just cli-verbs")
     if not inventory.arches or any(
         image.arch not in inventory.arches for image in inventory.images.values()
     ):
@@ -233,7 +241,9 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
             if refused:
                 supported, source = False, HANDLER_REFUSAL
             for configuration in row.configurations:
-                for exposure in ("direct", "gateway"):
+                for exposure in (
+                    ("direct", "gateway", "cli") if group.cli else ("direct", "gateway")
+                ):
                     scenario = f"tool/{row.tool}/{variant}"
                     identity = (
                         f"{scenario}/{configuration}/{exposure}/{provider}/{arch or 'service'}"
@@ -267,6 +277,8 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         owner = 3116
                     elif group.owner == 2815 and row.tool in _LOCAL_CONTROL_TOOLS:
                         owner = 3115
+                    if exposure == "cli":
+                        owner = _CLI_OWNER
                     cell = Cell(
                         identity + "/functional",
                         scenario_id + "/functional",
