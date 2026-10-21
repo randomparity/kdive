@@ -159,6 +159,21 @@ def kernel_inputs(tree: Path, manifest: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def uploaded_kernel_inputs(tree: Path, manifest: dict[str, Any], upload: Path) -> dict[str, str]:
+    """The five kernel ``Context`` fields of a fixture upload whose evidence is ``upload``.
+
+    The build ID and effective config come from what the upload recorded, not the manifest.
+    """
+    record = json.loads((upload / "upload.json").read_text(encoding="utf-8"))
+    return {
+        "kernel_sha256": boot_kernel_sha256(tree, manifest["arch"]),
+        "kernel_build_id": record["build_id"],
+        "kernel_source_sha": manifest["source"]["commit"],
+        "kernel_config_sha256": file_sha256(upload / "effective_config"),
+        "compiler_id": identity(manifest["toolchain"]),
+    }
+
+
 def gnu_build_id(notes: bytes) -> str | None:
     """The GNU build ID in a little-endian ELF note section such as ``/sys/kernel/notes``."""
     offset = 0
