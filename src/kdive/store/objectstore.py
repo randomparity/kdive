@@ -23,6 +23,7 @@ from typing import IO, Any, cast
 from uuid import uuid4
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 import kdive.config as config
@@ -1182,11 +1183,17 @@ class ObjectStore:
         return self.head(key) is not None
 
 
+#: Pins SigV4. Without it botocore presigns SigV2, which carries no ``X-Amz-Date`` for the vmcore
+#: deadline and signs no ``If-None-Match`` for the conditional-PUT fence (#3313). SigV4 signs the
+#: Host header, so a presigned URL works only at the ``KDIVE_S3_ENDPOINT_URL`` it was minted for.
+S3_CLIENT_CONFIG = Config(signature_version="s3v4")
+
+
 def object_store_from_env() -> ObjectStore:
     """Build an :class:`ObjectStore` from the ``KDIVE_S3_*`` environment.
 
     Reads ``KDIVE_S3_ENDPOINT_URL``, ``KDIVE_S3_BUCKET``, and ``KDIVE_S3_REGION``
-    (default ``us-east-1`` — boto3 signs with SigV4 and needs a region). Credentials
+    (default ``us-east-1`` — the client signs with SigV4 and needs a region). Credentials
     come from boto3's default chain (the standard ``AWS_*`` vars).
 
     Raises:
@@ -1207,7 +1214,9 @@ def object_store_from_env() -> ObjectStore:
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     region = config.get(S3_REGION) or _DEFAULT_REGION
-    client = boto3.client("s3", endpoint_url=endpoint_url, region_name=region)
+    client = boto3.client(
+        "s3", endpoint_url=endpoint_url, region_name=region, config=S3_CLIENT_CONFIG
+    )
     store = ObjectStore(client, bucket)
     store.validate_versioning()
     return store
