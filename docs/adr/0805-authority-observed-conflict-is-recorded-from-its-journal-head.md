@@ -39,6 +39,7 @@ No production path did this (#3327):
    next attempt completes. That is ADR-0583's "mixture proven by durable evidence". The adapter's
    `mixed` category does not consult that evidence, so treating it as a conflict would park a
    recoverable activation.
+   The operator chose this narrowing over also parking `mixed` (2026-10-21).
 3. **The worker carries a conflict observation to a dedicated commit.** A `conflict` or `mixed`
    observation returned by any of those calls, or by a release's derived recover phase, becomes a
    conflict result rather than terminal evidence. The worker commits it through
