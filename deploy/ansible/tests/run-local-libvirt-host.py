@@ -78,14 +78,31 @@ pcap_define = next(
     for t in pcap_by_module["community.libvirt.virt_pool"]
     if t["community.libvirt.virt_pool"].get("command") == "define"
 )
-for element in ("<mode>", "<owner>", "<group>"):
-    require(element in pcap_define["xml"], f"pcap pool XML must carry {element} permissions")
+for permission in (
+    "<mode>{{ libvirt_pool_net_pcap_pool_mode }}</mode>",
+    "<owner>{{ libvirt_pool_net_pcap_pool_passwd[1] }}</owner>",
+    "<group>{{ libvirt_pool_net_pcap_pool_passwd[2] }}</group>",
+):
+    require(permission in pcap_define["xml"], f"pcap pool XML must carry {permission}")
+
+
+def gates(task: dict) -> list[str]:
+    when = task.get("when", [])
+    return [when] if isinstance(when, str) else list(when)
+
+
+# Only the RedHat family installs sefcontext's bindings (libvirt_stack), and only an enforcing host
+# needs the label, so the rule and its relabel carry exactly the same two gates.
+SELINUX_GATES = [
+    "ansible_os_family == 'RedHat'",
+    "libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'",
+]
 pcap_fcontext = pcap_by_module["community.general.sefcontext"]
 require(
     len(pcap_fcontext) == 1
     and pcap_fcontext[0]["community.general.sefcontext"]["setype"] == "svirt_image_t"
-    and "== 'Enforcing'" in str(pcap_fcontext[0].get("when", "")),
-    "pcap pool fcontext must be svirt_image_t and gated on Enforcing",
+    and gates(pcap_fcontext[0]) == SELINUX_GATES,
+    "pcap pool fcontext must be svirt_image_t and gated on RedHat and Enforcing",
 )
 pcap_relabel = [
     t
@@ -93,8 +110,24 @@ pcap_relabel = [
     if "restorecon" in t["ansible.builtin.command"]["argv"]
 ]
 require(
-    len(pcap_relabel) == 1 and "-F" not in pcap_relabel[0]["ansible.builtin.command"]["argv"],
-    "pcap pool relabel must be one plain restorecon, never -F (ADR-0640)",
+    len(pcap_relabel) == 1
+    and "-F" not in pcap_relabel[0]["ansible.builtin.command"]["argv"]
+    and gates(pcap_relabel[0]) == SELINUX_GATES,
+    "pcap pool relabel must be one plain restorecon, never -F (ADR-0640), gated like the rule",
+)
+# Every AppArmor task runs only where libvirt's abstraction exists; ungated, the include assert
+# fails on every host without AppArmor.
+APPARMOR_GATE = ["libvirt_pool_net_apparmor_abstraction.stat.exists"]
+APPARMOR_TASKS = {
+    "Read libvirt's AppArmor QEMU abstraction",
+    "Require the abstraction to include its libvirt-qemu.d drop-ins",
+    "Create the libvirt-qemu.d AppArmor drop-in directory",
+    "Allow the confined QEMU to write capture pcaps",
+}
+apparmor_tasks = [t for t in pcap_pool_tasks if t["name"] in APPARMOR_TASKS]
+require(
+    len(apparmor_tasks) == 4 and all(gates(t) == APPARMOR_GATE for t in apparmor_tasks),
+    "the abstraction read, include assert, drop-in directory and drop-in must be AppArmor-gated",
 )
 pcap_dropin = [
     t["ansible.builtin.copy"]
@@ -102,8 +135,26 @@ pcap_dropin = [
     if "libvirt-qemu.d" in t["ansible.builtin.copy"]["dest"]
 ]
 require(
-    len(pcap_dropin) == 1 and "kdive-pcap-*.pcap rw," in pcap_dropin[0]["content"],
+    len(pcap_dropin) == 1
+    and "{{ libvirt_pool_net_pcap_pool_target }}/kdive-pcap-*.pcap rw,"
+    in pcap_dropin[0]["content"],
     "pcap pool must install the libvirt-qemu.d AppArmor drop-in for kdive-pcap-*.pcap",
+)
+# A parent the QEMU user cannot traverse defeats the leaf's ownership (review of #3316).
+pool_defaults = yaml.safe_load((ANSIBLE / "roles/libvirt_pool_net/defaults/main.yml").read_text())
+require(
+    not pool_defaults["libvirt_pool_net_pcap_pool_target"].startswith(
+        pool_defaults["libvirt_pool_net_boot_artifact_pool_target"].rsplit("/", 1)[0] + "/"
+    ),
+    "the pcap pool must not sit under the root:libvirt 0770 boot-artifact parent",
+)
+require(
+    any(
+        t["ansible.builtin.command"]["argv"][:2] == ["runuser", "-u"]
+        and "-w" in t["ansible.builtin.command"]["argv"]
+        for t in pcap_by_module["ansible.builtin.command"]
+    ),
+    "the role must prove the QEMU runtime user can write the pcap pool directory",
 )
 
 # The lifecycle installer below (deploy/systemd/install-live-worker-lifecycle.sh) runs as root

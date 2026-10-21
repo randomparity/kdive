@@ -7,9 +7,10 @@ libvirt_pool_net_boot_artifact_pool_mode: "0770"
 
 # Traffic-capture pcap pool (ADR-0432 amendment, #3316). The confined QEMU creates each capture's
 # pcap here, so the directory belongs to the family's QEMU runtime user; its primary group is
-# read from the host, not assumed.
+# read from the host, not assumed. The target sits outside /var/lib/libvirt/kdive, whose boot
+# artifact pool leaves it root:libvirt 0770 and so untraversable by QEMU.
 libvirt_pool_net_pcap_pool_name: kdive-pcap
-libvirt_pool_net_pcap_pool_target: /var/lib/libvirt/kdive/pcap
+libvirt_pool_net_pcap_pool_target: /var/lib/libvirt/kdive-pcap
 libvirt_pool_net_pcap_pool_mode: "0770"
 libvirt_pool_net_pcap_pool_owner_by_family:
   Debian: libvirt-qemu

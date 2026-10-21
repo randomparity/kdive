@@ -47,7 +47,9 @@
     autostart: true
 
 # getenforce, not the selinux fact, decides, as ADR-0640 does locally: the fact needs the libselinux
-# Python binding, and a host missing it would silently skip the label.
+# Python binding, and a host missing it would silently skip the label. Only the RedHat family gets
+# the label: libvirt_stack installs sefcontext's bindings there alone, so an enforcing SUSE host
+# is a documented residual (ADR-0432 amendment) rather than a failed site.yml.
 - name: Read the SELinux mode for the pcap pool label
   ansible.builtin.command:
     argv: [getenforce]
@@ -62,7 +64,9 @@
     target: "{{ libvirt_pool_net_pcap_pool_target }}(/.*)?"
     setype: svirt_image_t
     state: present
-  when: libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
+  when:
+    - ansible_os_family == 'RedHat'
+    - libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
 
 # Plain restorecon, not -F: -F would also reset the categories of a capture still being written.
 - name: Relabel the pcap pool directory
@@ -70,7 +74,9 @@
     argv: [restorecon, -R, -v, "{{ libvirt_pool_net_pcap_pool_target }}"]
   register: libvirt_pool_net_pcap_relabel
   changed_when: "'Relabeled' in libvirt_pool_net_pcap_relabel.stdout"
-  when: libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
+  when:
+    - ansible_os_family == 'RedHat'
+    - libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
 
 - name: Check for libvirt's AppArmor QEMU abstraction
   ansible.builtin.stat:
@@ -131,3 +137,21 @@
       pcap pool {{ libvirt_pool_net_pcap_pool_target }} is not a {{ libvirt_pool_net_pcap_pool_mode }}
       directory owned by {{ libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family] }}:
       {{ libvirt_pool_net_pcap_pool_stat.stat | default({}) }}
+
+# The leaf's owner and mode say nothing about its ancestors; a parent the QEMU user cannot
+# traverse fails every capture with pcap_open_denied. runuser checks DAC only; the label is the
+# fcontext rule's job above.
+- name: Require the QEMU runtime user to reach and write the pcap pool directory
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family] }}"
+      - --
+      - test
+      - -w
+      - "{{ libvirt_pool_net_pcap_pool_target }}"
+      - -a
+      - -x
+      - "{{ libvirt_pool_net_pcap_pool_target }}"
+  changed_when: false
