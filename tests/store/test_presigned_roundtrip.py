@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -18,6 +19,7 @@ from kdive.artifacts.storage import (
     PresignPutRequest,
     owner_prefix,
 )
+from kdive.artifacts.vmcore_retention import signed_get_deadline
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
@@ -90,6 +92,58 @@ def test_presigned_get_fetches_the_published_object(minio_store, key_ns: str) ->
     resp = httpx.get(url)
     assert resp.status_code == 200
     assert resp.content == payload
+
+
+def test_presigned_vmcore_get_has_a_deadline_and_reads_back(minio_store, key_ns: str) -> None:
+    # The vmcore read path protects the URL by its signed deadline before handing it out; that
+    # failed on every SigV2 URL the stack minted (#3313).
+    payload = b"vmcore-bytes"
+    stored = minio_store.put_artifact(
+        ArtifactWriteRequest(
+            tenant=key_ns,
+            owner_kind="runs",
+            owner_id="r1",
+            name="vmcore-kdump-redacted",
+            data=payload,
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class="vmcore",
+        )
+    )
+    before = datetime.now(UTC)
+    url = minio_store.presign_get(stored.key, expires_in=300, version_id=stored.version_id)
+
+    deadline = signed_get_deadline(url)
+
+    assert before - timedelta(seconds=1) <= deadline - timedelta(seconds=300) <= datetime.now(UTC)
+    resp = httpx.get(url)
+    assert resp.status_code == 200
+    assert resp.content == payload
+
+
+def test_conditional_presigned_put_requires_the_signed_if_none_match(
+    minio_store, key_ns: str
+) -> None:
+    # The vmcore write fence: a client that drops If-None-Match fails the signature, so it cannot
+    # turn a create-only upload into an overwrite (#3313).
+    payload = b"fenced-bytes"
+    presigned = minio_store.presign_put(
+        PresignPutRequest(
+            key=f"{key_ns}/runs/r1/vmcore-raw",
+            sha256=_b64_sha256(payload),
+            size_bytes=len(payload),
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class="vmcore",
+            expires_in=300,
+            if_absent=True,
+        )
+    )
+    headers = dict(presigned.required_headers)
+    assert headers.pop("if-none-match") == "*"
+
+    resp = httpx.put(presigned.url, content=payload, headers=headers)
+
+    assert resp.status_code == 403
+    assert "SignatureDoesNotMatch" in resp.text
 
 
 def test_presigned_put_rejects_checksum_mismatch(minio_store, key_ns: str) -> None:
