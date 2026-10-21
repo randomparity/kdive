@@ -10,16 +10,20 @@ import struct
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from uuid import UUID
 
 import pytest
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
-from scripts.coverage_campaign.contract import Cell, build_contract
+from scripts.coverage_campaign.contract import HANDLER_REFUSAL, Cell, build_contract
 from scripts.coverage_campaign.evidence import Outcome
+from tests.integration.live_stack import capture_cells
 from tests.integration.live_stack.capture_cells import (
     PANIC,
+    REFUSED_REASON,
+    REMOTE_DEBUGINFO_BLOCKED,
     TOOLS,
     CaptureTarget,
     Session,
@@ -29,11 +33,15 @@ from tests.integration.live_stack.capture_cells import (
     lane_keys,
     options,
     panic_seen,
+    refusal_of,
     rejection,
     require_core,
     require_tool,
     script_facts,
+    snapshot_of,
     transcript_names,
+    variant_of,
+    vmcore_body,
     vmcoreinfo,
 )
 from tests.integration.live_stack.image_smoke import Endpoint
@@ -176,6 +184,108 @@ def test_options_follow_each_functional_and_unsupported_cell() -> None:
         key = f"{cell.operation}/{variant}" if cell.operation == "vmcore.fetch" else cell.operation
         seen[key] = options(cell)
     assert seen == expected
+
+
+def _remote_cells(arch: str = "x86_64") -> list[Cell]:
+    return [
+        c
+        for c in build_contract().cells
+        if c.operation in TOOLS and c.provider == "remote-libvirt" and c.guest_arch == arch
+    ]
+
+
+def test_variant_of_reads_either_provider() -> None:
+    local = next(c for c in _cells() if c.operation == "vmcore.fetch" and c.kind == "functional")
+    remote = next(c for c in _remote_cells() if c.operation == "vmcore.fetch")
+    assert variant_of(local) == local.scenario_id.split("/")[2]
+    assert variant_of(remote) == remote.scenario_id.split("/")[3]
+
+
+def test_options_follow_each_remote_functional_and_unsupported_cell() -> None:
+    expected = {
+        "control.force_crash": "kdump",
+        "introspect.from_vmcore": "kdump",
+        "postmortem.crash": "kdump",
+        "vmcore.fetch/kdump": "kdump",
+        "vmcore.fetch/host_dump": "host_dump",
+        "vmcore.fetch/console": "host_dump",
+        "vmcore.fetch/gdbstub": "host_dump",
+    }
+    seen = {}
+    for cell in _remote_cells():
+        if cell.kind == "rejection" or cell.operation in REMOTE_DEBUGINFO_BLOCKED:
+            continue
+        op = cell.operation
+        seen[f"{op}/{variant_of(cell)}" if op == "vmcore.fetch" else op] = options(cell)
+    assert seen == expected
+
+
+def test_remote_live_introspection_is_blocked_on_3124() -> None:
+    cells = [
+        c
+        for c in _remote_cells()
+        if c.kind == "functional" and c.operation in ("introspect.run", "introspect.script")
+    ]
+    assert len(cells) == 8
+    for cell in cells:
+        with pytest.raises(ScenarioStop, match="#3124") as stop:
+            options(cell)
+        assert stop.value.outcome is Outcome.BLOCKED
+    local = [c for c in _cells() if c.operation == "introspect.run" and c.kind == "functional"]
+    assert {options(c) for c in local} == {"live"}
+
+
+def _remote_profile() -> dict[str, object]:
+    return {"arch": "x86_64", "provider": {"remote-libvirt": {"base_image_volume": "b"}}}
+
+
+@pytest.mark.parametrize(
+    ("crash", "expected"),
+    [
+        ("kdump", {"destructive_ops": ["force_crash"], "crashkernel": "256M"}),
+        ("host_dump", {"destructive_ops": ["force_crash"], "host_dump": True}),
+        ("target", {"destructive_ops": ["force_crash"]}),
+        ("live", {}),
+    ],
+)
+def test_remote_crash_profile_edits_only_the_remote_section(
+    crash: str, expected: dict[str, object]
+) -> None:
+    profile = _remote_profile()
+    edited = crash_profile(profile, crash)
+    assert edited["provider"] == {"remote-libvirt": {"base_image_volume": "b", **expected}}
+    assert profile == _remote_profile(), "the lane profile was changed in place"
+
+
+def test_refusal_of_accepts_only_the_handler_refusal() -> None:
+    data = {"method": "console", "reason": REFUSED_REASON}
+    refusal = ToolResponse.failure("run-1", ErrorCategory.CONFIGURATION_ERROR, data=data)
+    assert refusal_of(refusal, "console") == {
+        "error_category": "configuration_error",
+        "reason": REFUSED_REASON,
+        "method": "console",
+    }
+    wrong = [
+        ToolResponse.failure(
+            "run-1", ErrorCategory.CONFIGURATION_ERROR, data={**data, "reason": "x"}
+        ),
+        ToolResponse.failure("run-1", ErrorCategory.NOT_FOUND, data=data),
+        ToolResponse.failure(
+            "run-1", ErrorCategory.CONFIGURATION_ERROR, refs={"job_id": "j"}, data=data
+        ),
+    ]
+    for env in wrong:
+        with pytest.raises(AssertionError):
+            refusal_of(env, "console")
+    with pytest.raises(AssertionError):
+        refusal_of(refusal, "gdbstub")
+    assert HANDLER_REFUSAL.endswith(REFUSED_REASON)
+
+
+def test_lane_keys_keep_host_keys_remotely() -> None:
+    observed = {"host_os": "rocky:10.2", "host_arch": "x86_64", "guest_os": "fedora:43"}
+    assert lane_keys(observed) == {"guest_os": "fedora:43"}
+    assert lane_keys(observed, remote=True) == observed
 
 
 def test_options_stop_a_ppc64le_cell_as_blocked() -> None:
@@ -519,3 +629,180 @@ def test_force_crash_preserves_evidence_and_original_failure(
             assert content["content_sha256"] == hashlib.sha256(text.encode()).hexdigest()
         assert "do-not-copy-private-key" not in json.dumps(payload)
         assert "download_uri" not in json.dumps(payload)
+
+
+_SYS = str(UUID(int=7))
+
+
+def _dump_session(
+    monkeypatch: pytest.MonkeyPatch, *, remote: bool, present: bool, fails: bool = False
+) -> Session:
+    async def nothing(*_a: object, **_k: object) -> None:
+        return None
+
+    async def capture(*_a: object, **_k: object) -> list[str]:
+        if fails:
+            raise AssertionError("capture job failed")
+        return ["artifact-1"]
+
+    async def core(*_a: object) -> tuple[str, bytes]:
+        return "0" * 64, b""
+
+    monkeypatch.setattr(Session, "crash", nothing)
+    monkeypatch.setattr(Session, "armed", nothing)
+    monkeypatch.setattr(Session, "capture", capture)
+    monkeypatch.setattr(capture_cells, "raw_core", core)
+    monkeypatch.setattr(capture_cells, "require_core", lambda *_a: None)
+    lane = SimpleNamespace(
+        pool_volume=(lambda name: f"/srv/pool/{name}") if remote else None,
+        absent=lambda _path: not present,
+    )
+    guest = SimpleNamespace(system_id=_SYS, lane=lane, owned=[], op=None)
+    cell = SimpleNamespace(scenario_id="tool/remote-libvirt/vmcore.fetch/host_dump/functional")
+    run = cast(CellRun, SimpleNamespace(cell=cell))
+    caller = cast(HttpCaller, None)
+    return Session(
+        run, cast(Guest, guest), caller, Grants("s", ("p",)), _MANIFEST, "run-1", Endpoint("h", 22)
+    )
+
+
+def test_remote_host_dump_capture_owns_and_checks_its_dump_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = _dump_session(monkeypatch, remote=True, present=False)
+    observed = asyncio.run(vmcore_body(s))
+    path = f"/srv/pool/kdive-host-dump-{_SYS}.kdump"
+    assert s.guest.owned == [path] and observed["dump_volume"] == "absent"
+    leaked = _dump_session(monkeypatch, remote=True, present=True)
+    with pytest.raises(AssertionError, match="outlived"):
+        asyncio.run(vmcore_body(leaked))
+    assert leaked.guest.owned == [path], "a leaked volume must stay owned for the cleanup"
+    failed = _dump_session(monkeypatch, remote=True, present=True, fails=True)
+    with pytest.raises(AssertionError, match="capture job failed"):
+        asyncio.run(vmcore_body(failed))
+    assert failed.guest.owned == [path], "a failed capture's volume must stay owned"
+
+
+def test_local_host_dump_capture_owns_no_dump_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _dump_session(monkeypatch, remote=False, present=True)
+    observed = asyncio.run(vmcore_body(s))
+    assert s.guest.owned == [] and "dump_volume" not in observed
+
+
+def _target_run(provider: str) -> CellRun:
+    cell = SimpleNamespace(provider=provider)
+    return cast(CellRun, SimpleNamespace(cell=cell, writer=None, observed={}, artifacts=[]))
+
+
+def test_capture_target_is_prepared_per_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    prepared: list[str] = []
+
+    async def prepare(run: CellRun, *_a: object) -> CaptureTarget:
+        prepared.append(run.cell.provider)
+        return CaptureTarget("p", "s", "r", "x", {"host_os": run.cell.provider}, ())
+
+    monkeypatch.setattr(capture_cells, "_TARGETS", {})
+    monkeypatch.setattr(capture_cells, "_prepare_target", prepare)
+    for provider in ("local-libvirt", "remote-libvirt", "remote-libvirt"):
+        run = _target_run(provider)
+        asyncio.run(
+            capture_cells.capture_target(
+                run, "http://s", cast(Any, None), "db", lambda: (Path(), {})
+            )
+        )
+        assert run.observed == {"host_os": provider}
+    assert prepared == ["local-libvirt", "remote-libvirt"]
+
+
+def test_failed_remote_target_replays_its_host_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def prepare(
+        _run: CellRun, _url: str, _issuer: object, _db: str, _fx: object, scratch: CellRun
+    ) -> CaptureTarget:
+        scratch.observed |= {"host_os": "rocky:10.2", "host_arch": "x86_64"}
+        raise AssertionError("boot failed")
+
+    monkeypatch.setattr(capture_cells, "_TARGETS", {})
+    monkeypatch.setattr(capture_cells, "_prepare_target", prepare)
+    for _ in range(2):
+        run = _target_run("remote-libvirt")
+        with pytest.raises(AssertionError, match="could not be prepared"):
+            asyncio.run(
+                capture_cells.capture_target(
+                    run, "http://s", cast(Any, None), "db", lambda: (Path(), {})
+                )
+            )
+        assert (run.observed["host_os"], run.observed["host_arch"]) == ("rocky:10.2", "x86_64")
+
+
+def test_snapshot_of_reads_the_targets_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[str] = []
+
+    async def rows(*_a: object) -> list[object]:
+        return []
+
+    def defined(_system_id: str, connect: object) -> bool:
+        opened.append(cast(Any, connect)())
+        return True
+
+    monkeypatch.setattr(capture_cells, "project_state", rows)
+    monkeypatch.setattr(capture_cells, "named_jobs", rows)
+    monkeypatch.setattr(capture_cells, "domain_defined", defined)
+    target = CaptureTarget("p", "s", "r", "x", {}, (), connect=cast(Any, lambda: "provider"))
+    state = cast(dict[str, object], asyncio.run(snapshot_of("db", target)()))
+    assert opened == ["provider"] and state["domain_defined"] is True
+
+
+def test_target_session_tolerates_missing_debuginfo(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A remote guest never receives the vmlinux (#3124), so its drgn-live attach reports
+    # missing_debuginfo; the rejection target needs only the session id.
+    async def attach(*_a: object, **_k: object) -> ToolResponse:
+        return ToolResponse.success("ses-1", "live", data={"missing_debuginfo": True})
+
+    monkeypatch.setattr(capture_cells, "scalar", attach)
+    guest = cast(Guest, SimpleNamespace(op=None))
+    s = Session(
+        cast(CellRun, None),
+        guest,
+        cast(HttpCaller, None),
+        Grants("s", ("p",)),
+        _MANIFEST,
+        "r",
+        Endpoint("h", 22),
+    )
+    with pytest.raises(AssertionError, match="without debuginfo"):
+        asyncio.run(s.drgn_session())
+    assert asyncio.run(s.drgn_session(require_debuginfo=False)) == "ses-1"
+
+
+def test_refused_method_records_the_handler_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def booted(*_a: object) -> tuple[str, Endpoint]:
+        return "run-1", Endpoint("h", 22)
+
+    async def nothing(*_a: object, **_k: object) -> None:
+        return None
+
+    async def jobs(*_a: object) -> list[object]:
+        return [1, "digest"]
+
+    monkeypatch.setattr(capture_cells, "boot", booted)
+    monkeypatch.setattr(Session, "crash", nothing)
+    monkeypatch.setattr(capture_cells, "named_jobs", jobs)
+    monkeypatch.setattr(capture_cells, "await_system_state", nothing)
+    refusal = ToolResponse.failure(
+        "run-1",
+        ErrorCategory.CONFIGURATION_ERROR,
+        data={"method": "console", "reason": REFUSED_REASON},
+    )
+    cell = next(
+        c
+        for c in _remote_cells()
+        if c.operation == "vmcore.fetch" and variant_of(c) == "console" and c.kind != "rejection"
+    )
+    run = cast(CellRun, SimpleNamespace(cell=cell))
+    guest = cast(Guest, SimpleNamespace(project="p", system_id=_SYS, op=None))
+    observed = asyncio.run(
+        capture_cells.refused_method(
+            run, cast(HttpCaller, _Caller(refusal)), Path(), _MANIFEST, "db", guest
+        )
+    )
+    assert observed["reason"] == REFUSED_REASON and observed["jobs_unchanged"] is True

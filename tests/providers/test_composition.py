@@ -1072,7 +1072,7 @@ def test_remote_runtime_advertises_its_debug_and_introspection_descriptor() -> N
 
 
 def test_remote_runtime_advertises_host_dump_as_a_capture_method() -> None:
-    # #301: HOST_DUMP is in vmcore.fetch's _VMCORE_METHODS, so advertising it admits
+    # #301: HOST_DUMP is in vmcore.fetch's VMCORE_METHODS, so advertising it admits
     # vmcore.fetch(method=host_dump) on remote through the existing tool.
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
