@@ -22,12 +22,14 @@ from psycopg.rows import dict_row
 
 from kdive.domain.capacity.state import ExternalBootActivationState as State
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.domain.external_boot_activation import (
+    ExternalBootActivation,
+    ExternalBootReleaseEvidenceV1,
+)
 from kdive.domain.external_boot_timing import timing_deadline
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.evidence import (
     authority_result,
-    evidence_digest,
     terminal_evidence,
 )
 from kdive.jobs.handlers.external_boot.operations import ExternalBootOperationHandler
@@ -304,18 +306,22 @@ async def _run_active_release(context: OperationContext) -> ExternalBootDerivedR
             "derived release cleanup receipt was superseded", category=ErrorCategory.STALE_HANDLE
         )
     reservation = context.prerequisites["reservation"]
-    release = {
-        "schema": "external-boot-release-evidence-v1",
-        "activation_id": str(context.marker.activation_id),
-        "system_id": str(context.marker.system_id),
-        "store_identity": {"ref": reservation["store_identity"]},
-        "owner_key": {"ref": reservation["owner_key"]},
-        "reserved_bytes": reservation["reserved_bytes"],
-        "enumeration_complete": True,
-        "objects": [],
-        "verified_at": _now(),
-    }
-    identity = evidence_digest(release)
+    evidence = ExternalBootReleaseEvidenceV1.model_validate(
+        {
+            "schema": "external-boot-release-evidence-v1",
+            "activation_id": str(context.marker.activation_id),
+            "system_id": str(context.marker.system_id),
+            "store_identity": {"ref": reservation["store_identity"]},
+            "owner_key": {"ref": reservation["owner_key"]},
+            "reserved_bytes": reservation["reserved_bytes"],
+            "enumeration_complete": True,
+            "objects": [],
+            "verified_at": _now(),
+        }
+    )
+    # Teardown and cleanup recompute this identity from the persisted evidence (#3321).
+    release = evidence.model_dump(mode="json", by_alias=True)
+    identity = evidence.identity
     cleanup_evidence = {
         "schema": "external-boot-cleanup-evidence-v1",
         "activation_id": str(context.marker.activation_id),
@@ -584,7 +590,17 @@ async def _require_cleanable(
             f"{marker.operation!r} requires a recorded release for activation "
             f"{marker.activation_id}"
         )
-    return {"release_identity": release["release_identity"]}
+    teardown = activation.teardown_evidence
+    if teardown is None and activation.state not in _ORDINARY_CLEANUP_STATES:
+        raise _refuse(
+            f"system-teardown cleanup requires recorded teardown evidence for activation "
+            f"{marker.activation_id}"
+        )
+    # The activation's validator binds cleanup to this persisted evidence's identity.
+    return {
+        "release_identity": release["release_identity"],
+        "teardown_identity": None if teardown is None else teardown.identity,
+    }
 
 
 async def _teardown_prerequisites(
@@ -1032,7 +1048,7 @@ def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
                 "evidence": _cleanup_evidence(
                     context,
                     teardown_identity=(
-                        None if ordinary else evidence_digest(_teardown_evidence(context))
+                        None if ordinary else context.prerequisites["teardown_identity"]
                     ),
                 ),
             },
@@ -1046,15 +1062,6 @@ def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
         expected_observation="absent",
         build_result=build,
     )
-
-
-def _teardown_evidence(context: OperationContext) -> dict[str, Any]:
-    return {
-        "schema": "external-boot-teardown-evidence-v1",
-        "system_id": str(context.marker.system_id),
-        "system_state": "torn_down",
-        "observed_at": _now(),
-    }
 
 
 def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
