@@ -827,7 +827,9 @@ def test_debug_owners_and_carrier_follow_the_approved_split(inventory: Inventory
     assert (len(owned), kinds["functional"], kinds["rejection"]) == (440, 88, 352)
     assert not [c for c in owned if c.id.endswith("/capability")]
     assert len(local) == 880 and {c.node_id for c in local} == {_DEBUG_NODE}
-    assert not [c for c in cells if c.provider == "remote-libvirt" and c.node_id]
+    remote = [c for c in cells if c.provider == "remote-libvirt"]
+    # As for local: the remote ppc64le cells (#2818's) share the provider-qualified ids.
+    assert len(remote) == 880 and {c.node_id for c in remote} == {_DEBUG_NODE}
 
 
 _CLI_GROUPS = (2811, *_SPLIT)
