@@ -140,28 +140,50 @@ provider showed both refusals once #3294 let QEMU's reply reach the capturer.
   with per-domain MCS categories; both DAC and SELinux deny the create. Relabelling the disk pool
   would make every resting image writable by every domain. Remote pcaps therefore go to a dedicated
   dir pool, `KDIVE_REMOTE_LIBVIRT_PCAP_POOL` (default `kdive-pcap`), that `libvirt_pool_net`
-  provisions at `/var/lib/libvirt/kdive-pcap`: owned by the family's QEMU runtime user with group
-  `root` (the QEMU user's primary group, `kvm` on Debian, has members that must not read other
-  Systems' captures), mode `0770`, with the same permissions in the pool XML. The target sits outside
-  `/var/lib/libvirt/kdive`, which the boot-artifact pool leaves `root:libvirt 0770`, and the role
-  checks as the QEMU runtime user that it can reach and write the directory. On an SELinux-enforcing
-  host the role adds an
-  `svirt_image_t` fcontext rule and a plain `restorecon`, as ADR-0640 does locally; the file QEMU
-  creates is `svirt_image_t` at its own domain's categories. On an AppArmor host the role writes
-  `/etc/apparmor.d/abstractions/libvirt-qemu.d/kdive-pcap`, allowing `rw` on `kdive-pcap-*.pcap`
-  in that directory, and fails if the installed abstraction does not include `libvirt-qemu.d`.
-  The prepare, size, fetch and reclaim primitives and the ADR-0556 capture reaper use this pool. A
-  capture job on a host without the pool fails `CONFIGURATION_ERROR` `reason=pcap_pool_missing`;
-  the reaper treats the same lookup failure as infrastructure and defers the row.
+  provisions at `/var/lib/libvirt/kdive-pcap`, `root:root 0711`, with the same permissions in the
+  pool XML. The target sits outside `/var/lib/libvirt/kdive`, which the boot-artifact pool leaves
+  `root:libvirt 0770`.
+
+  QEMU does not create the file. Just before `object-add`, `attach` creates the job's volume
+  through the storage API (`pool.createXML`), owned by the uid and gid of the running domain's
+  live DAC seclabel (`<seclabel model='dac'><label>+uid:+gid</label>`) with mode `0600`, and
+  `filter-dump` opens that existing file. A missing, malformed or root seclabel fails
+  `CONFIGURATION_ERROR` `reason=dac_seclabel_unusable`; the owner is never guessed. A failed
+  `object-add` deletes the volume again. The role checks, as the QEMU runtime user, that the
+  directory is searchable and not writable.
+
+  A QEMU-owned directory was the first shape of this amendment, and a security review refuted it.
+  Owning the directory, a QEMU that a guest escaped into could replace its own pcap with a symlink
+  to any host file before fetch-back. The storage daemon resolves the volume path as root
+  (`virStorageBackendVolOpen` skips only dangling links), so the worker would return, for example,
+  `/etc/shadow`, the libvirt TLS server key or another tenant's QEMU-owned disk image as the
+  capture. SELinux already blocked it (`svirt_t` may not create links in `svirt_image_t`);
+  AppArmor did not, because `w` on the path covers creating a link there. With a root-owned
+  directory, QEMU can neither unlink nor create an entry, so no QEMU-made link can exist on
+  either MAC system.
+
+  On an SELinux-enforcing host the role adds an `svirt_image_t` fcontext rule and a plain
+  `restorecon`, as ADR-0640 does locally, so the confined QEMU may write the pre-created file. On
+  an AppArmor host the role writes `/etc/apparmor.d/abstractions/libvirt-qemu.d/kdive-pcap`,
+  allowing only `w` on `kdive-pcap-*.pcap` in that directory, and fails if the installed
+  abstraction does not include `libvirt-qemu.d`. The prepare, size, fetch and reclaim primitives,
+  the gated capture child and the ADR-0556 capture reaper use this pool. A capture job on a host
+  without the pool, or with the pool stopped, fails `CONFIGURATION_ERROR`
+  (`reason=pcap_pool_missing` or `pcap_pool_inactive`); the reaper treats the same lookup failure
+  as infrastructure and defers the row.
 
 Consequences:
 
 - The data NIC loses vhost-net on every ordinary remote System. The SSH forward and the gdbstub do
   not use it.
-- AppArmor has no MCS. On an AppArmor provider any domain's QEMU may create or overwrite any
-  `kdive-pcap-*.pcap` in the pcap directory, so one compromised QEMU can read or tamper with
-  another System's in-flight capture on that host. Under SELinux the per-domain categories prevent
-  that.
+- Under SELinux the pre-created pcap is `svirt_image_t:s0`, created by the storage daemon, not
+  `svirt_image_t` at the writing domain's MCS categories as a QEMU-created file would be. Every
+  domain dominates `s0`, so another confined QEMU could open it by path. It cannot list the
+  `0711` directory, so it would have to guess the System and job UUIDs in the name.
+- AppArmor has no MCS, so its rule admits every domain's QEMU to the same paths. DAC still limits
+  each file to the QEMU user and mode `0600`, and every domain's QEMU runs as that one user, so on
+  an AppArmor provider a compromised QEMU that guesses the name can read or overwrite another
+  System's in-flight capture. It can no longer reach any other host file through the fetch-back.
 - Existing provider hosts need `site.yml` rerun to provision the pool, and existing remote Systems
   need reprovisioning to drop vhost. The reaper looks only in the pcap pool, so a
   `kdive-pcap-*.pcap` an older build left in `storage_pool` stays there: drain capture jobs before

@@ -68,9 +68,10 @@ _DIR_POOL_TYPES = frozenset({"dir", "fs", "netfs"})
 REMOTE_PCAP_WRITE_REMEDIATION = (
     "rerun deploy/ansible site.yml on the provider host: it provisions the dir pool named by "
     "KDIVE_REMOTE_LIBVIRT_PCAP_POOL (default kdive-pcap; another name must match the "
-    "libvirt_pool_net_pcap_pool_name variable). Its directory must be owned by the QEMU runtime "
-    "user, mode 0770, labelled svirt_image_t on an SELinux-enforcing host or allowed by the "
-    "libvirt-qemu.d AppArmor drop-in, and on a filesystem neither full nor read-only"
+    "libvirt_pool_net_pcap_pool_name variable). Its directory must be root:root 0711 and "
+    "searchable by the QEMU runtime user, labelled svirt_image_t on an SELinux-enforcing host or "
+    "allowed by the libvirt-qemu.d AppArmor drop-in, and on a filesystem neither full nor "
+    "read-only"
 )
 # Operator guidance when the running domain's DAC identity cannot own the pre-created pcap.
 REMOTE_PCAP_DAC_REMEDIATION = (

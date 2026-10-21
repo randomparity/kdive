@@ -18,9 +18,10 @@ The resulting host needs:
   or modular `virtproxyd` according to the host distribution.
 - A **directory (`dir`) storage pool** and guest network. The remote module-restoration volume
   naming contract assumes a dir pool ([ADR-0588](../../adr/0588-remote-module-volume-ownership-lives-in-the-volume-name.md)).
-- A `kdive-pcap` dir pool at `/var/lib/libvirt/kdive-pcap` that the confined QEMU can write traffic
-  captures into: owned by the QEMU runtime user, labelled `svirt_image_t` on an SELinux-enforcing
-  host, and allowed by a `libvirt-qemu.d` drop-in on an AppArmor host
+- A `kdive-pcap` dir pool at `/var/lib/libvirt/kdive-pcap` for traffic captures: `root:root 0711`,
+  labelled `svirt_image_t` on an SELinux-enforcing host, and allowed by a write-only
+  `libvirt-qemu.d` drop-in on an AppArmor host. The provider pre-creates each capture file for the
+  domain's QEMU user
   ([ADR-0432](../../adr/0432-remote-libvirt-traffic-capturer.md) amendment).
 - Firewall rules admitting the worker to TLS and the gdbstub range. The gdbstub uses raw TCP;
   the libvirt TLS connection does not protect it. Verify both an allowed worker connection and

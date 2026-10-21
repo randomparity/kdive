@@ -67,10 +67,13 @@ operational env settings (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `_NETWORK`, `_MAC
 
 `control.capture_traffic` writes into a dedicated `kdive-pcap` dir pool at
 `/var/lib/libvirt/kdive-pcap`, which `site.yml` provisions
-([ADR-0432](../../adr/0432-remote-libvirt-traffic-capturer.md) amendment): owned by the QEMU
-runtime user, labelled `svirt_image_t` on an SELinux-enforcing host, and allowed through a
-`libvirt-qemu.d` drop-in on an AppArmor host. On an AppArmor host any domain's QEMU may write any
-pcap in that directory; AppArmor has no per-domain categories. The remote data NIC renders without
+([ADR-0432](../../adr/0432-remote-libvirt-traffic-capturer.md) amendment): `root:root 0711`,
+labelled `svirt_image_t` on an SELinux-enforcing host, and allowed through a write-only
+`libvirt-qemu.d` drop-in on an AppArmor host. The provider pre-creates each capture file, owned by
+the domain's DAC seclabel uid with mode `0600`, so QEMU can write its own capture but never create,
+unlink or link anything in the directory. A domain whose live XML lacks a usable DAC seclabel fails
+`dac_seclabel_unusable`. On an AppArmor host, and under SELinux at `s0`, a compromised QEMU that
+guesses a capture's name could still open another System's in-flight capture. The remote data NIC renders without
 vhost-net, because QEMU refuses a capture filter on a vhost netdev. After upgrading, rerun
 `site.yml` on each provider host and reprovision existing remote Systems: a capture on an
 unprovisioned host fails `pcap_pool_missing`, and one on a System defined with vhost fails
