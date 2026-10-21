@@ -404,6 +404,9 @@ class _Adapter:
         self.observe_release.set()
         self.fail_commit = False
         self.fail_observe = False
+        self.observe_category: Literal["source", "target", "mixed", "unreadable", "conflict"] = (
+            "target"
+        )
         # An already-bounded failure the adapter is entitled to reach on its own.
         self.commit_error: AuthorityServiceError | None = None
         self.provider_output = "bounded observation failure"
@@ -434,7 +437,7 @@ class _Adapter:
         await self.observe_release.wait()
         if self.fail_observe:
             raise RuntimeError(self.provider_output)
-        return self._observation("target")
+        return self._observation(self.observe_category)
 
     @staticmethod
     def _observation(

@@ -26,10 +26,12 @@ from typing import Any
 
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.jobs.handlers.external_boot.runner import OperationContext
-from kdive.jobs.models import ExternalBootAuthoritySuccessV1
+from kdive.jobs.models import ExternalBootAuthorityConflictV1, ExternalBootAuthoritySuccessV1
+from kdive.providers.external_boot_authority.protocol import AuthorityObservationV1
 
 __all__ = [
     "authority_result",
+    "conflict_result",
     "known_object_refs",
     "evidence_digest",
     "terminal_evidence",
@@ -94,32 +96,65 @@ def authority_result(
 
     The **subclass** is load-bearing, not decoration. ``_commit_external_result`` dispatches on
     ``isinstance``: an ``ExternalBootAuthoritySuccessV1`` goes to ``queue.complete_external_boot``,
-    an ``ExternalBootAuthorityFailureV1`` to ``queue.fail_external_boot``, and anything else — the
-    bare base class included — is logged as an "untyped result variant" and **written nowhere**, so
+    an ``ExternalBootAuthorityFailureV1`` to ``queue.fail_external_boot``, an
+    ``ExternalBootAuthorityConflictV1`` to ``queue.record_external_boot_conflict``, and anything
+    else — the bare base class included — is logged as an "untyped result variant" and **written
+    nowhere**, so
     the job keeps its lease and wedges ``running``. Returning the base class would satisfy every
     type annotation and every binding check and still never commit.
     """
-    marker = context.marker
-    return ExternalBootAuthoritySuccessV1.model_validate(
-        {
-            "schema": "external-boot-authority-result-v1",
-            "authority_id": context.authority.authority_id,
-            "generation": context.authority.generation,
-            "activation_id": marker.activation_id,
-            "run_id": marker.run_id,
-            "system_id": marker.system_id,
-            "plan_identity": marker.plan_identity,
-            "purpose": marker.purpose,
-            "provider_kind": marker.provider_kind,
-            "authority_instance": marker.authority_instance,
-            "admitted_operation": marker.operation,
-            "operation_identity": marker.operation_identity,
-            "operation_digest": context.authority.operation_digest,
-            "journal_sequence": context.acknowledgement.journal_sequence,
-            "journal_digest": context.acknowledgement.journal_digest,
-            "result": result,
-        }
+    return ExternalBootAuthoritySuccessV1.model_validate(_bound(context, result))
+
+
+def conflict_result(
+    context: OperationContext, observation: AuthorityObservationV1
+) -> ExternalBootAuthorityConflictV1:
+    """Carry the authority's conflict observation to the head-checked commit (ADR-0805).
+
+    The commit re-reads the observation id and composite from the authority's own terminal journal
+    head and refuses a carrier that differs, so these two values are a claim the database checks.
+    """
+    evidence = {
+        "schema": "external-boot-conflict-evidence-v1",
+        "activation_id": str(context.marker.activation_id),
+        "system_id": str(context.marker.system_id),
+        "observation_id": str(observation.observation_id),
+        "composite_state": observation.composite_state,
+        "objects": [{"ref": ref} for ref in known_object_refs(context.activation)],
+        "observed_at": _now(),
+    }
+    return ExternalBootAuthorityConflictV1.model_validate(
+        _bound(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "conflict",
+                "evidence": evidence,
+            },
+        )
     )
+
+
+def _bound(context: OperationContext, result: dict[str, Any]) -> dict[str, Any]:
+    marker = context.marker
+    return {
+        "schema": "external-boot-authority-result-v1",
+        "authority_id": context.authority.authority_id,
+        "generation": context.authority.generation,
+        "activation_id": marker.activation_id,
+        "run_id": marker.run_id,
+        "system_id": marker.system_id,
+        "plan_identity": marker.plan_identity,
+        "purpose": marker.purpose,
+        "provider_kind": marker.provider_kind,
+        "authority_instance": marker.authority_instance,
+        "admitted_operation": marker.operation,
+        "operation_identity": marker.operation_identity,
+        "operation_digest": context.authority.operation_digest,
+        "journal_sequence": context.acknowledgement.journal_sequence,
+        "journal_digest": context.acknowledgement.journal_digest,
+        "result": result,
+    }
 
 
 def _now() -> str:

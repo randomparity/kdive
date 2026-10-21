@@ -427,6 +427,7 @@ def test_post_provider_interruption_replays_without_a_second_mutation(
             readiness_reads = ["observe", "observe"] if operation == "activate" else []
             assert case.vehicle.port.calls == [*spec["port_calls"], *readiness_reads]
 
+            assert isinstance(replayed, ExternalBootAuthoritySuccessV1)
             committed = await queue.complete_external_boot(
                 worker,
                 job,
@@ -485,6 +486,7 @@ async def _run_operation(
             worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
         )
         if result.result.operation == "recovery-attempt":
+            assert isinstance(result, ExternalBootAuthoritySuccessV1)
             committed = await queue.complete_external_boot(
                 worker,
                 _job(case),
@@ -492,9 +494,10 @@ async def _run_operation(
                 incarnation_credential=SecretStr(case.credential),
             )
             assert committed is not None
-            return await handler(
+            result = await handler(
                 worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
             )
+        assert isinstance(result, ExternalBootAuthoritySuccessV1)
         return result
     del seed
 

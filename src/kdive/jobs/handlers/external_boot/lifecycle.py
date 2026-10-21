@@ -27,6 +27,7 @@ from kdive.domain.external_boot_timing import timing_deadline
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.evidence import (
     authority_result,
+    conflict_result,
     evidence_digest,
     terminal_evidence,
 )
@@ -43,6 +44,7 @@ from kdive.jobs.handlers.external_boot.runner import (
 )
 from kdive.jobs.handlers.system_reclaim import reclaim_system_core_after_provider_teardown
 from kdive.jobs.models import (
+    ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
     ExternalBootDerivedReleaseCompletion,
@@ -85,6 +87,8 @@ _CLEANUP_STATES: Final = frozenset(
     {State.RECOVERED, State.ABANDONED, State.RECOVERY_CONFLICT, State.RECOVERY_FAILED}
 )
 _ORDINARY_CLEANUP_STATES: Final = frozenset({State.RECOVERED, State.ABANDONED})
+# ADR-0805: the authority journals both as a terminal ``conflict`` outcome.
+_CONFLICT_CATEGORIES: Final = frozenset({"conflict", "mixed"})
 
 
 async def execute_remote_module_lifecycle_on_authority_host(**values: Any) -> Any:
@@ -216,7 +220,9 @@ def _derived_request(context: OperationContext, operation: str) -> AuthorityMuta
     )
 
 
-async def _run_active_release(context: OperationContext) -> ExternalBootDerivedReleaseCompletion:
+async def _run_active_release(
+    context: OperationContext,
+) -> ExternalBootDerivedReleaseCompletion | ExternalBootAuthorityConflictV1:
     """Commit the two derived mutations before the one root release completion."""
     executor = context.prerequisites.get("authority_executor")
     if executor is None:
@@ -245,6 +251,8 @@ async def _run_active_release(context: OperationContext) -> ExternalBootDerivedR
             context, recover, cast(ExternalBootAuthorityExecutor, executor)
         )
         observed = await cast(ExternalBootAuthorityExecutor, executor).execute(recover)
+        if observed.category in _CONFLICT_CATEGORIES:
+            return conflict_result(context, observed)
         _require_category(context, observed, "source")
         evidence = terminal_evidence(context, "recovered")
         status = await _derived_release_status(
@@ -643,12 +651,14 @@ def _handler(
 ) -> ExternalBootOperationHandler:
     async def handler(
         conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
-    ) -> ExternalBootAuthoritySuccessV1:
+    ) -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
         def checked_build(
             context: OperationContext,
             observations: tuple[AuthorityObservationV1, RunningKernelObservation | None],
-        ) -> ExternalBootAuthoritySuccessV1:
+        ) -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
             authority_observation, kernel_observation = observations
+            if authority_observation.category in _CONFLICT_CATEGORIES:
+                return conflict_result(context, authority_observation)
             _require_category(context, authority_observation, expected_observation)
             if expected_observation == "target":
                 _require_observed_kernel_matches(context, kernel_observation)
@@ -935,7 +945,9 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     infer absence from a release request or credit while owned artifacts remain.
     """
 
-    async def complete(context: OperationContext) -> ExternalBootDerivedReleaseCompletion:
+    async def complete(
+        context: OperationContext,
+    ) -> ExternalBootDerivedReleaseCompletion | ExternalBootAuthorityConflictV1:
         prerequisites = dict(context.prerequisites)
         prerequisites.update(
             connection=context.prerequisites["connection"],
@@ -948,9 +960,9 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
 
     async def handler(
         conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
-    ) -> ExternalBootAuthoritySuccessV1:
+    ) -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
         return cast(
-            ExternalBootAuthoritySuccessV1,
+            ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1,
             await run_operation(
                 conn,
                 job,
