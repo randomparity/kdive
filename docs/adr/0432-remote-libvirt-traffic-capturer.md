@@ -140,8 +140,9 @@ provider showed both refusals once #3294 let QEMU's reply reach the capturer.
   with per-domain MCS categories; both DAC and SELinux deny the create. Relabelling the disk pool
   would make every resting image writable by every domain. Remote pcaps therefore go to a dedicated
   dir pool, `KDIVE_REMOTE_LIBVIRT_PCAP_POOL` (default `kdive-pcap`), that `libvirt_pool_net`
-  provisions at `/var/lib/libvirt/kdive-pcap`: owned by the family's QEMU runtime user, mode
-  `0770`, with the same permissions in the pool XML. The target sits outside
+  provisions at `/var/lib/libvirt/kdive-pcap`: owned by the family's QEMU runtime user with group
+  `root` (the QEMU user's primary group, `kvm` on Debian, has members that must not read other
+  Systems' captures), mode `0770`, with the same permissions in the pool XML. The target sits outside
   `/var/lib/libvirt/kdive`, which the boot-artifact pool leaves `root:libvirt 0770`, and the role
   checks as the QEMU runtime user that it can reach and write the directory. On an SELinux-enforcing
   host the role adds an

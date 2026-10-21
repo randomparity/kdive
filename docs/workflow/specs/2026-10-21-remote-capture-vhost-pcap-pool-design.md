@@ -48,8 +48,10 @@ capture reaper and the live-stack lane spool use it in place of `storage_pool`. 
 
 `libvirt_pool_net` provisions the pool on every host it already prepares:
 
-- directory `/var/lib/libvirt/kdive-pcap`, owned by the QEMU runtime user and group of the host's
-  family (`qemu:qemu` on RedHat and SUSE, `libvirt-qemu:kvm` on Debian), mode `0770`;
+- directory `/var/lib/libvirt/kdive-pcap`, owned by the QEMU runtime user of the host's family
+  (`qemu` on RedHat and SUSE, `libvirt-qemu` on Debian) with group `root`, mode `0770`. The group
+  is not the QEMU user's primary group: on Debian that is `kvm`, whose members include the provider
+  authority account, which must not read other Systems' captures;
 - the pool XML carries the same owner, group and mode in `<permissions>`, so a pool build does not
   reset the directory to libvirt's `0711` default;
 - the directory sits outside `/var/lib/libvirt/kdive`, whose boot-artifact pool leaves it

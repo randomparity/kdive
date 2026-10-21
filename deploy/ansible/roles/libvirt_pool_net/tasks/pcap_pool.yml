@@ -11,10 +11,8 @@
     path: "{{ libvirt_pool_net_pcap_pool_target }}"
     state: directory
     owner: "{{ libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family] }}"
-    group: "{{ libvirt_pool_net_pcap_pool_gid }}"
+    group: root
     mode: "{{ libvirt_pool_net_pcap_pool_mode }}"
-  vars:
-    libvirt_pool_net_pcap_pool_gid: "{{ ansible_facts.getent_passwd[libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family]][2] }}"
 
 # define is a no-op for an existing pool, so the target check below catches a stale definition. The
 # XML permissions keep the directory 0770 should anyone later run a pool build, which resets a dir
@@ -31,7 +29,7 @@
           <permissions>
             <mode>{{ libvirt_pool_net_pcap_pool_mode }}</mode>
             <owner>{{ libvirt_pool_net_pcap_pool_passwd[1] }}</owner>
-            <group>{{ libvirt_pool_net_pcap_pool_passwd[2] }}</group>
+            <group>0</group>
           </permissions>
         </target>
       </pool>
@@ -147,9 +145,10 @@
       - libvirt_pool_net_pcap_pool_stat.stat.isdir
       - libvirt_pool_net_pcap_pool_stat.stat.mode == libvirt_pool_net_pcap_pool_mode
       - libvirt_pool_net_pcap_pool_stat.stat.pw_name == libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family]
+      - libvirt_pool_net_pcap_pool_stat.stat.gr_name == 'root'
     fail_msg: >-
       pcap pool {{ libvirt_pool_net_pcap_pool_target }} is not a {{ libvirt_pool_net_pcap_pool_mode }}
-      directory owned by {{ libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family] }}:
+      directory owned by {{ libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family] }}:root:
       {{ libvirt_pool_net_pcap_pool_stat.stat | default({}) }}
 
 # The leaf's owner and mode say nothing about its ancestors; a parent the QEMU user cannot

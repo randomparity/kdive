@@ -81,7 +81,7 @@ pcap_define = next(
 for permission in (
     "<mode>{{ libvirt_pool_net_pcap_pool_mode }}</mode>",
     "<owner>{{ libvirt_pool_net_pcap_pool_passwd[1] }}</owner>",
-    "<group>{{ libvirt_pool_net_pcap_pool_passwd[2] }}</group>",
+    "<group>0</group>",
 ):
     require(permission in pcap_define["xml"], f"pcap pool XML must carry {permission}")
 
