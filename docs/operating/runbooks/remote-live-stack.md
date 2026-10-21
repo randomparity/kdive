@@ -66,9 +66,10 @@ operational env settings (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `_NETWORK`, `_MAC
 `_PCAP_POOL`).
 
 `control.capture_traffic` writes into a dedicated `kdive-pcap` dir pool at
-`/var/lib/libvirt/kdive/pcap`, which `site.yml` provisions
+`/var/lib/libvirt/kdive-pcap`, which `site.yml` provisions
 ([ADR-0432](../../adr/0432-remote-libvirt-traffic-capturer.md) amendment): owned by the QEMU
-runtime user, labelled `svirt_image_t` on an SELinux-enforcing host, and allowed through a
+runtime user, labelled `svirt_image_t` on an SELinux-enforcing RedHat-family host (an enforcing
+SUSE host needs that label applied by hand), and allowed through a
 `libvirt-qemu.d` drop-in on an AppArmor host. On an AppArmor host any domain's QEMU may write any
 pcap in that directory; AppArmor has no per-domain categories. The remote data NIC renders without
 vhost-net, because QEMU refuses a capture filter on a vhost netdev. After upgrading, rerun
