@@ -36,6 +36,8 @@ from tests.providers.remote_libvirt.conftest import libvirt_error
 _SID = UUID("00000000-0000-0000-0000-0000000000cc")
 _JID = UUID("00000000-0000-0000-0000-0000000000dd")
 
+pytestmark = pytest.mark.usefixtures("fake_domain_monitor")
+
 _CERT_REFS = TlsCertRefs(
     client_cert_ref="secret://client-cert",
     client_key_ref="secret://client-key",  # pragma: allowlist secret
@@ -55,18 +57,25 @@ def _capture() -> OrphanedCapture:
 
 
 class _FakeDomain:
-    def __init__(self, calls: list[str], *, monitor_error: libvirt.libvirtError | None = None):
+    def __init__(
+        self,
+        calls: list[str],
+        *,
+        monitor_error: libvirt.libvirtError | None = None,
+        reply: str = '{"return": {}}',
+    ):
         self._calls = calls
         self._monitor_error = monitor_error
+        self._reply = reply
         self.del_commands: list[str] = []
 
-    def qemuMonitorCommand(self, cmd: str, flags: int) -> str:  # noqa: N802
+    def monitor(self, cmd: str, flags: int) -> str:
         del flags
         self._calls.append("object-del")
         self.del_commands.append(cmd)
         if self._monitor_error is not None:
             raise self._monitor_error
-        return '{"return": {}}'
+        return self._reply
 
 
 class _FakeVolume:
@@ -204,7 +213,10 @@ def test_a_missing_filter_is_tolerated(tmp_path: Path) -> None:
     calls: list[str] = []
     conn = _FakeConn(
         domain=_FakeDomain(
-            calls, monitor_error=libvirt.libvirtError("object 'kdive-dump-x' not found")
+            calls,
+            reply=json.dumps(
+                {"error": {"class": "GenericError", "desc": "object 'kdive-dump-x' not found"}}
+            ),
         )
     )
 
@@ -212,6 +224,29 @@ def test_a_missing_filter_is_tolerated(tmp_path: Path) -> None:
 
     assert reclaimed is True
     assert "volume-delete" in conn.calls
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        json.dumps({"error": {"class": "GenericError", "desc": "object is in use"}}),
+        "{}",
+        "not json",
+    ],
+    ids=["refused", "malformed-shape", "malformed-json"],
+)
+def test_a_refused_or_malformed_filter_reply_surfaces_as_categorized(
+    tmp_path: Path, reply: str
+) -> None:
+    """QEMU's error reply arrives on a successful libvirt call; it must not read as detached."""
+    calls: list[str] = []
+    conn = _FakeConn(domain=_FakeDomain(calls, reply=reply))
+
+    with pytest.raises(CategorizedError) as raised:
+        _reclaim(conn, tmp_path)
+
+    assert raised.value.category is ErrorCategory.CONTROL_FAILURE
+    assert "volume-delete" not in conn.calls
 
 
 def test_a_missing_domain_is_tolerated(tmp_path: Path) -> None:

@@ -23,14 +23,14 @@ import libvirt
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.qmp_reply import (
+from kdive.providers.local_libvirt.lifecycle.xml import SYSTEM_SSH_NETDEV_ID
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+from kdive.providers.ports.traffic import TrafficCapturer as TrafficCapturer
+from kdive.providers.shared.qmp_reply import (
     MalformedQmpReplyError,
     QmpReply,
     parse_qmp_reply,
 )
-from kdive.providers.local_libvirt.lifecycle.xml import SYSTEM_SSH_NETDEV_ID
-from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.ports.traffic import TrafficCapturer as TrafficCapturer
 from kdive.providers.shared.runtime_paths import (
     PCAP_HYPERVISOR_WRITE_REMEDIATION,
     pcap_path,
@@ -58,8 +58,6 @@ def _close(conn: _LibvirtConn) -> None:
         _log.warning("libvirt connection close failed; continuing", exc_info=True)
 
 
-_PCAP_OPEN_REFUSAL = "net dump: can't open "
-_EACCES_SUFFIX = ": Permission denied"
 # QEMU-controlled text reaches operator logs only, bounded and repr-quoted.
 _LOGGED_DESCRIPTION_CHARS = 256
 
@@ -183,9 +181,7 @@ class LocalLibvirtTrafficCapture:
             reply.error_class,
             reply.description[:_LOGGED_DESCRIPTION_CHARS],
         )
-        if reply.description.startswith(_PCAP_OPEN_REFUSAL) and reply.description.endswith(
-            _EACCES_SUFFIX
-        ):
+        if reply.pcap_open_denied:
             raise CategorizedError(
                 "the hypervisor was denied creating the capture pcap",
                 category=ErrorCategory.CONFIGURATION_ERROR,
