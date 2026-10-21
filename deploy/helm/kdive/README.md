@@ -284,7 +284,7 @@ When `systems.configMapName` is set, the chart mounts that ConfigMap read-only a
 reconciler, and sets `KDIVE_SYSTEMS_TOML` to the mounted `systems.fileName`. Use
 `config.*` only for the remaining remote-libvirt host-topology env vars that are not
 inventory identity: `KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `KDIVE_REMOTE_LIBVIRT_NETWORK`,
-and `KDIVE_REMOTE_LIBVIRT_MACHINE`.
+`KDIVE_REMOTE_LIBVIRT_MACHINE`, and `KDIVE_REMOTE_LIBVIRT_PCAP_POOL`.
 
 For S3, prefer IRSA/workload identity, or a managed Secret you `envFrom` onto the pods.
 The fixed `demoCredentials` are non-secret by design: the demo data they guard is
