@@ -68,7 +68,7 @@ ctime. Under the session daemon, qemu runs with that uid.
 
 libvirt's SELinux driver labels every non-top backing-chain image `virt_content_t` each time a
 domain starts. It calls `setfilecon` without comparing the current label and never restores a
-read-only image at stop. setxattr changes ctime even when the value is the same. The session
+backing-chain image at stop. setxattr changes ctime even when the value is the same. The session
 daemon runs as the authority account, which owns the base, so the relabel lands, and the
 authority exited once after every System start. The live run that found this was a remote
 authority on Fedora with SELinux enforcing.
@@ -77,7 +77,7 @@ The contract is now:
 
 - The base carries `virt_content_t` before any domain uses it. A confined `svirt_t` domain may
   read and map that type but not write it. The `provider_authority_host` role writes an
-  exact-path fcontext rule for each staged base and runs `restorecon` on it wherever `getenforce`
+  exact-path fcontext rule for each staged base and runs `restorecon -F` on it wherever `getenforce`
   reports SELinux enabled. A relabel changes ctime, so the role restarts the authority.
 - libvirt must not relabel the base. Local and remote authority domains render the base as an
   explicit `<backingStore>` whose source carries `<seclabel model='selinux' relabel='no'/>`. The
@@ -96,10 +96,17 @@ Ordinary local and remote Systems are unchanged. Their daemons relabel the backi
 themselves, and ADR-0640 rejects a `relabel='no'` seclabel for them. An authority domain is
 always on its private session daemon, where that rejection's reason, a privileged daemon's
 relabel, does not apply. A base that is relabelled out of band, such as by a `restorecon -F`
-under a different rule, fails the next domain start with a qemu permission error. The authority
-also exits until it is restarted, which re-hashes the base. Considered: dropping ctime from the
-comparison. Rejected, because ctime is the field that catches the same-uid rewrite described
-above.
+under a different rule, fails the next domain start on an enforcing host with a qemu permission
+error. The authority also exits until it is restarted, which re-hashes the base.
+
+Both identity schemas move to v2: the local domain identity now projects the backing store, and
+the remote intent's domain projection projects its seclabel. A local System recorded before
+this change no longer matches its domain, and a stored remote provision intent no longer loads.
+Deploy this only to an authority host with no live authority Systems and no stored provision
+intents.
+
+Considered: dropping ctime from the comparison. Rejected, because ctime is the field that
+catches the same-uid rewrite described above.
 
 ## Considered & rejected
 

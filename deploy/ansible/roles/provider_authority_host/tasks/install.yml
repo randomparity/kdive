@@ -263,8 +263,8 @@
 # because libvirt's sVirt relabel at every start changes the base's ctime and the authority's
 # staged-base check treats that as tampering. The base must therefore already carry
 # virt_content_t, which a confined svirt_t domain may read and map but not write. getenforce,
-# not the selinux fact, decides, as in local_worker_host (ADR-0640): a permissive host still gets
-# the label so a later switch to enforcing does not strand its bases.
+# not the selinux fact, decides, as in local_worker_host (ADR-0640). Unlike that role, a
+# permissive host also gets the label, so a later switch to enforcing does not strand its bases.
 - name: Read the SELinux mode for the authority System bases
   ansible.builtin.command:
     argv: [getenforce]
@@ -314,11 +314,13 @@
   when: provider_authority_host_system_manifest_source | length > 0
   notify: Restart provider authority after deployed changes
 
-# A relabel changes the base's ctime, which the running authority recorded at startup, so it
-# restarts the authority like any other deployed base change.
+# -F, unlike local_worker_host: virt_content_t and other types a base might carry are
+# customizable, which a plain restorecon leaves alone, and a base wants its exact context, not a
+# running domain's MCS categories. A relabel changes the base's ctime, which the running authority
+# recorded at startup, so it restarts the authority like any other deployed base change.
 - name: Relabel the authority System bases
   ansible.builtin.command:
-    argv: [restorecon, -v, "{{ item }}"]
+    argv: [restorecon, -F, -v, "{{ item }}"]
   loop: >-
     {{ provider_authority_host_system_base_destinations.results | default([])
        | map(attribute='item') | list }}

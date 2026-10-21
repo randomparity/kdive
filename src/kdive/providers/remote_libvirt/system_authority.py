@@ -560,7 +560,7 @@ def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, obje
 
 
 def _projection_identity(domain_xml: str) -> str:
-    return _digest(b"kdive-remote-authority-system-domain-v1", _domain_projection(domain_xml))
+    return _digest(b"kdive-remote-authority-system-domain-v2", _domain_projection(domain_xml))
 
 
 class _PrivateState:

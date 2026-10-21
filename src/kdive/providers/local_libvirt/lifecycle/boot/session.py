@@ -1889,7 +1889,7 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
         for interface in root.findall("devices/interface")
     )
     value = {
-        "schema": "kdive-local-authority-domain-semantics-v1",
+        "schema": "kdive-local-authority-domain-semantics-v2",
         "domain_type": root.get("type"),
         "name": root.findtext("name"),
         "uuid": root.findtext("uuid"),
@@ -1931,7 +1931,7 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
         "system_metadata": root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system"),
     }
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return _digest(b"kdive-local-authority-domain-semantics-v1", payload)
+    return _digest(b"kdive-local-authority-domain-semantics-v2", payload)
 
 
 def _memory_bytes(memory: ET.Element | None) -> int | None:

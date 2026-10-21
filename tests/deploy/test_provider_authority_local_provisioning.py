@@ -710,7 +710,7 @@ def test_authority_system_bases_carry_a_static_virt_content_label() -> None:
         "setype": "virt_content_t",
         "state": "present",
     }
-    assert relabel["ansible.builtin.command"]["argv"] == ["restorecon", "-v", "{{ item }}"]
+    assert relabel["ansible.builtin.command"]["argv"] == ["restorecon", "-F", "-v", "{{ item }}"]
     assert "Relabeled" in relabel["changed_when"]
     assert relabel["notify"] == "Restart provider authority after deployed changes"
     for task in (rules, relabel):
