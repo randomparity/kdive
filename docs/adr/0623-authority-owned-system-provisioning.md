@@ -57,6 +57,45 @@ Retained quarantine never performs core cleanup or releases capacity. Provider
 deployment must stage the same digest-pinned base directly into the authority
 store.
 
+### Amendment (2026-10-21): libvirt must not relabel the staged base (#3315)
+
+This adds a deployment contract to "Provider deployment must stage the same digest-pinned base".
+It does not change the provisioning lane. The authority hashes each staged base at startup and
+then compares its device, inode, size, mtime and ctime on every readiness check and before
+every provision. Any difference exits the authority. ctime stays in that comparison because an
+actor with the authority's uid can rewrite a base and restore its mtime, but cannot restore its
+ctime. Under the session daemon, qemu runs with that uid.
+
+libvirt's SELinux driver labels every non-top backing-chain image `virt_content_t` each time a
+domain starts. It calls `setfilecon` without comparing the current label and never restores a
+read-only image at stop. setxattr changes ctime even when the value is the same. The session
+daemon runs as the authority account, which owns the base, so the relabel lands, and the
+authority exited once after every System start. The live run that found this was a remote
+authority on Fedora with SELinux enforcing.
+
+The contract is now:
+
+- The base carries `virt_content_t` before any domain uses it. A confined `svirt_t` domain may
+  read and map that type but not write it. The `provider_authority_host` role writes an
+  exact-path fcontext rule for each staged base and runs `restorecon` on it wherever `getenforce`
+  reports SELinux enabled. A relabel changes ctime, so the role restarts the authority.
+- libvirt must not relabel the base. Local and remote authority domains render the base as an
+  explicit `<backingStore>` whose source carries `<seclabel model='selinux' relabel='no'/>`. The
+  overlay keeps libvirt's dynamic label. The authority's retained-domain identities include that
+  seclabel, so a definition without it, or with `relabel='yes'`, reads as drift.
+- The seclabel is inert on AppArmor and unconfined hosts. libvirt ignores a `relabel='no'`
+  seclabel for a security model it has not loaded, and its AppArmor driver changes no file
+  metadata.
+
+Ordinary local and remote Systems are unchanged. Their daemons relabel the backing chain
+themselves, and ADR-0640 rejects a `relabel='no'` seclabel for them. An authority domain is
+always on its private session daemon, where that rejection's reason, a privileged daemon's
+relabel, does not apply. A base that is relabelled out of band, such as by a `restorecon -F`
+under a different rule, fails the next domain start with a qemu permission error. The authority
+also exits until it is restarted, which re-hashes the base. Considered: dropping ctime from the
+comparison. Rejected, because ctime is the field that catches the same-uid rewrite described
+above.
+
 ## Considered & rejected
 
 - **Provision through the worker and hand the domain to the authority.**
