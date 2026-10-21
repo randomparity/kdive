@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+import zlib
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +25,46 @@ def test_read_vmcoreinfo_build_id_parses_the_note_line() -> None:
     vmcoreinfo = b"VMCOREINFO\x00OSRELEASE=7.0.0\nBUILD-ID=%s\nPAGESIZE=4096\n" % _BUILD_ID.encode()
     blob = b"\x00" * 128 + vmcoreinfo
     assert read_vmcoreinfo_build_id(blob) == _BUILD_ID
+
+
+def _vmcoreinfo_note(vmcoreinfo: bytes) -> bytes:
+    desc = vmcoreinfo + b"\x00" * (-len(vmcoreinfo) % 4)
+    return struct.pack("<III", 11, len(vmcoreinfo), 0) + b"VMCOREINFO\x00\x00\x00" + desc
+
+
+def _elf_core(vmcoreinfo: bytes) -> bytes:
+    # virsh dump --memory-only (host_dump): ELF header, program headers, then the PT_NOTE
+    # segment carrying QEMU's VMCOREINFO note, ahead of every PT_LOAD memory segment.
+    note = _vmcoreinfo_note(vmcoreinfo)
+    note_off = 64 + 2 * 56
+    header = b"\x7fELF\x02\x01\x01" + b"\x00" * 9
+    header += struct.pack("<HHIQQQIHHHHHH", 4, 62, 1, 0, 64, 0, 0, 64, 56, 2, 0, 0, 0)
+    load_off = note_off + len(note)
+    phdrs = struct.pack("<IIQQQQQQ", 4, 0, note_off, 0, 0, len(note), len(note), 0)
+    phdrs += struct.pack("<IIQQQQQQ", 1, 7, load_off, 0, 0, 4096, 4096, 4096)
+    return header + phdrs + note + b"\x00" * 4096
+
+
+def _kdump_compressed_core(vmcoreinfo: bytes) -> bytes:
+    # makedumpfile -c/-l (kdump): the KDUMP disk_dump_header block, then the kdump_sub_header
+    # whose offset_vmcoreinfo/size_vmcoreinfo (at +32) point at the raw, uncompressed
+    # VMCOREINFO text right after it, ahead of the bitmaps and compressed pages.
+    block = 4096
+    offset = block + 128
+    sub_header = struct.pack("<QiiQQQQ", 0, 31, 0, 0, 8, offset, len(vmcoreinfo))
+    core = b"KDUMP   ".ljust(block, b"\x00") + sub_header.ljust(128, b"\x00") + vmcoreinfo
+    return core.ljust(2 * block, b"\x00") + zlib.compress(b"\x00" * block)
+
+
+@pytest.mark.parametrize("build_core", [_elf_core, _kdump_compressed_core])
+def test_read_vmcoreinfo_build_id_reads_both_remote_core_formats(
+    build_core: Callable[[bytes], bytes],
+) -> None:
+    # #3317: remote postmortem.crash compares this reader's output against the Run's build-id,
+    # so it must yield the same lowercase 40-hex string from a host_dump ELF core and from a
+    # kdump-compressed core alike.
+    vmcoreinfo = b"OSRELEASE=7.0.0\nBUILD-ID=%s\nPAGESIZE=4096\n" % _BUILD_ID.encode()
+    assert read_vmcoreinfo_build_id(build_core(vmcoreinfo)) == _BUILD_ID
 
 
 def test_read_vmcoreinfo_build_id_missing_is_configuration_error() -> None:
