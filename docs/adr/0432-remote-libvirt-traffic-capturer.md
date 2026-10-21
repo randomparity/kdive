@@ -178,7 +178,12 @@ provider showed both refusals once #3294 let QEMU's reply reach the capturer.
 Consequences:
 
 - The data NIC loses vhost-net on every ordinary remote System. The SSH forward and the gdbstub do
-  not use it.
+  not use it. Measured on 2026-10-21 on a nested Rocky Linux 10.2 provider (8 vCPU KVM guest):
+  two otherwise identical guests, one with vhost-net, one with `<driver name='qemu'/>`, each
+  moving 4 GiB three times over a single TCP stream to and from the host bridge (`dd` over a bash
+  `/dev/tcp` socket; iperf3 could not be installed in the egress-less guests). Medians:
+  guest-to-host 7.1 GB/s with vhost and 7.6 GB/s without; host-to-guest 12.5 GB/s with vhost and
+  8.3 GB/s without, about a third lower. A kernel-debugging guest rarely needs either rate.
 - Under SELinux the pre-created pcap is `svirt_image_t:s0`, created by the storage daemon, not
   `svirt_image_t` at the writing domain's MCS categories as a QEMU-created file would be. Every
   domain dominates `s0`, so another confined QEMU could open it by path. It cannot list the
