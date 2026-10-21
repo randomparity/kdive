@@ -29,10 +29,9 @@ from uuid import uuid4
 
 import boto3
 import pytest
-from botocore.client import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
-from kdive.store.objectstore import ObjectStore
+from kdive.store.objectstore import S3_CLIENT_CONFIG, ObjectStore
 from tests.support import xdist_backend
 
 # The image is pinned to its OCI index digest so a re-tag cannot silently change the
@@ -116,7 +115,8 @@ def _s3_client(endpoint: str, access: str, secret: str) -> Any:
         region_name=_REGION,
         aws_access_key_id=access,
         aws_secret_access_key=secret,
-        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+        # Production's signing config, so the fixture cannot drift from the stack's (#3313).
+        config=S3_CLIENT_CONFIG,
     )
 
 

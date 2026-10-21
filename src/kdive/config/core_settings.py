@@ -86,6 +86,10 @@ def _nonnegative_int_at_most(maximum: int) -> Callable[[str], int]:
     return parse
 
 
+#: SigV4's presigned-URL expiry ceiling (7 days); the object store rejects a longer one.
+_SIGV4_MAX_PRESIGN_SECONDS = 604_800
+
+
 def _positive_int(raw: str) -> int:
     """Parse a count that is meaningless at zero or below."""
     value = int(raw)
@@ -346,15 +350,17 @@ ARTIFACT_INLINE_MAX_BYTES = Setting(
 )
 ARTIFACT_DOWNLOAD_TTL_SECONDS = Setting(
     name="KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS",
-    parse=_int,
+    # Every value is a SigV4 presign expiry, which the object store rejects above 7 days (#3313).
+    parse=_nonnegative_int_at_most(_SIGV4_MAX_PRESIGN_SECONDS),
     default="900",
     group="artifacts",
     processes=_SERVER,
     help=(
         "Expiry in seconds of the presigned download URL `artifacts.get` mints in "
-        "`refs.download_uri` for a redacted artifact (ADR-0140)."
+        "`refs.download_uri` for a redacted artifact (ADR-0140). At most 604800 (7 days), "
+        "the SigV4 presigned-URL ceiling."
     ),
-    suggest="an integer number of seconds, e.g. 900",
+    suggest="an integer number of seconds up to 604800, e.g. 900",
 )
 REPORT_INLINE_MAX_BYTES = Setting(
     name="KDIVE_REPORT_INLINE_MAX_BYTES",
