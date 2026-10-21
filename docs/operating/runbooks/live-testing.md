@@ -268,13 +268,14 @@ overlay and console owner and the live private-daemon domain before any public i
 request. The configured System must be disposable; this setup is not a migration mechanism for
 ordinary worker-owned Systems.
 
-**Fixture cleanup.** In `create` mode the fixture script reports the five exact names it made for
+**Fixture cleanup.** In `create` mode the fixture script reports the six exact names it made for
 the configured System, and the carrier records each one in its resource ledger:
 
 - `/var/lib/kdive/provider-authority/rootfs/<uuid>-fixture-base.qcow2`
 - `/var/lib/kdive/provider-authority/rootfs/<uuid>-baseline`
 - `/var/lib/kdive/provider-authority/rootfs/<uuid>-overlay.qcow2`
 - `/var/lib/kdive/provider-authority/console/<uuid>.log`
+- `/var/lib/kdive/provider-authority/console/<uuid>.boot` (the per-start boot marker, #3254)
 - the domain `kdive-<uuid>` on the private authority daemon
 
 When the rest of the run ends, whether it passed or failed and after the Investigation close
@@ -294,6 +295,7 @@ came back. Run the same exact-name mode, domain first:
 ```sh
 uuid=<system_id>
 for name in "kdive-$uuid" \
+  "/var/lib/kdive/provider-authority/console/$uuid.boot" \
   "/var/lib/kdive/provider-authority/console/$uuid.log" \
   "/var/lib/kdive/provider-authority/rootfs/$uuid-overlay.qcow2" \
   "/var/lib/kdive/provider-authority/rootfs/$uuid-baseline" \
@@ -321,7 +323,7 @@ the allocation has external-boot history (#2966): the teardown always runs first
 
 - `create` (the default): the fixture script refuses when the System's domain still exists on
   the private authority daemon. Otherwise it removes the System's worker domain and old fixture
-  files, provisions a new fixture on the private authority daemon, and reports its five names.
+  files, provisions a new fixture on the private authority daemon, and reports its six names.
   The carrier records them and removes them when the run ends
   ([fixture cleanup](#installed-local-authority-carrier)).
 - `verify-existing`: the carrier only verifies, read-only, a fixture that is already present, and
@@ -1131,8 +1133,10 @@ in the [remote runbook](remote-live-stack.md#11-remote-orchestration-fault-cells
 
 `tests/integration/test_core_tool_cells_live.py::test_core_tool_cell` has one parameter for each
 contract cell of `session.whoami`, `projects.list`, `tools.search`, `tools.invoke`,
-`fixtures.validate` and `systems.profile_examples`: 56 cells, each a configuration (`default` or
-`recovery`), an exposure (`direct` or `gateway`) and a kind (`functional`, `authentication` or
+`fixtures.validate` and `systems.profile_examples`: 84 cells, each a configuration (`default` or
+`recovery`), an exposure (`direct` or `gateway`, or `cli` for the core service tools, which drives
+the tool's generated `kdivectl` verb per
+[ADR-0795](../../adr/0795-cli-translation-exposure.md)) and a kind (`functional`, `authentication` or
 `validation`). [ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md)
 defines what each of those means. The harness in `tests/integration/live_stack/tool_cells.py` is
 shared by the later tool-cell carriers.
@@ -1161,7 +1165,7 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Each pytest run reports 28 cells skipped for the other configuration: the second run must skip the
+Each pytest run reports 42 cells skipped for the other configuration: the second run must skip the
 `…/default/default/…` cells, not the `…/default/recovery/…` ones. Run the pytest commands with
 `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, the least-privilege harness login: the
 protected-state snapshot reads every table with a `project` column, some of which the server DSN
@@ -1172,9 +1176,10 @@ next role-bootstrap run.
 A functional cell compares the tool's answer with the token's own claims, the fixture catalog and `systems.toml`
 read by the test process, or, for `tools.search`, the operator-direct catalog. A rejection cell
 proves its boundary (HTTP 401 for a token signed by a foreign key, where the issued token is not
-refused; a schema-validation failure for invalid arguments) and that the cell's project rows did not change. The tools create nothing, so
+refused; a schema-validation failure for invalid arguments; on `cli`, the readings of
+[ADR-0795](../../adr/0795-cli-translation-exposure.md) decision 3) and that the cell's project rows did not change. The tools create nothing, so
 there is nothing to tear down beyond the stack itself. `qualify` exits 1 because other owners'
-cells have no result; read the 56 `tool/…` rows of these six tools.
+cells have no result; read the 84 `tool/…` rows of these six tools.
 
 Last run: candidate `e3354a190` (server, worker and reconciler at that SHA in both lanes), a
 disposable Fedora 44 x86_64 lab guest with SELinux enforcing; the same result held at `09a80767c`
@@ -1187,7 +1192,7 @@ recovery lane started with `local` proved `default` again, which is why the lane
 
 #### Catalog and configuration tool cells (#3095)
 
-`tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell` carries the 152 cells
+`tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell` carries the 228 cells
 of `images.{delete,describe,kernel_config,list,upload}`, `shapes.{delete,list,set}` and
 `resources.{availability,describe,list}` on the same harness, lanes, bindings and assembly as the
 core cells above; run both files in each lane's pytest command. The
@@ -1230,7 +1235,7 @@ A cell killed mid-run can leave any of these behind; `demo-down.sh --wipe --yes`
 #### Investigation and artifact tool cells (#3096)
 
 `tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell` carries the
-260 cells of `investigations.{open,get,list,set,link,unlink,close,complete_rootfs_upload}` and
+390 cells of `investigations.{open,get,list,set,link,unlink,close,complete_rootfs_upload}` and
 `artifacts.{create_investigation_upload,create_run_upload,fetch_raw,get,list}` on the same harness,
 lanes, bindings and assembly; run all three carriers in each lane's pytest command. The
 [design](../../workflow/specs/2026-10-02-investigation-tool-cells-design.md) lists what each

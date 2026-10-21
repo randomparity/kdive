@@ -30,12 +30,12 @@ from kdive.services.systems.validation import validate_profile_for_provider
 from scripts.coverage_campaign.contract import Cell
 from tests.integration.live_stack.scenario import CellRun
 from tests.integration.live_stack.tool_cells import (
-    Exposure,
     Functional,
     Grants,
     HttpCaller,
     Rejection,
     boundary_of,
+    caller_for,
     claims_of,
     matches,
     one,
@@ -200,7 +200,7 @@ _FUNCTIONAL: dict[str, Functional] = {
 
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> None:
     cell = run.cell
-    caller = HttpCaller(cast(Exposure, cell.exposure), base_url, issuer)
+    caller = caller_for(cell.exposure, base_url, issuer)
     project = f"cov-{secrets.token_hex(4)}"
     grants = _grants(project)
     snapshot = partial(project_state, db_url, project)
