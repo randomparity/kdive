@@ -16,9 +16,9 @@ def test_0177_grants_the_server_update_on_created_at_only(pg_conn: psycopg.Conne
     updatable = {
         row[0]
         for row in pg_conn.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = %s "
-            "AND has_column_privilege('kdive_server', format('public.%%I', table_name), "
-            "column_name, 'UPDATE')",
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' "
+            "AND table_name = %s AND has_column_privilege('kdive_server', "
+            "format('public.%%I', table_name), column_name, 'UPDATE')",
             (_TABLE,),
         ).fetchall()
     }
