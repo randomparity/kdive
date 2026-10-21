@@ -10,6 +10,9 @@ caller it is handed, so a carrier chooses the exposure and role (#3186).
   ``ops.force_release`` refuses until the effect is quiescent, then releases.
 - :func:`quarantined_orphan` fails one cleanup finalization (ADR-0787) so the local authority
   publishes a real quarantine row, then resolves exactly that row.
+- :func:`recorded_conflict` changes the System's persistent definition out of band, as a host
+  administrator would (ADR-0584), so the release refuses and the activation is recorded in
+  ``recovery_conflict`` from the authority's journal head (ADR-0805); it then resolves it.
 - The remaining faults are product gaps; :func:`blocked_after_gates` records their narrower
   reasons after the lane gates and before any mutation.
 """
@@ -58,9 +61,9 @@ REMOTE_ORPHAN_BLOCKED = (
     "the remote-libvirt authority publishes no cleanup quarantine: no finalizer, quarantine "
     "inventory or remote recovery-object port"
 )
-CONFLICT_BLOCKED = (
-    "no production path enters recovery_conflict: record_conflict has no caller and an authority "
-    "conflict observation fails the job"
+CONFLICT_RESTORE_BLOCKED = (
+    "resolution cannot restore the recorded source over a third identity; the resolution job "
+    "re-records the conflict (#3330)"
 )
 LOCAL_PRESENT_ORPHAN_BLOCKED = (
     "a quarantined receipt survives to resolution only if the release job ends terminally "
@@ -85,6 +88,34 @@ _POLL_S = 0.5
 _REASON = "authority recovery fault proof (#3185)"
 _AUTHORITY_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
 _MAX_RECEIPT_REPORT_BYTES = 4096
+# The out-of-band change an administrator makes (ADR-0584): one token appended to the System's
+# persistent kernel command line on the authority daemon, so its boot identity is a third one.
+# Root through the receipt seam locally, the authority account remotely; it takes a UUID only.
+_PERTURB = """
+import sys
+from uuid import UUID
+from xml.etree.ElementTree import tostring
+
+import libvirt
+from defusedxml.ElementTree import fromstring
+
+if len(sys.argv) != 2:
+    raise SystemExit("the perturbation takes one System UUID")
+name = "kdive-" + str(UUID(sys.argv[1]))
+conn = libvirt.open("qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock")
+if conn is None:
+    raise SystemExit("authority daemon connection returned no handle")
+try:
+    domain = conn.lookupByName(name)
+    root = fromstring(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+    cmdline = root.find("./os/cmdline")
+    if cmdline is None or not cmdline.text:
+        raise SystemExit("the System's persistent definition has no external-boot cmdline")
+    cmdline.text += " kdive.authority-conflict-proof=1"
+    conn.defineXML(tostring(root, encoding="unicode"))
+finally:
+    conn.close()
+"""
 # Read-only, root through the sudo seam the proof barrier already requires (the ADR-0800
 # inventory collector returns fixed facts only); it takes UUIDs only.
 _RECEIPT = """
@@ -309,6 +340,52 @@ def receipt_state(system_id: str, activation_id: str) -> Receipt:
     if len(result.stdout) > _MAX_RECEIPT_REPORT_BYTES:
         raise AssertionError("the receipt observer output exceeds its bound")
     return Receipt(**json.loads(result.stdout))
+
+
+def perturb_definition(system: AuthoritySystem) -> None:
+    """Move the System's persistent definition to a third identity behind the authority."""
+    system_id = str(UUID(system.system_id))
+    config = system.config
+    if isinstance(config, RemoteAuthorityProofConfig):
+        remote_support.run_as_authority(config, _PERTURB, system_id)
+        return
+    argv = ["sudo", "-n", _AUTHORITY_PYTHON, "-I", "-c", _PERTURB, system_id]
+    result = subprocess.run(  # noqa: S603 - fixed argv  # nosec B603
+        argv, capture_output=True, text=True, timeout=60.0, check=False
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"the definition perturbation exited {result.returncode}")
+
+
+async def conflict_head(db_url: str, system_id: str) -> tuple[object, ...] | None:
+    """``(phase, operation, outcome, category, composite)`` of the System's journal head."""
+    rows = await _rows(
+        db_url,
+        "SELECT phase, head_record->>'operation', head_record->>'outcome', "
+        "head_record#>>'{observation,category}', head_record#>>'{observation,composite_state}' "
+        "FROM external_boot_authority_journal_heads WHERE system_id = %s",
+        (system_id,),
+    )
+    assert len(rows) <= 1, f"System {system_id} has {len(rows)} authority journal heads"
+    return rows[0] if rows else None
+
+
+async def _activation_state(db_url: str, activation_id: str) -> object:
+    rows = await _rows(
+        db_url, "SELECT state FROM external_boot_activations WHERE id = %s", (activation_id,)
+    )
+    assert len(rows) == 1, f"activation {activation_id} is not in the database"
+    return rows[0][0]
+
+
+async def _drain_conflict(system: AuthoritySystem, phase: str, job_id: str) -> None:
+    """Require the job to end ``failed`` with category ``conflict``, not to succeed."""
+    try:
+        await drain_job(system.op, phase, job_id)
+    except SpinePhaseError as failed:
+        assert failed.error_category == "conflict", f"{phase} failed with {_cause(failed)}"
+    else:
+        raise AssertionError(f"the {phase} job succeeded over a third identity")
 
 
 def _domain_present(system: AuthoritySystem) -> bool:
@@ -541,6 +618,47 @@ async def quarantined_orphan(
         "receipt_at_resolution": "absent",
         "resolved": "deleted",
         "present_receipt_delete": LOCAL_PRESENT_ORPHAN_BLOCKED,
+    }
+
+
+async def recorded_conflict(system: AuthoritySystem, db_url: str) -> dict[str, object]:
+    """Record a real ``recovery_conflict`` from a host change, then resolve it by its composite."""
+    op, system_id = system.op, system.system_id
+    await require_evidence_read_access(db_url, FAULT_READ_TABLES)
+    activation = await _activate(system)
+    activation_id = await activation_of(db_url, activation.run_id)
+    await asyncio.to_thread(perturb_definition, system)
+    release = await release_external_boot(op, activation.run_id)
+    await _drain_conflict(system, "release", release.object_id)
+    head = await conflict_head(db_url, system_id)
+    assert head is not None and head[:4] == ("terminal", "recover", "conflict", "conflict"), head
+    composite = str(head[4])
+    assert await _activation_state(db_url, activation_id) == "recovery_conflict"
+    resolution = ok(
+        await scalar(
+            op,
+            "systems.resolve_external_boot_conflict",
+            system_id=system_id,
+            operation="restore-recorded-source",
+            observed_identity=composite,
+        ),
+        "resolve-conflict",
+    )
+    await _drain_conflict(system, "resolve-conflict", resolution.object_id)
+    head = await conflict_head(db_url, system_id)
+    assert head is not None and head[:4] == (
+        "terminal",
+        "resolve-conflict",
+        "conflict",
+        "conflict",
+    ), head
+    assert await _activation_state(db_url, activation_id) == "recovery_conflict"
+    return {
+        "recorded": "recovery_conflict",
+        "release": "failed: conflict",
+        "resolution_admitted": resolution.object_id,
+        "resolution": "failed: conflict",
+        "restore_from_third_identity": CONFLICT_RESTORE_BLOCKED,
     }
 
 

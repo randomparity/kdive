@@ -135,8 +135,13 @@ def test_recovery_orphan_publication_and_disposition(
 
 
 @ARMS
-def test_recovery_conflict_is_blocked(
+def test_recovery_conflict_is_recorded_and_resolution_admitted(
     tmp_path: Path, provider: str, config_env: str, arch: str
 ) -> None:
-    run = _run(tmp_path, provider, arch, "authority-recovery-conflict")
-    _blocked(run, config_env, authority_faults.CONFLICT_BLOCKED)
+    def arm(db_url: str, _call: ToolCall) -> AuthorityBody:
+        async def body(system: AuthoritySystem) -> dict[str, object]:
+            return await authority_faults.recorded_conflict(system, db_url)
+
+        return body
+
+    _prove(_run(tmp_path, provider, arch, "authority-recovery-conflict"), config_env, arm)

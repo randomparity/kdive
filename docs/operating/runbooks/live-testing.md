@@ -2134,10 +2134,19 @@ nothing.
   the disposition of an already-absent object; the arm requires that row `deleted` by that job and
   every other quarantine row unchanged. If the arm fails after the abort it resolves the rows it
   published before the frame tears down, and names any it could not as residue on the failure.
-- **Blocked arms.** These pass the lane gates and skip with `blocked:` and the reason, before any
-  mutation. They are narrower blockers, not passes:
-  - the remote orphan: the remote-libvirt authority publishes no cleanup quarantine;
-  - the recovery conflict, local and remote: no production path enters `recovery_conflict`.
+- **Recovery conflict (local and remote, #3327).** The arm activates, then appends one token to
+  the System's persistent kernel command line on the authority daemon, as a host administrator
+  would ([ADR-0805](../../adr/0805-authority-observed-conflict-is-recorded-from-its-journal-head.md)).
+  Locally it runs as root through the receipt observer's interpreter; remotely it runs as the
+  authority account. It then calls `runs.release_external_boot` and requires the job `failed`
+  with category `conflict`, the journal head `terminal` for `recover` with outcome `conflict`, and
+  the activation in `recovery_conflict`. The frame's project admin then calls
+  `systems.resolve_external_boot_conflict` with the head's composite. Restoring over a third
+  identity is #3330, so the arm requires that job to end with `conflict` too and the activation
+  back in `recovery_conflict`. The frame's teardown removes the System.
+- **Blocked arm.** The remote orphan passes the lane gates and skips with `blocked:` and its
+  reason before any mutation: the remote-libvirt authority publishes no cleanup quarantine. It is a
+  narrower blocker, not a pass.
 
   The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
   a receipt survives to resolution only if the release job ends terminally, whose recovery is
