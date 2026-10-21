@@ -167,6 +167,32 @@ require(
     ),
     "the pcap pool directory must be created and asserted as the family's QEMU runtime user",
 )
+pcap_directory = pcap_by_name["Create the traffic-capture pcap pool directory"][
+    "ansible.builtin.file"
+]
+require(
+    pcap_directory["group"] == "root"
+    and pcap_directory["mode"] == "{{ libvirt_pool_net_pcap_pool_mode }}",
+    "the pcap pool directory must be group root (not the QEMU user's kvm group) and use the mode",
+)
+ownership_assert = pcap_by_name["Assert the pcap pool directory is owned by the QEMU runtime user"][
+    "ansible.builtin.assert"
+]["that"]
+require(
+    "libvirt_pool_net_pcap_pool_stat.stat.gr_name == 'root'" in ownership_assert
+    and "libvirt_pool_net_pcap_pool_stat.stat.mode == libvirt_pool_net_pcap_pool_mode"
+    in ownership_assert,
+    "the pcap pool ownership assert must check the root group and the mode",
+)
+access_check = pcap_by_name[
+    "Require the QEMU runtime user to reach and write the pcap pool directory"
+]["ansible.builtin.command"]["argv"]
+require(
+    access_check.count("{{ libvirt_pool_net_pcap_pool_target }}") == 2
+    and access_check[access_check.index("-w") : access_check.index("-w") + 2]
+    == ["-w", "{{ libvirt_pool_net_pcap_pool_target }}"],
+    "the QEMU-user access check must test the pcap pool target for write and search",
+)
 target_check = pcap_by_name["Require the pcap pool to target the provisioned directory"]
 require(
     any(
