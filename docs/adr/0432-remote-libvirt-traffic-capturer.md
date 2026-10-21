@@ -119,3 +119,43 @@ No new host tool: `filter-dump` is a QEMU built-in over the monitor, and the BPF
 - Live proof is gated on the remote `live_vm` tier (#1424/ADR-0425); the provider mechanics and the
   handler generalization are unit-tested with fakes here, and the live end-to-end proof is deferred
   to that tier, exactly as ADR-0385 proved local against real KVM.
+
+### Amendment (2026-10-21): vhost-off data NIC and a provisioned pcap pool (#3316)
+
+This corrects two premises of the Decision. A live run on an SELinux-enforcing Rocky Linux 10
+provider showed both refusals once #3294 let QEMU's reply reach the capturer.
+
+- **"`filter-dump` … attached to the data NIC" assumed a netdev QEMU would filter.** libvirt
+  enables vhost-net for the virtio `type='network'` interface, and QEMU's `netfilter_complete()`
+  refuses every netfilter on a vhost-backed netdev (`Vhost is not supported`). libvirt cannot
+  change the NIC driver of a running domain. The ordinary remote renderer therefore sets
+  `<driver name='qemu'/>` on the data NIC of every System, so the NIC uses QEMU's userspace
+  virtio-net backend. A per-System opt-in was rejected: capture is decided at run time, after the
+  domain is defined. The authority path renders no libvirt interface and is unchanged. A System
+  defined before this change still has vhost; its capture fails `CONFIGURATION_ERROR`
+  `reason=capture_netdev_vhost` with "reprovision the System" as the remediation, not the
+  retryable `capture_filter_rejected`.
+- **"`storage_pool` directory (already QEMU-writable …)" is false.** A libvirt dir pool is
+  `root 0711` and `virt_image_t`, and the confined QEMU runs as the QEMU runtime user in `svirt_t`
+  with per-domain MCS categories; both DAC and SELinux deny the create. Relabelling the disk pool
+  would make every resting image writable by every domain. Remote pcaps therefore go to a dedicated
+  dir pool, `KDIVE_REMOTE_LIBVIRT_PCAP_POOL` (default `kdive-pcap`), that `libvirt_pool_net`
+  provisions at `/var/lib/libvirt/kdive/pcap`: owned by the family's QEMU runtime user, mode
+  `0770`, with the same permissions in the pool XML. On an SELinux-enforcing host the role adds an
+  `svirt_image_t` fcontext rule and a plain `restorecon`, as ADR-0640 does locally; the file QEMU
+  creates is `svirt_image_t` at its own domain's categories. On an AppArmor host the role writes
+  `/etc/apparmor.d/abstractions/libvirt-qemu.d/kdive-pcap`, allowing `rw` on `kdive-pcap-*.pcap`
+  in that directory, and fails if the installed abstraction does not include `libvirt-qemu.d`.
+  The prepare, size, fetch and reclaim primitives and the ADR-0556 capture reaper use this pool. A
+  missing pool is `CONFIGURATION_ERROR` `reason=pcap_pool_missing`.
+
+Consequences:
+
+- The data NIC loses vhost-net on every ordinary remote System. The SSH forward and the gdbstub do
+  not use it.
+- AppArmor has no MCS. On an AppArmor provider any domain's QEMU may create or overwrite any
+  `kdive-pcap-*.pcap` in the pcap directory, so one compromised QEMU can read or tamper with
+  another System's in-flight capture on that host. Under SELinux the per-domain categories prevent
+  that.
+- Existing provider hosts need `site.yml` rerun to provision the pool, and existing remote Systems
+  need reprovisioning to drop vhost.
