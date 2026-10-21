@@ -325,7 +325,11 @@ def test_a_missing_pcap_pool_is_a_configuration_error(tmp_path: Path, operation:
 
 
 def test_the_write_remediation_names_the_provisioned_pool() -> None:
+    # The capture child forwards at most 512 remediation characters (capture_operations/child.py).
+    for remediation in (REMOTE_PCAP_WRITE_REMEDIATION, REMOTE_PCAP_VHOST_REMEDIATION):
+        assert len(remediation) <= 512
     assert "KDIVE_REMOTE_LIBVIRT_PCAP_POOL" in REMOTE_PCAP_WRITE_REMEDIATION
+    assert "libvirt_pool_net_pcap_pool_name" in REMOTE_PCAP_WRITE_REMEDIATION
     assert "site.yml" in REMOTE_PCAP_WRITE_REMEDIATION
     assert "svirt_image_t" in REMOTE_PCAP_WRITE_REMEDIATION
 

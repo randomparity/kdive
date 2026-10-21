@@ -64,12 +64,11 @@ _DIR_POOL_TYPES = frozenset({"dir", "fs", "netfs"})
 
 # Operator guidance when the remote hypervisor has no pcap pool or could not create the pcap in it.
 REMOTE_PCAP_WRITE_REMEDIATION = (
-    "remote traffic capture writes into the dedicated dir pool named by "
-    "KDIVE_REMOTE_LIBVIRT_PCAP_POOL (default kdive-pcap), which deploy/ansible site.yml "
-    "provisions on the provider host: rerun site.yml there. The pool directory must be owned by "
-    "the QEMU runtime user with mode 0770, labelled svirt_image_t on an SELinux-enforcing host, "
-    "and allowed by the libvirt-qemu.d AppArmor drop-in on an AppArmor host; also check that its "
-    "filesystem is neither full nor read-only"
+    "rerun deploy/ansible site.yml on the provider host: it provisions the dir pool named by "
+    "KDIVE_REMOTE_LIBVIRT_PCAP_POOL (default kdive-pcap; another name must match the "
+    "libvirt_pool_net_pcap_pool_name variable). Its directory must be owned by the QEMU runtime "
+    "user, mode 0770, labelled svirt_image_t on an SELinux-enforcing host or allowed by the "
+    "libvirt-qemu.d AppArmor drop-in, and on a filesystem neither full nor read-only"
 )
 # Operator guidance when the System's data NIC was defined with vhost-net, which QEMU never filters.
 REMOTE_PCAP_VHOST_REMEDIATION = (
