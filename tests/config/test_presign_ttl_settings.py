@@ -26,7 +26,7 @@ def test_download_ttl_accepts_the_sigv4_ceiling() -> None:
     assert config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS) == _SIGV4_MAX_SECONDS
 
 
-@pytest.mark.parametrize("ttl", [str(_SIGV4_MAX_SECONDS + 1), "-1"])
+@pytest.mark.parametrize("ttl", [str(_SIGV4_MAX_SECONDS + 1), "0", "-1"])
 def test_download_ttl_outside_the_sigv4_window_fails_server_validation(ttl: str) -> None:
     _load(ttl)
 

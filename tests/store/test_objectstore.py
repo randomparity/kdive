@@ -1721,6 +1721,8 @@ def test_object_store_from_env_presigns_sigv4_with_path_style_urls(
     # signs If-None-Match (the conditional-PUT write fence) (#3313). Presigning is offline.
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", endpoint)
     monkeypatch.setenv("KDIVE_S3_BUCKET", "artifacts")
+    for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SESSION_TOKEN", "KDIVE_S3_REGION"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
     monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))

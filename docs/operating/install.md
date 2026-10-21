@@ -30,7 +30,7 @@ KDIVE presigns object-store URLs with SigV4, which signs the `Host` header. Set
 `KDIVE_S3_ENDPOINT_URL` to the one address every consumer reaches: the server, workers, MCP
 clients, and remote guests. A proxy in front of the store that rewrites `Host` breaks every
 presigned URL with `403 SignatureDoesNotMatch`. SigV4 also caps a presigned URL at 7 days, so
-`KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` above 604800 fails startup validation.
+`KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` outside 1 to 604800 fails startup validation.
 
 ## Release compatibility
 
