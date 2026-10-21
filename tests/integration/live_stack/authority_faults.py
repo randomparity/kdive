@@ -343,9 +343,16 @@ async def _activate(system: AuthoritySystem) -> ActivationJob:
     except SpinePhaseError as failed:
         if not remote:
             raise
-        reason = f"remote external-boot activation failed at {failed.phase} ({failed.reason})"
+        reason = f"remote external-boot activation failed at {failed.phase} ({_cause(failed)})"
         raise ScenarioStop(Outcome.BLOCKED, reason) from failed
     return activation
+
+
+def _cause(failed: SpinePhaseError) -> str:
+    """The phase reason plus the envelope's public category and ``data.reason``, if any."""
+    data_reason = failed.data.get("reason")
+    envelope = [part for part in (failed.error_category, data_reason) if isinstance(part, str)]
+    return f"{failed.reason}; {': '.join(envelope)}" if envelope else failed.reason
 
 
 async def held_teardown_release(

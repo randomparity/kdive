@@ -17,6 +17,7 @@ from tests.integration.live_stack.authority_faults import Barrier
 from tests.integration.live_stack.authority_lane import AuthoritySystem
 from tests.integration.live_stack.evidence import EvidenceWriter
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.spine import SpinePhaseError
 from tests.live_vm.installed_local_authority_support import (
     ActivationJob,
     NativeAuthorityConfig,
@@ -151,6 +152,27 @@ def _async(result: object = None) -> Callable[..., Any]:
 
 def _activation() -> ActivationJob:
     return ActivationJob("inv", "run", "activate-job")
+
+
+def test_remote_activation_blocker_names_the_envelope_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def refused(*_args: object, **_kwargs: object) -> ActivationJob:
+        raise SpinePhaseError(
+            "boot",
+            "error envelope",
+            error_category="configuration_error",
+            data={"reason": "remote_external_boot_initrd_required"},
+        )
+
+    monkeypatch.setattr(authority_faults, "start_external_boot_activation", refused)
+    with pytest.raises(ScenarioStop) as stop:
+        asyncio.run(authority_faults._activate(_system(remote=True)))
+    assert stop.value.outcome is Outcome.BLOCKED
+    assert str(stop.value) == (
+        "remote external-boot activation failed at boot (error envelope; "
+        "configuration_error: remote_external_boot_initrd_required)"
+    )
 
 
 def _fake_arm_a(monkeypatch: pytest.MonkeyPatch, fake: _FakeBarrier) -> list[str]:
