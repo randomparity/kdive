@@ -27,6 +27,7 @@ reconciler's capture reaper (ADR-0556).
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import re
@@ -72,6 +73,13 @@ REMOTE_PCAP_WRITE_REMEDIATION = (
     "searchable by the QEMU runtime user, labelled svirt_image_t on an SELinux-enforcing host or "
     "allowed by the libvirt-qemu.d AppArmor drop-in, and on a filesystem neither full nor "
     "read-only"
+)
+# Operator guidance when the provider's storage daemon may not create the pcap owned by QEMU.
+REMOTE_PCAP_CREATE_REMEDIATION = (
+    "the provider host's libvirt storage daemon was denied creating the capture pcap owned by the "
+    "QEMU user; it needs CAP_CHOWN and CAP_FOWNER. Under SELinux check `ausearch -m AVC -c "
+    "virtstoraged` for its virtstoraged_t domain (virtd_t under a monolithic libvirtd) and allow "
+    "chown and fowner with a local policy module; also check the pool filesystem permits chown"
 )
 # Operator guidance when the running domain's DAC identity cannot own the pre-created pcap.
 REMOTE_PCAP_DAC_REMEDIATION = (
@@ -350,6 +358,7 @@ class RemoteLibvirtTrafficCapture:
         )
 
     def _pool_dir(self, conn: _CaptureConn) -> str:
+        """The pool's target directory, refused unless it is a root-owned, unwritable dir pool."""
         pool = self._lookup_pool(conn)
         try:
             pool_xml = pool.XMLDesc(0)
@@ -362,16 +371,35 @@ class RemoteLibvirtTrafficCapture:
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"pool_type": pool_type or "unknown"},
             )
+        if not _root_only_writable(pool_xml):
+            # QEMU, or any other account, able to write the directory could swap its pcap for a
+            # link the root storage daemon follows on fetch-back.
+            raise _pool_unusable(
+                "the remote pcap pool directory is writable by a non-root account",
+                "pcap_pool_unsafe",
+                self._config_factory().pcap_pool,
+            )
         return target
 
     def _create_capture_volume(
         self, conn: _CaptureConn, vol_name: str, uid: int, gid: int
     ) -> _CaptureVolume:
+        self._pool_dir(conn)
         self._delete_stale_volume(conn, vol_name)
         pool = self._lookup_pool(conn)
         try:
             return pool.createXML(capture_volume_xml(vol_name, uid, gid), 0)
         except libvirt.libvirtError as exc:
+            if _is_permission_refusal(exc):
+                raise CategorizedError(
+                    "the remote storage daemon was denied creating the capture pcap",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    details={
+                        "reason": "pcap_volume_create_denied",
+                        "pcap_pool": self._config_factory().pcap_pool,
+                        "remediation": REMOTE_PCAP_CREATE_REMEDIATION,
+                    },
+                ) from exc
             raise self._infra("creating the pcap volume for") from exc
 
     def _delete_stale_volume(self, conn: _CaptureConn, vol_name: str) -> None:
@@ -565,6 +593,29 @@ def _log_refusal(reply: QmpReply, operation: str, domain_name: str) -> None:
     )
 
 
+def _is_permission_refusal(exc: libvirt.libvirtError) -> bool:
+    """A libvirt system error carrying EPERM or EACCES (libvirt puts errno in ``int1``)."""
+    return exc.get_error_code() == libvirt.VIR_ERR_SYSTEM_ERROR and exc.get_int1() in (
+        errno.EPERM,
+        errno.EACCES,
+    )
+
+
+def _root_only_writable(pool_xml: str) -> bool:
+    """Whether the pool XML reports its directory root-owned with no group or other write.
+
+    libvirt fills ``<target><permissions>`` from the directory's stat on refresh; anything
+    missing or unparseable fails closed.
+    """
+    try:
+        root = _safe_fromstring(pool_xml)
+        owner = int(root.findtext("./target/permissions/owner") or "")
+        mode = int(root.findtext("./target/permissions/mode") or "", 8)
+    except Exception:  # noqa: BLE001 - host-emitted XML; anything unreadable is unsafe
+        return False
+    return owner == 0 and not mode & 0o022
+
+
 def _pool_unusable(message: str, reason: str, pool_name: str) -> CategorizedError:
     return CategorizedError(
         message,
@@ -623,6 +674,7 @@ def _pool_type_and_target(pool_xml: str) -> tuple[str | None, str | None]:
 
 __all__ = [
     "RemoteLibvirtTrafficCapture",
+    "REMOTE_PCAP_CREATE_REMEDIATION",
     "REMOTE_PCAP_DAC_REMEDIATION",
     "REMOTE_PCAP_VHOST_REMEDIATION",
     "REMOTE_PCAP_WRITE_REMEDIATION",

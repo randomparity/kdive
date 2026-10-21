@@ -9,6 +9,7 @@ backend; the real ``libvirt.open`` adapter is ``live_vm``-only, exercised by the
 
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.traffic import pcap_volume_name
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.lifecycle.traffic_capture import (
+    REMOTE_PCAP_CREATE_REMEDIATION,
     REMOTE_PCAP_DAC_REMEDIATION,
     REMOTE_PCAP_VHOST_REMEDIATION,
     REMOTE_PCAP_WRITE_REMEDIATION,
@@ -37,7 +39,11 @@ pytestmark = pytest.mark.usefixtures("fake_domain_monitor")
 _POOL = "kdivepool"
 # Captures go to the dedicated pcap pool, never the disk pool (#3316); the fake serves only it.
 _PCAP_POOL = "kdive-pcap-test"
-_POOL_XML = "<pool type='dir'><target><path>/var/lib/libvirt/images</path></target></pool>"
+_SAFE_PERMISSIONS = "<permissions><mode>0711</mode><owner>0</owner><group>0</group></permissions>"
+_POOL_XML = (
+    "<pool type='dir'><target><path>/var/lib/libvirt/images</path>"
+    f"{_SAFE_PERMISSIONS}</target></pool>"
+)
 _IFACE_XML = (
     "<domain><devices>"
     "<interface type='network'><alias name='net0'/><target dev='vnet3'/></interface>"
@@ -315,6 +321,82 @@ def test_a_failed_attach_deletes_the_precreated_volume(tmp_path: Path, reply: st
     assert pool.volumes["cap.pcap"].deleted is True
 
 
+def _system_error(err: int) -> libvirt.libvirtError:
+    error = libvirt_error(libvirt.VIR_ERR_SYSTEM_ERROR)
+    error.err = (libvirt.VIR_ERR_SYSTEM_ERROR, 0, "synthetic", 0, "", None, None, err, 0)
+    return error
+
+
+@pytest.mark.parametrize("err", [errno.EPERM, errno.EACCES])
+def test_a_denied_volume_create_is_a_configuration_error(tmp_path: Path, err: int) -> None:
+    """The storage daemon cannot chown the pcap to QEMU: a retry hits the same policy (#3316)."""
+
+    class _DenyingPool(_FakePool):
+        def createXML(self, xml: str, flags: int = 0) -> _FakeVolume:  # noqa: N802
+            raise _system_error(err)
+
+    domain = _FakeDomain()
+    cap = _capturer(_FakeConn(domain=domain, pool=_DenyingPool()), tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        cap.attach(_DOMAIN, qom_id="kdive-dump-J", dest_path=_DEST, snaplen=128)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {
+        "reason": "pcap_volume_create_denied",
+        "pcap_pool": _PCAP_POOL,
+        "remediation": REMOTE_PCAP_CREATE_REMEDIATION,
+    }
+    assert "object-add" not in [c["execute"] for c in domain.commands]
+
+
+def test_another_system_error_on_volume_create_stays_infrastructure(tmp_path: Path) -> None:
+    class _FullPool(_FakePool):
+        def createXML(self, xml: str, flags: int = 0) -> _FakeVolume:  # noqa: N802
+            raise _system_error(errno.ENOSPC)
+
+    cap = _capturer(_FakeConn(domain=_FakeDomain(), pool=_FullPool()), tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        cap.attach(_DOMAIN, qom_id="kdive-dump-J", dest_path=_DEST, snaplen=128)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    [
+        "",
+        "<permissions><mode>0711</mode><owner>107</owner><group>0</group></permissions>",
+        "<permissions><mode>0731</mode><owner>0</owner><group>0</group></permissions>",
+        "<permissions><mode>0713</mode><owner>0</owner><group>0</group></permissions>",
+        "<permissions><mode>0777</mode><owner>0</owner><group>0</group></permissions>",
+        "<permissions><mode>bogus</mode><owner>0</owner><group>0</group></permissions>",
+        "<permissions><mode>0711</mode><group>0</group></permissions>",
+    ],
+)
+@pytest.mark.parametrize("operation", ["prepare", "attach"])
+def test_an_unsafe_pcap_pool_directory_is_refused_before_any_create(
+    tmp_path: Path, permissions: str, operation: str
+) -> None:
+    """A QEMU-writable directory would let QEMU swap its pcap for a link the root daemon reads."""
+    pool = _FakePool(
+        xml=f"<pool type='dir'><target><path>/pool</path>{permissions}</target></pool>"
+    )
+    domain = _FakeDomain()
+    cap = _capturer(_FakeConn(domain=domain, pool=pool), tmp_path)
+    calls = {
+        "prepare": lambda: cap.prepare(uuid4(), uuid4()),
+        "attach": lambda: cap.attach(_DOMAIN, qom_id="kdive-dump-J", dest_path=_DEST, snaplen=128),
+    }
+    with pytest.raises(CategorizedError) as exc:
+        calls[operation]()
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {
+        "reason": "pcap_pool_unsafe",
+        "pcap_pool": _PCAP_POOL,
+        "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
+    }
+    assert pool.created == []
+    assert "object-add" not in [c["execute"] for c in domain.commands]
+
+
 def test_a_failed_volume_create_is_infrastructure_and_adds_no_filter(tmp_path: Path) -> None:
     class _RefusingPool(_FakePool):
         def createXML(self, xml: str, flags: int = 0) -> _FakeVolume:  # noqa: N802
@@ -459,6 +541,7 @@ def test_the_write_remediation_names_the_provisioned_pool() -> None:
         REMOTE_PCAP_WRITE_REMEDIATION,
         REMOTE_PCAP_VHOST_REMEDIATION,
         REMOTE_PCAP_DAC_REMEDIATION,
+        REMOTE_PCAP_CREATE_REMEDIATION,
     ):
         assert len(remediation) <= 512
     assert "KDIVE_REMOTE_LIBVIRT_PCAP_POOL" in REMOTE_PCAP_WRITE_REMEDIATION
