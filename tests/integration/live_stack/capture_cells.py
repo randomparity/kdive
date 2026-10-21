@@ -489,14 +489,16 @@ class Session:
         assert not raw_vmcore_refs(refs), "a capture ref exposes the raw core"
         return refs
 
-    async def drgn_session(self) -> str:
+    async def drgn_session(self, *, require_debuginfo: bool = True) -> str:
+        """Open a drgn-live session; ``require_debuginfo`` refuses one attached without it."""
         env = require_tool(
             await scalar(
                 self.guest.op, "debug.start_session", run_id=self.run_id, transport="drgn-live"
             ),
             "attach",
         )
-        assert "missing_debuginfo" not in env.data, "drgn-live attached without debuginfo"
+        if require_debuginfo:
+            assert "missing_debuginfo" not in env.data, "drgn-live attached without debuginfo"
         return env.object_id
 
     async def end(self, session_id: str) -> None:
@@ -821,7 +823,8 @@ async def _prepare_target(
         run_id, endpoint = await boot(scratch, guest, tree, manifest)
         caller = HttpCaller("direct", base_url, issuer)
         s = Session(scratch, guest, caller, grants(project, "viewer"), manifest, run_id, endpoint)
-        session = await s.drgn_session()
+        # The target needs only the session id; a remote guest never receives the vmlinux (#3124).
+        session = await s.drgn_session(require_debuginfo=False)
         await s.end(session)
         ids.update(system=guest.system_id, run=run_id, session=session)
         connects.append(guest.lane.connect)

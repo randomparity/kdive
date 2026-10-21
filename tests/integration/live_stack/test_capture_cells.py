@@ -750,3 +750,25 @@ def test_snapshot_of_reads_the_targets_connect(monkeypatch: pytest.MonkeyPatch) 
     target = CaptureTarget("p", "s", "r", "x", {}, (), connect=cast(Any, lambda: "provider"))
     state = cast(dict[str, object], asyncio.run(snapshot_of("db", target)()))
     assert opened == ["provider"] and state["domain_defined"] is True
+
+
+def test_target_session_tolerates_missing_debuginfo(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A remote guest never receives the vmlinux (#3124), so its drgn-live attach reports
+    # missing_debuginfo; the rejection target needs only the session id.
+    async def attach(*_a: object, **_k: object) -> ToolResponse:
+        return ToolResponse.success("ses-1", "live", data={"missing_debuginfo": True})
+
+    monkeypatch.setattr(capture_cells, "scalar", attach)
+    guest = cast(Guest, SimpleNamespace(op=None))
+    s = Session(
+        cast(CellRun, None),
+        guest,
+        cast(HttpCaller, None),
+        Grants("s", ("p",)),
+        _MANIFEST,
+        "r",
+        Endpoint("h", 22),
+    )
+    with pytest.raises(AssertionError, match="without debuginfo"):
+        asyncio.run(s.drgn_session())
+    assert asyncio.run(s.drgn_session(require_debuginfo=False)) == "ses-1"
