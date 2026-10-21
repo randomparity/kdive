@@ -137,6 +137,44 @@ require(
     in pcap_dropin[0]["content"],
     "pcap pool must install the libvirt-qemu.d AppArmor drop-in for kdive-pcap-*.pcap",
 )
+pcap_by_name = {t["name"]: t for t in pcap_pool_tasks}
+selinux_probe = pcap_by_name["Read the SELinux mode for the pcap pool label"]
+require(
+    selinux_probe["ansible.builtin.command"]["argv"] == ["getenforce"]
+    and selinux_probe.get("failed_when") is False
+    and selinux_probe.get("changed_when") is False,
+    "the pcap getenforce probe must not fail on a host without SELinux tools",
+)
+include_assert = pcap_by_name["Require the abstraction to include its libvirt-qemu.d drop-ins"]
+require(
+    any(
+        "'abstractions/libvirt-qemu.d'" in c
+        for c in include_assert["ansible.builtin.assert"]["that"]
+    ),
+    "the AppArmor probe must look for the libvirt-qemu.d include, not the abstraction's own name",
+)
+QEMU_OWNER = "libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family]"
+require(
+    QEMU_OWNER
+    in pcap_by_name["Create the traffic-capture pcap pool directory"]["ansible.builtin.file"][
+        "owner"
+    ]
+    and any(
+        "pw_name" in c and QEMU_OWNER in c
+        for c in pcap_by_name["Assert the pcap pool directory is owned by the QEMU runtime user"][
+            "ansible.builtin.assert"
+        ]["that"]
+    ),
+    "the pcap pool directory must be created and asserted as the family's QEMU runtime user",
+)
+target_check = pcap_by_name["Require the pcap pool to target the provisioned directory"]
+require(
+    any(
+        "libvirt_pool_net_pcap_pool_target" in c and "get_xml" in c
+        for c in target_check["ansible.builtin.assert"]["that"]
+    ),
+    "an existing pcap pool definition must be checked against the provisioned target",
+)
 # A parent the QEMU user cannot traverse defeats the leaf's ownership (review of #3316).
 pool_defaults = yaml.safe_load((ANSIBLE / "roles/libvirt_pool_net/defaults/main.yml").read_text())
 require(

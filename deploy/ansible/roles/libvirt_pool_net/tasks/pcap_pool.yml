@@ -16,7 +16,9 @@
   vars:
     libvirt_pool_net_pcap_pool_gid: "{{ ansible_facts.getent_passwd[libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family]][2] }}"
 
-# libvirt resets a built dir pool to its 0711 root default unless the XML names the permissions.
+# define is a no-op for an existing pool, so the target check below catches a stale definition. The
+# XML permissions keep the directory 0770 should anyone later run a pool build, which resets a dir
+# pool to libvirt's 0711 root default otherwise.
 - name: Define the traffic-capture pcap storage pool
   community.libvirt.virt_pool:
     name: "{{ libvirt_pool_net_pcap_pool_name }}"
@@ -36,7 +38,24 @@
   vars:
     libvirt_pool_net_pcap_pool_passwd: "{{ ansible_facts.getent_passwd[libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family]] }}"
 
-- name: Build the traffic-capture pcap storage pool
+# The capturer writes wherever the pool's own target points, not where this role created a directory.
+- name: Read the traffic-capture pcap storage pool definition
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_pcap_pool_name }}"
+    command: get_xml
+  register: libvirt_pool_net_pcap_pool_xml
+
+- name: Require the pcap pool to target the provisioned directory
+  ansible.builtin.assert:
+    that:
+      - ('<path>' ~ libvirt_pool_net_pcap_pool_target ~ '</path>') in libvirt_pool_net_pcap_pool_xml.get_xml
+    fail_msg: >-
+      libvirt pool {{ libvirt_pool_net_pcap_pool_name }} already exists with a different target than
+      {{ libvirt_pool_net_pcap_pool_target }}; run 'virsh pool-destroy
+      {{ libvirt_pool_net_pcap_pool_name }}; virsh pool-undefine {{ libvirt_pool_net_pcap_pool_name }}'
+      on the provider host and rerun site.yml.
+
+- name: Start the traffic-capture pcap storage pool
   community.libvirt.virt_pool:
     name: "{{ libvirt_pool_net_pcap_pool_name }}"
     state: active
