@@ -133,6 +133,10 @@ def test_render_domain_xml_carries_agent_channel_gdb_and_metadata() -> None:
     nic_model = root.find("./devices/interface/model")
     assert nic_model is not None
     assert nic_model.get("type") == "virtio"
+    # QEMU's userspace backend, not vhost-net: QEMU refuses a capture netfilter on a vhost netdev.
+    nic_driver = root.find("./devices/interface/driver")
+    assert nic_driver is not None
+    assert nic_driver.attrib == {"name": "qemu"}
     # i440fx by default: q35 root-port D3cold leaves the virtio disk inaccessible.
     os_type = root.find("./os/type")
     assert os_type is not None
