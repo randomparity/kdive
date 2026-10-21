@@ -166,6 +166,9 @@ def render_domain_xml(
         interface = ET.SubElement(devices, "interface", type="network")
         ET.SubElement(interface, "source", network=network)
         ET.SubElement(interface, "model", type="virtio")
+        # QEMU refuses every netfilter on a vhost-net netdev, so the capture's filter-dump needs
+        # the userspace backend; vhost is fixed when the domain is defined (ADR-0432, #3316).
+        ET.SubElement(interface, "driver", name="qemu")
     serial = ET.SubElement(devices, "serial", type="pty")
     ET.SubElement(serial, "target", port="0")
     console = ET.SubElement(devices, "console", type="pty")
