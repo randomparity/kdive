@@ -367,6 +367,7 @@ def build_local_authority_system_provider(
         allowed_roots=[base_root],
         materialize_rootfs=materialize,
         guest_egress=manifest.guest_egress,
+        authority_base=True,
     )
     provider = LocalAuthoritySystemProvider(
         provisioner=_AuthorityProvisioner(provisioner, (manifest.accel, manifest.emulator)),

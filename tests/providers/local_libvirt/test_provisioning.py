@@ -196,6 +196,25 @@ def test_render_x86_kvm_byte_identical_with_defaults() -> None:
     assert _render() == _X86_KVM_GOLDEN
 
 
+def test_render_authority_base_is_an_unrelabeled_backing_store() -> None:
+    rendered = render_domain_xml(
+        _SYS,
+        _profile(),
+        disk_path=_DISK,
+        kernel_path=_KERNEL,
+        ssh_port=40022,
+        authority_base_path="/authority/bases/base.qcow2",
+    )
+    bare_source = '<source file="/var/lib/kdive/rootfs/fedora-40.qcow2" />'
+
+    assert rendered == _X86_KVM_GOLDEN.replace(
+        bare_source,
+        bare_source + '<backingStore type="file"><format type="qcow2" />'
+        '<source file="/authority/bases/base.qcow2">'
+        '<seclabel model="selinux" relabel="no" /></source><backingStore /></backingStore>',
+    )
+
+
 def test_render_x86_kvm_drops_native_emulator_by_accel_not_none() -> None:
     # AC#3: the REAL deployed native input is ("kvm", "/usr/bin/qemu-system-x86_64"), not
     # ("kvm", None). The <emulator> is dropped because accel == "kvm"; a regression gating on

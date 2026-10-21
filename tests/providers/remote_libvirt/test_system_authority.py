@@ -915,6 +915,61 @@ async def test_libvirt_defaults_do_not_mask_device_tampering(
 
 
 @pytest.mark.anyio
+async def test_domain_keeps_libvirt_from_relabelling_only_the_base(tmp_path: Path) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        facts = await provider.execute_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert facts.complete
+    disk = ET.fromstring(connection.domains[DOMAIN_NAME].xml).find("./devices/disk")
+    assert disk is not None
+    assert disk.findall("./source/seclabel") == []
+    assert [label.attrib for label in disk.findall("./backingStore/source/seclabel")] == [
+        {"model": "selinux", "relabel": "no"}
+    ]
+
+
+def _drop_base_seclabel(root: ET.Element[str]) -> None:
+    source = root.find("./devices/disk/backingStore/source")
+    assert source is not None
+    for label in source.findall("./seclabel"):
+        source.remove(label)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        _drop_base_seclabel,
+        _set_attribute("./devices/disk/backingStore/source/seclabel", "relabel", "yes"),
+    ),
+    ids=("seclabel-missing", "relabel-yes"),
+)
+@pytest.mark.parametrize(
+    "xml_flags", (0, libvirt.VIR_DOMAIN_XML_INACTIVE), ids=("live", "inactive")
+)
+async def test_base_relabel_drift_fails_closed(
+    tmp_path: Path, xml_flags: int, tamper: Callable[[ET.Element[str]], None]
+) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        before = list(connection.mutations)
+        connection.xml_transforms[xml_flags] = tamper
+        with pytest.raises(CategorizedError, match="differs from private intent") as caught:
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert connection.mutations == before
+
+
+@pytest.mark.anyio
 async def test_live_custom_cpu_without_host_model_expansion_fails_closed(tmp_path: Path) -> None:
     connection = _Connection()
     provider, _bootstrap, executor, _state = _provider(tmp_path, connection)

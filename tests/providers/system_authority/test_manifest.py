@@ -430,11 +430,14 @@ def test_local_provider_rechecks_the_pinned_base_before_provisioning(
         **kwargs: Any,
     ) -> str:
         expected_guest_arch.append(kwargs.get("expected_guest_arch"))
+        unrelabeled_bases.append(_provisioner._authority_base)
         return "test-domain"
 
+    unrelabeled_bases: list[bool] = []
     monkeypatch.setattr(LocalLibvirtProvisioning, "provision", record_expected_guest_arch)
     provider._provisioner.provision(uuid4(), profile)
     assert expected_guest_arch == [(accel, manifest.emulator)]
+    assert unrelabeled_bases == [True]
     system_id, allocation_id, resource_id = uuid4(), uuid4(), uuid4()
     bootstrap_public_key = "ssh-ed25519 YWFhYQ== kdive-system"
     snapshot = AuthoritySystemProvisionSnapshot(
