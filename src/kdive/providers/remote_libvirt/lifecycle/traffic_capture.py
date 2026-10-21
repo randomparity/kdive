@@ -85,6 +85,7 @@ class _CaptureVolume(Protocol):
 
 
 class _CapturePool(Protocol):
+    def isActive(self) -> int: ...  # noqa: N802 - libvirt binding name
     def refresh(self, flags: int = 0) -> int: ...
     def XMLDesc(self, flags: int = 0) -> str: ...  # noqa: N802 - libvirt binding name
     def storageVolLookupByName(self, name: str) -> _CaptureVolume: ...  # noqa: N802
@@ -307,23 +308,28 @@ class RemoteLibvirtTrafficCapture:
     def _lookup_pool(self, conn: _CaptureConn) -> _CapturePool:
         pool_name = self._config_factory().pcap_pool
         try:
-            return conn.storagePoolLookupByName(pool_name)
+            pool = conn.storagePoolLookupByName(pool_name)
+            active = pool.isActive()
         except libvirt.libvirtError as exc:
             if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_POOL:
-                raise CategorizedError(
+                raise _pool_unusable(
                     "the remote host has no traffic-capture pcap pool",
-                    category=ErrorCategory.CONFIGURATION_ERROR,
-                    details={
-                        "reason": "pcap_pool_missing",
-                        "pcap_pool": pool_name,
-                        "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
-                    },
+                    "pcap_pool_missing",
+                    pool_name,
                 ) from exc
             raise CategorizedError(
                 "remote pcap pool lookup failed for traffic capture",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"pcap_pool": pool_name},
             ) from exc
+        if not active:
+            # A stopped pool cannot refresh, so every retry would fail the same way.
+            raise _pool_unusable(
+                "the remote traffic-capture pcap pool is not running",
+                "pcap_pool_inactive",
+                pool_name,
+            )
+        return pool
 
     @staticmethod
     def _refresh_pool(pool: _CapturePool) -> None:
@@ -479,6 +485,18 @@ def _log_refusal(reply: QmpReply, operation: str, domain_name: str) -> None:
         domain_name,
         reply.error_class,
         reply.description[:_LOGGED_DESCRIPTION_CHARS],
+    )
+
+
+def _pool_unusable(message: str, reason: str, pool_name: str) -> CategorizedError:
+    return CategorizedError(
+        message,
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "reason": reason,
+            "pcap_pool": pool_name,
+            "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
+        },
     )
 
 

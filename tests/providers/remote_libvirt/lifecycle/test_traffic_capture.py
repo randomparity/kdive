@@ -90,6 +90,10 @@ class _FakePool:
         self._xml = xml
         self.volumes = volumes if volumes is not None else {}
         self.refreshed = 0
+        self.active = 1
+
+    def isActive(self) -> int:  # noqa: N802 - libvirt binding name
+        return self.active
 
     def refresh(self, flags: int = 0) -> int:
         self.refreshed += 1
@@ -319,6 +323,27 @@ def test_a_missing_pcap_pool_is_a_configuration_error(tmp_path: Path, operation:
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details == {
         "reason": "pcap_pool_missing",
+        "pcap_pool": _PCAP_POOL,
+        "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
+    }
+
+
+@pytest.mark.parametrize("operation", ["prepare", "captured_size", "fetch"])
+def test_an_inactive_pcap_pool_is_a_configuration_error(tmp_path: Path, operation: str) -> None:
+    """A defined but stopped pool cannot refresh; retrying cannot start it (#3316)."""
+    pool = _FakePool()
+    pool.active = 0
+    cap = _capturer(_FakeConn(pool=pool), tmp_path)
+    calls = {
+        "prepare": lambda: cap.prepare(uuid4(), uuid4()),
+        "captured_size": lambda: cap.captured_size("/pool/cap.pcap"),
+        "fetch": lambda: cap.fetch("/pool/cap.pcap", max_bytes=1024),
+    }
+    with pytest.raises(CategorizedError) as exc:
+        calls[operation]()
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {
+        "reason": "pcap_pool_inactive",
         "pcap_pool": _PCAP_POOL,
         "remediation": REMOTE_PCAP_WRITE_REMEDIATION,
     }
