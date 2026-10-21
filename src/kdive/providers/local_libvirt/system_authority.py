@@ -603,6 +603,7 @@ class LocalAuthoritySystemProvider:
             guest_egress=self._topology.guest_egress,
             accel=self._topology.accel,
             emulator=self._topology.emulator,
+            authority_base_path=intent.base,
         )
         return replace(
             intent,

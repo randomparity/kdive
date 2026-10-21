@@ -57,6 +57,7 @@ from kdive.providers.shared.libvirt_external_boot import (
 )
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
+    backing_store_projection,
     recorded_gdb_port_from_root,
     recorded_ssh_port_from_root,
 )
@@ -1915,6 +1916,7 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
             "driver": (driver.get("name"), driver.get("type")),
             "target": (target.get("dev"), target.get("bus")),
             "readonly": disk.find("readonly") is not None,
+            "backing": backing_store_projection(disk),
         },
         "gdb_port": recorded_gdb_port_from_root(root),
         "ssh_port": recorded_ssh_port_from_root(root),

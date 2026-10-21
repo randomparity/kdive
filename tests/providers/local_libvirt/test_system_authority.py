@@ -11,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.local_libvirt.lifecycle.boot.session import owned_system_semantic_identity
@@ -28,6 +29,7 @@ from kdive.providers.local_libvirt.system_authority import (
     _Intent,
 )
 from kdive.providers.ports.external_boot import RootSpecV1
+from kdive.providers.shared.libvirt_xml import backing_store_projection
 from kdive.providers.system_authority import (
     AuthoritySystemCommitContextV1,
     AuthoritySystemMutationRequestV1,
@@ -203,11 +205,12 @@ def test_authority_tcg_defined_domain_matches_retained_intent_identity(tmp_path:
             prepare_console_log=lambda _path: None,
             overlay_virtual_size=lambda _overlay: 1 << 60,
         ),
-        materialize_rootfs=lambda rootfs, _system_id, _arch, *, job_id=None: rootfs.path,
+        materialize_rootfs=lambda _rootfs, _system_id, _arch, *, job_id=None: intent.base,
         extract_baseline_kernel=lambda _base, dest, _hint=None: BaselineKernel(
             kernel=dest / "kernel", initrd=None
         ),
         free_port=lambda: 2200,
+        authority_base=True,
     )
     provider = LocalAuthoritySystemProvider(
         provisioner=_AuthorityProvisioner(provisioner, expected_guest_arch),
@@ -239,6 +242,14 @@ def test_authority_tcg_defined_domain_matches_retained_intent_identity(tmp_path:
     assert len(conn.defined_xml) == 1
     assert intent_with_xml.xml_digest == owned_system_semantic_identity(
         conn.defined_xml[0], intent.system_id, intent.overlay
+    )
+    disk = _safe_fromstring(conn.defined_xml[0]).find("devices/disk")
+    assert disk is not None
+    assert backing_store_projection(disk) == (
+        "file",
+        "qcow2",
+        intent.base,
+        (("selinux", "no", None),),
     )
 
 
