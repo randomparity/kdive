@@ -1430,3 +1430,22 @@ async def test_added_libvirt_interface_fails_closed(
 
     assert caught.value.category is ErrorCategory.CONFLICT
     assert connection.mutations == before
+
+
+@pytest.mark.anyio
+async def test_guest_egress_is_bound_into_the_stored_intent_identity(tmp_path: Path) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, state = _provider(tmp_path, connection, guest_egress=True)
+    intent_path = state / f"{SYSTEM_ID}.provision.json"
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        intent = json.loads(intent_path.read_bytes())
+        intent["guest_egress"] = False
+        intent_path.write_text(json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n")
+        before = list(connection.mutations)
+        with pytest.raises(ValueError, match="intent identity changed"):
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert connection.mutations == before
