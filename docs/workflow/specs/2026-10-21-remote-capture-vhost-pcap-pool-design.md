@@ -54,9 +54,8 @@ capture reaper and the live-stack lane spool use it in place of `storage_pool`. 
   reset the directory to libvirt's `0711` default;
 - the directory sits outside `/var/lib/libvirt/kdive`, whose boot-artifact pool leaves it
   `root:libvirt 0770`, and the role checks with `runuser` that the QEMU runtime user can write it;
-- on a RedHat-family host whose `getenforce` reports `Enforcing` (the family `libvirt_stack` gives
-  `sefcontext`'s bindings; an enforcing SUSE host is a recorded residual): an `svirt_image_t`
-  fcontext rule for the directory
+- on a host whose `getenforce` reports `Enforcing` (`libvirt_stack` installs `sefcontext`'s bindings
+  on the RedHat and SUSE families): an `svirt_image_t` fcontext rule for the directory
   and a plain `restorecon -R` (not `-F`), as ADR-0640 does locally. Every domain reaches `s0` by MCS
   dominance; the file QEMU creates inherits `svirt_image_t` at that domain's own categories, so
   another domain cannot read or unlink it. The root storage daemon already reads category-labelled
@@ -121,7 +120,7 @@ configuration error and remediation.
   staged without it parses to the default.
 - Settings and config: field defaults and parsing.
 - Role: the structural checks in `deploy/ansible/tests/` (pool activated and autostarted by separate
-  tasks, permission templates in the pool XML, fcontext and relabel gated on RedHat and `Enforcing`,
+  tasks, permission templates in the pool XML, fcontext and relabel gated on `Enforcing`,
   the QEMU-user access check, the target outside the boot-artifact parent, AppArmor tasks gated on the
   abstraction), and the regenerated runner task fixture.
 - Live: the 4 remote `control.capture_traffic` functional cells on an SELinux-enforcing provider, one

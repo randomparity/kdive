@@ -47,9 +47,8 @@
     autostart: true
 
 # getenforce, not the selinux fact, decides, as ADR-0640 does locally: the fact needs the libselinux
-# Python binding, and a host missing it would silently skip the label. Only the RedHat family gets
-# the label: libvirt_stack installs sefcontext's bindings there alone, so an enforcing SUSE host
-# is a documented residual (ADR-0432 amendment) rather than a failed site.yml.
+# Python binding, and a host missing it would silently skip the label. libvirt_stack installs
+# sefcontext's bindings on the RedHat and SUSE families, which ship SELinux.
 - name: Read the SELinux mode for the pcap pool label
   ansible.builtin.command:
     argv: [getenforce]
@@ -64,9 +63,7 @@
     target: "{{ libvirt_pool_net_pcap_pool_target }}(/.*)?"
     setype: svirt_image_t
     state: present
-  when:
-    - ansible_os_family == 'RedHat'
-    - libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
+  when: libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
 
 # Plain restorecon, not -F: -F would also reset the categories of a capture still being written.
 - name: Relabel the pcap pool directory
@@ -74,9 +71,7 @@
     argv: [restorecon, -R, -v, "{{ libvirt_pool_net_pcap_pool_target }}"]
   register: libvirt_pool_net_pcap_relabel
   changed_when: "'Relabeled' in libvirt_pool_net_pcap_relabel.stdout"
-  when:
-    - ansible_os_family == 'RedHat'
-    - libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
+  when: libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
 
 - name: Check for libvirt's AppArmor QEMU abstraction
   ansible.builtin.stat:

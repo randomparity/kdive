@@ -91,18 +91,15 @@ def gates(task: dict) -> list[str]:
     return [when] if isinstance(when, str) else list(when)
 
 
-# Only the RedHat family installs sefcontext's bindings (libvirt_stack), and only an enforcing host
-# needs the label, so the rule and its relabel carry exactly the same two gates.
-SELINUX_GATES = [
-    "ansible_os_family == 'RedHat'",
-    "libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'",
-]
+# Every enforcing host needs the label (libvirt_stack installs sefcontext's bindings on both SELinux
+# families), so the rule and its relabel carry exactly that one gate.
+SELINUX_GATES = ["libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'"]
 pcap_fcontext = pcap_by_module["community.general.sefcontext"]
 require(
     len(pcap_fcontext) == 1
     and pcap_fcontext[0]["community.general.sefcontext"]["setype"] == "svirt_image_t"
     and gates(pcap_fcontext[0]) == SELINUX_GATES,
-    "pcap pool fcontext must be svirt_image_t and gated on RedHat and Enforcing",
+    "pcap pool fcontext must be svirt_image_t and gated on Enforcing",
 )
 pcap_relabel = [
     t

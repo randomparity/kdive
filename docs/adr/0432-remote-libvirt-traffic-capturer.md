@@ -144,7 +144,7 @@ provider showed both refusals once #3294 let QEMU's reply reach the capturer.
   `0770`, with the same permissions in the pool XML. The target sits outside
   `/var/lib/libvirt/kdive`, which the boot-artifact pool leaves `root:libvirt 0770`, and the role
   checks as the QEMU runtime user that it can reach and write the directory. On an SELinux-enforcing
-  RedHat-family host the role adds an
+  host the role adds an
   `svirt_image_t` fcontext rule and a plain `restorecon`, as ADR-0640 does locally; the file QEMU
   creates is `svirt_image_t` at its own domain's categories. On an AppArmor host the role writes
   `/etc/apparmor.d/abstractions/libvirt-qemu.d/kdive-pcap`, allowing `rw` on `kdive-pcap-*.pcap`
@@ -161,8 +161,5 @@ Consequences:
   `kdive-pcap-*.pcap` in the pcap directory, so one compromised QEMU can read or tamper with
   another System's in-flight capture on that host. Under SELinux the per-domain categories prevent
   that.
-- An SELinux-enforcing SUSE provider gets no label: `libvirt_stack` installs `sefcontext`'s
-  bindings only on the RedHat family. Captures there fail `pcap_open_denied`, whose remediation
-  names the `svirt_image_t` label, until the operator labels the directory.
 - Existing provider hosts need `site.yml` rerun to provision the pool, and existing remote Systems
   need reprovisioning to drop vhost.

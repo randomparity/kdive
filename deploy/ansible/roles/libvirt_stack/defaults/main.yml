@@ -78,6 +78,8 @@ libvirt_stack_packages_suse:
   # Zypper capabilities select bindings for the distro's default Python ABI.
   - python3-libvirt-python
   - python3-lxml
+  # semanage + the seobject bindings sefcontext needs for the pcap pool label (#3316).
+  - policycoreutils-python-utils
   # `combined_kernel_tar` (tests/integration/live_stack/spine.py) shells out to `make`
   # and a GNU `tar` supporting --transform when it cuts a combined kernel bundle. Both
   # were a pre-existing undeclared dependency of the live-stack spine; the #2318

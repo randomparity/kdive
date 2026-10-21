@@ -78,7 +78,7 @@ expected = {
         "libvirt-daemon-qemu", "libvirt-daemon-proxy", "libvirt-daemon-config-network",
         "libvirt-client", "qemu-tools",
         "guestfs-tools", "e2fsprogs", "virt-install", "gnutls", "libseccomp2",
-        "python3-libvirt-python", "python3-lxml", "make", "tar",
+        "python3-libvirt-python", "python3-lxml", "policycoreutils-python-utils", "make", "tar",
         "gcc", "binutils", "bison", "flex", "bc", "perl",
         "libelf-devel", "libopenssl-devel", "dwarves",
     ],
