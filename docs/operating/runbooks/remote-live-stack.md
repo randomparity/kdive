@@ -77,7 +77,11 @@ guesses a capture's name could still open another System's in-flight capture. Th
 vhost-net, because QEMU refuses a capture filter on a vhost netdev. After upgrading, rerun
 `site.yml` on each provider host and reprovision existing remote Systems: a capture on an
 unprovisioned host fails `pcap_pool_missing`, and one on a System defined with vhost fails
-`capture_netdev_vhost`. Drain capture jobs before upgrading; afterwards
+`capture_netdev_vhost`. A pool directory that is not root-owned, or that another account can
+write, fails `pcap_pool_unsafe` (rerun `site.yml`). The storage daemon must be allowed to `chown`
+the pre-created file: under SELinux a denial fails `pcap_volume_create_denied`, so check
+`ausearch -m AVC -c virtstoraged` and allow `chown` and `fowner` with a local policy module.
+Drain capture jobs before upgrading; afterwards
 `virsh vol-list <storage_pool>` should show no `kdive-pcap-` volume, because the reaper now looks
 only in the pcap pool.
 
