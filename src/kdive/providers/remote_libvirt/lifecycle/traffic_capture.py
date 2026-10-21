@@ -8,8 +8,8 @@ things differ, exactly as ADR-0385 anticipated:
 - **Netdev discovery.** Local hardcodes its SSH-forward netdev id; remote discovers libvirt's
   auto-generated netdev id (``hostnetN``) from the running domain's XML interface alias at runtime.
 - **Write location.** The pcap is written on the *remote* host, into the dedicated ``pcap_pool``
-  directory that ``site.yml`` provisions writable and labelled for the confined QEMU (ADR-0432
-  amendment, #3316), under a deterministic per-job volume name.
+  directory that ``site.yml`` provisions root:root 0711 (ADR-0432 amendment, #3316), under a
+  deterministic per-job volume name the provider pre-creates for the domain's QEMU user.
 - **Fetch-back.** After the capture window the pcap is streamed back to the worker over the same
   ``qemu+tls`` connection via ``volume.download`` + ``stream.recvAll`` — the mechanism remote
   host_dump already uses — bounded so a runaway file cannot exhaust worker memory.

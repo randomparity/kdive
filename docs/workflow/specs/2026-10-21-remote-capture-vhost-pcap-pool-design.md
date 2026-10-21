@@ -96,7 +96,8 @@ listing. The ADR records the refuted QEMU-owned-directory shape and this residua
 
 - New setting `KDIVE_REMOTE_LIBVIRT_PCAP_POOL` (`remote-libvirt` group, worker and reconciler),
   `RemoteLibvirtConfig.pcap_pool`; generated config reference regenerated.
-- New error reasons `capture_netdev_vhost` and `pcap_pool_missing`, both `CONFIGURATION_ERROR`.
+- New error reasons `capture_netdev_vhost`, `pcap_pool_missing`, `pcap_pool_inactive` and
+  `dac_seclabel_unusable`, all `CONFIGURATION_ERROR`.
 - Rendered remote domain XML gains the interface driver element.
 - `libvirt_pool_net` gains a pool, and its variables `libvirt_pool_net_pcap_pool_*`.
 - No migration, no agent-facing tool change.

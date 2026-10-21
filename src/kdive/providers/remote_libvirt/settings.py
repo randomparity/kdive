@@ -88,9 +88,10 @@ REMOTE_LIBVIRT_PCAP_POOL = Setting(
     group="remote-libvirt",
     processes=_RT,
     help=(
-        "Dedicated libvirt directory pool the confined QEMU writes traffic-capture pcaps into "
-        "(ADR-0432). site.yml provisions it; it must be writable and labelled for QEMU. A "
-        "non-default name must match the libvirt_pool_net_pcap_pool_name Ansible variable."
+        "Dedicated libvirt directory pool for traffic-capture pcaps (ADR-0432). site.yml "
+        "provisions it root:root 0711, searchable but not writable by the QEMU user, and labelled "
+        "or AppArmor-allowed so QEMU can write the pcap the provider pre-creates. A non-default "
+        "name must match the libvirt_pool_net_pcap_pool_name Ansible variable."
     ),
 )
 
