@@ -141,7 +141,7 @@ class RemoteAuthoritySystemManifestEntry:
     ssh_addr: str
     ssh_port_min: int
     ssh_port_max: int
-    guest_egress: bool = False
+    guest_egress: bool
 
     def __post_init__(self) -> None:
         for value in (self.resource_name, self.authority_instance):
