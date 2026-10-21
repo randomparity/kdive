@@ -147,7 +147,8 @@ provider showed both refusals once #3294 let QEMU's reply reach the capturer.
   `/etc/apparmor.d/abstractions/libvirt-qemu.d/kdive-pcap`, allowing `rw` on `kdive-pcap-*.pcap`
   in that directory, and fails if the installed abstraction does not include `libvirt-qemu.d`.
   The prepare, size, fetch and reclaim primitives and the ADR-0556 capture reaper use this pool. A
-  missing pool is `CONFIGURATION_ERROR` `reason=pcap_pool_missing`.
+  capture job on a host without the pool fails `CONFIGURATION_ERROR` `reason=pcap_pool_missing`;
+  the reaper treats the same lookup failure as infrastructure and defers the row.
 
 Consequences:
 
