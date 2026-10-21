@@ -867,6 +867,74 @@ def test_remote_root_selects_the_one_verified_catalog_image(migrated_url: str) -
     assert "found 2" in str(ambiguous)
 
 
+class _BodyCompleted(_Op):
+    """A body that already tore its System down and released its allocation (#3185)."""
+
+    async def call_tool(self, name: str, **args: object) -> ToolResponse:
+        if name == "systems.get":
+            self.calls.append(name)
+            return ToolResponse(object_id=_SYSTEM, status="torn_down")
+        if name == "allocations.wait":
+            self.calls.append(name)
+            return ToolResponse(object_id="alloc", status="released")
+        return await super().call_tool(name, **args)
+
+
+def _completed_over_http(calls: list[str]) -> Any:
+    @asynccontextmanager
+    async def over_http(_url: str, _token: str) -> AsyncIterator[_Op]:
+        yield _BodyCompleted(calls)
+
+    return over_http
+
+
+def test_cleanup_accepts_a_body_completed_teardown_and_release(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _fake_lane(monkeypatch, tmp_path)
+    monkeypatch.setattr(authority_lane.LiveStackClient, "over_http", _completed_over_http(calls))
+    run = _run(tmp_path)
+    _frame(run, _body_ok)
+    assert "systems.teardown" not in calls
+    assert "allocations.release" not in calls
+    assert set(run.assertions) == {"effect", "cleanup"}
+
+
+def test_remote_cleanup_accepts_a_body_completed_teardown_and_release(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[authority_lane.AuthoritySystem] = []
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, seen)
+    monkeypatch.setattr(authority_lane.LiveStackClient, "over_http", _completed_over_http(calls))
+    monkeypatch.setattr(
+        authority_lane,
+        "remote_authority_inventory",
+        lambda _config, system_id=None: RemoteAuthorityInventory(
+            "x86_64",
+            ["kdive-other"],
+            [],
+            RemoteDomain(True, "kvm") if system_id is not None and "body" not in calls else None,
+        ),
+    )
+    run = _remote(tmp_path)
+    _frame(run, body)
+    assert "systems.teardown" not in calls
+    assert "allocations.release" not in calls
+    assert set(run.assertions) == {"effect", "cleanup"}
+
+
+def test_lane_config_admits_only_the_fixed_barrier_socket(tmp_path: Path) -> None:
+    fixed = "/run/kdive/provider-authority/proof-control/control.sock"
+    config = authority_lane.load_lane_config(
+        {authority_lane.CONFIG_ENV: str(_config(tmp_path, barrier_socket=fixed))}
+    )
+    assert config is not None and config.barrier_socket == Path(fixed)
+    with pytest.raises(ValueError, match="fixed authority proof socket"):
+        authority_lane.load_lane_config(
+            {authority_lane.CONFIG_ENV: str(_config(tmp_path, barrier_socket="/tmp/x.sock"))}
+        )
+
+
 @pytest.mark.parametrize("fault", ["missing", "stale", "owner", "mode"])
 def test_collector_revision_gate(monkeypatch, fault):
     import stat
