@@ -29,6 +29,8 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
+import xml.etree.ElementTree as ET  # noqa: S405 - builds XML only; parsing uses defusedxml
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
@@ -70,6 +72,18 @@ REMOTE_PCAP_WRITE_REMEDIATION = (
     "user, mode 0770, labelled svirt_image_t on an SELinux-enforcing host or allowed by the "
     "libvirt-qemu.d AppArmor drop-in, and on a filesystem neither full nor read-only"
 )
+# Operator guidance when the running domain's DAC identity cannot own the pre-created pcap.
+REMOTE_PCAP_DAC_REMEDIATION = (
+    "the remote domain's live XML carries no usable DAC seclabel (<seclabel model='dac'> with a "
+    "<label> of +uid:+gid for a non-root QEMU user); keep libvirt's DAC security driver and an "
+    "unprivileged qemu.conf user, then reprovision the System"
+)
+# libvirt renders the DAC seclabel of a running domain as "+uid:+gid".
+_DAC_LABEL = re.compile(r"\+([0-9]{1,10}):\+([0-9]{1,10})")
+# The pre-created pcap is the QEMU user's alone; the root-owned pool directory stops QEMU from
+# unlinking or replacing it, so the root fetch-back never follows a QEMU-made link (#3316).
+_PCAP_FILE_MODE = "0600"
+
 # Operator guidance when the System's data NIC was defined with vhost-net, which QEMU never filters.
 REMOTE_PCAP_VHOST_REMEDIATION = (
     "this System's data NIC was defined with vhost-net, on which QEMU refuses every capture "
@@ -86,6 +100,7 @@ class _CaptureVolume(Protocol):
 
 class _CapturePool(Protocol):
     def isActive(self) -> int: ...  # noqa: N802 - libvirt binding name
+    def createXML(self, xml_desc: str, flags: int = 0, /) -> _CaptureVolume: ...  # noqa: N802
     def refresh(self, flags: int = 0) -> int: ...
     def XMLDesc(self, flags: int = 0) -> str: ...  # noqa: N802 - libvirt binding name
     def storageVolLookupByName(self, name: str) -> _CaptureVolume: ...  # noqa: N802
@@ -108,6 +123,46 @@ type OpenCaptureConnection = Callable[[str], _CaptureConn]
 def open_libvirt_capture(uri: str) -> _CaptureConn:
     """Production opener (live-host path; unit tests inject a fake)."""
     return open_libvirt_protocol(uri)
+
+
+def discover_dac_identity(domain_xml: str) -> tuple[int, int]:
+    """The ``(uid, gid)`` the running domain's QEMU process runs as, from its DAC seclabel.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` (``reason=dac_seclabel_unusable``) when the XML
+            is malformed or carries no ``+uid:+gid`` DAC label for a non-root user. The owner is
+            never guessed: a wrong one leaves QEMU unable to write or lets another account in.
+    """
+    try:
+        root = _safe_fromstring(domain_xml)
+    except Exception:  # noqa: BLE001 - host-emitted XML; a parse failure reads as unusable
+        root = None
+    label = None if root is None else root.findtext("./seclabel[@model='dac']/label")
+    match = _DAC_LABEL.fullmatch(label.strip()) if label else None
+    if match is None or int(match.group(1)) == 0:
+        raise CategorizedError(
+            "remote domain has no usable DAC identity to own the capture pcap",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "reason": "dac_seclabel_unusable",
+                "remediation": REMOTE_PCAP_DAC_REMEDIATION,
+            },
+        )
+    return int(match.group(1)), int(match.group(2))
+
+
+def capture_volume_xml(name: str, uid: int, gid: int) -> str:
+    """An empty raw volume ``name`` owned by ``uid:gid`` with mode 0600."""
+    volume = ET.Element("volume")
+    ET.SubElement(volume, "name").text = name
+    ET.SubElement(volume, "capacity", unit="bytes").text = "0"
+    target = ET.SubElement(volume, "target")
+    ET.SubElement(target, "format", type="raw")
+    permissions = ET.SubElement(target, "permissions")
+    ET.SubElement(permissions, "mode").text = _PCAP_FILE_MODE
+    ET.SubElement(permissions, "owner").text = str(uid)
+    ET.SubElement(permissions, "group").text = str(gid)
+    return ET.tostring(volume, encoding="unicode")
 
 
 def discover_netdev_id(domain_xml: str) -> str:
@@ -216,22 +271,33 @@ class RemoteLibvirtTrafficCapture:
             return str(PurePosixPath(pool_dir) / vol_name)
 
     def attach(self, domain_name: str, *, qom_id: str, dest_path: str, snaplen: int) -> None:
-        """Discover the netdev, then add a filter-dump writing ``dest_path`` (idempotent)."""
+        """Pre-create ``dest_path`` for the domain's QEMU user, then add a filter-dump writing it.
+
+        The volume is created before ``object-add`` so QEMU opens an existing file it owns in a
+        directory it cannot write; a refused or failed ``object-add`` deletes it again.
+        """
         with self._connection() as conn:
             domain = self._lookup_domain(conn, domain_name)
-            netdev = discover_netdev_id(self._domain_xml(domain, domain_name))
+            domain_xml = self._domain_xml(domain, domain_name)
+            netdev = discover_netdev_id(domain_xml)
+            uid, gid = discover_dac_identity(domain_xml)
             self._object_del(domain, domain_name, qom_id)
-            self._object_add(
-                domain,
-                domain_name,
-                {
-                    "qom-type": "filter-dump",
-                    "id": qom_id,
-                    "netdev": netdev,
-                    "file": dest_path,
-                    "maxlen": snaplen,
-                },
-            )
+            volume = self._create_capture_volume(conn, PurePosixPath(dest_path).name, uid, gid)
+            try:
+                self._object_add(
+                    domain,
+                    domain_name,
+                    {
+                        "qom-type": "filter-dump",
+                        "id": qom_id,
+                        "netdev": netdev,
+                        "file": dest_path,
+                        "maxlen": snaplen,
+                    },
+                )
+            except BaseException:
+                _delete_volume(volume)
+                raise
 
     def detach(self, domain_name: str, *, qom_id: str) -> None:
         """Remove the filter-dump ``qom_id`` (tolerating not-found)."""
@@ -296,6 +362,16 @@ class RemoteLibvirtTrafficCapture:
                 details={"pool_type": pool_type or "unknown"},
             )
         return target
+
+    def _create_capture_volume(
+        self, conn: _CaptureConn, vol_name: str, uid: int, gid: int
+    ) -> _CaptureVolume:
+        self._delete_stale_volume(conn, vol_name)
+        pool = self._lookup_pool(conn)
+        try:
+            return pool.createXML(capture_volume_xml(vol_name, uid, gid), 0)
+        except libvirt.libvirtError as exc:
+            raise self._infra("creating the pcap volume for") from exc
 
     def _delete_stale_volume(self, conn: _CaptureConn, vol_name: str) -> None:
         pool = self._lookup_pool(conn)
@@ -546,7 +622,10 @@ def _pool_type_and_target(pool_xml: str) -> tuple[str | None, str | None]:
 
 __all__ = [
     "RemoteLibvirtTrafficCapture",
+    "REMOTE_PCAP_DAC_REMEDIATION",
     "REMOTE_PCAP_VHOST_REMEDIATION",
     "REMOTE_PCAP_WRITE_REMEDIATION",
+    "capture_volume_xml",
+    "discover_dac_identity",
     "discover_netdev_id",
 ]
