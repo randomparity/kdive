@@ -74,7 +74,9 @@ pcap in that directory; AppArmor has no per-domain categories. The remote data N
 vhost-net, because QEMU refuses a capture filter on a vhost netdev. After upgrading, rerun
 `site.yml` on each provider host and reprovision existing remote Systems: a capture on an
 unprovisioned host fails `pcap_pool_missing`, and one on a System defined with vhost fails
-`capture_netdev_vhost`.
+`capture_netdev_vhost`. Drain capture jobs before upgrading; afterwards
+`virsh vol-list <storage_pool>` should show no `kdive-pcap-` volume, because the reaper now looks
+only in the pcap pool.
 
 ### Delivering the inventory and TLS refs to the fixed workers
 

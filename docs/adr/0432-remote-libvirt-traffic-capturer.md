@@ -163,4 +163,6 @@ Consequences:
   another System's in-flight capture on that host. Under SELinux the per-domain categories prevent
   that.
 - Existing provider hosts need `site.yml` rerun to provision the pool, and existing remote Systems
-  need reprovisioning to drop vhost.
+  need reprovisioning to drop vhost. The reaper looks only in the pcap pool, so a
+  `kdive-pcap-*.pcap` an older build left in `storage_pool` stays there: drain capture jobs before
+  upgrading and delete any such volume by hand.
