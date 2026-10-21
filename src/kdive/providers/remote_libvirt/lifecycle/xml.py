@@ -110,16 +110,20 @@ def render_domain_xml(
     backing_path: str,
     gdb_addr: str,
     gdb_port: int,
-    network: str = _DEFAULT_NETWORK,
+    network: str | None = _DEFAULT_NETWORK,
     machine: str = "pc",
     ssh_addr: str | None = None,
     ssh_port: int | None = None,
+    guest_egress: bool = False,
 ) -> str:
     """Render the tagged remote domain XML (ADR-0080 §2/§4).
 
     When both ``ssh_addr`` and ``ssh_port`` are given, a per-System user-mode SSH forward NIC is
     appended (ADR-0291): ``-netdev user,...restrict=on,hostfwd=tcp:<ssh_addr>:<ssh_port>-:22`` +
     a ``virtio-net-pci`` device. Omitted (either ``None``) → no forward NIC (guest-agent-only).
+    ``network=None`` renders no libvirt ``<interface>``: an unprivileged session daemon has no
+    network to attach it to, so the forward NIC is the guest's only NIC (ADR-0804), and
+    ``guest_egress`` renders it ``restrict=off`` (ADR-0313).
     """
     _ensure_namespaces_registered()
     if profile.provider.remote_libvirt_section is None:
@@ -156,9 +160,10 @@ def render_domain_xml(
     ET.SubElement(backing, "source", file=backing_path)
     ET.SubElement(backing, "backingStore")
     ET.SubElement(disk, "target", dev="vda", bus="virtio")
-    interface = ET.SubElement(devices, "interface", type="network")
-    ET.SubElement(interface, "source", network=network)
-    ET.SubElement(interface, "model", type="virtio")
+    if network is not None:
+        interface = ET.SubElement(devices, "interface", type="network")
+        ET.SubElement(interface, "source", network=network)
+        ET.SubElement(interface, "model", type="virtio")
     serial = ET.SubElement(devices, "serial", type="pty")
     ET.SubElement(serial, "target", port="0")
     console = ET.SubElement(devices, "console", type="pty")
@@ -173,11 +178,13 @@ def render_domain_xml(
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-gdb")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=f"tcp:{gdb_addr}:{gdb_port}")
     if ssh_addr is not None and ssh_port is not None:
-        _append_ssh_forward(commandline, ssh_addr, ssh_port)
+        _append_ssh_forward(commandline, ssh_addr, ssh_port, guest_egress=guest_egress)
     return ET.tostring(domain, encoding="unicode")
 
 
-def _append_ssh_forward(commandline: ET.Element, ssh_addr: str, ssh_port: int) -> None:
+def _append_ssh_forward(
+    commandline: ET.Element, ssh_addr: str, ssh_port: int, *, guest_egress: bool
+) -> None:
     """Append the per-System user-mode SSH forward NIC to ``<qemu:commandline>`` (ADR-0291).
 
     ``restrict=on`` isolates the slirp NIC to the inbound forward only (no guest-initiated
@@ -187,9 +194,11 @@ def _append_ssh_forward(commandline: ET.Element, ssh_addr: str, ssh_port: int) -
     is on the libvirt NIC. The reply returns through slirp only because the base image routes
     traffic sourced from the slirp lease back through slirp's gateway (ADR-0721); the forward
     keeps slirp's default subnet, which that route matches. ``addr=0x10`` pins the PCI slot so
-    it does not collide with the disk/bridge/agent virtio devices.
+    it does not collide with the disk/bridge/agent virtio devices. ``guest_egress`` (an operator
+    opt-in, ADR-0313) renders ``restrict=off`` so the NIC also carries guest-initiated NAT traffic.
     """
-    netdev = f"user,id=kdivessh,restrict=on,hostfwd=tcp:{ssh_addr}:{ssh_port}-:22"
+    restrict = "off" if guest_egress else "on"
+    netdev = f"user,id=kdivessh,restrict={restrict},hostfwd=tcp:{ssh_addr}:{ssh_port}-:22"
     device = "virtio-net-pci,netdev=kdivessh,addr=0x10"
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-netdev")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=netdev)
