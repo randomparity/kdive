@@ -269,6 +269,235 @@ def test_spine_upload_requires_the_contract_to_accept_effective_config(
         asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
 
 
+def _kernel_tree(tmp_path: Path, config: bytes = _BOOT_CONFIG) -> Path:
+    tree = tmp_path / "tree"
+    (tree / "include/config").mkdir(parents=True)
+    (tree / ".config").write_bytes(config)
+    (tree / "include/config/kernel.release").write_text("7.1.0-spine\n")
+    return tree
+
+
+def test_spine_initrd_runs_dracut_isolated_from_the_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tree = _kernel_tree(tmp_path)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setenv("DRACUT_INSTALL", "wrong")
+    monkeypatch.setattr(spine.shutil, "which", lambda name: f"/usr/bin/{name}")
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def record(command: list[str], *, check: bool, env: dict[str, str] | None = None) -> None:
+        assert check
+        assert not any((scratch / "dracut.conf.d").iterdir())
+        calls.append((command, env))
+
+    monkeypatch.setattr(spine.subprocess, "run", record)
+
+    initrd = spine.spine_initrd(tree, scratch, "upload-build")
+
+    assert initrd == scratch / "initrd"
+    assert calls == [
+        (
+            [
+                "dracut",
+                "--conf",
+                "/dev/null",
+                "--confdir",
+                str(scratch / "dracut.conf.d"),
+                "--no-kernel",
+                "--no-hostonly",
+                "--no-hostonly-cmdline",
+                "--no-early-microcode",
+                "--kver",
+                "7.1.0-spine",
+                "--modules",
+                "base rootfs-block udev-rules systemd systemd-initrd dracut-systemd fs-lib",
+                "--gzip",
+                "--force",
+                "--tmpdir",
+                str(scratch),
+                str(scratch / "initrd"),
+            ],
+            {
+                name: value
+                for name, value in os.environ.items()
+                if name in {"PATH", "HOME", "LANG", "LANGUAGE"} or name.startswith("LC_")
+            },
+        )
+    ]
+
+
+def test_spine_initrd_requires_dracut(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(spine.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(spine.subprocess, "run", Mock(side_effect=AssertionError("ran")))
+    with pytest.raises(SpinePhaseError, match="install the dracut package"):
+        spine.spine_initrd(_kernel_tree(tmp_path), tmp_path, "upload-build")
+
+
+def test_spine_initrd_requires_the_kernel_release(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tree = _kernel_tree(tmp_path)
+    (tree / "include/config/kernel.release").unlink()
+    monkeypatch.setattr(spine.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(spine.subprocess, "run", Mock(side_effect=AssertionError("ran")))
+    with pytest.raises(SpinePhaseError, match=r"include/config/kernel\.release"):
+        spine.spine_initrd(tree, tmp_path, "upload-build")
+
+
+@pytest.mark.parametrize("missing", ["BLK_DEV_INITRD", "RD_GZIP"])
+def test_spine_config_initrd_requires_gzip_initramfs_support(tmp_path: Path, missing: str) -> None:
+    present = {"BLK_DEV_INITRD", "RD_GZIP"} - {missing}
+    (tmp_path / ".config").write_bytes(
+        _BOOT_CONFIG + b"".join(f"CONFIG_{symbol}=y\n".encode() for symbol in present)
+    )
+    assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build")
+    with pytest.raises(SpinePhaseError, match=f"CONFIG_{missing}=y"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_initrd=True)
+
+
+_INITRD_CONFIG = _BOOT_CONFIG + b"CONFIG_BLK_DEV_INITRD=y\nCONFIG_RD_GZIP=y\n"
+
+
+def _fake_upload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    accepted: tuple[str, ...] = ("kernel", "effective_config", "initrd"),
+    returned: tuple[str, ...] = ("kernel", "effective_config", "initrd"),
+) -> tuple[list[tuple[str, dict[str, object]]], dict[str, bytes], Mock]:
+    kernel_tar = tmp_path / "kernel.tar"
+    kernel_tar.write_bytes(b"tar")
+
+    def initrd(_tree: Path, dest_dir: Path, _phase: str) -> Path:
+        built = dest_dir / "initrd"
+        built.write_bytes(b"\x1f\x8binitrd")
+        return built
+
+    build_initrd = Mock(side_effect=initrd)
+    monkeypatch.setattr(spine, "accepted_run_upload_names", lambda _c: list(accepted))
+    monkeypatch.setattr(spine, "combined_kernel_tar", lambda *_a, **_k: kernel_tar)
+    monkeypatch.setattr(spine, "spine_initrd", build_initrd)
+    monkeypatch.setattr(spine.platform, "machine", lambda: "x86_64")
+    calls: list[tuple[str, dict[str, object]]] = []
+    put: dict[str, bytes] = {}
+
+    async def _scalar(client: object, name: str, **args: object) -> ToolResponse:
+        calls.append((name, args))
+        if name == "artifacts.create_run_upload":
+            return ToolResponse.collection(
+                "run-1", "pending", [_upload_item(item) for item in returned]
+            )
+        return ToolResponse.success("run-1", "succeeded")
+
+    async def _put(item: ToolResponse, path: Path) -> None:
+        put[str(item.data["name"])] = path.read_bytes()
+
+    monkeypatch.setattr(spine, "scalar", _scalar)
+    monkeypatch.setattr(spine, "put_presigned", _put)
+    return calls, put, build_initrd
+
+
+def test_spine_upload_with_initrd_declares_and_puts_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tree = _kernel_tree(tmp_path, _INITRD_CONFIG)
+    calls, put, build_initrd = _fake_upload(monkeypatch, tmp_path)
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+
+    asyncio.run(
+        spine.build_and_upload_kernel(
+            cast(Any, client),
+            run_id="run-1",
+            kernel_tree=tree,
+            evidence_dir=tmp_path / "evidence",
+            with_initrd=True,
+        )
+    )
+
+    build_initrd.assert_called_once_with(tree, tmp_path / "evidence", "upload-build")
+    decls = cast(list[dict[str, object]], calls[0][1]["artifacts"])
+    initrd = next(decl for decl in decls if decl["name"] == "initrd")
+    assert initrd["size_bytes"] == len(b"\x1f\x8binitrd")
+    assert initrd["sha256"] == spine.sha256_b64(tmp_path / "evidence/initrd")
+    assert put["initrd"] == b"\x1f\x8binitrd"
+    assert calls[-1] == ("runs.complete_build", {"run_id": "run-1"})
+    evidence = json.loads((tmp_path / "evidence/upload.json").read_text())
+    assert "initrd" in {artifact["name"] for artifact in evidence["artifacts"]}
+
+
+def test_spine_upload_without_initrd_builds_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tree = _kernel_tree(tmp_path)
+    calls, put, build_initrd = _fake_upload(monkeypatch, tmp_path)
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+
+    asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1", kernel_tree=tree))
+
+    build_initrd.assert_not_called()
+    decls = cast(list[dict[str, object]], calls[0][1]["artifacts"])
+    assert [decl["name"] for decl in decls] == ["kernel", "effective_config"]
+    assert "initrd" not in put
+
+
+@pytest.mark.parametrize(
+    ("accepted", "returned", "arch", "config", "message"),
+    [
+        (
+            ("kernel", "effective_config"),
+            ("kernel", "effective_config"),
+            "x86_64",
+            _INITRD_CONFIG,
+            "accepts no 'initrd'",
+        ),
+        (
+            ("kernel", "effective_config", "initrd"),
+            ("kernel", "effective_config"),
+            "x86_64",
+            _INITRD_CONFIG,
+            "returned no 'initrd' item",
+        ),
+        (
+            ("kernel", "effective_config", "initrd"),
+            ("kernel", "effective_config", "initrd"),
+            "ppc64le",
+            _INITRD_CONFIG,
+            "build the ppc64le initrd on a ppc64le host",
+        ),
+        (
+            ("kernel", "effective_config", "initrd"),
+            ("kernel", "effective_config", "initrd"),
+            "x86_64",
+            _BOOT_CONFIG,
+            "CONFIG_BLK_DEV_INITRD=y",
+        ),
+    ],
+    ids=["contract", "upload-item", "foreign-arch", "config"],
+)
+def test_spine_upload_with_initrd_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    accepted: tuple[str, ...],
+    returned: tuple[str, ...],
+    arch: str,
+    config: bytes,
+    message: str,
+) -> None:
+    tree = _kernel_tree(tmp_path, config)
+    calls, _put, _build = _fake_upload(monkeypatch, tmp_path, accepted=accepted, returned=returned)
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+
+    with pytest.raises(SpinePhaseError, match=message):
+        asyncio.run(
+            spine.build_and_upload_kernel(
+                cast(Any, client), run_id="run-1", arch=arch, kernel_tree=tree, with_initrd=True
+            )
+        )
+    assert "runs.complete_build" not in [name for name, _ in calls]
+
+
 def _job(status: str, *, category: ErrorCategory | None = None) -> ToolResponse:
     return ToolResponse(
         object_id="job-1",
