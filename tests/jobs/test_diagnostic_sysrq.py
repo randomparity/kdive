@@ -4,8 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from uuid import UUID, uuid4
 
-from kdive.jobs.handlers.control.diagnostic_sysrq import CaptureResult, capture_console_delta
+from kdive.jobs.handlers.control.diagnostic_sysrq import (
+    MAX_POLLS,
+    POLL_INTERVAL_SECONDS,
+    SETTLE_POLLS,
+    CaptureResult,
+    capture_console_delta,
+)
+from kdive.providers.remote_libvirt.console.collector import ConsoleCollector
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 def _scripted_reader(frames: list[bytes]) -> Callable[[], Awaitable[bytes]]:
@@ -119,3 +128,66 @@ def test_disabled_marker_present_before_mark_does_not_report_disabled() -> None:
     assert result.exit_reason == "stabilized"
     # The overlap still carries the old marker into the stored slice, but it did not fail.
     assert b"This sysrq operation is disabled." in result.raw
+
+
+def test_remote_dump_is_captured_through_the_collector_idle_seal() -> None:
+    """A ~2 KiB dump with no crash marker reaches the poll only via the collector's idle seal."""
+    now = [0.0]
+    dump = b"sysrq: Show Memory\nMem-Info:\n" + b"active_anon:1 inactive_anon:2\n" * 60
+    script: list[bytes | None] = [b"boot\n" * 20, None]
+    parts: dict[int, bytes] = {}
+
+    class _Stream:
+        def recv(self, nbytes: int) -> bytes | None:
+            return script.pop(0) if script else None
+
+        def close(self) -> None: ...
+
+    class _Store:
+        def put_part(self, system_id: UUID, index: int, data: bytes) -> None:
+            parts[index] = data
+
+        def list_part_indices(self, system_id: UUID) -> list[int]:
+            return sorted(parts)
+
+        def read_part(self, system_id: UUID, index: int) -> bytes:
+            return parts[index]
+
+        def write_console_artifact(self, system_id: UUID, data: bytes) -> None: ...
+
+    collector = ConsoleCollector(
+        uuid4(),
+        open_console=lambda system_id: _Stream(),
+        store=_Store(),
+        secret_registry=SecretRegistry(),
+        clock=lambda: now[0],
+    )
+
+    async def _sleep(seconds: float) -> None:
+        now[0] += seconds
+        await asyncio.to_thread(collector.pump_once)
+
+    async def _read() -> bytes:
+        return b"".join(parts[i] for i in sorted(parts))
+
+    async def _inject() -> None:
+        script.append(dump)
+
+    collector.pump_once()
+    collector.pump_once()
+    now[0] = 5.0  # the boot burst is long sealed before the keystroke
+    collector.pump_once()
+
+    result = asyncio.run(
+        capture_console_delta(
+            _read,
+            _inject,
+            _sleep,
+            seam_overlap=0,
+            poll_interval=POLL_INTERVAL_SECONDS,
+            max_polls=MAX_POLLS,
+            settle_polls=SETTLE_POLLS,
+        )
+    )
+    assert result.exit_reason == "stabilized"
+    assert b"Mem-Info:" in result.raw
