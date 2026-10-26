@@ -37,7 +37,8 @@ with nothing held back.
   head is uploaded in one part and its tail in the next, each redacted on its own. The two
   places that join the parts redact the joined bytes again, so the split value is caught there:
   the read seam (ADR-0429) and `finalize`, which now re-redacts the assembled console artifact.
-  The individual S3 parts can still hold the two halves.
+  The individual S3 parts can still hold the two halves, so ADR-0095's rule that no part carries
+  a raw straddling secret holds for size rotation but not for an idle seal.
 - An interactive console produces more, smaller parts. No reader assumes a part's size: the read
   seam lists indices and assembles them, and the rotation threshold is read only by the collector.
 - A failed capture takes up to ten seconds to report, not five.
@@ -47,7 +48,11 @@ with nothing held back.
   poll settles after two quiet reads (about one second), so it can return the first part only.
   A `show_memory` dump is emitted in milliseconds, so this is not expected in practice.
 - A store failure during a seal keeps the buffered bytes and the part index, so the next idle pump
-  uploads the same part. Size rotation clears its buffer before the upload and is unchanged.
+  uploads the same part and the indices stay consecutive. Size rotation clears its buffer before
+  the upload and is unchanged.
+- The idle clock restarts on every received byte. A console that prints more often than once a
+  second never goes idle and seals only at the size threshold or a crash marker. A maximum age for
+  buffered bytes would close that gap and is not built here.
 
 ## Considered & rejected
 

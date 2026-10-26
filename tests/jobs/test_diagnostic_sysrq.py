@@ -13,6 +13,7 @@ from kdive.jobs.handlers.control.diagnostic_sysrq import (
     CaptureResult,
     capture_console_delta,
 )
+from kdive.providers.infra.console_hosting import _IDLE_PUMP_BACKOFF_SECONDS
 from kdive.providers.remote_libvirt.console.collector import IDLE_FLUSH_SECONDS, ConsoleCollector
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -194,5 +195,8 @@ def test_remote_dump_is_captured_through_the_collector_idle_seal() -> None:
 
 
 def test_poll_window_covers_the_collector_idle_seal() -> None:
-    # Idle interval, one 0.5 s pump backoff and the part upload must fit with room to spare.
-    assert MAX_POLLS * POLL_INTERVAL_SECONDS >= IDLE_FLUSH_SECONDS + 0.5 + 5.0
+    # The seal lands one idle interval plus one pump backoff after the last byte; keep a 2x margin
+    # for the part upload and the reader's own cadence.
+    assert MAX_POLLS * POLL_INTERVAL_SECONDS >= 2 * (
+        IDLE_FLUSH_SECONDS + _IDLE_PUMP_BACKOFF_SECONDS
+    )

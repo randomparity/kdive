@@ -13,7 +13,9 @@ to the next part, so a secret split across the size threshold is redacted as one
 run and is **never** uploaded raw in either part (the held-back bytes are uploaded only once,
 redacted, with the next part). A crash marker in the stream forces an immediate flush so the
 panic tail is the least-lost part. A console idle for ``IDLE_FLUSH_SECONDS`` seals what it holds
-the same way, so a small burst is readable without waiting for either trigger (ADR-0806).
+the same way, so a small burst is readable without waiting for either trigger (ADR-0806). Neither
+flush holds an overlap back, so a secret split across one is redacted in each part on its own;
+the read seam and ``finalize`` redact the joined bytes again.
 Finalization (on capture or teardown) flushes the held-back tail and assembles the ordered
 parts into **one** concatenated console artifact in the shape
 `classify_console` / `read_console_log` expect — kdive-side, not S3 multipart (the parts are
