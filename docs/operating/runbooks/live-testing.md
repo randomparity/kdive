@@ -2195,9 +2195,9 @@ configurations, both exposures, both providers) run in this frame through
 - `ops.force_release`: the held-teardown arm above, called by an outside platform admin through
   the cell's exposure. After the refusal and the quiescent teardown it requires the allocation
   read `released` and the capacity in use lower than while the effect was held.
-- `ops.resolve_recovery_orphan` (local): the recovery-orphan arm above, called the same way. The tool admits a local row
-  when its publishing authority is the server's fixed route; the server composes no local
-  recovery-object port.
+- `ops.resolve_recovery_orphan` (local): the recovery-orphan arm above, called the same way. The
+  tool admits a local row when its publishing authority is the server's fixed route; the server
+  composes no local recovery-object port.
 - The remote `ops.resolve_recovery_orphan` cells (#3326) and every
   `systems.resolve_external_boot_conflict` cell (#3327) pass their lane gates and stop `blocked`
   before any mutation.
