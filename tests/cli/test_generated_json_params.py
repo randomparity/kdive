@@ -123,8 +123,8 @@ def test_malformed_json_is_a_usage_error() -> None:
     assert excinfo.value.code == 2
 
 
-def test_scalar_json_is_a_usage_error() -> None:
-    # A bare scalar is valid JSON but not a structured param value; reject before dispatch.
+def test_container_param_refuses_a_scalar() -> None:
+    # A bare scalar is valid JSON but this container-only param has no scalar member.
     with pytest.raises(SystemExit) as excinfo:
         build_parser().parse_args(
             ["investigations", "link", "--investigation-id", "inv-1", "--ref-json", "5"]
@@ -136,5 +136,45 @@ def test_empty_string_json_is_a_usage_error() -> None:
     with pytest.raises(SystemExit) as excinfo:
         build_parser().parse_args(
             ["systems", "reprovision", "--system-id", "sys-1", "--profile-json", ""]
+        )
+    assert excinfo.value.code == 2
+
+
+# (argv past the required flags, escape flag) for the three verbs whose schema is ``Decimal``
+# (``number | string``) and, for ``allocations request``, a sibling object-only escape (#3299).
+_DECIMAL_ESCAPES = [
+    (["accounting", "set-budget", "--project", "p"], "--limit-kcu-json"),
+    (["allocations", "renew", "--allocation-id", "al-1"], "--extend-json"),
+    (["allocations", "request", "--project", "p"], "--window-json"),
+]
+
+
+@pytest.mark.parametrize(("argv", "flag"), _DECIMAL_ESCAPES, ids=lambda v: str(v[-1]))
+@pytest.mark.parametrize("value", ["5", "1.5", '"1.5"'])
+def test_decimal_escape_accepts_schema_allowed_scalars(
+    argv: list[str], flag: str, value: str
+) -> None:
+    args = build_parser().parse_args([*argv, flag, value])
+    assert (
+        getattr(args, _json_dest(flag.removeprefix("--").removesuffix("-json").replace("-", "_")))
+        == value
+    )
+
+
+@pytest.mark.parametrize(("argv", "flag"), _DECIMAL_ESCAPES, ids=lambda v: str(v[-1]))
+@pytest.mark.parametrize("value", ["true", "null"])
+def test_decimal_escape_refuses_scalars_the_schema_forbids(
+    argv: list[str], flag: str, value: str
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args([*argv, flag, value])
+    assert excinfo.value.code == 2
+
+
+def test_container_only_escape_still_refuses_a_scalar() -> None:
+    # ``resource`` is an object union with no scalar member, so a bare number stays refused.
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(
+            ["allocations", "request", "--project", "p", "--resource-json", "5"]
         )
     assert excinfo.value.code == 2

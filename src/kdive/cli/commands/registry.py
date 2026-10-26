@@ -176,42 +176,65 @@ def _add_generated_local_flag(parser: argparse.ArgumentParser, flag: GeneratedLo
     parser.add_argument(flag.name, dest=flag.dest, action="store_true", help=flag.help or None)
 
 
-def _json_container_arg(value: str) -> str:
-    """argparse ``type=`` validating a ``--<param>-json`` value is a JSON object or array.
+def _json_kind(parsed: object) -> str | None:
+    """The JSON Schema scalar type name of a parsed JSON value, ``None`` for the rest."""
+    if isinstance(parsed, bool):
+        return "boolean"
+    if isinstance(parsed, int):
+        return "integer"
+    if isinstance(parsed, float):
+        return "number"
+    return "string" if isinstance(parsed, str) else None
 
-    Mirrors :func:`kdive.cli.dispatch._parse_payload`'s "valid JSON, not a bare scalar" gate,
-    but raises :class:`argparse.ArgumentTypeError` so a malformed or scalar value fails as a
-    clean usage error (exit 2) at parse time — before the verb dispatches — instead of the
-    server-side error a bad payload would otherwise raise. Both a JSON object and a JSON array
-    are accepted because the non-scalar params span both shapes (e.g. ``profile`` is an object,
-    ``artifacts`` is a ``Sequence[...]`` array); the descriptor does not record which, and the
-    per-param typed payload assembly is #1450. The raw string is returned unchanged.
+
+def _json_value_arg(scalars: tuple[str, ...]) -> Callable[[str], str]:
+    """argparse ``type=`` factory for a ``--<param>-json`` value.
+
+    Mirrors :func:`kdive.cli.dispatch._parse_payload`'s "valid JSON" gate but raises
+    :class:`argparse.ArgumentTypeError`, so a malformed or wrong-shaped value fails as a clean
+    usage error (exit 2) at parse time, before the verb dispatches. A JSON object and a JSON
+    array are always accepted: the non-scalar params span both shapes and the descriptor does
+    not record which. A bare scalar is accepted only when the parameter's schema allows that
+    type (``scalars``, from :attr:`GeneratedVerb.json_scalars`, #3299); a JSON ``integer`` also
+    satisfies ``number``. The raw string is returned unchanged.
     """
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise argparse.ArgumentTypeError(f"not valid JSON: {exc}") from exc
-    if not isinstance(parsed, dict | list):
-        raise argparse.ArgumentTypeError("must be a JSON object or array")
-    return value
+
+    def parse(value: str) -> str:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise argparse.ArgumentTypeError(f"not valid JSON: {exc}") from exc
+        if isinstance(parsed, dict | list):
+            return value
+        kind = _json_kind(parsed)
+        if kind in scalars or (kind == "integer" and "number" in scalars):
+            return value
+        raise argparse.ArgumentTypeError(
+            f"must be a JSON value of type: {', '.join(['object', 'array', *scalars])}"
+        )
+
+    return parse
 
 
-def _add_generated_json_flag(parser: argparse.ArgumentParser, param: str) -> None:
+def _add_generated_json_flag(
+    parser: argparse.ArgumentParser, param: str, scalars: tuple[str, ...] = ()
+) -> None:
     """Declare the ``--<param>-json`` escape for a non-scalar generated-verb parameter (#1449).
 
-    Params the generator cannot express as a typed scalar flag — nested objects, object arrays —
-    are recorded in :attr:`GeneratedVerb.json_params` (#1447) and surfaced here as a single
-    JSON-valued flag, validated to a JSON container (:func:`_json_container_arg`) at parse time.
+    Params the generator cannot express as a typed scalar flag (nested objects, object arrays,
+    scalar unions) are recorded in :attr:`GeneratedVerb.json_params` (#1447) and surfaced here
+    as a single JSON-valued flag, validated at parse time (:func:`_json_value_arg`).
     The raw string lands on the namespace under the ``genarg_<param>_json`` dest for the
     flag-value-to-payload assembly seam (#1450).
     """
+    shapes = ", ".join(["object", "array", *scalars])
     parser.add_argument(
         f"{derive_cli_flag(param)}-json",
         dest=f"{GENERATED_ARG_PREFIX}{param}_json",
         default=None,
         metavar=f"{param.upper()}_JSON",
-        type=_json_container_arg,
-        help=f"JSON-encoded value (object or array) for the {param!r} parameter",
+        type=_json_value_arg(scalars),
+        help=f"JSON-encoded value ({shapes}) for the {param!r} parameter",
     )
 
 
@@ -231,8 +254,9 @@ def _generated_verb_parser(
     parser = group_parser.add_parser(verb.sub, parents=[parent], help=verb.help or None)
     for flag in verb.flags:
         _add_generated_flag(parser, flag, positional=flag.dest in verb.positionals)
+    scalars = dict(verb.json_scalars)
     for param in verb.json_params:
-        _add_generated_json_flag(parser, param)
+        _add_generated_json_flag(parser, param, scalars.get(param, ()))
     for flag in verb.local_flags:
         _add_generated_local_flag(parser, flag)
     if verb.confirm_destructive:
