@@ -98,6 +98,9 @@ class _ParserShape:
     help: str = ""
 
 
+#: Paging parameters every list tool accepts; omitted flags send no key (server defaults rule).
+_PAGING = ("limit", "cursor")
+
 _FORCE_CONFIRM = GeneratedLocalFlag("--force", "force", "")
 _EXPIRED_CONFIRM = GeneratedLocalFlag("--expired", "expired", "")
 
@@ -106,13 +109,15 @@ _EXPIRED_CONFIRM = GeneratedLocalFlag("--expired", "expired", "")
 # parser shape.  Keep this as data, not a second parser implementation.
 _PARSER_SHAPES: Mapping[str, _ParserShape] = MappingProxyType(
     {
-        "resources.list": _ParserShape(("kind",)),
+        "resources.list": _ParserShape(("kind", *_PAGING)),
         "resources.describe": _ParserShape(("resource_id",), ("resource_id",)),
-        "allocations.list": _ParserShape(("project",), required=("project",)),
-        "systems.list": _ParserShape(("state",)),
+        "allocations.list": _ParserShape(("project", "state", *_PAGING), required=("project",)),
+        "systems.list": _ParserShape(
+            ("project", "allocation_id", "state", "shape", "pcie", *_PAGING)
+        ),
         "systems.get": _ParserShape(("system_id",), ("system_id",)),
         "runs.get": _ParserShape(("run_id",), ("run_id",)),
-        "jobs.list": _ParserShape(()),
+        "jobs.list": _ParserShape(("state", "kind", "investigation_id", "system_id", *_PAGING)),
         "jobs.wait": _ParserShape(
             ("job_id", "timeout_s"),
             ("job_id",),
@@ -151,7 +156,7 @@ _PARSER_SHAPES: Mapping[str, _ParserShape] = MappingProxyType(
             help="set a host 'cordoned' or 'schedulable' (requires a platform_operator token)",
         ),
         "resources.drain": _ParserShape(("resource_id", "mode", "reason"), ("resource_id",)),
-        "images.list": _ParserShape(("scope",)),
+        "images.list": _ParserShape(("scope", *_PAGING)),
         "images.describe": _ParserShape(("image_id", "target_kernel"), ("image_id",)),
         "images.upload": _ParserShape(
             ("project", "name", "arch", "quarantine_key", "lifetime_seconds"),

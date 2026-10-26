@@ -56,6 +56,18 @@ def _payload(args: argparse.Namespace, *names: str) -> dict[str, object]:
     return payload
 
 
+def list_request(args: argparse.Namespace, *filters: str) -> dict[str, object]:
+    """Build a list tool's ``request`` body from its string filters plus ``limit``/``cursor``.
+
+    Only flags the caller gave are sent, so the tool's own defaults stay authoritative.
+    """
+    request = _payload(args, *filters, "cursor")
+    limit = optional_generated_arg(args, "limit", int)
+    if limit is not None:
+        request["limit"] = limit
+    return request
+
+
 async def _list(
     name: str, args: argparse.Namespace, columns: list[str], payload: Mapping[str, object]
 ) -> int:
@@ -71,7 +83,7 @@ async def _record(name: str, args: argparse.Namespace, payload: Mapping[str, obj
 
 
 async def resources_list(args: argparse.Namespace) -> int:
-    request = _payload(args, "kind")
+    request = list_request(args, "kind")
     envelope = await _fetch("resources.list", {"request": request} if request else {})
     emit(
         envelope,
@@ -98,7 +110,7 @@ async def images_get(args: argparse.Namespace) -> int:
 
 
 async def allocations_list(args: argparse.Namespace) -> int:
-    envelope = await _fetch("allocations.list", {"request": _payload(args, "project")})
+    envelope = await _fetch("allocations.list", {"request": list_request(args, "project", "state")})
     emit(
         envelope,
         lambda: render(collection_rows(envelope), columns=["id", "project", "system", "state"]),
@@ -108,7 +120,10 @@ async def allocations_list(args: argparse.Namespace) -> int:
 
 
 async def systems_list(args: argparse.Namespace) -> int:
-    envelope = await _fetch("systems.list", {"request": _payload(args, "state")})
+    envelope = await _fetch(
+        "systems.list",
+        {"request": list_request(args, "project", "allocation_id", "state", "shape", "pcie")},
+    )
     emit(
         envelope,
         lambda: render(collection_rows(envelope), columns=["id", "project", "state"]),
@@ -128,7 +143,10 @@ async def runs_get(args: argparse.Namespace) -> int:
 
 
 async def jobs_list(args: argparse.Namespace) -> int:
-    envelope = await _fetch("jobs.list", {"request": {}})
+    envelope = await _fetch(
+        "jobs.list",
+        {"request": list_request(args, "state", "kind", "investigation_id", "system_id")},
+    )
     emit(
         envelope,
         lambda: render(collection_rows(envelope), columns=["id", "kind", "state"]),
@@ -227,7 +245,7 @@ async def inventory_show(args: argparse.Namespace) -> int:
     ``inventory.list`` takes its filters inside a ``request`` wrapper, like the other list
     tools, so ``--project`` goes there rather than at the top level of the payload.
     """
-    request = {"request": _payload(args, "project")}
+    request = {"request": list_request(args, "project", "state")}
     return await _list("inventory.list", args, ["key", "backend", "status"], request)
 
 
