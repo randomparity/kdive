@@ -256,13 +256,22 @@ class ConsoleCollector:
         self._store.put_part(self._system_id, self._take_index(), self._redact(to_upload))
 
     def _flush_tail(self) -> None:
-        """Upload the held-back carry + buffer as the final part (no overlap held back)."""
+        """Upload the held-back carry + buffer as the final part (no overlap held back).
+
+        The buffer and carry are cleared only once the upload lands, so a store failure leaves the
+        bytes for the next flush, and the part index is given back so parts stay consecutive.
+        """
         data = self._carry + bytes(self._buffer)
-        self._buffer.clear()
-        self._carry = b""
         if not data:
             return
-        self._store.put_part(self._system_id, self._take_index(), self._redact(data))
+        index = self._take_index()
+        try:
+            self._store.put_part(self._system_id, index, self._redact(data))
+        except Exception:
+            self._next_index = index
+            raise
+        self._buffer.clear()
+        self._carry = b""
 
     def _redact(self, data: bytes) -> bytes:
         """Redact ``data`` before it leaves the worker (untrusted guest bytes, ADR-0027).
@@ -291,9 +300,11 @@ class ConsoleCollector:
             assembled = bytearray()
             for index in sorted(self._store.list_part_indices(self._system_id)):
                 assembled.extend(self._store.read_part(self._system_id, index))
-            self._store.write_console_artifact(self._system_id, bytes(assembled))
+            # A second pass over the joined parts catches a secret an idle seal split in two.
+            artifact = self._redact(bytes(assembled))
+            self._store.write_console_artifact(self._system_id, artifact)
             if self._telemetry is not None:
-                self._telemetry.record(len(assembled))
+                self._telemetry.record(len(artifact))
             self._finalized = True
         _log.info("console collector for %s finalized into one artifact", self._system_id)
 

@@ -34,12 +34,20 @@ with nothing held back.
 - A small console burst becomes readable within about two seconds. This also shortens the delay
   for any consumer of the parts, including crash-watch on output without a crash marker.
 - A secret split by a pause longer than one second is no longer held back across that boundary: its
-  head is uploaded in one part and its tail in the next, each redacted on its own. A registered
-  secret is matched whole, so such a split value can survive. Secrets in console output are
-  already treated as guest-controlled and best effort; size rotation keeps its overlap.
+  head is uploaded in one part and its tail in the next, each redacted on its own. The two
+  places that join the parts redact the joined bytes again, so the split value is caught there:
+  the read seam (ADR-0429) and `finalize`, which now re-redacts the assembled console artifact.
+  The individual S3 parts can still hold the two halves.
 - An interactive console produces more, smaller parts. No reader assumes a part's size: the read
   seam lists indices and assembles them, and the rotation threshold is read only by the collector.
 - A failed capture takes up to ten seconds to report, not five.
+- The seal runs only on a would-block read. Bytes buffered when the stream ends or errors stay
+  buffered until the next read or `finalize`.
+- A dump with an internal pause longer than about one second is sealed in two parts. The SysRq
+  poll settles after two quiet reads (about one second), so it can return the first part only.
+  A `show_memory` dump is emitted in milliseconds, so this is not expected in practice.
+- A store failure during a seal keeps the buffered bytes and the part index, so the next idle pump
+  uploads the same part. Size rotation clears its buffer before the upload and is unchanged.
 
 ## Considered & rejected
 

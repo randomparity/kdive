@@ -214,6 +214,49 @@ def test_idle_flush_redacts_a_secret_held_in_the_carry() -> None:
     assert REDACTION.encode() in joined
 
 
+def test_failed_idle_upload_keeps_the_bytes_and_the_part_index() -> None:
+    class FlakyStore(FakePartStore):
+        failures = 1
+
+        def put_part(self, system_id, index: int, data: bytes) -> None:  # noqa: ANN001
+            if self.failures:
+                self.failures -= 1
+                raise OSError("store unavailable")
+            super().put_part(system_id, index, data)
+
+    clock = FakeClock()
+    store = FlakyStore()
+    stream = FakeNonBlockingStream([b"dump\n", None, None])
+    collector = _collector(FakeOpenConsole([stream]), store, idle_flush_seconds=1.0, clock=clock)
+    collector.pump_once()
+    clock.now = 2.0
+    with pytest.raises(OSError, match="store unavailable"):
+        collector.pump_once()
+    collector.pump_once()  # the retry uploads the same bytes at the same index
+    assert store.parts == {0: b"dump\n"}
+
+
+def test_idle_split_secret_is_redacted_in_the_finalized_artifact() -> None:
+    secret = "abcdefghijklmnop"  # pragma: allowlist secret - synthetic test redaction target
+    registry = SecretRegistry()
+    registry.register(secret, scope=None)
+    clock = FakeClock()
+    store = FakePartStore()
+    stream = FakeNonBlockingStream([secret[:8].encode(), None, secret[8:].encode(), None])
+    collector = _collector(
+        FakeOpenConsole([stream]), store, registry=registry, idle_flush_seconds=1.0, clock=clock
+    )
+    collector.pump_once()
+    clock.now = 2.0
+    collector.pump_once()  # idle seal uploads the head alone
+    collector.pump_once()  # (stream yields the tail next)
+    clock.now = 4.0
+    collector.pump_once()
+    collector.finalize()
+    assert store.artifact is not None
+    assert secret.encode() not in store.artifact
+
+
 def test_rotation_on_threshold_uploads_numbered_parts() -> None:
     store = FakePartStore()
     stream = FakeStream([b"a" * 100, b"b" * 100])
