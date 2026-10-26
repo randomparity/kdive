@@ -783,6 +783,67 @@ def test_orphan_repair_needs_no_activation_to_report(migrated_url: str) -> None:
     _assert_unavailable(_drive(migrated_url, _body))
 
 
+# --- the server role's grants ---------------------------------------------------------------
+
+
+async def _server_role(conn: psycopg.AsyncConnection) -> None:
+    await conn.execute("SET SESSION AUTHORIZATION kdive_server")
+    await conn.commit()
+
+
+async def _seed_quarantined_object(conn: psycopg.AsyncConnection, seeded: _Seeded) -> str:
+    """Insert one quarantined row as the publishing authority would, returning its identity."""
+    identity = "sha256:" + "e" * 64
+    await conn.execute(
+        "INSERT INTO external_boot_recovery_quarantine "
+        "(object_identity, resource_id, system_id, activation_id, provider_kind, "
+        "authority_instance, object_kind, object_reference, ownership_digest, observed_digest, "
+        "operation_identity, attempt_id, mutation_journal_sequence, mutation_journal_digest, "
+        "reserved_bytes) SELECT %s, a.resource_id, s.id, %s, 'local-libvirt', 'authority/a', "
+        "'modules', 'modules/quarantined-a', %s, %s, 'cleanup-a', %s, 7, %s, 4096 "
+        "FROM systems s JOIN allocations a ON a.id = s.allocation_id WHERE s.id = %s",
+        (identity, seeded.activation_id, _DIGEST, _DIGEST, uuid4(), _DIGEST, seeded.system_id),
+    )
+    return identity
+
+
+def test_orphan_repair_admits_under_the_server_database_role(migrated_url: str) -> None:
+    """#3322: the quarantine row lock runs on the server pool, so it needs the server's grants.
+
+    The other suites drive admission through an owner connection, which hides any privilege the
+    ``kdive_server`` role lacks; this one connects the service pool as that role.
+    """
+
+    async def _run() -> tuple[ToolResponse, int]:
+        conn = await connect(migrated_url)
+        try:
+            seeded = await _seed(conn)
+            identity = await _seed_quarantined_object(conn, seeded)
+            async with AsyncConnectionPool(
+                migrated_url, min_size=1, max_size=2, open=False, configure=_server_role
+            ) as server_pool:
+                response = await resolve_recovery_orphan(
+                    server_pool,
+                    _platform_ctx(),
+                    resolver=provider_resolver(external_boot_recovery_objects=object()),
+                    system_id=str(seeded.system_id),
+                    object_identities=[identity],
+                    disposition="delete",
+                )
+            requests = await _count(
+                conn,
+                "SELECT count(*) FROM external_boot_recovery_orphan_requests WHERE system_id = %s",
+                seeded.system_id,
+            )
+            return response, requests
+        finally:
+            await conn.close()
+
+    response, requests = asyncio.run(_run())
+    assert response.error_category is None, response.model_dump()
+    assert requests == 1
+
+
 # --- the amendment's hard rule ----------------------------------------------------------------
 
 
