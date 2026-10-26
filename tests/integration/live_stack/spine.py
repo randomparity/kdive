@@ -23,7 +23,9 @@ import base64
 import hashlib
 import json
 import os
+import platform
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -737,9 +739,13 @@ def check_spine_kernel_config(
     require_kdump: bool = False,
     require_network: bool = False,
     require_live_debug: bool = False,
+    require_initrd: bool = False,
     root_fs: str | None = None,
 ) -> bytes:
-    """Reject a built tree that lacks the selected live proof's kernel features."""
+    """Reject a built tree that lacks the selected live proof's kernel features.
+
+    ``require_initrd`` adds the support to unpack :func:`spine_initrd`'s gzip initramfs.
+    """
     if arch not in {"x86_64", "ppc64le"}:
         raise SpinePhaseError(phase_name, f"unsupported kernel arch {arch!r}")
     if root_fs not in {None, "ext4", "xfs"}:
@@ -765,6 +771,12 @@ def check_spine_kernel_config(
             missing.append("CONFIG_XFS_FS=y")
     elif not (config.is_builtin("EXT4_FS") or config.is_builtin("XFS_FS")):
         missing.append("CONFIG_EXT4_FS=y or CONFIG_XFS_FS=y")
+    if require_initrd:
+        missing.extend(
+            f"CONFIG_{symbol}=y"
+            for symbol in ("BLK_DEV_INITRD", "RD_GZIP")
+            if not config.is_builtin(symbol)
+        )
     if require_network and not config.is_enabled("VIRTIO_NET"):
         missing.append("CONFIG_VIRTIO_NET=y or =m")
     has_dwarf = config.is_builtin("DEBUG_INFO_DWARF4") or config.is_builtin("DEBUG_INFO_DWARF5")
@@ -779,6 +791,73 @@ def check_spine_kernel_config(
             f"KDIVE_KERNEL_SRC/.config lacks required spine settings: {', '.join(missing)}",
         )
     return config_bytes
+
+
+def _host_tool_env() -> dict[str, str]:
+    """The caller's environment minus anything a host build tool reads as configuration."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name in {"PATH", "HOME", "LANG", "LANGUAGE"} or name.startswith("LC_")
+    }
+
+
+# The remote root is ``root=UUID=<uuid> rootfstype=<fs>``; the kernel resolves a filesystem UUID
+# only from initramfs userspace. The spine already requires the virtio and root-filesystem
+# drivers built in, so the initrd carries userspace only (udev, blkid, systemd's switch-root).
+_INITRD_DRACUT_MODULES = "base rootfs-block udev-rules systemd systemd-initrd dracut-systemd fs-lib"
+
+
+def spine_initrd(kernel_src: Path, dest_dir: Path, phase_name: str) -> Path:
+    """Build the userspace-only gzip initrd a remote external boot needs (#3323).
+
+    dracut packs this host's userspace and runs unprivileged. It skips ``/etc/dracut.conf`` and
+    ``/etc/dracut.conf.d``, but always sources the distro's ``/usr/lib/dracut/dracut.conf.d``,
+    whose drop-ins can still add dracut modules or files. ``--no-kernel`` adds no kernel modules,
+    so the initrd pairs with any kernel whose boot drivers are built in. Without root, dracut logs
+    that ldconfig needs uid 0 and writes no ``ld.so.cache``; glibc's built-in search path still
+    covers the distro library directories.
+    """
+    if shutil.which("dracut") is None:
+        raise SpinePhaseError(phase_name, "dracut not on PATH; install the dracut package")
+    release_file = kernel_src / "include/config/kernel.release"
+    try:
+        release = release_file.read_text().strip()
+    except OSError as exc:
+        raise SpinePhaseError(
+            phase_name, f"could not read {release_file} ({type(exc).__name__})"
+        ) from exc
+    confdir = dest_dir / "dracut.conf.d"
+    confdir.mkdir()
+    initrd = dest_dir / "initrd"
+    try:
+        subprocess.run(
+            [
+                "dracut",
+                "--conf",
+                "/dev/null",
+                "--confdir",
+                str(confdir),
+                "--no-kernel",
+                "--no-hostonly",
+                "--no-hostonly-cmdline",
+                "--no-early-microcode",
+                "--kver",
+                release,
+                "--modules",
+                _INITRD_DRACUT_MODULES,
+                "--gzip",
+                "--force",
+                "--tmpdir",
+                str(dest_dir),
+                str(initrd),
+            ],
+            check=True,
+            env=_host_tool_env(),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SpinePhaseError(phase_name, f"dracut exited {exc.returncode}") from exc
+    return initrd
 
 
 def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64") -> Path:
@@ -811,11 +890,6 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
         boot_root = dest_dir
         member = Path("vmlinuz")
     modstage = dest_dir / "modstage"
-    make_env = {
-        name: value
-        for name, value in os.environ.items()
-        if name in {"PATH", "HOME", "LANG", "LANGUAGE"} or name.startswith("LC_")
-    }
     make_arch = {"x86_64": "x86", "ppc64le": "powerpc"}[arch]
     subprocess.run(
         [
@@ -828,7 +902,7 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
             "INSTALL_MOD_STRIP=1",
         ],
         check=True,
-        env=make_env,
+        env=_host_tool_env(),
     )
     tar_path = dest_dir / "kernel.tar.gz"
     subprocess.run(
@@ -858,6 +932,7 @@ async def build_and_upload_kernel(
     phase_name: str = "upload-build",
     arch: str = "x86_64",
     with_vmlinux: bool = False,
+    with_initrd: bool = False,
     require_kdump: bool = False,
     require_network: bool = False,
     require_live_debug: bool = False,
@@ -879,6 +954,10 @@ async def build_and_upload_kernel(
     opt-in because the ELF is large (hundreds of MB) and a spine that never attaches pays the
     upload for nothing.
 
+    ``with_initrd`` additionally uploads :func:`spine_initrd`'s initrd. Remote external boot
+    refuses a build without one (``remote_external_boot_initrd_required``). dracut packs this
+    host's userspace, so the guest ``arch`` must be the host's.
+
     ``kernel_tree`` overrides the environment input. ``evidence_dir`` must be new;
     it retains the bundle, effective config and upload declarations/completion result.
     ``complete=False`` uploads the artifacts and skips ``runs.complete_build``, so the Run stays
@@ -890,6 +969,12 @@ async def build_and_upload_kernel(
         raise SpinePhaseError(phase_name, f"upload contract no longer accepts 'kernel': {accepted}")
     if with_vmlinux and "vmlinux" not in accepted:
         raise SpinePhaseError(phase_name, f"upload contract accepts no 'vmlinux': {accepted}")
+    if with_initrd and "initrd" not in accepted:
+        raise SpinePhaseError(phase_name, f"upload contract accepts no 'initrd': {accepted}")
+    if with_initrd and arch != platform.machine():
+        raise SpinePhaseError(
+            phase_name, f"build the {arch} initrd on a {arch} host, not {platform.machine()}"
+        )
     if "effective_config" not in accepted:
         raise SpinePhaseError(
             phase_name, f"upload contract no longer accepts 'effective_config': {accepted}"
@@ -904,6 +989,7 @@ async def build_and_upload_kernel(
         require_kdump=require_kdump,
         require_network=require_network,
         require_live_debug=require_live_debug,
+        require_initrd=with_initrd,
         root_fs=root_fs,
     )
     if evidence_dir is not None:
@@ -941,6 +1027,15 @@ async def build_and_upload_kernel(
                     "size_bytes": vmlinux.stat().st_size,
                 }
             )
+        if with_initrd:
+            initrd = spine_initrd(Path(kernel_src), Path(scratch), phase_name)
+            decls.append(
+                {
+                    "name": "initrd",
+                    "sha256": sha256_b64(initrd),
+                    "size_bytes": initrd.stat().st_size,
+                }
+            )
         up = ok(
             await scalar(client, "artifacts.create_run_upload", run_id=run_id, artifacts=decls),
             phase_name,
@@ -957,6 +1052,10 @@ async def build_and_upload_kernel(
                 raise SpinePhaseError(phase_name, "create_run_upload returned no 'vmlinux' item")
             await put_presigned(by_name["vmlinux"], vmlinux)
             build_id = elf_build_id(vmlinux)
+        if with_initrd:
+            if "initrd" not in by_name:
+                raise SpinePhaseError(phase_name, "create_run_upload returned no 'initrd' item")
+            await put_presigned(by_name["initrd"], initrd)
     # complete_build requires build_id iff a vmlinux was uploaded; sending it otherwise (or
     # omitting it here) is a configuration_error.
     extra: dict[str, JsonValue] = {"build_id": build_id} if with_vmlinux else {}

@@ -19,7 +19,6 @@ Two rules hold everything here together, and both exist because breaking them is
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -33,7 +32,6 @@ __all__ = [
     "authority_result",
     "conflict_result",
     "known_object_refs",
-    "evidence_digest",
     "terminal_evidence",
 ]
 
@@ -72,18 +70,6 @@ def terminal_evidence(context: OperationContext, outcome: str) -> dict[str, Any]
         "objects": [{"ref": ref} for ref in known_object_refs(context.activation)],
         "observed_at": _now(),
     }
-
-
-def evidence_digest(evidence: dict[str, Any]) -> str:
-    """``sha256`` over an evidence document's canonical JSON, so the digest names that document.
-
-    Used for both ``release_identity`` and ``teardown_identity``. The input must be the document
-    the result actually carries and the commit actually persists — a digest over anything else is
-    a value no auditor can recompute, and the schema only checks its shape, so nothing would catch
-    the substitution.
-    """
-    canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
-    return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
 def authority_result(

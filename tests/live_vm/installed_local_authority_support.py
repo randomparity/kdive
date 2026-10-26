@@ -2144,6 +2144,7 @@ async def start_external_boot_activation(
     label: str,
     require_kdump: bool,
     guest_arch: str = "x86_64",
+    with_initrd: bool = False,
     before_activate: Callable[[str], None] | None = None,
 ) -> ActivationJob:
     """Create, install, and publicly admit one activation without polling its job.
@@ -2151,7 +2152,8 @@ async def start_external_boot_activation(
     ``guest_arch`` is the architecture recorded in the Run's build profile; it defaults to
     ``"x86_64"`` for the native x86_64 carrier and must be ``"ppc64le"`` for the ppc64le
     carrier (#2152). ``require_kdump`` arms install's crash-config gate, so it is true only for
-    a System minted with a crashkernel.
+    a System minted with a crashkernel. ``with_initrd`` uploads an initrd with the kernel, which
+    remote external boot requires (#3323).
     """
     opened = ok(
         await scalar(
@@ -2179,7 +2181,11 @@ async def start_external_boot_activation(
     ledger.record(OwnedResource(kind="run", identity=run_id))
     # The uploaded effective_config arms install's crash-config gate, so check it before staging.
     await build_and_upload_kernel(
-        client, run_id=run_id, arch=guest_arch, require_kdump=require_kdump
+        client,
+        run_id=run_id,
+        arch=guest_arch,
+        require_kdump=require_kdump,
+        with_initrd=with_initrd,
     )
     install = ok(await scalar(client, "runs.install", run_id=run_id), "install")
     await drain_job(client, "install", install.object_id)

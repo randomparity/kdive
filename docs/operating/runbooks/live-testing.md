@@ -2117,7 +2117,28 @@ recovery tool. A platform admin with no role in the frame's project calls the to
 barrier on each authority (above) and add `"barrier_socket":
 "/run/kdive/provider-authority/proof-control/control.sock"` to the local lane config. Export
 `KDIVE_KERNEL_SRC` naming a pre-built x86_64 tree: the arms upload it without a `vmlinux` and build
-nothing.
+no kernel.
+
+A remote arm also uploads an initrd, because remote external boot refuses a build without one
+(`remote_external_boot_initrd_required`). The arm builds it on the test client with `dracut`,
+which Ubuntu 26.04, Fedora and Rocky install by default. It runs unprivileged and skips
+`/etc/dracut.conf` and `/etc/dracut.conf.d`. The distro's `/usr/lib/dracut/dracut.conf.d` drop-ins
+still apply and can add dracut modules or files; no dracut option turns them off.
+The tree's `.config` must also set `CONFIG_BLK_DEV_INITRD=y` and `CONFIG_RD_GZIP=y`. The initrd
+holds userspace only (it resolves `root=UUID=`), so the tree's virtio and root-filesystem drivers
+must be built in, as every spine already requires. To build the same initrd by hand, with
+`<scratch>` a new directory and `<scratch>/dracut.conf.d` an empty one:
+
+```bash
+dracut --conf /dev/null --confdir <scratch>/dracut.conf.d --no-kernel --no-hostonly \
+  --no-hostonly-cmdline --no-early-microcode \
+  --kver "$(cat "$KDIVE_KERNEL_SRC/include/config/kernel.release")" \
+  --modules "base rootfs-block udev-rules systemd systemd-initrd dracut-systemd fs-lib" \
+  --gzip --force --tmpdir <scratch> <scratch>/initrd
+```
+
+Without root, dracut logs `ldconfig might need uid=0 (root) for chroot()` and still exits 0. The
+image then carries no `ld.so.cache`, and glibc's built-in search path finds the libraries.
 
 - **Held teardown (local and remote).** The arm activates and releases one external boot, arms
   `teardown`/`after-provider`, and calls `systems.teardown`. While the effect is held it requires

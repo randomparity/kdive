@@ -79,6 +79,7 @@ from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connec
 from tests.jobs.handlers.external_boot.seeding import (
     RecordingAcknowledger,
     SeededCase,
+    release_evidence,
     seed_case,
 )
 from tests.jobs.handlers.external_boot.support import CASES, build_job
@@ -644,6 +645,103 @@ def test_cleanup_marks_the_activation_cleanup_complete(
         assert (await _activation_row(seed, case.vehicle.activation_id))["cleanup_complete"] is True
 
     _drive(migrated_url, authority_role_dsns, "cleanup", body)
+
+
+def _teardown_evidence(system_id: UUID) -> dict[str, Any]:
+    return {
+        "schema": "external-boot-teardown-evidence-v1",
+        "system_id": str(system_id),
+        "system_state": "torn_down",
+        "observed_at": "2026-09-06T00:00:00Z",
+    }
+
+
+def _drive_system_teardown_cleanup(
+    migrated_url: str,
+    body: Callable[[AsyncConnection, SeededCase], Awaitable[None]],
+    *,
+    with_teardown_evidence: bool,
+) -> None:
+    """A failed recovery whose System teardown already recorded its release (#3321)."""
+
+    async def _main() -> None:
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose="release",
+                operation="cleanup",
+                activation_state="recovery_failed",
+                attempt_state="failed",
+            )
+            release = release_evidence(vehicle)
+            await seed.execute(
+                "INSERT INTO external_boot_reservation_releases "
+                "(activation_id, store_identity, owner_key, reserved_bytes, release_identity, "
+                "release_evidence, teardown_evidence) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (
+                    vehicle.activation_id,
+                    release["store_identity"]["ref"],
+                    release["owner_key"]["ref"],
+                    release["reserved_bytes"],
+                    ExternalBootReleaseEvidenceV1.model_validate(release).identity,
+                    Jsonb(release),
+                    Jsonb(_teardown_evidence(vehicle.system_id))
+                    if with_teardown_evidence
+                    else None,
+                ),
+            )
+            if with_teardown_evidence:
+                await seed.execute(
+                    "UPDATE external_boot_activations SET teardown_evidence = %s WHERE id = %s",
+                    (Jsonb(_teardown_evidence(vehicle.system_id)), vehicle.activation_id),
+                )
+            await seed.execute(
+                "UPDATE systems SET state = 'torn_down' WHERE id = %s", (vehicle.system_id,)
+            )
+            await body(seed, case)
+
+    asyncio.run(_main())
+
+
+def test_system_teardown_cleanup_names_the_persisted_teardown_evidence(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """The commit accepts only the recorded teardown evidence's canonical identity."""
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        result = await _run_operation(authority_role_dsns, seed, case, "cleanup")
+        evidence = cast(Any, result.result).evidence
+        assert evidence.mode == "system_teardown"
+        assert evidence.teardown_identity == (
+            ExternalBootTeardownEvidenceV1.model_validate(
+                _teardown_evidence(case.vehicle.system_id)
+            ).identity
+        )
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            await queue.complete_external_boot(
+                worker,
+                _job(case),
+                result,
+                incarnation_credential=SecretStr(case.credential),
+            )
+
+        assert (await _activation_row(seed, case.vehicle.activation_id))["cleanup_complete"] is True
+
+    _drive_system_teardown_cleanup(migrated_url, body, with_teardown_evidence=True)
+
+
+def test_system_teardown_cleanup_without_teardown_evidence_refuses_before_the_port(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        with pytest.raises(CategorizedError, match="requires recorded teardown evidence"):
+            await _run_operation(authority_role_dsns, seed, case, "cleanup")
+
+        assert case.vehicle.port.calls == []
+
+    _drive_system_teardown_cleanup(migrated_url, body, with_teardown_evidence=False)
 
 
 @pytest.mark.parametrize(
