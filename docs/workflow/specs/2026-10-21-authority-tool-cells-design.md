@@ -81,7 +81,7 @@ following, with no change:
 |---|---|---|---|
 | `runs.release_external_boot` | `_release` (new, run carrier) | `_release` | `contributor` of the frame's project |
 | `ops.force_release` | `held_teardown_release` | `held_teardown_release` | `platform_admin` with no role in the project |
-| `ops.resolve_recovery_orphan` | `quarantined_orphan` | `REMOTE_ORPHAN_BLOCKED` after the lane gates | `platform_admin` with no role in the project |
+| `ops.resolve_recovery_orphan` | `FIXTURE_ORPHAN_BLOCKED` after the lane gates (live finding: `recovery_provider_not_configured`; the arm `quarantined_orphan` stays for #3144/#3148) | `REMOTE_ORPHAN_BLOCKED` after the lane gates | `platform_admin` with no role in the project |
 | `systems.resolve_external_boot_conflict` | `CONFLICT_BLOCKED` after the lane gates | `CONFLICT_BLOCKED` after the lane gates | none |
 
 A `ToolCall` binds the cell's `HttpCaller` and token:

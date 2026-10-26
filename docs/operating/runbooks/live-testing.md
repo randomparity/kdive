@@ -2195,7 +2195,9 @@ configurations, both exposures, both providers) run in this frame through
 - `ops.force_release`: the held-teardown arm above, called by an outside platform admin through
   the cell's exposure. After the refusal and the quiescent teardown it requires the allocation
   read `released` and the capacity in use lower than while the effect was held.
-- `ops.resolve_recovery_orphan` (local): the recovery-orphan arm above, called the same way.
+- The local `ops.resolve_recovery_orphan` cells stop `blocked` after the gates: a fixture-mode
+  System has no authority-backed recovery provider, so the tool answers
+  `recovery_provider_not_configured` until #3144 and #3148 land.
 - The remote `ops.resolve_recovery_orphan` cells (#3326) and every
   `systems.resolve_external_boot_conflict` cell (#3327) pass their lane gates and stop `blocked`
   before any mutation.

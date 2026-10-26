@@ -59,6 +59,11 @@ REMOTE_ORPHAN_BLOCKED = (
     "the remote-libvirt authority publishes no cleanup quarantine: no finalizer, quarantine "
     "inventory or remote recovery-object port (#3326)"
 )
+FIXTURE_ORPHAN_BLOCKED = (
+    "a fixture-mode System has no authority-backed recovery provider: ops.resolve_recovery_orphan "
+    "answers recovery_provider_not_configured until authority-owned provisioning lands "
+    "(#3144, #3148)"
+)
 CONFLICT_BLOCKED = (
     "no production path enters recovery_conflict: record_conflict has no caller and an authority "
     "conflict observation fails the job (#3327)"
