@@ -216,7 +216,7 @@ async def invoke_generated_verb(verb: GeneratedVerb, args: argparse.Namespace) -
     session = _session_factory()
     async with session.client() as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
-        tier = classify_tool(tools.get(verb.tool))
+        tier = _generated_tier(verb, tools)
         refusal = _generated_ceremony_refusal(verb, tier, args, token=session.token)
         if refusal is not None:
             print(refusal)
@@ -225,6 +225,26 @@ async def invoke_generated_verb(verb: GeneratedVerb, args: argparse.Namespace) -
     envelope = tool_envelope(result)
     render_envelope(envelope, as_json=getattr(args, "json", False))
     return exit_code_for_envelope(envelope)
+
+
+def _generated_tier(verb: GeneratedVerb, tools: dict[str, object]) -> ToolTier:
+    """Resolve a generated verb's tier from the live catalog, with one narrow fallback.
+
+    A visible tool is classified from its live annotations alone (ADR-0107 decision 4). A tool
+    absent from the caller's catalog is hidden from that caller (ADR-0756), so there is nothing to
+    classify; it is treated as read-only only when the committed descriptor says read-only and
+    not destructive, so the server can answer with its own contract (the empty page for a
+    filtered list). An absent mutating or destructive verb stays ``UNKNOWN`` and is refused.
+
+    Residual risk: a descriptor gone stale-read-only for a tool that is now mutating would skip
+    the CLI ceremony (token-``exp`` preflight, typed ``yes``) for a call the caller's catalog
+    cannot see. The server still authorizes the call, and the descriptors are generated from the
+    registry and drift-checked in CI.
+    """
+    tool = tools.get(verb.tool)
+    if tool is None and verb.read_only and not verb.destructive:
+        return ToolTier.READ_ONLY
+    return classify_tool(tool)
 
 
 def _generated_ceremony_refusal(
