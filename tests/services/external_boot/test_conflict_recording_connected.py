@@ -469,6 +469,10 @@ _BROKEN_BINDINGS = {
     "head outcome not conflict": (_HEAD, _head_field("outcome", "target")),
     "head observation source": (_HEAD, _head_field("observation,category", "source")),
     "head observation unreadable": (_HEAD, _head_field("observation,category", "unreadable")),
+    "head of another attempt": (
+        _HEAD,
+        _head_field("attempt_id", "00000000-0000-0000-0000-0000000000b1"),
+    ),
     "head of another authority": (_HEAD, "authority_id = gen_random_uuid()"),
     "head of another generation": (_HEAD, "generation = generation + 1"),
     "authority retired": (_AUTHORITY, "state = 'retired', retired_at = now()"),
@@ -491,7 +495,7 @@ def test_conflict_is_refused_when_any_binding_is_broken(
         vehicle = build_vehicle()
         adapter = _ThirdIdentityAdapter()
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
-            recovering = broken == "attempt of a newer generation"
+            recovering = broken in {"attempt of a newer generation", "head of another attempt"}
             case = await seed_case(
                 seed,
                 vehicle,

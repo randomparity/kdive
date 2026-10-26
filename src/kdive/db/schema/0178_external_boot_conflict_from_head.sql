@@ -72,7 +72,8 @@ BEGIN
         AND (
             v_activation.state = 'activating'
             OR (v_activation.state = 'recovering' AND v_attempt.state = 'recovering'
-                AND v_attempt.authority_generation <= p_generation)
+                AND v_attempt.authority_generation <= p_generation
+                AND v_head.head_record ->> 'attempt_id' = v_attempt.attempt_id::text)
         )
         AND v_head.authority_id = p_authority_id AND v_head.generation = p_generation
         AND v_head.phase = 'terminal'

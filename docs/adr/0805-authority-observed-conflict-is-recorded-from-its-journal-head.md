@@ -59,8 +59,10 @@ No production path did this (#3327):
    attempt: a new attempt from `activating`, or the current attempt from `recovering`. It fails
    the job with category `conflict`, retires the authority and writes an audit row. It leaves the
    Run alone. Any other input returns `superseded` and writes nothing.
-5. The unused server-side `record_conflict` is removed. Only the authority's journal can now put
-   an activation into `recovery_conflict`.
+5. The unused server-side `record_conflict` is removed. No production path other than the
+   authority's journal puts an activation into `recovery_conflict`. The repository's
+   `finish_recovery_attempt` still accepts a conflict state without journal evidence; it has no
+   caller in `src/`, and removing that branch is separate work.
 
 ## Consequences
 
