@@ -40,6 +40,14 @@ def test_boot_artifact_pool_setting_fields() -> None:
     assert s.processes == _RT
 
 
+def test_pcap_pool_setting_fields() -> None:
+    s = settings.REMOTE_LIBVIRT_PCAP_POOL
+    assert s.name == "KDIVE_REMOTE_LIBVIRT_PCAP_POOL"
+    assert s.default == "kdive-pcap"
+    assert s.group == "remote-libvirt"
+    assert s.processes == _RT
+
+
 def test_boot_artifact_capacity_setting_fields() -> None:
     s = settings.REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES
     assert s.name == "KDIVE_REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES"
@@ -56,5 +64,6 @@ def test_settings_list_is_the_declared_settings_in_order() -> None:
         settings.REMOTE_LIBVIRT_MACHINE,
         settings.REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL,
         settings.REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES,
+        settings.REMOTE_LIBVIRT_PCAP_POOL,
         settings.REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS,
     ]

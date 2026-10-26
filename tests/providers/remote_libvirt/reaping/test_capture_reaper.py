@@ -142,7 +142,8 @@ class _FakeConn:
         return self.domain
 
     def storagePoolLookupByName(self, name: str) -> _FakePool:  # noqa: N802
-        assert name == "default"
+        # The capturer writes into the pcap pool, never the disk pool (#3316).
+        assert name == "lab-pcap"
         self.calls.append("pool-lookup")
         return self.pool
 
@@ -170,6 +171,8 @@ def _reaper(
             uri="qemu+tls://builder.example/system",
             cert_refs=_CERT_REFS,
             concurrent_allocation_cap=1,
+            storage_pool="default",
+            pcap_pool="lab-pcap",
         )
 
     def open_connection(uri: str) -> _FakeConn:

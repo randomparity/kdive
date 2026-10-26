@@ -85,3 +85,16 @@ def test_pcap_open_denied_is_only_the_eacces_open_refusal(desc: str, denied: boo
     reply = parse_qmp_reply(json.dumps({"error": {"class": "GenericError", "desc": desc}}))
 
     assert reply.pcap_open_denied is denied
+
+
+@pytest.mark.parametrize(
+    ("raw", "refused"),
+    [
+        ({"error": {"class": "GenericError", "desc": "Vhost is not supported"}}, True),
+        ({"error": {"class": "GenericError", "desc": "multiqueue is not supported"}}, False),
+        ({"return": {}}, False),
+    ],
+)
+def test_vhost_refused_is_only_the_netfilter_vhost_refusal(raw: dict, refused: bool) -> None:
+    """QEMU's netfilter_complete() refuses any netfilter on a vhost-backed netdev (#3316)."""
+    assert parse_qmp_reply(json.dumps(raw)).vhost_refused is refused

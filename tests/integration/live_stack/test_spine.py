@@ -1440,3 +1440,31 @@ def test_console_rejects_qualified_result_after_deadline(
     assert observation.incomplete == "deadline"
     assert observation.records[-1]["data"] == _artifact_content("new", text).data
     assert predicate_calls == ([] if expiry_stage == "response" else [text])
+
+
+@pytest.mark.parametrize("provider", ["local", "remote-libvirt"])
+def test_console_parts_accept_each_provider_key(provider: str) -> None:
+    # A remote System's console parts are keyed under its provider (#3114).
+    part = ToolResponse.success(
+        "p", "ready", refs={"object": f"{provider}/systems/system-1/console-part-1-000003"}
+    )
+    observation = spine.ConsoleObservation(expires_at=float("inf"))
+    parts = asyncio.run(
+        observation.parts(_live_client(_client([_artifact_listing(part)])), "system-1")
+    )
+    assert list(parts) == [(1, 3)]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "fault-inject/systems/system-1/console-part-1-000003",
+        "remote-libvirt/systems/system-2/console-part-1-000003",
+        "x/remote-libvirt/systems/system-1/console-part-1-000003",
+    ],
+)
+def test_console_parts_refuse_another_provider_or_system(key: str) -> None:
+    part = ToolResponse.success("p", "ready", refs={"object": key})
+    observation = spine.ConsoleObservation(expires_at=float("inf"))
+    with pytest.raises(SpinePhaseError, match="invalid_part_key"):
+        asyncio.run(observation.parts(_live_client(_client([_artifact_listing(part)])), "system-1"))
