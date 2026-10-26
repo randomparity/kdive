@@ -264,9 +264,7 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         if provider == "remote-libvirt"
                         else scenario
                     )
-                    roles = (
-                        ("server",) if provider == "service" else ("server", "worker", "reconciler")
-                    )
+                    roles = ("server",) if arch is None else ("server", "worker", "reconciler")
                     roles = tuple(group.role_overrides.get(row.tool, roles))
                     if group.authority:
                         roles = (*roles, "authority")

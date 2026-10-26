@@ -898,7 +898,12 @@ def test_guest_observing_tools_have_lane_functional_cells(inventory: Inventory) 
         ("x86_64", "x86_64", "kvm"),
         ("ppc64le", "ppc64le", "kvm-hv"),
     }
-    assert all(c.provider == "service" and c.roles != () for c in functional)
+    assert {c.provider for c in functional} == {"service"}
+    roles = {c.operation: c.roles for c in functional}
+    assert (
+        roles["accounting.usage"] == roles["reports.generate"] == ("server", "worker", "reconciler")
+    )
+    assert roles["allocations.release"] == ("server", "worker", "reconciler", "authority")
     rejections = [c for c in cells if c.kind == "rejection"]
     assert {(c.host_arch, c.guest_arch, c.accelerator) for c in rejections} == {
         (None, None, "none")

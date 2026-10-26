@@ -688,6 +688,18 @@ def test_guest_observing_service_cells_bind_what_their_frame_records(tmp_path: P
         cells=cells,
         staged=lambda _name: image,
     )
+    foreign = _bound(_cell("accounting.usage", "service", "ppc64le"))
+    assert (
+        foreign.id
+        not in bindings(
+            "a" * 40,
+            host_os="fedora:44",
+            host_arch=entry.arch,
+            matrix=build_contract().matrix_sha256,
+            cells=[foreign],
+            staged=lambda _name: image,
+        ).cells
+    )
     inventory = read_inventory()
     for cell in cells:
         bound = inputs.cells[cell.id]

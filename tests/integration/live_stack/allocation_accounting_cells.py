@@ -96,7 +96,6 @@ _BY_ALLOCATION = frozenset({"allocations.wait", "allocations.renew", "allocation
 
 
 # Functional bodies that need a ready System: Run attribution, report sections, real teardown.
-_ON_SYSTEM = frozenset({"accounting.usage", "reports.generate", "allocations.release"})
 
 
 _LIVE = ["requested", "granted", "active", "releasing"]
