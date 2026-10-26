@@ -175,6 +175,24 @@ def test_remote_activation_blocker_names_the_envelope_reason(
     )
 
 
+@pytest.mark.parametrize("remote", [False, True])
+def test_only_a_remote_activation_uploads_an_initrd(
+    monkeypatch: pytest.MonkeyPatch, remote: bool
+) -> None:
+    started: list[dict[str, object]] = []
+
+    async def start(*_args: object, **kwargs: object) -> ActivationJob:
+        started.append(kwargs)
+        return _activation()
+
+    monkeypatch.setattr(authority_faults, "start_external_boot_activation", start)
+    monkeypatch.setattr(authority_faults, "drain_job", _async())
+    asyncio.run(authority_faults.activate(_system(remote=remote)))
+    assert [(kwargs["with_initrd"], kwargs["require_kdump"]) for kwargs in started] == [
+        (remote, not remote)
+    ]
+
+
 def _fake_arm_a(
     monkeypatch: pytest.MonkeyPatch,
     fake: _FakeBarrier,

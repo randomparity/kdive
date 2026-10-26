@@ -345,10 +345,12 @@ async def activate(
             project=system.project,
             system_id=system.system_id,
             label=system.config.ownership_prefix,
-            # Only the local fixture profile carries a crashkernel.
+            # Only the local fixture profile carries a crashkernel; only remote boot needs an
+            # initrd (#3323).
             require_kdump=not remote,
             kernel_tree=kernel_tree,
             evidence_dir=evidence_dir,
+            with_initrd=remote,
         )
         await drain_job(system.op, "activate", activation.activate_job_id)
     except SpinePhaseError as failed:
