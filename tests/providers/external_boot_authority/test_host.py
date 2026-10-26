@@ -1213,9 +1213,10 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
         "build_local_external_boot_authority",
         lambda actual_store, socket: (
             captured.append((actual_store, socket))
-            or SimpleNamespace(adapter=object(), provider=object())
+            or SimpleNamespace(adapter=local_adapter, provider=object())
         ),
     )
+    local_adapter = object()
     closed: list[bool] = []
 
     class Pool:
@@ -1280,6 +1281,8 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
     remote_module_host = cast(Any, service._remote_module_host)  # noqa: SLF001
     assert remote_module_host._host._factory._pool_name == "authority-systems"  # noqa: SLF001
     assert cast(Any, service._adapter)._remote_module_host is remote_module_host  # noqa: SLF001
+    # Remote external-boot mutations never route through the local adapter (#3328).
+    assert local_adapter not in vars(service._adapter).values()  # noqa: SLF001
     operations = cast(Any, service._adapter)._coordinator._operations  # noqa: SLF001
     assert operations._pool_name == "authority-systems"  # noqa: SLF001
     assert operations._materializer._pool_name == "authority-systems"  # noqa: SLF001

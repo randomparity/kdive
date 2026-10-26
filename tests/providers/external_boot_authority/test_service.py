@@ -299,14 +299,18 @@ async def test_read_only_observation_rechecks_current_authority(tmp_path: Path) 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("evidence_present", [True, False])
+@pytest.mark.parametrize(
+    ("purpose", "operation"),
+    [("recover", AuthorityOperation.RECOVER), ("release", AuthorityOperation.CLEANUP)],
+)
 async def test_authenticated_cleanup_resolves_subject_evidence_before_commit(
-    tmp_path: Path, evidence_present: bool
+    tmp_path: Path, evidence_present: bool, purpose: str, operation: AuthorityOperation
 ) -> None:
     peer = AuthenticatedPeer(uuid4())
     takeover = _takeover().model_copy(
         update={
-            "purpose": "recover",
-            "operation": AuthorityOperation.RECOVER,
+            "purpose": purpose,
+            "operation": operation,
             "provider_kind": "remote-libvirt",
         }
     )
@@ -354,6 +358,43 @@ async def test_authenticated_cleanup_resolves_subject_evidence_before_commit(
         if evidence_present
         else ["cleanup-subject"]
     )
+
+
+@pytest.mark.anyio
+async def test_release_recover_commits_without_cleanup_evidence(tmp_path: Path) -> None:
+    """Migration 0145 admits no (release, recover) evidence; a release restore deletes nothing."""
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(
+        update={
+            "purpose": "release",
+            "operation": AuthorityOperation.RECOVER,
+            "provider_kind": "remote-libvirt",
+        }
+    )
+    repository = _Repository(peer, takeover)
+
+    class CleanupAdapter(_Adapter):
+        async def cleanup_subject(self, request: object) -> str:
+            raise AssertionError("release recover reached the cleanup-evidence gate")
+
+        async def commit_cleanup(
+            self, request: object, context: object, evidence: object
+        ) -> object:
+            raise AssertionError("release recover reached commit_cleanup")
+
+    adapter = CleanupAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    await service.execute_mutation(peer, _mutation(takeover))
+
+    assert repository.cleanup_nonces == []
+    assert adapter.calls == ["commit:recover", "observe"]
 
 
 @pytest.mark.anyio
