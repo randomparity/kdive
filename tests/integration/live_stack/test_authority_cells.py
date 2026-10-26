@@ -15,11 +15,7 @@ from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import authority_cells
-from tests.integration.live_stack.authority_faults import (
-    CONFLICT_BLOCKED,
-    FIXTURE_ORPHAN_BLOCKED,
-    REMOTE_ORPHAN_BLOCKED,
-)
+from tests.integration.live_stack.authority_faults import CONFLICT_BLOCKED, REMOTE_ORPHAN_BLOCKED
 from tests.integration.live_stack.authority_lane import AuthoritySystem
 from tests.integration.live_stack.evidence import EvidenceWriter
 from tests.integration.live_stack.remote_lifecycle import RemoteHost
@@ -92,7 +88,6 @@ def _fake_lanes(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
 @pytest.mark.parametrize(
     ("tool", "provider", "reason"),
     [
-        ("ops.resolve_recovery_orphan", "local-libvirt", FIXTURE_ORPHAN_BLOCKED),
         ("ops.resolve_recovery_orphan", "remote-libvirt", REMOTE_ORPHAN_BLOCKED),
         ("systems.resolve_external_boot_conflict", "local-libvirt", CONFLICT_BLOCKED),
         ("systems.resolve_external_boot_conflict", "remote-libvirt", CONFLICT_BLOCKED),
@@ -113,9 +108,7 @@ def test_a_product_blocked_cell_stops_after_its_gates_and_before_any_mutation(
             authority_cells.run_authority_cell(run, "url", cast(Any, None), "db", body, project="p")
         )
     assert (stop.value.outcome, str(stop.value)) == (Outcome.BLOCKED, reason)
-    assert (
-        "#3327" if "conflict" in tool else "#3144" if provider == "local-libvirt" else "#3326"
-    ) in reason
+    assert ("#3326" if "orphan" in tool else "#3327") in reason
     remote = provider == "remote-libvirt"
     assert calls == (["observe_host", "gates"] if remote else ["gates"])
 
@@ -127,6 +120,7 @@ def test_a_product_blocked_cell_stops_after_its_gates_and_before_any_mutation(
         ("runs.release_external_boot", "remote-libvirt"),
         ("ops.force_release", "local-libvirt"),
         ("ops.force_release", "remote-libvirt"),
+        ("ops.resolve_recovery_orphan", "local-libvirt"),
     ],
 )
 def test_a_runnable_cell_frames_its_body_with_the_bound_fixture(

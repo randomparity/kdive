@@ -25,7 +25,6 @@ from kdive.mcp.responses import ToolResponse
 from tests.integration.live_stack import authority_lane
 from tests.integration.live_stack.authority_faults import (
     CONFLICT_BLOCKED,
-    FIXTURE_ORPHAN_BLOCKED,
     REMOTE_ORPHAN_BLOCKED,
     ToolCall,
     activate,
@@ -60,7 +59,6 @@ _REMOTE = "remote-libvirt"
 _RELEASE = "runs.release_external_boot"
 # Cells whose construction waits on a product change; the reason names its owner.
 PRODUCT_BLOCKERS: dict[tuple[str, str], str] = {
-    ("ops.resolve_recovery_orphan", "local-libvirt"): FIXTURE_ORPHAN_BLOCKED,
     ("ops.resolve_recovery_orphan", _REMOTE): REMOTE_ORPHAN_BLOCKED,
     ("systems.resolve_external_boot_conflict", "local-libvirt"): CONFLICT_BLOCKED,
     ("systems.resolve_external_boot_conflict", _REMOTE): CONFLICT_BLOCKED,
