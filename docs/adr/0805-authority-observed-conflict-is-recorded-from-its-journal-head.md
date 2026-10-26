@@ -69,7 +69,10 @@ No production path did this (#3327):
 - A host administrator's change to an active external boot now ends its release, recovery or
   activation job `failed` with category `conflict`. The activation stays in `recovery_conflict`
   and keeps its reservation and recovery evidence. The operator resolves it with
-  `systems.resolve_external_boot_conflict` or removes it with `systems.teardown`.
+  `systems.resolve_external_boot_conflict`. `systems.teardown` and `ops.force_teardown` do not
+  yet complete from `recovery_conflict`: on the local authority lane the teardown mutation is
+  refused as `provider-conflict`, its journal head stays `mutation-started` and the System stays
+  `ready`. That gap is not owned by any record yet.
 - Such a refusal costs one generation instead of the two that ADR-0714's repeat check needed.
   Refusals over any other observed state still follow ADR-0714 unchanged.
 - The conflict evidence's composite is the value `resolve_external_boot_conflict` needs as
