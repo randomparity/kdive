@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -33,7 +34,6 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
-    AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityTeardownMutationRequestV1,
@@ -71,6 +71,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     DurableRemoteModuleVolumePreparationHost,
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
+    RemoteExternalBootObservedState,
     RemoteExternalBootOperations,
     RemoteExternalBootRecoveryRecord,
     RemoteModuleLifecycleRequestV1,
@@ -493,10 +494,24 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
     assert domain.creates == 1
     assert observation.identity == recovery.materialization.kernel_observation
     assert observation.cmdline == recovery.definition.expected_cmdline.encode()
+    activated = operations.observe_state(recovery, 2.0)
+    assert (activated.definition, activated.active, activated.recovery_objects_absent) == (
+        "target",
+        True,
+        False,
+    )
     operations.recover(recovery, authority, 2.0)
     operations.recover(recovery, authority, 2.0)
     assert domain.xml == recovery.definition.source_xml
     assert not domain.active
+    recovered = operations.observe_state(recovery, 2.0)
+    assert (recovered.definition, recovered.active, recovered.recovery_objects_absent) == (
+        "source",
+        False,
+        False,
+    )
+    assert recovered.preserved == recovery.definition.source_definition
+    assert recovered.boot == recovery.definition.source_boot
 
     incomplete = recovery.model_copy(
         update={
@@ -534,6 +549,8 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
     assert recovery.materialization.artifacts.initrd is not None
     operations.cleanup(recovery, authority, 2.0)
     operations.cleanup(recovery, authority, 2.0)
+    cleaned = operations.observe_state(recovery, 2.0)
+    assert (cleaned.definition, cleaned.recovery_objects_absent) == ("source", True)
     assert deleted == {
         recovery.materialization.artifacts.kernel.ref,
         recovery.materialization.artifacts.initrd.ref,
@@ -573,16 +590,9 @@ async def test_remote_adapter_replays_materialize_and_prepare_without_repeating_
                 }
             )
 
-    class Delegate:
-        async def observe(self, request: object) -> object:
-            raise AssertionError(request)
-
-        async def commit(self, request: object, context: object) -> object:
-            raise AssertionError((request, context))
-
     coordinator = RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 9.0)
     executor = RemoteModulePreparationExecutor()
-    adapter = RemoteExternalBootAuthorityAdapter(cast(Any, Delegate()), coordinator, executor)
+    adapter = RemoteExternalBootAuthorityAdapter(coordinator, executor)
     prepare_request = terminal.request.authority
     materialize_request = prepare_request.model_copy(
         update={
@@ -638,16 +648,9 @@ async def test_remote_cleanup_changed_nonce_fails_before_provider_mutation() -> 
             del point, authority
             calls.append("recover")
 
-        def cleanup(self, point: object, authority: object) -> None:
-            del point, authority
+        def cleanup(self, point: object) -> None:
+            del point
             calls.append("cleanup")
-
-    class Delegate:
-        async def observe(self, request: object) -> object:
-            raise AssertionError(request)
-
-        async def commit(self, request: object, context: object) -> object:
-            raise AssertionError((request, context))
 
     request = AuthorityMutationRequestV1(
         authority_id=uuid4(),
@@ -682,14 +685,359 @@ async def test_remote_cleanup_changed_nonce_fails_before_provider_mutation() -> 
         recovery_reference_json=record.module_recovery.model_dump_json(),
     )
     executor = RemoteModulePreparationExecutor()
-    adapter = RemoteExternalBootAuthorityAdapter(
-        cast(Any, Delegate()), cast(Any, Coordinator()), executor
-    )
+    adapter = RemoteExternalBootAuthorityAdapter(cast(Any, Coordinator()), executor)
 
     with pytest.raises(ValueError, match="changed before provider deletion"):
         await adapter.commit_cleanup(request, context, evidence)
     assert calls == ["point", "record"]
     executor.shutdown()
+
+
+class _NativeOperations:
+    """Remote operations fake recording mutations and serving one scripted live read."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.cleanup_owners: list[OpaqueProviderRef] = []
+        self.state = RemoteExternalBootObservedState(
+            definition="target",
+            preserved="sha256:" + "1" * 64,
+            boot="sha256:" + "2" * 64,
+            active=True,
+            recovery_objects_absent=False,
+        )
+        self.fail_read = False
+
+    def activate(self, recovery: object, owner: object, deadline: float) -> None:
+        self.calls.append("activate")
+
+    def recover(self, recovery: object, owner: object, deadline: float) -> None:
+        self.calls.append("recover")
+
+    def cleanup(
+        self, recovery: RemoteExternalBootRecoveryRecord, owner: OpaqueProviderRef, deadline: float
+    ) -> None:
+        # The concrete cleanup's first act: the record must be re-presented under the
+        # authority its module reference was minted for.
+        recovery.module_recovery.validate_authority(owner)
+        self.calls.append("cleanup")
+        self.cleanup_owners.append(owner)
+
+    def observe_state(self, recovery: object, deadline: float) -> RemoteExternalBootObservedState:
+        if self.fail_read:
+            raise RuntimeError("libvirt connection dropped")
+        return self.state
+
+
+def _native_adapter(
+    tmp_path: Path, *, restored: bool = False
+) -> tuple[
+    RemoteExternalBootAuthorityAdapter,
+    _NativeOperations,
+    RemoteExternalBootRecoveryRecord,
+    RecoveryPoint,
+    OpaqueProviderRef,
+]:
+    """A real store holding one prepared remote activation, behind the native adapter."""
+    record = _record()
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    prepared = store.reopen_terminal(record.binding, record.plan_identity).request.authority
+    preparation_authority = OpaqueProviderRef(
+        ref=f"authority/{prepared.authority_id}/{prepared.generation}/{prepared.attempt_id}"
+    )
+    record = record.model_copy(
+        update={
+            "module_recovery": record.module_recovery.model_copy(
+                update={
+                    "authority_identity": RemoteModuleRecoveryRefV2.identity_for_authority(
+                        preparation_authority
+                    )
+                }
+            )
+        }
+    )
+    store.publish_recovery(record)
+    if restored:
+        key = store._terminal_key(
+            record.binding.system_id,
+            record.binding.activation_id,
+            record.binding.run_id,
+            record.plan_identity,
+        )
+        store._publish(
+            f"{key}.restored",
+            _restored_response(
+                store.reopen_terminal(record.binding, record.plan_identity).request
+            ).to_canonical_json(),
+        )
+    point = store.recovery_point(record.binding, record.plan_identity)
+    operations = _NativeOperations()
+    adapter = RemoteExternalBootAuthorityAdapter(
+        RemoteExternalBootCoordinator(cast(Any, operations), store, lambda: 300.0),
+        RemoteModulePreparationExecutor(),
+        close=store.close,
+    )
+    return adapter, operations, record, point, preparation_authority
+
+
+def _native_request(
+    record: RemoteExternalBootRecoveryRecord,
+    point: RecoveryPoint,
+    *,
+    purpose: str,
+    operation: AuthorityOperation,
+    named: bool = False,
+    generation: int = 9,
+) -> AuthorityMutationRequestV1:
+    return AuthorityMutationRequestV1.model_validate(
+        {
+            "authority_id": uuid4(),
+            "generation": generation,
+            "system_id": record.binding.system_id,
+            "activation_id": record.binding.activation_id,
+            "run_id": record.binding.run_id,
+            "plan_identity": record.plan_identity,
+            "purpose": purpose,
+            "operation": operation,
+            "provider_kind": "remote-libvirt",
+            "authority_instance": "remote-a",
+            "operation_identity": f"{purpose}-{operation.value}",
+            "operation_digest": "sha256:" + "c" * 64,
+            "attempt_id": uuid4(),
+            "expected_source_identity": record.source_state.definition,
+            "intended_target_identity": record.target_state.definition,
+            "recovery_objects": (
+                [
+                    {
+                        "system_id": record.binding.system_id,
+                        "activation_id": record.binding.activation_id,
+                        "reference": point.recovery_ref.ref,
+                    }
+                ]
+                if named
+                else []
+            ),
+        }
+    )
+
+
+def _native_context(request: AuthorityMutationRequestV1) -> AuthorityCommitContextV1:
+    return AuthorityCommitContextV1(
+        commit_point=request.operation,
+        operation_identity=request.operation_identity,
+        attempt_id=request.attempt_id,
+        journal_sequence=3,
+        journal_digest="sha256:" + "a" * 64,
+    )
+
+
+@pytest.mark.anyio
+async def test_remote_activate_commits_through_the_remote_coordinator(tmp_path: Path) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path)
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+
+    observed = await adapter.commit(request, _native_context(request))
+
+    assert operations.calls == ["activate"]
+    assert observed.category == "target"
+    assert await adapter.observe(request) == observed
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_release_recover_restores_without_deleting(tmp_path: Path) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=True)
+    operations.state = replace(operations.state, definition="source", active=False)
+    request = _native_request(
+        record, point, purpose="release", operation=AuthorityOperation.RECOVER
+    )
+
+    observed = await adapter.commit(request, _native_context(request))
+
+    assert operations.calls == ["recover"]
+    assert observed.category == "source"
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("purpose", "operation"),
+    [
+        ("release", AuthorityOperation.CLEANUP),
+        ("teardown", AuthorityOperation.TEARDOWN),
+        ("recover", AuthorityOperation.RECOVERY_ATTEMPT),
+    ],
+)
+async def test_remote_commit_refuses_points_outside_its_mutations(
+    tmp_path: Path, purpose: str, operation: AuthorityOperation
+) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path)
+    request = _native_request(record, point, purpose=purpose, operation=operation, named=True)
+
+    with pytest.raises(ValueError, match="is not admitted"):
+        await adapter.commit(request, _native_context(request))
+    assert operations.calls == []
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_commit_refuses_changed_identity_before_provider(tmp_path: Path) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path)
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    ).model_copy(update={"expected_source_identity": "sha256:" + "9" * 64})
+
+    with pytest.raises(ValueError, match="identities differ"):
+        await adapter.commit(request, _native_context(request))
+    assert operations.calls == []
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("definition", "objects_absent", "restored", "category"),
+    [
+        # Prepared, not yet activated: modules are installed in the shared overlay.
+        ("source", False, False, "source"),
+        ("source", False, True, "source"),
+        ("source", True, True, "absent"),
+        ("target", False, False, "target"),
+        ("target", False, True, "mixed"),
+        ("target", True, True, "conflict"),
+        ("other", False, False, "conflict"),
+    ],
+)
+async def test_remote_observation_categorizes_live_definition_and_durable_modules(
+    tmp_path: Path, definition: str, objects_absent: bool, restored: bool, category: str
+) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=restored)
+    operations.state = replace(
+        operations.state, definition=definition, recovery_objects_absent=objects_absent
+    )
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+
+    observed = await adapter.observe(request)
+
+    assert observed.category == category
+    assert operations.calls == []
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_observation_composite_names_exactly_what_was_seen(tmp_path: Path) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path)
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+
+    first = await adapter.observe(request)
+    assert await adapter.observe(request) == first
+    operations.state = replace(operations.state, active=False)
+    changed = await adapter.observe(request)
+
+    assert changed.category == first.category == "target"
+    assert changed.composite_state != first.composite_state
+    assert changed.observation_id != first.observation_id
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_observation_is_unreadable_or_conflict_without_raising(
+    tmp_path: Path,
+) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path)
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+    operations.fail_read = True
+    assert (await adapter.observe(request)).category == "unreadable"
+    absent_plan = request.model_copy(update={"plan_identity": "sha256:" + "8" * 64})
+    assert (await adapter.observe(absent_plan)).category == "unreadable"
+    operations.fail_read = False
+    foreign = request.model_copy(update={"intended_target_identity": "sha256:" + "7" * 64})
+    assert (await adapter.observe(foreign)).category == "conflict"
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_release_cleanup_deletes_under_its_preparation_authority(
+    tmp_path: Path,
+) -> None:
+    adapter, operations, record, point, preparation_authority = _native_adapter(
+        tmp_path, restored=True
+    )
+    request = _native_request(
+        record, point, purpose="release", operation=AuthorityOperation.CLEANUP, named=True
+    )
+    assert f"authority/{request.authority_id}/" not in preparation_authority.ref
+    evidence = AuthorityCleanupEvidenceContextV1(
+        operation_identity=request.operation_identity,
+        attempt_id=request.attempt_id,
+        operation_nonce=record.module_recovery.operation_nonce,
+        cleanup_state="discharged",
+        recovery_reference_json=record.module_recovery.model_dump_json(),
+    )
+    operations.state = replace(
+        operations.state, definition="source", active=False, recovery_objects_absent=True
+    )
+
+    assert await adapter.cleanup_subject(request) == record.module_recovery.operation_nonce
+    observed = await adapter.commit_cleanup(request, _native_context(request), evidence)
+
+    assert operations.calls == ["recover", "cleanup"]
+    assert operations.cleanup_owners == [preparation_authority]
+    assert observed.category == "absent"
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_release_cleanup_must_name_the_object_it_deletes(tmp_path: Path) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=True)
+    request = _native_request(
+        record, point, purpose="release", operation=AuthorityOperation.CLEANUP
+    )
+    evidence = AuthorityCleanupEvidenceContextV1(
+        operation_identity=request.operation_identity,
+        attempt_id=request.attempt_id,
+        operation_nonce=record.module_recovery.operation_nonce,
+        cleanup_state="discharged",
+        recovery_reference_json=record.module_recovery.model_dump_json(),
+    )
+
+    with pytest.raises(ValueError, match="recovery objects are not this activation's"):
+        await adapter.commit_cleanup(request, _native_context(request), evidence)
+    assert operations.calls == []
+    adapter.close()
+
+
+def test_coordinator_cleanup_refuses_a_record_from_another_preparation(tmp_path: Path) -> None:
+    record = _record()
+    operations = _NativeOperations()
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    foreign = record.model_copy(
+        update={
+            "module_recovery": record.module_recovery.model_copy(
+                update={
+                    "authority_identity": RemoteModuleRecoveryRefV2.identity_for_authority(
+                        OpaqueProviderRef(ref="authority/other-preparation")
+                    )
+                }
+            )
+        }
+    )
+    store.publish_recovery(foreign)
+    coordinator = RemoteExternalBootCoordinator(cast(Any, operations), store, lambda: 300.0)
+
+    with pytest.raises(ValueError, match="recovery authority does not match reference"):
+        coordinator.cleanup(store.recovery_point(foreign.binding, foreign.plan_identity))
+    assert operations.calls == []
+    store.close()
 
 
 def _module_lifecycle_request(
@@ -2371,7 +2719,9 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
             calls.append(("recover", deadline))
 
         def cleanup(self, recovery: object, owner: object, deadline: float) -> None:
-            assert recovery == record and owner == authority
+            # Cleanup is fenced by the PREPARE authority the module reference was minted
+            # under, not by the caller's later attempt.
+            assert recovery == record and owner == preparation_authority
             calls.append(("cleanup", deadline))
 
     store = RemoteModuleVolumePreparationStore(tmp_path)
@@ -2384,6 +2734,11 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
     )
     _publish_terminal(store, record)
     point = coordinator.prepare(record.materialization, record.binding, authority)
+    prepared = store.reopen_terminal(record.binding, record.plan_identity).request.authority
+    preparation_authority = OpaqueProviderRef(
+        ref=f"authority/{prepared.authority_id}/{prepared.generation}/{prepared.attempt_id}"
+    )
+    assert preparation_authority != authority
     store.close()
 
     restarted_store = RemoteModuleVolumePreparationStore(tmp_path)
@@ -2395,7 +2750,7 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
     restarted.activate(point, authority)
     assert restarted.observe(point, authority).identity == record.materialization.kernel_observation
     restarted.recover(point, authority)
-    restarted.cleanup(point, authority)
+    restarted.cleanup(point)
     assert calls == [
         ("materialize", 123.0),
         ("prepare", 123.0),
@@ -2474,19 +2829,12 @@ def test_running_observation_reopens_exact_recovery_after_restart(tmp_path: Path
             calls.append((recovery, authority))
             return observed
 
-    class Delegate:
-        async def observe(self, request: object) -> AuthorityObservationV1:
-            raise AssertionError("ordinary observation used")
-
-        async def commit(self, request: object, context: object) -> AuthorityObservationV1:
-            raise AssertionError("mutation used")
-
     restarted = RemoteModuleVolumePreparationStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), restarted, lambda: 123.0
     )
     executor = RemoteModulePreparationExecutor()
-    adapter = RemoteExternalBootAuthorityAdapter(Delegate(), coordinator, executor)  # type: ignore[arg-type]
+    adapter = RemoteExternalBootAuthorityAdapter(coordinator, executor)
     assert asyncio.run(adapter.observe_running(request)) == observed
     assert calls == [
         (
@@ -2506,13 +2854,6 @@ def test_running_observation_rejects_changed_request_before_provider(tmp_path: P
     class Operations:
         def observe(self, *args: object) -> RunningKernelObservation:
             raise AssertionError("provider touched")
-
-    class Delegate:
-        async def observe(self, request: object) -> AuthorityObservationV1:
-            raise AssertionError
-
-        async def commit(self, request: object, context: object) -> AuthorityObservationV1:
-            raise AssertionError
 
     request = AuthorityMutationRequestV1(
         authority_id=uuid4(),
@@ -2534,12 +2875,11 @@ def test_running_observation_rejects_changed_request_before_provider(tmp_path: P
     )
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(
-        Delegate(),
         RemoteExternalBootCoordinator(
             cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
         ),
         executor,
-    )  # type: ignore[arg-type]
+    )
     with pytest.raises(ValueError, match="identities differ"):
         asyncio.run(adapter.observe_running(request))
     executor.shutdown()
@@ -2731,7 +3071,6 @@ async def test_remote_system_teardown_restarts_after_lost_storage_response(
     def adapter(store: RemoteModuleVolumePreparationStore) -> RemoteExternalBootAuthorityAdapter:
         executor = RemoteModulePreparationExecutor()
         return RemoteExternalBootAuthorityAdapter(
-            cast(Any, object()),
             RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
             executor,
             teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
@@ -2804,7 +3143,6 @@ def _completing_teardown_adapter(
     store: RemoteModuleVolumePreparationStore, operations: _CompletingTeardownOperations
 ) -> RemoteExternalBootAuthorityAdapter:
     return RemoteExternalBootAuthorityAdapter(
-        cast(Any, object()),
         RemoteExternalBootCoordinator(cast(Any, operations), store, lambda: 300.0),
         RemoteModulePreparationExecutor(),
         teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
@@ -2958,7 +3296,6 @@ async def test_remote_system_teardown_reaps_full_private_recovery_before_undefin
 
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(
-        cast(Any, object()),
         RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
         executor,
         remote_module_host=cast(Any, ModuleHost()),
@@ -3003,7 +3340,6 @@ async def test_remote_system_teardown_cancellation_retains_underlying_checkpoint
     store = RemoteModuleVolumePreparationStore(tmp_path)
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(
-        cast(Any, object()),
         RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
         executor,
     )
@@ -3087,7 +3423,6 @@ async def test_remote_system_teardown_retains_unfinished_preparation_before_unde
 
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(
-        cast(Any, object()),
         RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
         executor,
     )
