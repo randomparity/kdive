@@ -688,7 +688,8 @@ def test_guest_observing_service_cells_bind_what_their_frame_records(tmp_path: P
         cells=cells,
         staged=lambda _name: image,
     )
-    foreign = _bound(_cell("accounting.usage", "service", "ppc64le"))
+    other_arch = "ppc64le" if entry.arch == "x86_64" else "x86_64"
+    foreign = _bound(_cell("accounting.usage", "service", other_arch))
     assert (
         foreign.id
         not in bindings(

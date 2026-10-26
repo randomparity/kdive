@@ -95,9 +95,6 @@ _ADMIN_FLOOR = frozenset({"accounting.set_budget", "accounting.set_quota"})
 _BY_ALLOCATION = frozenset({"allocations.wait", "allocations.renew", "allocations.release"})
 
 
-# Functional bodies that need a ready System: Run attribution, report sections, real teardown.
-
-
 _LIVE = ["requested", "granted", "active", "releasing"]
 
 
@@ -907,6 +904,7 @@ _SERVER_BODIES: dict[str, Body] = {
 }
 
 
+# Functional bodies that need a ready System: Run attribution, report sections, real teardown.
 _SYSTEM_BODIES: dict[str, Body] = {
     "accounting.usage": _usage_body,
     "reports.generate": _generate_body,
