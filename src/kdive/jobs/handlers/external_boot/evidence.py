@@ -99,9 +99,8 @@ def authority_result(
     an ``ExternalBootAuthorityFailureV1`` to ``queue.fail_external_boot``, an
     ``ExternalBootAuthorityConflictV1`` to ``queue.record_external_boot_conflict``, and anything
     else — the bare base class included — is logged as an "untyped result variant" and **written
-    nowhere**, so
-    the job keeps its lease and wedges ``running``. Returning the base class would satisfy every
-    type annotation and every binding check and still never commit.
+    nowhere**, so the job keeps its lease and wedges ``running``. Returning the base class would
+    satisfy every type annotation and every binding check and still never commit.
     """
     return ExternalBootAuthoritySuccessV1.model_validate(_bound(context, result))
 

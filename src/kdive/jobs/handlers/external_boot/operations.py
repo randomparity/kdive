@@ -36,10 +36,10 @@ type ExternalBootOperationHandler = Callable[
 The two subclasses rather than the base ``ExternalBootAuthorityResultV1`` are deliberate.
 ``kdive.jobs.worker._commit_external_result`` dispatches on ``isinstance``: a success goes to
 ``queue.complete_external_boot``, a conflict to ``queue.record_external_boot_conflict``, a failure
-to ``queue.fail_external_boot``, and a bare base
-instance is logged as an "untyped result variant" and written nowhere — so the job keeps its lease
-and wedges ``running``. Typing the seam as the base class let exactly that ship and type-check
-clean; typing it as the subclass makes the same mistake a ``ty`` error.
+to ``queue.fail_external_boot``, and a bare base instance is logged as an "untyped result
+variant" and written nowhere — so the job keeps its lease and wedges ``running``. Typing the seam
+as the base class let exactly that ship and type-check clean; typing it as the subclass makes the
+same mistake a ``ty`` error.
 """
 
 
