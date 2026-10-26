@@ -91,6 +91,7 @@ class RemoteHost:
     host_os: str
     host_arch: str
     virt: str
+    pcap_pool: str = "kdive-pcap"
 
 
 # One remote base image per family; Fedora and Enterprise Linux stay distinct (#2803 req 7).
@@ -241,7 +242,8 @@ def remote_host() -> RemoteHost:
         raise ScenarioStop(
             Outcome.BLOCKED, f"provider-host probe failed: {type(exc).__name__}"
         ) from None
-    return RemoteHost(dest, remote_config_for_resource(names[0]).storage_pool, **probe)
+    configuration = remote_config_for_resource(names[0])
+    return RemoteHost(dest, configuration.storage_pool, **probe, pcap_pool=configuration.pcap_pool)
 
 
 def observe_host(run: CellRun, host: RemoteHost) -> None:

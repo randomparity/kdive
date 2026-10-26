@@ -33,9 +33,20 @@ require(
 # community.libvirt virt_pool/virt_net ignore `autostart` in a task that also sets `state`
 # (#3203), so each object libvirt_pool_net activates needs its own autostart-only task.
 pool_net_tasks = yaml.safe_load((ANSIBLE / "roles/libvirt_pool_net/tasks/main.yml").read_text())
+pcap_pool_tasks = yaml.safe_load(
+    (ANSIBLE / "roles/libvirt_pool_net/tasks/pcap_pool.yml").read_text()
+)
+require(
+    {
+        "name": "Provision the traffic-capture pcap pool",
+        "ansible.builtin.import_tasks": "pcap_pool.yml",
+    }
+    in pool_net_tasks,
+    "libvirt_pool_net must import the pcap pool tasks (#3316)",
+)
 libvirt_args = [
     (module, task[module])
-    for task in pool_net_tasks
+    for task in pool_net_tasks + pcap_pool_tasks
     for module in ("community.libvirt.virt_pool", "community.libvirt.virt_net")
     if module in task
 ]
@@ -46,6 +57,7 @@ require(
 for module, name in (
     ("community.libvirt.virt_pool", "default"),
     ("community.libvirt.virt_pool", "{{ libvirt_pool_net_boot_artifact_pool_name }}"),
+    ("community.libvirt.virt_pool", "{{ libvirt_pool_net_pcap_pool_name }}"),
     ("community.libvirt.virt_net", "{{ libvirt_network }}"),
 ):
     require(
@@ -53,6 +65,138 @@ for module, name in (
         and (module, {"name": name, "autostart": True}) in libvirt_args,
         f"{module} {name} must be activated and autostarted by separate tasks",
     )
+
+# The capturer pre-creates each pcap for the domain's QEMU user in this root:root 0711 pool (#3316,
+# ADR-0432): QEMU may search the directory but never create, unlink, rename or symlink in it, so the
+# root storage daemon never follows a QEMU-made link on fetch-back. Only an svirt_image_t label
+# (SELinux) or the libvirt-qemu.d drop-in (AppArmor) lets the domain write the pre-created file.
+pcap_by_module: dict[str, list[dict]] = {}
+for task in pcap_pool_tasks:
+    for module in task:
+        pcap_by_module.setdefault(module, []).append(task)
+pcap_by_name = {t["name"]: t for t in pcap_pool_tasks}
+pool_defaults = yaml.safe_load((ANSIBLE / "roles/libvirt_pool_net/defaults/main.yml").read_text())
+require(
+    pool_defaults["libvirt_pool_net_pcap_pool_mode"] == "0711",
+    "the pcap pool directory must be 0711: searchable, never writable or listable by QEMU",
+)
+pcap_directory = pcap_by_name["Create the traffic-capture pcap pool directory"][
+    "ansible.builtin.file"
+]
+require(
+    pcap_directory["owner"] == "root"
+    and pcap_directory["group"] == "root"
+    and pcap_directory["mode"] == "{{ libvirt_pool_net_pcap_pool_mode }}",
+    "the pcap pool directory must be created root:root with the pool mode",
+)
+pcap_define = next(
+    t["community.libvirt.virt_pool"]
+    for t in pcap_by_module["community.libvirt.virt_pool"]
+    if t["community.libvirt.virt_pool"].get("command") == "define"
+)
+for permission in (
+    "<mode>{{ libvirt_pool_net_pcap_pool_mode }}</mode>",
+    "<owner>0</owner>",
+    "<group>0</group>",
+):
+    require(permission in pcap_define["xml"], f"pcap pool XML must carry {permission}")
+ownership_assert = pcap_by_name["Assert the pcap pool directory is root's"][
+    "ansible.builtin.assert"
+]["that"]
+for condition in (
+    "libvirt_pool_net_pcap_pool_stat.stat.pw_name == 'root'",
+    "libvirt_pool_net_pcap_pool_stat.stat.gr_name == 'root'",
+    "libvirt_pool_net_pcap_pool_stat.stat.mode == libvirt_pool_net_pcap_pool_mode",
+):
+    require(condition in ownership_assert, f"the pcap pool assert must check {condition}")
+access_check = pcap_by_name[
+    "Require the QEMU runtime user to search but not write the pcap pool directory"
+]["ansible.builtin.command"]["argv"]
+target = "{{ libvirt_pool_net_pcap_pool_target }}"
+require(
+    access_check[:3]
+    == ["runuser", "-u", "{{ libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family] }}"]
+    and access_check[4:] == ["test", "-x", target, "-a", "!", "-w", target],
+    "the role must prove as the QEMU user that the pcap directory is searchable and not writable",
+)
+
+
+def gates(task: dict) -> list[str]:
+    when = task.get("when", [])
+    return [when] if isinstance(when, str) else list(when)
+
+
+# Every enforcing host needs the label (libvirt_stack installs sefcontext's bindings on both SELinux
+# families), so the rule and its relabel carry exactly that one gate.
+SELINUX_GATES = ["libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'"]
+pcap_fcontext = pcap_by_module["community.general.sefcontext"]
+require(
+    len(pcap_fcontext) == 1
+    and pcap_fcontext[0]["community.general.sefcontext"]["setype"] == "svirt_image_t"
+    and gates(pcap_fcontext[0]) == SELINUX_GATES,
+    "pcap pool fcontext must be svirt_image_t and gated on Enforcing",
+)
+pcap_relabel = [
+    t
+    for t in pcap_by_module["ansible.builtin.command"]
+    if "restorecon" in t["ansible.builtin.command"]["argv"]
+]
+require(
+    len(pcap_relabel) == 1
+    and "-F" not in pcap_relabel[0]["ansible.builtin.command"]["argv"]
+    and gates(pcap_relabel[0]) == SELINUX_GATES,
+    "pcap pool relabel must be one plain restorecon, never -F (ADR-0640), gated like the rule",
+)
+selinux_probe = pcap_by_name["Read the SELinux mode for the pcap pool label"]
+require(
+    selinux_probe["ansible.builtin.command"]["argv"] == ["getenforce"]
+    and selinux_probe.get("failed_when") is False
+    and selinux_probe.get("changed_when") is False,
+    "the pcap getenforce probe must not fail on a host without SELinux tools",
+)
+# Every AppArmor task runs only where libvirt's abstraction exists; ungated, the include assert
+# fails on every host without AppArmor.
+APPARMOR_GATE = ["libvirt_pool_net_apparmor_abstraction.stat.exists"]
+APPARMOR_TASKS = {
+    "Read libvirt's AppArmor QEMU abstraction",
+    "Require the abstraction to include its libvirt-qemu.d drop-ins",
+    "Create the libvirt-qemu.d AppArmor drop-in directory",
+    "Allow the confined QEMU to write capture pcaps",
+}
+apparmor_tasks = [t for t in pcap_pool_tasks if t["name"] in APPARMOR_TASKS]
+require(
+    len(apparmor_tasks) == 4 and all(gates(t) == APPARMOR_GATE for t in apparmor_tasks),
+    "the abstraction read, include assert, drop-in directory and drop-in must be AppArmor-gated",
+)
+include_assert = pcap_by_name["Require the abstraction to include its libvirt-qemu.d drop-ins"]
+require(
+    any(
+        "'abstractions/libvirt-qemu.d'" in str(c)
+        for c in include_assert["ansible.builtin.assert"]["that"]
+    ),
+    "the AppArmor probe must look for the libvirt-qemu.d include, not the abstraction's own name",
+)
+pcap_dropin = pcap_by_name["Allow the confined QEMU to write capture pcaps"]["ansible.builtin.copy"]
+dropin_rules = [line for line in pcap_dropin["content"].splitlines() if not line.startswith("#")]
+require(
+    "libvirt-qemu.d" in pcap_dropin["dest"] and dropin_rules == [f"{target}/kdive-pcap-*.pcap w,"],
+    "the AppArmor drop-in must grant only write on the pool's kdive-pcap-*.pcap files",
+)
+target_check = pcap_by_name["Require the pcap pool to target the provisioned directory"]
+require(
+    any(
+        "libvirt_pool_net_pcap_pool_target" in str(c) and "get_xml" in str(c)
+        for c in target_check["ansible.builtin.assert"]["that"]
+    ),
+    "an existing pcap pool definition must be checked against the provisioned target",
+)
+# A parent the QEMU user cannot traverse hides the pre-created file (review of #3316).
+require(
+    not pool_defaults["libvirt_pool_net_pcap_pool_target"].startswith(
+        pool_defaults["libvirt_pool_net_boot_artifact_pool_target"].rsplit("/", 1)[0] + "/"
+    ),
+    "the pcap pool must not sit under the root:libvirt 0770 boot-artifact parent",
+)
 
 # The lifecycle installer below (deploy/systemd/install-live-worker-lifecycle.sh) runs as root
 # through this play's `become: true` and resolves `uv` with a bare `command -v uv`; a host

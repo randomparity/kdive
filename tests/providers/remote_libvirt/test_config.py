@@ -380,17 +380,20 @@ def test_provisioning_knob_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert cfg.storage_pool == "default"
     assert cfg.network == "default"
     assert cfg.machine == "pc"
+    assert cfg.pcap_pool == "kdive-pcap"
 
 
 def test_provisioning_knobs_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_STORAGE_POOL", "kdive-pool")
     monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_NETWORK", "lab-net")
     monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_MACHINE", "q35")
+    monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_PCAP_POOL", "lab-pcap")
     _write_inventory(tmp_path, monkeypatch)
     cfg = remote_config_for_resource(_RESOURCE)
     assert cfg.storage_pool == "kdive-pool"
     assert cfg.network == "lab-net"
     assert cfg.machine == "q35"
+    assert cfg.pcap_pool == "lab-pcap"
 
 
 def test_resolve_base_image_staged_volume_returns_volume(
