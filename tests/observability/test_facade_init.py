@@ -91,14 +91,15 @@ def test_init_telemetry_replaces_floor_with_bridge() -> None:
 
 def _meter_resource_attrs(telemetry: Telemetry) -> dict[str, object]:
     # OTel-internal coupling: the MeterProvider exposes neither its resource nor its
-    # readers publicly, so both accessors reach through the private _sdk_config. Isolated
-    # here so a future public accessor (or SDK rename) is a one-line change.
+    # readers publicly, so the accessors reach through private attributes (_sdk_config for the
+    # resource, _metric_readers for the readers). Isolated here so a future public accessor
+    # (or SDK rename) is a one-line change.
     return dict(telemetry.meter_provider._sdk_config.resource.attributes)
 
 
 def _metric_readers(telemetry: Telemetry) -> list[object]:
     # OTel-internal coupling (see _meter_resource_attrs).
-    return list(telemetry.meter_provider._sdk_config.metric_readers)
+    return list(telemetry.meter_provider._metric_readers)
 
 
 def test_init_telemetry_threads_service_name_into_every_provider_resource() -> None:
