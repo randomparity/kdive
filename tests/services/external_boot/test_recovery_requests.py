@@ -13,6 +13,7 @@ import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, LiteralString
 from uuid import UUID, uuid4
 
@@ -24,6 +25,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.domain.capacity.state import DebugSessionState, ExternalBootActivationState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.external_boot import recovery_requests
 from kdive.mcp.tools.external_boot.recovery_idempotency import recovery_request
@@ -32,6 +34,7 @@ from kdive.mcp.tools.external_boot.recovery_requests import (
     resolve_conflict,
     resolve_recovery_orphan,
 )
+from kdive.providers.core.runtime import AuthorityCapability
 from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role, RoleDenied
@@ -768,6 +771,77 @@ def test_orphan_repair_refuses_without_a_configured_provider(
     assert "ops.resolve_recovery_orphan" in (response.detail or "")
 
 
+def _orphan_repair_through_the_server_route(
+    url: str, configured_instance: str | None
+) -> tuple[ToolResponse, int]:
+    """Admit one quarantined object as a server that composes no recovery port, only a route."""
+    if configured_instance is not None:
+        config.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": configured_instance})
+
+    async def _body(fixture: _Fixture) -> tuple[ToolResponse, int]:
+        seeded = await _seed(fixture.conn)
+        identity = await _seed_quarantined_object(fixture.conn, seeded)
+        response = await resolve_recovery_orphan(
+            fixture.pool,
+            _platform_ctx(),
+            resolver=provider_resolver(),
+            system_id=str(seeded.system_id),
+            object_identities=[identity],
+            disposition="delete",
+        )
+        requests = await _count(
+            fixture.conn,
+            "SELECT count(*) FROM external_boot_recovery_orphan_requests WHERE system_id = %s",
+            seeded.system_id,
+        )
+        return response, requests
+
+    return _drive(url, _body)
+
+
+def test_orphan_repair_admits_through_the_fixed_authority_route(migrated_url: str) -> None:
+    """#3186: the server composes no recovery port; the quarantine row's authority is the route."""
+    response, requests = _orphan_repair_through_the_server_route(migrated_url, "authority/a")
+    assert response.error_category is None, response.model_dump()
+    assert requests == 1
+
+
+@pytest.mark.parametrize("configured", ["authority/other", None])
+def test_orphan_repair_refuses_when_the_server_route_is_not_the_rows_authority(
+    migrated_url: str, configured: str | None
+) -> None:
+    response, requests = _orphan_repair_through_the_server_route(migrated_url, configured)
+    _assert_unavailable(response)
+    assert requests == 0
+
+
+def _binding(kind: ResourceKind, instance: str | None, port: object | None) -> Any:
+    capability = None if instance is None else AuthorityCapability(instance, None, None)
+    runtime = SimpleNamespace(authority=capability, external_boot_recovery_objects=port)
+    return SimpleNamespace(kind=kind, runtime=runtime)
+
+
+@pytest.mark.parametrize(
+    ("kind", "instance", "port", "expected"),
+    [
+        (ResourceKind.LOCAL_LIBVIRT, "authority/a", None, True),
+        (ResourceKind.LOCAL_LIBVIRT, "authority/b", None, False),
+        (ResourceKind.LOCAL_LIBVIRT, None, None, False),
+        (ResourceKind.LOCAL_LIBVIRT, None, object(), True),
+        (ResourceKind.REMOTE_LIBVIRT, "authority/a", None, False),
+        (ResourceKind.REMOTE_LIBVIRT, None, object(), True),
+    ],
+)
+def test_the_recovery_provider_is_a_port_or_a_local_route_matching_every_row(
+    kind: ResourceKind, instance: str | None, port: object | None, expected: bool
+) -> None:
+    rows = [{"provider_kind": kind.value, "authority_instance": "authority/a"}]
+    configured = recovery_requests._recovery_provider_configured(
+        _binding(kind, instance, port), rows
+    )
+    assert configured is expected
+
+
 def test_orphan_repair_needs_no_activation_to_report(migrated_url: str) -> None:
     """ADR-0583 scopes the orphan tool to quarantined objects, not to the activation."""
 
@@ -946,6 +1020,9 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.services.external_boot:check_external_boot_admission",
         "kdive.services.external_boot.local_timing:local_external_boot_timing",
         "kdive.providers.core.resolver:ProviderResolver",
+        "kdive.providers.core.resolver:ProviderBinding",
+        "kdive.domain.catalog.resources:ResourceKind",
+        "kdive.services.external_boot.routing:server_authority_instance",
     }
 )
 
