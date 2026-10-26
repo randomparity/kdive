@@ -1040,8 +1040,10 @@ class ExternalBootAuthorityService:
             )
         return AuthorityServiceError("provider_conflict", telemetry_recorded=True)
 
-    async def _answer_refusal(
+    async def _answer_refusal(  # noqa: PLR0913 - the mutation path's own context, passed through
         self,
+        authenticated: AuthenticatedPeer,
+        lane: _Lane,
         binding: AuthorityBinding,
         journal: FileAuthorityJournal,
         records: list[JournalRecordV1],
@@ -1063,14 +1065,20 @@ class ExternalBootAuthorityService:
             raise refusal from None
         if observation.category != "conflict":
             raise refusal
-        for phase, changes in (
-            (JournalPhase.PROVIDER_RETURNED, {}),
-            (JournalPhase.OBSERVED, {"observation": observation}),
-            (JournalPhase.TERMINAL, {"observation": observation, "outcome": "conflict"}),
-        ):
-            records = await self._anchor(
-                binding, journal, records, self._record(request, records, phase, **changes)
-            )
+        async with lane.lock:
+            for phase, changes in (
+                (JournalPhase.PROVIDER_RETURNED, {}),
+                (JournalPhase.OBSERVED, {"observation": observation}),
+                (JournalPhase.TERMINAL, {"observation": observation, "outcome": "conflict"}),
+            ):
+                records = await self._anchor(
+                    binding, journal, records, self._record(request, records, phase, **changes)
+                )
+            try:
+                await self._finalize_adapter(request, records)
+            except AuthorityServiceError:
+                await self._publish_cleanup_quarantine(authenticated, binding, request, records[-1])
+                raise
         return observation
 
     async def _head_still_anchors(
@@ -1972,10 +1980,15 @@ class ExternalBootAuthorityService:
                 else:
                     refusal = None
                 if refusal is not None:
-                    async with lane.lock:
-                        return await self._answer_refusal(
-                            active.completion_binding or binding, journal, records, request, refusal
-                        )
+                    return await self._answer_refusal(
+                        authenticated,
+                        lane,
+                        active.completion_binding or binding,
+                        journal,
+                        records,
+                        request,
+                        refusal,
+                    )
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(

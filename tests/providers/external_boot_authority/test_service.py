@@ -2355,6 +2355,27 @@ async def test_refusal_observed_as_conflict_is_journaled_and_answered(
 
 
 @pytest.mark.anyio
+async def test_refusal_answered_as_conflict_finalizes_the_provider(tmp_path: Path) -> None:
+    """The refused mutation had started, so its finalize runs as it does after a commit."""
+    _unused, repository, _plain, peer, takeover = _service(tmp_path)
+    adapter = _FinalizingAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    adapter.fail_commit = True
+    adapter.observe_category = "conflict"
+
+    observation = await service.execute_mutation(peer, _mutation(takeover))
+
+    assert observation.category == "conflict"
+    assert adapter.calls == ["commit:activate", "observe", "finalize"]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("category", ["source", "target", "mixed", "unreadable", None])
 async def test_refusal_observed_without_conflict_stays_the_refusal(
     tmp_path: Path, category: Literal["source", "target", "mixed", "unreadable"] | None
