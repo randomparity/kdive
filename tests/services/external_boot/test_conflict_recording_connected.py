@@ -474,6 +474,7 @@ _BROKEN_BINDINGS = {
     "authority retired": (_AUTHORITY, "state = 'retired', retired_at = now()"),
     "attempt of a newer generation": (_ATTEMPT, "authority_generation = authority_generation + 5"),
     "job of another incarnation": (_JOB, "worker_id = 'docker:other'"),
+    "job not running": (_JOB, "state = 'failed'"),
     "authority of another incarnation": (_JOB, "state = state"),
     "authority of another job": (_JOB, "state = state"),
 }
