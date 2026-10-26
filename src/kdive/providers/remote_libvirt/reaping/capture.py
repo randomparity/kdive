@@ -113,7 +113,7 @@ class RemoteLibvirtCaptureReaper:
             pki_base_dir=self._pki_base_dir,
         ) as conn:
             self._detach_filter(conn, capture)
-            self._delete_volume(conn, config.storage_pool, capture)
+            self._delete_volume(conn, config.pcap_pool, capture)
         return True
 
     def _detach_filter(self, conn: _ReaperConn, capture: OrphanedCapture) -> None:
@@ -151,19 +151,17 @@ class RemoteLibvirtCaptureReaper:
             )
             raise _control("removing capture filter on", capture.domain_name)
 
-    def _delete_volume(
-        self, conn: _ReaperConn, storage_pool: str, capture: OrphanedCapture
-    ) -> None:
-        """Delete the job's pcap volume from the pool, tolerating its absence."""
+    def _delete_volume(self, conn: _ReaperConn, pcap_pool: str, capture: OrphanedCapture) -> None:
+        """Delete the job's pcap volume from the pcap pool, tolerating its absence."""
         vol_name = pcap_volume_name(capture.system_id, capture.job_id)
         try:
-            pool = conn.storagePoolLookupByName(storage_pool)
+            pool = conn.storagePoolLookupByName(pcap_pool)
         except libvirt.libvirtError as exc:
-            raise _infra("looking up storage pool", pool=storage_pool) from exc
+            raise _infra("looking up pcap pool", pool=pcap_pool) from exc
         try:
             pool.refresh(0)
         except libvirt.libvirtError as exc:
-            raise _infra("refreshing storage pool", pool=storage_pool) from exc
+            raise _infra("refreshing pcap pool", pool=pcap_pool) from exc
         try:
             volume = pool.storageVolLookupByName(vol_name)
         except libvirt.libvirtError as exc:

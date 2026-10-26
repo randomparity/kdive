@@ -6,9 +6,11 @@ from dataclasses import replace
 import pytest
 
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
+from kdive.mcp.tools.lifecycle.vmcore.handlers import VMCORE_METHODS
 from scripts.coverage_campaign import contract
 from scripts.coverage_campaign.contract import (
     FILTERED_LIST_BOUNDARIES,
+    HANDLER_REFUSAL,
     Cell,
     Inventory,
     build_contract,
@@ -301,7 +303,9 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     local_capture = [c for c in capture if c.provider == "local-libvirt"]
     # As for power: the local ppc64le cells (#2818's) share the arch-free scenario ids.
     assert len(local_capture) == 324 and {c.node_id for c in local_capture} == {_CAPTURE_NODE}
-    assert {c.node_id for c in capture if c.provider == "remote-libvirt"} == {None}
+    remote_capture = [c for c in capture if c.provider == "remote-libvirt"]
+    # A remote scenario id names no architecture either: the ppc64le cells (#2818's) share it.
+    assert len(remote_capture) == 360 and {c.node_id for c in remote_capture} == {_CAPTURE_NODE}
     corpus = [c for c in contract.cells if c.operation == "kernel-corpus"]
     # As for power: the ppc64le corpus cells share the arch-free scenario ids.
     assert len(corpus) == 8 and {c.node_id for c in corpus} == {_CORPUS_NODE}
@@ -800,6 +804,43 @@ def test_capture_owners_follow_the_approved_split(inventory: Inventory) -> None:
     local = [c for c in cells if c.owner == 2814]
     kinds = Counter(c.kind for c in local)
     assert (len(local), kinds["functional"], kinds["unsupported"]) == (164, 28, 4)
+    remote = [c for c in cells if c.owner == 3114]
+    kinds = Counter(c.kind for c in remote)
+    assert (len(remote), kinds["functional"], kinds["unsupported"]) == (180, 28, 8)
+
+
+def test_remote_capture_cells_bind_the_capture_carrier(inventory: Inventory) -> None:
+    cells = [c for c in build_contract(inventory=inventory).cells if c.owner == 3114]
+    assert len(cells) == 180 and {c.node_id for c in cells} == {_CAPTURE_NODE}
+
+
+def test_handler_refused_capture_variants_are_unsupported(inventory: Inventory) -> None:
+    # ADR-0722 (2026-10-20): vmcore.fetch refuses console/gdbstub itself, on every lane, so
+    # those variants are unsupported and carry no capability refusal cell.
+    cells = build_contract(inventory=inventory).cells
+    ids = {c.id for c in cells}
+    fetch = [c for c in cells if c.operation == "vmcore.fetch" and c.kind != "rejection"]
+    refused = {c.id for c in fetch if c.unsupported_reason == HANDLER_REFUSAL}
+    assert refused == {
+        f"tool/vmcore.fetch/{method}/{configuration}/{exposure}/remote-libvirt/{arch}/functional"
+        for method in ("console", "gdbstub")
+        for configuration in ("default", "recovery")
+        for exposure in ("direct", "gateway")
+        for arch in inventory.arches
+    }
+    assert all(c.kind == "unsupported" for c in fetch if c.id in refused)
+    assert not {i.removesuffix("/functional") + "/capability" for i in refused} & ids
+
+
+def test_handler_refusal_follows_the_core_method_set(inventory: Inventory) -> None:
+    advertised = {m.value for m in inventory.capabilities["remote-libvirt"].capture_methods}
+    cells = build_contract(inventory=inventory).cells
+    refused = {
+        c.scenario_id.split("/")[-2]
+        for c in cells
+        if c.provider == "remote-libvirt" and c.unsupported_reason == HANDLER_REFUSAL
+    }
+    assert refused == advertised - {m.value for m in VMCORE_METHODS} == {"console", "gdbstub"}
 
 
 _DEBUG_NODE = "tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell"

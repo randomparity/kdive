@@ -310,8 +310,11 @@ class ConsoleObservation:
                 key = item.refs.get("object", "")
                 if "console-part-" not in key:
                     continue
+                # Parts are keyed under the System's provider: local- or remote-libvirt.
                 match = re.fullmatch(
-                    rf"local/systems/{re.escape(system_id)}/console-part-(\d+)-(\d+)", key
+                    rf"(?:local|remote-libvirt)/systems/{re.escape(system_id)}"
+                    r"/console-part-(\d+)-(\d+)",
+                    key,
                 )
                 if match is None:
                     self.fail("invalid_part_key")
