@@ -47,6 +47,7 @@ from kdive.mcp.tools.ops.images.build_publish import REMOTE_PUBLISH_REFUSAL
 from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.authority_cells import (
+    contributor_grants,
     exposed,
     released_external_boot,
     run_authority_cell,
@@ -393,7 +394,7 @@ async def _release(
 ) -> None:
     """Release an external boot of an authority-owned System as a contributor of its project."""
     project = f"cov-{secrets.token_hex(4)}"
-    call = exposed(caller, caller.token(_grants(project, "contributor")))
+    call = exposed(caller, caller.token(contributor_grants(project)))
 
     async def body(
         system: AuthoritySystem, tree: Path, manifest: dict[str, Any]

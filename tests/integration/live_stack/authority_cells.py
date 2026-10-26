@@ -12,6 +12,7 @@ mutation, with that change's reason. Every other cell runs its body inside
 from __future__ import annotations
 
 import asyncio
+import secrets
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -43,7 +44,7 @@ from tests.integration.live_stack.remote_lifecycle import observe_host, remote_h
 from tests.integration.live_stack.scenario import CellRun
 from tests.integration.live_stack.service_cells import _fixture
 from tests.integration.live_stack.spine import drain_job, ok
-from tests.integration.live_stack.tool_cells import Caller
+from tests.integration.live_stack.tool_cells import Caller, Grants
 from tests.live_vm.installed_local_authority_support import (
     NormalOperationJobs,
     assert_root_release_completion,
@@ -85,6 +86,17 @@ def exposed(caller: Caller, token: str) -> ToolCall:
         return result
 
     return call
+
+
+def contributor_grants(project: str) -> Grants:
+    """The release cell's caller: a contributor of the frame's project (#3186)."""
+    return Grants(f"{project}-contributor", (project,), {project: "contributor"})
+
+
+def platform_admin_grants() -> Grants:
+    """The ops cells' caller: a platform admin with a project of its own, outside the frame's."""
+    project = f"cov-{secrets.token_hex(4)}"
+    return Grants(f"{project}-platform_admin", (project,), {}, ("platform_admin",))
 
 
 async def run_authority_cell(

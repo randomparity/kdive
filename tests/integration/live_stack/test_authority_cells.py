@@ -14,8 +14,6 @@ import pytest
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
-from tests.integration import test_breakglass_tool_cells_live as breakglass
-from tests.integration import test_run_tool_cells_live as run_cells
 from tests.integration.live_stack import authority_cells
 from tests.integration.live_stack.authority_faults import CONFLICT_BLOCKED, REMOTE_ORPHAN_BLOCKED
 from tests.integration.live_stack.authority_lane import AuthoritySystem
@@ -182,38 +180,17 @@ def test_exposed_returns_error_envelopes_unchanged_after_discovery() -> None:
         asyncio.run(many("ops.force_release", {}))
 
 
-def _carrier_grants(monkeypatch: pytest.MonkeyPatch, module: Any, tool: str) -> Grants:
-    captured: dict[str, object] = {}
-
-    async def framed(*_args: object, project: str) -> None:
-        captured["project"] = project
-
-    monkeypatch.setattr(module, "run_authority_cell", framed)
-    caller = _Caller(ToolResponse(object_id="x", status="ok"))
-    run = CellRun(_cell(tool, "local-libvirt"), cast(Any, None))
-    entry = run_cells._release if module is run_cells else breakglass._authority
-    asyncio.run(entry(run, cast(Any, caller), "url", cast(Any, None), "db"))
-    (grants,) = caller.grants
-    if module is run_cells:
-        assert grants.projects == (captured["project"],)
-    return grants
-
-
-def test_the_release_is_called_by_a_contributor_of_the_frame_project(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    grants = _carrier_grants(monkeypatch, run_cells, "runs.release_external_boot")
-    assert (dict(grants.roles), grants.platform_roles) == (
-        {grants.projects[0]: "contributor"},
+def test_the_release_is_called_by_a_contributor_of_the_frame_project() -> None:
+    grants = authority_cells.contributor_grants("cov-1")
+    assert (grants.projects, dict(grants.roles), grants.platform_roles) == (
+        ("cov-1",),
+        {"cov-1": "contributor"},
         (),
     )
 
 
-@pytest.mark.parametrize("tool", ["ops.force_release", "ops.resolve_recovery_orphan"])
-def test_the_ops_tools_are_called_by_an_outside_platform_admin(
-    monkeypatch: pytest.MonkeyPatch, tool: str
-) -> None:
-    grants = _carrier_grants(monkeypatch, breakglass, tool)
+def test_the_ops_tools_are_called_by_an_outside_platform_admin() -> None:
+    grants = authority_cells.platform_admin_grants()
     assert (dict(grants.roles), grants.platform_roles) == ({}, ("platform_admin",))
 
 

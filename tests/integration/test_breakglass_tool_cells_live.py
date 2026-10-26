@@ -37,7 +37,11 @@ from kdive.mcp.responses import ToolResponse
 from kdive.providers.shared.runtime_paths import domain_name_for
 from scripts.coverage_campaign.contract import Cell
 from tests.integration.live_stack import authority_faults
-from tests.integration.live_stack.authority_cells import exposed, run_authority_cell
+from tests.integration.live_stack.authority_cells import (
+    exposed,
+    platform_admin_grants,
+    run_authority_cell,
+)
 from tests.integration.live_stack.authority_lane import AuthoritySystem
 from tests.integration.live_stack.image_smoke import staged_image
 from tests.integration.live_stack.remote_lifecycle import (
@@ -207,7 +211,7 @@ async def _authority(
     run: CellRun, caller: HttpCaller, base_url: str, issuer: OidcIssuer, db_url: str
 ) -> None:
     """Run the tool's fault arm on an authority-owned System; an outside platform admin calls."""
-    call = exposed(caller, caller.token(_platform("platform_admin")))
+    call = exposed(caller, caller.token(platform_admin_grants()))
     tool = run.cell.operation
 
     async def body(system: AuthoritySystem, tree: Path, _manifest: object) -> dict[str, object]:
