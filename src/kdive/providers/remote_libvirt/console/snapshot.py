@@ -51,6 +51,10 @@ class RemoteLibvirtConsoleSnapshotter:
         self._store = store
         self._secret_registry = secret_registry or SecretRegistry()
 
+    def _redact(self, data: bytes) -> bytes:
+        redactor = Redactor(registry=self._secret_registry)
+        return redactor.redact_text(data.decode("utf-8", "replace")).encode("utf-8")
+
     async def mark_boot_window(self, system_id: UUID) -> int:
         """Return the next part index for ``system_id`` — this boot's window starts here.
 
@@ -82,8 +86,7 @@ class RemoteLibvirtConsoleSnapshotter:
             return None
         # An idle seal holds no overlap back (ADR-0806), so a secret split across two parts is
         # whole only here, in the joined bytes.
-        redactor = Redactor(registry=self._secret_registry)
-        data = redactor.redact_text(data.decode("utf-8", "replace")).encode("utf-8")
+        data = await asyncio.to_thread(self._redact, data)
         stored = await asyncio.to_thread(parts.put_run_console, system_id, run_id, data)
         artifact_id = await _upsert_run_console_row(conn, system_id, stored)
         return ConsoleSnapshot(artifact_id, stored.key, data)

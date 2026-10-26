@@ -53,7 +53,8 @@ with nothing held back.
   poll settles after two quiet reads (about one second), so it can return the first part only.
   A `show_memory` dump is emitted in milliseconds, so this is not expected in practice.
 - A store failure during a seal keeps the buffered bytes and the part index, so the next idle pump
-  uploads the same part and the indices stay consecutive. Size rotation clears its buffer before
+  uploads the same part and the indices stay consecutive. A failed idle seal is retried on every
+  pump, since the spacing floor counts only successful seals. Size rotation clears its buffer before
   the upload and is unchanged.
 - The idle clock restarts on every received byte. A console that prints more often than once a
   second never goes idle and seals only at the size threshold or a crash marker. A maximum age for
@@ -61,7 +62,8 @@ with nothing held back.
 - A console that prints a byte every few seconds produces at most one part per five seconds, about
   720 an hour, each with an `artifacts` row.
 - While the store is down, a failed tail flush keeps at most one MiB of the newest bytes and drops
-  older ones, so guest output cannot grow the buffer without limit.
+  older ones, so guest output cannot grow the buffer without limit. A cut there, like an idle seal,
+  can split a secret across parts, which the same joins redact.
 
 ## Considered & rejected
 
