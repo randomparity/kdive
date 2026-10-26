@@ -503,7 +503,6 @@ async def test_takeover_recovers_a_generation_that_never_began_over_an_older_rec
     store = RemoteModuleVolumePreparationStore(tmp_path / "provider")
     host = _RemoteTeardownHost()
     adapter = _DiesBeforeBegin(
-        cast(Any, object()),
         RemoteExternalBootCoordinator(cast(Any, host), store, lambda: 300.0),
         RemoteModulePreparationExecutor(),
         teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),

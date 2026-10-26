@@ -20,6 +20,7 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteExternalBootObservedState,
     RemoteExternalBootRecoveryRecord,
     RemoteModuleTerminalRecord,
     RemoteSystemTeardownInspection,
@@ -33,6 +34,7 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     _AgentRunner,
     activate_definition,
     boot_projection_identity,
+    observe_definition,
     observe_guest_identity,
     parse_projected_domain_xml,
     prepare_target_definition,
@@ -301,6 +303,34 @@ class ConcreteRemoteExternalBootOperations:
                     definition=recovery.definition, prior_power=recovery.prior_power
                 ),
             )
+
+    def observe_state(
+        self, recovery: RemoteExternalBootRecoveryRecord, deadline: float
+    ) -> RemoteExternalBootObservedState:
+        """Read the definition side, power, and owned-volume absence without any write."""
+        self._require_deadline(deadline, "observation")
+        boot = [recovery.materialization.artifacts.kernel]
+        if recovery.materialization.artifacts.initrd is not None:
+            boot.append(recovery.materialization.artifacts.initrd)
+        modules = (recovery.module_recovery.source_volume, recovery.module_recovery.scratch_volume)
+        with self._connection() as connection:
+            which, preserved, boot_identity, active = observe_definition(
+                connection, recovery.definition
+            )
+            boot_pool = connection.storagePoolLookupByName(self._pool_name)
+            module_pool = connection.storagePoolLookupByName(recovery.module_recovery.pool.ref)
+            absent = all(
+                self._lookup_optional(boot_pool, reference.ref) is None for reference in boot
+            ) and all(
+                self._lookup_optional(module_pool, reference.ref) is None for reference in modules
+            )
+        return RemoteExternalBootObservedState(
+            definition=which,
+            preserved=preserved,
+            boot=boot_identity,
+            active=active,
+            recovery_objects_absent=absent,
+        )
 
     @staticmethod
     def _lookup_optional(pool: _Pool, name: str) -> _Volume | None:
