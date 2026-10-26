@@ -81,6 +81,7 @@ class OperationGroup(BaseModel):
     kernel: bool = False
     authority: bool = False
     cli: bool = False
+    guest_observing: list[str] = Field(default_factory=list)
     tools: dict[str, str]
     capabilities: dict[str, str] = Field(default_factory=dict)
     role_overrides: dict[str, list[Literal["server", "worker", "reconciler", "authority"]]] = Field(
@@ -187,6 +188,10 @@ def _validate_mapping(mapping: ContractMapping, inventory: Inventory) -> None:
             raise ValueError("tool mapping needs a concrete observable assertion")
         if (set(group.capabilities) | set(group.role_overrides)) - set(group.tools):
             raise ValueError("capability mapping names an unknown tool")
+        if group.guest_observing and group.execution != "service":
+            raise ValueError("guest_observing marks service tools only; provider cells have guests")
+        if set(group.guest_observing) - set(group.tools):
+            raise ValueError("guest_observing names an unknown tool")
         if any(name.split(".")[0] not in support_fields for name in group.capabilities.values()):
             raise ValueError("unknown provider capability owner")
         if group.cli and group.execution != "service":
@@ -218,6 +223,7 @@ def _capability_variants(
 
 def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> list[Cell]:
     cells: list[Cell] = []
+    observes_guest = row.tool in group.guest_observing
     lanes = (
         [("service", None)]
         if group.execution == "service"
@@ -227,6 +233,10 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
             for arch in sorted(inventory.arches)
         ]
     )
+    if observes_guest:
+        # The functional scenario boots a lane System, so its cell is the lane host's, per
+        # architecture. The rejection cells observe no guest and stay on the host-only lane.
+        lanes += [("service", arch) for arch in sorted(inventory.arches)]
     for provider, arch in lanes:
         variants = (
             [("default", True, None)]
@@ -254,7 +264,9 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         if provider == "remote-libvirt"
                         else scenario
                     )
-                    roles = ("server",) if arch is None else ("server", "worker", "reconciler")
+                    roles = (
+                        ("server",) if provider == "service" else ("server", "worker", "reconciler")
+                    )
                     roles = tuple(group.role_overrides.get(row.tool, roles))
                     if group.authority:
                         roles = (*roles, "authority")
@@ -263,7 +275,10 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                     # wait for the POWER lane (#2818); x86_64 remote System cells are #3080's,
                     # remote run/image cells #3120's, remote debug cells #3113's, remote capture
                     # cells #3114's, remote power/snapshot/control cells #3116's.
-                    if group.owner in (2813, 2814, 2815, 3062, 3112, 3119) and arch == "ppc64le":
+                    if (
+                        group.owner in (2813, 2814, 2815, 3062, 3098, 3112, 3119)
+                        and arch == "ppc64le"
+                    ):
                         owner = 2818
                     elif group.owner == 2813 and provider == "remote-libvirt":
                         owner = 3113
@@ -298,7 +313,10 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         unsupported_reason=None if supported else source,
                     )
                     refusal = _ADMISSION_REFUSALS.get((provider, row.tool))
-                    cells.append(cell if refusal is None else _admission_refusal(cell, refusal))
+                    if not (observes_guest and arch is None):
+                        cells.append(cell if refusal is None else _admission_refusal(cell, refusal))
+                    if provider == "service" and arch is not None:
+                        continue
                     boundaries = ["authentication"]
                     if row.scopes:
                         boundaries.append("authorization")
