@@ -23,6 +23,7 @@ from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import (
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthoritySuccessV1,
     _FailureResult,
     _RecoveryAttemptResult,
 )
@@ -133,6 +134,7 @@ def test_sender_disconnect_returns_nonterminal_bound_failure_with_same_operation
             async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
                 prepared = await handler(worker, job, marker)
                 assert prepared.result.operation == "deadline"
+                assert isinstance(prepared, ExternalBootAuthoritySuccessV1)
                 committed_result = await queue.complete_external_boot(
                     worker,
                     job,
@@ -217,6 +219,7 @@ def test_worker_uses_authority_observation_with_only_the_readiness_read(
             async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
                 result = await handler(worker, job, marker)
                 if result.result.operation == "recovery-attempt":
+                    assert isinstance(result, ExternalBootAuthoritySuccessV1)
                     await queue.complete_external_boot(
                         worker,
                         job,
@@ -261,6 +264,7 @@ def test_activate_commits_deadline_before_provider_and_reuses_it(
                 result = await handler(worker, job, marker)
                 assert result.result.operation == "deadline"
                 assert executor.requests == []
+                assert isinstance(result, ExternalBootAuthoritySuccessV1)
                 committed = await queue.complete_external_boot(
                     worker,
                     job,
@@ -328,6 +332,7 @@ def test_local_activation_client_starts_after_preparation_and_uses_committed_dea
             async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
                 result = await handler(worker, job, marker)
                 assert result.result.operation == "deadline"
+                assert isinstance(result, ExternalBootAuthoritySuccessV1)
                 committed = await queue.complete_external_boot(
                     worker,
                     job,
@@ -454,6 +459,7 @@ def test_recover_commits_attempt_before_provider_and_reuses_it(
                 result = await handler(worker, job, marker)
                 assert result.result.operation == "recovery-attempt"
                 assert executor.requests == []
+                assert isinstance(result, ExternalBootAuthoritySuccessV1)
                 committed = await queue.complete_external_boot(
                     worker,
                     job,

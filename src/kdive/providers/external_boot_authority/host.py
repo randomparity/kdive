@@ -1810,7 +1810,6 @@ def _build_mutation_service(
         connection.close()
 
     adapter = RemoteExternalBootAuthorityAdapter(
-        binding.adapter,
         coordinator,
         module_executor,
         remote_module_host=remote_module_host,

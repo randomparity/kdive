@@ -94,6 +94,11 @@ def _prove(run: CellRun, config_env: str, arm: Callable[[str, ToolCall], Authori
     except ScenarioStop as stop:
         assert stop.outcome is Outcome.BLOCKED, str(stop)
         pytest.skip(f"blocked: {stop}")
+    except BaseExceptionGroup as failure:
+        stop = authority_faults.blocked_primary(failure)
+        if stop is None:
+            raise
+        pytest.skip(f"blocked: {stop}; the frame cleanup failed, see the runbook")
     assert set(run.assertions) == {"effect", "cleanup"}
 
 
@@ -135,8 +140,14 @@ def test_recovery_orphan_publication_and_disposition(
 
 
 @ARMS
-def test_recovery_conflict_is_blocked(
+def test_recovery_conflict_is_recorded_and_resolution_admitted(
     tmp_path: Path, provider: str, config_env: str, arch: str
 ) -> None:
-    run = _run(tmp_path, provider, arch, "authority-recovery-conflict")
-    _blocked(run, config_env, authority_faults.CONFLICT_BLOCKED)
+    def arm(db_url: str, _call: ToolCall) -> AuthorityBody:
+        async def body(system: AuthoritySystem) -> dict[str, object]:
+            await authority_faults.recorded_conflict(system, db_url)
+            raise ScenarioStop(Outcome.BLOCKED, authority_faults.CONFLICT_TEARDOWN_BLOCKED)
+
+        return body
+
+    _prove(_run(tmp_path, provider, arch, "authority-recovery-conflict"), config_env, arm)

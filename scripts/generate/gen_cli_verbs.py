@@ -208,6 +208,23 @@ def _unwrap_optional(
     return non_null[0] if len(non_null) == 1 else None
 
 
+_JSON_SCALAR_TYPES = ("string", "number", "integer", "boolean")
+
+
+def _json_scalar_types(spec: dict[str, Any], defs: Mapping[str, Any] = _NO_DEFS) -> tuple[str, ...]:
+    """The JSON scalar types a ``--<param>-json`` parameter's schema accepts, in schema order.
+
+    Reads the parameter's own type and each ``anyOf`` member (``number | string`` for a
+    ``Decimal``), ``$ref``-resolved. Containers and ``null`` are not listed: the escape always
+    takes containers, and a bare ``null`` is not a value the verb sends (#3299).
+    """
+    spec = _resolve_ref(spec, defs)
+    members = [_resolve_ref(v, defs) for v in spec.get("anyOf", []) if isinstance(v, dict)]
+    types = [m.get("type") for m in (spec, *members)]
+    found = dict.fromkeys(t for t in types if t in _JSON_SCALAR_TYPES)
+    return tuple(str(t) for t in found)
+
+
 def _object_body(spec: dict[str, Any], defs: Mapping[str, Any] = _NO_DEFS) -> dict[str, Any] | None:
     """Return the object subschema of a ``request`` wrapper (``{object}`` or ``[object, null]``)."""
     body = _unwrap_optional(spec, defs)
@@ -378,10 +395,13 @@ def _verb_for(tool: Any) -> GeneratedVerb:
             required = set(body.get("required", []))
     flags: list[GeneratedFlag] = []
     json_params: list[str] = []
+    json_scalars: list[tuple[str, tuple[str, ...]]] = []
     for name, spec in props.items():
         flag = _flag_for(name, spec, name in required, defs)
         if flag is None:
             json_params.append(name)
+            if scalars := _json_scalar_types(spec, defs):
+                json_scalars.append((name, scalars))
         else:
             flags.append(flag)
     if not flags and not json_params and (required or top_required):
@@ -401,6 +421,7 @@ def _verb_for(tool: Any) -> GeneratedVerb:
         # handler owns any payload rewrite (the accounting discriminators and report window).
         flags = [_shape_flag(tool.name, schema, name, shape, defs) for name in shape.fields]
         json_params = []
+        json_scalars = []
     return GeneratedVerb(
         group=group,
         sub=op.replace("_", "-"),
@@ -411,6 +432,7 @@ def _verb_for(tool: Any) -> GeneratedVerb:
         unwrap_request=unwrap,
         flags=tuple(flags),
         json_params=tuple(json_params),
+        json_scalars=tuple(json_scalars),
         positionals=shape.positionals if shape is not None else (),
         local_flags=shape.local_flags if shape is not None else (),
         confirm_destructive=shape.confirm_destructive

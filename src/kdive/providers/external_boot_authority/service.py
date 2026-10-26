@@ -70,6 +70,20 @@ from kdive.serialization import ServerFaultError
 _ERROR_MESSAGE_MAX = 512
 # Defence in depth for the fixed refusal text: every URL userinfo is masked.
 _URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
+# ADR-0805: the mutations whose refusal is re-observed for a conflict before it is answered.
+_REFUSAL_OBSERVED_OPERATIONS = frozenset(
+    {AuthorityOperation.ACTIVATE, AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
+)
+# Exactly the (purpose, operation) pairs read_authorized_remote_module_cleanup_evidence
+# (migration 0145) admits. A release RECOVER restores without deleting, so it commits directly.
+_CLEANUP_EVIDENCE_COMMITS = frozenset(
+    {
+        ("recover", AuthorityOperation.RECOVER),
+        ("release", AuthorityOperation.CLEANUP),
+        ("teardown", AuthorityOperation.TEARDOWN),
+        ("resolve-conflict", AuthorityOperation.RESOLVE_CONFLICT),
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1036,6 +1050,50 @@ class ExternalBootAuthorityService:
             )
         return AuthorityServiceError("provider_conflict", telemetry_recorded=True)
 
+    async def _answer_refusal(  # noqa: PLR0913 - the mutation path's own context, passed through
+        self,
+        authenticated: AuthenticatedPeer,
+        lane: _Lane,
+        active: _ActiveOperation,
+        binding: AuthorityBinding,
+        journal: FileAuthorityJournal,
+        records: list[JournalRecordV1],
+        request: AuthorityMutationRequestV1,
+        refusal: AuthorityServiceError,
+    ) -> AuthorityObservationV1:
+        """Answer a refused provider call with the conflict its state proves (ADR-0805).
+
+        Only an activate, recover or resolve-conflict refusal whose fresh observation is a third or
+        unowned state is journaled terminal and answered with that observation. Anything else —
+        including ``mixed``, which durable phase evidence may still resume — leaves the operation
+        at ``mutation-started`` and keeps the ADR-0714 retry, exactly as before.
+        """
+        if request.operation not in _REFUSAL_OBSERVED_OPERATIONS:
+            raise refusal
+        try:
+            observation = await self._adapter.observe(request)
+        except Exception:  # noqa: BLE001 - an unobservable refusal stays the refusal it was
+            raise refusal from None
+        if observation.category != "conflict":
+            raise refusal
+        async with lane.lock:
+            # A takeover during the unlocked observe moves the completion binding (ADR-0584).
+            binding = active.completion_binding or binding
+            for phase, changes in (
+                (JournalPhase.PROVIDER_RETURNED, {}),
+                (JournalPhase.OBSERVED, {"observation": observation}),
+                (JournalPhase.TERMINAL, {"observation": observation, "outcome": "conflict"}),
+            ):
+                records = await self._anchor(
+                    binding, journal, records, self._record(request, records, phase, **changes)
+                )
+            try:
+                await self._finalize_adapter(request, records)
+            except AuthorityServiceError:
+                await self._publish_cleanup_quarantine(authenticated, binding, request, records[-1])
+                raise
+        return observation
+
     async def _head_still_anchors(
         self, binding: AuthorityBinding, context: AuthorityCommitContextV1
     ) -> bool:
@@ -1861,6 +1919,7 @@ class ExternalBootAuthorityService:
                         or observed.composite_state != request.expected_observed_composite
                     ):
                         raise AuthorityServiceError("superseded")
+                in_provider = False
                 try:
                     if self._proof_checkpoint is not None and adopted_release_phase is None:
                         await self._proof_checkpoint.checkpoint(
@@ -1869,6 +1928,7 @@ class ExternalBootAuthorityService:
                             request.operation,
                             "before-provider",
                         )
+                    in_provider = adopted_release_phase is None
                     if predecessor is not None:
                         if not isinstance(self._adapter, AuthorityPreparationAdopter):
                             raise AuthorityServiceError("provider_conflict")
@@ -1888,12 +1948,10 @@ class ExternalBootAuthorityService:
                             request, context, teardown_snapshot.reservation
                         )
                     elif adopted_release_phase is None:
-                        cleanup_operations = {
-                            AuthorityOperation.RECOVER,
-                            AuthorityOperation.TEARDOWN,
-                            AuthorityOperation.RESOLVE_CONFLICT,
-                        }
-                        if request.operation in cleanup_operations and isinstance(
+                        if (
+                            request.purpose,
+                            request.operation,
+                        ) in _CLEANUP_EVIDENCE_COMMITS and isinstance(
                             self._adapter, AuthorityCleanupAdapter
                         ):
                             if not isinstance(self._repository, AuthorityCleanupRepository):
@@ -1912,6 +1970,7 @@ class ExternalBootAuthorityService:
                             await self._adapter.commit_cleanup(request, context, evidence)
                         else:
                             await self._adapter.commit(request, context)
+                    in_provider = False
                     if self._proof_checkpoint is not None and adopted_release_phase is None:
                         await self._proof_checkpoint.checkpoint(
                             request.system_id,
@@ -1919,12 +1978,29 @@ class ExternalBootAuthorityService:
                             request.operation,
                             "after-provider",
                         )
-                except AuthorityServiceError:
+                except AuthorityServiceError as error:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
-                    raise
+                    if not in_provider or error.category != "provider_conflict":
+                        raise
+                    refusal = error
                 except Exception as error:
-                    raise self._provider_error(request, error) from None
+                    refusal = self._provider_error(request, error)
+                    if not in_provider:
+                        raise refusal from None
+                else:
+                    refusal = None
+                if refusal is not None:
+                    return await self._answer_refusal(
+                        authenticated,
+                        lane,
+                        active,
+                        binding,
+                        journal,
+                        records,
+                        request,
+                        refusal,
+                    )
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(

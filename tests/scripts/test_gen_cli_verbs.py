@@ -254,6 +254,21 @@ def test_nested_object_parameter_defers_to_json_params() -> None:
     assert verb.flags == () and verb.json_params == ("profile",)
 
 
+def test_scalar_union_records_its_json_scalar_types() -> None:
+    tool = _tool(
+        "demo.run",
+        {
+            "properties": {
+                "amount": {"anyOf": [{"type": "number"}, {"type": "string"}]},
+                "profile": {"type": "object", "properties": {"x": {"type": "string"}}},
+            },
+        },
+    )
+    verb = gen._verb_for(tool)
+    assert verb.json_params == ("amount", "profile")
+    assert verb.json_scalars == (("amount", ("number", "string")),)
+
+
 def test_ref_into_defs_resolves_to_its_enum_choices() -> None:
     """A ``$ref``-rendered enum keeps its ``choices`` instead of falling to the JSON escape.
 
