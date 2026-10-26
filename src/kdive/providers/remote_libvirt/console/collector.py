@@ -50,6 +50,14 @@ DEFAULT_READ_CHUNK = 16 * 1024
 # becomes readable without waiting for the size threshold or a crash marker (ADR-0806).
 IDLE_FLUSH_SECONDS = 1.0
 
+# Idle seals are at least this far apart, so a console printing a byte every few seconds yields a
+# part per interval, not per byte. The first seal after a quiet spell is immediate (ADR-0806).
+MIN_IDLE_SEAL_INTERVAL_SECONDS = 5.0
+
+# A failed tail flush keeps its bytes for the next try; this bounds what is kept while the store
+# is down so guest output cannot grow the buffer without limit.
+MAX_RETAINED_BYTES = 1024 * 1024
+
 # The same crash signature `classify_console` keys on, duplicated here (no core import from a
 # provider): a crash marker forces an immediate rotation so the panic tail is flushed promptly.
 _CRASH_MARKER = re.compile(
@@ -115,6 +123,8 @@ class ConsoleCollector:
         read_chunk: int = DEFAULT_READ_CHUNK,
         telemetry: ConsoleRecorder | None = None,
         idle_flush_seconds: float = IDLE_FLUSH_SECONDS,
+        min_idle_seal_interval: float = MIN_IDLE_SEAL_INTERVAL_SECONDS,
+        max_retained_bytes: int = MAX_RETAINED_BYTES,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._system_id = system_id
@@ -126,8 +136,11 @@ class ConsoleCollector:
         self._read_chunk = read_chunk
         self._telemetry = telemetry
         self._idle_flush_seconds = idle_flush_seconds
+        self._min_idle_seal_interval = min_idle_seal_interval
+        self._max_retained_bytes = max_retained_bytes
         self._clock = clock
         self._last_rx = clock()
+        self._last_idle_seal: float | None = None
         self._stream: ConsoleStream | None = None
         self._buffer = bytearray()
         # Raw trailing bytes held back from the previous rotation and prepended to the next
@@ -221,10 +234,18 @@ class ConsoleCollector:
         Uses the tail-flush path, so the seam-overlap carry goes out redacted with the buffer; a
         secret split by a pause longer than the interval is the accepted cost (ADR-0806). Once
         flushed, the buffer and carry are empty, so further idle pumps seal nothing until new
-        bytes arrive: at most one part per idle episode, never an empty one.
+        bytes arrive: at most one part per idle episode, never an empty one. Seals are also
+        spaced by ``min_idle_seal_interval``; bytes that arrive sooner wait in the buffer.
         """
-        if self._clock() - self._last_rx >= self._idle_flush_seconds:
+        now = self._clock()
+        if now - self._last_rx < self._idle_flush_seconds:
+            return
+        last = self._last_idle_seal
+        if last is not None and now - last < self._min_idle_seal_interval:
+            return
+        if self._carry or self._buffer:
             self._flush_tail()
+            self._last_idle_seal = now
 
     def _maybe_rotate(self) -> None:
         if _CRASH_MARKER.search(self._buffer):
@@ -271,9 +292,17 @@ class ConsoleCollector:
             self._store.put_part(self._system_id, index, self._redact(data))
         except Exception:
             self._next_index = index
+            self._trim_retained()
             raise
         self._buffer.clear()
         self._carry = b""
+
+    def _trim_retained(self) -> None:
+        """Drop the oldest unsent bytes beyond ``max_retained_bytes`` after a failed flush."""
+        held = self._carry + bytes(self._buffer)
+        if len(held) > self._max_retained_bytes:
+            self._carry = b""
+            self._buffer = bytearray(held[-self._max_retained_bytes :])
 
     def _redact(self, data: bytes) -> bytes:
         """Redact ``data`` before it leaves the worker (untrusted guest bytes, ADR-0027).

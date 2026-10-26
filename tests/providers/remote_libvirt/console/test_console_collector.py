@@ -166,7 +166,13 @@ def test_repeated_idle_pumps_seal_one_part_and_never_an_empty_one() -> None:
     clock = FakeClock()
     store = FakePartStore()
     stream = FakeNonBlockingStream([b"burst one\n", None, None, None, b"burst two\n", None, None])
-    collector = _collector(FakeOpenConsole([stream]), store, idle_flush_seconds=1.0, clock=clock)
+    collector = _collector(
+        FakeOpenConsole([stream]),
+        store,
+        idle_flush_seconds=1.0,
+        min_idle_seal_interval=0.0,
+        clock=clock,
+    )
     collector.pump_once()
     clock.now = 2.0
     for _ in range(3):
@@ -255,6 +261,47 @@ def test_idle_split_secret_is_redacted_in_the_finalized_artifact() -> None:
     collector.finalize()
     assert store.artifact is not None
     assert secret.encode() not in store.artifact
+
+
+def test_idle_seals_are_spaced_by_the_minimum_interval() -> None:
+    clock = FakeClock()
+    store = FakePartStore()
+    stream = FakeNonBlockingStream([b"one\n", None, b"two\n", None, None, None])
+    collector = _collector(
+        FakeOpenConsole([stream]),
+        store,
+        idle_flush_seconds=1.0,
+        min_idle_seal_interval=5.0,
+        clock=clock,
+    )
+    collector.pump_once()
+    clock.now = 2.0
+    collector.pump_once()  # first seal after a quiet spell is immediate
+    assert store.parts == {0: b"one\n"}
+    collector.pump_once()  # "two" arrives at t=2
+    clock.now = 4.0
+    collector.pump_once()  # idle for 2 s, but only 2 s since the last seal: held
+    assert list(store.parts) == [0]
+    clock.now = 7.5
+    collector.pump_once()
+    assert store.parts == {0: b"one\n", 1: b"two\n"}
+
+
+def test_failed_flush_bounds_the_retained_bytes() -> None:
+    class DownStore(FakePartStore):
+        def put_part(self, system_id, index: int, data: bytes) -> None:  # noqa: ANN001
+            raise OSError("store unavailable")
+
+    store = DownStore()
+    stream = FakeStream([b"Kernel panic " + b"x" * 40, b"y" * 40])
+    collector = _collector(
+        FakeOpenConsole([stream]), store, rotation_threshold=10_000, max_retained_bytes=64
+    )
+    for _ in range(2):
+        with pytest.raises(OSError, match="store unavailable"):
+            collector.pump_once()
+    assert len(collector._buffer) + len(collector._carry) <= 64  # noqa: SLF001
+    assert collector._buffer.endswith(b"y" * 40)  # noqa: SLF001 - the newest bytes survive
 
 
 def test_rotation_on_threshold_uploads_numbered_parts() -> None:

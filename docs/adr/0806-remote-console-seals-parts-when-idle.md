@@ -24,10 +24,12 @@ The collector seals whatever it holds once the console has been quiet for one se
 uses the tail-flush path: the carry and the buffer are redacted together and uploaded as one part,
 with nothing held back.
 
+- Idle seals are at least five seconds apart. The first seal after a quiet spell is immediate;
+  bytes that arrive within five seconds of the last idle seal wait in the buffer for the next.
 - A seal happens at most once per idle episode. After it the buffer and carry are empty, so further
   idle pumps upload nothing, and a part is never empty.
-- The diagnostic SysRq poll window grows from 10 to 20 reads of 0.5 s each, so it covers the idle
-  interval, the pump backoff and the part upload.
+- The diagnostic SysRq poll window grows from 10 to 20 reads of 0.5 s each, so it covers the seal
+  interval, the idle interval, the pump backoff and the part upload.
 
 ## Consequences
 
@@ -36,9 +38,12 @@ with nothing held back.
 - A secret split by a pause longer than one second is no longer held back across that boundary: its
   head is uploaded in one part and its tail in the next, each redacted on its own. The two
   places that join the parts redact the joined bytes again, so the split value is caught there:
-  the read seam (ADR-0429) and `finalize`, which now re-redacts the assembled console artifact.
+  the read seam (ADR-0429), `finalize`, which now re-redacts the assembled console artifact, and
+  the per-Run console snapshot, which now receives the secret registry and redacts the joined
+  parts.
   The individual S3 parts can still hold the two halves, so ADR-0095's rule that no part carries
-  a raw straddling secret holds for size rotation but not for an idle seal.
+  a raw straddling secret holds for size rotation but not for an idle seal. That includes the
+  observable per-part copies that agents can list.
 - An interactive console produces more, smaller parts. No reader assumes a part's size: the read
   seam lists indices and assembles them, and the rotation threshold is read only by the collector.
 - A failed capture takes up to ten seconds to report, not five.
@@ -53,6 +58,10 @@ with nothing held back.
 - The idle clock restarts on every received byte. A console that prints more often than once a
   second never goes idle and seals only at the size threshold or a crash marker. A maximum age for
   buffered bytes would close that gap and is not built here.
+- A console that prints a byte every few seconds produces at most one part per five seconds, about
+  720 an hour, each with an `artifacts` row.
+- While the store is down, a failed tail flush keeps at most one MiB of the newest bytes and drops
+  older ones, so guest output cannot grow the buffer without limit.
 
 ## Considered & rejected
 
