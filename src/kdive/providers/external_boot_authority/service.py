@@ -74,6 +74,16 @@ _URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
 _REFUSAL_OBSERVED_OPERATIONS = frozenset(
     {AuthorityOperation.ACTIVATE, AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
 )
+# Exactly the (purpose, operation) pairs read_authorized_remote_module_cleanup_evidence
+# (migration 0145) admits. A release RECOVER restores without deleting, so it commits directly.
+_CLEANUP_EVIDENCE_COMMITS = frozenset(
+    {
+        ("recover", AuthorityOperation.RECOVER),
+        ("release", AuthorityOperation.CLEANUP),
+        ("teardown", AuthorityOperation.TEARDOWN),
+        ("resolve-conflict", AuthorityOperation.RESOLVE_CONFLICT),
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1938,12 +1948,10 @@ class ExternalBootAuthorityService:
                             request, context, teardown_snapshot.reservation
                         )
                     elif adopted_release_phase is None:
-                        cleanup_operations = {
-                            AuthorityOperation.RECOVER,
-                            AuthorityOperation.TEARDOWN,
-                            AuthorityOperation.RESOLVE_CONFLICT,
-                        }
-                        if request.operation in cleanup_operations and isinstance(
+                        if (
+                            request.purpose,
+                            request.operation,
+                        ) in _CLEANUP_EVIDENCE_COMMITS and isinstance(
                             self._adapter, AuthorityCleanupAdapter
                         ):
                             if not isinstance(self._repository, AuthorityCleanupRepository):
