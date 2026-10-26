@@ -150,6 +150,13 @@ def _async(result: object = None) -> Callable[..., Any]:
     return coroutine
 
 
+def _async_record(calls: list[str], label: str) -> Callable[..., Any]:
+    async def coroutine(*args: object, **_kwargs: object) -> None:
+        calls.append(f"{label}:{args[-1]}")
+
+    return coroutine
+
+
 def _activation() -> ActivationJob:
     return ActivationJob("inv", "run", "activate-job")
 
@@ -446,6 +453,7 @@ def _fake_conflict_arm(
         "conflict_head": lambda *_a: _async(next(remaining))(),
         "_activation_state": _async("recovery_conflict"),
         "scalar": scalar,
+        "await_system_state": _async_record(calls, "await"),
     }
     for name, value in patches.items():
         monkeypatch.setattr(authority_faults, name, value)
@@ -469,7 +477,10 @@ def test_conflict_arm_records_then_resolves_by_the_head_composite(
         "drain:release",
         f"systems.resolve_external_boot_conflict:{_COMPOSITE}",
         "drain:resolve-conflict",
+        "systems.teardown:None",
+        "await:torn_down",
     ]
+    assert observed["torn_down"] == "from recovery_conflict"
     assert observed["recorded"] == "recovery_conflict"
     assert observed["restore_from_third_identity"] == authority_faults.CONFLICT_RESTORE_BLOCKED
 

@@ -653,11 +653,16 @@ async def recorded_conflict(system: AuthoritySystem, db_url: str) -> dict[str, o
         "conflict",
     ), head
     assert await _activation_state(db_url, activation_id) == "recovery_conflict"
+    # The frame removes the fixture domain before it tears the System down, and a teardown from
+    # ``recovery_conflict`` needs the domain; tear down here, where the domain still exists.
+    ok(await scalar(op, "systems.teardown", system_id=system_id), "teardown")
+    await await_system_state(op, "teardown", system_id, "torn_down")
     return {
         "recorded": "recovery_conflict",
         "release": "failed: conflict",
         "resolution_admitted": resolution.object_id,
         "resolution": "failed: conflict",
+        "torn_down": "from recovery_conflict",
         "restore_from_third_identity": CONFLICT_RESTORE_BLOCKED,
     }
 
