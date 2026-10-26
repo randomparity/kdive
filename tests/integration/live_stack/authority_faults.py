@@ -668,6 +668,14 @@ async def recorded_conflict(system: AuthoritySystem, db_url: str) -> dict[str, o
     }
 
 
+def blocked_primary(failure: BaseExceptionGroup[BaseException]) -> ScenarioStop | None:
+    """The blocked stop a frame cleanup failure joined, which the frame lists first."""
+    primary = failure.exceptions[0]
+    if isinstance(primary, ScenarioStop) and primary.outcome is Outcome.BLOCKED:
+        return primary
+    return None
+
+
 def blocked_after_gates(run: CellRun, base_url: str, reason: str) -> NoReturn:
     """Pass the lane's revision gates, then stop ``blocked`` before any mutation."""
     if run.cell.provider == "remote-libvirt":
