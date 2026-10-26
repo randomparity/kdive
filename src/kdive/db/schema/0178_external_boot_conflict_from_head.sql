@@ -69,7 +69,6 @@ BEGIN
         AND v_authority.job_id = p_job_id AND v_authority.job_attempt = p_attempt
         AND v_job.state = 'running' AND v_job.worker_id = v_incarnation
         AND v_job.attempt = p_attempt AND v_job.lease_expires_at > clock_timestamp()
-        AND NOT v_activation.cleanup_complete
         AND (
             v_activation.state = 'activating'
             OR (v_activation.state = 'recovering' AND v_attempt.state = 'recovering'

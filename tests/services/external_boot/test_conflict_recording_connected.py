@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 import psycopg
@@ -65,13 +65,22 @@ def _ctx() -> RequestContext:
 class _ThirdIdentityAdapter:
     """A provider an out-of-band host change moved to a third identity (ADR-0584)."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        category: Literal["conflict", "mixed"] = "conflict",
+        refuses: bool = True,
+        restores: bool = True,
+    ) -> None:
+        self.category = category
+        self.refuses = refuses
+        self.restores = restores
         self.restored = False
         self.commits: list[str] = []
 
     async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         del request
-        category, digest = ("source", _SOURCE) if self.restored else ("conflict", _THIRD)
+        category, digest = ("source", _SOURCE) if self.restored else (self.category, _THIRD)
         return AuthorityObservationV1(
             observation_id=uuid5(NAMESPACE_URL, digest), category=category, composite_state=digest
         )
@@ -81,11 +90,12 @@ class _ThirdIdentityAdapter:
     ) -> AuthorityObservationV1:
         del context
         self.commits.append(request.operation.value)
-        if request.operation.value != "resolve-conflict":
+        if request.operation.value == "resolve-conflict":
+            self.restored = self.restores
+        elif self.refuses:
             raise ValueError(
                 "external-boot source XML/power state conflicts with recovery metadata"
             )
-        self.restored = True
         return await self.observe(request)
 
 
@@ -206,8 +216,14 @@ async def _resolve(
     worker: AsyncConnection,
     case: SeededCase,
     ports: ExternalBootHandlerPorts,
-) -> None:
-    """Admit and run ``systems.resolve_external_boot_conflict`` on the recorded composite."""
+    *,
+    restores: bool = True,
+) -> object:
+    """Admit and run ``systems.resolve_external_boot_conflict`` on the recorded composite.
+
+    With ``restores`` false the provider stays on the third identity, so the resolution re-records
+    the conflict through the head-fenced function from its ``recovering`` attempt.
+    """
     vehicle = case.vehicle
     admitted = await resolve_conflict(
         pool,
@@ -234,19 +250,28 @@ async def _resolve(
         worker, claimed, result, incarnation_credential=SecretStr(case.credential)
     )
     result = await handler(worker, claimed, marker)
+    if not restores:
+        assert isinstance(result, ExternalBootAuthorityConflictV1)
+        recorded = await queue.record_external_boot_conflict(
+            worker, claimed, result, incarnation_credential=SecretStr(case.credential)
+        )
+        assert isinstance(recorded, Job) and recorded.state.value == "failed"
+        return claimed.id
     assert isinstance(result, ExternalBootAuthoritySuccessV1)
     completed = await queue.complete_external_boot(
         worker, claimed, result, incarnation_credential=SecretStr(case.credential)
     )
     assert isinstance(completed, Job) and completed.state.value == "succeeded"
+    return claimed.id
 
 
+@pytest.mark.parametrize("restores", [True, False])
 def test_release_conflict_is_recorded_through_the_worker_and_resolved(
-    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path, restores: bool
 ) -> None:
     async def run() -> None:
         vehicle = build_vehicle()
-        adapter = _ThirdIdentityAdapter()
+        adapter = _ThirdIdentityAdapter(restores=restores)
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
             case = await seed_case(
                 seed,
@@ -290,7 +315,10 @@ def test_release_conflict_is_recorded_through_the_worker_and_resolved(
                 assert reservation == {"n": 1}
 
                 async with await role_connection(authority_role_dsns("kdive_worker")) as conn:
-                    await _resolve(pool, conn, case, ports)
+                    resolve_job = await _resolve(pool, conn, case, ports, restores=restores)
+            if not restores:
+                await _assert_conflict_recorded(seed, case, resolve_job, "resolve-conflict")
+                return
             state = await _row(
                 seed,
                 "SELECT state FROM external_boot_activations WHERE id = %s",
@@ -321,19 +349,23 @@ async def _run_marked(
     return result
 
 
-@pytest.mark.parametrize(
-    ("purpose", "activation_state"), [("activate", "activating"), ("recover", "active")]
-)
+_PURPOSES = [("activate", "activating"), ("recover", "active")]
+
+
+@pytest.mark.parametrize(("category", "refuses"), [("conflict", True), ("mixed", False)])
+@pytest.mark.parametrize(("purpose", "activation_state"), _PURPOSES)
 def test_conflict_is_recorded_only_from_the_authority_head(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     tmp_path: Path,
     purpose: str,
     activation_state: str,
+    category: Literal["conflict", "mixed"],
+    refuses: bool,
 ) -> None:
     async def run() -> None:
         vehicle = build_vehicle()
-        adapter = _ThirdIdentityAdapter()
+        adapter = _ThirdIdentityAdapter(category=category, refuses=refuses)
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
             case = await seed_case(
                 seed, vehicle, purpose=purpose, activation_state=activation_state
@@ -411,5 +443,108 @@ def test_conflict_is_recorded_only_from_the_authority_head(
                 )
             await _assert_conflict_recorded(seed, case, case.job_id, purpose)
         assert adapter.commits == [purpose]
+
+    asyncio.run(run())
+
+
+def _head_field(path: str, value: str) -> str:
+    return f"head_record = jsonb_set(head_record, '{{{path}}}', '\"{value}\"')"
+
+
+_HEAD = "UPDATE external_boot_authority_journal_heads SET {} WHERE system_id = %s"
+_AUTHORITY = "UPDATE external_boot_authorities SET {} WHERE job_id = %s AND state = 'current'"
+_ATTEMPT = "UPDATE external_boot_recovery_attempts SET {} WHERE activation_id = %s"
+_JOB = "UPDATE jobs SET {} WHERE id = %s"
+
+# Each arm breaks exactly one binding record_external_boot_conflict_from_head checks (ADR-0805).
+_BROKEN_BINDINGS = {
+    "head not terminal": (_HEAD, "phase = 'observed'"),
+    "head of another operation": (_HEAD, _head_field("operation", "activate-other")),
+    "head of another identity": (_HEAD, _head_field("operation_identity", "other-identity")),
+    "head of another digest": (_HEAD, _head_field("operation_digest", "sha256:" + "9" * 64)),
+    "head of another activation": (
+        _HEAD,
+        _head_field("activation_id", "00000000-0000-0000-0000-0000000000a1"),
+    ),
+    "head outcome not conflict": (_HEAD, _head_field("outcome", "target")),
+    "head observation source": (_HEAD, _head_field("observation,category", "source")),
+    "head observation unreadable": (_HEAD, _head_field("observation,category", "unreadable")),
+    "head of another authority": (_HEAD, "authority_id = gen_random_uuid()"),
+    "head of another generation": (_HEAD, "generation = generation + 1"),
+    "authority retired": (_AUTHORITY, "state = 'retired', retired_at = now()"),
+    "attempt of a newer generation": (_ATTEMPT, "authority_generation = authority_generation + 5"),
+    "job of another incarnation": (_JOB, "worker_id = 'docker:other'"),
+    "authority of another incarnation": (_JOB, "state = state"),
+    "authority of another job": (_JOB, "state = state"),
+}
+
+
+@pytest.mark.parametrize("broken", list(_BROKEN_BINDINGS))
+def test_conflict_is_refused_when_any_binding_is_broken(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    broken: str,
+) -> None:
+    async def run() -> None:
+        vehicle = build_vehicle()
+        adapter = _ThirdIdentityAdapter()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            recovering = broken == "attempt of a newer generation"
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose="recover" if recovering else "activate",
+                activation_state="active" if recovering else "activating",
+            )
+            ports = _ports(_service(authority_role_dsns, tmp_path, adapter), case)
+            async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+                job = Job.model_validate(
+                    await _row(worker, "SELECT * FROM jobs WHERE id = %s", (case.job_id,))
+                )
+                result = await _run_marked(worker, case, ports)
+                if broken == "authority of another job":
+                    # A second running job of the same incarnation and attempt.
+                    other = await _row(
+                        seed,
+                        "INSERT INTO jobs (id, kind, payload, state, attempt, max_attempts, "
+                        "worker_id, lease_expires_at, heartbeat_at, authorizing, dedup_key) "
+                        "SELECT gen_random_uuid(), kind, payload, state, attempt, max_attempts, "
+                        "worker_id, lease_expires_at, heartbeat_at, authorizing, 'other-job' "
+                        "FROM jobs WHERE id = %s RETURNING id",
+                        (case.job_id,),
+                    )
+                    job = job.model_copy(update={"id": other["id"]})
+                template, clause = _BROKEN_BINDINGS[broken]
+                credential = case.credential
+                await seed.execute(
+                    "INSERT INTO worker_incarnations (incarnation, authority_kind, "
+                    "authority_binding, credential_hash, fence_protocol) VALUES "
+                    "('docker:other', 'docker', '{}'::jsonb, "
+                    "sha256(convert_to('another-incarnation-credential', 'UTF8')), 4)"
+                )
+                if broken == "authority of another incarnation":
+                    # The job follows the caller, so only the authority's own binding refuses.
+                    credential = "another-incarnation-credential"
+                    template, clause = _JOB, "worker_id = 'docker:other'"
+                key = {
+                    _HEAD: vehicle.system_id,
+                    _AUTHORITY: case.job_id,
+                    _ATTEMPT: vehicle.activation_id,
+                    _JOB: case.job_id,
+                }[template]
+                await seed.execute(template.format(clause), (key,))  # ty: ignore[invalid-argument-type]
+                assert (
+                    await queue.record_external_boot_conflict(
+                        worker, job, result, incarnation_credential=SecretStr(credential)
+                    )
+                    is queue.ExternalBootCommitStatus.SUPERSEDED
+                )
+            untouched = await _row(
+                seed,
+                "SELECT state FROM external_boot_activations WHERE id = %s",
+                (vehicle.activation_id,),
+            )
+            assert untouched == {"state": "recovering" if recovering else "activating"}
 
     asyncio.run(run())
