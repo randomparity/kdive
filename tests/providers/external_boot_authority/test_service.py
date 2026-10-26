@@ -1632,6 +1632,54 @@ async def test_takeover_waits_for_started_operation_positive_observation(tmp_pat
 
 
 @pytest.mark.anyio
+async def test_finalize_failure_after_a_refusal_conflict_publishes_the_quarantine(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = await _finalize_fault_service(
+        tmp_path, ProofBarrierAbort("aborted")
+    )
+    adapter.fail_commit = True
+    adapter.observe_category = "conflict"
+
+    with pytest.raises(AuthorityServiceError) as raised:
+        await service.execute_mutation(peer, request)
+
+    assert raised.value.category == "provider_conflict"
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert [args[-1] for args in repository.published_cleanup_quarantines] == [(adapter.receipt,)]
+
+
+@pytest.mark.anyio
+async def test_takeover_during_a_refusal_observation_completes_under_its_binding(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.fail_commit = True
+    adapter.observe_category = "conflict"
+    adapter.observe_release.clear()
+    mutation_task = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+    await adapter.observe_entered.wait()
+    successor = request.model_copy(
+        update={"authority_id": uuid4(), "generation": 2, "operation_identity": "takeover-b"}
+    )
+    repository.allocating_request = successor
+    takeover_task = asyncio.create_task(service.acknowledge_takeover(peer, successor))
+    await asyncio.sleep(0)
+    assert not takeover_task.done()
+    adapter.observe_release.set()
+    assert (await mutation_task).category == "conflict"
+    assert (await takeover_task).generation == 2
+    assert [record.phase for record in repository.records[-4:]] == [
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+    ]
+
+
+@pytest.mark.anyio
 async def test_newer_takeover_supersedes_unacknowledged_watermark(tmp_path: Path) -> None:
     service, repository, adapter, peer, first = _service(tmp_path)
     repository.pause_phase = JournalPhase.WATERMARK_INSTALLED

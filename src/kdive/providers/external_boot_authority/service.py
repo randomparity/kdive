@@ -1044,6 +1044,7 @@ class ExternalBootAuthorityService:
         self,
         authenticated: AuthenticatedPeer,
         lane: _Lane,
+        active: _ActiveOperation,
         binding: AuthorityBinding,
         journal: FileAuthorityJournal,
         records: list[JournalRecordV1],
@@ -1066,6 +1067,8 @@ class ExternalBootAuthorityService:
         if observation.category != "conflict":
             raise refusal
         async with lane.lock:
+            # A takeover during the unlocked observe moves the completion binding (ADR-0584).
+            binding = active.completion_binding or binding
             for phase, changes in (
                 (JournalPhase.PROVIDER_RETURNED, {}),
                 (JournalPhase.OBSERVED, {"observation": observation}),
@@ -1983,7 +1986,8 @@ class ExternalBootAuthorityService:
                     return await self._answer_refusal(
                         authenticated,
                         lane,
-                        active.completion_binding or binding,
+                        active,
+                        binding,
                         journal,
                         records,
                         request,
