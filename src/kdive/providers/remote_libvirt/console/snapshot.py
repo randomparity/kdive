@@ -21,6 +21,8 @@ from kdive.artifacts.storage import StoredArtifact
 from kdive.db.repositories import ARTIFACTS
 from kdive.providers.ports.console import ConsoleSnapshot
 from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
+from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
 from kdive.store.objectstore import ObjectStore
 
@@ -40,8 +42,14 @@ _REFRESH_ETAG_SQL = "UPDATE artifacts SET etag = %s WHERE id = %s"
 class RemoteLibvirtConsoleSnapshotter:
     """Assemble the System's S3 console parts into an immutable per-Run console artifact."""
 
-    def __init__(self, store: ObjectStore = UNCONFIGURED_OBJECT_STORE) -> None:
+    def __init__(
+        self,
+        store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
+        *,
+        secret_registry: SecretRegistry | None = None,
+    ) -> None:
         self._store = store
+        self._secret_registry = secret_registry or SecretRegistry()
 
     async def mark_boot_window(self, system_id: UUID) -> int:
         """Return the next part index for ``system_id`` — this boot's window starts here.
@@ -72,6 +80,10 @@ class RemoteLibvirtConsoleSnapshotter:
         data = await asyncio.to_thread(parts.assemble, system_id, start_index)
         if not data:
             return None
+        # An idle seal holds no overlap back (ADR-0806), so a secret split across two parts is
+        # whole only here, in the joined bytes.
+        redactor = Redactor(registry=self._secret_registry)
+        data = redactor.redact_text(data.decode("utf-8", "replace")).encode("utf-8")
         stored = await asyncio.to_thread(parts.put_run_console, system_id, run_id, data)
         artifact_id = await _upsert_run_console_row(conn, system_id, stored)
         return ConsoleSnapshot(artifact_id, stored.key, data)
