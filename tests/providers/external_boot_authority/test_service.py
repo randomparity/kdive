@@ -356,8 +356,11 @@ async def test_authenticated_cleanup_resolves_subject_evidence_before_commit(
     assert adapter.calls == (
         ["cleanup-subject", "commit-cleanup", "observe"]
         if evidence_present
-        # ADR-0805: the refusal is re-observed; a non-conflict state keeps the refusal.
+        # ADR-0805: a recover refusal is re-observed, and a non-conflict state keeps the refusal.
+        # A cleanup refusal is not re-observed.
         else ["cleanup-subject", "observe"]
+        if operation is AuthorityOperation.RECOVER
+        else ["cleanup-subject"]
     )
 
 
