@@ -85,6 +85,14 @@ def _lane(config_env: str) -> tuple[str, str, OidcIssuer]:
     return db_url, require_stack(), require_issuer()
 
 
+def blocked_primary(failure: BaseExceptionGroup[BaseException]) -> ScenarioStop | None:
+    """The blocked stop a frame cleanup failure joined, which the frame lists first."""
+    primary = failure.exceptions[0]
+    if isinstance(primary, ScenarioStop) and primary.outcome is Outcome.BLOCKED:
+        return primary
+    return None
+
+
 def _prove(run: CellRun, config_env: str, arm: Callable[[str, ToolCall], AuthorityBody]) -> None:
     db_url, base_url, issuer = _lane(config_env)
     body = arm(db_url, _platform_admin(base_url, issuer))
@@ -95,11 +103,10 @@ def _prove(run: CellRun, config_env: str, arm: Callable[[str, ToolCall], Authori
         assert stop.outcome is Outcome.BLOCKED, str(stop)
         pytest.skip(f"blocked: {stop}")
     except BaseExceptionGroup as failure:
-        # A blocked body whose frame cleanup then fails leaves residue: the killed-run cleanup.
-        blocked = [e for e in failure.exceptions if isinstance(e, ScenarioStop)]
-        if not blocked or blocked[0].outcome is not Outcome.BLOCKED:
+        stop = blocked_primary(failure)
+        if stop is None:
             raise
-        pytest.skip(f"blocked: {blocked[0]}; the frame cleanup failed, see the runbook")
+        pytest.skip(f"blocked: {stop}; the frame cleanup failed, see the runbook")
     assert set(run.assertions) == {"effect", "cleanup"}
 
 

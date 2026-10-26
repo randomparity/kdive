@@ -18,6 +18,7 @@ from tests.integration.live_stack.authority_lane import AuthoritySystem
 from tests.integration.live_stack.evidence import EvidenceWriter
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
 from tests.integration.live_stack.spine import SpinePhaseError
+from tests.integration.test_authority_faults_live import blocked_primary
 from tests.live_vm.installed_local_authority_support import (
     ActivationJob,
     NativeAuthorityConfig,
@@ -514,3 +515,19 @@ def test_conflict_arm_requires_the_authority_conflict_head(
     )
     with pytest.raises(AssertionError, match="source"):
         asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+@pytest.mark.parametrize(
+    ("primary", "skips"),
+    [
+        (ScenarioStop(Outcome.BLOCKED, "teardown"), True),
+        (ScenarioStop(Outcome.FAILURE, "other"), False),
+        (AssertionError("a real failure"), False),
+        (KeyboardInterrupt(), False),
+    ],
+)
+def test_a_failed_cleanup_after_a_blocked_body_is_still_blocked(
+    primary: BaseException, skips: bool
+) -> None:
+    group = BaseExceptionGroup("frame and cleanup failures", [primary, RuntimeError("cleanup")])
+    assert (blocked_primary(group) is not None) is skips
