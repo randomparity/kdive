@@ -42,7 +42,7 @@ _PCAP_VOLUME_SUFFIX = ".pcap"
 
 
 def pcap_volume_name(system_id: UUID, job_id: UUID) -> str:
-    """The deterministic per-job remote pcap volume filename inside the storage pool.
+    """The deterministic per-job remote pcap volume filename inside the pcap pool.
 
     Defined here, beside :func:`capture_qom_id`, for the same reason: the capture that creates
     the destination and the ADR-0556 reaper that reclaims it must spell it identically, and the
@@ -114,6 +114,8 @@ class RemoteCaptureConfiguration(BaseModel):
     ca_cert_ref: Annotated[str, Field(min_length=1, max_length=1024)]
     secrets_root: Annotated[str, Field(min_length=1, max_length=1024)]
     storage_pool: Annotated[str, Field(min_length=1, max_length=255)]
+    # Defaulted so configuration staged before the pcap pool existed still parses (#3316).
+    pcap_pool: Annotated[str, Field(min_length=1, max_length=255)] = "kdive-pcap"
 
     def to_canonical_json(self) -> bytes:
         """Serialize references and topology without resolving credential bytes."""

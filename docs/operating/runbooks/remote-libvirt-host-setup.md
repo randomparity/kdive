@@ -18,6 +18,11 @@ The resulting host needs:
   or modular `virtproxyd` according to the host distribution.
 - A **directory (`dir`) storage pool** and guest network. The remote module-restoration volume
   naming contract assumes a dir pool ([ADR-0588](../../adr/0588-remote-module-volume-ownership-lives-in-the-volume-name.md)).
+- A `kdive-pcap` dir pool at `/var/lib/libvirt/kdive-pcap` for traffic captures: `root:root 0711`,
+  labelled `svirt_image_t` on an SELinux-enforcing host, and allowed by a write-only
+  `libvirt-qemu.d` drop-in on an AppArmor host. The provider pre-creates each capture file for the
+  domain's QEMU user
+  ([ADR-0432](../../adr/0432-remote-libvirt-traffic-capturer.md) amendment).
 - Firewall rules admitting the worker to TLS and the gdbstub range. The gdbstub uses raw TCP;
   the libvirt TLS connection does not protect it. Verify both an allowed worker connection and
   refusal from outside the configured worker network.
@@ -100,9 +105,9 @@ Adjust the namespace and Secret name to your deployment. If the emitted refs use
 `remote-clientcert.pem`, use those names on the left side of `--from-file` too. Mount the client
 bundle and CA certificate; keep the CA signing key on the PKI controller.
 
-The storage pool, network, and machine settings remain runtime configuration
+The storage pool, network, machine, and pcap pool settings remain runtime configuration
 (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `KDIVE_REMOTE_LIBVIRT_NETWORK`,
-`KDIVE_REMOTE_LIBVIRT_MACHINE`); see the [configuration reference](../../guide/reference/config.md).
+`KDIVE_REMOTE_LIBVIRT_MACHINE`, `KDIVE_REMOTE_LIBVIRT_PCAP_POOL`); see the [configuration reference](../../guide/reference/config.md).
 Onboard the tenant's budget and quota using [project onboarding](../project-onboarding.md).
 
 ### Object-store reachability

@@ -1,4 +1,4 @@
-"""Local crash capture and introspection tool cells over HTTP (#2814, ADR-0722).
+"""Crash capture and introspection tool cells over HTTP on both providers (#2814, #3114).
 
 A functional cell provisions the lane image with its tool's crash options through
 :func:`~tests.integration.live_stack.tool_cells.on_lane_system`, boots the verified ``longterm``
@@ -13,6 +13,12 @@ A rejection cell aims at the stack's :func:`capture_target`: a torn-down fixture
 and an ended drgn-live session. A ``capability`` cell (the x86_64 ``fadump`` refusal, ADR-0722
 2026-10-13) crashes its own Run-bound System. Neither records a kernel field, since neither
 declares kernel inputs.
+
+A remote cell runs the same bodies on the remote lane (ADR-0722): its profile edits the
+``remote-libvirt`` section, its rejection target is the remote one of the stack and keeps the
+provider host's identity, and a ``host_dump`` capture owns its pool dump volume. Its
+``console``/``gdbstub`` ``vmcore.fetch`` cells prove the handler's refusal (2026-10-20
+amendment). Its live drgn cells stay blocked on #3124 (:data:`REMOTE_DEBUGINFO_BLOCKED`).
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, BinaryIO, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import psycopg
@@ -40,6 +46,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.platform.arch_traits import arch_traits
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
+from kdive.providers.remote_libvirt.retrieve.host_dump_capture import host_dump_volume_name
 from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.deep_lifecycle import deep_body
@@ -68,6 +75,7 @@ from tests.integration.live_stack.spine import (
 )
 from tests.integration.live_stack.tool_cells import (
     Boundary,
+    Connect,
     Grants,
     Guest,
     HttpCaller,
@@ -80,6 +88,7 @@ from tests.integration.live_stack.tool_cells import (
     project_state,
     prove_rejection,
     settled,
+    worker_connect,
 )
 
 TOOLS = (
@@ -118,6 +127,16 @@ _EXTRA: dict[str, dict[str, object]] = {
 # the admin role deny force_crash on the rejection target; live adds nothing.
 _CRASH_OPTIONS = frozenset({"kdump", "host_dump", "target", "live"})
 _LANE_KEYS = ("guest_os", "guest_arch", "accelerator", "image_sha256")
+_HOST_KEYS = ("host_os", "host_arch")
+# vmcore.fetch's refusal of a method outside its core-producing set (handlers.py).
+REFUSED_REASON = "method does not produce a vmcore"
+# Remote drgn-live runs in the guest, which never receives the Run's vmlinux: these cells stay
+# blocked on the open defect, not failed (#3124, blocked by #3121). Drop an entry when its issue
+# closes.
+REMOTE_DEBUGINFO_BLOCKED = {
+    tool: "remote guests do not receive the uploaded vmlinux (#3124)"
+    for tool in ("introspect.run", "introspect.script")
+}
 PANIC = "Kernel panic - not syncing"
 # The panic's dump_stack ``CPU:`` record follows it within a few lines.
 _PANIC_LINES = 8
@@ -143,29 +162,42 @@ for task in for_each_task(prog):
 """
 
 
+def variant_of(cell: Cell) -> str:
+    """The tool variant of ``cell``, read from a local or a provider-qualified scenario id."""
+    return cell.scenario_id.split("/")[-2]
+
+
 def options(cell: Cell) -> str:
     """The crash options a functional or unsupported cell provisions with."""
     if cell.guest_arch != "x86_64":
         raise ScenarioStop(Outcome.BLOCKED, f"{cell.id} is the POWER lane's (#2818)")
-    variant = cell.scenario_id.split("/")[2]
+    if cell.provider == "remote-libvirt" and cell.operation in REMOTE_DEBUGINFO_BLOCKED:
+        raise ScenarioStop(Outcome.BLOCKED, REMOTE_DEBUGINFO_BLOCKED[cell.operation])
+    variant = variant_of(cell)
     if cell.operation == "vmcore.fetch" and variant in ("kdump", "host_dump"):
         return variant
+    if cell.operation == "vmcore.fetch" and variant in ("console", "gdbstub"):
+        return "host_dump"  # a crashed System the handler refuses to fetch from
     if cell.operation in ("introspect.run", "introspect.script") or variant == "fadump":
         return "live"
     return "kdump"
 
 
 def crash_profile(profile: Mapping[str, object], crash: str) -> dict[str, object]:
-    """``profile`` with the local-libvirt crash options ``crash`` names; the input is unchanged."""
+    """``profile`` with ``crash`` options in its provider section; the input is unchanged."""
     assert crash in _CRASH_OPTIONS, f"unknown crash options {crash!r}"
     edited = copy.deepcopy(dict(profile))
-    local = cast(dict[str, Any], edited["provider"])["local-libvirt"]
+    sections = cast(dict[str, Any], edited["provider"])
+    assert len(sections) == 1, f"the profile names {len(sections)} provider sections"
+    ((provider, section),) = sections.items()
     if crash != "live":
-        local["destructive_ops"] = ["force_crash"]
+        section["destructive_ops"] = ["force_crash"]
     if crash == "kdump":
-        local["crashkernel"] = arch_traits(str(edited["arch"])).default_crashkernel
-    if crash == "host_dump":
-        local["debug"] = {"preserve_on_crash": True}
+        section["crashkernel"] = arch_traits(str(edited["arch"])).default_crashkernel
+    if crash == "host_dump" and provider == "remote-libvirt":
+        section["host_dump"] = True
+    elif crash == "host_dump":
+        section["debug"] = {"preserve_on_crash": True}
     return edited
 
 
@@ -178,9 +210,13 @@ def provision_with(crash: str) -> Provision:
     return provision
 
 
-def lane_keys(observed: Mapping[str, object]) -> dict[str, object]:
-    """The lane context of ``observed``: no kernel field, which no rejection cell declares."""
-    return {key: observed[key] for key in _LANE_KEYS if key in observed}
+def lane_keys(observed: Mapping[str, object], *, remote: bool = False) -> dict[str, object]:
+    """The lane context of ``observed``: no kernel field, which no rejection cell declares.
+
+    On the remote lane it keeps the provider host's keys, which the frame observed there.
+    """
+    keys = (*_LANE_KEYS, *_HOST_KEYS) if remote else _LANE_KEYS
+    return {key: observed[key] for key in keys if key in observed}
 
 
 def require_tool(env: ToolResponse, phase: str) -> ToolResponse:
@@ -453,14 +489,16 @@ class Session:
         assert not raw_vmcore_refs(refs), "a capture ref exposes the raw core"
         return refs
 
-    async def drgn_session(self) -> str:
+    async def drgn_session(self, *, require_debuginfo: bool = True) -> str:
+        """Open a drgn-live session; ``require_debuginfo`` refuses one attached without it."""
         env = require_tool(
             await scalar(
                 self.guest.op, "debug.start_session", run_id=self.run_id, transport="drgn-live"
             ),
             "attach",
         )
-        assert "missing_debuginfo" not in env.data, "drgn-live attached without debuginfo"
+        if require_debuginfo:
+            assert "missing_debuginfo" not in env.data, "drgn-live attached without debuginfo"
         return env.object_id
 
     async def end(self, session_id: str) -> None:
@@ -521,14 +559,27 @@ async def force_crash_body(s: Session) -> dict[str, object]:
 
 async def vmcore_body(s: Session) -> dict[str, object]:
     """Crash, capture through the exposure, then read the stored core back twice."""
-    method = s.run.cell.scenario_id.split("/")[2]
+    method = variant_of(s.run.cell)
     if method == "kdump":
         await s.armed()
     await s.crash()
+    path = None
+    if method == "host_dump" and s.guest.lane.pool_volume is not None:
+        # Owned before the capture: a failed capture can leave the deterministic volume.
+        path = s.guest.lane.pool_volume(host_dump_volume_name(UUID(s.guest.system_id)))
+        s.guest.owned.append(path)
     refs = await s.capture(method, exposed=True)
+    dump: dict[str, object] = {}
+    if path is not None:
+        # The remote capture reclaims its per-System dump volume in its own finally.
+        assert await asyncio.to_thread(s.guest.lane.absent, path), (
+            "the host_dump volume outlived its capture"
+        )
+        dump = {"dump_volume": "absent"}
     sha, info = await raw_core(s.guest.op, s.run_id)
     require_core(info, s.manifest)
     return {
+        **dump,
         "method": method,
         "job": "succeeded",
         "refs_agree": True,
@@ -620,6 +671,23 @@ BODIES: dict[str, Callable[[Session], Awaitable[dict[str, object]]]] = {
 }
 
 
+def refusal_of(env: ToolResponse, method: str) -> dict[str, object]:
+    """``vmcore.fetch``'s refusal of a non-core ``method``, with no job (ADR-0722)."""
+    refused = {
+        "error_category": env.error_category,
+        "reason": env.data.get("reason"),
+        "method": env.data.get("method"),
+    }
+    expected = {
+        "error_category": ErrorCategory.CONFIGURATION_ERROR.value,
+        "reason": REFUSED_REASON,
+        "method": method,
+    }
+    assert refused == expected, f"vmcore.fetch({method}) was not refused: {refused}"
+    assert not env.refs, f"the refused vmcore.fetch({method}) returned refs"
+    return refused
+
+
 async def boot(
     run: CellRun, guest: Guest, tree: Path, manifest: Mapping[str, Any]
 ) -> tuple[str, Endpoint]:
@@ -677,12 +745,46 @@ async def unsupported(
     return {"tool": run.cell.operation, "advertised": sorted(map(str, methods))}
 
 
+async def refused_method(
+    run: CellRun,
+    caller: HttpCaller,
+    tree: Path,
+    manifest: Mapping[str, Any],
+    db_url: str,
+    guest: Guest,
+) -> dict[str, object]:
+    """A crashed fixture System's Run refuses a non-core capture method, writing no job.
+
+    The handler checks the Run, role, binding and CRASHED state before the method, so the
+    System is booted and crashed first (ADR-0722, 2026-10-20). The fetch goes through the
+    cell's exposure as a contributor.
+    """
+    method = variant_of(run.cell)
+    run_id, endpoint = await boot(run, guest, tree, manifest)
+    role = grants(guest.project, GATES["vmcore.fetch"])
+    await Session(run, guest, caller, role, manifest, run_id, endpoint).crash()
+    jobs = partial(named_jobs, db_url, guest.system_id, run_id)
+    before = await jobs()
+    args = {"run_id": run_id, "method": method}
+    answer = await caller.call("vmcore.fetch", args, caller.token(role), discover=True)
+    assert isinstance(answer, ToolResponse), (
+        f"vmcore.fetch({method}) answered {len(answer)} envelopes"
+    )
+    refused = refusal_of(answer, method)
+    assert await jobs() == before, "the refused fetch changed the jobs of its System or Run"
+    await await_system_state(guest.op, "refused", guest.system_id, "crashed")
+    return {"tool": run.cell.operation, **refused, "jobs_unchanged": True, "system": "crashed"}
+
+
 # --- rejection cells ------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class CaptureTarget:
-    """A torn-down fixture System, its Run and an ended drgn-live session."""
+    """A torn-down fixture System, its Run and an ended drgn-live session.
+
+    ``connect`` opens the provider libvirt its domain is read through.
+    """
 
     project: str
     system_id: str
@@ -690,6 +792,7 @@ class CaptureTarget:
     session_id: str
     observed: dict[str, object]
     artifacts: tuple[str, ...]
+    connect: Connect = worker_connect
 
     def id_for(self, tool: str) -> str:
         key = _ID[tool]
@@ -700,9 +803,10 @@ class CaptureTarget:
 class _Failed:
     error: Exception
     artifacts: tuple[str, ...]
+    observed: dict[str, object]
 
 
-_TARGETS: dict[str, CaptureTarget | _Failed] = {}
+_TARGETS: dict[tuple[str, str], CaptureTarget | _Failed] = {}
 
 
 async def _prepare_target(
@@ -716,14 +820,17 @@ async def _prepare_target(
     tree, manifest = fixture()
     project = f"cov-{secrets.token_hex(4)}"
     ids: dict[str, str] = {}
+    connects: list[Connect] = []
 
     async def body(guest: Guest) -> dict[str, object]:
         run_id, endpoint = await boot(scratch, guest, tree, manifest)
         caller = HttpCaller("direct", base_url, issuer)
         s = Session(scratch, guest, caller, grants(project, "viewer"), manifest, run_id, endpoint)
-        session = await s.drgn_session()
+        # The target needs only the session id; a remote guest never receives the vmlinux (#3124).
+        session = await s.drgn_session(require_debuginfo=False)
         await s.end(session)
         ids.update(system=guest.system_id, run=run_id, session=session)
+        connects.append(guest.lane.connect)
         return {"capture_target": "prepared"}
 
     await on_lane_system(
@@ -747,8 +854,9 @@ async def _prepare_target(
         ids["system"],
         ids["run"],
         ids["session"],
-        lane_keys(scratch.observed),
+        lane_keys(scratch.observed, remote=run.cell.provider == "remote-libvirt"),
         (*scratch.artifacts, *scratch.assertions.values(), summary),
+        connects[0],
     )
 
 
@@ -761,17 +869,26 @@ async def capture_target(
 ) -> CaptureTarget:
     """The stack's rejection target, prepared on first use; a failure is replayed, not retried.
 
-    The fixture boot runs on a scratch record, so the cached context keeps only the lane keys.
+    The fixture boot runs on a scratch record, so the cached context keeps only the lane keys,
+    with the provider host's on the remote lane, also for a failed preparation that reached it.
+    Each provider of a stack has its own target.
     """
-    cached = _TARGETS.get(base_url)
+    key = (base_url, run.cell.provider)
+    cached = _TARGETS.get(key)
     if cached is None:
         scratch = CellRun(run.cell, run.writer)
         try:
             cached = await _prepare_target(run, base_url, issuer, db_url, fixture, scratch)
         except Exception as exc:  # noqa: BLE001 - remembered and replayed for every cell
-            cached = _Failed(exc, (*scratch.artifacts, *scratch.assertions.values()))
-        _TARGETS[base_url] = cached
+            remote = run.cell.provider == "remote-libvirt"
+            cached = _Failed(
+                exc,
+                (*scratch.artifacts, *scratch.assertions.values()),
+                lane_keys(scratch.observed, remote=remote),
+            )
+        _TARGETS[key] = cached
     if isinstance(cached, _Failed):
+        run.observed |= cached.observed
         run.artifacts.extend(cached.artifacts)
         if isinstance(cached.error, ScenarioStop):
             raise ScenarioStop(cached.error.outcome, str(cached.error))
@@ -825,18 +942,28 @@ async def named_jobs(db_url: str, *object_ids: str) -> list[object]:
 
 
 async def protected_state(
-    db_url: str, project: str, system_id: str, run_id: str
+    db_url: str, project: str, system_id: str, run_id: str, *, connect: Connect = worker_connect
 ) -> dict[str, object]:
-    """The project's rows, the jobs naming the System or Run, and whether its domain exists."""
+    """The project's rows, the jobs naming the System or Run, and whether its domain exists.
+
+    ``connect`` opens the provider libvirt that defines the domain: the worker's by default.
+    """
     return {
         "project": await project_state(db_url, project),
         "jobs": await named_jobs(db_url, system_id, run_id),
-        "domain_defined": await asyncio.to_thread(domain_defined, system_id),
+        "domain_defined": await asyncio.to_thread(domain_defined, system_id, connect),
     }
 
 
 def snapshot_of(db_url: str, target: CaptureTarget) -> Snapshot:
-    return partial(protected_state, db_url, target.project, target.system_id, target.run_id)
+    return partial(
+        protected_state,
+        db_url,
+        target.project,
+        target.system_id,
+        target.run_id,
+        connect=target.connect,
+    )
 
 
 async def capability(

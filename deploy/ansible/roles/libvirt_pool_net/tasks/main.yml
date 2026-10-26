@@ -67,6 +67,9 @@
       {{ libvirt_pool_net_boot_artifact_pool_owner }}:
       {{ libvirt_pool_net_boot_artifact_pool_stat.stat | default({}) }}
 
+- name: Provision the traffic-capture pcap pool
+  ansible.builtin.import_tasks: pcap_pool.yml
+
 - name: Ensure the default network is active
   community.libvirt.virt_net:
     name: "{{ libvirt_network }}"

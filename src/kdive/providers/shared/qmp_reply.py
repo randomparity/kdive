@@ -17,6 +17,8 @@ from dataclasses import dataclass
 _ERROR_CLASS = re.compile(r"[A-Za-z]{1,64}")
 _PCAP_OPEN_REFUSAL = "net dump: can't open "
 _EACCES_SUFFIX = ": Permission denied"
+# net/filter.c netfilter_complete(): every netfilter is refused on a vhost-backed netdev.
+_VHOST_REFUSAL = "Vhost is not supported"
 
 
 class MalformedQmpReplyError(ValueError):
@@ -47,6 +49,11 @@ class QmpReply:
             and self.description.startswith(_PCAP_OPEN_REFUSAL)
             and self.description.endswith(_EACCES_SUFFIX)
         )
+
+    @property
+    def vhost_refused(self) -> bool:
+        """A netfilter ``object-add`` refused because the netdev is vhost-backed."""
+        return self.error_class is not None and self.description == _VHOST_REFUSAL
 
 
 def parse_qmp_reply(raw: str) -> QmpReply:

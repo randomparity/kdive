@@ -70,7 +70,7 @@ _VMCORE_FETCH_KIND = "vmcore.fetch"
 
 # The core-producing methods valid for vmcore.fetch (excludes console/gdbstub). fadump produces a
 # core through the shared kdump retrieve path (ADR-0349).
-_VMCORE_METHODS: frozenset[CaptureMethod] = frozenset(
+VMCORE_METHODS: frozenset[CaptureMethod] = frozenset(
     {CaptureMethod.HOST_DUMP, CaptureMethod.KDUMP, CaptureMethod.FADUMP}
 )
 
@@ -162,7 +162,7 @@ def _resolve_capture_method(
     """Resolve the capture method to admit, or a typed rejection (ADR-0209).
 
     ``object_id`` is the Run id the envelope is keyed on (ADR-0244). An explicit method must parse,
-    be core-producing (``_VMCORE_METHODS``), and be advertised by the bound provider's descriptor
+    be core-producing (``VMCORE_METHODS``), and be advertised by the bound provider's descriptor
     (else ``capability_unsupported``). An omitted method resolves through the System profile's
     ``capture_method`` clamped to the core-producing set; if that yields no descriptor-supported
     core method the call needs an explicit ``method`` (``missing_required_field`` — the provider may
@@ -176,7 +176,7 @@ def _resolve_capture_method(
             return _config_error(
                 object_id, data={"method": method, "reason": "unknown capture method"}
             )
-        if explicit not in _VMCORE_METHODS:
+        if explicit not in VMCORE_METHODS:
             return _config_error(
                 object_id, data={"method": method, "reason": "method does not produce a vmcore"}
             )
@@ -201,7 +201,7 @@ def _resolve_capture_method(
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(object_id, exc)
     resolved = runtime.profile_policy.capture_method(profile)
-    if resolved in _VMCORE_METHODS and resolved in supported:
+    if resolved in VMCORE_METHODS and resolved in supported:
         return resolved
     return _config_error_reason(
         object_id,
