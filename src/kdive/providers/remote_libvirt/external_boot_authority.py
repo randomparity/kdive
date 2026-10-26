@@ -1974,7 +1974,11 @@ class RemoteExternalBootCoordinator:
         self._operations.recover(self._store.reopen_recovery(recovery), authority, self._deadline())
 
     def cleanup(self, recovery: RecoveryPoint) -> None:
-        """Delete owned boot artifacts, fencing the record by its own PREPARE authority."""
+        """Delete owned boot artifacts, fencing the record by its own PREPARE authority.
+
+        The fence is a consistency check between two provider-private records; request
+        authority is enforced by the service journal and cleanup-evidence gate.
+        """
         record = self._store.reopen_recovery(recovery)
         authority = self._store.preparation_authority(recovery.binding, recovery.plan_identity)
         self._operations.cleanup(record, authority, self._deadline())
