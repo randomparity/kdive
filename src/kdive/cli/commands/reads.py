@@ -245,7 +245,7 @@ async def inventory_show(args: argparse.Namespace) -> int:
     ``inventory.list`` takes its filters inside a ``request`` wrapper, like the other list
     tools, so ``--project`` goes there rather than at the top level of the payload.
     """
-    request = {"request": list_request(args, "project", "state")}
+    request = {"request": _payload(args, "project")}
     return await _list("inventory.list", args, ["key", "backend", "status"], request)
 
 
