@@ -19,6 +19,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
 from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
@@ -275,7 +276,7 @@ async def _seed_store_rows(
                 store_identity(vehicle),
                 owner_key(vehicle),
                 RESERVED_BYTES,
-                _digest(f"release/{vehicle.activation_id}"),
+                ExternalBootReleaseEvidenceV1.model_validate(evidence).identity,
                 Jsonb(evidence),
             ),
         )
