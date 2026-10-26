@@ -187,6 +187,10 @@ def _json_kind(parsed: object) -> str | None:
     return "string" if isinstance(parsed, str) else None
 
 
+def _reject_non_finite(constant: str) -> float:
+    raise argparse.ArgumentTypeError(f"not a finite JSON number: {constant}")
+
+
 def _json_value_arg(scalars: tuple[str, ...]) -> Callable[[str], str]:
     """argparse ``type=`` factory for a ``--<param>-json`` value.
 
@@ -201,9 +205,11 @@ def _json_value_arg(scalars: tuple[str, ...]) -> Callable[[str], str]:
 
     def parse(value: str) -> str:
         try:
-            parsed = json.loads(value)
+            parsed = json.loads(value, parse_constant=_reject_non_finite)
         except json.JSONDecodeError as exc:
             raise argparse.ArgumentTypeError(f"not valid JSON: {exc}") from exc
+        if isinstance(parsed, float) and not math.isfinite(parsed):
+            raise argparse.ArgumentTypeError(f"not a finite JSON number: {value}")
         if isinstance(parsed, dict | list):
             return value
         kind = _json_kind(parsed)
