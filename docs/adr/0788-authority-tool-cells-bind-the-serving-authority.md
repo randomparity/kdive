@@ -57,6 +57,12 @@ that served it.
 - When the two hosts' revisions differ, the record keeps only one of them. It keeps the
   non-candidate one, which is enough to fail the cell. It cannot show both.
 - This amends the 2026-10-07 option A decision for `ops.force_release` only.
+- The first live lane run found that `ops.resolve_recovery_orphan` answered
+  `recovery_provider_not_configured` for every local System. The server composes no local
+  recovery-object port, so the tool's `external_boot_recovery_objects` test could never pass
+  there. The tool now also accepts a local row whose publishing authority is the server's fixed
+  route, as release and conflict admission already do (`recovery_requests.py`). Remote still
+  needs the port. No API, schema or contract changes.
 
 ## Considered & rejected
 
