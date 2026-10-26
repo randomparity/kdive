@@ -180,12 +180,16 @@ def _fake_arm_a(
     fake: _FakeBarrier,
     *,
     after: tuple[str, int] = ("released", 0),
+    before_release: str = "active",
 ) -> list[str]:
-    """``after`` is what the allocation read and the capacity show once force_release answered."""
+    """``after`` is what the allocation read and the capacity show once force_release answered.
+
+    ``before_release`` is the allocation read once the teardown has drained, ahead of the release.
+    """
     heads = iter([("mutation-started", "teardown"), ("terminal", "teardown")])
     allocations: list[str] = []
-    states = iter(["active", "active", after[0]])
-    capacity = iter([1, 1, after[1]])
+    states = iter(["active", "active", before_release, after[0]])
+    capacity = iter([1, 1, 1, after[1]])
 
     async def scalar(_op: object, name: str, **_args: object) -> ToolResponse:
         if name == "systems.teardown":
@@ -260,6 +264,20 @@ def test_force_release_arm_observes_the_release_outside_the_envelope(
     fake = _FakeBarrier()
     _fake_arm_a(monkeypatch, fake, after=after)
     with pytest.raises(AssertionError, match=message):
+        asyncio.run(
+            authority_faults.held_teardown_release(
+                _system(), "db", _force_release(_refusal(authority_faults.TEARDOWN_REQUIRED))
+            )
+        )
+
+
+def test_force_release_arm_requires_the_allocation_active_before_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A release the teardown itself performed would make force_release's effect unprovable.
+    fake = _FakeBarrier()
+    _fake_arm_a(monkeypatch, fake, before_release="released")
+    with pytest.raises(AssertionError, match="teardown released"):
         asyncio.run(
             authority_faults.held_teardown_release(
                 _system(), "db", _force_release(_refusal(authority_faults.TEARDOWN_REQUIRED))

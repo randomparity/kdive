@@ -418,6 +418,8 @@ async def held_teardown_release(
     await drain_job(op, "teardown", teardown.object_id)
     await await_system_state(op, "teardown", system_id, "torn_down")
     assert await journal_head(db_url, system_id) == ("terminal", "teardown")
+    assert await _allocation_state(system) == "active", "the teardown released the allocation"
+    in_use = await capacity_in_use(op)
     released = await force_release("ops.force_release", args)
     assert released.status == "released", f"force_release answered {released.status}"
     allocation = await _allocation_state(system)
