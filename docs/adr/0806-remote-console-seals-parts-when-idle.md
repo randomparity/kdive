@@ -37,7 +37,8 @@ with nothing held back.
   head is uploaded in one part and its tail in the next, each redacted on its own. A registered
   secret is matched whole, so such a split value can survive. Secrets in console output are
   already treated as guest-controlled and best effort; size rotation keeps its overlap.
-- An interactive console produces more, smaller parts.
+- An interactive console produces more, smaller parts. No reader assumes a part's size: the read
+  seam lists indices and assembles them, and the rotation threshold is read only by the collector.
 - A failed capture takes up to ten seconds to report, not five.
 
 ## Considered & rejected
