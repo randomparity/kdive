@@ -9,6 +9,7 @@ from psycopg import AsyncConnection
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.models import (
+    ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
 )
@@ -27,16 +28,18 @@ __all__ = [
 
 type ExternalBootOperationHandler = Callable[
     [AsyncConnection, Job, ExternalBootAuthorityMarkerV1],
-    Awaitable[ExternalBootAuthoritySuccessV1],
+    Awaitable[ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1],
 ]
-"""An operation either returns a **success** result or raises ``ExternalBootAuthorityFailure``.
+"""An operation returns a **success** or a **conflict** result, or raises
+``ExternalBootAuthorityFailure``.
 
-The success subclass rather than the base ``ExternalBootAuthorityResultV1`` is deliberate.
+The two subclasses rather than the base ``ExternalBootAuthorityResultV1`` are deliberate.
 ``kdive.jobs.worker._commit_external_result`` dispatches on ``isinstance``: a success goes to
-``queue.complete_external_boot``, a failure to ``queue.fail_external_boot``, and a bare base
-instance is logged as an "untyped result variant" and written nowhere — so the job keeps its lease
-and wedges ``running``. Typing the seam as the base class let exactly that ship and type-check
-clean; typing it as the subclass makes the same mistake a ``ty`` error.
+``queue.complete_external_boot``, a conflict to ``queue.record_external_boot_conflict``, a failure
+to ``queue.fail_external_boot``, and a bare base instance is logged as an "untyped result
+variant" and written nowhere — so the job keeps its lease and wedges ``running``. Typing the seam
+as the base class let exactly that ship and type-check clean; typing it as the subclass makes the
+same mistake a ``ty`` error.
 """
 
 
@@ -76,7 +79,9 @@ class ExternalBootOperations:
     def registered_operations(self) -> frozenset[str]:
         return frozenset(self._handlers)
 
-    async def run(self, conn: AsyncConnection, job: Job) -> ExternalBootAuthoritySuccessV1:
+    async def run(
+        self, conn: AsyncConnection, job: Job
+    ) -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
         """Decode ``job``'s marker and dispatch to the handler bound to its operation.
 
         Decoding happens here rather than in the router, so the router needs no decoder of its own

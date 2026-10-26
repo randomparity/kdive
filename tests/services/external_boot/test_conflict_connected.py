@@ -19,7 +19,7 @@ from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.jobs.models import ExternalBootAuthorityMarkerV1, ExternalBootAuthoritySuccessV1
 from kdive.mcp.tools.external_boot.recovery_requests import resolve_conflict
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
@@ -222,6 +222,7 @@ def test_mcp_conflict_job_claims_and_converges_through_authority_service(
                 assert handler is not None
                 result = await handler(worker, claimed, marker)
                 if result.result.operation == "recovery-attempt":
+                    assert isinstance(result, ExternalBootAuthoritySuccessV1)
                     interim = await queue.complete_external_boot(
                         worker,
                         claimed,
@@ -230,6 +231,7 @@ def test_mcp_conflict_job_claims_and_converges_through_authority_service(
                     )
                     assert interim is not None
                     result = await handler(worker, claimed, marker)
+                assert isinstance(result, ExternalBootAuthoritySuccessV1)
                 completed = await queue.complete_external_boot(
                     worker,
                     claimed,

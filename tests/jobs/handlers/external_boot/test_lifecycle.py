@@ -43,6 +43,7 @@ from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import (
+    ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthorityMarkerV1,
@@ -428,6 +429,7 @@ def test_post_provider_interruption_replays_without_a_second_mutation(
             readiness_reads = ["observe", "observe"] if operation == "activate" else []
             assert case.vehicle.port.calls == [*spec["port_calls"], *readiness_reads]
 
+            assert isinstance(replayed, ExternalBootAuthoritySuccessV1)
             committed = await queue.complete_external_boot(
                 worker,
                 job,
@@ -469,6 +471,19 @@ async def _run_operation(
     *,
     registry: SecretRegistry | None = None,
 ) -> ExternalBootAuthoritySuccessV1:
+    result = await _run_to_terminal(dsns, seed, case, operation, registry=registry)
+    assert isinstance(result, ExternalBootAuthoritySuccessV1)
+    return result
+
+
+async def _run_to_terminal(
+    dsns: Callable[[str], str],
+    seed: AsyncConnection,
+    case: SeededCase,
+    operation: str,
+    *,
+    registry: SecretRegistry | None = None,
+) -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
     ports = _ports(case, case.vehicle, dsns)
     if operation == "teardown":
         ports = replace(ports, teardown_executor=_TeardownExecutor(seed))
@@ -486,6 +501,7 @@ async def _run_operation(
             worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
         )
         if result.result.operation == "recovery-attempt":
+            assert isinstance(result, ExternalBootAuthoritySuccessV1)
             committed = await queue.complete_external_boot(
                 worker,
                 _job(case),
@@ -493,7 +509,7 @@ async def _run_operation(
                 incarnation_credential=SecretStr(case.credential),
             )
             assert committed is not None
-            return await handler(
+            result = await handler(
                 worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
             )
         return result
@@ -953,7 +969,7 @@ def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
     spec = CASES[operation]
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
-        case.vehicle.port.__dict__["authority_category"] = "conflict"
+        case.vehicle.port.__dict__["authority_category"] = "unreadable"
 
         with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
             await _run_operation(authority_role_dsns, seed, case, operation)
@@ -973,9 +989,39 @@ def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
         assert str(case.vehicle.activation_id) in warning
         assert "phase=commit" in warning
         assert "exception=CategorizedError" in warning
-        assert f"authority observed 'conflict' for {operation!r}" in warning
+        assert f"authority observed 'unreadable' for {operation!r}" in warning
         assert "authority observed" not in excinfo.value.result.model_dump_json(by_alias=True)
         # The mutation happened; what is refused is *recording* it as a good terminal state.
+        row = await _activation_row(seed, case.vehicle.activation_id)
+        expected_state = (
+            "recovering" if operation == "resolve-conflict" else spec["activation_state"]
+        )
+        assert row["state"] == expected_state
+
+    _drive(migrated_url, authority_role_dsns, operation, body)
+
+
+@pytest.mark.parametrize("category", ["conflict", "mixed"])
+@pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict"])
+def test_a_conflict_observation_is_carried_to_the_conflict_commit(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    operation: str,
+    category: str,
+) -> None:
+    """ADR-0805: a conflict is carried as the authority observed it, never as terminal evidence."""
+    spec = CASES[operation]
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        case.vehicle.port.__dict__["authority_category"] = category
+
+        result = await _run_to_terminal(authority_role_dsns, seed, case, operation)
+
+        assert isinstance(result, ExternalBootAuthorityConflictV1)
+        evidence = result.result.model_dump(mode="json", by_alias=True)["evidence"]
+        assert evidence["composite_state"] == "sha256:" + "8" * 64
+        assert evidence["activation_id"] == str(case.vehicle.activation_id)
+        assert result.admitted_operation == operation
         row = await _activation_row(seed, case.vehicle.activation_id)
         expected_state = (
             "recovering" if operation == "resolve-conflict" else spec["activation_state"]
