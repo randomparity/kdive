@@ -484,6 +484,42 @@ def test_normal_driver_uploads_a_kernel_for_the_recorded_guest_arch(
     assert [upload["arch"] for upload in uploads] == [guest_arch]
 
 
+@pytest.mark.parametrize("with_initrd", [False, True])
+def test_activation_forwards_the_initrd_request_to_the_upload(
+    with_initrd: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Remote external boot refuses a build without an initrd (#3323), so the caller chooses it.
+    uploads: list[dict[str, object]] = []
+
+    class Client:
+        async def call_tool(self, name: str, **args: object) -> ToolResponse:
+            del name, args
+            return ToolResponse.success("11111111-1111-1111-1111-111111111111", "running")
+
+    async def uploaded(_client: object, **kwargs: object) -> None:
+        uploads.append(kwargs)
+
+    async def drained_job(_client: object, _phase: str, job_id: str, **_: object) -> ToolResponse:
+        return ToolResponse.success(job_id, "succeeded")
+
+    monkeypatch.setattr(carrier, "build_and_upload_kernel", uploaded)
+    monkeypatch.setattr(carrier, "drain_job", drained_job)
+    prefix = "kdive-2151-" + "1" * 12 + "-" + "2" * 8
+    asyncio.run(
+        carrier.start_external_boot_activation(
+            cast(Any, Client()),
+            ResourceLedger(prefix),
+            project="kdive-2151-project",
+            system_id=str(uuid4()),
+            label=prefix,
+            require_kdump=False,
+            with_initrd=with_initrd,
+        )
+    )
+
+    assert [upload["with_initrd"] for upload in uploads] == [with_initrd]
+
+
 def test_normal_driver_waits_out_a_system_job_before_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
