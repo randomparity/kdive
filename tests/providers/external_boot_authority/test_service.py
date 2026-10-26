@@ -1677,6 +1677,7 @@ async def test_takeover_during_a_refusal_observation_completes_under_its_binding
         JournalPhase.TERMINAL,
         JournalPhase.TAKEOVER_ACKNOWLEDGED,
     ]
+    assert {b.generation for b in repository.advance_bindings[-4:-1]} == {2}
 
 
 @pytest.mark.anyio

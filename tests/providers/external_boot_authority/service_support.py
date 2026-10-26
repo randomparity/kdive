@@ -102,6 +102,7 @@ class _Repository:
         self.allocating_request = request
         self.head: JournalHead | None = None
         self.records: list[JournalRecordV1] = []
+        self.advance_bindings: list[AuthorityBinding] = []
         self.advance_status: Literal["advanced", "superseded", "conflict"] = "advanced"
         self.pause_phase: JournalPhase | None = None
         self.phase_entered = asyncio.Event()
@@ -316,6 +317,7 @@ class _Repository:
         expected_digest: str,
         record: JournalRecordV1,
     ) -> Literal["advanced", "superseded", "conflict"]:
+        self.advance_bindings.append(binding)
         if record.phase is self.pause_phase:
             self.phase_entered.set()
             await self.phase_release.wait()
