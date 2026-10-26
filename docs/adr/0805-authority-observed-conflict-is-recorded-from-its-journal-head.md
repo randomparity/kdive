@@ -72,7 +72,7 @@ No production path did this (#3327):
   `systems.resolve_external_boot_conflict`. `systems.teardown` and `ops.force_teardown` do not
   yet complete from `recovery_conflict`: on the local authority lane the teardown mutation is
   refused as `provider-conflict`, its journal head stays `mutation-started` and the System stays
-  `ready`. That gap is not owned by any record yet.
+  `ready`. #3341 owns that gap.
 - Such a refusal costs one generation instead of the two that ADR-0714's repeat check needed.
   Refusals over any other observed state still follow ADR-0714 unchanged.
 - The conflict evidence's composite is the value `resolve_external_boot_conflict` needs as

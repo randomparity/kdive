@@ -2143,9 +2143,10 @@ nothing.
   the activation in `recovery_conflict`. The frame's project admin then calls
   `systems.resolve_external_boot_conflict` with the head's composite. Restoring over a third
   identity is #3330, so the arm requires that job to end with `conflict` too and the activation
-  back in `recovery_conflict`. The arm then calls `systems.teardown` and requires `torn_down`
-  itself: the frame removes the fixture domain before its own teardown, and a teardown from
-  `recovery_conflict` needs the domain.
+  back in `recovery_conflict`. The arm then stops `blocked` (#3341): teardown from
+  `recovery_conflict` does not complete, so the frame's cleanup fails after its 600 s wait and the
+  System stays `ready` with its allocation held. Run the killed-run cleanup above, or roll the lane
+  host back.
 - **Blocked arm.** The remote orphan passes the lane gates and skips with `blocked:` and its
   reason before any mutation: the remote-libvirt authority publishes no cleanup quarantine. It is a
   narrower blocker, not a pass.
