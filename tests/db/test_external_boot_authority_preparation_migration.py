@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
     JournalPhase,
     JournalRecordV1,
     canonical_record_bytes,
     record_digest,
 )
+from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
+from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from kdive.providers.ports.external_boot import (
     DebuginfoSource,
     ExternalBootActivationBinding,
@@ -27,6 +36,22 @@ from tests.db.external_boot_authority_support import (
     _seed_case,
 )
 from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
+
+
+async def _open_through_repository(
+    dsn: str,
+    worker_id: str,
+    request: AuthorityPreparationMutationRequestV1,
+    ack_digest: str,
+) -> ModuleAttemptPreparationRequestV1 | None:
+    @asynccontextmanager
+    async def connections() -> AsyncIterator[AsyncConnection]:
+        async with await AsyncConnection.connect(dsn, autocommit=True) as conn:
+            yield conn
+
+    return await DatabaseAuthorityRepository(connections).open_remote_module_attempt(
+        AuthenticatedPeer(worker_id), request, 1, ack_digest
+    )
 
 
 def test_preparing_allocation_and_phase_resolution_are_exact(
@@ -353,6 +378,36 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
                 prepared[1],
             ),
         ).fetchone() == (None,)
+    receipt = asyncio.run(
+        _open_through_repository(
+            authority_role_dsns("kdive_provider_authority"),
+            case.worker_id,
+            AuthorityPreparationMutationRequestV1(
+                authority_id=authority_id,
+                generation=generation,
+                system_id=case.system_id,
+                activation_id=case.activation_id,
+                run_id=case.run_id,
+                plan_identity=plan.identity,
+                purpose="activate",
+                operation=AuthorityOperation.PREPARE,
+                provider_kind=case.provider_kind,
+                authority_instance=case.authority_instance,
+                operation_identity=prepared[0],
+                operation_digest=prepared[1],
+                attempt_id=prepare_attempt_id,
+                expected_source_identity="source-a",
+                intended_target_identity="target-a",
+                recovery_objects=(),
+                plan=plan,
+            ),
+            ack_digest,
+        )
+    )
+    assert receipt is not None
+    assert receipt.module_attempt_obligation.system_id == case.system_id
+    assert receipt.module_attempt_obligation.run_id == case.run_id
+    assert receipt.module_attempt_obligation.operation_nonce == prepare_attempt_id.hex
     open_arguments = (
         case.worker_id,
         authority_id,

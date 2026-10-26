@@ -142,7 +142,7 @@ class DatabaseAuthorityRepository:
         """Open/replay the authority-only 0146 receipt after PREPARE is journal-started."""
         async with self._connections() as conn, conn.transaction():
             row = await conn.execute(
-                "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,%s,%s,%s,%s,%s)",
+                "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,%s,%s,%s,%s,%s)::text",
                 (
                     str(peer.incarnation_id),
                     request.authority_id,
@@ -157,7 +157,8 @@ class DatabaseAuthorityRepository:
             result = await row.fetchone()
             if result is None or result[0] is None:
                 return None
-            return ModuleAttemptPreparationRequestV1.model_validate(result[0])
+            # The closed model is strict: UUIDs parse only from JSON text, not from a dict.
+            return ModuleAttemptPreparationRequestV1.model_validate_json(result[0])
 
     async def resolve_current_release_phase(
         self,
