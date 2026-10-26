@@ -204,7 +204,8 @@ async def invoke_generated_verb(verb: GeneratedVerb, args: argparse.Namespace) -
 
     Assembles the tool payload from the parsed namespace (:func:`assemble_generated_payload`),
     resolves the verb's tier from the *live* server annotations — never the committed artifact, so
-    a stale artifact cannot downgrade a tool's tier (ADR-0107 decision 4) — and drives the mutating
+    a stale artifact cannot downgrade a tool's tier (ADR-0107 decision 4; the one exception, a
+    hidden read-only tool, is in :func:`_generated_tier`) — and drives the mutating
     ceremony from that tier: a mutating verb needs no opt-in flag (naming the verb is the
     acknowledgement, ADR-0421 decision 4), a mutating or destructive verb runs the fail-closed
     token-``exp`` preflight, and a destructive verb additionally needs the typed-``yes`` confirm

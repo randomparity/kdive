@@ -319,12 +319,14 @@ def test_hidden_read_only_verb_calls_through(monkeypatch: pytest.MonkeyPatch) ->
     assert client.calls == [("runs.list", {})]
 
 
-@pytest.mark.parametrize("destructive", [False, True])
+@pytest.mark.parametrize(
+    ("read_only", "destructive"), [(False, False), (False, True), (True, True)]
+)
 def test_hidden_mutating_verb_stays_refused(
-    monkeypatch: pytest.MonkeyPatch, capsys, destructive: bool
+    monkeypatch: pytest.MonkeyPatch, capsys, read_only: bool, destructive: bool
 ) -> None:
     client = _install(monkeypatch, _read_tool("present.tool"))
-    verb = _verb("runs.cancel", read_only=False, destructive=destructive)
+    verb = _verb("runs.cancel", read_only=read_only, destructive=destructive)
     assert _run(verb, _ns(yes=True)) == 3
     assert client.calls == []
     assert "not positively classified" in capsys.readouterr().out
