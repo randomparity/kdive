@@ -311,6 +311,42 @@ def test_unclassifiable_tool_is_refused(monkeypatch: pytest.MonkeyPatch, capsys)
     assert "not positively classified" in capsys.readouterr().out
 
 
+def test_hidden_read_only_verb_calls_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Absent from the caller's catalog but a read-only descriptor: the server answers (#3301).
+    client = _install(monkeypatch, _read_tool("present.tool"))
+    monkeypatch.setattr(dispatch, "ensure_token_valid", _raise_expiring)
+    assert _run(_verb("runs.list"), _ns()) == 0
+    assert client.calls == [("runs.list", {})]
+
+
+@pytest.mark.parametrize(
+    ("read_only", "destructive"), [(False, False), (False, True), (True, True)]
+)
+def test_hidden_mutating_verb_stays_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys, read_only: bool, destructive: bool
+) -> None:
+    client = _install(monkeypatch, _read_tool("present.tool"))
+    verb = _verb("runs.cancel", read_only=read_only, destructive=destructive)
+    assert _run(verb, _ns(yes=True)) == 3
+    assert client.calls == []
+    assert "not positively classified" in capsys.readouterr().out
+
+
+def test_visible_tool_keeps_live_tier_over_read_only_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install(monkeypatch, _mutating_tool("runs.list"))
+    monkeypatch.setattr(dispatch, "ensure_token_valid", _raise_expiring)
+    assert _run(_verb("runs.list"), _ns()) == 3
+    assert client.calls == []
+
+
+def test_visible_unclassified_tool_stays_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _install(monkeypatch, _Tool("runs.list"))
+    assert _run(_verb("runs.list"), _ns()) == 3
+    assert client.calls == []
+
+
 def test_denied_envelope_maps_to_exit_3(monkeypatch: pytest.MonkeyPatch) -> None:
     denied = {
         "object_id": "h",
