@@ -208,6 +208,26 @@ it by byte length, naming that length and the limit. Values this protocol constr
 `release`, the digests, the UUIDs, the nonce — have equal byte and character lengths, so their
 bounds are unaffected.
 
+### Amendment (2026-10-27): PREPARE stops the System, and the proof precedes `createXML` (#3347)
+
+The worker's shut-off proof was only evaluated after the appliance ran, and nothing stopped a
+running System, so a `ready` System made qemu fail with `Failed to get "write" lock` on its
+overlay. The authority-host PREPARE now owns the stop, as ADR-0583 describes for quiescing:
+
+- Before any other provider mutation, PREPARE reads the System's power and records it in the
+  provider-host store, then destroys a running domain and requires it inactive. The record is
+  written ahead of the destroy and the first record wins, so a retry that finds the domain already
+  stopped keeps the power the System had. The remote recovery record takes `prior_power` from this
+  record, falling back to a live read when none exists.
+- A domain that cannot be read or stopped is refused with `refused-before-mutation`, which the
+  preparation operation now maps to `remote-module-refused` as the lifecycle operation already did.
+- `run_or_adopt_appliance` runs the attachment inspection before `createXML`, so the appliance
+  is unreachable while the owning System is active, whichever caller reaches it.
+
+The stop is provider-private; no journal phase or wire field changes. Restoring a previously
+running System after a failed PREPARE is not part of this amendment (#3348): until it lands, a
+failed PREPARE leaves that System stopped.
+
 ## Consequences
 
 - Remote offline mutation gains one operator-provisioned appliance image per supported hypervisor
