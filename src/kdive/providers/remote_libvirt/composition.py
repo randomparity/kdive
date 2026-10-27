@@ -554,7 +554,7 @@ def build_runtime(
         # System's console (ADR-0433, #1435). Built lazily at job time so this composition stays
         # buildable without S3 config (ADR-0076), like the snapshotter's own lazy store.
         console=ConsoleCapabilities(
-            snapshotter=RemoteLibvirtConsoleSnapshotter(store),
+            snapshotter=RemoteLibvirtConsoleSnapshotter(store, secret_registry=secret_registry),
             reader_factory=lambda: build_remote_console_reader(
                 secret_registry=secret_registry, store=store
             ),
