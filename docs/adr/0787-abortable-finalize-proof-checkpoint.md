@@ -81,7 +81,7 @@ checkpoint never fires there". The remote-libvirt authority now fires the checkp
 publishes a quarantine row like the local one.
 
 - After release cleanup, `commit_cleanup` records a private `cleanup-quarantine` receipt in the
-  module store, named by the activation's recovery key. It binds the operation identity, the
+  module store, named by the recovery record's identity. It binds the operation identity, the
   attempt and the anchored `mutation-started` journal sequence and digest.
 - `finalize` runs for `cleanup` only. It requires the receipt to equal the anchored proof, writes
   a `cleanup-finalized` marker, then removes the recovery record, the indexes that name it and,
@@ -95,5 +95,8 @@ publishes a quarantine row like the local one.
 - The remote branch of the authority host builds the orphan service over the remote adapter, not
   the local one.
 - The marker keeps a finalized cleanup distinguishable from a record that never existed, so a
-  later cleanup `observe` classifies `absent`, as it did while the record remained. System
+  later cleanup `observe` classifies `absent`, as it did while the record remained. It also
+  locates the receipt once the recovery index is gone. The object port and inventory report the
+  receipt actually on disk, whatever the marker says, so an interrupted finalize never hides
+  residue. System
   teardown already treats an absent record as `recovery_absent`.
