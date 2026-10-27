@@ -278,9 +278,12 @@ as before. A failure with no recorded power (nothing was stopped) is reported
 `refused-before-mutation`.
 
 Two further refusals left the same unresolved operation and are closed the same way. A PREPARE the
-authority itself refuses after anchoring it, because the attempt-receipt gate answers `superseded`
-or the host's `begin` fails, is settled before the refusal is raised. The remote adapter also
-implements `adopt_preparation`, delegating to the coordinator, so a retry generation adopts the
+authority itself refuses after anchoring it, because the attempt-receipt gate answers `superseded`,
+is settled before the refusal is raised. Only an operation the same call anchored is settled: an
+idempotent re-begin may belong to a live execute, and a transient `begin` failure (a derive error or
+timeout) stays unresolved and retryable as before. The remote adapter also
+implements `adopt_preparation`, delegating to the coordinator without the admissible-generation
+tracker the local adapter keeps (the rest of the remote adapter has none), so a retry generation adopts the
 first generation's MATERIALIZE receipt instead of being refused `provider-conflict`. A retry
 generation after the first still cannot open its module attempt: the receipt gate requires a
 `materialize`/`result_committed` audit row for the current generation, which an adopted
