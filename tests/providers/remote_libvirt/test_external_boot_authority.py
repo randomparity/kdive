@@ -4326,6 +4326,7 @@ async def test_remote_finalize_deletes_the_activations_files_and_keeps_the_marke
         }
     )
     _publish_terminal(store, other)
+    _seed_activation_residue(store, other)
     before = _store_names(store)
     await adapter.finalize(request, context)
     after = _store_names(store)
@@ -4434,4 +4435,42 @@ async def test_remote_reads_of_a_finalized_activation_say_finalized_not_unknown(
     assert state.materialization is None
     assert state.recovery is None
     assert teardown in _store_names(store)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_replays_after_finalize_are_refused_not_recreated(tmp_path: Path) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    lifecycle = _module_lifecycle_request(terminal.request, action="restore")
+    prepare = _preparation_request(record, "materialize", operation_identity="replayed")
+    await adapter.finalize(request, context)
+    names = _store_names(store)
+    finalized_error = external_boot_authority.RemoteCleanupFinalizedError
+
+    with pytest.raises(finalized_error):
+        store.stage(terminal.request, 1.0)
+    with pytest.raises(finalized_error):
+        store.stage_lifecycle(lifecycle, 1.0)
+    with pytest.raises(finalized_error):
+        adapter._coordinator.execute_preparation(prepare)
+
+    assert _store_names(store) == names
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_leaves_an_unparseable_foreign_file_and_still_finalizes(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    foreign = "f" * 64 + ".request"
+    store._publish(foreign, b"not json")
+
+    await adapter.finalize(request, context)
+
+    assert foreign in _store_names(store)
+    assert store.cleanup_finalized(record.binding, record.plan_identity)
+    with pytest.raises(FileNotFoundError):
+        store.recovery_point(record.binding, record.plan_identity)
     adapter.close()

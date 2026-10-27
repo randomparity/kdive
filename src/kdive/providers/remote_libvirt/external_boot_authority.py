@@ -796,6 +796,16 @@ def _recovery_identity(reference: OpaqueProviderRef) -> str:
     return identity
 
 
+def _authority_binding(
+    authority: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+) -> ExternalBootActivationBinding:
+    return ExternalBootActivationBinding(
+        system_id=str(authority.system_id),
+        run_id=str(authority.run_id),
+        activation_id=str(authority.activation_id),
+    )
+
+
 def _object_index_name(reference: OpaqueProviderRef) -> str:
     key = hashlib.sha256(b"kdive-remote-recovery-object-v1\0" + reference.to_canonical_json())
     return f"{key.hexdigest()}.object-index"
@@ -1021,6 +1031,9 @@ class RemoteModuleVolumePreparationStore:
         return updated
 
     def stage(self, request: RemoteModuleVolumePreparationRequestV1, local_deadline: float) -> None:
+        self.refuse_finalized(
+            _authority_binding(request.authority), request.authority.plan_identity
+        )
         name = f"{self._key(request)}.request"
         candidate = _PersistedRemoteModulePreparationV1(
             request=request, local_deadline=local_deadline
@@ -1126,6 +1139,9 @@ class RemoteModuleVolumePreparationStore:
     def stage_lifecycle(
         self, request: RemoteModuleLifecycleRequestV1, local_deadline: float
     ) -> None:
+        self.refuse_finalized(
+            _authority_binding(request.authority), request.authority.plan_identity
+        )
         name = f"{self._lifecycle_key(request)}.lifecycle-request"
         candidate = _PersistedRemoteModuleLifecycleV1(
             request=request, local_deadline=local_deadline
@@ -1187,7 +1203,7 @@ class RemoteModuleVolumePreparationStore:
         )
         data = self._read(f"{key}.restored")
         if data is None:
-            self._refuse_finalized(binding, plan_identity)
+            self.refuse_finalized(binding, plan_identity)
             return None
         response = RemoteModuleLifecycleResponseV1.from_canonical_json(data)
         if response.action != "restore":
@@ -1280,7 +1296,7 @@ class RemoteModuleVolumePreparationStore:
         )
         data = self._read(f"{key}.terminal")
         if data is None:
-            self._refuse_finalized(binding, plan_identity)
+            self.refuse_finalized(binding, plan_identity)
             raise FileNotFoundError("remote module terminal preparation is absent")
         record = RemoteModuleTerminalRecord.from_canonical_json(data)
         if (
@@ -1621,7 +1637,7 @@ class RemoteModuleVolumePreparationStore:
         """Whether finalization began removing this activation's recovery record."""
         return self._read(self._finalized_name(binding, plan_identity)) is not None
 
-    def _refuse_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
+    def refuse_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
         if self.cleanup_finalized(binding, plan_identity):
             raise RemoteCleanupFinalizedError(
                 "remote activation records were removed when its cleanup was finalized"
@@ -1640,8 +1656,17 @@ class RemoteModuleVolumePreparationStore:
             and name.endswith(suffix)
             and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
             and (data := self._read(name)) is not None
-            and owns(data)
+            and self._owns(name, owns, data)
         ]
+
+    @staticmethod
+    def _owns(name: str, owns: Callable[[bytes], bool], data: bytes) -> bool:
+        """A file that does not parse is not provably this activation's, so it is not."""
+        try:
+            return owns(data)
+        except ValueError:
+            logger.warning("remote store file %s is unreadable and left in place", name)
+            return False
 
     def _activation_files(
         self, binding: ExternalBootActivationBinding, plan_identity: str
@@ -2348,6 +2373,7 @@ class RemoteExternalBootCoordinator:
         observed = self._store.observe_preparation(request)
         if observed.state != "absent":
             return observed
+        self._store.refuse_finalized(request.binding, request.plan.identity)
         if request.phase == "materialize":
             materialization = self.materialize(request.plan, request.binding, request.authority)
             receipt = observed.model_copy(
