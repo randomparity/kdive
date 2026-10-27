@@ -175,7 +175,10 @@ class RecoveryOrphanAuthorityService:
         selection: _Selection,
         observed_digest: str,
     ) -> None:
-        async with self._connections() as conn:
+        # The host's connection is not autocommit and closes without committing, so the write
+        # needs its own transaction (as the repository's mutations have): without one the
+        # disposition rolls back while the response still reports it completed.
+        async with self._connections() as conn, conn.transaction():
             row = await (
                 await conn.execute(
                     "SELECT commit_external_boot_recovery_orphan_disposition(%s,%s,%s,%s,%s,%s,%s)",
