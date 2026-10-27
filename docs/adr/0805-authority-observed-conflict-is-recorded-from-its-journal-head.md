@@ -77,14 +77,52 @@ No production path did this (#3327):
   Refusals over any other observed state still follow ADR-0714 unchanged.
 - The conflict evidence's composite is the value `resolve_external_boot_conflict` needs as
   `observed_identity`. No MCP read exposes it yet (#3331).
-- Resolution still restores only through the provider's ordinary recovery. Restoring from an
-  acknowledged third identity is #3330.
+- Resolution restores the recorded source from the acknowledged third identity. See the
+  amendment below (#3330).
 - `unreadable` never becomes a conflict here. ADR-0583's promotion of an unreadable recovery to
   `recovery_conflict` at its deadline is still unimplemented.
 - A conflict found only while the authority finishes an earlier generation's unresolved
   operation is journaled against that earlier generation. The current request still answers
   `provider-conflict`, so that path still ends through ADR-0714.
 - Preparation (`preparing`, `prepared`) and teardown refusals are unchanged.
+
+### Amendment (2026-10-26): resolution restores from the acknowledged identity (#3330)
+
+ADR-0583 describes resolution as restoration from the acknowledged identity by per-component
+compare-and-swap. This amendment records how the providers do that.
+
+1. **The acknowledged identity is a digest, so its components come from a fresh observation.**
+   Before a `resolve-conflict` commit writes, the adapter observes the provider again and
+   requires the observation's composite to equal the request's `expected_observed_composite`.
+   That read is then the acknowledged state, and each write compares its own component with it
+   immediately before writing.
+2. **Local.** The commit runs the ordinary recovery with the acknowledged state. A third domain
+   definition is accepted only when its boot identity is the acknowledged one. The live module
+   tree is replaced by the recorded source through the existing publication machine, with the
+   acknowledged tree as the tree being replaced. A tree that is already the recorded source is
+   confirmed instead of rewritten. A running third domain is destroyed, not stopped cleanly,
+   because it is not the activated target. A component that differs from the acknowledged one
+   ends the commit as `provider-conflict` with no further write, and the activation returns to
+   `recovery_conflict` with the new evidence.
+3. **Remote.** The module restore runs first, as for `recover`. The domain definition is then
+   replaced by the recorded source when its `(preserved, boot)` digests are the acknowledged
+   pair, compared again after the stop and before the define. The commit still ends with the
+   same cleanup that `recover` runs.
+4. **The remote composite no longer covers module restore evidence.** Resolution writes that
+   evidence before the authority rechecks the acknowledged composite, so including it made the
+   recheck answer `superseded` for any conflict recorded before the restore. Composites recorded
+   before this change no longer match; the operator re-reads the conflict evidence.
+5. Ordinary `recover` is unchanged: a third identity is still refused.
+6. **Crash recovery is not automatic.** ADR-0583 says a crash after the transition resumes the
+   same recovering operation. After the first component write the composite no longer equals the
+   acknowledged one, so the authority's recheck answers `superseded` for a retry of the same
+   resolve. The journal's `mutation-started` record is settled by the next observation, which
+   classifies a part-restored state as a conflict and parks the activation again. The operator
+   then resolves it again, and that state is handled by ordinary recovery. A resumable
+   operation needs durable per-component evidence, which this change does not add.
+7. The acknowledgement covers the definition's boot identity, the module manifest and power,
+   not the whole domain XML. Resolving to the recorded source replaces the whole definition
+   after the boot identity matches.
 
 ## Considered & rejected
 
