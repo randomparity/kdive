@@ -25,8 +25,7 @@ from kdive.db.remote_module_attempt_obligations import (
 )
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from tests.db.external_boot_authority_support import _AuthorityCase, _RoleDsns, _seed_case
-from tests.db.remote_module_attempt_obligations_support import _attempt, _evidence
-from tests.db.test_remote_module_worker_evidence import _real_evidence
+from tests.db.remote_module_attempt_obligations_support import _attempt, _evidence, _real_evidence
 
 _REPO = RemoteModuleAttemptObligationRepository()
 
