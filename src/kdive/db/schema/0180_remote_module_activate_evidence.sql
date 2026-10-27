@@ -22,6 +22,7 @@ SECURITY DEFINER
 SET search_path = ''
 STABLE
 AS $$
+    -- The caller holds the System advisory lock, which serializes takeovers and activation moves.
     SELECT COALESCE((
         SELECT latest.job_id = p_job_id AND latest.job_attempt = p_job_attempt
         FROM public.external_boot_activations AS activation
@@ -30,6 +31,7 @@ AS $$
             FROM public.external_boot_authority_audit AS audit
             WHERE audit.activation_id = activation.id
               AND audit.outcome = 'takeover_allocated'
+              AND audit.purpose = 'activate'
             ORDER BY audit.created_at DESC, audit.generation DESC
             LIMIT 1
         ) AS latest
