@@ -623,6 +623,67 @@ async def test_remote_adapter_replays_materialize_and_prepare_without_repeating_
     store.close()
 
 
+@pytest.mark.anyio
+async def test_remote_adapter_adopts_a_new_generations_materialize(tmp_path: Path) -> None:
+    """A retry generation re-materializes by adopting the first generation's receipt (#3348)."""
+    record = _record()
+    plan = _plan_for_record(record)
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    terminal = store.reopen_terminal(record.binding, plan.identity)
+    calls: list[str] = []
+
+    class Operations:
+        def materialize(self, *args: object) -> object:
+            calls.append("materialize")
+            return record.materialization.model_copy(
+                update={"plan_identity": terminal.request.authority.plan_identity}
+            )
+
+    coordinator = RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 9.0)
+    executor = RemoteModulePreparationExecutor()
+    adapter = RemoteExternalBootAuthorityAdapter(coordinator, executor)
+    base = terminal.request.authority
+    first = base.model_copy(
+        update={
+            "operation": AuthorityOperation.MATERIALIZE,
+            "operation_identity": "materialize-gen-1",
+            "attempt_id": uuid4(),
+        }
+    )
+    retry = first.model_copy(
+        update={
+            "generation": first.generation + 1,
+            "operation_identity": "materialize-gen-2",
+            "attempt_id": uuid4(),
+        }
+    )
+
+    def context(request: AuthorityPreparationMutationRequestV1) -> AuthorityCommitContextV1:
+        return AuthorityCommitContextV1(
+            commit_point=request.operation,
+            operation_identity=request.operation_identity,
+            attempt_id=request.attempt_id,
+            journal_sequence=1,
+            journal_digest="sha256:" + "a" * 64,
+        )
+
+    original = await adapter.commit(first, context(first))
+    adopted = await adapter.adopt_preparation(
+        retry, first, original.composite_state, context(retry)
+    )
+
+    assert calls == ["materialize"]
+    assert adopted.composite_state != original.composite_state
+    assert (await adapter.preparation_receipt(retry)).operation_identity == "materialize-gen-2"
+    with pytest.raises(ValueError, match="predecessor cannot be adopted"):
+        await adapter.adopt_preparation(retry, first, "sha256:" + "0" * 64, context(retry))
+    with pytest.raises(ValueError, match="differs from request"):
+        await adapter.adopt_preparation(retry, first, original.composite_state, context(first))
+    executor.shutdown()
+    store.close()
+
+
 @pytest.mark.parametrize(
     ("recorded", "live", "expected"),
     [

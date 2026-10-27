@@ -2627,6 +2627,24 @@ class RemoteExternalBootAuthorityAdapter:
             lambda: self._coordinator.observe_preparation(self._preparation_request(request))
         )
 
+    async def adopt_preparation(
+        self,
+        request: AuthorityPreparationMutationRequestV1,
+        predecessor: AuthorityPreparationMutationRequestV1,
+        predecessor_receipt_identity: str,
+        context: AuthorityCommitContextV1,
+    ) -> AuthorityObservationV1:
+        """Adopt an earlier generation's identical receipt instead of repeating the mutation."""
+        self._require_commit_point(cast(AuthorityMutationRequestV1, request), context)
+        receipt = await self._executor.run(
+            lambda: self._coordinator.adopt_preparation(
+                self._preparation_request(request),
+                self._preparation_request(predecessor),
+                predecessor_receipt_identity,
+            )
+        )
+        return self._preparation_observation(receipt)
+
     async def cleanup_subject(self, request: AuthorityMutationRequestV1) -> str:
         binding = _activation_binding(request)
 
