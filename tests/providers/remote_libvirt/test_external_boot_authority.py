@@ -1837,7 +1837,9 @@ async def test_durable_remote_preparation_reopens_before_and_after_mutation(tmp_
 
     second = RemoteModuleVolumePreparationStore(tmp_path)
     durable = DurableRemoteModuleVolumePreparationHost(second, cast(Any, Host()))
+    assert not durable.execution_started(request)
     expected = await durable.execute(request)
+    assert durable.execution_started(request)
     second.close()
 
     third = RemoteModuleVolumePreparationStore(tmp_path)
