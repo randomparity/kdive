@@ -235,6 +235,63 @@ The stop is provider-private; no journal phase or wire field changes. Restoring 
 running System after a failed PREPARE is not part of this amendment (#3348): until it lands, a
 failed PREPARE leaves that System stopped.
 
+### Amendment (2026-10-27): a failed PREPARE restores the System's power and is abandoned (#3348)
+
+The previous amendment left a failed PREPARE with the System stopped, its completion latched
+`failed-after-mutation`, and its authority journal operation unresolved at `mutation-started`.
+The next PREPARE was then refused `provider-conflict` and the System teardown `journal-conflict`.
+The authority host now settles the failure:
+
+- When the appliance run raises, the host reads the power recorded ahead of the stop and starts a
+  System that was `running`. An `inactive` record, or a System that is already running, changes
+  nothing. The start requires the attachment inspection to show the appliance absent and the
+  System shut off and exclusive, so a System is never started while an appliance may hold its
+  root.
+- Every failure of PREPARE after admission is handled this way: a refusal before the stop (no
+  record exists, so there is nothing to restore), a stop that failed after `destroy`, and an
+  appliance failure. A successful restore clears the power record, so the next attempt observes the
+  System again instead of trusting a record the operator may have outlived.
+- A restored System leaves no completion behind, so the failure does not latch. The host raises the
+  failure with `completion` unchanged (`failed-after-mutation` by default, `refused-before-mutation`
+  when the appliance host said so) plus an `abandoned` detail. The wire reason is unchanged.
+- The authority service sees `abandoned` and closes the PREPARE operation through the existing
+  anchors, `provider-returned`, `observed` and `terminal`, with a `source` observation and outcome:
+  nothing was adopted. A replay of the same operation reports `failed-after-mutation` again
+  without running the host. A retry in a new generation then finds no unresolved operation, and the
+  module-attempt obligation keeps its nonce, so it resumes the same attempt.
+- When the restore fails, the failure stays latched, the journal operation stays unresolved, and
+  the System is left stopped for the operator, as before. A settle that fails is logged and never
+  replaces the provider's failure.
+
+A PREPARE the authority refuses at its pre-stop recheck (`system_held`, or `provider_conflict`
+for an unreadable answer) is settled the same way before the refusal is raised, because the
+operation was already anchored; a `superseded` answer is not settled. The refusal reason on the
+wire is unchanged, and a replay of a refused operation is refused again without running the host.
+An execute the host had already started, including one whose stop that same request recorded
+before a crash, is never refused; the power record is per activation and survives a successful
+PREPARE, so a record written by another request does not count. The record is written ahead of the stop, so a
+crash between the record and the `destroy` also counts as started, and a record left by a build
+that predates the owner file counts as not started. A replay of a refused operation
+whose holders have since cleared is answered `provider_conflict`: the host is never run, and
+[ADR-0714](0714-repeated-provider-conflict-ends-the-external-boot-job.md) counts it as a repeat. A cancellation while the stop itself is in flight is not covered and behaves
+as before. A failure with no recorded power (nothing was stopped) is reported
+`refused-before-mutation`.
+
+Two further refusals left the same unresolved operation and are closed the same way. A PREPARE the
+authority itself refuses after anchoring it, because the attempt-receipt gate answers `superseded`,
+is settled before the refusal is raised. Only an operation the same call anchored is settled: an
+idempotent re-begin may belong to a live execute, and a transient `begin` failure (a derive error or
+timeout) stays unresolved and retryable as before. The remote adapter also
+implements `adopt_preparation`, delegating to the coordinator without the admissible-generation
+tracker the local adapter keeps (the rest of the remote adapter has none), so a retry generation adopts the
+first generation's MATERIALIZE receipt instead of being refused `provider-conflict`. A retry
+generation after the first still cannot open its module attempt: the receipt gate requires a
+`materialize`/`result_committed` audit row for the current generation, which an adopted
+materialization does not write. That gate is tracked as #3370; until it lands a failed PREPARE is
+not retried, and the job exhausts with nothing left unresolved.
+
+No journal phase, wire field or schema changes.
+
 ### Amendment (2026-10-27): the host formats scratch, the appliance finds a btrfs root, and failures reach the console (#3363)
 
 A live remote PREPARE ended with "did not produce a durable result" and no cause in the log. Three

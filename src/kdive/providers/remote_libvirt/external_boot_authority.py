@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal, Protocol, Self, cast
+from typing import Annotated, Literal, NoReturn, Protocol, Self, cast
 from uuid import UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -75,6 +75,8 @@ _MAX_RECORD_BYTES = 1_048_576
 _MAX_PREPARATION_BYTES = 1_048_576
 _OBSERVATION_NAMESPACE = UUID("9cf0fa94-f250-4e5f-a950-155e7860b692")
 type PriorPower = Literal["running", "inactive"]
+PREPARATION_ABANDONED = "abandoned"
+"""Detail on a PREPARE failure the provider settled: the System's power is restored."""
 type RemoteSystemTeardownPhase = Literal[
     "intent-recorded",
     "domain-validated",
@@ -732,7 +734,10 @@ class RemoteModuleVolumePreparationStore:
 
     @staticmethod
     def _key(request: RemoteModuleVolumePreparationRequestV1) -> str:
-        authority = request.authority
+        return RemoteModuleVolumePreparationStore._authority_key(request.authority)
+
+    @staticmethod
+    def _authority_key(authority: AuthorityPreparationMutationRequestV1) -> str:
         bound = "\0".join(
             (
                 str(authority.system_id),
@@ -1116,9 +1121,39 @@ class RemoteModuleVolumePreparationStore:
         )
         name = f"{key}.prior-power"
         if (existing := self._read(name)) is None:
+            # An owner with no power file is the residue of a crash or a failed clear; it must
+            # not make a later request's differing owner bytes a conflict.
+            with suppress(FileNotFoundError):
+                os.unlink(f"{key}.prior-power-owner", dir_fd=self._root_fd)
+            self._publish(
+                f"{key}.prior-power-owner", self._authority_key(authority).encode("ascii")
+            )
             self._publish(name, observed.encode("ascii"))
             existing = self._read(name)
         return self._decode_prior_power(existing)
+
+    def prior_power_started_by(self, authority: AuthorityPreparationMutationRequestV1) -> bool:
+        """Whether this exact request wrote the activation's prior-power record.
+
+        The record is per activation and outlives a successful PREPARE, so only the request
+        that wrote it may treat it as proof that its own stop was reached.
+        """
+        key = self._terminal_key(
+            authority.system_id, authority.activation_id, authority.run_id, authority.plan_identity
+        )
+        owner = self._read(f"{key}.prior-power-owner")
+        return owner is not None and owner == self._authority_key(authority).encode("ascii")
+
+    def clear_prior_power(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
+        """Forget the record once the System is back in that power, so the next stop re-observes."""
+        key = self._terminal_key(
+            binding.system_id, binding.activation_id, binding.run_id, plan_identity
+        )
+        # The owner goes first: a failure between the two leaves a power file, never an orphan.
+        for suffix in ("prior-power-owner", "prior-power"):
+            with suppress(FileNotFoundError):
+                os.unlink(f"{key}.{suffix}", dir_fd=self._root_fd)
+        os.fsync(self._root_fd)
 
     def prior_power(
         self, binding: ExternalBootActivationBinding, plan_identity: str
@@ -1474,6 +1509,10 @@ class RemoteModulePreparationOperation(Protocol):
 
     async def stop_system(self, admitted: AdmittedRemoteModulePreparation) -> None: ...
 
+    async def restore_system_power(
+        self, admitted: AdmittedRemoteModulePreparation, prior: PriorPower
+    ) -> None: ...
+
     async def execute(
         self, admitted: AdmittedRemoteModulePreparation
     ) -> RemoteModuleTerminalPreparationResponseV1: ...
@@ -1559,11 +1598,19 @@ class DurableRemoteModuleVolumePreparationHost:
         )
 
     def execution_started(self, request: RemoteModuleVolumePreparationRequestV1) -> bool:
-        """Whether an earlier execute already reached the provider for this request."""
+        """Whether an earlier execute already reached the provider for this request.
+
+        A prior power this request recorded counts: it is written ahead of the stop, and a
+        successful abandon clears it, so a crash after the stop leaves a System that must not be
+        refused. A record another request wrote does not count, or a later PREPARE would skip the
+        held-System recheck. A replay of a refused operation whose holders have since cleared is
+        answered ``provider_conflict``, which the host never runs and ADR-0714 counts as a repeat.
+        """
         self._store.reopen_request(request)
         return (
             self._store.reopen_completion(request) is not None
             or self._store.reopen_result(request) is not None
+            or self._store.prior_power_started_by(request.authority)
         )
 
     async def _quiesce_system(self, admitted: AdmittedRemoteModulePreparation) -> None:
@@ -1593,7 +1640,10 @@ class DurableRemoteModuleVolumePreparationHost:
             )
         if result := self._store.reopen_result(request):
             result.validate_for(request.operation)
-        await self._quiesce_system(admitted)
+        try:
+            await self._quiesce_system(admitted)
+        except Exception as failure:
+            await self._raise_abandoned(admitted, failure)
         task = asyncio.create_task(self._host.execute(admitted))
         cancelled, consumed = await _wait_for_owned_child(task)
         if cancelled is not None:
@@ -1608,11 +1658,77 @@ class DurableRemoteModuleVolumePreparationHost:
             raise cancelled from None
         try:
             result = task.result()
+        except Exception as failure:
+            await self._raise_abandoned(admitted, failure)
         except BaseException:
             self._store.publish_failed_completion(request)
             raise
         self._store.publish_result(request, result)
         return result
+
+    async def _raise_abandoned(
+        self, admitted: AdmittedRemoteModulePreparation, failure: Exception
+    ) -> NoReturn:
+        try:
+            settled = await self._abandon(admitted, failure)
+        except BaseException:
+            self._store.publish_failed_completion(admitted.request)
+            raise
+        if settled is failure:
+            raise failure
+        raise settled from failure
+
+    async def _abandon(
+        self, admitted: AdmittedRemoteModulePreparation, failure: Exception
+    ) -> Exception:
+        """Put the System back in its recorded power state, then report the failure as abandoned.
+
+        A restored System leaves no completion behind, so the failure does not latch: the
+        authority settles its journal and the retry derives a fresh attempt. When the restore
+        fails the System's power is unknown, so the latch is kept and the original failure stands.
+        """
+        request = admitted.request
+        authority = request.authority
+        binding = ExternalBootActivationBinding(
+            system_id=str(authority.system_id),
+            run_id=str(authority.run_id),
+            activation_id=str(authority.activation_id),
+        )
+        try:
+            prior = self._store.prior_power(binding, authority.plan_identity)
+            if prior is not None:
+                await self._host.restore_system_power(admitted, prior)
+        except Exception as restore_failure:  # noqa: BLE001 -- any failure keeps the latch
+            logger.error(
+                "remote module preparation abandon could not restore System power: %s: %s",
+                type(restore_failure).__qualname__,
+                restore_failure if isinstance(restore_failure, CategorizedError) else "",
+            )
+            self._store.publish_failed_completion(request)
+            return failure
+        if prior is not None:
+            try:
+                self._store.clear_prior_power(binding, authority.plan_identity)
+            except OSError as clear_failure:
+                logger.error(
+                    "remote module preparation abandon could not clear the prior-power record: %s",
+                    type(clear_failure).__qualname__,
+                )
+        details = dict(failure.details) if isinstance(failure, CategorizedError) else {}
+        # Nothing was stopped when no power was recorded, so a failure before that mutated nothing.
+        details.setdefault(
+            "completion",
+            "failed-after-mutation" if prior is not None else "refused-before-mutation",
+        )
+        details[PREPARATION_ABANDONED] = True
+        return CategorizedError(
+            str(failure) or "remote module preparation failed",
+            category=failure.category
+            if isinstance(failure, CategorizedError)
+            else ErrorCategory.CONFLICT,
+            details=details,
+            terminal=isinstance(failure, CategorizedError) and failure.terminal,
+        )
 
     async def observe_lifecycle(
         self, request: RemoteModuleLifecycleRequestV1
@@ -2510,6 +2626,24 @@ class RemoteExternalBootAuthorityAdapter:
         return await self._executor.run(
             lambda: self._coordinator.observe_preparation(self._preparation_request(request))
         )
+
+    async def adopt_preparation(
+        self,
+        request: AuthorityPreparationMutationRequestV1,
+        predecessor: AuthorityPreparationMutationRequestV1,
+        predecessor_receipt_identity: str,
+        context: AuthorityCommitContextV1,
+    ) -> AuthorityObservationV1:
+        """Adopt an earlier generation's identical receipt instead of repeating the mutation."""
+        self._require_commit_point(cast(AuthorityMutationRequestV1, request), context)
+        receipt = await self._executor.run(
+            lambda: self._coordinator.adopt_preparation(
+                self._preparation_request(request),
+                self._preparation_request(predecessor),
+                predecessor_receipt_identity,
+            )
+        )
+        return self._preparation_observation(receipt)
 
     async def cleanup_subject(self, request: AuthorityMutationRequestV1) -> str:
         binding = _activation_binding(request)
