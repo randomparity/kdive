@@ -58,6 +58,9 @@ class Volume:
         self.capacity = capacity
         self.deleted = False
         self.payload = bytearray()
+        # Ranged uploads (the scratch filesystem) keyed by offset; the rest reads as zero.
+        self.ranges: dict[int, bytes] = {}
+        self.upload_log: list[tuple[int, int]] = []
         self.fail_metadata_read = False
         self.backing_path = f"/var/lib/libvirt/images/{name}"
         self.fail_path = False
@@ -80,8 +83,19 @@ class Volume:
         return [0, self.capacity, len(self.payload)]
 
     def upload(self, stream: object, offset: int, length: int, flags: int = 0) -> int:
-        cast(Stream, stream).volume = self
+        typed = cast(Stream, stream)
+        typed.volume = self
+        typed.offset = offset
+        self.upload_log.append((offset, length))
         return 0
+
+    def window(self, offset: int, length: int) -> bytes:
+        buffer = bytearray(length)
+        for start, blob in [(0, bytes(self.payload)), *self.ranges.items()]:
+            low, high = max(start, offset), min(start + len(blob), offset + length)
+            if low < high:
+                buffer[low - offset : high - offset] = blob[low - start : high - start]
+        return bytes(buffer)
 
     def download(self, stream: object, offset: int, length: int, flags: int = 0) -> int:
         typed_stream = cast(Stream, stream)
@@ -89,7 +103,10 @@ class Volume:
             import libvirt
 
             raise libvirt.libvirtError("download transport failed")
-        typed_stream.download_payload = bytes(self.payload)
+        if self.ranges or (not self.payload and length < self.capacity):
+            typed_stream.download_payload = self.window(offset, length)
+        else:
+            typed_stream.download_payload = bytes(self.payload)
         return 0
 
     def delete(self, flags: int = 0) -> int:
@@ -125,14 +142,20 @@ class Pool:
 
 class Stream:
     volume: Volume
+    offset: int = 0
     download_payload: bytes = b""
     fail_download_stage: str | None = None
 
     def sendAll(  # noqa: N802
         self, handler: Callable[[object, int, object], bytes], opaque: object
     ) -> None:
+        received = bytearray()
         while chunk := handler(self, 1024, opaque):
-            self.volume.payload.extend(chunk)
+            received.extend(chunk)
+        if self.offset == 0 and not self.volume.ranges:
+            self.volume.payload.extend(received)
+        else:
+            self.volume.ranges[self.offset] = bytes(received)
 
     def finish(self) -> int:
         if self.fail_download_stage == "finish":
@@ -234,6 +257,11 @@ class UniqueTrackingWriter(Writer):
         return super().build(operation, entries)
 
 
+SCRATCH_NAME = (
+    "kdive-module-00000000-0000-4000-8000-000000000001-"
+    "00000000-0000-4000-8000-000000000002-" + "a" * 32 + "-scratch.ext4"
+)
+
 SOURCE_NAME = (
     "kdive-module-00000000-0000-4000-8000-000000000001-"
     "00000000-0000-4000-8000-000000000002-" + "a" * 32 + "-source.ext4"
@@ -242,6 +270,12 @@ SOURCE_NAME = (
 
 def _detached_source() -> AttachmentInspection:
     return AttachmentInspection(True, True, False, frozenset({("systems", SOURCE_NAME)}))
+
+
+def _detached_all() -> AttachmentInspection:
+    return AttachmentInspection(
+        True, True, False, frozenset({("systems", SOURCE_NAME), ("systems", SCRATCH_NAME)})
+    )
 
 
 def _kill_upload(conn: Conn) -> Callable[[], None]:

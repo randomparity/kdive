@@ -189,6 +189,9 @@ class FakeStorageVolume:
         self._state = state
         self._pool = pool
         self._data = b""
+        # Ranged uploads past offset 0 land here, keyed by offset, so a sparse multi-GiB volume
+        # stays a few small blobs. Everything outside every blob reads as zero.
+        self._ranges: dict[int, bytes] = {}
 
     def name(self) -> str:
         return self._state.name
@@ -205,16 +208,39 @@ class FakeStorageVolume:
 
     def upload(self, stream: object, offset: int, length: int, flags: int = 0) -> int:
         del flags
-        if not isinstance(stream, FakeStorageStream) or offset != 0 or length < 0:
+        if (
+            not isinstance(stream, FakeStorageStream)
+            or offset < 0
+            or length < 0
+            or offset + length > self._state.capacity_bytes
+        ):
             raise libvirt_error(libvirt.VIR_ERR_INVALID_ARG)
-        stream.begin_upload(self)
+        stream.begin_upload(self, offset, length)
         return 0
 
+    def _commit_upload(self, offset: int, data: bytes) -> None:
+        if offset == 0 and not self._ranges:
+            self._data = data
+            return
+        self._ranges[offset] = data
+
+    def _read_range(self, offset: int, length: int) -> bytes:
+        buffer = bytearray(length)
+        for start, blob in [(0, self._data), *self._ranges.items()]:
+            low, high = max(start, offset), min(start + len(blob), offset + length)
+            if low < high:
+                buffer[low - offset : high - offset] = blob[low - start : high - start]
+        return bytes(buffer)
+
     def download(self, stream: object, offset: int, length: int, flags: int = 0) -> int:
-        del length, flags
+        del flags
         if not isinstance(stream, FakeStorageStream) or offset != 0:
             raise libvirt_error(libvirt.VIR_ERR_INVALID_ARG)
-        stream.begin_download(self._data)
+        if self._ranges or (not self._data and length < self._state.capacity_bytes):
+            # A ranged read answers with exactly the requested window, zero outside any upload.
+            stream.begin_download(self._read_range(offset, length))
+        else:
+            stream.begin_download(self._data)
         return 0
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt binding name
@@ -347,12 +373,16 @@ class FakeStorageStream:
 
     def __init__(self) -> None:
         self._upload_target: FakeStorageVolume | None = None
+        self._upload_offset = 0
+        self._upload_length = 0
         self._download_data: bytes | None = None
         self._sent = bytearray()
         self._aborted = False
 
-    def begin_upload(self, volume: FakeStorageVolume) -> None:
+    def begin_upload(self, volume: FakeStorageVolume, offset: int = 0, length: int = 0) -> None:
         self._upload_target = volume
+        self._upload_offset = offset
+        self._upload_length = length
 
     def begin_download(self, data: bytes) -> None:
         self._download_data = data
@@ -373,7 +403,7 @@ class FakeStorageStream:
         if self._aborted:
             raise libvirt_error(libvirt.VIR_ERR_OPERATION_INVALID)
         if self._upload_target is not None:
-            self._upload_target._data = bytes(self._sent)
+            self._upload_target._commit_upload(self._upload_offset, bytes(self._sent))
         return 0
 
     def abort(self) -> int:

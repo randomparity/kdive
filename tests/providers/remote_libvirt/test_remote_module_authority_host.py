@@ -871,3 +871,30 @@ def test_prior_power_record_is_first_write_wins_and_validated(tmp_path: Path) ->
     assert store.record_prior_power(authority, "running") == "running"
     assert store.record_prior_power(authority, "inactive") == "running"
     store.close()
+
+
+@pytest.mark.anyio
+async def test_missing_result_logs_the_bounded_console_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from kdive.providers.remote_libvirt import remote_module_authority_host as host_module
+    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+        ApplianceOutcome,
+    )
+
+    tail = "phase=accepted\nerror_code=FILESYSTEM_FAILURE\n"
+    monkeypatch.setattr(
+        host_module, "run_or_adopt_appliance", lambda *_args: ApplianceOutcome(None, tail, False)
+    )
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+
+    with (
+        caplog.at_level("WARNING", logger=host_module.__name__),
+        pytest.raises(CategorizedError, match="durable result"),
+    ):
+        await stack.durable.execute(stack.request)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("error_code=FILESYSTEM_FAILURE" in message for message in messages)
+    assert any(f"system={stack.request.operation.system_id}" in message for message in messages)
+    stack.close()

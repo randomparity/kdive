@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import stat
 import tempfile
@@ -34,6 +35,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationResponseV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    ApplianceOutcome,
     ApplianceRequest,
     run_or_adopt_appliance,
     teardown_remote_module_appliance,
@@ -77,6 +79,8 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 
+_LOG = logging.getLogger(__name__)
+
 
 def _refused(message: str) -> CategorizedError:
     return CategorizedError(
@@ -88,6 +92,18 @@ def _refused(message: str) -> CategorizedError:
 
 def _stop_failed(message: str) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+
+def _log_missing_result(operation: RemoteModuleOperationV1, outcome: ApplianceOutcome) -> None:
+    """Record the appliance's bounded, redacted, protocol-filtered console tail."""
+    _LOG.warning(
+        "remote module appliance produced no durable result: system=%s run=%s "
+        "timed_out=%s console_tail=%r",
+        operation.system_id,
+        operation.run_id,
+        outcome.timed_out,
+        outcome.console_tail,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,6 +438,7 @@ class ConcreteRemoteModuleAuthorityHost:
         appliance_request = self._appliance_request(operation, volumes, root, deadline)
         outcome = run_or_adopt_appliance(self._configuration.appliance.appliance, appliance_request)
         if outcome.result is None:
+            _log_missing_result(operation, outcome)
             raise CategorizedError(
                 "remote module appliance did not produce a durable result",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -624,6 +641,7 @@ class ConcreteRemoteModuleAuthorityHost:
         appliance_request = self._appliance_request(restore, volumes, root, deadline)
         outcome = run_or_adopt_appliance(self._configuration.appliance.appliance, appliance_request)
         if outcome.result is None:
+            _log_missing_result(restore, outcome)
             raise RuntimeError("remote module restore did not produce durable terminal evidence")
         result = outcome.result
         result.validate_for(restore)
