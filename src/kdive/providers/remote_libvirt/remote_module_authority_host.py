@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import libvirt
 
@@ -24,6 +25,7 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager, OpaqueProviderRef
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
+    PriorPower,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
     RemoteModuleSystemTeardownRequestV1,
@@ -72,7 +74,20 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     recovery_attempt_volumes,
     render_module_volume_name,
 )
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+
+def _refused(message: str) -> CategorizedError:
+    return CategorizedError(
+        message,
+        category=ErrorCategory.CONFLICT,
+        details={"completion": "refused-before-mutation"},
+    )
+
+
+def _stop_failed(message: str) -> CategorizedError:
+    return CategorizedError(message, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,13 +365,11 @@ class ConcreteRemoteModuleAuthorityHost:
             invocation_deadline=deadline,
         )
 
-    def _execute(
+    def _preflight(
         self, admitted: AdmittedRemoteModulePreparation
-    ) -> RemoteModuleTerminalPreparationResponseV1:
-        request = admitted.request
-        deadline = admitted.local_deadline
-        operation = request.operation
-        volumes_config = self._configuration.volumes
+    ) -> tuple[ExternalBootArtifactStager, PreparedVolume]:
+        """Refuse what can be known without touching the System, before it is stopped."""
+        operation = admitted.request.operation
         appliance_config = self._configuration.appliance
         root = appliance_config.root(operation)
         if (
@@ -364,16 +377,24 @@ class ConcreteRemoteModuleAuthorityHost:
             or root.name != operation.root_volume.key
             or root.digest != operation.root_volume.identity
         ):
-            raise CategorizedError(
-                "remote module fixed appliance or root identity changed",
-                category=ErrorCategory.CONFLICT,
-            )
-        stager = volumes_config.artifact_stager
+            raise _refused("remote module fixed appliance or root identity changed")
+        stager = self._configuration.volumes.artifact_stager
         if stager is None:
             raise CategorizedError(
                 "remote module artifact staging is not configured",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
+        self._require_deadline(admitted.local_deadline)
+        return stager, root
+
+    def _execute(
+        self, admitted: AdmittedRemoteModulePreparation
+    ) -> RemoteModuleTerminalPreparationResponseV1:
+        request = admitted.request
+        deadline = admitted.local_deadline
+        operation = request.operation
+        volumes_config = self._configuration.volumes
+        stager, root = self._preflight(admitted)
         with tempfile.TemporaryDirectory(
             prefix="kdive-remote-module-", dir=volumes_config.work_dir
         ) as raw:
@@ -470,6 +491,56 @@ class ConcreteRemoteModuleAuthorityHost:
         self, admitted: AdmittedRemoteModulePreparation
     ) -> RemoteModuleTerminalPreparationResponseV1:
         return await self._executor.run(lambda: self._execute(admitted))
+
+    def _system_domain(self, admitted: AdmittedRemoteModulePreparation) -> Any:
+        system_id = UUID(admitted.request.operation.system_id)
+        try:
+            return self._configuration.appliance.appliance.lookupByName(domain_name_for(system_id))
+        except libvirt.libvirtError as exc:
+            raise _refused("remote System domain could not be read") from exc
+
+    async def observe_system_power(self, admitted: AdmittedRemoteModulePreparation) -> PriorPower:
+        def observe() -> PriorPower:
+            self._preflight(admitted)
+            domain = self._system_domain(admitted)
+            try:
+                return "running" if domain.isActive() else "inactive"
+            except libvirt.libvirtError as exc:
+                raise _refused("remote System power could not be read") from exc
+
+        return await self._executor.run(observe)
+
+    async def stop_system(self, admitted: AdmittedRemoteModulePreparation) -> None:
+        """Destroy a running System and prove it inactive; a no-op for a stopped one.
+
+        ``destroy`` follows the external-boot stop: verified inactivity, not guest cooperation,
+        is the precondition for the appliance. A destroy whose response was lost but whose
+        effect landed is accepted when the domain reads back inactive. Once ``destroy`` has been
+        issued the System's power is no longer known to be unchanged, so a failure after that is
+        an infrastructure failure, not a refusal before mutation.
+        """
+
+        def stop() -> None:
+            domain = self._system_domain(admitted)
+            try:
+                active = bool(domain.isActive())
+            except libvirt.libvirtError as exc:
+                raise _refused("remote System power could not be read") from exc
+            if not active:
+                return
+            self._require_deadline(admitted.local_deadline)
+            try:
+                try:
+                    domain.destroy()
+                except libvirt.libvirtError:
+                    if domain.isActive():
+                        raise
+                if domain.isActive():
+                    raise _stop_failed("remote System domain remained active after destroy")
+            except libvirt.libvirtError as exc:
+                raise _stop_failed("remote System domain could not be stopped") from exc
+
+        await self._executor.run(stop)
 
     @staticmethod
     def _restore_operation(
@@ -874,6 +945,14 @@ class FactoryRemoteModuleAuthorityHost:
     ) -> RemoteModuleTerminalPreparationResponseV1:
         request = admitted.request
         return await self._factory.host(request.authority.plan.architecture).execute(admitted)
+
+    async def observe_system_power(self, admitted: AdmittedRemoteModulePreparation) -> PriorPower:
+        architecture = admitted.request.authority.plan.architecture
+        return await self._factory.host(architecture).observe_system_power(admitted)
+
+    async def stop_system(self, admitted: AdmittedRemoteModulePreparation) -> None:
+        architecture = admitted.request.authority.plan.architecture
+        await self._factory.host(architecture).stop_system(admitted)
 
     async def execute_lifecycle(
         self,

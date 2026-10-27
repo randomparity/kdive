@@ -34,6 +34,10 @@ from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools._common import project_filter as _project_filter
 from kdive.mcp.tools.lifecycle._recovery import iso, provisioning_profile_summary
+from kdive.mcp.tools.lifecycle.systems.conflict_evidence import (
+    RESOLVE_CONFLICT_ACTION,
+    read_conflict_evidence,
+)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -189,6 +193,7 @@ def system_envelope(
     supported_capture_methods: list[str] | None = None,
     failure_job: FailureJobLookup = FAILURE_JOB_NOT_LOOKED_UP,
     run_history: SystemRunHistory | None = None,
+    external_boot_conflict: dict[str, JsonValue] | None = None,
 ) -> ToolResponse:
     """Render a System with recovery context; ``failed`` becomes a failure envelope.
 
@@ -232,6 +237,10 @@ def system_envelope(
         data["supports_traffic_capture"] = supports_traffic_capture
     if supported_capture_methods is not None:
         data["supported_capture_methods"] = list(supported_capture_methods)
+    conflict_actions: list[str] = []
+    if external_boot_conflict is not None:
+        data["external_boot_conflict"] = external_boot_conflict
+        conflict_actions.append(RESOLVE_CONFLICT_ACTION)
     history_actions: list[str] = []
     if run_history is not None:
         data["run_investigation_ids"] = list(run_history.investigation_ids)
@@ -249,7 +258,12 @@ def system_envelope(
     return ToolResponse.success(
         str(system.id),
         system.state.value,
-        suggested_next_actions=["systems.get", "systems.teardown", *history_actions],
+        suggested_next_actions=[
+            "systems.get",
+            "systems.teardown",
+            *conflict_actions,
+            *history_actions,
+        ],
         data=data,
     )
 
@@ -465,6 +479,7 @@ async def get_system(
             active_sessions = await active_session_ids_for_system(conn, system.id)
             active_run = await _active_run_for_system(conn, system.id)
             run_history = await _run_history_for_system(conn, system.id, system.project)
+            external_boot_conflict = await read_conflict_evidence(conn, ctx, system)
             # In-memory capability read (no libvirt round-trip): whether this System's provider can
             # snapshot/restore, surfaced so an agent discovers support before calling the tools.
             # A System whose provider kind is no longer registered (disabled/uncomposed) cannot
@@ -502,6 +517,7 @@ async def get_system(
             active_debug_session_ids=active_sessions,
             active_run=active_run,
             run_history=run_history,
+            external_boot_conflict=external_boot_conflict,
             supports_snapshots=supports_snapshots,
             supports_traffic_capture=supports_traffic_capture,
             supported_capture_methods=supported_capture_methods,

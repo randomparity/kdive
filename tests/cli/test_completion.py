@@ -36,7 +36,7 @@ def test_tree_root_lists_subcommands_and_top_flag() -> None:
 def test_tree_specialized_handler_verb_flags() -> None:
     tree = _tree()
     assert "list" in tree["resources"]
-    assert set(tree["resources list"]) == {"--help", "--json", "--kind"}
+    assert set(tree["resources list"]) == {"--help", "--json", "--kind", "--limit", "--cursor"}
 
 
 def test_tree_generic_descriptor_verb_reachable_with_its_flags() -> None:
@@ -149,6 +149,8 @@ def test_bash_script_resolves_groups_verbs_flags(bash_script: str) -> None:
         "--help",
         "--json",
         "--kind",
+        "--limit",
+        "--cursor",
     }
     # A positional argument value leaves the path unchanged, so the verb's flags still complete.
     assert "--json" in _bash_complete(
@@ -164,5 +166,7 @@ def test_zsh_script_resolves_groups_verbs_flags(zsh_script: str) -> None:
         "--help",
         "--json",
         "--kind",
+        "--limit",
+        "--cursor",
     }
     assert "--json" in _zsh_complete(zsh_script, ["kdivectl", "resources", "describe", "res-1", ""])
