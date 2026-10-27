@@ -235,6 +235,35 @@ The stop is provider-private; no journal phase or wire field changes. Restoring 
 running System after a failed PREPARE is not part of this amendment (#3348): until it lands, a
 failed PREPARE leaves that System stopped.
 
+### Amendment (2026-10-27): the host formats scratch, the appliance finds a btrfs root, and failures reach the console (#3363)
+
+A live remote PREPARE ended with "did not produce a durable result" and no cause in the log. Three
+gaps in this record's own contract explained it:
+
+- **Scratch was never formatted.** The record said the host provides "a newly created
+  capacity-bounded scratch volume" and the appliance mounts it as ext4, but nothing made it ext4. The
+  host now formats it when it creates the volume: it builds a sparse ext4 image with `mkfs.ext4`
+  and uploads only the allocated extents, with the block that holds the superblock last. A retry
+  never rewrites a scratch whose first block carries the ext4 magic, because it may hold a durable
+  phase. A zero first block proves no phase was ever written (the superblock goes last), so the
+  retry finishes the format after the same detachment proof a volume delete needs; any other first
+  block is a conflict and nothing is written. The result reader is unchanged: a freshly formatted
+  scratch has no `result-v1.json`, which it already reports as absent.
+- **Root discovery missed btrfs subvolume layouts.** The appliance accepted a candidate only when
+  its top level held `lib/modules`. Fedora images keep the System root in a `root` subvolume under
+  an empty top level, so root discovery failed before scratch was mounted. For btrfs the appliance
+  now also tries the `root` subvolume of a candidate whose top level has no `lib/modules`, and the
+  exactly-one-match rule across all candidates is unchanged.
+- **The appliance wrote nothing to its console.** It now writes `phase=accepted` once the operation
+  document is read, and `error_code=<code>` for the failure it reports. These are the keys the host
+  console filter already keeps. When no result is read, the host logs the bounded, redacted,
+  filtered console tail.
+
+The appliance image changes with `appliance.py`, so its installed manifest digest, which is the
+appliance identity in operation and result documents, changes too; it must be rebuilt and
+re-installed (`deploy/remote_module_appliance/README.md`, "Rebuilding the image"). No wire,
+document schema or journal phase changes.
+
 ## Consequences
 
 - Remote offline mutation gains one operator-provisioned appliance image per supported hypervisor

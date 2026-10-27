@@ -88,3 +88,22 @@ acquisition and again from the installed read-only file before the artifact is u
 On a host where SELinux is enforcing or permissive, the role also labels the install tree
 `virt_content_t` through a persistent fcontext rule and `restorecon`, then reads the labels back,
 so the confined qemu can open the appliance kernel and initramfs.
+
+## Rebuilding the image
+
+Any change to `appliance.py` or `build_image.py` changes the installed manifest digest, which is the
+appliance identity stored in every operation and result document, so an installed host serves the
+old behaviour until the bundle is rebuilt and installed again. To rebuild:
+
+1. Prepare the runtime root again with the same closed library set (the kernel, Python, `depmod` and
+   their libraries as described under "Image v1"); the root is an input, not part of this repository.
+2. Run `build_image.py --architecture <arch> --kernel <kernel> --runtime-root <root> --output <bundle>`
+   for each architecture the host serves.
+3. Point `remote_libvirt_module_appliance_images` (url and `sha256` of the new bundle, x86_64 then
+   ppc64le) at the new bundle and apply the `remote_libvirt_module_appliance` role, or install the
+   bundle at the role's install directory by hand on a lab host.
+4. Confirm the authority host reports the new manifest digest before relying on a PREPARE.
+
+Console contract: the appliance writes `phase=accepted` after reading its operation document and
+`error_code=<stable code>` for a failure, to the kernel console; nothing else. The host keeps only
+those whitelisted keys.
