@@ -537,14 +537,32 @@ async def _published_row(
         await asyncio.sleep(_POLL_S)
 
 
-async def _resolve(system: AuthoritySystem, resolve: ToolCall, identities: list[str]) -> str:
+async def _await_internal_job(db_url: str, job_id: str) -> None:
+    """Wait for a platform-internal job to succeed, read from the database.
+
+    ``resolve_recovery_orphan`` is in ``PLATFORM_INTERNAL_JOB_KINDS``: no tenant-facing job tool
+    exposes it, so ``jobs.wait`` never reports it terminal.
+    """
+    deadline = time.monotonic() + ROW_DEADLINE_S
+    while True:
+        state, _attempt = await job_claim(db_url, job_id)
+        if state == "succeeded":
+            return
+        assert state not in {"failed", "canceled"}, f"resolve-orphan job {job_id} is {state}"
+        assert time.monotonic() < deadline, f"resolve-orphan job {job_id} is still {state}"
+        await asyncio.sleep(_POLL_S)
+
+
+async def _resolve(
+    system: AuthoritySystem, resolve: ToolCall, db_url: str, identities: list[str]
+) -> str:
     """Admit and drain one exact-set ``delete`` disposition; return its job id."""
     admitted = await resolve(
         "ops.resolve_recovery_orphan",
         {"system_id": system.system_id, "object_identities": identities, "disposition": "delete"},
     )
     job = ok(admitted, "resolve-orphan").object_id
-    await drain_job(system.op, "resolve-orphan", job)
+    await _await_internal_job(db_url, job)
     return job
 
 
@@ -577,7 +595,7 @@ async def _resolve_published(
         if not identities:
             failure.add_note("no owned quarantine row observed after the abort")
             return
-        await _resolve(system, resolve, identities)
+        await _resolve(system, resolve, db_url, identities)
     except Exception as cleanup:  # noqa: BLE001 - recorded on the primary failure below
         failure.add_note(f"owned quarantine residue {identities}: {type(cleanup).__name__}")
 
@@ -637,7 +655,7 @@ async def quarantined_orphan(
         assert not (await asyncio.to_thread(receipt_state, system_id, activation_id)).present
         quarantined = await quarantine_rows(db_url)
         assert quarantined[row_id]["status"] == "quarantined"
-        resolved_by = await _resolve(system, resolve, [str(row["object_identity"])])
+        resolved_by = await _resolve(system, resolve, db_url, [str(row["object_identity"])])
     except BaseException as failure:
         if aborted:
             await _resolve_published(system, resolve, db_url, (before, activation_id), failure)

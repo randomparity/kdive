@@ -377,7 +377,7 @@ def _fake_arm_b(
         fake.arrive()
         return ToolResponse(object_id="release-job", status="queued")
 
-    claims = iter([("running", 1), ("succeeded", 2)])
+    claims = iter([("running", 1), ("succeeded", 2), ("succeeded", 1), ("succeeded", 1)])
     patches: dict[str, Any] = {
         "require_evidence_read_access": _async(),
         "activate": _async(_activation()),
@@ -614,3 +614,22 @@ def test_activation_forwards_the_kernel_tree_and_evidence_dir(
         )
     )
     assert (seen["kernel_tree"], seen["evidence_dir"]) == (Path("/tree"), Path("/evidence"))
+
+
+@pytest.mark.parametrize("state", ["failed", "canceled"])
+def test_an_internal_job_that_did_not_succeed_fails_the_arm(
+    monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    monkeypatch.setattr(authority_faults, "job_claim", _async((state, 1)))
+    with pytest.raises(AssertionError, match=state):
+        asyncio.run(authority_faults._await_internal_job("db", "job"))
+
+
+def test_an_internal_job_is_read_from_the_database_until_it_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims = iter([("queued", 1), ("running", 1), ("succeeded", 1)])
+    monkeypatch.setattr(authority_faults, "job_claim", lambda *_a: _async(next(claims))())
+    monkeypatch.setattr(authority_faults, "_POLL_S", 0.0)
+    asyncio.run(authority_faults._await_internal_job("db", "job"))
+    assert next(claims, None) is None
