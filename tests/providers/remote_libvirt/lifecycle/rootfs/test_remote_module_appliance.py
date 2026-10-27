@@ -1106,7 +1106,10 @@ def test_teardown_requires_absence_and_all_detach_proofs() -> None:
 @pytest.mark.parametrize(
     ("old", "new"),
     [
-        ("<cmdline>console=hvc0 panic=-1</cmdline>", "<cmdline>console=ttyS0</cmdline>"),
+        (
+            "<cmdline>console=hvc0 panic=-1 PYTHONHASHSEED=0</cmdline>",
+            "<cmdline>console=ttyS0</cmdline>",
+        ),
         ("<on_poweroff>destroy</on_poweroff>", "<on_poweroff>restart</on_poweroff>"),
         ("<on_crash>destroy</on_crash>", "<on_crash>preserve</on_crash>"),
         ("<on_reboot>destroy</on_reboot>", ""),

@@ -34,7 +34,9 @@ _MAX_IDENTITY_COMPONENT = (1 << 64) - 1
 _MAX_PATH_IDENTITIES = 4096
 
 # Kernel command line of the direct-boot appliance; domain-v1-<arch>.xml carries the same value.
-APPLIANCE_KERNEL_CMDLINE = "console=hvc0 panic=-1"
+# PYTHONHASHSEED reaches /init as an environment variable: the default qemu64 guest has no RDRAND,
+# so without it Python cannot seed its hash and the init dies before it can report anything.
+APPLIANCE_KERNEL_CMDLINE = "console=hvc0 panic=-1 PYTHONHASHSEED=0"
 
 _NORMALIZED_APPLIANCE_DEVICES = {
     "x86_64": (

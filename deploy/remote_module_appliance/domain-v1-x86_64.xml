@@ -6,7 +6,7 @@
     <type arch="x86_64" machine="q35">hvm</type>
     <kernel>/var/lib/kdive/remote-module-appliance/v1/x86_64/image/vmlinuz</kernel>
     <initrd>/var/lib/kdive/remote-module-appliance/v1/x86_64/image/initramfs.cpio</initrd>
-    <cmdline>console=hvc0 panic=-1</cmdline>
+    <cmdline>console=hvc0 panic=-1 PYTHONHASHSEED=0</cmdline>
   </os>
   <features><acpi/></features>
   <clock offset="utc"/>
