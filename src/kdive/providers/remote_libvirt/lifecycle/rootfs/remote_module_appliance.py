@@ -274,6 +274,20 @@ def _domain(
     return domain
 
 
+def _domain_running(domain: ApplianceDomain, request: ApplianceRequest, deadline: float) -> bool:
+    """Whether the transient appliance still exists and runs.
+
+    The console stream of a finished domain keeps answering "would block" instead of reaching
+    end of file, so the idle wait ends only when the domain is gone, not after the full timeout.
+    """
+    try:
+        return bool(request.executor.call(domain.isActive, deadline))
+    except libvirt.libvirtError as exc:
+        if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+            return False
+        raise
+
+
 def _read_console(
     conn: ApplianceConn,
     domain: ApplianceDomain,
@@ -305,6 +319,8 @@ def _read_console(
         while request.monotonic() < deadline:
             chunk = request.executor.call(lambda: stream.recv(4096), deadline)
             if chunk == -2:
+                if not _domain_running(domain, request, deadline):
+                    break
                 remaining = deadline - request.monotonic()
                 if remaining > 0:
                     time.sleep(min(0.01, remaining))

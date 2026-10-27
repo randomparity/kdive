@@ -624,6 +624,49 @@ def test_console_timeout_uses_fresh_bounded_deadline_for_abort() -> None:
     assert conn.domain is not None and conn.domain.destroyed
 
 
+def test_finished_domain_ends_the_console_wait_instead_of_timing_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FinishedConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = Domain(xml, active=False)
+            return self.domain
+
+    clock = Clock()
+    conn = FinishedConn([-2] * 50, clock)
+    delays: list[float] = []
+    monkeypatch.setattr(remote_module_appliance.time, "sleep", delays.append)
+
+    outcome = run_or_adopt_appliance(conn, request(clock, result=success_result()))
+
+    assert not outcome.timed_out
+    assert outcome.result is not None
+    assert delays == []
+    assert conn.domain is not None and not conn.domain.destroyed
+
+
+def test_vanished_domain_also_ends_the_console_wait() -> None:
+    class VanishedDomain(Domain):
+        def isActive(self) -> int:  # noqa: N802
+            raise libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
+
+    class VanishedConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = VanishedDomain(xml)
+            return self.domain
+
+    clock = Clock()
+
+    outcome = run_or_adopt_appliance(
+        VanishedConn([-2] * 50, clock), request(clock, result=success_result())
+    )
+
+    assert not outcome.timed_out
+    assert outcome.result is not None
+
+
 def test_would_block_does_not_end_console_before_later_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
