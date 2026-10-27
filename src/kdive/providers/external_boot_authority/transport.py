@@ -419,6 +419,21 @@ def _error(category: str) -> bytes:
     return _canonical_json({"category": category, "status": "error"})
 
 
+def _log_module_completion(operation: str, exc: CategorizedError) -> None:
+    """Leave the cause on the authority journal; only the category crosses the wire.
+
+    Logs the type and kdive's own message, not the traceback: its cause chain can hold
+    provider output (ADR-0707).
+    """
+    _log.error(
+        "authority transport %s ended %s: %s: %s",
+        operation,
+        exc.details.get("completion"),
+        type(exc).__qualname__,
+        exc,
+    )
+
+
 def _service_category(category: str) -> str:
     return {
         "journal_conflict": "journal-conflict",
@@ -485,6 +500,7 @@ async def _dispatch(
         except AuthorityServiceError as exc:
             return _error(_service_category(exc.category))
         except CategorizedError as exc:
+            _log_module_completion(operation, exc)
             if exc.details.get("completion") == "failed-after-mutation":
                 return _error("remote-module-failed")
             if exc.details.get("completion") == "refused-before-mutation":
@@ -504,8 +520,11 @@ async def _dispatch(
         except AuthorityServiceError as exc:
             return _error(_service_category(exc.category))
         except CategorizedError as exc:
+            _log_module_completion(operation, exc)
             if exc.details.get("completion") == "failed-after-mutation":
                 return _error("remote-module-failed")
+            if exc.details.get("completion") == "refused-before-mutation":
+                return _error("remote-module-refused")
             return _error("provider-conflict")
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
             _log.exception("authority transport %s failed unexpectedly", operation)

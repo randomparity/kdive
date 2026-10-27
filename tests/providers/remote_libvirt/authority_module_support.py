@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 from kdive.providers.external_boot_authority.protocol import AuthorityPreparationMutationRequestV1
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    PriorPower,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
     RemoteModuleVolumePreparationResponseV1,
@@ -145,3 +146,13 @@ def _terminal_response(
             authority_identity=RemoteModuleRecoveryRefV2.identity_for_authority(authority_ref),
         ),
     )
+
+
+class InactiveSystemHost:
+    """Preparation-host stub whose System is already stopped, so quiescing is a no-op."""
+
+    async def observe_system_power(self, admitted: object) -> PriorPower:
+        return "inactive"
+
+    async def stop_system(self, admitted: object) -> None:
+        return None

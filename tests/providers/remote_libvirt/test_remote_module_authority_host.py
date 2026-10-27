@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import libvirt
 import pytest
 from pydantic import SecretStr
 
@@ -18,6 +19,7 @@ from kdive.db.remote_module_attempt_obligations import (
     ModuleAttemptTerminalEvidence,
     ModuleAttemptWorkerWriteContext,
 )
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
@@ -26,6 +28,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityPreparationMutationRequestV1,
 )
+from kdive.providers.ports.external_boot import ExternalBootActivationBinding
 from kdive.providers.remote_libvirt.authority_client import (
     RemoteModuleAuthorityAdapter,
     module_completion,
@@ -69,13 +72,17 @@ from kdive.providers.remote_libvirt.remote_module_authority_host import (
     RemoteModuleAuthorityHostFactory,
     load_installed_remote_module_appliance,
 )
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.remote_module_authority_preparation import (
     execute_remote_module_lifecycle_on_authority_host,
 )
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
+    UUID1,
     Clock,
+    Domain,
     Executor,
+    libvirt_error,
 )
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     Conn as ApplianceConn,
@@ -295,6 +302,56 @@ class _Identity:
         return None
 
 
+class _SystemDomain(Domain):
+    """The System's own libvirt domain: ``destroy`` really stops it."""
+
+    def __init__(self, *, active: bool) -> None:
+        super().__init__("<domain/>", active=active, persistent=True)
+
+    def destroy(self) -> int:
+        self.destroyed = True
+        self.active = False
+        return 0
+
+
+class _LostResponseDomain(_SystemDomain):
+    def destroy(self) -> int:
+        super().destroy()
+        raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+
+class _StuckDomain(_SystemDomain):
+    def destroy(self) -> int:
+        self.destroyed = True
+        raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+
+class _IgnoredDestroyDomain(_SystemDomain):
+    def destroy(self) -> int:
+        self.destroyed = True
+        return 0
+
+
+class _SystemConn(ApplianceConn):
+    """Appliance connection that also serves the System domain and notes when it is created."""
+
+    def __init__(self, *args: Any, system: _SystemDomain | None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.system = system
+        self.created_while_system_active: list[bool] = []
+
+    def lookupByName(self, name: str) -> Any:  # noqa: N802
+        if name == domain_name_for(UUID(UUID1)):
+            if self.system is None:
+                raise libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
+            return self.system
+        return super().lookupByName(name)
+
+    def createXML(self, xml: str, flags: int = 0) -> Any:  # noqa: N802
+        self.created_while_system_active.append(bool(self.system and self.system.active))
+        return super().createXML(xml, flags)
+
+
 def _result(operation: RemoteModuleOperationV1) -> RemoteModuleResultV1:
     return RemoteModuleResultV1(
         status="success",
@@ -358,7 +415,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
     )
     storage = StorageConn()
     clock = Clock()
-    appliance = ApplianceConn([], clock)
+    appliance = _SystemConn([], clock, system=_SystemDomain(active=False))
     durable_result = _result(operation)
     current_result = [durable_result]
 
@@ -585,3 +642,232 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
         assert restored.operation.evidence.identity == reaped.operation.evidence.identity
     restarted_store.close()
     executor.shutdown()
+
+
+class _Quiesce:
+    """A concrete host over fakes whose attachment inspection tracks the System's power."""
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        system: _SystemDomain | None,
+        *,
+        staging: bool = True,
+        appliance_digest: str | None = None,
+        deadline: float = 10_000.0,
+    ) -> None:
+        self.request = _request()
+        operation = self.request.operation
+        names = [
+            render_module_volume_name(
+                operation.system_id, operation.run_id, operation.operation_nonce, purpose
+            )
+            for purpose in ("source.ext4", "scratch.ext4")
+        ]
+        detached = AttachmentInspection(
+            system_shut_off=True,
+            exclusive=True,
+            appliance_present=False,
+            detached_volumes=frozenset(("systems", name) for name in names),
+        )
+        self.storage = StorageConn()
+        clock = self.clock = Clock()
+        self.appliance = _SystemConn([], clock, system=system)
+
+        def inspect() -> AttachmentInspection:
+            if system is not None and system.active:
+                raise CategorizedError("owning System is active", category=ErrorCategory.CONFLICT)
+            return detached
+
+        volume_config = RemoteModuleVolumePreparation(
+            storage=self.storage,
+            pool_name="systems",
+            entries=(),
+            writer=_Writer(tmp_path / "source.ext4"),
+            inspect_attachments=lambda identity_port, present_attempt_volumes=None: detached,
+            work_dir=tmp_path,
+            artifact_stager=_Stager() if staging else None,
+        )
+        appliance_config = RemoteModuleApplianceExecution(
+            appliance=self.appliance,
+            architecture="x86_64",
+            emulator_path="/usr/bin/qemu-system-x86_64",
+            memory_kib=262_144,
+            vcpus=1,
+            appliance_volume="appliance-x86_64.qcow2",
+            appliance_image_digest=appliance_digest or operation.appliance_image_digest,
+            root=lambda _operation: PreparedVolume(
+                "systems",
+                operation.root_volume.key,
+                operation.system_id,
+                operation.run_id,
+                operation.operation_nonce,
+                "root",
+                operation.root_volume.identity,
+                4096,
+            ),
+            read_scratch_result=lambda volume, deadline: _result(operation).to_wire_bytes(),
+            inspect_attachments=inspect,
+            secret_registry=SecretRegistry(),
+            deadline_executor=Executor(),
+            monotonic=clock,
+        )
+        self.executor = RemoteModulePreparationExecutor()
+        host = ConcreteRemoteModuleAuthorityHost(
+            RemoteModuleAuthorityHostConfiguration(volume_config, appliance_config, _Identity()),
+            self.executor,
+        )
+        evidence_root = tmp_path / "evidence"
+        evidence_root.mkdir(mode=0o700)
+        self.store = RemoteModuleVolumePreparationStore(evidence_root)
+        self.store.stage(self.request, deadline)
+        self.durable = DurableRemoteModuleVolumePreparationHost(self.store, host)
+
+    def prior_power(self) -> str | None:
+        authority = self.request.authority
+        binding = ExternalBootActivationBinding(
+            system_id=str(authority.system_id),
+            run_id=str(authority.run_id),
+            activation_id=str(authority.activation_id),
+        )
+        return self.store.prior_power(binding, authority.plan_identity)
+
+    def close(self) -> None:
+        self.store.close()
+        self.executor.shutdown()
+
+
+@pytest.mark.anyio
+async def test_running_system_is_recorded_then_stopped_before_the_appliance(
+    tmp_path: Path,
+) -> None:
+    system = _SystemDomain(active=True)
+    stack = _Quiesce(tmp_path, system)
+    response = await stack.durable.execute(stack.request)
+
+    assert isinstance(response, RemoteModuleTerminalPreparationResponseV1)
+    assert system.destroyed and not system.active
+    assert stack.prior_power() == "running"
+    assert stack.appliance.created_while_system_active == [False]
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_stopped_system_is_recorded_inactive_and_never_destroyed(tmp_path: Path) -> None:
+    system = _SystemDomain(active=False)
+    stack = _Quiesce(tmp_path, system)
+    await stack.durable.execute(stack.request)
+
+    assert not system.destroyed
+    assert stack.prior_power() == "inactive"
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_retry_after_the_stop_landed_keeps_the_recorded_running_power(
+    tmp_path: Path,
+) -> None:
+    """The first worker died after the destroy; the retry finds an inactive domain."""
+    system = _SystemDomain(active=False)
+    stack = _Quiesce(tmp_path, system)
+    stack.store.record_prior_power(stack.request.authority, "running")
+    await stack.durable.execute(stack.request)
+
+    assert stack.prior_power() == "running"
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_destroy_whose_response_was_lost_is_accepted_when_the_domain_is_inactive(
+    tmp_path: Path,
+) -> None:
+    system = _LostResponseDomain(active=True)
+    stack = _Quiesce(tmp_path, system)
+    response = await stack.durable.execute(stack.request)
+
+    assert isinstance(response, RemoteModuleTerminalPreparationResponseV1)
+    assert stack.appliance.created_while_system_active == [False]
+    stack.close()
+
+
+def _assert_nothing_started(stack: _Quiesce) -> None:
+    assert stack.appliance.created_flags is None
+    assert stack.storage.pool.volumes == {}
+    assert stack.store.reopen_completion(stack.request) is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("domain_type", [_StuckDomain, _IgnoredDestroyDomain])
+async def test_system_that_survives_destroy_is_not_reported_as_refused_before_mutation(
+    tmp_path: Path, domain_type: type[_SystemDomain]
+) -> None:
+    """Once destroy was issued the System's power may have changed, so it is no refusal."""
+    system = domain_type(active=True)
+    stack = _Quiesce(tmp_path, system)
+    with pytest.raises(CategorizedError, match="System domain") as failed:
+        await stack.durable.execute(stack.request)
+
+    assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert failed.value.details == {}
+    assert stack.prior_power() == "running"
+    _assert_nothing_started(stack)
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_missing_system_domain_is_refused_before_any_mutation(tmp_path: Path) -> None:
+    stack = _Quiesce(tmp_path, None)
+    with pytest.raises(CategorizedError, match="could not be read") as refused:
+        await stack.durable.execute(stack.request)
+
+    assert refused.value.details == {"completion": "refused-before-mutation"}
+    assert stack.prior_power() is None
+    _assert_nothing_started(stack)
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_preflight_refusal_leaves_a_running_system_running(tmp_path: Path) -> None:
+    system = _SystemDomain(active=True)
+    stack = _Quiesce(tmp_path, system, staging=False)
+    with pytest.raises(CategorizedError, match="staging is not configured"):
+        await stack.durable.execute(stack.request)
+
+    assert system.active and not system.destroyed
+    assert stack.prior_power() is None
+    _assert_nothing_started(stack)
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_changed_appliance_identity_is_refused_before_the_stop(tmp_path: Path) -> None:
+    system = _SystemDomain(active=True)
+    stack = _Quiesce(tmp_path, system, appliance_digest="sha256:" + "f" * 64)
+    with pytest.raises(CategorizedError, match="identity changed") as refused:
+        await stack.durable.execute(stack.request)
+
+    assert refused.value.details == {"completion": "refused-before-mutation"}
+    assert system.active and not system.destroyed
+    _assert_nothing_started(stack)
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_expired_deadline_leaves_a_running_system_running(tmp_path: Path) -> None:
+    system = _SystemDomain(active=True)
+    stack = _Quiesce(tmp_path, system, deadline=0.5)
+    stack.clock.value = 1.0
+    with pytest.raises(TimeoutError):
+        await stack.durable.execute(stack.request)
+
+    assert system.active and not system.destroyed
+    _assert_nothing_started(stack)
+    stack.close()
+
+
+def test_prior_power_record_is_first_write_wins_and_validated(tmp_path: Path) -> None:
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    authority = _request().authority
+    assert store.record_prior_power(authority, "running") == "running"
+    assert store.record_prior_power(authority, "inactive") == "running"
+    store.close()

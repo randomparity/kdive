@@ -4,6 +4,11 @@
 
 Accepted (2026-10-21)
 
+> **Amended by [ADR-0620](0620-authority-owned-system-teardown.md) (#3341):** the Consequences
+> below say `systems.teardown` and `ops.force_teardown` do not yet complete from
+> `recovery_conflict`. They now do on the local authority lane: teardown discards the retained
+> recovery point instead of recovering it.
+
 ## Context
 
 [ADR-0583](0583-external-run-boot-uses-prepared-recovery-points.md) parks an external-boot
@@ -85,6 +90,12 @@ No production path did this (#3327):
   operation is journaled against that earlier generation. The current request still answers
   `provider-conflict`, so that path still ends through ADR-0714.
 - Preparation (`preparing`, `prepared`) and teardown refusals are unchanged.
+
+### Amendment (2026-10-26): `systems.get` now exposes the conflict composite (#3331)
+
+The Consequences bullet saying that no MCP read exposes the conflict evidence's composite is out
+of date. [ADR-0807](0807-systems-get-shows-conflict-evidence-to-admins.md) adds it to
+`systems.get` for admins.
 
 ### Amendment (2026-10-26): resolution restores from the acknowledged identity (#3330)
 

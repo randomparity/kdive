@@ -125,6 +125,7 @@ from kdive.services.remote_module_authority_preparation import (
 )
 from tests.db.external_boot_authority_support import _RoleDsns
 from tests.providers.remote_libvirt.authority_module_support import (
+    InactiveSystemHost,
     _prepared_volumes,
     _remote_preparation_request,
     _terminal_response,
@@ -619,6 +620,46 @@ async def test_remote_adapter_replays_materialize_and_prepare_without_repeating_
     assert calls == ["materialize", "prepare"]
     assert await adapter.preparation_receipt(prepare_request) is not None
     executor.shutdown()
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("recorded", "live", "expected"),
+    [
+        ("running", "inactive", "running"),
+        (None, "running", "running"),
+        (None, "inactive", "inactive"),
+    ],
+)
+def test_prepare_records_the_power_written_ahead_of_the_stop(
+    tmp_path: Path, recorded: str | None, live: str, expected: str
+) -> None:
+    record = _record()
+    plan = _plan_for_record(record)
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    terminal = store.reopen_terminal(record.binding, plan.identity)
+    authority = terminal.request.authority
+    if recorded is not None:
+        store.record_prior_power(authority, cast(Any, recorded))
+    materialization = record.materialization.model_copy(update={"plan_identity": plan.identity})
+    prepared = record.model_copy(
+        update={
+            "plan_identity": plan.identity,
+            "materialization": materialization,
+            "prior_power": live,
+        }
+    )
+
+    class Operations:
+        def prepare(self, *args: object) -> RemoteExternalBootRecoveryRecord:
+            return prepared
+
+    coordinator = RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 9.0)
+    store.publish_materialization(plan, materialization)
+    point = coordinator.prepare(materialization, record.binding, OpaqueProviderRef(ref="a"))
+
+    assert store.reopen_recovery(point).prior_power == expected
     store.close()
 
 
@@ -1778,7 +1819,7 @@ async def test_durable_remote_preparation_reopens_before_and_after_mutation(tmp_
     request = _remote_preparation_request()
     calls = 0
 
-    class Host:
+    class Host(InactiveSystemHost):
         async def execute(
             self, admitted: AdmittedRemoteModulePreparation
         ) -> RemoteModuleTerminalPreparationResponseV1:
@@ -1815,7 +1856,7 @@ async def test_durable_remote_lifecycle_waits_through_lost_reply_and_reopens_ter
     release = asyncio.Event()
     calls = 0
 
-    class Host:
+    class Host(InactiveSystemHost):
         async def execute_lifecycle(
             self, request: object, terminal: object, restored: object, deadline: float
         ) -> RemoteModuleLifecycleResponseV1:
@@ -1908,7 +1949,7 @@ async def test_remote_reap_requires_restored_cleanup_or_installed_teardown(
     )
     calls = 0
 
-    class Host:
+    class Host(InactiveSystemHost):
         async def execute_lifecycle(
             self,
             request: RemoteModuleLifecycleRequestV1,
@@ -2285,7 +2326,7 @@ def test_durable_remote_preparation_preserves_first_authority_clock_deadline(
 async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_path: Path) -> None:
     request = _remote_preparation_request()
 
-    class FailingHost:
+    class FailingHost(InactiveSystemHost):
         async def execute(self, request: object) -> object:
             del request
             raise RuntimeError("provider returned after mutation")
@@ -2313,7 +2354,7 @@ async def test_durable_remote_preparation_cancellation_waits_and_records_termina
     release = asyncio.Event()
     expected = _terminal_response(request)
 
-    class BlockingHost:
+    class BlockingHost(InactiveSystemHost):
         async def execute(self, request: object) -> object:
             del request
             started.set()
@@ -2352,7 +2393,7 @@ async def test_durable_remote_preparation_cancel_persists_exceptional_completion
     started = asyncio.Event()
     release = asyncio.Event()
 
-    class FailingHost:
+    class FailingHost(InactiveSystemHost):
         async def execute(self, request: object) -> object:
             del request
             started.set()
@@ -2390,7 +2431,7 @@ async def test_durable_remote_lifecycle_cancel_persists_exceptional_completion(
     started = asyncio.Event()
     release = asyncio.Event()
 
-    class FailingHost:
+    class FailingHost(InactiveSystemHost):
         async def execute_lifecycle(self, *_args: object) -> object:
             started.set()
             await release.wait()
@@ -2439,7 +2480,7 @@ async def test_durable_remote_preparation_retries_unrecorded_provider_return(
     executor.shutdown()
     store.close()
 
-    class Host:
+    class Host(InactiveSystemHost):
         async def execute(
             self, admitted: AdmittedRemoteModulePreparation
         ) -> RemoteModuleTerminalPreparationResponseV1:
@@ -3384,7 +3425,7 @@ async def test_remote_system_teardown_reaps_full_private_recovery_before_undefin
                 recovery_absent=not flags["recovery"] and not flags["artifacts"],
             )
 
-    class ModuleHost:
+    class ModuleHost(InactiveSystemHost):
         async def execute_system_teardown(self, exact: object) -> object:
             assert isinstance(exact, external_boot_authority.RemoteModuleSystemTeardownRequestV1)
             assert exact.authority == request

@@ -74,6 +74,7 @@ logger = logging.getLogger(__name__)
 _MAX_RECORD_BYTES = 1_048_576
 _MAX_PREPARATION_BYTES = 1_048_576
 _OBSERVATION_NAMESPACE = UUID("9cf0fa94-f250-4e5f-a950-155e7860b692")
+type PriorPower = Literal["running", "inactive"]
 type RemoteSystemTeardownPhase = Literal[
     "intent-recorded",
     "domain-validated",
@@ -1102,6 +1103,40 @@ class RemoteModuleVolumePreparationStore:
             raise ValueError("remote module restored evidence has the wrong action")
         return response
 
+    def record_prior_power(
+        self, authority: AuthorityPreparationMutationRequestV1, observed: PriorPower
+    ) -> PriorPower:
+        """Durably fix the System's power from before the first stop; the first record wins.
+
+        A retry after the stop landed observes ``inactive``, so it must read this record
+        rather than the domain. The key is the activation, so a later activation records anew.
+        """
+        key = self._terminal_key(
+            authority.system_id, authority.activation_id, authority.run_id, authority.plan_identity
+        )
+        name = f"{key}.prior-power"
+        if (existing := self._read(name)) is None:
+            self._publish(name, observed.encode("ascii"))
+            existing = self._read(name)
+        return self._decode_prior_power(existing)
+
+    def prior_power(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> PriorPower | None:
+        key = self._terminal_key(
+            binding.system_id, binding.activation_id, binding.run_id, plan_identity
+        )
+        data = self._read(f"{key}.prior-power")
+        return None if data is None else self._decode_prior_power(data)
+
+    @staticmethod
+    def _decode_prior_power(data: bytes | None) -> PriorPower:
+        if data == b"running":
+            return "running"
+        if data == b"inactive":
+            return "inactive"
+        raise ValueError("remote prior-power evidence is malformed")
+
     @staticmethod
     def _terminal_key(
         system_id: object, activation_id: object, run_id: object, plan_identity: str
@@ -1433,6 +1468,12 @@ class RemoteModulePreparationOperation(Protocol):
         preparation: ModuleAttemptPreparationRequestV1,
     ) -> RemoteModuleOperationV1: ...
 
+    async def observe_system_power(
+        self, admitted: AdmittedRemoteModulePreparation
+    ) -> PriorPower: ...
+
+    async def stop_system(self, admitted: AdmittedRemoteModulePreparation) -> None: ...
+
     async def execute(
         self, admitted: AdmittedRemoteModulePreparation
     ) -> RemoteModuleTerminalPreparationResponseV1: ...
@@ -1517,6 +1558,17 @@ class DurableRemoteModuleVolumePreparationHost:
             preparation=preparation, operation=admitted.request.operation
         )
 
+    async def _quiesce_system(self, admitted: AdmittedRemoteModulePreparation) -> None:
+        """Record the System's power, then stop it, before any other provider mutation.
+
+        ADR-0585 starts the appliance only against a shut-off System. The record is written
+        ahead of the stop so a retry that finds the domain already stopped keeps the power the
+        System had before this activation. A refusal before the destroy has mutated nothing.
+        """
+        observed = await self._host.observe_system_power(admitted)
+        self._store.record_prior_power(admitted.request.authority, observed)
+        await self._host.stop_system(admitted)
+
     async def execute(
         self, request: RemoteModuleVolumePreparationRequestV1
     ) -> RemoteModuleTerminalPreparationResponseV1:
@@ -1533,6 +1585,7 @@ class DurableRemoteModuleVolumePreparationHost:
             )
         if result := self._store.reopen_result(request):
             result.validate_for(request.operation)
+        await self._quiesce_system(admitted)
         task = asyncio.create_task(self._host.execute(admitted))
         cancelled, consumed = await _wait_for_owned_child(task)
         if cancelled is not None:
@@ -1656,7 +1709,7 @@ class RemoteExternalBootRecoveryRecord(BaseModel):
     module_recovery: RemoteModuleRecoveryRefV2
     source_state: ProviderStateIdentity
     target_state: ProviderStateIdentity
-    prior_power: Literal["running", "inactive"]
+    prior_power: PriorPower
     recovery_objects: Annotated[tuple[OpaqueProviderRef, ...], Field(min_length=1, max_length=32)]
 
     @field_validator("recovery_objects")
@@ -1951,6 +2004,12 @@ class RemoteExternalBootCoordinator:
         recovery = self._operations.prepare(
             durable.plan, materialization, binding, modules, authority, self._deadline()
         )
+        # PREPARE stopped the System before the appliance ran, so the live read above is
+        # always "inactive"; the record written ahead of that stop is the power to restore.
+        if (
+            recorded := self._store.prior_power(binding, materialization.plan_identity)
+        ) is not None:
+            recovery = recovery.model_copy(update={"prior_power": recorded})
         if recovery.binding != binding or recovery.materialization != materialization:
             raise ValueError("remote preparation returned a different activation")
         reference = self._store.publish_recovery(recovery)

@@ -239,6 +239,7 @@ class _FakeIO:
         self.recovery_absent = False
         self.begun_teardown_intent: LocalSystemTeardownIntentV1 | None = None
         self.acknowledged: LocalObservedState | None = None
+        self.discard_error: BaseException | None = None
 
     # -- LocalExternalBootIO -------------------------------------------------------
     def open(self, authority: OpaqueProviderRef, expected: object) -> _FakeContext:
@@ -443,6 +444,19 @@ class _FakeIO:
         self.actions.append("system-teardown-recovery-absence")
         return self.recovery_absent
 
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        del intent
+        self.actions.append("discard-system-teardown-recovery")
+        if self.discard_error is not None:
+            raise self.discard_error
+        self.finalize_tombstone(recovery, proof)
+
     def abort_system_teardown_preparation(
         self,
         binding: ExternalBootActivationBinding,
@@ -575,19 +589,22 @@ async def test_system_teardown_settles_pre_stop_intent_activation() -> None:
     result = await adapter.execute_system_teardown(request, context, _TEARDOWN_RESERVATION)
 
     assert result.complete
-    assert io.actions.index("recover-modules") < io.actions.index("cleanup")
-    assert io.actions.index("cleanup") < io.actions.index("finalize")
-    assert io.actions.index("finalize") < io.actions.index("teardown-system")
+    assert "recover-modules" not in io.actions
+    assert io.actions.index("discard-system-teardown-recovery") < io.actions.index(
+        "teardown-system"
+    )
     adapter.close()
 
 
 @pytest.mark.parametrize(
-    "phase", ["pre-stop-intent", "target-defined", "module-restored", "source-restored"]
+    "phase",
+    ["pre-stop-intent", "target-defined", "new-live", "module-restored", "source-restored"],
 )
-async def test_system_teardown_takeover_recovery_never_restores_power(
+@pytest.mark.anyio
+async def test_system_teardown_discards_retained_recovery_without_recovering_it(
     phase: RecoveryPhase,
 ) -> None:
-    """#2898: a retained activation whose guest ran before is recovered without a start."""
+    """#3341: a conflicted activation cannot be recovered, and teardown destroys it anyway."""
     io = _FakeIO(_metadata(phase))
     adapter = _adapter(io)
 
@@ -596,9 +613,30 @@ async def test_system_teardown_takeover_recovery_never_restores_power(
     )
 
     assert result.complete
-    assert "restore-power" not in io.actions
-    assert io.actions.index("phase:recovered") < io.actions.index("cleanup")
+    recovery_steps = {"recover-modules", "define-source", "restore-power", "phase:recovered"}
+    assert not recovery_steps & set(io.actions)
+    assert "cleanup" not in io.actions
+    assert io.actions.index("discard-system-teardown-recovery") < io.actions.index(
+        "teardown-system"
+    )
     assert io.actions[-1] == "teardown-system"
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_discard_refusal_leaves_the_host_untouched() -> None:
+    io = _FakeIO(_metadata("target-defined"))
+    io.discard_error = ValueError("foreign definition")
+    adapter = _adapter(io)
+
+    with pytest.raises(ValueError, match="foreign definition"):
+        await adapter.execute_system_teardown(
+            _system_teardown_request(),
+            _context(AuthorityOperation.TEARDOWN),
+            _TEARDOWN_RESERVATION,
+        )
+
+    assert "teardown-system" not in io.actions
     adapter.close()
 
 
