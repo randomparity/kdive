@@ -1544,3 +1544,27 @@ def test_every_announced_console_line_survives_the_host_console_filter() -> None
     assert _filter_console("".join(f"{line}\n" for line in lines)) == "".join(
         f"{line}\n" for line in lines
     )
+
+
+def test_a_failing_announcement_does_not_skip_the_poweroff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    powered: list[bool] = []
+
+    monkeypatch.setattr(appliance, "_mount", lambda *_args: None)
+    monkeypatch.setattr(
+        appliance,
+        "_mount_root",
+        lambda: (_ for _ in ()).throw(appliance.ApplianceError("ROOT_DISCOVERY_FAILED")),
+    )
+    monkeypatch.setattr(appliance, "_finish_mounts", lambda _document, error: error)
+    monkeypatch.setattr(
+        appliance, "_announce", lambda _line: (_ for _ in ()).throw(RuntimeError("console"))
+    )
+    monkeypatch.setattr(appliance, "_poweroff", lambda _document: powered.append(True))
+
+    with pytest.raises(RuntimeError, match="console"):
+        appliance.main()
+
+    assert powered == [True]

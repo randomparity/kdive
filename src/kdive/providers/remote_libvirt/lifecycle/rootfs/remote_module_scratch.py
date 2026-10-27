@@ -131,6 +131,7 @@ def build_scratch_image(capacity_bytes: int, work_dir: Path | None) -> Path:
             capture_output=True,
             timeout=_MKFS_TIMEOUT_SECONDS,
         )
+        _strip_orphan_file(image)
     except (OSError, subprocess.SubprocessError) as exc:
         image.unlink(missing_ok=True)
         raise CategorizedError(
@@ -139,6 +140,32 @@ def build_scratch_image(capacity_bytes: int, work_dir: Path | None) -> Path:
             details={"tool": "mkfs.ext4"},
         ) from exc
     return image
+
+
+def _strip_orphan_file(image: Path) -> None:
+    """Drop ``orphan_file`` (e2fsprogs >= 1.47) so an appliance kernel older than 6.1 can mount.
+
+    Gated on the feature being present: an older ``tune2fs`` rejects the unknown token (ADR-0351).
+    """
+    listing = subprocess.run(  # noqa: S603 - fixed executable and closed argument vector
+        ["tune2fs", "-l", str(image)],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=_MKFS_TIMEOUT_SECONDS,
+    )
+    features = [
+        line.split()
+        for line in listing.stdout.splitlines()
+        if line.startswith("Filesystem features:")
+    ]
+    if features and "orphan_file" in features[0]:
+        subprocess.run(  # noqa: S603 - fixed executable and closed argument vector
+            ["tune2fs", "-O", "^orphan_file", str(image)],  # noqa: S607
+            check=True,
+            capture_output=True,
+            timeout=_MKFS_TIMEOUT_SECONDS,
+        )
 
 
 def _data_extents(image: Path) -> list[tuple[int, int]]:

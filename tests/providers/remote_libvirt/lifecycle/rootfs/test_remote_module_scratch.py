@@ -253,3 +253,23 @@ def test_a_short_image_read_aborts_the_upload(
 
     with pytest.raises(CategorizedError, match="upload the remote module"):
         prepare_attempt_volumes(Conn(), request(tmp_path))
+
+
+def test_scratch_image_carries_no_orphan_file_feature(tmp_path: Path) -> None:
+    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_scratch import (
+        build_scratch_image,
+    )
+
+    image = build_scratch_image(SCRATCH_CAPACITY_BYTES, tmp_path)
+    try:
+        listing = subprocess.run(
+            ["tune2fs", "-l", str(image)], capture_output=True, text=True, check=True
+        ).stdout
+    finally:
+        image.unlink()
+
+    features = next(
+        line for line in listing.splitlines() if line.startswith("Filesystem features:")
+    )
+    assert "orphan_file" not in features.split()
+    assert "has_journal" in features.split()

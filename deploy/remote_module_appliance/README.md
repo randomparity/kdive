@@ -102,7 +102,8 @@ old behaviour until the bundle is rebuilt and installed again. To rebuild:
 3. Point `remote_libvirt_module_appliance_images` (url and `sha256` of the new bundle, x86_64 then
    ppc64le) at the new bundle and apply the `remote_libvirt_module_appliance` role, or install the
    bundle at the role's install directory by hand on a lab host.
-4. Confirm the authority host reports the new manifest digest before relying on a PREPARE.
+4. Confirm that the installed `manifest.json` on the authority host carries the new digest before
+   relying on a PREPARE.
 
 Console contract: the appliance writes `phase=accepted` after reading its operation document and
 `error_code=<stable code>` for a failure, to the kernel console; nothing else. The host keeps only

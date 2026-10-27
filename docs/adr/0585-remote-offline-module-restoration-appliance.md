@@ -247,7 +247,9 @@ gaps in this record's own contract explained it:
   never rewrites a scratch whose first block carries the ext4 magic, because it may hold a durable
   phase. A zero first block proves no phase was ever written (the superblock goes last), so the
   retry finishes the format after the same detachment proof a volume delete needs; any other first
-  block is a conflict and nothing is written. The result reader is unchanged: a freshly formatted
+  block is a conflict and nothing is written. The format assumes one live preparation per attempt, as
+  the source-volume upload and its repair already do. The filesystem is built without `orphan_file`,
+  so an appliance kernel older than 6.1 can mount it. The result reader is unchanged: a freshly formatted
   scratch has no `result-v1.json`, which it already reports as absent.
 - **Root discovery missed btrfs subvolume layouts.** The appliance accepted a candidate only when
   its top level held `lib/modules`. Fedora images keep the System root in a `root` subvolume under
