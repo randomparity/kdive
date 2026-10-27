@@ -263,7 +263,11 @@ The authority host now settles the failure:
   the System is left stopped for the operator, as before. A settle that fails is logged and never
   replaces the provider's failure.
 
-A cancellation while the stop itself is in flight is not covered and behaves as before. A failure
+A PREPARE the authority refuses at its pre-stop recheck (`system_held`, or `provider_conflict` for
+an unreadable answer) is settled the same way before the refusal is raised, because the operation
+was already anchored; the refusal reason on the wire is unchanged, and an execute the host had
+already started is never refused. A cancellation while the stop itself is in flight is not covered
+and behaves as before. A failure
 with no recorded power (nothing was stopped) is reported `refused-before-mutation`.
 
 No journal phase, wire field or schema changes.
