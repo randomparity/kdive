@@ -1360,3 +1360,187 @@ def test_preacceptance_shutdown_failure_is_closed_and_identity_free() -> None:
 @pytest.mark.parametrize("name", ["operation-v1.schema.json", "result-v1.schema.json"])
 def test_schema_documents_are_self_valid(name: str) -> None:
     Draft202012Validator.check_schema(_json(name))
+
+
+_Layouts = dict[tuple[str, str, bytes | None], bool]
+
+
+def _root_mount_double(
+    appliance: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    layouts: _Layouts,
+) -> list[tuple[str, str, int, bytes | None]]:
+    """Fake `_mount`: a candidate mounts when listed, and carries lib/modules when True."""
+    live: list[tuple[str, str, bytes | None]] = []
+    mounted: list[tuple[str, str, int, bytes | None]] = []
+
+    def mount(
+        source: str, _target: Path, filesystem: str, flags: int, data: bytes | None = None
+    ) -> None:
+        key = (source, filesystem, data)
+        if key not in layouts:
+            raise OSError(22, "invalid")
+        live[:] = [key]
+        mounted.append((source, filesystem, flags, data))
+
+    monkeypatch.setattr(appliance, "_mount", mount)
+    monkeypatch.setattr(appliance, "_unmount", lambda _target: live.clear())
+    monkeypatch.setattr(
+        Path,
+        "is_dir",
+        lambda path: bool(live) and layouts[live[0]] and path == appliance.ROOT / "lib" / "modules",
+    )
+    return mounted
+
+
+def test_root_discovery_mounts_the_btrfs_root_subvolume(monkeypatch: pytest.MonkeyPatch) -> None:
+    appliance = _module()
+    layouts: _Layouts = {
+        ("/dev/vda3", "btrfs", None): False,
+        ("/dev/vda3", "btrfs", b"subvol=root"): True,
+    }
+    mounted = _root_mount_double(appliance, monkeypatch, layouts)
+
+    appliance._mount_root()
+
+    assert mounted[-1] == ("/dev/vda3", "btrfs", 2 | 4 | 8, b"subvol=root")
+
+
+def test_root_discovery_prefers_a_top_level_btrfs_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    appliance = _module()
+    layouts: _Layouts = {
+        ("/dev/vda3", "btrfs", None): True,
+        ("/dev/vda3", "btrfs", b"subvol=root"): True,
+    }
+    mounted = _root_mount_double(appliance, monkeypatch, layouts)
+
+    appliance._mount_root()
+
+    assert mounted[-1] == ("/dev/vda3", "btrfs", 2 | 4 | 8, None)
+
+
+def test_root_discovery_refuses_a_subvolume_less_btrfs_without_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    layouts: _Layouts = {("/dev/vda3", "btrfs", None): False}
+    _root_mount_double(appliance, monkeypatch, layouts)
+
+    with pytest.raises(appliance.ApplianceError, match="ROOT_DISCOVERY_FAILED"):
+        appliance._mount_root()
+
+
+def test_root_discovery_requires_exactly_one_match_across_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    layouts: _Layouts = {
+        ("/dev/vda2", "ext4", None): True,
+        ("/dev/vda3", "btrfs", b"subvol=root"): True,
+        ("/dev/vda3", "btrfs", None): False,
+    }
+    _root_mount_double(appliance, monkeypatch, layouts)
+
+    with pytest.raises(appliance.ApplianceError, match="ROOT_DISCOVERY_FAILED"):
+        appliance._mount_root()
+
+
+def test_main_announces_the_accepted_phase_and_the_failure_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    lines: list[str] = []
+
+    class PoweredOff(Exception):
+        pass
+
+    monkeypatch.setattr(appliance, "_mount", lambda *_args: None)
+    monkeypatch.setattr(appliance, "_mount_root", lambda: None)
+    monkeypatch.setattr(appliance, "_read_operation", lambda _path: _operation())
+    monkeypatch.setattr(
+        appliance,
+        "execute",
+        lambda _document: (_ for _ in ()).throw(appliance.ApplianceError("DEPMOD_FAILURE")),
+    )
+    monkeypatch.setattr(appliance, "_finish_mounts", lambda _document, error: error)
+    monkeypatch.setattr(appliance, "_announce", lines.append)
+    monkeypatch.setattr(appliance, "_poweroff", lambda _document: (_ for _ in ()).throw(PoweredOff))
+
+    with pytest.raises(PoweredOff):
+        appliance.main()
+
+    assert lines == ["phase=accepted", "error_code=DEPMOD_FAILURE"]
+
+
+def test_main_announces_a_root_discovery_failure_without_a_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    lines: list[str] = []
+
+    class PoweredOff(Exception):
+        pass
+
+    monkeypatch.setattr(appliance, "_mount", lambda *_args: None)
+    monkeypatch.setattr(
+        appliance,
+        "_mount_root",
+        lambda: (_ for _ in ()).throw(appliance.ApplianceError("ROOT_DISCOVERY_FAILED")),
+    )
+    monkeypatch.setattr(appliance, "_finish_mounts", lambda _document, error: error)
+    monkeypatch.setattr(appliance, "_announce", lines.append)
+    monkeypatch.setattr(appliance, "_poweroff", lambda _document: (_ for _ in ()).throw(PoweredOff))
+
+    with pytest.raises(PoweredOff):
+        appliance.main()
+
+    assert lines == ["error_code=ROOT_DISCOVERY_FAILED"]
+
+
+def test_main_stays_silent_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    appliance = _module()
+    lines: list[str] = []
+
+    class PoweredOff(Exception):
+        pass
+
+    monkeypatch.setattr(appliance, "_mount", lambda *_args: None)
+    monkeypatch.setattr(appliance, "_mount_root", lambda: None)
+    monkeypatch.setattr(appliance, "_read_operation", lambda _path: _operation())
+    monkeypatch.setattr(appliance, "execute", lambda _document: {})
+    monkeypatch.setattr(appliance, "_finish_mounts", lambda _document, error: error)
+    monkeypatch.setattr(appliance, "_announce", lines.append)
+    monkeypatch.setattr(appliance, "_poweroff", lambda _document: (_ for _ in ()).throw(PoweredOff))
+
+    with pytest.raises(PoweredOff):
+        appliance.main()
+
+    assert lines == ["phase=accepted"]
+
+
+def test_announce_writes_one_line_to_the_console_and_tolerates_its_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    console = tmp_path / "console"
+    console.write_bytes(b"")
+    monkeypatch.setattr(appliance, "CONSOLE", str(console))
+
+    appliance._announce("error_code=FILESYSTEM_FAILURE")
+    monkeypatch.setattr(appliance, "CONSOLE", str(tmp_path / "absent"))
+    appliance._announce("phase=accepted")
+
+    assert console.read_bytes() == b"error_code=FILESYSTEM_FAILURE\n"
+
+
+def test_every_announced_console_line_survives_the_host_console_filter() -> None:
+    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+        _filter_console,
+    )
+
+    appliance = _module()
+    lines = ["phase=accepted", *[f"error_code={code}" for code in sorted(appliance.ERROR_CODES)]]
+
+    assert _filter_console("".join(f"{line}\n" for line in lines)) == "".join(
+        f"{line}\n" for line in lines
+    )

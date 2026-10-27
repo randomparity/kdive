@@ -28,6 +28,7 @@ DEPMOD_TIMEOUT_SECONDS = 300
 ROOT = Path("/mnt/root")
 SOURCE = Path("/mnt/source")
 SCRATCH = Path("/mnt/scratch")
+CONSOLE = "/dev/console"
 RELEASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -940,10 +941,12 @@ def execute(document: dict[str, object]) -> dict[str, object]:
     return _restore(document)
 
 
-def _mount(source: str, target: Path, filesystem: str, flags: int) -> None:
+def _mount(
+    source: str, target: Path, filesystem: str, flags: int, data: bytes | None = None
+) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     target.mkdir(parents=True, exist_ok=True)
-    result = libc.mount(source.encode(), os.fsencode(target), filesystem.encode(), flags, None)
+    result = libc.mount(source.encode(), os.fsencode(target), filesystem.encode(), flags, data)
     if result != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
@@ -956,23 +959,62 @@ def _unmount(target: Path) -> None:
         raise OSError(error, os.strerror(error))
 
 
+# Fedora's btrfs images keep the root filesystem in a `root` subvolume under an otherwise empty
+# top level, so the top-level mount carries no lib/modules.
+BTRFS_ROOT_SUBVOLUME = b"subvol=root"
+
+
+def _root_mounts(device: str, filesystem: str) -> list[tuple[str, str, bytes | None]]:
+    """Return the read-only mounts of one candidate that expose a module tree."""
+    options: list[bytes | None] = [None]
+    if filesystem == "btrfs":
+        options.append(BTRFS_ROOT_SUBVOLUME)
+    found = []
+    for data in options:
+        try:
+            if data is None:
+                _mount(device, ROOT, filesystem, 1 | 2 | 4 | 8)
+            else:
+                _mount(device, ROOT, filesystem, 1 | 2 | 4 | 8, data)
+        except OSError:
+            continue
+        try:
+            has_modules = (ROOT / "lib" / "modules").is_dir()
+        finally:
+            _unmount(ROOT)
+        if has_modules:
+            found.append((device, filesystem, data))
+            break
+    return found
+
+
 def _mount_root() -> None:
     candidates = ["/dev/vda", *[f"/dev/vda{index}" for index in range(1, 17)]]
-    matches: list[tuple[str, str]] = []
+    matches: list[tuple[str, str, bytes | None]] = []
     for device in candidates:
         for filesystem in ("ext4", "xfs", "btrfs"):
-            try:
-                _mount(device, ROOT, filesystem, 1 | 2 | 4 | 8)
-            except OSError as error:
-                if error.errno not in {errno.ENOENT, errno.EINVAL, errno.ENODEV}:
-                    continue
-            else:
-                if (ROOT / "lib" / "modules").is_dir():
-                    matches.append((device, filesystem))
-                _unmount(ROOT)
+            matches.extend(_root_mounts(device, filesystem))
     if len(matches) != 1:
         raise ApplianceError("ROOT_DISCOVERY_FAILED")
-    _mount(matches[0][0], ROOT, matches[0][1], 2 | 4 | 8)
+    device, filesystem, data = matches[0]
+    if data is None:
+        _mount(device, ROOT, filesystem, 2 | 4 | 8)
+    else:
+        _mount(device, ROOT, filesystem, 2 | 4 | 8, data)
+
+
+def _announce(line: str) -> None:
+    """Write one protocol line to the console; the console is advisory and never fails the run."""
+    try:
+        descriptor = os.open(CONSOLE, os.O_WRONLY | os.O_NOCTTY)
+    except OSError:
+        return
+    try:
+        os.write(descriptor, f"{line}\n".encode("ascii"))
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _reboot() -> int:
@@ -1064,6 +1106,7 @@ def main() -> NoReturn:
         _mount("/dev/vdb", SOURCE, "ext4", 1 | 2 | 4 | 8)
         _mount("/dev/vdc", SCRATCH, "ext4", 2 | 4 | 8)
         document = _read_operation(SOURCE / "operation-v1.json")
+        _announce("phase=accepted")
         execute(document)
     except ApplianceError as error:
         operation_error = error
@@ -1071,9 +1114,12 @@ def main() -> NoReturn:
         operation_error = ApplianceError("FILESYSTEM_FAILURE")
     except Exception:
         operation_error = ApplianceError("FILESYSTEM_FAILURE")
+    failure = operation_error
     try:
-        _finish_mounts(document, operation_error)
+        failure = _finish_mounts(document, operation_error)
     finally:
+        if failure is not None:
+            _announce(f"error_code={failure.code}")
         _poweroff(document)
 
 
