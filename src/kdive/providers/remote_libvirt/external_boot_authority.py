@@ -230,6 +230,7 @@ class RemoteSystemTeardownState:
     terminal: RemoteModuleTerminalRecord | None
     materialization: RemoteExternalBootMaterializationRecord | None
     recovery: RemoteExternalBootRecoveryRecord | None
+    finalized: RemoteFinalizedTeardownRefsV1 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -718,6 +719,10 @@ class RemoteModuleVolumePreparationHost:
         return response
 
 
+class RemoteCleanupFinalizedError(FileNotFoundError):
+    """A per-activation record is gone because its cleanup was finalized, not never written."""
+
+
 class RemoteCleanupQuarantineV1(BaseModel):
     """Provider-private proof that release cleanup ran, kept until authority finalization.
 
@@ -750,6 +755,62 @@ class RemoteCleanupQuarantineV1(BaseModel):
         if value.to_canonical_json() != data:
             raise ValueError("remote cleanup quarantine receipt is not canonical JSON")
         return value
+
+
+class RemoteFinalizedBootArtifactV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ref: Annotated[str, Field(min_length=1, max_length=1024)]
+    kind: Literal["kernel", "initrd"]
+    sha256: Annotated[str, Field(min_length=1, max_length=128)] | None
+
+
+class RemoteFinalizedTeardownRefsV1(BaseModel):
+    """What System teardown must still prove absent once finalize removed the records naming it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    module_volumes: tuple[tuple[str, str], ...]
+    operation_nonce: Annotated[str, Field(min_length=1, max_length=1024)] | None
+    boot_artifacts: tuple[RemoteFinalizedBootArtifactV1, ...]
+
+
+class RemoteCleanupFinalizedMarkerV1(BaseModel):
+    """The ``cleanup-finalized`` marker: the cleaned receipt plus the refs teardown still needs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_: Literal["remote-libvirt-cleanup-finalized-v1"] = Field(
+        "remote-libvirt-cleanup-finalized-v1", alias="schema"
+    )
+    receipt: RemoteCleanupQuarantineV1
+    teardown: RemoteFinalizedTeardownRefsV1
+
+    def to_canonical_json(self) -> bytes:
+        return _canonical_model_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        if len(data) > _MAX_RECORD_BYTES:
+            raise ValueError("remote cleanup finalized marker exceeds 1048576 bytes")
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("remote cleanup finalized marker is not canonical JSON")
+        return value
+
+
+def _parse_finalized_marker(
+    data: bytes,
+) -> tuple[RemoteCleanupQuarantineV1, RemoteFinalizedTeardownRefsV1 | None]:
+    """Receipt and teardown refs; a marker from before the refs existed has none."""
+    try:
+        marker = RemoteCleanupFinalizedMarkerV1.from_canonical_json(data)
+    except ValueError:
+        try:
+            return RemoteCleanupQuarantineV1.from_canonical_json(data), None
+        except ValueError:
+            raise ValueError("remote cleanup finalized marker is malformed") from None
+    return marker.receipt, marker.teardown
 
 
 def _quarantine_observation(receipt: RemoteCleanupQuarantineV1) -> RecoveryObjectObservation:
@@ -790,6 +851,29 @@ def _recovery_identity(reference: OpaqueProviderRef) -> str:
     if len(identity) != 64 or any(value not in "0123456789abcdef" for value in identity):
         raise ValueError("remote recovery reference is malformed")
     return identity
+
+
+def _authority_binding(
+    authority: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+) -> ExternalBootActivationBinding:
+    return ExternalBootActivationBinding(
+        system_id=str(authority.system_id),
+        run_id=str(authority.run_id),
+        activation_id=str(authority.activation_id),
+    )
+
+
+def _authority_owned(
+    authority: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+    binding: ExternalBootActivationBinding,
+    plan_identity: str,
+) -> bool:
+    return (
+        str(authority.system_id),
+        str(authority.activation_id),
+        str(authority.run_id),
+        authority.plan_identity,
+    ) == (binding.system_id, binding.activation_id, binding.run_id, plan_identity)
 
 
 def _object_index_name(reference: OpaqueProviderRef) -> str:
@@ -1017,6 +1101,9 @@ class RemoteModuleVolumePreparationStore:
         return updated
 
     def stage(self, request: RemoteModuleVolumePreparationRequestV1, local_deadline: float) -> None:
+        self.refuse_finalized(
+            _authority_binding(request.authority), request.authority.plan_identity
+        )
         name = f"{self._key(request)}.request"
         candidate = _PersistedRemoteModulePreparationV1(
             request=request, local_deadline=local_deadline
@@ -1122,6 +1209,9 @@ class RemoteModuleVolumePreparationStore:
     def stage_lifecycle(
         self, request: RemoteModuleLifecycleRequestV1, local_deadline: float
     ) -> None:
+        self.refuse_finalized(
+            _authority_binding(request.authority), request.authority.plan_identity
+        )
         name = f"{self._lifecycle_key(request)}.lifecycle-request"
         candidate = _PersistedRemoteModuleLifecycleV1(
             request=request, local_deadline=local_deadline
@@ -1183,6 +1273,7 @@ class RemoteModuleVolumePreparationStore:
         )
         data = self._read(f"{key}.restored")
         if data is None:
+            self.refuse_finalized(binding, plan_identity)
             return None
         response = RemoteModuleLifecycleResponseV1.from_canonical_json(data)
         if response.action != "restore":
@@ -1275,6 +1366,7 @@ class RemoteModuleVolumePreparationStore:
         )
         data = self._read(f"{key}.terminal")
         if data is None:
+            self.refuse_finalized(binding, plan_identity)
             raise FileNotFoundError("remote module terminal preparation is absent")
         record = RemoteModuleTerminalRecord.from_canonical_json(data)
         if (
@@ -1601,7 +1693,7 @@ class RemoteModuleVolumePreparationStore:
         if index is not None:
             reference = OpaqueProviderRef(ref=f"remote-external-boot/{index.decode('ascii')}")
         elif marker is not None:
-            reference = RemoteCleanupQuarantineV1.from_canonical_json(marker).recovery_ref
+            reference = _parse_finalized_marker(marker)[0].recovery_ref
         else:
             return None
         receipt = self._receipt(reference)
@@ -1614,6 +1706,203 @@ class RemoteModuleVolumePreparationStore:
     def cleanup_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> bool:
         """Whether finalization began removing this activation's recovery record."""
         return self._read(self._finalized_name(binding, plan_identity)) is not None
+
+    def refuse_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
+        if self.cleanup_finalized(binding, plan_identity):
+            raise RemoteCleanupFinalizedError(
+                "remote activation records were removed when its cleanup was finalized"
+            )
+
+    def _scan_owned(
+        self,
+        suffix: str,
+        owns: Callable[[bytes], bool],
+        *,
+        strict: bool = False,
+    ) -> list[str]:
+        """Names of this suffix whose bytes the activation owns, in no particular order.
+
+        A file that does not parse cannot be proven foreign. The deleting scan leaves it in
+        place; a ``strict`` scan, which captures what teardown must still prove, refuses it.
+        """
+        return [
+            name
+            for name in os.listdir(self._root_fd)
+            if len(name) == 64 + len(suffix)
+            and name.endswith(suffix)
+            and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
+            and (data := self._read(name)) is not None
+            and (owns(data) if strict else self._owns(name, owns, data))
+        ]
+
+    @staticmethod
+    def _owns(name: str, owns: Callable[[bytes], bool], data: bytes) -> bool:
+        try:
+            return owns(data)
+        except ValueError:
+            logger.warning("remote store file %s is unreadable and left in place", name)
+            return False
+
+    def _activation_files(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> list[str]:
+        """Every per-activation file but the recovery record, each anchor after what it names.
+
+        A file another file's name is derived from is listed after it, so a retry that finds
+        the anchor still finds everything it anchors.
+        """
+
+        def owned(
+            authority: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        ) -> bool:
+            return _authority_owned(authority, binding, plan_identity)
+
+        names: list[str] = []
+        for suffix, dependents, parse in (
+            (
+                ".lifecycle-request",
+                (".lifecycle-completion",),
+                lambda data: owned(
+                    _PersistedRemoteModuleLifecycleV1.from_canonical_json(data).request.authority
+                ),
+            ),
+            (
+                ".request",
+                (".result", ".completion"),
+                lambda data: owned(
+                    _PersistedRemoteModulePreparationV1.from_canonical_json(data).request.authority
+                ),
+            ),
+        ):
+            for name in self._scan_owned(suffix, parse):
+                stem = name.removesuffix(suffix)
+                names += [*(f"{stem}{dependent}" for dependent in dependents), name]
+        names += self._scan_owned(
+            ".preparation",
+            lambda data: (
+                (receipt := ExternalBootPreparationObservation.from_canonical_json(data)).binding
+                == binding
+                and receipt.plan_identity == plan_identity
+            ),
+        )
+        key = self._terminal_key(
+            binding.system_id, binding.activation_id, binding.run_id, plan_identity
+        )
+        names += [
+            f"{key}.{suffix}"
+            for suffix in ("terminal", "restored", "prior-power-owner", "prior-power")
+        ]
+        return names + self._materialization_files(binding, plan_identity)
+
+    def _materialization_files(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> list[str]:
+        index_name = f"{plan_identity.removeprefix('sha256:')}.materialization-index"
+        index = self._read(index_name)
+        if index is None:
+            return []
+        identity = index.decode("ascii", errors="replace")
+        if len(identity) != 64 or any(value not in "0123456789abcdef" for value in identity):
+            raise ValueError("remote materialization plan index is malformed")
+        data = self._read(f"{identity}.materialization")
+        if data is not None:
+            ownership = RemoteExternalBootMaterializationRecord.from_canonical_json(
+                data
+            ).materialization.ownership
+            if ownership.system_id != binding.system_id or ownership.run_id != binding.run_id:
+                raise ValueError("remote materialization differs from the finalized activation")
+        return [f"{identity}.materialization", index_name]
+
+    def finalized_teardown_refs(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteFinalizedTeardownRefsV1 | None:
+        """The refs teardown proves absent for a finalized activation; ``None`` if not finalized.
+
+        A marker written before it carried refs is only usable while the activation's terminal
+        record still stands, because that earlier finalize removed nothing else. Without it
+        nothing says what to prove absent, so teardown is refused instead of passing vacuously.
+        """
+        data = self._read(self._finalized_name(binding, plan_identity))
+        if data is None:
+            return None
+        refs = _parse_finalized_marker(data)[1]
+        if refs is not None:
+            return refs
+        key = self._terminal_key(
+            binding.system_id, binding.activation_id, binding.run_id, plan_identity
+        )
+        if self._read(f"{key}.terminal") is not None:
+            return None
+        raise ValueError("remote cleanup finalized marker has no teardown refs; teardown refused")
+
+    def _teardown_refs(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteFinalizedTeardownRefsV1:
+        try:
+            module = self.reopen_terminal(binding, plan_identity).response.recovery
+            volumes = (
+                (module.pool.ref, module.source_volume.ref),
+                (module.pool.ref, module.scratch_volume.ref),
+            )
+        except FileNotFoundError:
+            volumes = ()
+        nonces: list[str] = []
+
+        def collect(data: bytes) -> bool:
+            request = _PersistedRemoteModulePreparationV1.from_canonical_json(data).request
+            if owned := _authority_owned(request.authority, binding, plan_identity):
+                nonces.append(request.operation.operation_nonce)
+            return owned
+
+        self._scan_owned(".request", collect, strict=True)
+        if len(set(nonces)) > 1:
+            raise ValueError(
+                "remote finalize found preparation requests with different nonces for one "
+                "activation; resolve the duplicate .request records before finalizing"
+            )
+        boot: list[RemoteFinalizedBootArtifactV1] = []
+        if (record := self.teardown_materialization(binding, plan_identity)) is not None:
+            materialization = record.materialization
+            artifacts = materialization.artifacts
+            boot.append(
+                RemoteFinalizedBootArtifactV1(
+                    ref=artifacts.kernel.ref,
+                    kind="kernel",
+                    sha256=materialization.extracted_vmlinuz_sha256,
+                )
+            )
+            if artifacts.initrd is not None:
+                boot.append(
+                    RemoteFinalizedBootArtifactV1(
+                        ref=artifacts.initrd.ref,
+                        kind="initrd",
+                        sha256=materialization.verified_initrd_sha256,
+                    )
+                )
+        return RemoteFinalizedTeardownRefsV1(
+            module_volumes=volumes,
+            operation_nonce=nonces[0] if nonces else None,
+            boot_artifacts=tuple(boot),
+        )
+
+    def _write_finalized_marker(self, receipt: RemoteCleanupQuarantineV1) -> None:
+        """Publish the marker once; a retry keeps the refs captured before anything was removed."""
+        name = self._finalized_name(receipt.binding, receipt.plan_identity)
+        existing = self._read(name)
+        cleaned = receipt.model_copy(update={"managed": False})
+        if existing is not None:
+            held, refs = _parse_finalized_marker(existing)
+            if held != cleaned:
+                raise ValueError("remote cleanup finalized marker conflicts with durable bytes")
+            if refs is not None:
+                return
+        marker = RemoteCleanupFinalizedMarkerV1(
+            receipt=cleaned, teardown=self._teardown_refs(receipt.binding, receipt.plan_identity)
+        )
+        if existing is None:
+            self._publish(name, marker.to_canonical_json())
+        else:
+            self._replace(name, existing, marker.to_canonical_json())
 
     def _recovery_record(self, identity: str) -> RemoteExternalBootRecoveryRecord | None:
         data = self._read(f"{identity}.recovery")
@@ -1637,12 +1926,13 @@ class RemoteModuleVolumePreparationStore:
         )
 
     def finalize_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
-        """Remove the recovery record and its indexes, then the receipt that proves the cleanup.
+        """Remove the activation's records and indexes, then the receipt that proves the cleanup.
 
-        A finalized marker is written first and the receipt goes last. The receipt is found by
-        its record's identity, or through the marker once the index is gone, so an interrupted
-        finalization is repeatable until nothing but the marker remains. The marker keeps a
-        finalized cleanup distinguishable from a record that never existed.
+        A finalized marker is written first and the receipt goes last. The activation's other
+        files go before the recovery record, whose identity and plan name them. The receipt is
+        found by its record's identity, or through the marker once the index is gone, so an
+        interrupted finalization is repeatable until nothing but the marker remains. The marker
+        keeps a finalized cleanup distinguishable from a record that never existed.
         """
         identity = _recovery_identity(receipt.recovery_ref)
         record = self._recovery_record(identity)
@@ -1650,13 +1940,10 @@ class RemoteModuleVolumePreparationStore:
             record.binding != receipt.binding or record.plan_identity != receipt.plan_identity
         ):
             raise ValueError("remote recovery record differs from the quarantine receipt")
-        self._publish(
-            self._finalized_name(receipt.binding, receipt.plan_identity),
-            receipt.model_copy(update={"managed": False}).to_canonical_json(),
-        )
-        names: list[str] = []
+        self._write_finalized_marker(receipt)
+        names = self._activation_files(receipt.binding, receipt.plan_identity)
         if record is not None:
-            names = [
+            names += [
                 name
                 for reference in record.recovery_objects
                 if self._read(name := _object_index_name(reference)) == identity.encode("ascii")
@@ -2244,6 +2531,7 @@ class RemoteExternalBootCoordinator:
         observed = self._store.observe_preparation(request)
         if observed.state != "absent":
             return observed
+        self._store.refuse_finalized(request.binding, request.plan.identity)
         if request.phase == "materialize":
             materialization = self.materialize(request.plan, request.binding, request.authority)
             receipt = observed.model_copy(
@@ -2402,18 +2690,24 @@ class RemoteExternalBootCoordinator:
     def system_teardown_state(
         self, binding: ExternalBootActivationBinding, plan_identity: str
     ) -> RemoteSystemTeardownState:
-        preparation = self._store.teardown_preparation(binding, plan_identity)
+        finalized = self._store.finalized_teardown_refs(binding, plan_identity)
         try:
             terminal = self._store.reopen_terminal(binding, plan_identity)
         except FileNotFoundError:
             terminal = None
+        # A finalized activation's marker names what was removed or is mid-removal, so the
+        # records a partial removal may have left half-deleted are not read.
+        live = finalized is None
         return RemoteSystemTeardownState(
             binding=binding,
             plan_identity=plan_identity,
-            preparation=preparation,
+            preparation=self._store.teardown_preparation(binding, plan_identity) if live else None,
             terminal=terminal,
-            materialization=self._store.teardown_materialization(binding, plan_identity),
+            materialization=(
+                self._store.teardown_materialization(binding, plan_identity) if live else None
+            ),
             recovery=self._store.teardown_recovery(binding, plan_identity),
+            finalized=finalized,
         )
 
     def begin_system_teardown(
@@ -2774,7 +3068,7 @@ class RemoteExternalBootAuthorityAdapter:
                 await host.execute_system_teardown(
                     RemoteModuleSystemTeardownRequestV1(authority=request, budget_seconds=300)
                 )
-            elif state.preparation is not None:
+            elif state.preparation is not None or state.finalized is not None:
                 absent = await self._executor.run(
                     lambda: self._coordinator.unfinished_preparation_absent(state)
                 )
