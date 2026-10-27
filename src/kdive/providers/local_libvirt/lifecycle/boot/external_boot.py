@@ -69,6 +69,7 @@ from kdive.providers.ports.external_boot import (
     ActivationOwnership,
     ArtifactSource,
     ComponentState,
+    DebuginfoSource,
     ExternalBootActivationBinding,
     ExternalBootArtifactStager,
     ExternalBootMaterialization,
@@ -410,6 +411,10 @@ class TargetProjectionV1(_ClosedValue):
     modules_filename: Literal["modules"] = "modules"
     initrd_filename: Literal["initrd"] | None
     whole_disk_root_uuid: Annotated[str, Field(min_length=1, max_length=255)] | None = None
+    # Omitted when absent so projections written before #3130 keep their digest.
+    debuginfo_filename: Literal["debuginfo"] | None = Field(
+        None, exclude_if=lambda value: value is None
+    )
 
     def canonical_bytes(self) -> bytes:
         return json.dumps(
@@ -438,6 +443,7 @@ _OWNED_TEMPORARY_NAMES = frozenset(
         ".modules.next",
         ".initrd.next",
         ".initrd.verify",
+        ".debuginfo.next",
         _PROJECTION_TEMPORARY_NAME,
     }
 )
@@ -580,7 +586,7 @@ def _artifact_ref_parts(
         or parts[3] != activation_id
         or len(parts[4]) != 64
         or any(character not in "0123456789abcdef" for character in parts[4])
-        or parts[5] not in {"kernel", "modules", "initrd"}
+        or parts[5] not in {"kernel", "modules", "initrd", "debuginfo"}
     ):
         raise ValueError("local artifact reference is malformed or cross-owner")
     return parts
@@ -1183,6 +1189,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             cmdline=plan.cmdline,
             initrd_filename=None if plan.initrd is None else "initrd",
             whole_disk_root_uuid=_whole_disk_root_uuid(plan),
+            debuginfo_filename=None if plan.debuginfo is None else "debuginfo",
         )
         with session.projection_directory(projection) as directory_fd:
             try:
@@ -1190,6 +1197,8 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             except FileNotFoundError:
                 try:
                     evidence, installed_manifest = self.materialize_artifacts(plan, directory_fd)
+                    self._fetch_debuginfo(plan, directory_fd)
+                    self._validate_local_debuginfo(plan, directory_fd)
                 except BaseException as primary:
                     _cleanup_uncommitted_payloads(directory_fd, primary)
                     raise
@@ -1199,6 +1208,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
                 evidence, installed_manifest = self.validate_materialized_artifacts(
                     plan, directory_fd
                 )
+                self._validate_local_debuginfo(plan, directory_fd)
             if reopened != projection:
                 raise ValueError("materialized target projection changed on exact reopen")
         return ExternalBootMaterialization(
@@ -1211,6 +1221,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             installed_module_tree=installed_manifest,
             verified_bundle_sha256=plan.bundle.sha256,
             verified_initrd_sha256=None if plan.initrd is None else plan.initrd.sha256,
+            verified_debuginfo_sha256=None if plan.debuginfo is None else plan.debuginfo.sha256,
             kernel_observation=KernelIdentity(
                 architecture=plan.architecture,
                 release=str(evidence["release"]),
@@ -1220,6 +1231,9 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
                 kernel=_projection_ref(projection, "kernel"),
                 modules=_projection_ref(projection, "modules"),
                 initrd=(None if plan.initrd is None else _projection_ref(projection, "initrd")),
+                debuginfo=(
+                    None if plan.debuginfo is None else _projection_ref(projection, "debuginfo")
+                ),
             ),
         )
 
@@ -1260,6 +1274,12 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
                 None
                 if projection.initrd_filename is None
                 else _projection_ref(projection, "initrd")
+            )
+            or materialization.artifacts.debuginfo
+            != (
+                None
+                if projection.debuginfo_filename is None
+                else _projection_ref(projection, "debuginfo")
             )
         ):
             raise ValueError("external-boot materialization does not match target projection")
@@ -1349,6 +1369,17 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
             os.close(initrd_fd)
             _commit_private_artifact(directory_fd, ".initrd.next", "initrd")
 
+    def _fetch_debuginfo(self, plan: ExternalBootPlan, directory_fd: int) -> None:
+        # Local projections only: the remote authorities share `materialize_artifacts` through
+        # `ExternalBootArtifactStager` and do not stage the vmlinux (#3131).
+        if plan.debuginfo is None:
+            return
+        debuginfo_fd = _stream_exact_version(
+            self._object_store, plan.debuginfo, directory_fd, ".debuginfo.next"
+        )
+        os.close(debuginfo_fd)
+        _commit_private_artifact(directory_fd, ".debuginfo.next", "debuginfo")
+
     @staticmethod
     def _validate_bundle_evidence(plan: ExternalBootPlan, descriptor: int) -> dict[str, object]:
         size = os.fstat(descriptor).st_size
@@ -1426,6 +1457,16 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
         if digest != plan.initrd.sha256 or size != plan.initrd.size_bytes:
             raise ValueError("materialized initrd bytes do not match external-boot plan")
 
+    @staticmethod
+    def _validate_local_debuginfo(plan: ExternalBootPlan, directory_fd: int) -> None:
+        # Unlike the initrd, the object is not streamed a second time: a second copy of up to
+        # 1.5 GiB is outside the materialization reservation (#3130).
+        if plan.debuginfo is None:
+            return
+        digest, size = _descriptor_digest(directory_fd, "debuginfo")
+        if digest != plan.debuginfo.sha256 or size != plan.debuginfo.size_bytes:
+            raise ValueError("materialized debuginfo bytes do not match external-boot plan")
+
 
 def _stream_exact_version(
     store: ObjectStore, source: ArtifactSource, directory_fd: int, name: str
@@ -1467,8 +1508,8 @@ def _stream_exact_version(
                     view = view[written:]
         if "sha256:" + digest.hexdigest() != source.sha256:
             raise ValueError("exact object version digest does not match external-boot plan")
-        if isinstance(source, InitrdSource) and size != source.size_bytes:
-            raise ValueError("exact initrd version size does not match external-boot plan")
+        if isinstance(source, InitrdSource | DebuginfoSource) and size != source.size_bytes:
+            raise ValueError("exact object version size does not match external-boot plan")
         os.fsync(descriptor)
         os.lseek(descriptor, 0, os.SEEK_SET)
         return descriptor
@@ -1622,7 +1663,7 @@ def _cleanup_uncommitted_payloads(directory_fd: int, primary: BaseException) -> 
         primary.add_note("uncommitted payload cleanup refused: projection is committed")
         return
     entries = set(os.listdir(directory_fd))
-    allowed = {"kernel", "modules", "initrd", *_OWNED_TEMPORARY_NAMES}
+    allowed = {"kernel", "modules", "initrd", "debuginfo", *_OWNED_TEMPORARY_NAMES}
     if not entries <= allowed:
         primary.add_note("uncommitted payload cleanup refused: projection has unknown entries")
         return
@@ -1997,6 +2038,14 @@ class _RealLocalExternalBootOperation:
                 )
                 capture_sink, owned_sink = owned_sink, None
                 capture = self._recovery_writer.capture(tree, intent.release, capture_sink)
+                debuginfo = None
+                if materialization.artifacts.debuginfo is not None:
+                    debuginfo = (
+                        GuestDebuginfoFile(
+                            guest, binding=binding, release=intent.release
+                        ).observe_live(),
+                        self._materialized_debuginfo_state(materialization),
+                    )
                 with guest_policy(guest) as policy:
                     target_manifest = materialization.installed_module_tree
                     if policy is not None:
@@ -2023,9 +2072,28 @@ class _RealLocalExternalBootOperation:
                     if primary is None:
                         raise
                     primary.add_note(f"recovery archive sink cleanup failed: {cleanup!r}")
-        metadata = _complete_preparation_metadata(intent, materialization, capture, target_manifest)
+        metadata = _complete_preparation_metadata(
+            intent, materialization, capture, target_manifest, debuginfo
+        )
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.complete_preparation(reference, intent, metadata)
+
+    def _materialized_debuginfo_state(
+        self, materialization: ExternalBootMaterialization
+    ) -> PresentComponentState:
+        """The identity the staged vmlinux must read back as in the guest (#3130)."""
+        if materialization.artifacts.debuginfo is None:
+            raise ValueError("external-boot materialization has no debuginfo payload")
+        descriptor = self._session.open_projection_artifact(
+            materialization.artifacts.debuginfo, os.O_RDONLY
+        )
+        try:
+            digest, size = _open_descriptor_digest(descriptor)
+        finally:
+            os.close(descriptor)
+        if digest != materialization.verified_debuginfo_sha256:
+            raise ValueError("materialized debuginfo bytes do not match materialization")
+        return debuginfo_file_state(size=size, sha256=digest, mode=0o644, uid=0, gid=0)
 
     @staticmethod
     def recovery_ref(binding: ExternalBootActivationBinding) -> OpaqueProviderRef:
@@ -2121,6 +2189,15 @@ class _RealLocalExternalBootOperation:
                         raise ValueError(
                             "external-boot target staging layout conflicts with metadata"
                         )
+                    # Staged before any module move is recorded, so a failed upload leaves
+                    # the record in pre-stop-intent, which recovery settles (#3130).
+                    if (states := _debuginfo_states(metadata)) is not None:
+                        _debuginfo_file(opened_guest, metadata).stage(
+                            *states,
+                            lambda path: opened_guest.upload_projection_artifact(
+                                _debuginfo_ref(metadata), path
+                            ),
+                        )
                     publication.guest_sync()
                     publication.record_phase(
                         PublicationPhase.MOVE_READY
@@ -2128,6 +2205,8 @@ class _RealLocalExternalBootOperation:
                         else PublicationPhase.OLD_ASIDE
                     )
                 self._finish_present_publication(publication, prior=prior, desired=desired)
+                if (states := _debuginfo_states(metadata)) is not None:
+                    _debuginfo_file(opened_guest, metadata).publish(*states)
                 completed = publication.metadata
                 observed = self._observe_modules(opened_guest, completed)
         self.record_phase(completed, "module-restored", inactive_modules=observed)
@@ -2170,6 +2249,7 @@ class _RealLocalExternalBootOperation:
         target = _present_component(metadata.target_state.modules, "target module state")
         desired = _layout_component(metadata.source_state.modules)
         with self._session.guest() as opened_guest:
+            _restore_debuginfo(opened_guest, metadata)
             guest = cast(_GuestfsTreeHandle, opened_guest)
             publication = _SessionModulePublicationIO(
                 guest,
@@ -2237,6 +2317,7 @@ class _RealLocalExternalBootOperation:
             )
         prior = _layout_component(metadata.source_state.modules)
         with self._session.guest() as opened_guest:
+            _restore_debuginfo(opened_guest, metadata)
             publication = _SessionModulePublicationIO(
                 cast(_GuestfsTreeHandle, opened_guest),
                 metadata,
@@ -2580,6 +2661,167 @@ class _SessionModulePublicationIO:
         return self._writer.observe(tree, self.metadata.release)
 
 
+_DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
+_DEBUGINFO_ANCESTORS = ("/usr/lib/debug", "/usr/lib/debug/lib", _DEBUGINFO_ROOT)
+type _DebuginfoLayout = tuple[
+    PresentComponentState | None, PresentComponentState | None, PresentComponentState | None
+]
+
+
+def debuginfo_file_state(
+    *, size: int, sha256: str, mode: int, uid: int, gid: int
+) -> PresentComponentState:
+    """Identity of one regular guest file: its content plus the metadata publish sets (#3130)."""
+    facts = {"gid": gid, "mode": f"{mode:04o}", "sha256": sha256, "size": size, "uid": uid}
+    data = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(b"kdive-debuginfo-file-v1\0" + data).hexdigest()
+    return PresentComponentState(manifest=f"sha256:{digest}")
+
+
+class GuestDebuginfoFile:
+    """Activation-owned live, staging and old names for one release's DWARF vmlinux (#3130).
+
+    Every step is chosen from the observed (live, staging, old) layout and the known prior and
+    target states, so a restart repeats or skips a step without a recorded phase. The prior
+    file stays beside the live name under the old name until recovery renames it back.
+    """
+
+    def __init__(
+        self, guest: InactiveGuest, *, binding: ExternalBootActivationBinding, release: str
+    ) -> None:
+        if not release or "/" in release or release in {".", ".."}:
+            raise ValueError("debuginfo release is invalid")
+        self._guest = guest
+        self._directory = f"{_DEBUGINFO_ROOT}/{release}"
+        prefix = f"{self._directory}/.kdive-{binding.activation_id}-vmlinux"
+        self.live = f"{self._directory}/vmlinux"
+        self.staging = f"{prefix}-staging"
+        self.old = f"{prefix}-old"
+
+    def observe_live(self) -> ComponentState:
+        state = self._layout()[0]
+        return AbsentComponentState() if state is None else state
+
+    def stage(
+        self,
+        source: ComponentState,
+        target: PresentComponentState,
+        upload: Callable[[str], None],
+    ) -> None:
+        prior = _layout_component(source)
+        live, staging, old = self._layout()
+        if live != prior or old is not None:
+            raise ValueError("external-boot debuginfo staging conflict")
+        if staging == target:
+            return
+        if staging is not None:
+            self._guest.rm_rf(self.staging)
+        self._directories(create=True)
+        upload(self.staging)
+        self._guest.chmod(0o644, self.staging)
+        self._guest.chown(0, 0, self.staging)
+        if self._observe(self.staging) != target:
+            raise ValueError("staged debuginfo does not match the materialized vmlinux")
+        self._guest.sync()
+
+    def publish(self, source: ComponentState, target: PresentComponentState) -> None:
+        prior = _layout_component(source)
+        layout = self._layout()
+        if prior is not None and layout == (prior, target, None):
+            self._guest.mv(self.live, self.old)
+            layout = (None, target, prior)
+        if layout == (None, target, prior):
+            self._guest.mv(self.staging, self.live)
+            self._guest.sync()
+        elif layout != (target, None, prior):
+            raise ValueError("external-boot debuginfo publication conflict")
+        if self._layout() != (target, None, prior):
+            raise ValueError("external-boot debuginfo publication did not complete")
+
+    def restore(self, source: ComponentState, target: PresentComponentState) -> None:
+        prior = _layout_component(source)
+        layout = self._layout()
+        if layout == (prior, None, None):
+            return
+        if layout in ((target, None, prior), (None, target, prior)):
+            if prior is not None:
+                self._guest.mv(self.old, self.live)
+            elif layout[0] is not None:
+                self._guest.rm_rf(self.live)
+            layout = (prior, layout[1], None)
+        if layout[0] != prior or layout[2] is not None:
+            raise ValueError("external-boot debuginfo recovery conflict")
+        if layout[1] is not None:
+            self._guest.rm_rf(self.staging)
+        self._guest.sync()
+        if self._layout() != (prior, None, None):
+            raise ValueError("external-boot debuginfo recovery did not complete")
+
+    def _layout(self) -> _DebuginfoLayout:
+        if not self._directories(create=False):
+            return None, None, None
+        return self._observe(self.live), self._observe(self.staging), self._observe(self.old)
+
+    def _directories(self, *, create: bool) -> bool:
+        # Distro symlinks above the release directory are followed (Fedora's `filesystem`
+        # package ships /usr/lib/debug/lib -> usr/lib); libguestfs keeps every path inside the
+        # guest root. The release directory itself must be a real directory.
+        walk = [(path, True) for path in _DEBUGINFO_ANCESTORS] + [(self._directory, False)]
+        for path, follow in walk:
+            if not self._guest.exists(path):
+                if not create:
+                    return False
+                self._guest.mkdir(path)
+            elif not self._guest.is_dir(path, followsymlinks=follow):
+                raise ValueError("external-boot debuginfo directory is not a directory")
+        return True
+
+    def _observe(self, path: str) -> PresentComponentState | None:
+        # `exists` follows links, so a dangling link would otherwise read as absent.
+        if self._guest.is_symlink(path):
+            raise ValueError("external-boot debuginfo name is not a regular file")
+        if not self._guest.exists(path):
+            return None
+        status = self._guest.lstatns(path)
+        if not stat.S_ISREG(status["st_mode"]):
+            raise ValueError("external-boot debuginfo name is not a regular file")
+        return debuginfo_file_state(
+            size=status["st_size"],
+            sha256="sha256:" + self._guest.checksum("sha256", path),
+            mode=stat.S_IMODE(status["st_mode"]),
+            uid=status["st_uid"],
+            gid=status["st_gid"],
+        )
+
+
+def _debuginfo_states(
+    metadata: LocalRecoveryMetadataV1,
+) -> tuple[ComponentState, PresentComponentState] | None:
+    """The prior and target debuginfo states, or ``None`` for a plan without the member."""
+    target = metadata.target_state.debuginfo
+    if target is None:
+        return None
+    source = metadata.source_state.debuginfo
+    if source is None or not isinstance(target, PresentComponentState):
+        raise ValueError("external-boot debuginfo recovery state is incomplete")
+    return source, target
+
+
+def _debuginfo_file(guest: InactiveGuest, metadata: LocalRecoveryMetadataV1) -> GuestDebuginfoFile:
+    return GuestDebuginfoFile(guest, binding=metadata.binding, release=metadata.release)
+
+
+def _debuginfo_ref(metadata: LocalRecoveryMetadataV1) -> OpaqueProviderRef:
+    """The `debuginfo` payload beside the materialized modules in the same projection."""
+    directory = metadata.materialized_modules.ref.rsplit("/", 1)[0]
+    return OpaqueProviderRef(ref=f"{directory}/debuginfo")
+
+
+def _restore_debuginfo(guest: InactiveGuest, metadata: LocalRecoveryMetadataV1) -> None:
+    if (states := _debuginfo_states(metadata)) is not None:
+        _debuginfo_file(guest, metadata).restore(*states)
+
+
 def _layout_component(state: ComponentState) -> PresentComponentState | None:
     return state if isinstance(state, PresentComponentState) else None
 
@@ -2609,6 +2851,7 @@ def _complete_preparation_metadata(
     materialization: ExternalBootMaterialization,
     capture: ModuleCapture,
     target_manifest: str,
+    debuginfo: tuple[ComponentState, PresentComponentState] | None = None,
 ) -> LocalRecoveryMetadataV1:
     source_modules: ComponentState
     if isinstance(capture, AbsentModuleCapture):
@@ -2621,10 +2864,12 @@ def _complete_preparation_metadata(
             "source_state": ProviderStateIdentity(
                 definition=intent.source_boot,
                 modules=source_modules,
+                debuginfo=None if debuginfo is None else debuginfo[0],
             ),
             "target_state": ProviderStateIdentity(
                 definition=intent.target_boot,
                 modules=PresentComponentState(manifest=target_manifest),
+                debuginfo=None if debuginfo is None else debuginfo[1],
             ),
             "capture": capture,
             "phase": "pre-stop-intent",
@@ -4132,6 +4377,8 @@ class RecoveryMetadataStore:
         refs = [materialization.artifacts.kernel, materialization.artifacts.modules]
         if materialization.artifacts.initrd is not None:
             refs.append(materialization.artifacts.initrd)
+        if materialization.artifacts.debuginfo is not None:
+            refs.append(materialization.artifacts.debuginfo)
         parts = [_artifact_ref_parts(ref, ownership, binding.activation_id) for ref in refs]
         if any(item[1:5] != parts[0][1:5] for item in parts[1:]):
             raise ValueError("materialization artifacts do not share one projection")
