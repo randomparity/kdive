@@ -42,6 +42,9 @@ def _current_prepare_authority(migrated_url: str, role_dsns: _RoleDsns) -> _Prep
             (
                 Jsonb(
                     {
+                        # A real boot job names its System and Run, so it must exclude itself.
+                        "system_id": str(case.system_id),
+                        "run_id": str(case.run_id),
                         "external_boot_authority_v1": marker[0] | {"plan_identity": plan.identity},
                         "external_boot_plan_v1": plan.model_dump(mode="json", by_alias=True),
                     }
