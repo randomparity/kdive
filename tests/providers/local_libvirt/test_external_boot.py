@@ -2310,11 +2310,17 @@ class _ExternalIO:
             expected_cmdline=b"root=UUID=x",
         )
 
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.actions.append("recover-modules")
         self.record_phase(metadata, "module-restored")
 
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.actions.append("define-source")
         self.record_phase(metadata, "source-restored")
 
@@ -3568,6 +3574,141 @@ def test_recovery_stops_a_ready_target_cleanly_and_an_unready_one_hard(
 
     assert session.stops == [mode]
     assert session.xml == metadata.source_xml
+
+
+_THIRD_DEFINITION = "sha256:" + "7" * 64
+_THIRD_XML = "<domain><name>third</name></domain>"
+_THIRD_TREE = PresentComponentState(manifest="sha256:" + "5" * 64)
+
+
+def _third_state_fixture(
+    tmp_path: Path, *, third_xml: bool, third_tree: bool, active: bool = False
+) -> tuple[
+    LocalLibvirtExternalBoot,
+    LocalRecoveryMetadataV1,
+    _RestartSession,
+    _RestartGuest,
+    LocalObservedState,
+]:
+    ports, metadata, session, guest, _root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=True,
+        xml=_THIRD_XML if third_xml else _metadata().target_xml,
+        active=active,
+    )
+    live = f"/lib/modules/{metadata.release}"
+    if third_tree:
+        guest.states[live] = _THIRD_TREE
+    if third_xml:
+        session.inspection = replace(session.inspection, source_boot_identity=_THIRD_DEFINITION)
+    acknowledged = LocalObservedState(
+        definition=_THIRD_DEFINITION if third_xml else metadata.target_state.definition,
+        modules=guest.states[live],
+        active=active,
+    )
+    return ports, metadata, session, guest, acknowledged
+
+
+@pytest.mark.parametrize(
+    ("third_xml", "third_tree", "active"),
+    [
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+        (True, True, True),
+    ],
+    ids=["third-definition", "third-module-tree", "both-third", "both-third-and-running"],
+)
+def test_resolution_restores_the_source_from_an_acknowledged_third_state(
+    tmp_path: Path, third_xml: bool, third_tree: bool, active: bool
+) -> None:
+    ports, metadata, session, guest, acknowledged = _third_state_fixture(
+        tmp_path, third_xml=third_xml, third_tree=third_tree, active=active
+    )
+
+    ports.recover(
+        _point(metadata),
+        OpaqueProviderRef(ref="authority/current"),
+        acknowledged=acknowledged,
+    )
+
+    live = f"/lib/modules/{metadata.release}"
+    assert guest.states == {live: metadata.source_state.modules}
+    assert session.xml == metadata.source_xml
+    assert session.stops == (["destroy"] if third_xml and active else [])
+
+
+def test_resolution_confirms_a_module_tree_that_is_already_the_source(tmp_path: Path) -> None:
+    ports, metadata, session, guest, _ = _third_state_fixture(
+        tmp_path, third_xml=True, third_tree=False
+    )
+    live = f"/lib/modules/{metadata.release}"
+    guest.states[live] = cast(PresentComponentState, metadata.source_state.modules)
+    acknowledged = LocalObservedState(
+        definition=_THIRD_DEFINITION, modules=metadata.source_state.modules, active=False
+    )
+
+    ports.recover(
+        _point(metadata), OpaqueProviderRef(ref="authority/current"), acknowledged=acknowledged
+    )
+
+    assert session.xml == metadata.source_xml
+    assert guest.states == {live: metadata.source_state.modules}
+
+
+def test_resolution_refuses_a_module_tree_changed_since_the_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    ports, metadata, session, guest, acknowledged = _third_state_fixture(
+        tmp_path, third_xml=True, third_tree=True
+    )
+    live = f"/lib/modules/{metadata.release}"
+    guest.states[live] = PresentComponentState(manifest="sha256:" + "6" * 64)
+
+    with pytest.raises(ValueError, match="staging conflicts with metadata"):
+        ports.recover(
+            _point(metadata),
+            OpaqueProviderRef(ref="authority/current"),
+            acknowledged=acknowledged,
+        )
+
+    assert session.xml == _THIRD_XML
+    assert guest.states[live] == PresentComponentState(manifest="sha256:" + "6" * 64)
+
+
+def test_resolution_refuses_a_definition_other_than_the_acknowledged_one(tmp_path: Path) -> None:
+    ports, metadata, session, guest, acknowledged = _third_state_fixture(
+        tmp_path, third_xml=True, third_tree=True
+    )
+    session.inspection = replace(session.inspection, source_boot_identity="sha256:" + "8" * 64)
+
+    with pytest.raises(ValueError, match="does not match recovery metadata"):
+        ports.recover(
+            _point(metadata),
+            OpaqueProviderRef(ref="authority/current"),
+            acknowledged=acknowledged,
+        )
+
+    assert session.xml == _THIRD_XML
+    assert guest.states[f"/lib/modules/{metadata.release}"] == _THIRD_TREE
+
+
+@pytest.mark.parametrize(
+    ("third_xml", "third_tree"), [(True, False), (False, True)], ids=["definition", "module-tree"]
+)
+def test_ordinary_recovery_still_refuses_a_third_state(
+    tmp_path: Path, third_xml: bool, third_tree: bool
+) -> None:
+    ports, metadata, session, guest, _ = _third_state_fixture(
+        tmp_path, third_xml=third_xml, third_tree=third_tree
+    )
+    before = (session.xml, dict(guest.states))
+
+    with pytest.raises(ValueError):
+        ports.recover(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert (session.xml, guest.states) == before
 
 
 def _staging_name(metadata: LocalRecoveryMetadataV1) -> str:

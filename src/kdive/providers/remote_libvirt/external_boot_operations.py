@@ -30,6 +30,7 @@ from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
+    AcknowledgedDefinition,
     RemoteExternalBootRecovery,
     _AgentRunner,
     activate_definition,
@@ -293,6 +294,24 @@ class ConcreteRemoteExternalBootOperations:
         authority: OpaqueProviderRef,
         deadline: float,
     ) -> None:
+        self._recover(recovery, authority, deadline, None)
+
+    def recover_acknowledged(
+        self,
+        recovery: RemoteExternalBootRecoveryRecord,
+        authority: OpaqueProviderRef,
+        acknowledged: AcknowledgedDefinition,
+        deadline: float,
+    ) -> None:
+        self._recover(recovery, authority, deadline, acknowledged)
+
+    def _recover(
+        self,
+        recovery: RemoteExternalBootRecoveryRecord,
+        authority: OpaqueProviderRef,
+        deadline: float,
+        acknowledged: AcknowledgedDefinition | None,
+    ) -> None:
         del authority
         if self._monotonic() >= deadline:
             raise TimeoutError("remote external-boot recovery deadline expired")
@@ -302,6 +321,7 @@ class ConcreteRemoteExternalBootOperations:
                 RemoteExternalBootRecovery(
                     definition=recovery.definition, prior_power=recovery.prior_power
                 ),
+                acknowledged,
             )
 
     def observe_state(

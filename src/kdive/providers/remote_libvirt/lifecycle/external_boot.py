@@ -690,15 +690,31 @@ def _stop(domain: ExternalBootDomain, definition: RemoteExternalBootDefinition) 
             ) from exc
 
 
+type AcknowledgedDefinition = tuple[str, str]
+"""The ``(preserved, boot)`` digest pair of a third definition an administrator acknowledged."""
+
+
+def _is_replaceable(
+    which: str, preserved: str, boot: str, acknowledged: AcknowledgedDefinition | None
+) -> bool:
+    """Whether the observed definition is the recorded target or exactly the acknowledged one."""
+    return which == "target" or (
+        which == "other" and acknowledged is not None and (preserved, boot) == acknowledged
+    )
+
+
 def _restore_source_definition(
-    conn: ExternalBootConn, domain: ExternalBootDomain, definition: RemoteExternalBootDefinition
+    conn: ExternalBootConn,
+    domain: ExternalBootDomain,
+    definition: RemoteExternalBootDefinition,
+    acknowledged: AcknowledgedDefinition | None = None,
 ) -> None:
     """Stop the target and compare-and-set the persistent definition back to the source."""
     if _is_active(domain, definition, subject="recovery"):
         _stop(domain, definition)
         which, preserved, boot = _observed_state(domain, definition, subject="recovery")
         still_active = _is_active(domain, definition, subject="recovery")
-        if which != "target" or still_active:
+        if not _is_replaceable(which, preserved, boot, acknowledged) or still_active:
             # Both halves are reported: a caller told only the digests cannot tell a competing
             # redefine from a competing restart, and they take different operator resolutions.
             raise _refused(
@@ -710,6 +726,16 @@ def _restore_source_definition(
                 observed_boot=boot,
                 active=still_active,
             )
+    which, preserved, boot = _observed_state(domain, definition, subject="recovery")
+    if not _is_replaceable(which, preserved, boot, acknowledged):
+        raise _refused(
+            "the definition changed before the baseline was restored",
+            subject="recovery",
+            definition=definition,
+            phase="compare",
+            observed_definition=preserved,
+            observed_boot=boot,
+        )
     try:
         conn.defineXML(definition.source_xml)
     except libvirt.libvirtError as exc:
@@ -729,7 +755,9 @@ def _restore_source_definition(
 
 
 def recover_disk_grub_baseline(
-    conn: ExternalBootConn, recovery: RemoteExternalBootRecovery
+    conn: ExternalBootConn,
+    recovery: RemoteExternalBootRecovery,
+    acknowledged: AcknowledgedDefinition | None = None,
 ) -> None:
     """Restore the System's persistent definition and power state to its disk/GRUB baseline.
 
@@ -745,7 +773,10 @@ def recover_disk_grub_baseline(
 
     Any other observed definition, and a baseline running when the recorded prior power was
     stopped, are ADR-0583's unproven mixtures: they raise ``CONFLICT`` with the observed digests
-    retained, for the operator resolution path, rather than overwriting provider state.
+    retained, for the operator resolution path, rather than overwriting provider state. The one
+    exception is ``acknowledged``, the digest pair an administrator acknowledged through conflict
+    resolution: a definition with exactly those digests is replaced like the recorded target, and
+    the digests are compared again immediately before the write.
 
     Two halves of ADR-0583 recovery are deliberately not here. Restoring the prior module tree is
     #2129's, and the fresh baseline readiness core requires before it may commit ``recovered`` for
@@ -755,7 +786,7 @@ def recover_disk_grub_baseline(
     definition = recovery.definition
     domain = _lookup(conn, definition, subject="recovery")
     which, preserved, boot = _observed_state(domain, definition, subject="recovery")
-    if which == "other":
+    if which == "other" and not _is_replaceable(which, preserved, boot, acknowledged):
         raise _refused(
             "the observed definition is neither the recorded source nor the recorded target",
             subject="recovery",
@@ -763,8 +794,8 @@ def recover_disk_grub_baseline(
             observed_definition=preserved,
             observed_boot=boot,
         )
-    if which == "target":
-        _restore_source_definition(conn, domain, definition)
+    if which != "source":
+        _restore_source_definition(conn, domain, definition, acknowledged)
     active = _is_active(domain, definition, subject="recovery")
     if recovery.prior_power == "inactive":
         if active:

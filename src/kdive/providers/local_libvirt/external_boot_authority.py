@@ -22,6 +22,7 @@ from uuid import UUID, uuid5
 
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -76,12 +77,13 @@ _OFFLOAD_CAPACITY = 4
 
 # Commit points that reach a provider mutation. Every other legal operation is a
 # bookkeeping edge whose provider effect is exactly one observation: ADR-0584 makes
-# conflict resolution, release, and teardown each allocate their own later generation
-# before mutating, and names "no provider mutation began" as a terminal condition.
+# release and teardown each allocate their own later generation before mutating, and
+# names "no provider mutation began" as a terminal condition.
 _MUTATING_OPERATIONS = frozenset(
     {
         AuthorityOperation.ACTIVATE,
         AuthorityOperation.RECOVER,
+        AuthorityOperation.RESOLVE_CONFLICT,
         AuthorityOperation.RECOVERY_ATTEMPT,
         AuthorityOperation.CLEANUP,
         AuthorityOperation.TEARDOWN,
@@ -630,6 +632,13 @@ class LocalExternalBootAuthorityAdapter:
                 AuthorityOperation.RECOVERY_ATTEMPT,
             }:
                 self._ports.recover(point, authority, local_timing=request.local_timing)
+            elif operation is AuthorityOperation.RESOLVE_CONFLICT:
+                self._ports.recover(
+                    point,
+                    authority,
+                    local_timing=request.local_timing,
+                    acknowledged=self._acknowledged_state(request, authority),
+                )
             elif operation in _DELETING_OPERATIONS:
                 if not self._ports.cleanup_is_accounted(point, authority):
                     self._pending_cleanup_finalization[context.operation_identity] = point
@@ -651,6 +660,25 @@ class LocalExternalBootAuthorityAdapter:
         except Exception:  # noqa: BLE001 - bound provider failure to a closed category
             logger.exception("external-boot provider commit failed", extra={"operation": operation})
             raise AuthorityServiceError("provider_conflict") from None
+
+    def _acknowledged_state(
+        self, request: AuthorityMutationRequestV1, authority: OpaqueProviderRef
+    ) -> LocalObservedState:
+        """Re-observe and return the state the administrator acknowledged, or refuse.
+
+        The acknowledged identity is a digest, so the components a restore compares against are
+        taken from this fresh observation, which is proven to be that identity by its digest.
+        Each provider write then re-checks its own component against these values.
+        """
+        observed = self._read_state(_activation_binding(request), authority)
+        if (
+            not isinstance(request, AuthorityConflictResolutionRequestV1)
+            or observed.definition is None
+            or observed.modules is None
+            or self._composite_state(request, observed) != request.expected_observed_composite
+        ):
+            raise AuthorityServiceError("provider_conflict")
+        return observed
 
     def _observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         binding = _activation_binding(request)
