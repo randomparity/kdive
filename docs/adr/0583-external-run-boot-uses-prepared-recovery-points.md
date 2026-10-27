@@ -8,6 +8,20 @@ Debug-detach restrictions superseded by [ADR-0617](0617-external-boot-detach-rem
 
 > **Amended by [ADR-0681](0681-external-boot-clean-power-off.md) (#2780):** on local-libvirt KVM,
 > recovery stops a `target-defined` target with a bounded clean shutdown; otherwise it destroys.
+>
+> **Amended (#3353):** the pre-stop recheck is implemented for PREPARE on both providers by the
+> authority-bound SQL function `external_boot_prestop_system_holders` (migration 0179). It applies
+> the preparation resolver's binding conditions, then answers `session_active` when a debug session
+> is `attach` or `live` on any Run of the System, or `job_active` when a queued or running job
+> other than the activation's own names the System or one of its Runs. It is a separate function
+> because the preparation resolver is also the post-mutation recheck, where a late attach must not
+> turn a completed power change into `superseded`. Local PREPARE reads it before the
+> `mutation-started` anchor, so a refusal is journaled `terminal`/`never-began`. Remote PREPARE
+> reads it before the attempt is journaled and again immediately before the host executes. A held
+> System is `system_held` on the wire (`system-held`), which the worker reports as a terminal
+> `transport_conflict` with completion `refused-before-mutation`; an unreadable answer is a
+> retried `provider_conflict`. The read and the stop are not one atomic step, so a session that
+> commits between them is not seen; the lane lock serializes authority operations, not attaches.
 
 ## Context
 
