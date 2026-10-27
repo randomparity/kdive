@@ -531,6 +531,9 @@ def test_adoption_uses_exact_configured_native_ppc64le_emulator() -> None:
               <alias name="sata0"/><address type="pci" domain="0x0000" bus="0x00"
                 slot="0x1f" function="0x2"/>
             </controller>
+            <controller type="virtio-serial" index="0">
+              <alias name="virtio-serial0"/>
+            </controller>
             <input type="mouse" bus="ps2"><alias name="input0"/></input>
             <input type="keyboard" bus="ps2"><alias name="input1"/></input>
             <memballoon model="none"><alias name="balloon0"/></memballoon>
@@ -546,6 +549,9 @@ def test_adoption_uses_exact_configured_native_ppc64le_emulator() -> None:
             </controller>
             <controller type="pci" index="0" model="pci-root">
               <alias name="pci.0"/>
+            </controller>
+            <controller type="virtio-serial" index="0">
+              <alias name="virtio-serial0"/>
             </controller>
             <input type="mouse" bus="usb"><alias name="input0"/></input>
             <input type="keyboard" bus="usb"><alias name="input1"/></input>
@@ -1103,6 +1109,7 @@ def test_teardown_requires_absence_and_all_detach_proofs() -> None:
         ("<cmdline>console=hvc0 panic=-1</cmdline>", "<cmdline>console=ttyS0</cmdline>"),
         ("<on_poweroff>destroy</on_poweroff>", "<on_poweroff>restart</on_poweroff>"),
         ("<on_crash>destroy</on_crash>", "<on_crash>preserve</on_crash>"),
+        ("<on_reboot>destroy</on_reboot>", ""),
         ('<target type="virtio" port="0" />', '<target type="serial" port="0" />'),
     ],
 )

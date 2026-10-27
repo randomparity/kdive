@@ -41,6 +41,7 @@ _NORMALIZED_APPLIANCE_DEVICES = {
         ("controller", (("index", "0"), ("model", "qemu-xhci"), ("ports", "15"), ("type", "usb"))),
         ("controller", (("index", "0"), ("model", "pcie-root"), ("type", "pci"))),
         ("controller", (("index", "0"), ("type", "sata"))),
+        ("controller", (("index", "0"), ("type", "virtio-serial"))),
         ("input", (("bus", "ps2"), ("type", "mouse"))),
         ("input", (("bus", "ps2"), ("type", "keyboard"))),
         ("memballoon", (("model", "none"),)),
@@ -48,6 +49,7 @@ _NORMALIZED_APPLIANCE_DEVICES = {
     "ppc64le": (
         ("controller", (("index", "0"), ("model", "qemu-xhci"), ("ports", "15"), ("type", "usb"))),
         ("controller", (("index", "0"), ("model", "pci-root"), ("type", "pci"))),
+        ("controller", (("index", "0"), ("type", "virtio-serial"))),
         ("input", (("bus", "usb"), ("type", "mouse"))),
         ("input", (("bus", "usb"), ("type", "keyboard"))),
         ("memballoon", (("model", "none"),)),
@@ -660,7 +662,7 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         raise _conflict("resumed appliance top-level shape mismatched")
     for tag in lifecycle:
         nodes = root.findall(tag)
-        if len(nodes) > 1 or any(
+        if len(nodes) != 1 or any(
             node.attrib or list(node) or (node.text or "").strip() != "destroy" for node in nodes
         ):
             raise _conflict("resumed appliance lifecycle action mismatched")
