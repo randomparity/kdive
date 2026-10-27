@@ -114,8 +114,8 @@ empty. Unlike ``resources.describe``'s provider-wide set, this is the per-System
 ``data.external_boot_conflict`` appears only for a caller holding admin on the System's
 project, and only while the System's external-boot recovery is in conflict: it carries
 ``activation_id``, ``attempt_id``, ``observation_id``, ``composite_state``, ``observed_at``
-and the observed ``objects`` (at most 64; ``objects_truncated`` is ``true`` when more were
-recorded). Pass ``composite_state`` as ``observed_identity`` to
+and the observed ``objects`` (at most 64; ``objects_truncated`` is
+``true`` when more were recorded). Pass ``composite_state`` as ``observed_identity`` to
 ``systems.resolve_external_boot_conflict``. Other callers read the System unchanged.
 
 | Parameter | Type | Required | Description |

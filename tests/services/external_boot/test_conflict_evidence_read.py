@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.lifecycle.systems.conflict_evidence import MAX_CONFLICT_OBJECTS
 from kdive.mcp.tools.lifecycle.systems.view import get_system
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
@@ -110,11 +111,13 @@ def test_admin_reads_the_recorded_conflict_evidence(migrated_url: str) -> None:
 
 
 def test_objects_are_capped_and_flagged(migrated_url: str) -> None:
-    response = _read(migrated_url, _STATE.RECOVERY_CONFLICT, _ctx(), objects=70)
+    response = _read(
+        migrated_url, _STATE.RECOVERY_CONFLICT, _ctx(), objects=MAX_CONFLICT_OBJECTS + 6
+    )
 
     block = response.data[_BLOCK]
     assert isinstance(block, dict)
-    assert block["objects"] == [f"objects/o{index:03d}" for index in range(64)]
+    assert block["objects"] == [f"objects/o{index:03d}" for index in range(MAX_CONFLICT_OBJECTS)]
     assert block["objects_truncated"] is True
 
 
