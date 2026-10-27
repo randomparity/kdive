@@ -2488,6 +2488,18 @@ class RemoteExternalBootAuthorityAdapter:
             raise ValueError("remote external-boot recovery objects are not this activation's")
         return point
 
+    def _finalized_cleanup(self, request: AuthorityMutationRequestV1) -> bool:
+        """Whether this CLEANUP's record is gone because finalization removed it."""
+        if request.operation is not AuthorityOperation.CLEANUP:
+            return False
+        try:
+            return self._coordinator.cleanup_finalized(
+                _activation_binding(request), request.plan_identity
+            )
+        except Exception:  # noqa: BLE001 - an unreadable marker stays the unreadable class
+            logger.exception("remote cleanup finalization marker is unreadable")
+            return False
+
     def _observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         binding = _activation_binding(request)
         state: RemoteExternalBootObservedState | None = None
@@ -2498,10 +2510,7 @@ class RemoteExternalBootAuthorityAdapter:
             restored = self._coordinator.modules_restored(binding, request.plan_identity)
             state = self._coordinator.observe_state(point)
         except FileNotFoundError:
-            if (
-                request.operation is AuthorityOperation.CLEANUP
-                and self._coordinator.cleanup_finalized(binding, request.plan_identity)
-            ):
+            if self._finalized_cleanup(request):
                 category = "absent"
             else:
                 logger.exception("remote external-boot provider state is unreadable")
@@ -2857,7 +2866,11 @@ class RemoteExternalBootAuthorityAdapter:
     ) -> RecoveryObjectObservation:
         observed = await self.observe_recovery_object(binding, authority)
         receipt = await self._quarantine_receipt(binding)
-        if observed.observed_digest != digest or receipt is None:
+        if (
+            observed.observed_digest != digest
+            or receipt is None
+            or _quarantine_observation(receipt).observed_digest != digest
+        ):
             raise ValueError("remote cleanup quarantine observation changed before adopt")
         await self._executor.run(lambda: self._coordinator.adopt_cleanup_quarantine(receipt))
         return await self.observe_recovery_object(binding, authority)
