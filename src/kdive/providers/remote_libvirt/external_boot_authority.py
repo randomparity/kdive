@@ -1187,6 +1187,7 @@ class RemoteModuleVolumePreparationStore:
         )
         data = self._read(f"{key}.restored")
         if data is None:
+            self._refuse_finalized(binding, plan_identity)
             return None
         response = RemoteModuleLifecycleResponseV1.from_canonical_json(data)
         if response.action != "restore":
@@ -1279,6 +1280,7 @@ class RemoteModuleVolumePreparationStore:
         )
         data = self._read(f"{key}.terminal")
         if data is None:
+            self._refuse_finalized(binding, plan_identity)
             raise FileNotFoundError("remote module terminal preparation is absent")
         record = RemoteModuleTerminalRecord.from_canonical_json(data)
         if (
@@ -1619,6 +1621,103 @@ class RemoteModuleVolumePreparationStore:
         """Whether finalization began removing this activation's recovery record."""
         return self._read(self._finalized_name(binding, plan_identity)) is not None
 
+    def _refuse_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
+        if self.cleanup_finalized(binding, plan_identity):
+            raise RemoteCleanupFinalizedError(
+                "remote activation records were removed when its cleanup was finalized"
+            )
+
+    def _scan_owned(
+        self,
+        suffix: str,
+        owns: Callable[[bytes], bool],
+    ) -> list[str]:
+        """Names of this suffix whose bytes the activation owns, in no particular order."""
+        return [
+            name
+            for name in os.listdir(self._root_fd)
+            if len(name) == 64 + len(suffix)
+            and name.endswith(suffix)
+            and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
+            and (data := self._read(name)) is not None
+            and owns(data)
+        ]
+
+    def _activation_files(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> list[str]:
+        """Every per-activation file but the recovery record, each anchor after what it names.
+
+        A file another file's name is derived from is listed after it, so a retry that finds
+        the anchor still finds everything it anchors.
+        """
+
+        def owned(
+            authority: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        ) -> bool:
+            return (
+                str(authority.system_id),
+                str(authority.activation_id),
+                str(authority.run_id),
+                authority.plan_identity,
+            ) == (binding.system_id, binding.activation_id, binding.run_id, plan_identity)
+
+        names: list[str] = []
+        for suffix, dependents, parse in (
+            (
+                ".lifecycle-request",
+                (".lifecycle-completion",),
+                lambda data: owned(
+                    _PersistedRemoteModuleLifecycleV1.from_canonical_json(data).request.authority
+                ),
+            ),
+            (
+                ".request",
+                (".result", ".completion"),
+                lambda data: owned(
+                    _PersistedRemoteModulePreparationV1.from_canonical_json(data).request.authority
+                ),
+            ),
+        ):
+            for name in self._scan_owned(suffix, parse):
+                stem = name.removesuffix(suffix)
+                names += [*(f"{stem}{dependent}" for dependent in dependents), name]
+        names += self._scan_owned(
+            ".preparation",
+            lambda data: (
+                (receipt := ExternalBootPreparationObservation.from_canonical_json(data)).binding
+                == binding
+                and receipt.plan_identity == plan_identity
+            ),
+        )
+        key = self._terminal_key(
+            binding.system_id, binding.activation_id, binding.run_id, plan_identity
+        )
+        names += [
+            f"{key}.{suffix}"
+            for suffix in ("terminal", "restored", "prior-power-owner", "prior-power")
+        ]
+        return names + self._materialization_files(binding, plan_identity)
+
+    def _materialization_files(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> list[str]:
+        index_name = f"{plan_identity.removeprefix('sha256:')}.materialization-index"
+        index = self._read(index_name)
+        if index is None:
+            return []
+        identity = index.decode("ascii", errors="replace")
+        if len(identity) != 64 or any(value not in "0123456789abcdef" for value in identity):
+            raise ValueError("remote materialization plan index is malformed")
+        data = self._read(f"{identity}.materialization")
+        if data is not None:
+            ownership = RemoteExternalBootMaterializationRecord.from_canonical_json(
+                data
+            ).materialization.ownership
+            if ownership.system_id != binding.system_id or ownership.run_id != binding.run_id:
+                raise ValueError("remote materialization differs from the finalized activation")
+        return [f"{identity}.materialization", index_name]
+
     def _recovery_record(self, identity: str) -> RemoteExternalBootRecoveryRecord | None:
         data = self._read(f"{identity}.recovery")
         if data is None:
@@ -1641,12 +1740,13 @@ class RemoteModuleVolumePreparationStore:
         )
 
     def finalize_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
-        """Remove the recovery record and its indexes, then the receipt that proves the cleanup.
+        """Remove the activation's records and indexes, then the receipt that proves the cleanup.
 
-        A finalized marker is written first and the receipt goes last. The receipt is found by
-        its record's identity, or through the marker once the index is gone, so an interrupted
-        finalization is repeatable until nothing but the marker remains. The marker keeps a
-        finalized cleanup distinguishable from a record that never existed.
+        A finalized marker is written first and the receipt goes last. The activation's other
+        files go before the recovery record, whose identity and plan name them. The receipt is
+        found by its record's identity, or through the marker once the index is gone, so an
+        interrupted finalization is repeatable until nothing but the marker remains. The marker
+        keeps a finalized cleanup distinguishable from a record that never existed.
         """
         identity = _recovery_identity(receipt.recovery_ref)
         record = self._recovery_record(identity)
@@ -1658,9 +1758,9 @@ class RemoteModuleVolumePreparationStore:
             self._finalized_name(receipt.binding, receipt.plan_identity),
             receipt.model_copy(update={"managed": False}).to_canonical_json(),
         )
-        names: list[str] = []
+        names = self._activation_files(receipt.binding, receipt.plan_identity)
         if record is not None:
-            names = [
+            names += [
                 name
                 for reference in record.recovery_objects
                 if self._read(name := _object_index_name(reference)) == identity.encode("ascii")
