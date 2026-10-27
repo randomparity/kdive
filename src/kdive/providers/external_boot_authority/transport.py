@@ -419,6 +419,17 @@ def _error(category: str) -> bytes:
     return _canonical_json({"category": category, "status": "error"})
 
 
+def _log_module_completion(operation: str, exc: CategorizedError) -> None:
+    """Leave the cause on the authority journal; only the category crosses the wire."""
+    _log.error(
+        "authority transport %s ended %s: %s",
+        operation,
+        exc.details.get("completion"),
+        exc,
+        exc_info=exc,
+    )
+
+
 def _service_category(category: str) -> str:
     return {
         "journal_conflict": "journal-conflict",
@@ -486,8 +497,10 @@ async def _dispatch(
             return _error(_service_category(exc.category))
         except CategorizedError as exc:
             if exc.details.get("completion") == "failed-after-mutation":
+                _log_module_completion(operation, exc)
                 return _error("remote-module-failed")
             if exc.details.get("completion") == "refused-before-mutation":
+                _log_module_completion(operation, exc)
                 return _error("remote-module-refused")
             return _error("provider-conflict")
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
@@ -505,6 +518,7 @@ async def _dispatch(
             return _error(_service_category(exc.category))
         except CategorizedError as exc:
             if exc.details.get("completion") == "failed-after-mutation":
+                _log_module_completion(operation, exc)
                 return _error("remote-module-failed")
             return _error("provider-conflict")
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
