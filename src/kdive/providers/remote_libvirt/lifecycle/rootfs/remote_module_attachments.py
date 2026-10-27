@@ -659,9 +659,11 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
     if root.get("type") != "kvm" or set(root.attrib) - {"type", "id"}:
         raise _conflict("resumed appliance domain type mismatched")
     lifecycle = ("on_poweroff", "on_reboot", "on_crash")
-    top_level = {"name", "uuid", "memory", "vcpu", "os", "metadata", "devices", *lifecycle}
+    top_level = {"name", "uuid", "memory", "vcpu", "os", "metadata", "devices", "features"}
+    top_level.update(lifecycle)
     if any(child.tag not in top_level for child in root):
         raise _conflict("resumed appliance top-level shape mismatched")
+    _validate_features(root, expected.appliance.architecture)
     for tag in lifecycle:
         nodes = root.findall(tag)
         if len(nodes) != 1 or any(
@@ -808,6 +810,20 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
     for address in console.findall("address"):
         if set(address.attrib) - address_attrs:
             raise _conflict("resumed appliance console set mismatched")
+
+
+def _validate_features(root: ET.Element, architecture: str) -> None:
+    """x86_64 needs exactly ``<features><acpi/></features>``; other architectures have none."""
+    nodes = root.findall("features")
+    if architecture != "x86_64":
+        if nodes:
+            raise _conflict("resumed appliance features mismatched")
+        return
+    if len(nodes) != 1 or nodes[0].attrib or nodes[0].text and nodes[0].text.strip():
+        raise _conflict("resumed appliance features mismatched")
+    children = list(nodes[0])
+    if len(children) != 1 or children[0].tag != "acpi" or children[0].attrib or list(children[0]):
+        raise _conflict("resumed appliance features mismatched")
 
 
 def _validate_rng(devices: ET.Element) -> None:

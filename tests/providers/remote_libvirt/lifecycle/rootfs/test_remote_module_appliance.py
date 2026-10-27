@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import libvirt
 import pytest
@@ -1162,3 +1163,48 @@ def test_rendered_direct_kernel_appliance_is_adopted() -> None:
     xml = render_remote_module_appliance(req)
 
     run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def _direct_kernel_domain_request(architecture: str = "x86_64") -> Any:
+    return replace(
+        request(Clock()),
+        architecture=architecture,
+        appliance_volume=None,
+        appliance_kernel=f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/vmlinuz",
+        appliance_initrd=(
+            f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/initramfs.cpio"
+        ),
+    )
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_rendered_features_match_the_reference(architecture: str) -> None:
+    reference = ET.parse(_REFERENCE_DIR / f"domain-v1-{architecture}.xml").getroot()
+
+    rendered = ET.fromstring(
+        render_remote_module_appliance(_direct_kernel_domain_request(architecture))
+    )
+
+    def features(root: ET.Element) -> list[str] | None:
+        node = root.find("features")
+        return None if node is None else [child.tag for child in node]
+
+    assert features(rendered) == features(reference)
+    assert (features(rendered) == ["acpi"]) is (architecture == "x86_64")
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("<features><acpi /></features>", ""),
+        ("<features><acpi /></features>", "<features><acpi /><apic /></features>"),
+        ("<features><acpi /></features>", "<features><pae /></features>"),
+    ],
+)
+def test_adoption_rejects_drift_in_x86_64_features(old: str, new: str) -> None:
+    clock = Clock()
+    req = _direct_kernel_domain_request()
+    xml = render_remote_module_appliance(req)
+    assert old in xml
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new, 1))), req)
