@@ -1011,10 +1011,14 @@ def _announce(line: str) -> None:
         return
     try:
         os.write(descriptor, f"{line}\n".encode("ascii"))
-    except OSError:
+    except OSError, UnicodeError:
         pass
     finally:
-        os.close(descriptor)
+        # contextlib is outside the closed runtime's stdlib subset, so no suppress() here.
+        try:  # noqa: SIM105
+            os.close(descriptor)
+        except OSError:
+            pass
 
 
 def _reboot() -> int:
@@ -1118,9 +1122,11 @@ def main() -> NoReturn:
     try:
         failure = _finish_mounts(document, operation_error)
     finally:
-        if failure is not None:
-            _announce(f"error_code={failure.code}")
-        _poweroff(document)
+        try:
+            if failure is not None:
+                _announce(f"error_code={failure.code}")
+        finally:
+            _poweroff(document)
 
 
 if __name__ == "__main__":

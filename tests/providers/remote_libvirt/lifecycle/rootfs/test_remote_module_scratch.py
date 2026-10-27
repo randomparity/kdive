@@ -2,6 +2,7 @@
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,6 +19,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes_support import (
     SCRATCH_NAME,
     Conn,
+    Stream,
     Volume,
     _detached_all,
     request,
@@ -177,3 +179,77 @@ def test_mkfs_failure_removes_the_scratch_it_created(
 )
 def test_head_classification(head: bytes, state: ScratchState) -> None:
     assert classify_head(head) is state
+
+
+def test_retry_refuses_a_scratch_with_the_wrong_capacity_before_writing(tmp_path: Path) -> None:
+    conn = Conn()
+    wanted = request(tmp_path, inspect_attachments=_detached_all)
+    prepare_attempt_volumes(conn, wanted)
+    scratch = _scratch(conn)
+    scratch.ranges.clear()
+    scratch.capacity = 4096 * 2
+    scratch.upload_log.clear()
+
+    with pytest.raises(CategorizedError, match="capacity") as raised:
+        prepare_attempt_volumes(conn, wanted)
+
+    assert raised.value.category is ErrorCategory.CONFLICT
+    assert scratch.upload_log == []
+
+
+def test_retry_refuses_a_scratch_formatted_by_another_worker_mid_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_volumes as volumes
+
+    conn = Conn()
+    wanted = request(tmp_path, inspect_attachments=_detached_all)
+    prepare_attempt_volumes(conn, wanted)
+    scratch = _scratch(conn)
+    head = scratch.ranges[0]
+    scratch.ranges.clear()
+    scratch.upload_log.clear()
+    real = volumes.read_head
+    reads = []
+
+    def racing(conn_: Any, volume_: Any, io: Any) -> bytes:
+        reads.append(1)
+        if len(reads) == 2:
+            scratch.ranges[0] = head
+        return real(conn_, volume_, io)
+
+    monkeypatch.setattr(volumes, "read_head", racing)
+
+    with pytest.raises(CategorizedError, match="changed during"):
+        prepare_attempt_volumes(conn, wanted)
+
+    assert scratch.upload_log == []
+
+
+def test_a_seek_failure_other_than_end_of_data_fails_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+    import os
+
+    def broken(_descriptor: int, _position: int, _how: int) -> int:
+        raise OSError(errno.EIO, "io")
+
+    monkeypatch.setattr(os, "lseek", broken)
+
+    with pytest.raises(CategorizedError, match="enumerate") as raised:
+        prepare_attempt_volumes(Conn(), request(tmp_path))
+
+    assert raised.value.category is ErrorCategory.BUILD_FAILURE
+
+
+def test_a_short_image_read_aborts_the_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def short(self: Stream, handler: object, opaque: object) -> None:
+        del self, handler, opaque
+
+    monkeypatch.setattr(Stream, "sendAll", short)
+
+    with pytest.raises(CategorizedError, match="upload the remote module"):
+        prepare_attempt_volumes(Conn(), request(tmp_path))

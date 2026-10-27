@@ -756,7 +756,12 @@ def _ensure_scratch_formatted(
     written. Reformatting also demands the detachment proof a delete does, so nothing writes
     into a volume a live appliance still holds.
     """
-    state = classify_head(read_head(conn, volume, _stream_io(admission, call_stream)))
+    observed_name, capacity = _readback_facts(volume, name)
+    _require_owner(observed_name, _expected_owner(request, "scratch"), name)
+    if capacity != SCRATCH_CAPACITY_BYTES:
+        raise _conflict("remote module volume capacity mismatched", volume=name)
+    io = _stream_io(admission, call_stream)
+    state = classify_head(read_head(conn, volume, io))
     if state is ScratchState.FORMATTED:
         return
     if state is ScratchState.FOREIGN:
@@ -764,6 +769,10 @@ def _ensure_scratch_formatted(
     _admit(admission)
     if not request.inspect_attachments().proves_detached(request.pool, name):
         raise _conflict("remote module scratch volume is unformatted but not detached", volume=name)
+    # Re-read after the proof, immediately before the first write, so a volume another worker
+    # formatted in between is left alone.
+    if classify_head(read_head(conn, volume, io)) is not ScratchState.BLANK:
+        raise _conflict("remote module scratch volume changed during its repair", volume=name)
     _admit(admission)
     _format_scratch(conn, volume, request, admission, call_stream)
 

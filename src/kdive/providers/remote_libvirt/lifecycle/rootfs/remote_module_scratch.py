@@ -10,6 +10,7 @@ already carries the ext4 magic is never written again, because it may hold an AD
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import tempfile
@@ -150,8 +151,13 @@ def _data_extents(image: Path) -> list[tuple[int, int]]:
         while position < size:
             try:
                 start = os.lseek(descriptor, position, os.SEEK_DATA)
-            except OSError:
-                break
+            except OSError as exc:
+                if exc.errno == errno.ENXIO:
+                    break
+                raise CategorizedError(
+                    "failed to enumerate the remote module scratch filesystem",
+                    category=ErrorCategory.BUILD_FAILURE,
+                ) from exc
             end = os.lseek(descriptor, start, os.SEEK_HOLE)
             extents.append((start, end - start))
             position = end
@@ -191,6 +197,8 @@ def _upload_range(
         opened = stream
         io.bounded(lambda: volume.upload(opened, offset, length, 0))
         io.bounded(lambda: opened.sendAll(send, None))
+        if remaining:
+            raise OSError("scratch filesystem image ended before its extent did")
         io.bounded(opened.finish)
     except TimeoutError:
         raise
