@@ -491,6 +491,60 @@ def test_ansible_installs_only_the_selected_supported_architectures() -> None:
     assert "remote_libvirt_module_appliance_enabled | bool" in site
 
 
+def test_appliance_install_dir_carries_a_static_virt_content_label() -> None:
+    """A confined svirt_t qemu cannot read the generic var_lib_t the install tree defaults to."""
+    tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text(encoding="utf-8"))
+    names = [task["name"] for task in tasks]
+    by_name = {task["name"]: task for task in tasks}
+    probe = by_name["Read the SELinux mode for the module-appliance image label"]
+    rule = by_name["Install the module-appliance image virt_content_t fcontext rule"]
+    relabel = by_name["Relabel the module-appliance image tree"]
+    readback = by_name["Read back the module-appliance image labels"]
+    refuse = by_name["Refuse a module-appliance image qemu cannot read"]
+    selinux_enabled = (
+        "remote_libvirt_module_appliance_selinux_mode.stdout | default('') "
+        "in ['Enforcing', 'Permissive']"
+    )
+
+    assert probe["ansible.builtin.command"]["argv"] == ["getenforce"]
+    assert probe["changed_when"] is False
+    assert probe["failed_when"] is False
+    assert rule["community.general.sefcontext"] == {
+        "target": "{{ remote_libvirt_module_appliance_install_dir | regex_escape }}(/.*)?",
+        "setype": "virt_content_t",
+        "state": "present",
+    }
+    assert relabel["ansible.builtin.command"]["argv"] == [
+        "restorecon",
+        "-R",
+        "-v",
+        "{{ remote_libvirt_module_appliance_install_dir }}",
+    ]
+    assert "Relabeled" in relabel["changed_when"]
+    assert readback["ansible.builtin.command"]["argv"] == [
+        "find",
+        "{{ remote_libvirt_module_appliance_install_dir }}",
+        "!",
+        "-context",
+        "*:virt_content_t:*",
+    ]
+    assert readback["changed_when"] is False
+    assert refuse["ansible.builtin.assert"]["that"] == [
+        "remote_libvirt_module_appliance_label_readback.stdout | length == 0"
+    ]
+    for task in (rule, relabel, readback, refuse):
+        assert selinux_enabled in task["when"]
+    assert (
+        names.index(probe["name"])
+        < names.index(rule["name"])
+        < names.index("Create the read-only module-appliance image directory")
+        < names.index("Extract the verified selected module-appliance bundles")
+        < names.index(relabel["name"])
+        < names.index(readback["name"])
+        < names.index(refuse["name"])
+    )
+
+
 def test_installer_and_both_architecture_templates_match_the_fixed_consumer_root() -> None:
     expected = Path("/var/lib/kdive/remote-module-appliance/v1")
     consumer = next(
