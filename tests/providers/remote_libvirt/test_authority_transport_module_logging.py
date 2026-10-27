@@ -36,14 +36,14 @@ def _lifecycle_request() -> RemoteModuleLifecycleRequestV1:
 
 
 class _FailingService:
-    def __init__(self, completion: str) -> None:
+    def __init__(self, completion: str | None) -> None:
         self._completion = completion
 
     def _fail(self) -> None:
         raise CategorizedError(
             "appliance console tail",
             category=ErrorCategory.CONFLICT,
-            details={"completion": self._completion},
+            details={"completion": self._completion} if self._completion else {},
         )
 
     async def execute_remote_module_preparation(self, *_args: object) -> None:
@@ -64,11 +64,13 @@ async def _authenticate(_credential: SecretStr) -> AuthenticatedPeer:
         ("execute-remote-module-preparation", "failed-after-mutation", "remote-module-failed"),
         ("execute-remote-module-lifecycle", "failed-after-mutation", "remote-module-failed"),
         ("execute-remote-module-lifecycle", "refused-before-mutation", "remote-module-refused"),
+        ("execute-remote-module-preparation", None, "provider-conflict"),
+        ("execute-remote-module-lifecycle", None, "provider-conflict"),
     ],
 )
 async def test_remote_module_completion_is_logged_and_wire_response_unchanged(
     operation: Literal["execute-remote-module-preparation", "execute-remote-module-lifecycle"],
-    completion: str,
+    completion: str | None,
     category: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -92,8 +94,7 @@ async def test_remote_module_completion_is_logged_and_wire_response_unchanged(
     [record] = [record for record in caplog.records if record.name == transport.__name__]
     message = record.getMessage()
     assert operation in message
-    assert completion in message
+    assert str(completion) in message
     assert "appliance console tail" in message
-    assert record.exc_info is not None
-    assert record.exc_info[0] is CategorizedError
+    assert "CategorizedError" in message
     assert "credential" not in message
