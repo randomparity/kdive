@@ -1150,3 +1150,35 @@ def test_adoption_rejects_a_missing_or_wrong_disk_driver(old: str, new: str) -> 
     assert old in xml
     with pytest.raises(CategorizedError):
         run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new, 1))), req)
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_rendered_features_match_the_reference(architecture: str) -> None:
+    reference_dir = Path(__file__).resolve().parents[5] / "deploy" / "remote_module_appliance"
+    reference = ET.parse(reference_dir / f"domain-v1-{architecture}.xml").getroot()
+
+    rendered = ET.fromstring(render_remote_module_appliance(_direct_kernel_request(architecture)))
+
+    def features(root: ET.Element) -> list[str] | None:
+        node = root.find("features")
+        return None if node is None else [child.tag for child in node]
+
+    assert features(rendered) == features(reference)
+    assert (features(rendered) == ["acpi"]) is (architecture == "x86_64")
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("<features><acpi /></features>", ""),
+        ("<features><acpi /></features>", "<features><acpi /><apic /></features>"),
+        ("<features><acpi /></features>", "<features><pae /></features>"),
+    ],
+)
+def test_adoption_rejects_drift_in_x86_64_features(old: str, new: str) -> None:
+    clock = Clock()
+    req = _direct_kernel_request()
+    xml = render_remote_module_appliance(req)
+    assert old in xml
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new, 1))), req)
