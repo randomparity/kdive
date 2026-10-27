@@ -201,6 +201,7 @@ async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation
 
     class ModuleService:
         failed = False
+        refused = False
 
         async def open_remote_module_attempt(
             self,
@@ -214,6 +215,12 @@ async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation
         ) -> RemoteModuleTerminalPreparationResponseV1:
             assert peer == AuthenticatedPeer("worker")
             assert remote == remote_request
+            if self.refused:
+                raise CategorizedError(
+                    "private provider refusal",
+                    category=ErrorCategory.CONFLICT,
+                    details={"completion": "refused-before-mutation"},
+                )
             if self.failed:
                 raise CategorizedError(
                     "private provider failure",
@@ -247,6 +254,12 @@ async def test_sender_dispatches_remote_module_preparation_as_a_closed_operation
     assert await adapter.execute_remote_module_preparation(neutral_request, deadline=123.0) == (
         module_completion(remote_request.operation, response)
     )
+    ModuleService.refused = True
+    with pytest.raises(CategorizedError, match="remote-module-refused") as refused:
+        await adapter.execute_remote_module_preparation(neutral_request, deadline=123.0)
+    assert refused.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert refused.value.details == {"completion": "refused-before-mutation"}
+    ModuleService.refused = False
     ModuleService.failed = True
     with pytest.raises(CategorizedError, match="remote-module-failed") as failed:
         await adapter.execute_remote_module_preparation(neutral_request, deadline=123.0)

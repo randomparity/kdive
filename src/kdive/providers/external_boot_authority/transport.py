@@ -506,6 +506,8 @@ async def _dispatch(
         except CategorizedError as exc:
             if exc.details.get("completion") == "failed-after-mutation":
                 return _error("remote-module-failed")
+            if exc.details.get("completion") == "refused-before-mutation":
+                return _error("remote-module-refused")
             return _error("provider-conflict")
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
             _log.exception("authority transport %s failed unexpectedly", operation)
