@@ -31,5 +31,6 @@
     </disk>
     <console type="pty"><target type="virtio" port="0"/></console>
     <memballoon model="none"/>
+    <rng model="virtio"><backend model="random">/dev/urandom</backend></rng>
   </devices>
 </domain>

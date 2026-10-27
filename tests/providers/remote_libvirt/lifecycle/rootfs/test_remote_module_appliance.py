@@ -101,6 +101,15 @@ def test_xml_is_exactly_confined_and_native(architecture: str) -> None:
 _REFERENCE_DIR = Path(__file__).resolve().parents[5] / "deploy" / "remote_module_appliance"
 
 
+def _rng_projection(root: ET.Element) -> list[tuple[dict[str, str], str | None, dict[str, str]]]:
+    rngs = []
+    for rng in root.findall("./devices/rng"):
+        backend = rng.find("backend")
+        assert backend is not None
+        rngs.append((dict(rng.attrib), backend.text, dict(backend.attrib)))
+    return rngs
+
+
 def _boot_console_lifecycle_balloon(root: ET.Element) -> dict[str, object]:
     console = root.find("./devices/console")
     balloon = root.find("./devices/memballoon")
@@ -112,6 +121,7 @@ def _boot_console_lifecycle_balloon(root: ET.Element) -> dict[str, object]:
         "console_target": None if target is None else target.attrib,
         "lifecycle": [root.findtext(tag) for tag in ("on_poweroff", "on_reboot", "on_crash")],
         "balloon": balloon.attrib,
+        "rng": _rng_projection(root),
     }
 
 

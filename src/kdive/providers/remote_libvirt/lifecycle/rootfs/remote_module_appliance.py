@@ -200,6 +200,9 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
     ET.SubElement(devices, "emulator").text = request.emulator_path
     console = ET.SubElement(devices, "console", {"type": "pty"})
     ET.SubElement(console, "target", {"type": "virtio", "port": "0"})
+    # The default qemu64 guest has no RDRAND, so the kernel's entropy pool would stay empty.
+    rng = ET.SubElement(devices, "rng", {"model": "virtio"})
+    ET.SubElement(rng, "backend", {"model": "random"}).text = "/dev/urandom"
     return ET.tostring(domain, encoding="unicode", short_empty_elements=True)
 
 

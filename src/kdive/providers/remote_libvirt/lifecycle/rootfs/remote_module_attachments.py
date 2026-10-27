@@ -752,11 +752,12 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
     devices = root.find("./devices")
     if devices is None:
         raise _conflict("resumed appliance devices are absent")
-    allowed = {"disk", "console", "controller", "input", "memballoon", "emulator"}
+    allowed = {"disk", "console", "controller", "input", "memballoon", "emulator", "rng"}
     if any(device.tag not in allowed for device in devices):
         raise _conflict("resumed appliance unexpectedly has a forbidden device")
+    _validate_rng(devices)
     for device in devices:
-        if device.tag not in {"disk", "console"}:
+        if device.tag not in {"disk", "console", "rng"}:
             _validate_normalized_device(device)
     normalized = [
         device for device in devices if device.tag in {"controller", "input", "memballoon"}
@@ -807,6 +808,32 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
     for address in console.findall("address"):
         if set(address.attrib) - address_attrs:
             raise _conflict("resumed appliance console set mismatched")
+
+
+def _validate_rng(devices: ET.Element) -> None:
+    """Require exactly the reference ``<rng model="virtio">`` backed by ``/dev/urandom``."""
+    nodes = devices.findall("rng")
+    if len(nodes) != 1 or nodes[0].attrib != {"model": "virtio"}:
+        raise _conflict("resumed appliance entropy device mismatched")
+    rng = nodes[0]
+    if nodes[0].text and nodes[0].text.strip():
+        raise _conflict("resumed appliance entropy device mismatched")
+    backends = rng.findall("backend")
+    if (
+        len(backends) != 1
+        or backends[0].attrib != {"model": "random"}
+        or list(backends[0])
+        or (backends[0].text or "").strip() != "/dev/urandom"
+    ):
+        raise _conflict("resumed appliance entropy device mismatched")
+    for child in rng:
+        if child.tag not in {"backend", "alias", "address"} or (
+            child.tag != "backend" and (list(child) or set(child.attrib) - _RNG_CHILD_ATTRS)
+        ):
+            raise _conflict("resumed appliance entropy device mismatched")
+
+
+_RNG_CHILD_ATTRS = {"name", "type", "domain", "bus", "slot", "function"}
 
 
 def _validate_normalized_device(device: ET.Element) -> None:
