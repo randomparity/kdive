@@ -1515,6 +1515,14 @@ class DurableRemoteModuleVolumePreparationHost:
             preparation=preparation, operation=admitted.request.operation
         )
 
+    def execution_started(self, request: RemoteModuleVolumePreparationRequestV1) -> bool:
+        """Whether an earlier execute already reached the provider for this request."""
+        self._store.reopen_request(request)
+        return (
+            self._store.reopen_completion(request) is not None
+            or self._store.reopen_result(request) is not None
+        )
+
     async def execute(
         self, request: RemoteModuleVolumePreparationRequestV1
     ) -> RemoteModuleTerminalPreparationResponseV1:

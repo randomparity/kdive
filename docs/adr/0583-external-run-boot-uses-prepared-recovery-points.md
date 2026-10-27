@@ -19,7 +19,9 @@ Debug-detach restrictions superseded by [ADR-0617](0617-external-boot-detach-rem
 > late attach must not turn a completed power change into `superseded`. Local PREPARE reads it
 > before the `admitted` anchor, so a refusal writes no journal record and the same operation can be
 > admitted again; an adopted predecessor performs no stop and is not rechecked. Remote PREPARE reads
-> it before the attempt is journaled and again immediately before the host executes. A held System
+> it before the attempt is journaled and again immediately before the host executes, unless the host
+> already holds a result or completion for the request (a resume, which refuses nothing). A refusal at
+> that second read leaves the already-anchored `mutation-started` for takeover to recover. A held System
 > is `system_held` on the wire (`system-held`), which the worker raises as a `transport_conflict`
 > with completion `refused-before-mutation`; an unreadable answer is a `provider_conflict`. Both
 > perform no provider mutation. PREPARE runs outside the bound-failure wrapper, so no `fail` result

@@ -169,6 +169,11 @@ class AuthorityPreparationAdapter(Protocol):
 
 
 @runtime_checkable
+class RemoteModuleExecutionProbe(Protocol):
+    def execution_started(self, request: RemoteModuleVolumePreparationRequestV1) -> bool: ...
+
+
+@runtime_checkable
 class AuthorityPreparationAdopter(Protocol):
     async def adopt_preparation(
         self,
@@ -2353,7 +2358,14 @@ class ExternalBootAuthorityService:
                             "journal_conflict", reason="finish_mutation_started_missing"
                         )
                     context = AuthorityCommitContextV1.for_record(started)
-                if refusal := await self._prestop_refusal(authenticated, request, acknowledgement):
+                # A resumed execute may already have stopped the System; refusing it now would
+                # report "refused-before-mutation" for a mutation that happened.
+                resumed = isinstance(host, RemoteModuleExecutionProbe) and host.execution_started(
+                    remote
+                )
+                if not resumed and (
+                    refusal := await self._prestop_refusal(authenticated, request, acknowledgement)
+                ):
                     raise refusal
                 result = await host.execute(remote)
                 result.validate_terminal_for(remote.operation, request)

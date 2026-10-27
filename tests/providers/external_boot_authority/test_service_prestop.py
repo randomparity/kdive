@@ -153,6 +153,10 @@ async def test_materialize_never_consults_the_pre_stop_recheck(tmp_path: Path) -
     assert adapter.calls == ["commit:materialize", "observe"]
 
 
+class _Reached(Exception):
+    pass
+
+
 class _RemoteHost:
     def __init__(self) -> None:
         self.begun = 0
@@ -181,8 +185,15 @@ class _RemoteHost:
             ),
         )
 
+    started = False
+
+    def execution_started(self, request: object) -> bool:
+        return self.started
+
     async def execute(self, request: object) -> object:
         self.executed += 1
+        if self.started:
+            raise _Reached
         raise AssertionError("a refused PREPARE must not reach the provider host")
 
 
@@ -312,3 +323,23 @@ async def test_prepare_that_adopts_a_predecessor_is_not_rechecked(tmp_path: Path
 
     assert "adopt" in adapter.calls
     assert len(repository.prestop_calls) == calls
+
+
+@pytest.mark.anyio
+async def test_remote_prepare_execute_does_not_refuse_a_resume_the_host_already_started(
+    tmp_path: Path,
+) -> None:
+    service, repository, host, peer, request = await _remote_lane(tmp_path)
+    begun = await service.open_remote_module_attempt(
+        peer, RemoteModulePreparationBeginRequestV1(authority=request, budget_seconds=30)
+    )
+    remote = RemoteModuleVolumePreparationRequestV1(authority=request, operation=begun.operation)
+    host.started = True
+    repository.prestop_holders = "job_active"
+    checks = len(repository.prestop_calls)
+
+    with pytest.raises(_Reached):
+        await service.execute_remote_module_preparation(peer, remote)
+
+    assert host.executed == 1
+    assert len(repository.prestop_calls) == checks
