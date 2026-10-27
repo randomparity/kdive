@@ -7,6 +7,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
+from pathlib import Path
 
 import libvirt
 import pytest
@@ -95,6 +96,43 @@ def test_xml_is_exactly_confined_and_native(architecture: str) -> None:
         ({"pool": "pool", "volume": "source"}, {"dev": "vdc", "bus": "virtio"}, True),
         ({"pool": "pool", "volume": "scratch"}, {"dev": "vdd", "bus": "virtio"}, False),
     ]
+
+
+_REFERENCE_DIR = Path(__file__).resolve().parents[5] / "deploy" / "remote_module_appliance"
+
+
+def _boot_console_lifecycle_balloon(root: ET.Element) -> dict[str, object]:
+    console = root.find("./devices/console")
+    balloon = root.find("./devices/memballoon")
+    assert console is not None and balloon is not None
+    target = console.find("target")
+    return {
+        "cmdline": root.findtext("./os/cmdline"),
+        "console": console.attrib,
+        "console_target": None if target is None else target.attrib,
+        "lifecycle": [root.findtext(tag) for tag in ("on_poweroff", "on_reboot", "on_crash")],
+        "balloon": balloon.attrib,
+    }
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_rendered_boot_console_lifecycle_and_balloon_match_the_reference(
+    architecture: str,
+) -> None:
+    req = replace(
+        request(Clock()),
+        architecture=architecture,
+        appliance_volume=None,
+        appliance_kernel=f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/vmlinuz",
+        appliance_initrd=(
+            f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/initramfs.cpio"
+        ),
+    )
+    reference = ET.parse(_REFERENCE_DIR / f"domain-v1-{architecture}.xml").getroot()
+
+    rendered = ET.fromstring(render_remote_module_appliance(req))
+
+    assert _boot_console_lifecycle_balloon(rendered) == _boot_console_lifecycle_balloon(reference)
 
 
 def test_direct_kernel_appliance_uses_the_installed_three_disk_mapping() -> None:
