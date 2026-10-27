@@ -97,4 +97,5 @@ async def test_remote_module_completion_is_logged_and_wire_response_unchanged(
     assert str(completion) in message
     assert "appliance console tail" in message
     assert "CategorizedError" in message
+    assert record.exc_info is None
     assert "credential" not in message
