@@ -1020,8 +1020,12 @@ class LocalExternalBootOperation(Protocol):
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation: ...
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None: ...
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None: ...
     def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def record_phase(
         self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
@@ -1101,6 +1105,13 @@ class LocalSystemTeardownIO(Protocol):
     def system_teardown_recovery_is_absent(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
     ) -> bool: ...
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None: ...
 
 
 class LocalExternalBootMaterializer(Protocol):
@@ -1841,6 +1852,49 @@ class RealLocalExternalBootIO:
         ):
             return store.exact_recovery_absence(intent.binding)
 
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        """Settle a retained recovery point without recovering it (#3341).
+
+        The domain is destroyed next, so restoring the guest is pointless, and a conflicted
+        activation cannot be restored: its definition matches neither source nor target. This
+        needs the pinned teardown lane (so a foreign definition still refuses in the ownership
+        check) but not a domain, and it accepts any recovery phase.
+        """
+        with (
+            self._open_system_teardown(intent, authority) as session,
+            RecoveryMetadataStore(self._recovery_root) as store,
+        ):
+            session.inspect()
+            reference = recovery.recovery_ref
+            if (
+                proof.binding != recovery.binding
+                or proof.point_digest != LocalLibvirtExternalBoot.point_digest(recovery)
+            ):
+                raise ValueError("external-boot cleanup proof does not match recovery point")
+            if not store.cleanup_complete(reference, recovery):
+                metadata = store.reopen(reference, recovery.binding)
+                if _recovery_point_of(metadata, reference) != recovery:
+                    raise ValueError(
+                        "external-boot recovery metadata does not match recovery point"
+                    )
+                session.cleanup_payloads(metadata)
+                store.publish_tombstone(
+                    reference,
+                    recovery.binding,
+                    metadata,
+                    LocalLibvirtExternalBoot.point_digest(recovery),
+                    require_recovered=False,
+                )
+            if store.read_cleanup_quarantine(recovery.binding) is None:
+                store.record_cleanup_quarantine(recovery, proof)
+            store.finalize_tombstone(reference, recovery, proof)
+
     def teardown_system(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
     ) -> AuthoritySystemTeardownFacts:
@@ -1901,6 +1955,19 @@ class RealLocalExternalBootIO:
             raise
         else:
             session.close()
+
+
+def _recovery_point_of(
+    metadata: LocalRecoveryMetadataV1, reference: OpaqueProviderRef
+) -> RecoveryPoint:
+    return RecoveryPoint(
+        binding=metadata.binding,
+        plan_identity=metadata.plan_identity,
+        materialization_identity=metadata.materialization_identity,
+        recovery_ref=reference,
+        source_state=metadata.source_state,
+        target_state=metadata.target_state,
+    )
 
 
 def _system_teardown_facts(
@@ -2162,12 +2229,24 @@ class _RealLocalExternalBootOperation:
             raise ValueError("external-boot running kernel does not match recovery metadata")
         return observed
 
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
         if metadata.phase == "pre-stop-intent":
             self._settle_unpublished_modules(metadata)
             return
-        self._stop_for_recovery(metadata)
-        target = _present_component(metadata.target_state.modules, "target module state")
+        self._stop_for_recovery(metadata, acknowledged)
+        # The tree being replaced is the recorded target, or the acknowledged third tree: its
+        # manifest is the compare-and-swap expectation the live layout is checked against.
+        replaced = (
+            metadata.target_state.modules
+            if acknowledged is None or acknowledged.modules is None
+            else acknowledged.modules
+        )
+        if acknowledged is not None and replaced == metadata.source_state.modules:
+            self._confirm_modules_restored(metadata, replaced)
+            return
+        target = _layout_component(replaced)
         desired = _layout_component(metadata.source_state.modules)
         with self._session.guest() as opened_guest:
             guest = cast(_GuestfsTreeHandle, opened_guest)
@@ -2221,13 +2300,25 @@ class _RealLocalExternalBootOperation:
                     publication.guest_sync()
                     publication.record_phase(PublicationPhase.MOVE_READY)
             if isinstance(metadata.capture, AbsentModuleCapture):
-                self._finish_absence_publication(publication, prior=target)
+                self._finish_absence_publication(
+                    publication, prior=_present_component(replaced, "replaced module state")
+                )
             else:
                 assert desired is not None
                 self._finish_present_publication(publication, prior=target, desired=desired)
             completed = publication.metadata
             observed = self._observe_modules(opened_guest, completed)
         self.record_phase(completed, "module-restored", inactive_modules=observed)
+
+    def _confirm_modules_restored(
+        self, metadata: LocalRecoveryMetadataV1, expected: ComponentState
+    ) -> None:
+        """Record the module tree as restored when the live tree is already the source."""
+        with self._session.guest() as opened_guest:
+            observed = self._observe_modules(opened_guest, metadata)
+        if observed != expected:
+            raise ValueError("external-boot module tree changed since the acknowledged observation")
+        self.record_phase(metadata, "module-restored", inactive_modules=observed)
 
     def _settle_unpublished_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         """ADR-0707: an activation that never published keeps only its own staging name."""
@@ -2252,10 +2343,12 @@ class _RealLocalExternalBootOperation:
             observed = self._observe_modules(opened_guest, metadata)
         self.record_phase(metadata, "module-restored", inactive_modules=observed)
 
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
         while metadata.phase == "module-restored":
-            xml, active = self._host_state(metadata)
-            if xml == "target" and not active:
+            xml, active = self._host_state(metadata, acknowledged)
+            if xml in {"target", "acknowledged"} and not active:
                 self._session.define_xml(metadata.source_xml)
                 continue
             if xml == "source" and not active:
@@ -2448,31 +2541,39 @@ class _RealLocalExternalBootOperation:
             raise ValueError("external-boot completed module absence layout conflicts")
 
     def _host_state(
-        self, metadata: LocalRecoveryMetadataV1
-    ) -> tuple[Literal["source", "target"], bool]:
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> tuple[Literal["source", "target", "acknowledged"], bool]:
+        """Classify the domain definition; a third one only when it is the acknowledged one."""
         inspection = self._session.inspect_closed(projected=True)
         if inspection.xml == metadata.source_xml.encode():
             return "source", inspection.active
         if _same_domain_definition(inspection.xml.decode(), metadata.target_xml):
             return "target", inspection.active
+        if acknowledged is not None and acknowledged.definition == inspection.source_boot_identity:
+            return "acknowledged", inspection.active
         raise ValueError("external-boot observed domain XML does not match recovery metadata")
 
-    def _stop_for_recovery(self, metadata: LocalRecoveryMetadataV1) -> None:
-        xml, active = self._host_state(metadata)
-        if metadata.phase == "target-defined" and xml != "target":
+    def _stop_for_recovery(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        xml, active = self._host_state(metadata, acknowledged)
+        if metadata.phase == "target-defined" and xml == "source":
             raise ValueError("external-boot recovery expected the target domain XML")
-        if active and xml != "target":
+        if active and xml == "source":
             raise ValueError("external-boot refuses to stop an unexpected running domain")
         if not active:
             self._session.require_inactive()
             return
         # ADR-0681: only a target that reached `target-defined` stops cleanly, and only on KVM.
-        mode: StopMode = "clean-on-kvm" if metadata.phase == "target-defined" else "destroy"
+        # An acknowledged third definition is not that target, so it is destroyed.
+        mode: StopMode = (
+            "clean-on-kvm" if metadata.phase == "target-defined" and xml == "target" else "destroy"
+        )
         try:
             self._session.stop_and_require_inactive(mode=mode)
         except Exception as primary:
             try:
-                after = self._host_state(metadata)
+                after = self._host_state(metadata, acknowledged)
             except Exception as observation_error:
                 primary.add_note(f"post-stop host-state observation failed: {observation_error!r}")
                 raise primary from None
@@ -2480,7 +2581,7 @@ class _RealLocalExternalBootOperation:
                 self._session.require_inactive()
                 return
             raise
-        if self._host_state(metadata) != (xml, False):
+        if self._host_state(metadata, acknowledged) != (xml, False):
             raise ValueError("external-boot stop did not preserve exact XML and inactivity")
 
     def _require_readiness(self) -> None:
@@ -2683,6 +2784,17 @@ class LocalLibvirtExternalBoot:
             intent, authority
         )
 
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        cast(LocalSystemTeardownIO, self._io).discard_system_teardown_recovery(
+            intent, recovery, proof, authority
+        )
+
     @staticmethod
     def point_digest(recovery: RecoveryPoint) -> str:
         return (
@@ -2832,8 +2944,14 @@ class LocalLibvirtExternalBoot:
         *,
         local_timing: LocalExternalBootTimingV1 | None = None,
         restore_power: bool = True,
+        acknowledged: LocalObservedState | None = None,
     ) -> None:
         """Resume recovery to ``recovered``, restoring prior power unless told not to.
+
+        ``acknowledged`` is the conflict observation an administrator acknowledged
+        (ADR-0583): a third definition or module tree is replaced by the recorded source only
+        when it is exactly that observation, and each write re-checks its own component. Without
+        it a third identity is refused.
 
         System teardown passes ``restore_power=False`` (#2898): it destroys the domain next,
         so a start would only boot a guest it is about to kill. ``define_source`` records
@@ -2868,10 +2986,16 @@ class LocalLibvirtExternalBoot:
             }:
                 raise ProviderRecoveryRefusal("external-boot recovery phase is not resumable")
             if metadata.phase not in {"source-restored"}:
-                operation.recover_modules(metadata)
+                if acknowledged is None:
+                    operation.recover_modules(metadata)
+                else:
+                    operation.recover_modules(metadata, acknowledged)
                 metadata = self._reopen(operation, recovery)
             if metadata.phase == "module-restored":
-                operation.define_source(metadata)
+                if acknowledged is None:
+                    operation.define_source(metadata)
+                else:
+                    operation.define_source(metadata, acknowledged)
                 metadata = self._reopen(operation, recovery)
             if metadata.phase == "source-restored":
                 if restore_power:
@@ -3767,8 +3891,14 @@ class RecoveryMetadataStore:
         binding: ExternalBootActivationBinding,
         expected: LocalRecoveryMetadataV1,
         point_digest: Digest,
+        *,
+        require_recovered: bool = True,
     ) -> CleanupTombstoneV1:
-        """Atomically replace recovered metadata with accounted cleanup evidence."""
+        """Atomically replace recovered metadata with accounted cleanup evidence.
+
+        System teardown discards a conflicted activation unrecovered (#3341), so it passes
+        ``require_recovered=False``.
+        """
         self._require_open()
         name = recovery_directory_name(reference, binding)
         directory_fd = _open_private_directory(self._root_fd, name)
@@ -3788,7 +3918,7 @@ class RecoveryMetadataStore:
         try:
             if expected.binding != binding or self._read(directory_fd) != expected:
                 raise ValueError("recovery metadata changed before cleanup")
-            if expected.phase != "recovered":
+            if require_recovered and expected.phase != "recovered":
                 raise ValueError("recovery must complete before cleanup")
             temporary = ".tombstone.next"
             _replace_private_file(
@@ -3970,7 +4100,9 @@ class RecoveryMetadataStore:
                 source_state=metadata.source_state,
                 target_state=metadata.target_state,
             )
-            if metadata.phase != "recovered" or recovered != point:
+            # System teardown publishes the tombstone from any phase (#3341), so a crash between
+            # the publish and the intent unlink leaves the intent at that phase.
+            if recovered != point:
                 raise ValueError("cleanup intent does not match tombstone recovery point")
         if _PREPARATION_NAME not in entries:
             return

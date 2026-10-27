@@ -84,3 +84,7 @@ an operator may instead stage immutable bundles on each host and use `file://` U
 intentional: the repository owns the deterministic build and pinned installation contract, while
 artifact publication remains an operator/release action. Ansible verifies every digest during
 acquisition and again from the installed read-only file before the artifact is usable.
+
+On a host where SELinux is enforcing or permissive, the role also labels the install tree
+`virt_content_t` through a persistent fcontext rule and `restorecon`, then reads the labels back,
+so the confined qemu can open the appliance kernel and initramfs.

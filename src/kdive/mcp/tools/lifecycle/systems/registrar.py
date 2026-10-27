@@ -40,6 +40,7 @@ from kdive.mcp.tools.lifecycle.systems.admin import (
 from kdive.mcp.tools.lifecycle.systems.admin import (
     teardown_system as _teardown_system,
 )
+from kdive.mcp.tools.lifecycle.systems.conflict_evidence import MAX_CONFLICT_OBJECTS
 from kdive.mcp.tools.lifecycle.systems.profile_examples import (
     build_profile_examples as _build_profile_examples,
 )
@@ -124,7 +125,9 @@ def _with_run_history_limit(
     """Interpolate the enforced history cap before FastMCP reads the docstring."""
     if func.__doc__ is None:
         raise AssertionError("systems.get wrapper must have a docstring")
-    func.__doc__ = func.__doc__.replace("{cap}", str(_RUN_INVESTIGATIONS_LIMIT))
+    func.__doc__ = func.__doc__.replace("{cap}", str(_RUN_INVESTIGATIONS_LIMIT)).replace(
+        "{conflict_objects_cap}", str(MAX_CONFLICT_OBJECTS)
+    )
     return func
 
 
@@ -329,6 +332,13 @@ def _register_systems_get(
         state is capture-ready, and ``vmcore.fetch`` still accepts only core-producing methods.
         Absent means unknown (provider unregistered or profile unreadable); ``[]`` means known
         empty. Unlike ``resources.describe``'s provider-wide set, this is the per-System view.
+
+        ``data.external_boot_conflict`` appears only for a caller holding admin on the System's
+        project, and only while the System's external-boot recovery is in conflict: it carries
+        ``activation_id``, ``attempt_id``, ``observation_id``, ``composite_state``, ``observed_at``
+        and the observed ``objects`` (at most {conflict_objects_cap}; ``objects_truncated`` is
+        ``true`` when more were recorded). Pass ``composite_state`` as ``observed_identity`` to
+        ``systems.resolve_external_boot_conflict``. Other callers read the System unchanged.
         """
         return await _get_system(pool, current_context(), system_id, resolver=resolver)
 
@@ -760,7 +770,8 @@ def _register_systems_resolve_external_boot_conflict(
             Field(
                 max_length=_MAX_OBSERVED_IDENTITY_LENGTH,
                 description=(
-                    "The composite state identity from your most recent systems.get, as "
+                    "The composite state identity from your most recent systems.get "
+                    "(data.external_boot_conflict.composite_state, shown to admins), as "
                     "'sha256:<64 lowercase hex>'. It is durably bound to the request; the worker "
                     "must freshly observe and match this exact identity before changing state."
                 ),
@@ -789,7 +800,8 @@ def _register_systems_resolve_external_boot_conflict(
         `data.recovery_readiness_deadline` is an absolute server-clock timestamp for this
         request's recovery job. For local libvirt it contains the configured console readiness
         window, scaled for TCG; other providers retain their own deadline. Expiry fails the job
-        without renewing it. Read `systems.get` for a fresh composite identity, then submit a
+        without renewing it. Read `data.external_boot_conflict.composite_state` from
+        `systems.get` for a fresh composite identity, then submit a
         new `systems.resolve_external_boot_conflict` request with a new idempotency key, or use
         `systems.teardown` if recovery is unavailable. The same key replays the original job.
 

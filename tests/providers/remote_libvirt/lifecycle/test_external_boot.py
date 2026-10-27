@@ -971,6 +971,52 @@ def test_recovery_refuses_an_unproven_state_without_writing(
     assert domain.calls.count("create") == 0
 
 
+def _acknowledged(domain: _FakeDomain) -> tuple[str, str]:
+    observed = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+    return preserved_definition_identity(observed), boot_projection_identity(observed)
+
+
+@pytest.mark.parametrize("active", [False, True], ids=["stopped", "running"])
+def test_recovery_restores_the_source_from_an_acknowledged_third_definition(active: bool) -> None:
+    recovery = _recovery("inactive")
+    domain = _domain_for("other", recovery, active=active)
+
+    recover_disk_grub_baseline(_FakeConn(domain), recovery, _acknowledged(domain))
+
+    assert domain.defined == [recovery.definition.source_xml]
+    assert domain.calls.count("destroy") == int(active)
+    assert _observed_side(domain, recovery.definition) == "source"
+
+
+def test_recovery_refuses_a_third_definition_other_than_the_acknowledged_one() -> None:
+    recovery = _recovery("inactive")
+    domain = _domain_for("other", recovery, active=False)
+
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(
+            _FakeConn(domain), recovery, ("sha256:" + "0" * 64, "sha256:" + "0" * 64)
+        )
+
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert domain.defined == []
+
+
+def test_recovery_refuses_to_define_when_the_acknowledged_definition_changed_during_the_stop() -> (
+    None
+):
+    recovery = _recovery("inactive")
+    domain = _domain_for("other", recovery, active=True)
+    acknowledged = _acknowledged(domain)
+    domain.on_destroy = lambda fake: fake._replace(_OTHER_XML.replace("kdive-other", "kdive-yet"))
+
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(_FakeConn(domain), recovery, acknowledged)
+
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["phase"] == "stop"
+    assert domain.defined == []
+
+
 def test_recovery_resumes_after_a_lost_response_without_writing_again() -> None:
     recovery = _recovery("running")
     domain = _domain_for("target", recovery, active=True)
