@@ -1704,10 +1704,10 @@ def _build_mutation_service(
             config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
         )
 
-    recovery_orphans = RecoveryOrphanAuthorityService(
-        connections, binding.provider, executor=binding.adapter
-    )
     if not config.remote_module_enabled:
+        recovery_orphans = RecoveryOrphanAuthorityService(
+            connections, binding.provider, executor=binding.adapter
+        )
         if isinstance(system_manifest, RemoteAuthoritySystemManifestV1):
             raise HostReadinessError("system-provider", "remote-binding-missing")
         system_service = (
@@ -1814,6 +1814,9 @@ def _build_mutation_service(
         module_executor,
         remote_module_host=remote_module_host,
         close=close_remote,
+    )
+    recovery_orphans = RecoveryOrphanAuthorityService(
+        connections, binding.provider, executor=adapter
     )
 
     try:

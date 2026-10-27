@@ -83,6 +83,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationStore,
     RemoteSystemTeardownInspection,
     RemoteSystemTeardownState,
+    authority_reference,
 )
 from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
@@ -3621,3 +3622,161 @@ def test_concrete_remote_system_teardown_preserves_siblings_and_rejects_aliases(
     with pytest.raises(CategorizedError, match="another domain references"):
         operations.validate_system_teardown(state)
     assert deleted == set()
+
+
+async def _cleaned_release(
+    tmp_path: Path,
+) -> tuple[
+    RemoteExternalBootAuthorityAdapter,
+    RemoteExternalBootRecoveryRecord,
+    AuthorityMutationRequestV1,
+    AuthorityCommitContextV1,
+]:
+    """A remote release CLEANUP committed, with finalization not yet run (#3326)."""
+    adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=True)
+    request = _native_request(
+        record, point, purpose="release", operation=AuthorityOperation.CLEANUP, named=True
+    )
+    context = _native_context(request)
+    evidence = AuthorityCleanupEvidenceContextV1(
+        operation_identity=request.operation_identity,
+        attempt_id=request.attempt_id,
+        operation_nonce=record.module_recovery.operation_nonce,
+        cleanup_state="discharged",
+        recovery_reference_json=record.module_recovery.model_dump_json(),
+    )
+    operations.state = replace(
+        operations.state, definition="source", active=False, recovery_objects_absent=True
+    )
+    await adapter.commit_cleanup(request, context, evidence)
+    return adapter, record, request, context
+
+
+@pytest.mark.anyio
+async def test_remote_cleanup_inventory_is_the_exact_unmanaged_recovery_record(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+
+    (observation,) = await adapter.cleanup_quarantine_inventory(request)
+
+    assert observation.present
+    assert not observation.managed
+    bound = observation.binding
+    assert bound.kind == "recovery-record"
+    assert bound.binding == record.binding
+    assert bound.operation_identity == request.operation_identity
+    assert bound.attempt_id == str(request.attempt_id)
+    assert bound.mutation_journal_sequence == context.journal_sequence
+    assert bound.mutation_journal_digest == context.journal_digest
+    other = request.model_copy(update={"attempt_id": uuid4()})
+    with pytest.raises(ValueError, match="differs from the request"):
+        await adapter.cleanup_quarantine_inventory(other)
+    activate = request.model_copy(update={"operation": AuthorityOperation.ACTIVATE})
+    assert await adapter.cleanup_quarantine_inventory(activate) == ()
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_cleanup_inventory_is_empty_before_cleanup(tmp_path: Path) -> None:
+    adapter, _operations, record, point, _ = _native_adapter(tmp_path, restored=True)
+    request = _native_request(
+        record, point, purpose="release", operation=AuthorityOperation.CLEANUP, named=True
+    )
+
+    assert await adapter.cleanup_quarantine_inventory(request) == ()
+    await adapter.finalize(request, _native_context(request))
+    assert adapter._coordinator.recovery_point(record.binding, record.plan_identity) == point
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_removes_the_receipt_and_recovery_record_idempotently(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+
+    await adapter.finalize(request, context)
+
+    assert await adapter.cleanup_quarantine_inventory(request) == ()
+    with pytest.raises(FileNotFoundError):
+        adapter._coordinator.recovery_point(record.binding, record.plan_identity)
+    assert (
+        adapter._coordinator._store.teardown_recovery(record.binding, record.plan_identity) is None
+    )
+    await adapter.finalize(request, context)
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("field", ["journal_digest", "journal_sequence", "attempt_id"])
+async def test_remote_finalize_refuses_a_proof_that_differs_from_the_receipt(
+    tmp_path: Path, field: str
+) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    changed = {
+        "journal_digest": "sha256:" + "b" * 64,
+        "journal_sequence": context.journal_sequence + 1,
+        "attempt_id": uuid4(),
+    }[field]
+
+    with pytest.raises(ValueError, match="differs from the quarantine receipt"):
+        await adapter.finalize(request, context.model_copy(update={field: changed}))
+
+    assert len(await adapter.cleanup_quarantine_inventory(request)) == 1
+    assert adapter._coordinator.recovery_point(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_recovery_record_delete_and_adopt_are_digest_fenced(tmp_path: Path) -> None:
+    adapter, _record, request, _context = await _cleaned_release(tmp_path)
+    (observed,) = await adapter.cleanup_quarantine_inventory(request)
+    authority = authority_reference(request)
+    stale = "sha256:" + "0" * 64
+
+    with pytest.raises(ValueError, match="changed before delete"):
+        await adapter.delete_recovery_object(observed.binding, authority, stale)
+    with pytest.raises(ValueError, match="changed before adopt"):
+        await adapter.adopt_recovery_object(observed.binding, authority, stale)
+    assert await adapter.observe_recovery_object(observed.binding, authority) == observed
+
+    adopted = await adapter.adopt_recovery_object(
+        observed.binding, authority, observed.observed_digest
+    )
+    assert adopted.managed
+    assert await adapter.cleanup_quarantine_inventory(request) == ()
+    with pytest.raises(ValueError, match="changed before delete"):
+        await adapter.delete_recovery_object(observed.binding, authority, adopted.observed_digest)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_recovery_record_delete_finalizes_the_exact_record(tmp_path: Path) -> None:
+    adapter, record, request, _context = await _cleaned_release(tmp_path)
+    (observed,) = await adapter.cleanup_quarantine_inventory(request)
+    authority = authority_reference(request)
+
+    deleted = await adapter.delete_recovery_object(
+        observed.binding, authority, observed.observed_digest
+    )
+
+    assert not deleted.present
+    assert await adapter.cleanup_quarantine_inventory(request) == ()
+    with pytest.raises(FileNotFoundError):
+        adapter._coordinator.recovery_point(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_recovery_object_port_serves_only_the_recovery_record(
+    tmp_path: Path,
+) -> None:
+    adapter, _record, request, _context = await _cleaned_release(tmp_path)
+    (observed,) = await adapter.cleanup_quarantine_inventory(request)
+
+    with pytest.raises(ValueError, match="only the recovery record"):
+        await adapter.observe_recovery_object(
+            observed.binding.model_copy(update={"kind": "kernel"}), authority_reference(request)
+        )
+    adapter.close()
