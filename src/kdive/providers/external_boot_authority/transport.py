@@ -438,6 +438,7 @@ def _service_category(category: str) -> str:
     return {
         "journal_conflict": "journal-conflict",
         "provider_conflict": "provider-conflict",
+        "system_held": "system-held",
         "configuration_error": "configuration-error",
     }.get(category, category)
 
