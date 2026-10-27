@@ -77,8 +77,8 @@ No production path did this (#3327):
   Refusals over any other observed state still follow ADR-0714 unchanged.
 - The conflict evidence's composite is the value `resolve_external_boot_conflict` needs as
   `observed_identity`. No MCP read exposes it yet (#3331).
-- Resolution restores the recorded source from the acknowledged third identity. See the
-  amendment below (#3330).
+- Resolution still restores only through the provider's ordinary recovery. Restoring from an
+  acknowledged third identity is #3330.
 - `unreadable` never becomes a conflict here. ADR-0583's promotion of an unreadable recovery to
   `recovery_conflict` at its deadline is still unimplemented.
 - A conflict found only while the authority finishes an earlier generation's unresolved
@@ -88,8 +88,9 @@ No production path did this (#3327):
 
 ### Amendment (2026-10-26): resolution restores from the acknowledged identity (#3330)
 
+This qualifies the consequence above that resolution restores only through ordinary recovery.
 ADR-0583 describes resolution as restoration from the acknowledged identity by per-component
-compare-and-swap. This amendment records how the providers do that.
+compare-and-swap, and the providers now do that. This amendment records how.
 
 1. **The acknowledged identity is a digest, so its components come from a fresh observation.**
    Before a `resolve-conflict` commit writes, the adapter observes the provider again and
