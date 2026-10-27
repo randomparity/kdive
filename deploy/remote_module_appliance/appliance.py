@@ -628,14 +628,30 @@ def _capture_fields(checkpoint: dict[str, object]) -> dict[str, object]:
     raise ApplianceError("RECOVERY_CONFLICT")
 
 
+def _modules_components() -> tuple[str, ...]:
+    """Name the module directory, resolving only the usr-merged `lib -> usr/lib` symlink.
+
+    Fedora and its relatives keep `/lib` as the relative symlink `usr/lib`; every other symlink
+    in the walk stays refused, so the resolved path cannot leave the mounted root.
+    """
+    try:
+        target = os.readlink(ROOT / "lib")
+    except OSError:
+        return ("lib", "modules")
+    if target != "usr/lib":
+        raise ApplianceError("RECOVERY_CONFLICT")
+    return ("usr", "lib", "modules")
+
+
 def _module_paths(document: dict[str, object]) -> tuple[Path, Path, Path, Path]:
     release = str(document["release"])
     nonce = str(document["operation_nonce"])
+    components = _modules_components()
     descriptors: list[int] = []
     try:
         descriptor = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         descriptors.append(descriptor)
-        for component in ("lib", "modules"):
+        for component in components:
             descriptor = os.open(
                 component,
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -647,7 +663,7 @@ def _module_paths(document: dict[str, object]) -> tuple[Path, Path, Path, Path]:
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
-    parent = ROOT / "lib" / "modules"
+    parent = ROOT.joinpath(*components)
     staged = parent / f".kdive-{nonce}-new"
     staged_tree = staged / "lib" / "modules" / release
     displaced = parent / f".kdive-{nonce}-old"

@@ -150,8 +150,23 @@ class TeardownObservation:
         return self.absent and self.root_detached and self.source_detached and self.scratch_detached
 
 
-def _disk(parent: ET.Element, pool: str, volume: str, alias: str, *, readonly: bool) -> None:
+def _disk(
+    parent: ET.Element,
+    pool: str,
+    volume: str,
+    alias: str,
+    *,
+    readonly: bool,
+    image_format: str | None = None,
+) -> None:
     disk = ET.SubElement(parent, "disk", {"type": "volume", "device": "disk"})
+    if image_format is not None:
+        # Without a driver element libvirt hands a qcow2 overlay to the guest as a raw disk.
+        ET.SubElement(
+            disk,
+            "driver",
+            {"name": "qemu", "type": image_format, "cache": "none", "io": "native"},
+        )
     ET.SubElement(disk, "source", {"pool": pool, "volume": volume})
     ET.SubElement(disk, "target", {"dev": alias, "bus": "virtio"})
     if readonly:
@@ -183,9 +198,11 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
     )
     devices = ET.SubElement(domain, "devices")
     if request.appliance_volume is None:
-        _disk(devices, request.pool, request.root.name, "vda", readonly=False)
-        _disk(devices, request.pool, request.source.name, "vdb", readonly=True)
-        _disk(devices, request.pool, request.scratch.name, "vdc", readonly=False)
+        _disk(devices, request.pool, request.root.name, "vda", readonly=False, image_format="qcow2")
+        _disk(devices, request.pool, request.source.name, "vdb", readonly=True, image_format="raw")
+        _disk(
+            devices, request.pool, request.scratch.name, "vdc", readonly=False, image_format="raw"
+        )
     else:
         _disk(devices, request.pool, request.appliance_volume, "vda", readonly=True)
         _disk(devices, request.pool, request.root.name, "vdb", readonly=False)

@@ -190,7 +190,10 @@ def appliance_xml(state: ExpectedAttachmentState, **metadata: str) -> str:
     }
     attrs = " ".join(f"{key}='{value}'" for key, value in values.items())
     disks = "".join(
-        f"<disk type='volume' device='disk'><source pool='{state.pool}' volume='{volume}'/>"
+        f"<disk type='volume' device='disk'>"
+        f"<driver name='qemu' type='{'qcow2' if alias == 'vda' else 'raw'}' "
+        "cache='none' io='native'/>"
+        f"<source pool='{state.pool}' volume='{volume}'/>"
         f"<target dev='{alias}' bus='virtio'/>"
         f"{'<readonly/>' if alias == 'vdb' else ''}</disk>"
         for volume, alias in (

@@ -551,6 +551,23 @@ def _inspect_definition(
     return False
 
 
+_DIRECT_KERNEL_DISK_FORMATS = {"vda": "qcow2", "vdb": "raw", "vdc": "raw"}
+
+
+def _has_reference_driver(dev: str | None, driver: ET.Element | None) -> bool:
+    """Whether a direct-kernel disk carries the reference driver for its role.
+
+    The System root is a qcow2 overlay and the other two volumes are raw; a missing or different
+    driver hands the guest the wrong bytes (a qcow2 container read as a raw disk).
+    """
+    image_format = _DIRECT_KERNEL_DISK_FORMATS.get(dev or "")
+    return (
+        image_format is not None
+        and driver is not None
+        and driver.attrib == {"name": "qemu", "type": image_format, "cache": "none", "io": "native"}
+    )
+
+
 def _validate_appliance(
     root: ET.Element,
     active: bool,
@@ -610,6 +627,10 @@ def _validate_appliance(
         driver = disk.find("driver")
         driver_attrs = {"name", "type", "cache", "io", "discard"}
         if driver is not None and (set(driver.attrib) - driver_attrs or list(driver)):
+            raise _conflict("resumed appliance volume set mismatched")
+        if expected.appliance.volume is None and not _has_reference_driver(
+            target.get("dev"), driver
+        ):
             raise _conflict("resumed appliance volume set mismatched")
         alias = disk.find("alias")
         if alias is not None and (set(alias.attrib) - {"name"} or list(alias)):

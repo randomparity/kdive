@@ -618,14 +618,18 @@ def test_appliance_devtmpfs_mount_allows_its_device_nodes(
     assert mounts[0] == ("devtmpfs", Path("/dev"), "devtmpfs", 2 | 8)
 
 
+@pytest.mark.parametrize("usr_merged", [False, True])
 def test_capture_install_and_restore_round_trip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, usr_merged: bool
 ) -> None:
     appliance = _module()
     root = tmp_path / "root"
     source = tmp_path / "source"
     scratch = tmp_path / "scratch"
     release = str(_operation()["release"])
+    if usr_merged:
+        (root / "usr" / "lib" / "modules").mkdir(parents=True)
+        (root / "lib").symlink_to("usr/lib")
     old_tree = root / "lib" / "modules" / release
     new_tree = source / "modules"
     old_tree.mkdir(parents=True)
@@ -1568,3 +1572,37 @@ def test_a_failing_announcement_does_not_skip_the_poweroff(
         appliance.main()
 
     assert powered == [True]
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["/usr/lib", "../outside", "usr/lib64", "usr/lib/"],
+)
+def test_module_paths_refuse_any_lib_symlink_but_the_usr_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    appliance = _module()
+    root = tmp_path / "root"
+    (root / "usr" / "lib" / "modules").mkdir(parents=True)
+    (root / "lib").symlink_to(target)
+    monkeypatch.setattr(appliance, "ROOT", root)
+
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance._module_paths(appliance._validate_operation(_operation()))
+
+
+def test_module_paths_resolve_the_usr_merged_root_under_usr_lib(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    root = tmp_path / "root"
+    (root / "usr" / "lib" / "modules").mkdir(parents=True)
+    (root / "lib").symlink_to("usr/lib")
+    monkeypatch.setattr(appliance, "ROOT", root)
+
+    destination, staged, _tree, _displaced = appliance._module_paths(
+        appliance._validate_operation(_operation())
+    )
+
+    assert destination.parent == root / "usr" / "lib" / "modules"
+    assert staged.parent == destination.parent

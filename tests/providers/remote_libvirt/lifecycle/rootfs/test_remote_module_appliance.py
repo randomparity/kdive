@@ -7,6 +7,8 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
 import libvirt
 import pytest
@@ -1055,3 +1057,53 @@ def test_teardown_requires_absence_and_all_detach_proofs() -> None:
     assert observed.absent and observed.source_detached and observed.scratch_detached
     unresolved = replace(proof, appliance_present=True)
     assert not observe_appliance_absent_and_detached(expected, lambda: unresolved).complete
+
+
+def _disk_drivers(root: ET.Element) -> dict[str, dict[str, str]]:
+    drivers = {}
+    for disk in root.findall("./devices/disk"):
+        target = disk.find("target")
+        driver = disk.find("driver")
+        assert target is not None and driver is not None
+        drivers[str(target.get("dev"))] = dict(driver.attrib)
+    return drivers
+
+
+def _direct_kernel_request(architecture: str = "x86_64") -> Any:
+    return replace(
+        request(Clock()),
+        architecture=architecture,
+        appliance_volume=None,
+        appliance_kernel=f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/vmlinuz",
+        appliance_initrd=(
+            f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/initramfs.cpio"
+        ),
+    )
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_rendered_disk_drivers_match_the_reference(architecture: str) -> None:
+    reference_dir = Path(__file__).resolve().parents[5] / "deploy" / "remote_module_appliance"
+    reference = ET.parse(reference_dir / f"domain-v1-{architecture}.xml").getroot()
+
+    rendered = ET.fromstring(render_remote_module_appliance(_direct_kernel_request(architecture)))
+
+    assert _disk_drivers(rendered) == _disk_drivers(reference)
+    assert _disk_drivers(rendered)["vda"]["type"] == "qcow2"
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('<driver name="qemu" type="qcow2" cache="none" io="native" />', ""),
+        ('type="qcow2"', 'type="raw"'),
+        ('<driver name="qemu" type="raw" cache="none" io="native" />', ""),
+    ],
+)
+def test_adoption_rejects_a_missing_or_wrong_disk_driver(old: str, new: str) -> None:
+    clock = Clock()
+    req = _direct_kernel_request()
+    xml = render_remote_module_appliance(req)
+    assert old in xml
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new, 1))), req)
