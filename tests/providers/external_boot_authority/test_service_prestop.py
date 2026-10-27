@@ -314,7 +314,85 @@ async def test_remote_prepare_refused_at_the_pre_stop_recheck_leaves_nothing_uns
         peer, RemoteModulePreparationBeginRequestV1(authority=retry, budget_seconds=30)
     )
     assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+
+async def _refused_remote_prepare(
+    tmp_path: Path, holders: PrestopHolders | None = "session_active"
+) -> tuple[
+    ExternalBootAuthorityService,
+    _Repository,
+    _RemoteHost,
+    AuthenticatedPeer,
+    RemoteModuleVolumePreparationRequestV1,
+]:
+    service, repository, host, peer, request = await _remote_lane(tmp_path)
+    begun = await service.open_remote_module_attempt(
+        peer, RemoteModulePreparationBeginRequestV1(authority=request, budget_seconds=30)
+    )
+    remote = RemoteModuleVolumePreparationRequestV1(authority=request, operation=begun.operation)
+    repository.prestop_holders = holders
+    return service, repository, host, peer, remote
+
+
+@pytest.mark.anyio
+async def test_replay_of_a_refused_prepare_is_refused_again_without_the_host(
+    tmp_path: Path,
+) -> None:
+    service, repository, host, peer, remote = await _refused_remote_prepare(tmp_path)
+    with pytest.raises(AuthorityServiceError):
+        await service.execute_remote_module_preparation(peer, remote)
+    records = len(repository.records)
+
+    with pytest.raises(AuthorityServiceError) as held:
+        await service.execute_remote_module_preparation(peer, remote)
+    assert held.value.category == "system_held"
+
+    repository.prestop_holders = "clear"
+    with pytest.raises(AuthorityServiceError) as clear:
+        await service.execute_remote_module_preparation(peer, remote)
+    assert clear.value.category == "provider_conflict"
+    assert (host.executed, len(repository.records)) == (0, records)
+
+
+@pytest.mark.anyio
+async def test_unreadable_pre_stop_answer_is_settled_and_still_refused(tmp_path: Path) -> None:
+    service, repository, host, peer, remote = await _refused_remote_prepare(tmp_path)
+    repository.prestop_error = RuntimeError("connection reset")
+
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.execute_remote_module_preparation(peer, remote)
+
+    assert refused.value.category == "provider_conflict"
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
     assert host.executed == 0
+
+
+@pytest.mark.anyio
+async def test_superseded_pre_stop_answer_is_not_settled(tmp_path: Path) -> None:
+    service, repository, _host, peer, remote = await _refused_remote_prepare(tmp_path, None)
+
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.execute_remote_module_preparation(peer, remote)
+
+    assert refused.value.category == "superseded"
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+
+@pytest.mark.anyio
+async def test_settle_failure_still_raises_the_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, repository, _host, peer, remote = await _refused_remote_prepare(tmp_path)
+
+    async def refuse(*_args: object) -> None:
+        raise OSError("journal unavailable")
+
+    monkeypatch.setattr(service, "_anchor", refuse)
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.execute_remote_module_preparation(peer, remote)
+
+    assert refused.value.category == "system_held"
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
 
 
 class _AdoptingAdapter(_Adapter):

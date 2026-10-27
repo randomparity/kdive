@@ -520,12 +520,10 @@ class AuthorityServiceMetrics:
                 self.unresolved.pop(key)
 
 
-def _abandoned_digest(operation_identity: str) -> str:
-    """The observation identity that marks a PREPARE the provider abandoned."""
-    return (
-        "sha256:"
-        + hashlib.sha256(b"kdive-prepare-abandoned-v1\0" + operation_identity.encode()).hexdigest()
-    )
+def _settled_digest(kind: Literal["abandoned", "refused"], operation_identity: str) -> str:
+    """The observation identity that marks a PREPARE closed without adopting anything."""
+    tag = f"kdive-prepare-{kind}-v1".encode()
+    return "sha256:" + hashlib.sha256(tag + b"\0" + operation_identity.encode()).hexdigest()
 
 
 @dataclass(slots=True)
@@ -2307,16 +2305,21 @@ class ExternalBootAuthorityService:
                             raise AuthorityServiceError(
                                 "journal_conflict", reason="terminal_operation_mismatch"
                             )
-                        if (
-                            terminal.outcome == "source"
-                            and terminal.observation is not None
-                            and terminal.observation.composite_state
-                            == _abandoned_digest(request.operation_identity)
-                        ):
+                        settled = (
+                            terminal.observation.composite_state
+                            if terminal.outcome == "source" and terminal.observation is not None
+                            else None
+                        )
+                        if settled == _settled_digest("abandoned", request.operation_identity):
                             raise CategorizedError(
                                 "remote module preparation was abandoned",
                                 category=ErrorCategory.CONFLICT,
                                 details={"completion": "failed-after-mutation"},
+                            )
+                        if settled == _settled_digest("refused", request.operation_identity):
+                            raise (
+                                await self._prestop_refusal(authenticated, request, acknowledgement)
+                                or AuthorityServiceError("provider_conflict")
                             )
                         result = await host.execute(remote)
                         result.validate_terminal_for(remote.operation, request)
@@ -2387,9 +2390,15 @@ class ExternalBootAuthorityService:
                 if not resumed and (
                     refusal := await self._prestop_refusal(authenticated, request, acknowledgement)
                 ):
-                    await self._settle_abandoned_preparation(
-                        mutation, records, journal, active.completion_binding or binding, lane
-                    )
+                    if refusal.category in {"system_held", "provider_conflict"}:
+                        await self._settle_abandoned_preparation(
+                            mutation,
+                            records,
+                            journal,
+                            active.completion_binding or binding,
+                            lane,
+                            "refused",
+                        )
                     raise refusal
                 try:
                     result = await host.execute(remote)
@@ -2399,7 +2408,12 @@ class ExternalBootAuthorityService:
                         and failure.details.get(PREPARATION_ABANDONED) is True
                     ):
                         await self._settle_abandoned_preparation(
-                            mutation, records, journal, active.completion_binding or binding, lane
+                            mutation,
+                            records,
+                            journal,
+                            active.completion_binding or binding,
+                            lane,
+                            "abandoned",
                         )
                     raise
                 result.validate_terminal_for(remote.operation, request)
@@ -2537,6 +2551,7 @@ class ExternalBootAuthorityService:
         journal: FileAuthorityJournal,
         binding: AuthorityBinding,
         lane: _Lane,
+        kind: Literal["abandoned", "refused"],
     ) -> None:
         """Close a PREPARE that was refused or abandoned, so a retry or teardown is not refused.
 
@@ -2546,7 +2561,7 @@ class ExternalBootAuthorityService:
         recovered op uses. A failure here leaves the op unresolved, which is today's state, so it
         is logged and never replaces the provider's failure.
         """
-        digest = _abandoned_digest(mutation.operation_identity)
+        digest = _settled_digest(kind, mutation.operation_identity)
         observation = AuthorityObservationV1(
             observation_id=uuid5(NAMESPACE_URL, digest), category="source", composite_state=digest
         )
