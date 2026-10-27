@@ -99,3 +99,7 @@ publishes a quarantine row like the local one.
   locates the receipt once the recovery index is gone. The object port and inventory report the
   receipt actually on disk, whatever the marker says, so an interrupted finalize never hides
   residue. System teardown already treats an absent record as `recovery_absent`.
+
+### Amendment (2026-10-27): remote finalize also removes the activation's other files (#3333)
+
+After the marker, remote `finalize` removes the activation's remaining per-activation files (terminal, restored, prior-power, preparation, materialization, lifecycle and request records) before the recovery record, keeping the marker and the System `teardown` record; a later read of a removed terminal or restored record raises `RemoteCleanupFinalizedError`, not an unknown-record error.
