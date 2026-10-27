@@ -521,10 +521,17 @@ def test_appliance_install_dir_carries_a_static_virt_content_label() -> None:
         "{{ remote_libvirt_module_appliance_install_dir }}",
     ]
     assert "Relabeled" in relabel["changed_when"]
-    assert "-context" in " ".join(readback["ansible.builtin.command"]["argv"])
-    assert "virt_content_t" in " ".join(readback["ansible.builtin.command"]["argv"])
+    assert readback["ansible.builtin.command"]["argv"] == [
+        "find",
+        "{{ remote_libvirt_module_appliance_install_dir }}",
+        "!",
+        "-context",
+        "*:virt_content_t:*",
+    ]
     assert readback["changed_when"] is False
-    assert "label_readback.stdout" in refuse["ansible.builtin.assert"]["that"][0]
+    assert refuse["ansible.builtin.assert"]["that"] == [
+        "remote_libvirt_module_appliance_label_readback.stdout | length == 0"
+    ]
     for task in (rule, relabel, readback, refuse):
         assert selinux_enabled in task["when"]
     assert (
