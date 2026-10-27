@@ -1110,6 +1110,8 @@ def test_teardown_requires_absence_and_all_detach_proofs() -> None:
         ("<on_poweroff>destroy</on_poweroff>", "<on_poweroff>restart</on_poweroff>"),
         ("<on_crash>destroy</on_crash>", "<on_crash>preserve</on_crash>"),
         ("<on_reboot>destroy</on_reboot>", ""),
+        ('<memballoon model="none" />', '<memballoon model="virtio" />'),
+        ('<controller index="0" type="virtio-serial" />', ""),
         ('<target type="virtio" port="0" />', '<target type="serial" port="0" />'),
     ],
 )
