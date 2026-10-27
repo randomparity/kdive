@@ -646,6 +646,41 @@ def test_finished_domain_ends_the_console_wait_instead_of_timing_out(
     assert conn.domain is not None and not conn.domain.destroyed
 
 
+def test_console_bytes_written_just_before_the_domain_ended_are_kept() -> None:
+    class FinishedConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = Domain(xml, active=False)
+            return self.domain
+
+    clock = Clock()
+    conn = FinishedConn([-2, b"error_code=FILESYSTEM_FAILURE\n", -2, -2], clock)
+
+    outcome = run_or_adopt_appliance(conn, request(clock, result=success_result()))
+
+    assert outcome.console_tail == "error_code=FILESYSTEM_FAILURE\n"
+    assert not outcome.timed_out
+
+
+def test_a_domain_probe_failure_other_than_absence_is_a_console_failure() -> None:
+    class BrokenProbeDomain(Domain):
+        def isActive(self) -> int:  # noqa: N802
+            raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    class BrokenProbeConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = BrokenProbeDomain(xml)
+            return self.domain
+
+    clock = Clock()
+
+    outcome = run_or_adopt_appliance(BrokenProbeConn([-2] * 5, clock), request(clock))
+
+    assert outcome.timed_out
+    assert outcome.result is None
+
+
 def test_vanished_domain_also_ends_the_console_wait() -> None:
     class VanishedDomain(Domain):
         def isActive(self) -> int:  # noqa: N802

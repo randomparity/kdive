@@ -318,12 +318,17 @@ def _read_console(
     text = ""
     timed_out = False
     unresolved_rpc = False
+    draining = False
     try:
         while request.monotonic() < deadline:
             chunk = request.executor.call(lambda: stream.recv(4096), deadline)
             if chunk == -2:
-                if not _domain_running(domain, request, deadline):
+                if draining:
                     break
+                if not _domain_running(domain, request, deadline):
+                    # One more read picks up bytes written just before the domain ended.
+                    draining = True
+                    continue
                 remaining = deadline - request.monotonic()
                 if remaining > 0:
                     time.sleep(min(0.01, remaining))
