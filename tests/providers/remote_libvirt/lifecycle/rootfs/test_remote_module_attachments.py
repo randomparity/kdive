@@ -321,7 +321,7 @@ def test_resumed_appliance_requires_exact_aliases_and_readonly_source(old: str, 
     "mutation",
     [
         "<auth username='secret'/>",
-        "<backingStore/>",
+        "<backingStore type='file'><source file='/etc/shadow'/></backingStore>",
         "<source pool='extra' volume='extra'/>",
         "<serial>unexpected</serial>",
     ],

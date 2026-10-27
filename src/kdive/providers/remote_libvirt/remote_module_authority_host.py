@@ -76,6 +76,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     recovery_attempt_volumes,
     render_module_volume_name,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import parse_libvirt_xml
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -348,7 +349,9 @@ class ConcreteRemoteModuleAuthorityHost:
         deadline: float,
     ) -> ApplianceRequest:
         configured = self._configuration.appliance
+        pool_name = self._configuration.volumes.pool_name
         return ApplianceRequest(
+            root_backing_path=self._root_backing_path(pool_name, root),
             name=f"kdive-module-{operation.system_id}-{operation.run_id}-{operation.operation_nonce}",
             architecture=configured.architecture,
             emulator_path=configured.emulator_path,
@@ -380,6 +383,20 @@ class ConcreteRemoteModuleAuthorityHost:
             monotonic=configured.monotonic,
             invocation_deadline=deadline,
         )
+
+    def _root_backing_path(self, pool_name: str, root: PreparedVolume) -> str | None:
+        """The staged base the System's overlay is backed by, from the root volume's libvirt XML."""
+        storage = self._configuration.volumes.storage
+        try:
+            volume = storage.storagePoolLookupByName(pool_name).storageVolLookupByName(root.name)
+            document = parse_libvirt_xml(volume.XMLDesc(0))
+        except (libvirt.libvirtError, ET.ParseError, ValueError) as exc:
+            raise CategorizedError(
+                "could not read the System root volume's backing store",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ) from exc
+        path = document.findtext("./backingStore/path")
+        return path.strip() if path and path.strip() else None
 
     def _preflight(
         self, admitted: AdmittedRemoteModulePreparation

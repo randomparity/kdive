@@ -26,6 +26,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
     validate_volume_key,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import PreparedVolume
+from kdive.providers.shared.libvirt_xml import append_qcow2_backing_store
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -115,6 +116,7 @@ class ApplianceRequest:
     appliance_volume: str | None = None
     appliance_kernel: str | None = None
     appliance_initrd: str | None = None
+    root_backing_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.architecture not in {"x86_64", "ppc64le"}:
@@ -158,6 +160,7 @@ def _disk(
     *,
     readonly: bool,
     image_format: str | None = None,
+    backing_path: str | None = None,
 ) -> None:
     disk = ET.SubElement(parent, "disk", {"type": "volume", "device": "disk"})
     if image_format is not None:
@@ -168,6 +171,10 @@ def _disk(
             {"name": "qemu", "type": image_format, "cache": "none", "io": "native"},
         )
     ET.SubElement(disk, "source", {"pool": pool, "volume": volume})
+    if backing_path is not None:
+        # Naming the backing file lets the selinux seclabel keep libvirt from relabelling the
+        # shared staged base at every start, which moves its ctime (ADR-0623).
+        append_qcow2_backing_store(disk, backing_path, relabel=False)
     ET.SubElement(disk, "target", {"dev": alias, "bus": "virtio"})
     if readonly:
         ET.SubElement(disk, "readonly")
@@ -201,7 +208,15 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
     )
     devices = ET.SubElement(domain, "devices")
     if request.appliance_volume is None:
-        _disk(devices, request.pool, request.root.name, "vda", readonly=False, image_format="qcow2")
+        _disk(
+            devices,
+            request.pool,
+            request.root.name,
+            "vda",
+            readonly=False,
+            image_format="qcow2",
+            backing_path=request.root_backing_path,
+        )
         _disk(devices, request.pool, request.source.name, "vdb", readonly=True, image_format="raw")
         _disk(
             devices, request.pool, request.scratch.name, "vdc", readonly=False, image_format="raw"
@@ -237,6 +252,7 @@ def expected_attachment_state(request: ApplianceRequest) -> ExpectedAttachmentSt
             request.emulator_path,
             request.appliance_kernel,
             request.appliance_initrd,
+            request.root_backing_path,
         ),
     )
 

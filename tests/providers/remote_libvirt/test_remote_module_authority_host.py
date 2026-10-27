@@ -414,6 +414,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
         detached_volumes=frozenset({("systems", source_name), ("systems", scratch_name)}),
     )
     storage = StorageConn()
+    storage.seed_root(operation.root_volume.key)
     clock = Clock()
     appliance = _SystemConn([], clock, system=_SystemDomain(active=False))
     durable_result = _result(operation)
@@ -671,6 +672,7 @@ class _Quiesce:
             detached_volumes=frozenset(("systems", name) for name in names),
         )
         self.storage = StorageConn()
+        self.storage.seed_root(operation.root_volume.key)
         clock = self.clock = Clock()
         self.appliance = _SystemConn([], clock, system=system)
 

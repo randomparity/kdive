@@ -117,10 +117,15 @@ class Volume:
 class Pool:
     def __init__(self) -> None:
         self.volumes: dict[str, Volume] = {}
+        # Volumes the attempt did not create (the System overlay); lookups see them, listings of
+        # attempt volumes do not.
+        self.foreign: dict[str, Volume] = {}
         self.fail_on_scratch = False
 
     def storageVolLookupByName(self, name: str) -> Volume:  # noqa: N802
 
+        if name in self.foreign:
+            return self.foreign[name]
         if name not in self.volumes or self.volumes[name].deleted:
             error = libvirt.libvirtError("missing")
             error.err = [libvirt.VIR_ERR_NO_STORAGE_VOL] + [None] * 8
@@ -183,6 +188,15 @@ class Conn:
         self.fail_pool_lookup = False
         self.fail_new_stream = False
         self.fail_download_stage: str | None = None
+
+    def seed_root(self, name: str, backing: str = "/var/lib/libvirt/images/base.qcow2") -> None:
+        """Add the System overlay the appliance's root disk names, backed by a staged base."""
+        xml = (
+            f"<volume><name>{name}</name><capacity unit='bytes'>4096</capacity>"
+            "<target><format type='qcow2'/></target>"
+            f"<backingStore><path>{backing}</path><format type='qcow2'/></backingStore></volume>"
+        )
+        self.pool.foreign[name] = Volume(xml, 4096, name)
 
     def storagePoolLookupByName(self, name: str) -> Pool:  # noqa: N802
         if self.fail_pool_lookup:
