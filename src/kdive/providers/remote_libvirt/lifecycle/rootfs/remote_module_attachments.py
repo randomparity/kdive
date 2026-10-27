@@ -842,14 +842,20 @@ def _validate_rng(devices: ET.Element) -> None:
         or (backends[0].text or "").strip() != "/dev/urandom"
     ):
         raise _conflict("resumed appliance entropy device mismatched")
-    for child in rng:
-        if child.tag not in {"backend", "alias", "address"} or (
-            child.tag != "backend" and (list(child) or set(child.attrib) - _RNG_CHILD_ATTRS)
+    for tag, attributes in _RNG_CHILD_ATTRS.items():
+        nodes_by_tag = rng.findall(tag)
+        if len(nodes_by_tag) > 1 or any(
+            list(node) or set(node.attrib) - attributes for node in nodes_by_tag
         ):
             raise _conflict("resumed appliance entropy device mismatched")
+    if any(child.tag not in {"backend", *_RNG_CHILD_ATTRS} for child in rng):
+        raise _conflict("resumed appliance entropy device mismatched")
 
 
-_RNG_CHILD_ATTRS = {"name", "type", "domain", "bus", "slot", "function"}
+_RNG_CHILD_ATTRS = {
+    "alias": {"name"},
+    "address": {"type", "domain", "bus", "slot", "function"},
+}
 
 
 def _validate_normalized_device(device: ET.Element) -> None:

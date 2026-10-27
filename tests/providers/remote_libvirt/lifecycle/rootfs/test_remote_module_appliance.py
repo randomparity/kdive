@@ -1124,6 +1124,13 @@ def test_teardown_requires_absence_and_all_detach_proofs() -> None:
         ),
         ('<backend model="random">', '<backend model="egd">'),
         ('<rng model="virtio">', '<rng model="virtio" rate="1">'),
+        ("</backend></rng>", '</backend><rate period="1000" /></rng>'),
+        ("</backend></rng>", '</backend><alias name="a" /><alias name="b" /></rng>'),
+        ("</backend></rng>", '</backend><address type="pci" evil="1" /></rng>'),
+        (
+            "</rng>",
+            '</rng><rng model="virtio"><backend model="random">/dev/urandom</backend></rng>',
+        ),
         (
             "<cmdline>console=hvc0 panic=-1 PYTHONHASHSEED=0</cmdline>",
             "<cmdline>console=ttyS0</cmdline>",
@@ -1208,3 +1215,15 @@ def test_adoption_rejects_drift_in_x86_64_features(old: str, new: str) -> None:
     assert old in xml
     with pytest.raises(CategorizedError):
         run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new, 1))), req)
+
+
+def test_adoption_accepts_the_alias_and_address_libvirt_adds_to_the_entropy_device() -> None:
+    clock = Clock()
+    req = _direct_kernel_domain_request()
+    xml = render_remote_module_appliance(req).replace(
+        "</backend></rng>",
+        '</backend><alias name="rng0" />'
+        '<address type="pci" domain="0x0000" bus="0x06" slot="0x00" function="0x0" /></rng>',
+    )
+
+    run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
