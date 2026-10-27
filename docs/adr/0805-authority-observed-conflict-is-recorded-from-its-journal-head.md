@@ -4,6 +4,11 @@
 
 Accepted (2026-10-21)
 
+> **Amended by [ADR-0620](0620-authority-owned-system-teardown.md) (#3341):** the Consequences
+> below say `systems.teardown` and `ops.force_teardown` do not yet complete from
+> `recovery_conflict`. They now do on the local authority lane: teardown discards the retained
+> recovery point instead of recovering it.
+
 ## Context
 
 [ADR-0583](0583-external-run-boot-uses-prepared-recovery-points.md) parks an external-boot
