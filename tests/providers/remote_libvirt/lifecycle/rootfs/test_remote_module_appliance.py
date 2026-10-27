@@ -1116,6 +1116,13 @@ def test_teardown_requires_absence_and_all_detach_proofs() -> None:
 @pytest.mark.parametrize(
     ("old", "new"),
     [
+        ('<rng model="virtio"><backend model="random">/dev/urandom</backend></rng>', ""),
+        (
+            '<backend model="random">/dev/urandom</backend>',
+            '<backend model="random">/dev/random</backend>',
+        ),
+        ('<backend model="random">', '<backend model="egd">'),
+        ('<rng model="virtio">', '<rng model="virtio" rate="1">'),
         (
             "<cmdline>console=hvc0 panic=-1 PYTHONHASHSEED=0</cmdline>",
             "<cmdline>console=ttyS0</cmdline>",
