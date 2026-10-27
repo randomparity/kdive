@@ -320,7 +320,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     service = [c for c in contract.cells if c.operation in _RUN_SYSTEM_JOB_TOOLS]
     assert len(service) == 330 and {c.node_id for c in service} == {_RUN_SYSTEM_JOB_NODE}
     accounting = [c for c in contract.cells if c.operation in _SPLIT[3098]]
-    assert len(accounting) == 330 and {c.node_id for c in accounting} == {_ACCOUNTING_NODE}
+    assert len(accounting) == 348 and {c.node_id for c in accounting} == {_ACCOUNTING_NODE}
     bound = {
         "image-smoke",
         "deep-lifecycle",
@@ -880,13 +880,47 @@ def test_cli_cells_twin_the_core_direct_cells(inventory: Inventory) -> None:
     cells = build_contract(inventory=inventory).cells
     by_id = {c.id: c for c in cells}
     cli = [c for c in cells if c.exposure == "cli"]
-    assert len(cli) == 454
+    assert len(cli) == 460
     for cell in cli:
         twin = by_id[cell.id.replace("/cli/", "/direct/")]
         assert replace(cell, id=twin.id, exposure="direct", owner=twin.owner) == twin
         assert cell.owner == 3099 and cell.node_id is not None
     core = {t for g in load_mapping().groups if g.owner in _CLI_GROUPS for t in g.tools}
     assert {c.operation for c in cli} == core and len(core) == 52
+
+
+def test_guest_observing_tools_have_lane_functional_cells(inventory: Inventory) -> None:
+    marked = {t for g in load_mapping().groups for t in g.guest_observing}
+    assert marked == {"accounting.usage", "allocations.release", "reports.generate"}
+    cells = [c for c in build_contract(inventory=inventory).cells if c.operation in marked]
+    functional = [c for c in cells if c.kind == "functional"]
+    assert {(c.host_arch, c.guest_arch, c.accelerator) for c in functional} == {
+        ("x86_64", "x86_64", "kvm"),
+        ("ppc64le", "ppc64le", "kvm-hv"),
+    }
+    assert {c.provider for c in functional} == {"service"}
+    roles = {c.operation: c.roles for c in functional}
+    assert (
+        roles["accounting.usage"] == roles["reports.generate"] == ("server", "worker", "reconciler")
+    )
+    assert roles["allocations.release"] == ("server", "worker", "reconciler", "authority")
+    rejections = [c for c in cells if c.kind == "rejection"]
+    assert {(c.host_arch, c.guest_arch, c.accelerator) for c in rejections} == {
+        (None, None, "none")
+    }
+
+
+def test_guest_observing_must_name_service_tools(inventory: Inventory) -> None:
+    mapping = load_mapping().model_copy(deep=True)
+    group = next(g for g in mapping.groups if g.guest_observing)
+    group.guest_observing = [*group.guest_observing, "no.such_tool"]
+    with pytest.raises(ValueError, match="guest_observing names an unknown tool"):
+        build_contract(mapping=mapping, inventory=inventory)
+    mapping = load_mapping().model_copy(deep=True)
+    provider = next(g for g in mapping.groups if g.execution == "provider")
+    provider.guest_observing = [next(iter(provider.tools))]
+    with pytest.raises(ValueError, match="marks service tools only"):
+        build_contract(mapping=mapping, inventory=inventory)
 
 
 def test_cli_exposure_validators_fail_closed(
