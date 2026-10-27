@@ -1530,18 +1530,17 @@ class RemoteModuleVolumePreparationStore:
             raise ValueError("remote recovery point differs from durable record")
         return recovery
 
-    def _quarantine_name(self, binding: ExternalBootActivationBinding, plan_identity: str) -> str:
-        return f"{self._recovery_key(binding, plan_identity)}.cleanup-quarantine"
+    @staticmethod
+    def _quarantine_name(reference: OpaqueProviderRef) -> str:
+        return f"{_recovery_identity(reference)}.cleanup-quarantine"
 
     def _finalized_name(self, binding: ExternalBootActivationBinding, plan_identity: str) -> str:
         return f"{self._recovery_key(binding, plan_identity)}.cleanup-finalized"
 
     def record_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
         """Record the receipt; another operation's unfinalized receipt is a conflict."""
-        name = self._quarantine_name(receipt.binding, receipt.plan_identity)
-        existing = self.read_cleanup_quarantine(
-            receipt.binding, receipt.plan_identity, include_finalized=True
-        )
+        name = self._quarantine_name(receipt.recovery_ref)
+        existing = self.read_cleanup_quarantine(receipt.binding, receipt.plan_identity)
         if existing is None:
             self._publish(name, receipt.to_canonical_json())
         elif existing.operation_identity != receipt.operation_identity:
@@ -1549,26 +1548,36 @@ class RemoteModuleVolumePreparationStore:
         elif existing != receipt:
             self._replace(name, existing.to_canonical_json(), receipt.to_canonical_json())
 
-    def read_cleanup_quarantine(
-        self,
-        binding: ExternalBootActivationBinding,
-        plan_identity: str,
-        *,
-        include_finalized: bool = False,
-    ) -> RemoteCleanupQuarantineV1 | None:
-        """The unfinalized receipt; a finalized one is leftover that only finalization may see."""
-        data = self._read(self._quarantine_name(binding, plan_identity))
+    def _receipt(self, reference: OpaqueProviderRef) -> RemoteCleanupQuarantineV1 | None:
+        data = self._read(self._quarantine_name(reference))
         if data is None:
             return None
         receipt = RemoteCleanupQuarantineV1.from_canonical_json(data)
-        if receipt.binding != binding or receipt.plan_identity != plan_identity:
-            raise ValueError("remote cleanup quarantine receipt differs from its owner")
-        if not include_finalized and self.cleanup_finalized(binding, plan_identity):
+        if receipt.recovery_ref != reference:
+            raise ValueError("remote cleanup quarantine receipt names another recovery record")
+        return receipt
+
+    def read_cleanup_quarantine(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteCleanupQuarantineV1 | None:
+        """The receipt on disk, found by the recovery index or, once that is gone, the marker."""
+        index = self._read(f"{self._recovery_key(binding, plan_identity)}.recovery-index")
+        marker = self._read(self._finalized_name(binding, plan_identity))
+        if index is not None:
+            reference = OpaqueProviderRef(ref=f"remote-external-boot/{index.decode('ascii')}")
+        elif marker is not None:
+            reference = RemoteCleanupQuarantineV1.from_canonical_json(marker).recovery_ref
+        else:
             return None
+        receipt = self._receipt(reference)
+        if receipt is not None and (
+            receipt.binding != binding or receipt.plan_identity != plan_identity
+        ):
+            raise ValueError("remote cleanup quarantine receipt differs from its owner")
         return receipt
 
     def cleanup_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> bool:
-        """Whether finalization removed this activation's recovery record."""
+        """Whether finalization began removing this activation's recovery record."""
         return self._read(self._finalized_name(binding, plan_identity)) is not None
 
     def _recovery_record(self, identity: str) -> RemoteExternalBootRecoveryRecord | None:
@@ -1582,18 +1591,12 @@ class RemoteModuleVolumePreparationStore:
     def cleanup_quarantine_for_object(
         self, reference: OpaqueProviderRef
     ) -> RemoteCleanupQuarantineV1 | None:
-        """The receipt of a recovery record still on disk; none once finalization removed it."""
-        record = self._recovery_record(_recovery_identity(reference))
-        if record is None:
-            return None
-        receipt = self.read_cleanup_quarantine(record.binding, record.plan_identity)
-        if receipt is not None and receipt.recovery_ref != reference:
-            raise ValueError("remote cleanup quarantine receipt names another recovery record")
-        return receipt
+        """The receipt actually on disk, whatever the finalization marker says."""
+        return self._receipt(reference)
 
     def adopt_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
         self._replace(
-            self._quarantine_name(receipt.binding, receipt.plan_identity),
+            self._quarantine_name(receipt.recovery_ref),
             receipt.to_canonical_json(),
             receipt.model_copy(update={"managed": True}).to_canonical_json(),
         )
@@ -1627,7 +1630,7 @@ class RemoteModuleVolumePreparationStore:
                 f"{self._recovery_key(record.binding, record.plan_identity)}.recovery-index",
                 f"{identity}.recovery",
             ]
-        names.append(self._quarantine_name(receipt.binding, receipt.plan_identity))
+        names.append(self._quarantine_name(receipt.recovery_ref))
         for name in names:
             with suppress(FileNotFoundError):
                 os.unlink(name, dir_fd=self._root_fd)
@@ -2223,12 +2226,8 @@ class RemoteExternalBootCoordinator:
         self,
         binding: ExternalBootActivationBinding,
         plan_identity: str,
-        *,
-        include_finalized: bool = False,
     ) -> RemoteCleanupQuarantineV1 | None:
-        return self._store.read_cleanup_quarantine(
-            binding, plan_identity, include_finalized=include_finalized
-        )
+        return self._store.read_cleanup_quarantine(binding, plan_identity)
 
     def cleanup_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> bool:
         return self._store.cleanup_finalized(binding, plan_identity)
@@ -2808,9 +2807,7 @@ class RemoteExternalBootAuthorityAdapter:
             return
         binding = _activation_binding(request)
         receipt = await self._executor.run(
-            lambda: self._coordinator.cleanup_quarantine(
-                binding, request.plan_identity, include_finalized=True
-            )
+            lambda: self._coordinator.cleanup_quarantine(binding, request.plan_identity)
         )
         if receipt is None:
             return

@@ -3926,7 +3926,27 @@ async def test_remote_cleanup_refuses_another_operations_unfinalized_receipt(
 
 
 @pytest.mark.anyio
-async def test_remote_interrupted_finalize_leaves_no_visible_orphan_and_repeats(
+async def test_remote_marker_without_removal_still_reports_the_receipt_present(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    (observed,) = await adapter.cleanup_quarantine_inventory(request)
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    # The crash window: the marker landed, no removal did.
+    store._publish(
+        store._finalized_name(record.binding, record.plan_identity), receipt.to_canonical_json()
+    )
+
+    assert await adapter.cleanup_quarantine_inventory(request) == (observed,)
+    present = await adapter.observe_recovery_object(observed.binding, authority_reference(request))
+    assert present == observed
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_interrupted_finalize_keeps_the_receipt_visible_and_repeats(
     tmp_path: Path,
 ) -> None:
     adapter, record, request, context = await _cleaned_release(tmp_path)
@@ -3934,17 +3954,18 @@ async def test_remote_interrupted_finalize_leaves_no_visible_orphan_and_repeats(
     (observed,) = await adapter.cleanup_quarantine_inventory(request)
     receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
     assert receipt is not None
-    name = store._quarantine_name(record.binding, record.plan_identity)
+    name = store._quarantine_name(receipt.recovery_ref)
     # The crash window: the marker and record removal landed, the receipt unlink did not.
     store.finalize_cleanup_quarantine(receipt)
     store._publish(name, receipt.to_canonical_json())
 
-    assert await adapter.cleanup_quarantine_inventory(request) == ()
-    gone = await adapter.observe_recovery_object(observed.binding, authority_reference(request))
-    assert not gone.present
+    assert await adapter.cleanup_quarantine_inventory(request) == (observed,)
+    leftover = await adapter.observe_recovery_object(observed.binding, authority_reference(request))
+    assert leftover.present
 
     await adapter.finalize(request, context)
     assert store._read(name) is None
+    assert await adapter.cleanup_quarantine_inventory(request) == ()
     adapter.close()
 
 
