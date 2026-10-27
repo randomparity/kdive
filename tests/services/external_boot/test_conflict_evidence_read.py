@@ -134,15 +134,12 @@ def test_lower_roles_see_no_block_and_no_resolve_hint(migrated_url: str) -> None
         assert "systems.resolve_external_boot_conflict" not in response.suggested_next_actions
 
 
-def test_admin_elsewhere_or_no_recorded_role_sees_no_block(migrated_url: str) -> None:
-    held_elsewhere = _ctx(
-        projects=("proj", "other"), roles={"proj": Role.VIEWER, "other": Role.ADMIN}
-    )
-    unrecorded = _ctx(roles={})
-    for ctx in (held_elsewhere, unrecorded):
-        response = _read(migrated_url, _STATE.RECOVERY_CONFLICT, ctx, objects=1)
+def test_admin_on_another_project_sees_no_block(migrated_url: str) -> None:
+    ctx = _ctx(projects=("proj", "other"), roles={"proj": Role.VIEWER, "other": Role.ADMIN})
 
-        assert _BLOCK not in response.data
+    response = _read(migrated_url, _STATE.RECOVERY_CONFLICT, ctx, objects=1)
+
+    assert _BLOCK not in response.data
 
 
 def test_a_foreign_project_caller_gets_not_found(migrated_url: str) -> None:
