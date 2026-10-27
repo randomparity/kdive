@@ -2156,10 +2156,22 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   the disposition of an already-absent object; the arm requires that row `deleted` by that job and
   every other quarantine row unchanged. If the arm fails after the abort it resolves the rows it
   published before the frame tears down, and names any it could not as residue on the failure.
-- **Blocked arms.** These pass the lane gates and skip with `blocked:` and the reason, before any
-  mutation. They are narrower blockers, not passes:
-  - the remote orphan: the remote-libvirt authority publishes no cleanup quarantine;
-  - the recovery conflict, local and remote: no production path enters `recovery_conflict`.
+- **Recovery conflict (local and remote, #3327).** The arm activates, then appends one token to
+  the System's persistent kernel command line on the authority daemon, as a host administrator
+  would ([ADR-0805](../../adr/0805-authority-observed-conflict-is-recorded-from-its-journal-head.md)).
+  Locally it runs as root through the receipt observer's interpreter; remotely it runs as the
+  authority account. It then calls `runs.release_external_boot` and requires the job `failed`
+  with category `conflict`, the journal head `terminal` for `recover` with outcome `conflict`, and
+  the activation in `recovery_conflict`. The frame's project admin then calls
+  `systems.resolve_external_boot_conflict` with the head's composite. Restoring over a third
+  identity is #3330, so the arm requires that job to end with `conflict` too and the activation
+  back in `recovery_conflict`. The arm then stops `blocked` (#3341): teardown from
+  `recovery_conflict` does not complete, so the frame's cleanup fails after its 600 s wait and the
+  System stays `ready` with its allocation held. Run the killed-run cleanup above, or roll the lane
+  host back.
+- **Blocked arm.** The remote orphan passes the lane gates and skips with `blocked:` and its
+  reason before any mutation: the remote-libvirt authority publishes no cleanup quarantine. It is a
+  narrower blocker, not a pass.
 
   The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
   a receipt survives to resolution only if the release job ends terminally, whose recovery is
@@ -2199,7 +2211,7 @@ configurations, both exposures, both providers) run in this frame through
   tool admits a local row when its publishing authority is the server's fixed route; the server
   composes no local recovery-object port.
 - The remote `ops.resolve_recovery_orphan` cells (#3326) and every
-  `systems.resolve_external_boot_conflict` cell (#3327) pass their lane gates and stop `blocked`
+  `systems.resolve_external_boot_conflict` cell (#3330, #3341) pass their lane gates and stop `blocked`
   before any mutation.
 - A local record's `effect` discloses its fixture-mode System: provisioned through the worker
   and moved onto the authority by the fixture script, because of #3144/#3148. Every operation

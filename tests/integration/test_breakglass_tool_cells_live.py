@@ -11,7 +11,7 @@ domains and the lane's staged base stay. The other functional cells run on the i
 authority lanes through :func:`~tests.integration.live_stack.authority_cells.run_authority_cell`
 (#3186): ``force_release`` and ``resolve_recovery_orphan`` run their #3185 fault arm, called by an
 outside platform admin through the cell's exposure; the remote orphan (#3326) and both conflict
-cells (#3327) stop ``blocked`` after their lane gates. A rejection cell aims at the stack's
+cells (#3330, #3341) stop ``blocked`` after their lane gates. A rejection cell aims at the stack's
 :func:`~tests.integration.live_stack.tool_cells.lane_target` for its provider.
 ``docs/operating/runbooks/live-testing.md`` covers both lanes.
 """

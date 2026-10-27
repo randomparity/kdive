@@ -65,7 +65,6 @@ _ACTIVATION_WRITING_NAMES = frozenset(
         "create",
         "finish_recovery_attempt",
         "mark_cleanup_complete",
-        "record_conflict",
         "release_reservation",
         "transition",
     }

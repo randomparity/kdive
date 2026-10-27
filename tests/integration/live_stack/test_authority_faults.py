@@ -474,9 +474,108 @@ def test_blocked_arm_passes_the_lane_gates_first(
     cell = Cell("c", "tool/c", 3185, "c", "c", ("effect",), provider=provider, guest_arch="x86_64")
     run = CellRun(cell, EvidenceWriter(tmp_path))
     with pytest.raises(ScenarioStop) as stop:
-        authority_faults.blocked_after_gates(run, "u", authority_faults.CONFLICT_BLOCKED)
+        authority_faults.blocked_after_gates(run, "u", authority_faults.REMOTE_ORPHAN_BLOCKED)
     assert gates == ["select", "gate"]
-    assert str(stop.value) == authority_faults.CONFLICT_BLOCKED
+    assert str(stop.value) == authority_faults.REMOTE_ORPHAN_BLOCKED
+
+
+_COMPOSITE = "sha256:" + "c" * 64
+
+
+def _fake_conflict_arm(
+    monkeypatch: pytest.MonkeyPatch, failures: dict[str, str], heads: list[tuple[object, ...]]
+) -> list[str]:
+    """Fake every boundary of the conflict arm; return the ordered calls it made."""
+    calls: list[str] = []
+    remaining = iter(heads)
+
+    async def drain(_op: object, phase: str, _job: str, **_kwargs: object) -> ToolResponse:
+        calls.append(f"drain:{phase}")
+        category = failures.get(phase)
+        if category is None:
+            return ToolResponse(object_id=_job, status="succeeded")
+        raise SpinePhaseError(phase, "job failed", error_category=category)
+
+    async def scalar(_op: object, name: str, **args: object) -> ToolResponse:
+        calls.append(f"{name}:{args.get('observed_identity')}")
+        return ToolResponse(object_id="resolve-job", status="queued")
+
+    patches: dict[str, Any] = {
+        "require_evidence_read_access": _async(),
+        "activate": _async(_activation()),
+        "activation_of": _async(_ACTIVATION),
+        "perturb_definition": lambda _system: calls.append("perturb"),
+        "release_external_boot": _async(ToolResponse(object_id="release-job", status="queued")),
+        "drain_job": drain,
+        "conflict_head": lambda *_a: _async(next(remaining))(),
+        "_activation_state": _async("recovery_conflict"),
+        "scalar": scalar,
+    }
+    for name, value in patches.items():
+        monkeypatch.setattr(authority_faults, name, value)
+    return calls
+
+
+def test_conflict_arm_records_then_resolves_by_the_head_composite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict", "resolve-conflict": "conflict"},
+        [
+            ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
+            ("terminal", "resolve-conflict", "conflict", "conflict", _COMPOSITE),
+        ],
+    )
+    observed = asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+    assert calls == [
+        "perturb",
+        "drain:release",
+        f"systems.resolve_external_boot_conflict:{_COMPOSITE}",
+        "drain:resolve-conflict",
+    ]
+    assert observed["recorded"] == "recovery_conflict"
+    assert observed["restore_from_third_identity"] == authority_faults.CONFLICT_RESTORE_BLOCKED
+
+
+def test_conflict_arm_refuses_a_release_that_succeeded(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_conflict_arm(monkeypatch, {}, [])
+    with pytest.raises(AssertionError, match="succeeded over a third identity"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+def test_conflict_arm_refuses_another_failure_category(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_conflict_arm(monkeypatch, {"release": "infrastructure_failure"}, [])
+    with pytest.raises(AssertionError, match="infrastructure_failure"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+def test_conflict_arm_requires_the_authority_conflict_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict"},
+        [("terminal", "recover", "source", "source", _COMPOSITE)],
+    )
+    with pytest.raises(AssertionError, match="source"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+@pytest.mark.parametrize(
+    ("primary", "skips"),
+    [
+        (ScenarioStop(Outcome.BLOCKED, "teardown"), True),
+        (ScenarioStop(Outcome.FAILURE, "other"), False),
+        (AssertionError("a real failure"), False),
+        (KeyboardInterrupt(), False),
+    ],
+)
+def test_a_failed_cleanup_after_a_blocked_body_is_still_blocked(
+    primary: BaseException, skips: bool
+) -> None:
+    group = BaseExceptionGroup("frame and cleanup failures", [primary, RuntimeError("cleanup")])
+    assert (authority_faults.blocked_primary(group) is not None) is skips
 
 
 @pytest.mark.parametrize("arm", ["held_teardown_release", "quarantined_orphan"])
