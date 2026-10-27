@@ -653,6 +653,7 @@ class _Quiesce:
         system: _SystemDomain | None,
         *,
         staging: bool = True,
+        appliance_digest: str | None = None,
         deadline: float = 10_000.0,
     ) -> None:
         self.request = _request()
@@ -694,7 +695,7 @@ class _Quiesce:
             memory_kib=262_144,
             vcpus=1,
             appliance_volume="appliance-x86_64.qcow2",
-            appliance_image_digest=operation.appliance_image_digest,
+            appliance_image_digest=appliance_digest or operation.appliance_image_digest,
             root=lambda _operation: PreparedVolume(
                 "systems",
                 operation.root_volume.key,
@@ -834,6 +835,19 @@ async def test_preflight_refusal_leaves_a_running_system_running(tmp_path: Path)
 
     assert system.active and not system.destroyed
     assert stack.prior_power() is None
+    _assert_nothing_started(stack)
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_changed_appliance_identity_is_refused_before_the_stop(tmp_path: Path) -> None:
+    system = _SystemDomain(active=True)
+    stack = _Quiesce(tmp_path, system, appliance_digest="sha256:" + "f" * 64)
+    with pytest.raises(CategorizedError, match="identity changed") as refused:
+        await stack.durable.execute(stack.request)
+
+    assert refused.value.details == {"completion": "refused-before-mutation"}
+    assert system.active and not system.destroyed
     _assert_nothing_started(stack)
     stack.close()
 

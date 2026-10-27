@@ -377,10 +377,7 @@ class ConcreteRemoteModuleAuthorityHost:
             or root.name != operation.root_volume.key
             or root.digest != operation.root_volume.identity
         ):
-            raise CategorizedError(
-                "remote module fixed appliance or root identity changed",
-                category=ErrorCategory.CONFLICT,
-            )
+            raise _refused("remote module fixed appliance or root identity changed")
         stager = self._configuration.volumes.artifact_stager
         if stager is None:
             raise CategorizedError(
