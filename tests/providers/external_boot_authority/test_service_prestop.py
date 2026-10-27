@@ -89,16 +89,20 @@ async def test_local_prepare_refuses_a_held_system_before_any_provider_call(
     tmp_path: Path, holders: PrestopHolders
 ) -> None:
     service, repository, adapter, peer, takeover = await _local_lane(tmp_path)
+    request = cast(Any, _prepare(takeover))
     repository.prestop_holders = holders
+    records = len(repository.records)
 
     with pytest.raises(AuthorityServiceError) as refused:
-        await service.execute_mutation(peer, cast(Any, _prepare(takeover)))
+        await service.execute_mutation(peer, request)
 
     assert refused.value.category == "system_held"
     assert adapter.calls == []
-    assert repository.records[-1].phase is JournalPhase.TERMINAL
-    assert repository.records[-1].outcome == "never-began"
-    assert JournalPhase.MUTATION_STARTED not in {record.phase for record in repository.records}
+    assert len(repository.records) == records
+
+    repository.prestop_holders = "clear"
+    await service.execute_mutation(peer, request)
+    assert adapter.calls == ["commit:prepare", "observe"]
 
 
 @pytest.mark.anyio
@@ -123,6 +127,7 @@ async def test_local_prepare_refuses_an_unreadable_answer_without_mutating(
 
     assert refused.value.category == "provider_conflict"
     assert adapter.calls == []
+    assert JournalPhase.ADMITTED not in {record.phase for record in repository.records}
 
 
 @pytest.mark.anyio
@@ -232,6 +237,23 @@ async def test_remote_prepare_begin_refuses_a_held_system_before_journaling(
 
 
 @pytest.mark.anyio
+async def test_remote_prepare_begin_refuses_an_unreadable_answer_before_journaling(
+    tmp_path: Path,
+) -> None:
+    service, repository, host, peer, request = await _remote_lane(tmp_path)
+    repository.prestop_error = RuntimeError("connection reset")
+    records = len(repository.records)
+
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.open_remote_module_attempt(
+            peer, RemoteModulePreparationBeginRequestV1(authority=request, budget_seconds=30)
+        )
+
+    assert refused.value.category == "provider_conflict"
+    assert (host.begun, len(repository.records)) == (0, records)
+
+
+@pytest.mark.anyio
 async def test_remote_prepare_execute_rechecks_immediately_before_the_host_stops(
     tmp_path: Path,
 ) -> None:
@@ -251,3 +273,42 @@ async def test_remote_prepare_execute_rechecks_immediately_before_the_host_stops
 
     assert refused.value.category == "system_held"
     assert host.executed == 0
+
+
+class _AdoptingAdapter(_Adapter):
+    async def adopt_preparation(self, *arguments: object) -> None:
+        self.calls.append("adopt")
+
+
+@pytest.mark.anyio
+async def test_prepare_that_adopts_a_predecessor_is_not_rechecked(tmp_path: Path) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover()
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    takeover = takeover.model_copy(update={"plan_identity": plan.identity})
+    repository = _Repository(peer, takeover)
+    adapter = _AdoptingAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    await service.execute_mutation(peer, cast(Any, _prepare(takeover)))
+
+    successor = takeover.model_copy(
+        update={"authority_id": uuid4(), "generation": 2, "operation_identity": "takeover-b"}
+    )
+    repository.current = False
+    repository.request = repository.allocating_request = successor
+    await service.acknowledge_takeover(peer, successor)
+    repository.current = True
+    repository.prestop_holders = "session_active"
+    calls = len(repository.prestop_calls)
+    adopted = _prepare(successor).model_copy(update={"operation_identity": "prepare-op-2"})
+
+    await service.execute_mutation(peer, cast(Any, adopted))
+
+    assert "adopt" in adapter.calls
+    assert len(repository.prestop_calls) == calls

@@ -4,7 +4,8 @@
 -- the same authority-bound snapshot that admits the mutation, whether a debug session or another
 -- System-holding job exists. It is a separate function rather than a clause of the preparation
 -- resolver because that resolver is also the post-mutation recheck: a session attaching during
--- the stop must not turn a completed power change into `superseded`.
+-- the stop must not turn a completed power change into `superseded`. Passive housekeeping jobs
+-- (console rotation, reachability probes) are recurring, hold nothing and are not counted.
 
 CREATE FUNCTION public.external_boot_prestop_system_holders(
     p_peer_incarnation text, p_authority_id uuid, p_generation bigint,
@@ -22,11 +23,13 @@ LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
             SELECT 1
             FROM public.jobs AS j
             WHERE j.state IN ('queued', 'running') AND j.id <> bound.job_id
+              AND j.kind NOT IN ('console_rotate', 'check_ssh_reachable')
               AND j.payload->>'system_id' = bound.system_id::text
         ) OR EXISTS (
             SELECT 1
             FROM public.jobs AS j
             WHERE j.state IN ('queued', 'running') AND j.id <> bound.job_id
+              AND j.kind NOT IN ('console_rotate', 'check_ssh_reachable')
               AND j.payload->>'run_id' IN (
                   SELECT r.id::text FROM public.runs AS r WHERE r.system_id = bound.system_id
               )

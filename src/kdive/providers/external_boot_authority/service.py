@@ -1056,15 +1056,6 @@ class ExternalBootAuthorityService:
         if holders is None:
             return AuthorityServiceError("superseded")
         if holders != "clear":
-            self._logger.warning(
-                "authority PREPARE refused before the first stop",
-                extra={
-                    "provider_kind": request.provider_kind,
-                    "authority_instance": request.authority_instance,
-                    "category": "system_held",
-                    "reason": holders,
-                },
-            )
             return AuthorityServiceError("system_held")
         return None
 
@@ -1911,6 +1902,14 @@ class ExternalBootAuthorityService:
                                 "journal_conflict", reason="unresolved_binding_mismatch"
                             )
                         raise AuthorityServiceError("provider_conflict")
+                    # An adopted predecessor performs no stop, and a refusal here is answered
+                    # before any journal record so the same operation can be admitted again.
+                    if predecessor is None and (
+                        refusal := await self._prestop_refusal(
+                            authenticated, request, acknowledgement
+                        )
+                    ):
+                        raise refusal
                     records = await self._anchor(
                         binding,
                         journal,
@@ -1920,12 +1919,7 @@ class ExternalBootAuthorityService:
                     lane.active = active
                 await asyncio.sleep(0)
                 async with lane.lock:
-                    refusal = (
-                        AuthorityServiceError("superseded")
-                        if active.stop_before_start
-                        else await self._prestop_refusal(authenticated, request, acknowledgement)
-                    )
-                    if refusal is not None:
+                    if active.stop_before_start:
                         await self._anchor(
                             binding,
                             journal,
@@ -1937,7 +1931,7 @@ class ExternalBootAuthorityService:
                                 outcome="never-began",
                             ),
                         )
-                        raise refusal
+                        raise AuthorityServiceError("superseded")
                     records = await self._anchor(
                         binding,
                         journal,

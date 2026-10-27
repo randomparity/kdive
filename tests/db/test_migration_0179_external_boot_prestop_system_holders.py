@@ -126,7 +126,9 @@ def _insert_session(url: str, run_id: UUID, state: str) -> None:
         )
 
 
-def _insert_job(url: str, system_id: UUID | None, run_id: UUID | None, state: str) -> None:
+def _insert_job(
+    url: str, system_id: UUID | None, run_id: UUID | None, state: str, kind: str = "power"
+) -> None:
     payload = {}
     if system_id is not None:
         payload["system_id"] = str(system_id)
@@ -137,14 +139,15 @@ def _insert_job(url: str, system_id: UUID | None, run_id: UUID | None, state: st
         admin.execute(
             "INSERT INTO jobs (id, kind, payload, state, attempt, max_attempts, worker_id, "
             "lease_expires_at, heartbeat_at, authorizing, dedup_key) VALUES "
-            "(%s, 'power', %s, %s, 1, 3, NULL, NULL, NULL, %s, %s)"
+            "(%s, %s, %s, %s, 1, 3, NULL, NULL, NULL, %s, %s)"
             if not running
             else "INSERT INTO jobs (id, kind, payload, state, attempt, max_attempts, worker_id, "
             "lease_expires_at, heartbeat_at, authorizing, dedup_key) VALUES "
-            "(%s, 'power', %s, %s, 1, 3, 'other-worker', now() + interval '5 minutes', now(), "
+            "(%s, %s, %s, %s, 1, 3, 'other-worker', now() + interval '5 minutes', now(), "
             "%s, %s)",
             (
                 uuid4(),
+                kind,
                 Jsonb(payload),
                 state,
                 Jsonb({"principal": "p", "project": "proj"}),
@@ -201,6 +204,16 @@ def test_a_settled_job_or_another_systems_job_does_not_hold_the_system(
     assert _holders(authority_role_dsns, prepare) == "clear"
 
 
+@pytest.mark.parametrize("kind", ["console_rotate", "check_ssh_reachable"])
+def test_passive_housekeeping_jobs_do_not_hold_the_system(
+    migrated_url: str, authority_role_dsns: _RoleDsns, kind: str
+) -> None:
+    prepare = _current_prepare_authority(migrated_url, authority_role_dsns)
+    _insert_job(migrated_url, prepare.case.system_id, None, "queued", kind)
+    _insert_job(migrated_url, None, prepare.case.run_id, "running", kind)
+    assert _holders(authority_role_dsns, prepare) == "clear"
+
+
 def test_a_session_outranks_a_job(migrated_url: str, authority_role_dsns: _RoleDsns) -> None:
     prepare = _current_prepare_authority(migrated_url, authority_role_dsns)
     _insert_job(migrated_url, prepare.case.system_id, None, "queued")
@@ -221,6 +234,7 @@ def test_an_unbound_authority_answers_nothing_even_with_a_holder_present(
     migrated_url: str, authority_role_dsns: _RoleDsns, overrides: dict[str, object]
 ) -> None:
     prepare = _current_prepare_authority(migrated_url, authority_role_dsns)
+    _insert_session(migrated_url, prepare.case.run_id, "live")
     assert _holders(authority_role_dsns, prepare, **overrides) is None
 
 
