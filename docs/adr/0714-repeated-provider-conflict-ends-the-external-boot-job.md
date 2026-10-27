@@ -67,6 +67,17 @@ observation is a `conflict`, it answers with the observation instead of `provide
 the worker records `recovery_conflict` after that one generation. Refusals over any other observed
 state still reach this ADR's repeat check unchanged.
 
+### Amendment (2026-10-27): a failed remote module PREPARE no longer leaves an unresolved operation (#3348)
+
+This qualifies the consequence that a provider-conflict raised during preparation churns the job.
+For a remote module PREPARE the cause was the PREPARE journal operation left at `mutation-started`
+after the appliance failed; the next generation's `begin` and the System teardown were refused
+because of it. The authority now closes that operation when the host reports the failure as
+abandoned, after restoring the System's power ([ADR-0585](0585-remote-offline-module-restoration-appliance.md)
+amendment of the same date). The retry runs instead of reaching the repeat check, and a teardown
+is no longer refused for it. A failure the host could not abandon still leaves the operation
+unresolved and churns as described above.
+
 ## Considered & rejected
 
 - **Do nothing; rely on #2898's provider fixes.** judgment: the next deterministic provider defect

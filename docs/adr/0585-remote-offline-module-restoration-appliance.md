@@ -235,6 +235,31 @@ The stop is provider-private; no journal phase or wire field changes. Restoring 
 running System after a failed PREPARE is not part of this amendment (#3348): until it lands, a
 failed PREPARE leaves that System stopped.
 
+### Amendment (2026-10-27): a failed PREPARE restores the System's power and is abandoned (#3348)
+
+The previous amendment left a failed PREPARE with the System stopped, its completion latched
+`failed-after-mutation`, and its authority journal operation unresolved at `mutation-started`.
+The next PREPARE was then refused `provider-conflict` and the System teardown `journal-conflict`.
+The authority host now settles the failure:
+
+- When the appliance run raises, the host reads the power recorded ahead of the stop and starts a
+  System that was `running`. An `inactive` record, or a System that is already running, changes
+  nothing. The start requires the attachment inspection to show the appliance absent and the
+  System shut off and exclusive, so a System is never started while an appliance may hold its
+  root.
+- A restored System leaves no completion behind, so the failure does not latch. The host raises the
+  failure with `completion` unchanged (`failed-after-mutation` by default, `refused-before-mutation`
+  when the appliance host said so) plus an `abandoned` detail. The wire reason is unchanged.
+- The authority service sees `abandoned` and closes the PREPARE operation through the existing
+  anchors, `provider-returned`, `observed` and `terminal`, with a `source` observation and outcome:
+  nothing was adopted. A retry in a new generation then finds no unresolved operation, and the
+  module-attempt obligation keeps its nonce, so it resumes the same attempt.
+- When the restore fails, the failure stays latched, the journal operation stays unresolved, and
+  the System is left stopped for the operator, as before. A settle that fails is logged and never
+  replaces the provider's failure.
+
+No journal phase, wire field or schema changes.
+
 ## Consequences
 
 - Remote offline mutation gains one operator-provisioned appliance image per supported hypervisor
