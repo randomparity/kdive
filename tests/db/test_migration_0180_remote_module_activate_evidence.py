@@ -193,6 +193,26 @@ def _mutate(migrated_url: str, statement: str, *args: object) -> None:
             ),
         ),
         (
+            "the payload marker names a different run",
+            lambda url, a: _mutate(
+                url,
+                "UPDATE jobs SET payload = jsonb_set(payload, "
+                "'{external_boot_authority_v1,run_id}', to_jsonb(%s::text)) WHERE id = %s",
+                str(uuid4()),
+                a.case.job_id,
+            ),
+        ),
+        (
+            "the payload marker names a different system",
+            lambda url, a: _mutate(
+                url,
+                "UPDATE jobs SET payload = jsonb_set(payload, "
+                "'{external_boot_authority_v1,system_id}', to_jsonb(%s::text)) WHERE id = %s",
+                str(uuid4()),
+                a.case.job_id,
+            ),
+        ),
+        (
             "the payload marker is not an activate purpose",
             lambda url, a: _mutate(
                 url,
