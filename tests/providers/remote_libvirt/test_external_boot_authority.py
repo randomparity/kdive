@@ -889,12 +889,11 @@ async def test_remote_activate_commits_through_the_remote_coordinator(tmp_path: 
 
 
 @pytest.mark.anyio
-async def test_remote_release_recover_restores_without_deleting(tmp_path: Path) -> None:
+@pytest.mark.parametrize("purpose", ["release", "recover"])
+async def test_remote_recover_restores_without_deleting(tmp_path: Path, purpose: str) -> None:
     adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=True)
     operations.state = replace(operations.state, definition="source", active=False)
-    request = _native_request(
-        record, point, purpose="release", operation=AuthorityOperation.RECOVER
-    )
+    request = _native_request(record, point, purpose=purpose, operation=AuthorityOperation.RECOVER)
 
     observed = await adapter.commit(request, _native_context(request))
 
