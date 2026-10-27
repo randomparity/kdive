@@ -187,7 +187,9 @@ def test_retry_rehashes_existing_volume_and_reuses_matching_identity() -> None:
         conn, "images", system_id=SYSTEM, run_id=RUN, kernel=b"kernel", initrd=None
     )
 
-    assert result.kernel.ref == f"kernel/{SYSTEM}/{RUN}"
+    assert result.kernel.ref == artifact_volume_name(
+        "kernel", SYSTEM, RUN, "sha256:" + hashlib.sha256(b"kernel").hexdigest()
+    )
     assert pool.created is None
     assert pool.existing is not None
     assert not pool.existing.deleted
