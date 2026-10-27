@@ -1538,7 +1538,7 @@ class RemoteModuleVolumePreparationStore:
         return f"{self._recovery_key(binding, plan_identity)}.cleanup-finalized"
 
     def record_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
-        """Record the receipt; another operation's unfinalized receipt is a conflict."""
+        """Record the receipt; another operation's standing receipt is a conflict."""
         name = self._quarantine_name(receipt.recovery_ref)
         existing = self.read_cleanup_quarantine(receipt.binding, receipt.plan_identity)
         if existing is None:
@@ -1604,10 +1604,10 @@ class RemoteModuleVolumePreparationStore:
     def finalize_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
         """Remove the recovery record and its indexes, then the receipt that proves the cleanup.
 
-        A finalized marker is written first and the receipt goes last, found by owner rather
-        than by record, so an interrupted finalization is repeatable until nothing but the
-        marker remains. The marker keeps a finalized cleanup distinguishable from a record that
-        never existed.
+        A finalized marker is written first and the receipt goes last. The receipt is found by
+        its record's identity, or through the marker once the index is gone, so an interrupted
+        finalization is repeatable until nothing but the marker remains. The marker keeps a
+        finalized cleanup distinguishable from a record that never existed.
         """
         identity = _recovery_identity(receipt.recovery_ref)
         record = self._recovery_record(identity)
@@ -2780,7 +2780,7 @@ class RemoteExternalBootAuthorityAdapter:
     async def cleanup_quarantine_inventory(
         self, request: AuthorityMutationRequestV1
     ) -> tuple[RecoveryObjectObservation, ...]:
-        """Reopen only the exact unfinalized private cleanup receipt."""
+        """Reopen only the exact standing private cleanup receipt."""
         if request.operation is not AuthorityOperation.CLEANUP:
             return ()
         binding = _activation_binding(request)

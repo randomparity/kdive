@@ -86,8 +86,8 @@ publishes a quarantine row like the local one.
 - `finalize` runs for `cleanup` only. It requires the receipt to equal the anchored proof, writes
   a `cleanup-finalized` marker, then removes the recovery record, the indexes that name it and,
   last, the receipt. It is repeatable until only the marker remains, and a missing receipt is a
-  no-op. A cleanup for another operation is refused before any provider call while an unfinalized
-  receipt stands.
+  no-op. A cleanup for another operation is refused before any provider call while a receipt
+  stands.
 - `cleanup_quarantine_inventory` reports the one unmanaged `recovery-record` observation whose
   operation identity and attempt equal the request's. Any other receipt is a conflict.
 - The remote adapter serves `observe`, `delete` and `adopt` for `recovery-record` under digest
@@ -98,5 +98,4 @@ publishes a quarantine row like the local one.
   later cleanup `observe` classifies `absent`, as it did while the record remained. It also
   locates the receipt once the recovery index is gone. The object port and inventory report the
   receipt actually on disk, whatever the marker says, so an interrupted finalize never hides
-  residue. System
-  teardown already treats an absent record as `recovery_absent`.
+  residue. System teardown already treats an absent record as `recovery_absent`.
