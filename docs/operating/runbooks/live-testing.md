@@ -2170,8 +2170,10 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   stops `blocked` there: that fix changed the local provider only, so the remote cleanup is
   unproven, and the killed-run cleanup above or a lane-host rollback clears a stranded System.
 - **Blocked arm.** The remote orphan passes the lane gates and skips with `blocked:` and its
-  reason before any mutation: the remote-libvirt authority publishes no cleanup quarantine. It is a
-  narrower blocker, not a pass.
+  reason before any mutation: the arm needs an activated remote System, and remote PREPARE is
+  blocked (#3363). The remote authority now publishes and resolves the quarantine (#3326), and the
+  arm reads the remote store's receipt, but that path is unproven live. It is a narrower blocker,
+  not a pass.
 
   The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
   a receipt survives to resolution only if the release job ends terminally, whose recovery is

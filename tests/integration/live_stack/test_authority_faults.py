@@ -271,14 +271,16 @@ def test_force_release_arm_rejects_another_refusal_reason(
     assert fake.state == "idle"
 
 
-def _row(row_id: str, status: str = "quarantined") -> dict[str, object]:
+def _row(
+    row_id: str, status: str = "quarantined", provider: str = "local-libvirt"
+) -> dict[str, object]:
     return {
         "id": row_id,
         "object_identity": f"sha256:{row_id}",
         "system_id": _SYSTEM,
         "activation_id": _ACTIVATION,
         "object_kind": "recovery-record",
-        "provider_kind": "local-libvirt",
+        "provider_kind": provider,
         "status": status,
         "operation_identity": "cleanup-op",
         "mutation_journal_digest": "sha256:journal",
@@ -408,11 +410,42 @@ def test_orphan_failure_before_the_row_is_seen_resolves_it(
     assert [args["object_identities"] for args in resolved] == [["sha256:a"]]
 
 
-def test_remote_orphan_is_blocked_before_any_fault() -> None:
-    with pytest.raises(ScenarioStop) as stop:
-        asyncio.run(authority_faults.quarantined_orphan(_system(remote=True), "db", _resolver([])))
-    assert stop.value.outcome is Outcome.BLOCKED
-    assert str(stop.value) == authority_faults.REMOTE_ORPHAN_BLOCKED
+def test_remote_orphan_arm_observes_the_remote_receipt_and_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeBarrier()
+    resolved = _fake_arm_b(monkeypatch, fake, _async())
+    seen: list[tuple[str, str]] = []
+    receipts = iter(
+        [
+            authority_faults.Receipt(True, "f" * 64, "cleanup-op", "sha256:journal"),
+            authority_faults.Receipt(False),
+        ]
+    )
+
+    def remote_receipt(_config: object, ids: tuple[str, str]) -> authority_faults.Receipt:
+        seen.append(ids)
+        return next(receipts)
+
+    monkeypatch.setattr(authority_faults, "remote_receipt_state", remote_receipt)
+    monkeypatch.setattr(
+        authority_faults, "receipt_state", lambda *_a: pytest.fail("local observer used")
+    )
+    _quarantine_sequence(
+        monkeypatch,
+        [
+            {},
+            {},
+            {"a": _row("a", provider="remote-libvirt")},
+            {"a": _row("a", provider="remote-libvirt")},
+            {"a": _row("a", "deleted", provider="remote-libvirt")},
+        ],
+    )
+    observed = asyncio.run(
+        authority_faults.quarantined_orphan(_system(remote=True), "db", _resolver(resolved))
+    )
+    assert seen == [(_SYSTEM, _ACTIVATION)] * 2
+    assert observed["resolved"] == "deleted"
 
 
 @pytest.mark.parametrize("provider", ["local-libvirt", "remote-libvirt"])

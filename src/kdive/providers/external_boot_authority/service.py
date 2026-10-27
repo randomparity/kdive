@@ -9,12 +9,13 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead, PrestopHolders
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
@@ -56,6 +57,7 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    PREPARATION_ABANDONED,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
     RemoteModulePreparationBeginRequestV1,
@@ -518,6 +520,12 @@ class AuthorityServiceMetrics:
                 self.unresolved[key] = remaining
             else:
                 self.unresolved.pop(key)
+
+
+def _settled_digest(kind: Literal["abandoned", "refused"], operation_identity: str) -> str:
+    """The observation identity that marks a PREPARE closed without adopting anything."""
+    tag = f"kdive-prepare-{kind}-v1".encode()
+    return "sha256:" + hashlib.sha256(tag + b"\0" + operation_identity.encode()).hexdigest()
 
 
 @dataclass(slots=True)
@@ -2155,6 +2163,7 @@ class ExternalBootAuthorityService:
         if trusted is None or not self._root_candidate_matches_preparation(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
+        anchored_here = False
         try:
             async with lane.lock:
                 if lane.failed:
@@ -2227,6 +2236,7 @@ class ExternalBootAuthorityService:
                         records,
                         self._record(mutation, records, JournalPhase.MUTATION_STARTED),
                     )
+                    anchored_here = True
                 receipt = await self._repository.open_remote_module_attempt(
                     authenticated,
                     request,
@@ -2234,6 +2244,13 @@ class ExternalBootAuthorityService:
                     record_digest(acknowledgement),
                 )
                 if receipt is None:
+                    if anchored_here:
+                        # A definitive refusal of an operation this call anchored; a re-begin
+                        # of an earlier operation may belong to a live execute, and a transient
+                        # host failure must stay retryable, so neither is settled.
+                        await self._settle_abandoned_preparation(
+                            mutation, records, journal, binding, lane, "refused", lane_locked=True
+                        )
                     raise AuthorityServiceError("superseded")
                 return await self._remote_module_host.begin(request, receipt, begin.budget_seconds)
         except AuthorityServiceError as error:
@@ -2299,6 +2316,22 @@ class ExternalBootAuthorityService:
                             raise AuthorityServiceError(
                                 "journal_conflict", reason="terminal_operation_mismatch"
                             )
+                        settled = (
+                            terminal.observation.composite_state
+                            if terminal.outcome == "source" and terminal.observation is not None
+                            else None
+                        )
+                        if settled == _settled_digest("abandoned", request.operation_identity):
+                            raise CategorizedError(
+                                "remote module preparation was abandoned",
+                                category=ErrorCategory.CONFLICT,
+                                details={"completion": "failed-after-mutation"},
+                            )
+                        if settled == _settled_digest("refused", request.operation_identity):
+                            raise (
+                                await self._prestop_refusal(authenticated, request, acknowledgement)
+                                or AuthorityServiceError("provider_conflict")
+                            )
                         result = await host.execute(remote)
                         result.validate_terminal_for(remote.operation, request)
                         return result
@@ -2326,6 +2359,15 @@ class ExternalBootAuthorityService:
                             record_digest(acknowledgement),
                         )
                         if receipt is None:
+                            await self._settle_abandoned_preparation(
+                                mutation,
+                                records,
+                                journal,
+                                binding,
+                                lane,
+                                "refused",
+                                lane_locked=True,
+                            )
                             raise AuthorityServiceError("superseded")
                         active = _ActiveOperation(
                             request.generation,
@@ -2368,8 +2410,32 @@ class ExternalBootAuthorityService:
                 if not resumed and (
                     refusal := await self._prestop_refusal(authenticated, request, acknowledgement)
                 ):
+                    if refusal.category in {"system_held", "provider_conflict"}:
+                        await self._settle_abandoned_preparation(
+                            mutation,
+                            records,
+                            journal,
+                            active.completion_binding or binding,
+                            lane,
+                            "refused",
+                        )
                     raise refusal
-                result = await host.execute(remote)
+                try:
+                    result = await host.execute(remote)
+                except Exception as failure:
+                    if (
+                        isinstance(failure, CategorizedError)
+                        and failure.details.get(PREPARATION_ABANDONED) is True
+                    ):
+                        await self._settle_abandoned_preparation(
+                            mutation,
+                            records,
+                            journal,
+                            active.completion_binding or binding,
+                            lane,
+                            "abandoned",
+                        )
+                    raise
                 result.validate_terminal_for(remote.operation, request)
                 rechecked = await self._resolve_confirmed(authenticated, mutation, acknowledgement)
                 if rechecked is None or not self._binding_matches(rechecked, mutation):
@@ -2497,6 +2563,66 @@ class ExternalBootAuthorityService:
         except AuthorityServiceError as error:
             self._ensure_rejection(request, error)
             raise
+
+    async def _settle_abandoned_preparation(
+        self,
+        mutation: AuthorityMutationRequestV1,
+        records: list[JournalRecordV1],
+        journal: FileAuthorityJournal,
+        binding: AuthorityBinding,
+        lane: _Lane,
+        kind: Literal["abandoned", "refused"],
+        *,
+        lane_locked: bool = False,
+    ) -> None:
+        """Close a PREPARE that was refused or abandoned, so a retry or teardown is not refused.
+
+        A pre-stop refusal mutated nothing, and the provider restored the System before reporting
+        an abandon, so nothing was adopted:
+        the op ends ``source`` through the same PROVIDER_RETURNED, OBSERVED, TERMINAL anchors a
+        recovered op uses. A failure here leaves the op unresolved, which is today's state, so it
+        is logged and never replaces the provider's failure.
+        """
+        digest = _settled_digest(kind, mutation.operation_identity)
+        observation = AuthorityObservationV1(
+            observation_id=uuid5(NAMESPACE_URL, digest), category="source", composite_state=digest
+        )
+        try:
+            async with nullcontext() if lane_locked else lane.lock:
+                records = await self._anchor(
+                    binding,
+                    journal,
+                    records,
+                    self._record(mutation, records, JournalPhase.PROVIDER_RETURNED),
+                )
+                records = await self._anchor(
+                    binding,
+                    journal,
+                    records,
+                    self._record(mutation, records, JournalPhase.OBSERVED, observation=observation),
+                )
+                await self._anchor(
+                    binding,
+                    journal,
+                    records,
+                    self._record(
+                        mutation,
+                        records,
+                        JournalPhase.TERMINAL,
+                        observation=observation,
+                        outcome="source",
+                    ),
+                )
+        except Exception as error:  # noqa: BLE001 -- the provider's failure is the one reported
+            superseded = getattr(error, "category", None) == "superseded"
+            (self._logger.warning if superseded else self._logger.error)(
+                "abandoned remote module preparation could not be settled",
+                extra={
+                    "error": type(error).__qualname__,
+                    "category": getattr(error, "category", None),
+                    "reason": getattr(error, "reason", None),
+                },
+            )
 
     async def execute_conflict_resolution(
         self, peer: AuthenticatedPeer | None, request: AuthorityConflictResolutionRequestV1
