@@ -506,6 +506,14 @@ class AuthorityServiceMetrics:
                 self.unresolved.pop(key)
 
 
+def _abandoned_digest(operation_identity: str) -> str:
+    """The observation identity that marks a PREPARE the provider abandoned."""
+    return (
+        "sha256:"
+        + hashlib.sha256(b"kdive-prepare-abandoned-v1\0" + operation_identity.encode()).hexdigest()
+    )
+
+
 @dataclass(slots=True)
 class _Lane:
     lock: asyncio.Lock
@@ -2242,7 +2250,12 @@ class ExternalBootAuthorityService:
                             raise AuthorityServiceError(
                                 "journal_conflict", reason="terminal_operation_mismatch"
                             )
-                        if terminal.outcome == "source":
+                        if (
+                            terminal.outcome == "source"
+                            and terminal.observation is not None
+                            and terminal.observation.composite_state
+                            == _abandoned_digest(request.operation_identity)
+                        ):
                             raise CategorizedError(
                                 "remote module preparation was abandoned",
                                 category=ErrorCategory.CONFLICT,
@@ -2463,12 +2476,7 @@ class ExternalBootAuthorityService:
         recovered op uses. A failure here leaves the op unresolved, which is today's state, so it
         is logged and never replaces the provider's failure.
         """
-        digest = (
-            "sha256:"
-            + hashlib.sha256(
-                b"kdive-prepare-abandoned-v1\0" + mutation.operation_identity.encode()
-            ).hexdigest()
-        )
+        digest = _abandoned_digest(mutation.operation_identity)
         observation = AuthorityObservationV1(
             observation_id=uuid5(NAMESPACE_URL, digest), category="source", composite_state=digest
         )

@@ -11,7 +11,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NoReturn, cast
 from uuid import UUID, uuid4
 
 import libvirt
@@ -2387,6 +2387,53 @@ async def test_durable_remote_preparation_failure_restores_power_and_does_not_la
         assert failed.value.details["abandoned"] is True
         assert failed.value.__cause__ is raised
     assert restored == ["inactive", "inactive"]
+    assert store.reopen_completion(request) is None
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_failure_before_the_stop_is_reported_as_refused_before_mutation(
+    tmp_path: Path,
+) -> None:
+    request = _remote_preparation_request()
+
+    class UnreadableHost(InactiveSystemHost):
+        async def observe_system_power(self, admitted: object) -> NoReturn:
+            raise ValueError("power could not be read")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, UnreadableHost()))
+    with pytest.raises(CategorizedError) as failed:
+        await durable.execute(request)
+
+    assert failed.value.details == {"completion": "refused-before-mutation", "abandoned": True}
+    assert store.reopen_completion(request) is None
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_unclearable_prior_power_record_does_not_latch_a_restored_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _remote_preparation_request()
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            raise RuntimeError("provider returned after mutation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+
+    def refuse(*_args: object) -> None:
+        raise OSError("read-only store")
+
+    monkeypatch.setattr(store, "clear_prior_power", refuse)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(CategorizedError) as failed:
+        await durable.execute(request)
+
+    assert failed.value.details["abandoned"] is True
     assert store.reopen_completion(request) is None
     store.close()
 

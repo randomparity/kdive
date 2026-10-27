@@ -263,6 +263,9 @@ The authority host now settles the failure:
   the System is left stopped for the operator, as before. A settle that fails is logged and never
   replaces the provider's failure.
 
+A cancellation while the stop itself is in flight is not covered and behaves as before. A failure
+with no recorded power (nothing was stopped) is reported `refused-before-mutation`.
+
 No journal phase, wire field or schema changes.
 
 ## Consequences

@@ -1658,7 +1658,6 @@ class DurableRemoteModuleVolumePreparationHost:
             prior = self._store.prior_power(binding, authority.plan_identity)
             if prior is not None:
                 await self._host.restore_system_power(admitted, prior)
-                self._store.clear_prior_power(binding, authority.plan_identity)
         except Exception as restore_failure:  # noqa: BLE001 -- any failure keeps the latch
             logger.error(
                 "remote module preparation abandon could not restore System power: %s: %s",
@@ -1667,8 +1666,20 @@ class DurableRemoteModuleVolumePreparationHost:
             )
             self._store.publish_failed_completion(request)
             return failure
+        if prior is not None:
+            try:
+                self._store.clear_prior_power(binding, authority.plan_identity)
+            except OSError as clear_failure:
+                logger.error(
+                    "remote module preparation abandon could not clear the prior-power record: %s",
+                    type(clear_failure).__qualname__,
+                )
         details = dict(failure.details) if isinstance(failure, CategorizedError) else {}
-        details.setdefault("completion", "failed-after-mutation")
+        # Nothing was stopped when no power was recorded, so a failure before that mutated nothing.
+        details.setdefault(
+            "completion",
+            "failed-after-mutation" if prior is not None else "refused-before-mutation",
+        )
         details[PREPARATION_ABANDONED] = True
         return CategorizedError(
             str(failure) or "remote module preparation failed",
