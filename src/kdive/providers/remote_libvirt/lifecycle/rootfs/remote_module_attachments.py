@@ -37,21 +37,28 @@ _MAX_STORAGE_PATH_BYTES = 4096
 _MAX_IDENTITY_COMPONENT = (1 << 64) - 1
 _MAX_PATH_IDENTITIES = 4096
 
+# Kernel command line of the direct-boot appliance; domain-v1-<arch>.xml carries the same value.
+# PYTHONHASHSEED reaches /init as an environment variable: the default qemu64 guest has no RDRAND,
+# so without it Python cannot seed its hash and the init dies before it can report anything.
+APPLIANCE_KERNEL_CMDLINE = "console=hvc0 panic=-1 PYTHONHASHSEED=0"
+
 _NORMALIZED_APPLIANCE_DEVICES = {
     "x86_64": (
         ("controller", (("index", "0"), ("model", "qemu-xhci"), ("ports", "15"), ("type", "usb"))),
         ("controller", (("index", "0"), ("model", "pcie-root"), ("type", "pci"))),
         ("controller", (("index", "0"), ("type", "sata"))),
+        ("controller", (("index", "0"), ("type", "virtio-serial"))),
         ("input", (("bus", "ps2"), ("type", "mouse"))),
         ("input", (("bus", "ps2"), ("type", "keyboard"))),
-        ("memballoon", (("model", "virtio"),)),
+        ("memballoon", (("model", "none"),)),
     ),
     "ppc64le": (
         ("controller", (("index", "0"), ("model", "qemu-xhci"), ("ports", "15"), ("type", "usb"))),
         ("controller", (("index", "0"), ("model", "pci-root"), ("type", "pci"))),
+        ("controller", (("index", "0"), ("type", "virtio-serial"))),
         ("input", (("bus", "usb"), ("type", "mouse"))),
         ("input", (("bus", "usb"), ("type", "keyboard"))),
-        ("memballoon", (("model", "virtio"),)),
+        ("memballoon", (("model", "none"),)),
     ),
 }
 
@@ -240,18 +247,31 @@ def _top_level_volume_references(root: ET.Element) -> list[tuple[str, str]]:
     return references
 
 
+def _top_level_path_references(root: ET.Element) -> list[str]:
+    """File- and block-backed top-level disk sources, one per disk, backing chains excluded."""
+    paths = (
+        source.get("file") or source.get("dev") for source in root.findall("./devices/disk/source")
+    )
+    return [path for path in paths if path is not None]
+
+
 def path_references(root: ET.Element) -> set[str]:
     """Return host paths from every source and legacy mirror in each disk graph."""
-    paths = set()
+    return set(_path_reference_list(root))
+
+
+def _path_reference_list(root: ET.Element) -> list[str]:
+    """Every path in each disk graph, repeats kept so a duplicate reference stays countable."""
+    paths = []
     for disk in root.findall("./devices/disk"):
         for source in disk.iter("source"):
             path = source.get("file") or source.get("dev")
             if path is not None:
-                paths.add(path)
+                paths.append(path)
         for mirror in disk.iter("mirror"):
             path = mirror.get("file") or mirror.get("dev")
             if path is not None:
-                paths.add(path)
+                paths.append(path)
     return paths
 
 
@@ -521,7 +541,14 @@ def _inspect_definition(
         if domain_active:
             raise _conflict("owning System is active", domain=name)
         owning_root = (expected.pool, expected.root_volume)
-        if _top_level_volume_references(root).count(owning_root) != 1:
+        root_identity = protected_identities[expected.root_volume]
+        # A provisioned System's root is a file-backed overlay with no pool/volume source, so
+        # it counts by device identity; the same root named any other way still counts twice.
+        root_references = _top_level_volume_references(root).count(owning_root) + sum(
+            _device_identity(identity_port, path) == root_identity
+            for path in _top_level_path_references(root)
+        )
+        if root_references != 1:
             raise _conflict("owning System definition has a different root volume", domain=name)
         attempt_identities = {
             identity
@@ -532,9 +559,9 @@ def _inspect_definition(
             protected_references & attempt_identities
         ):
             raise _conflict("System references attempt-scoped appliance storage", domain=name)
-        root_identity = protected_identities[expected.root_volume]
-        root_count = resolved_identities.count(root_identity) + list(direct_identities).count(
-            root_identity
+        root_count = resolved_identities.count(root_identity) + sum(
+            _device_identity(identity_port, path) == root_identity
+            for path in _path_reference_list(root)
         )
         if root_count != 1:
             raise _conflict("owning System has duplicate root volume references", domain=name)
@@ -750,10 +777,18 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         return
     if root.get("type") != "kvm" or set(root.attrib) - {"type", "id"}:
         raise _conflict("resumed appliance domain type mismatched")
+    lifecycle = ("on_poweroff", "on_reboot", "on_crash")
     top_level = {"name", "uuid", "memory", "vcpu", "os", "metadata", "devices", "features"}
+    top_level.update(lifecycle)
     if any(child.tag not in top_level for child in root):
         raise _conflict("resumed appliance top-level shape mismatched")
     _validate_features(root, expected.appliance.architecture)
+    for tag in lifecycle:
+        nodes = root.findall(tag)
+        if len(nodes) != 1 or any(
+            node.attrib or list(node) or (node.text or "").strip() != "destroy" for node in nodes
+        ):
+            raise _conflict("resumed appliance lifecycle action mismatched")
     required_once = {"name", "memory", "vcpu", "os", "metadata", "devices"}
     if any(len(root.findall(tag)) != 1 for tag in required_once):
         raise _conflict("resumed appliance top-level shape mismatched")
@@ -773,7 +808,9 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         raise _conflict("resumed appliance UUID normalization mismatched")
     os_nodes = root.findall("os")
     expected_os_children = (
-        ["type"] if expected.appliance.volume is not None else ["type", "kernel", "initrd"]
+        ["type"]
+        if expected.appliance.volume is not None
+        else ["type", "kernel", "initrd", "cmdline"]
     )
     if os_nodes[0].attrib or [child.tag for child in os_nodes[0]] != expected_os_children:
         raise _conflict("resumed appliance OS shape mismatched")
@@ -802,6 +839,14 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
             or (initrd.text or "") != expected.appliance.initrd
         ):
             raise _conflict("resumed appliance direct kernel mismatched")
+        cmdline = root.find("./os/cmdline")
+        if (
+            cmdline is None
+            or cmdline.attrib
+            or list(cmdline)
+            or (cmdline.text or "") != APPLIANCE_KERNEL_CMDLINE
+        ):
+            raise _conflict("resumed appliance kernel command line mismatched")
     if expected.appliance.memory_kib is not None:
         memory_nodes = root.findall("./memory")
         if (
@@ -828,11 +873,12 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
     devices = root.find("./devices")
     if devices is None:
         raise _conflict("resumed appliance devices are absent")
-    allowed = {"disk", "console", "controller", "input", "memballoon", "emulator"}
+    allowed = {"disk", "console", "controller", "input", "memballoon", "emulator", "rng"}
     if any(device.tag not in allowed for device in devices):
         raise _conflict("resumed appliance unexpectedly has a forbidden device")
+    _validate_rng(devices)
     for device in devices:
-        if device.tag not in {"disk", "console"}:
+        if device.tag not in {"disk", "console", "rng"}:
             _validate_normalized_device(device)
     normalized = [
         device for device in devices if device.tag in {"controller", "input", "memballoon"}
@@ -872,10 +918,8 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
     if len(sources) > 1 or any(set(source.attrib) - {"path"} for source in sources):
         raise _conflict("resumed appliance console set mismatched")
     targets = console.findall("target")
-    if len(targets) > 1:
-        raise _conflict("resumed appliance console set mismatched")
-    if targets and (
-        set(targets[0].attrib) - {"type", "port"} or targets[0].get("type") not in {None, "serial"}
+    if len(targets) != 1 or (
+        set(targets[0].attrib) - {"type", "port"} or targets[0].get("type") != "virtio"
     ):
         raise _conflict("resumed appliance console set mismatched")
     for alias in console.findall("alias"):
@@ -885,6 +929,38 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
     for address in console.findall("address"):
         if set(address.attrib) - address_attrs:
             raise _conflict("resumed appliance console set mismatched")
+
+
+def _validate_rng(devices: ET.Element) -> None:
+    """Require exactly the reference ``<rng model="virtio">`` backed by ``/dev/urandom``."""
+    nodes = devices.findall("rng")
+    if len(nodes) != 1 or nodes[0].attrib != {"model": "virtio"}:
+        raise _conflict("resumed appliance entropy device mismatched")
+    rng = nodes[0]
+    if nodes[0].text and nodes[0].text.strip():
+        raise _conflict("resumed appliance entropy device mismatched")
+    backends = rng.findall("backend")
+    if (
+        len(backends) != 1
+        or backends[0].attrib != {"model": "random"}
+        or list(backends[0])
+        or (backends[0].text or "").strip() != "/dev/urandom"
+    ):
+        raise _conflict("resumed appliance entropy device mismatched")
+    for tag, attributes in _RNG_CHILD_ATTRS.items():
+        nodes_by_tag = rng.findall(tag)
+        if len(nodes_by_tag) > 1 or any(
+            list(node) or set(node.attrib) - attributes for node in nodes_by_tag
+        ):
+            raise _conflict("resumed appliance entropy device mismatched")
+    if any(child.tag not in {"backend", *_RNG_CHILD_ATTRS} for child in rng):
+        raise _conflict("resumed appliance entropy device mismatched")
+
+
+_RNG_CHILD_ATTRS = {
+    "alias": {"name"},
+    "address": {"type", "domain", "bus", "slot", "function"},
+}
 
 
 def _validate_normalized_device(device: ET.Element) -> None:
