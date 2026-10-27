@@ -270,6 +270,11 @@ _VERB_ARG_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
     ("accounting", "usage"): {"investigation_id": None},
     ("jobs", "wait"): {"timeout_s": 0.0},
     ("allocations", "wait"): {"timeout_s": 0.0},
+    ("systems", "list"): {"limit": 1},
+    ("allocations", "list"): {"limit": 1},
+    ("jobs", "list"): {"limit": 1},
+    ("images", "list"): {"limit": 1},
+    ("resources", "list"): {"limit": 1},
 }
 
 
@@ -666,3 +671,88 @@ def test_report_all_denial_exits_authorization_denied(
     _install_session(monkeypatch, _denied("report"))
     code = asyncio.run(reads.ledger_report(_report_args(scope="all-projects")))
     assert code == 3
+
+
+_LIST_OPTION_CASES = [
+    (
+        ["systems", "list", "--project", "p", "--allocation-id", "a", "--state", "ready"]
+        + ["--shape", "s", "--pcie", "x", "--limit", "5", "--cursor", "c"],
+        "systems.list",
+        {
+            "project": "p",
+            "allocation_id": "a",
+            "state": "ready",
+            "shape": "s",
+            "pcie": "x",
+            "limit": 5,
+            "cursor": "c",
+        },
+    ),
+    (
+        ["allocations", "list", "--project", "p", "--state", "active", "--limit", "2"]
+        + ["--cursor", "c"],
+        "allocations.list",
+        {"project": "p", "state": "active", "limit": 2, "cursor": "c"},
+    ),
+    (
+        ["jobs", "list", "--state", "failed", "--kind", "build", "--investigation-id", "i"]
+        + ["--system-id", "s", "--limit", "7", "--cursor", "c"],
+        "jobs.list",
+        {
+            "state": "failed",
+            "kind": "build",
+            "investigation_id": "i",
+            "system_id": "s",
+            "limit": 7,
+            "cursor": "c",
+        },
+    ),
+    (
+        ["images", "list", "--scope", "public_baseline", "--limit", "3", "--cursor", "c"],
+        "images.list",
+        {"scope": "public_baseline", "limit": 3, "cursor": "c"},
+    ),
+    (
+        ["resources", "list", "--kind", "local-libvirt", "--limit", "4", "--cursor", "c"],
+        "resources.list",
+        {"kind": "local-libvirt", "limit": 4, "cursor": "c"},
+    ),
+]
+
+
+@pytest.mark.parametrize(("argv", "tool", "expected"), _LIST_OPTION_CASES)
+def test_list_verbs_forward_every_filter_and_paging_option(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], tool: str, expected: dict
+) -> None:
+    client = _install_session(monkeypatch, _collection([]))
+    args = build_parser().parse_args(argv)
+    assert asyncio.run(HANDLER_OVERRIDES[tool](args)) == 0
+    assert client.calls == [(tool, {"request": expected})]
+
+
+@pytest.mark.parametrize(
+    ("argv", "tool", "sent"),
+    [
+        (["systems", "list"], "systems.list", {"request": {}}),
+        (["allocations", "list", "--project", "p"], "allocations.list", None),
+        (["jobs", "list"], "jobs.list", {"request": {}}),
+        (["images", "list"], "images.list", {}),
+        (["resources", "list"], "resources.list", {}),
+    ],
+)
+def test_list_verbs_omit_unset_paging_options(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], tool: str, sent: dict | None
+) -> None:
+    client = _install_session(monkeypatch, _collection([]))
+    assert asyncio.run(HANDLER_OVERRIDES[tool](build_parser().parse_args(argv))) == 0
+    ((_, arguments),) = client.calls
+    request = arguments.get("request", {})
+    assert "limit" not in request and "cursor" not in request
+    if sent is not None:
+        assert arguments == sent
+
+
+def test_list_limit_must_be_an_integer(capsys) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["jobs", "list", "--limit", "many"])
+    assert "--limit" in capsys.readouterr().err
