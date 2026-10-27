@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import posixpath
 import stat
 import tempfile
 import xml.etree.ElementTree as ET
@@ -34,6 +36,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationResponseV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    ApplianceOutcome,
     ApplianceRequest,
     run_or_adopt_appliance,
     teardown_remote_module_appliance,
@@ -74,8 +77,12 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     recovery_attempt_volumes,
     render_module_volume_name,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import parse_libvirt_xml
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+_LOG = logging.getLogger(__name__)
+_MAX_BACKING_PATH_BYTES = 4096
 
 
 def _refused(message: str) -> CategorizedError:
@@ -88,6 +95,18 @@ def _refused(message: str) -> CategorizedError:
 
 def _stop_failed(message: str) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+
+def _log_missing_result(operation: RemoteModuleOperationV1, outcome: ApplianceOutcome) -> None:
+    """Record the appliance's bounded, redacted, protocol-filtered console tail."""
+    _LOG.warning(
+        "remote module appliance produced no durable result: system=%s run=%s "
+        "timed_out=%s console_tail=%r",
+        operation.system_id,
+        operation.run_id,
+        outcome.timed_out,
+        outcome.console_tail,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +260,9 @@ class ConcreteRemoteModuleAuthorityHost:
                 initrd=(
                     None if appliance.appliance_initrd is None else str(appliance.appliance_initrd)
                 ),
+                root_backing_path=self._root_backing_path(
+                    self._configuration.volumes.pool_name, operation.root_volume.key, absent_ok=True
+                ),
             ),
         )
 
@@ -332,7 +354,9 @@ class ConcreteRemoteModuleAuthorityHost:
         deadline: float,
     ) -> ApplianceRequest:
         configured = self._configuration.appliance
+        pool_name = self._configuration.volumes.pool_name
         return ApplianceRequest(
+            root_backing_path=self._root_backing_path(pool_name, root.name),
             name=f"kdive-module-{operation.system_id}-{operation.run_id}-{operation.operation_nonce}",
             architecture=configured.architecture,
             emulator_path=configured.emulator_path,
@@ -364,6 +388,52 @@ class ConcreteRemoteModuleAuthorityHost:
             monotonic=configured.monotonic,
             invocation_deadline=deadline,
         )
+
+    def _root_backing_path(
+        self, pool_name: str, root_name: str, *, absent_ok: bool = False
+    ) -> str | None:
+        """The staged base the System's overlay is backed by, from the root volume's libvirt XML.
+
+        Inspections run during cleanup, when the root volume may already be gone; they pass
+        ``absent_ok`` and get ``None``, which no appliance domain's typed backing can match.
+        """
+        storage = self._configuration.volumes.storage
+        try:
+            volume = storage.storagePoolLookupByName(pool_name).storageVolLookupByName(root_name)
+            document = parse_libvirt_xml(volume.XMLDesc(0))
+        except libvirt.libvirtError as exc:
+            if absent_ok and exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                return None
+            raise CategorizedError(
+                "could not read the System root volume's backing store",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ) from exc
+        except (ET.ParseError, ValueError) as exc:
+            raise CategorizedError(
+                "could not read the System root volume's backing store",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ) from exc
+        path = document.findtext("./backingStore/path")
+        if path is None:
+            return None
+        if (
+            not path.startswith("/")
+            or path != path.strip()
+            or "\x00" in path
+            or len(path.encode()) > _MAX_BACKING_PATH_BYTES
+            or posixpath.normpath(path) != path
+        ):
+            raise CategorizedError(
+                "the System root volume's backing path is not a normalized absolute path",
+                category=ErrorCategory.CONFLICT,
+            )
+        backing_format = document.find("./backingStore/format")
+        if backing_format is None or backing_format.get("type") != "qcow2":
+            raise CategorizedError(
+                "the System root volume's backing store is not qcow2",
+                category=ErrorCategory.CONFLICT,
+            )
+        return path
 
     def _preflight(
         self, admitted: AdmittedRemoteModulePreparation
@@ -422,6 +492,7 @@ class ConcreteRemoteModuleAuthorityHost:
         appliance_request = self._appliance_request(operation, volumes, root, deadline)
         outcome = run_or_adopt_appliance(self._configuration.appliance.appliance, appliance_request)
         if outcome.result is None:
+            _log_missing_result(operation, outcome)
             raise CategorizedError(
                 "remote module appliance did not produce a durable result",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -655,6 +726,7 @@ class ConcreteRemoteModuleAuthorityHost:
         appliance_request = self._appliance_request(restore, volumes, root, deadline)
         outcome = run_or_adopt_appliance(self._configuration.appliance.appliance, appliance_request)
         if outcome.result is None:
+            _log_missing_result(restore, outcome)
             raise RuntimeError("remote module restore did not produce durable terminal evidence")
         result = outcome.result
         result.validate_for(restore)

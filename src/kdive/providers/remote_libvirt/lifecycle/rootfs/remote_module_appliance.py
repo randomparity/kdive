@@ -14,6 +14,7 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+    APPLIANCE_KERNEL_CMDLINE,
     AttachmentInspection,
     ExpectedAppliance,
     ExpectedAttachmentState,
@@ -26,6 +27,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
     validate_volume_key,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import PreparedVolume
+from kdive.providers.shared.libvirt_xml import append_qcow2_backing_store
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -115,6 +117,7 @@ class ApplianceRequest:
     appliance_volume: str | None = None
     appliance_kernel: str | None = None
     appliance_initrd: str | None = None
+    root_backing_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.architecture not in {"x86_64", "ppc64le"}:
@@ -150,9 +153,29 @@ class TeardownObservation:
         return self.absent and self.root_detached and self.source_detached and self.scratch_detached
 
 
-def _disk(parent: ET.Element, pool: str, volume: str, alias: str, *, readonly: bool) -> None:
+def _disk(
+    parent: ET.Element,
+    pool: str,
+    volume: str,
+    alias: str,
+    *,
+    readonly: bool,
+    image_format: str | None = None,
+    backing_path: str | None = None,
+) -> None:
     disk = ET.SubElement(parent, "disk", {"type": "volume", "device": "disk"})
+    if image_format is not None:
+        # Without a driver element libvirt hands a qcow2 overlay to the guest as a raw disk.
+        ET.SubElement(
+            disk,
+            "driver",
+            {"name": "qemu", "type": image_format, "cache": "none", "io": "native"},
+        )
     ET.SubElement(disk, "source", {"pool": pool, "volume": volume})
+    if backing_path is not None:
+        # Naming the backing file lets the selinux seclabel keep libvirt from relabelling the
+        # shared staged base at every start, which moves its ctime (ADR-0623).
+        append_qcow2_backing_store(disk, backing_path, relabel=False)
     ET.SubElement(disk, "target", {"dev": alias, "bus": "virtio"})
     if readonly:
         ET.SubElement(disk, "readonly")
@@ -171,6 +194,10 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
         assert request.appliance_kernel is not None and request.appliance_initrd is not None
         ET.SubElement(os_node, "kernel").text = request.appliance_kernel
         ET.SubElement(os_node, "initrd").text = request.appliance_initrd
+        ET.SubElement(os_node, "cmdline").text = APPLIANCE_KERNEL_CMDLINE
+    if request.architecture == "x86_64":
+        # Without ACPI q35 exposes no PCI devices beyond the root complex and cannot power off.
+        ET.SubElement(ET.SubElement(domain, "features"), "acpi")
     metadata = ET.SubElement(domain, "metadata")
     ET.SubElement(
         metadata,
@@ -181,11 +208,23 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
             "nonce": request.operation.operation_nonce,
         },
     )
+    for action in ("on_poweroff", "on_reboot", "on_crash"):
+        ET.SubElement(domain, action).text = "destroy"
     devices = ET.SubElement(domain, "devices")
     if request.appliance_volume is None:
-        _disk(devices, request.pool, request.root.name, "vda", readonly=False)
-        _disk(devices, request.pool, request.source.name, "vdb", readonly=True)
-        _disk(devices, request.pool, request.scratch.name, "vdc", readonly=False)
+        _disk(
+            devices,
+            request.pool,
+            request.root.name,
+            "vda",
+            readonly=False,
+            image_format="qcow2",
+            backing_path=request.root_backing_path,
+        )
+        _disk(devices, request.pool, request.source.name, "vdb", readonly=True, image_format="raw")
+        _disk(
+            devices, request.pool, request.scratch.name, "vdc", readonly=False, image_format="raw"
+        )
     else:
         _disk(devices, request.pool, request.appliance_volume, "vda", readonly=True)
         _disk(devices, request.pool, request.root.name, "vdb", readonly=False)
@@ -194,7 +233,11 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
     for tag, attributes in normalized_appliance_devices(request.architecture):
         ET.SubElement(devices, tag, attributes)
     ET.SubElement(devices, "emulator").text = request.emulator_path
-    ET.SubElement(devices, "console", {"type": "pty"})
+    console = ET.SubElement(devices, "console", {"type": "pty"})
+    ET.SubElement(console, "target", {"type": "virtio", "port": "0"})
+    # The default qemu64 guest has no RDRAND, so the kernel's entropy pool would stay empty.
+    rng = ET.SubElement(devices, "rng", {"model": "virtio"})
+    ET.SubElement(rng, "backend", {"model": "random"}).text = "/dev/urandom"
     return ET.tostring(domain, encoding="unicode", short_empty_elements=True)
 
 
@@ -217,6 +260,7 @@ def expected_attachment_state(request: ApplianceRequest) -> ExpectedAttachmentSt
             request.emulator_path,
             request.appliance_kernel,
             request.appliance_initrd,
+            request.root_backing_path,
         ),
     )
 
@@ -257,6 +301,20 @@ def _domain(
     return domain
 
 
+def _domain_running(domain: ApplianceDomain, request: ApplianceRequest, deadline: float) -> bool:
+    """Whether the transient appliance still exists and runs.
+
+    The console stream of a finished domain keeps answering "would block" instead of reaching
+    end of file, so the idle wait ends only when the domain is gone, not after the full timeout.
+    """
+    try:
+        return bool(request.executor.call(domain.isActive, deadline))
+    except libvirt.libvirtError as exc:
+        if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+            return False
+        raise
+
+
 def _read_console(
     conn: ApplianceConn,
     domain: ApplianceDomain,
@@ -284,10 +342,17 @@ def _read_console(
     text = ""
     timed_out = False
     unresolved_rpc = False
+    draining = False
     try:
         while request.monotonic() < deadline:
             chunk = request.executor.call(lambda: stream.recv(4096), deadline)
             if chunk == -2:
+                if draining:
+                    break
+                if not _domain_running(domain, request, deadline):
+                    # One more read picks up bytes written just before the domain ended.
+                    draining = True
+                    continue
                 remaining = deadline - request.monotonic()
                 if remaining > 0:
                     time.sleep(min(0.01, remaining))

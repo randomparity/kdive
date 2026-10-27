@@ -23,7 +23,11 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import (
     XmlEnumerationBudget,
     parse_libvirt_xml,
 )
-from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, remote_metadata_system_id
+from kdive.providers.shared.libvirt_xml import (
+    KDIVE_METADATA_NS,
+    backing_store_projection,
+    remote_metadata_system_id,
+)
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 _DOMAIN_UUID = re.compile(
@@ -33,21 +37,28 @@ _MAX_STORAGE_PATH_BYTES = 4096
 _MAX_IDENTITY_COMPONENT = (1 << 64) - 1
 _MAX_PATH_IDENTITIES = 4096
 
+# Kernel command line of the direct-boot appliance; domain-v1-<arch>.xml carries the same value.
+# PYTHONHASHSEED reaches /init as an environment variable: the default qemu64 guest has no RDRAND,
+# so without it Python cannot seed its hash and the init dies before it can report anything.
+APPLIANCE_KERNEL_CMDLINE = "console=hvc0 panic=-1 PYTHONHASHSEED=0"
+
 _NORMALIZED_APPLIANCE_DEVICES = {
     "x86_64": (
         ("controller", (("index", "0"), ("model", "qemu-xhci"), ("ports", "15"), ("type", "usb"))),
         ("controller", (("index", "0"), ("model", "pcie-root"), ("type", "pci"))),
         ("controller", (("index", "0"), ("type", "sata"))),
+        ("controller", (("index", "0"), ("type", "virtio-serial"))),
         ("input", (("bus", "ps2"), ("type", "mouse"))),
         ("input", (("bus", "ps2"), ("type", "keyboard"))),
-        ("memballoon", (("model", "virtio"),)),
+        ("memballoon", (("model", "none"),)),
     ),
     "ppc64le": (
         ("controller", (("index", "0"), ("model", "qemu-xhci"), ("ports", "15"), ("type", "usb"))),
         ("controller", (("index", "0"), ("model", "pci-root"), ("type", "pci"))),
+        ("controller", (("index", "0"), ("type", "virtio-serial"))),
         ("input", (("bus", "usb"), ("type", "mouse"))),
         ("input", (("bus", "usb"), ("type", "keyboard"))),
-        ("memballoon", (("model", "virtio"),)),
+        ("memballoon", (("model", "none"),)),
     ),
 }
 
@@ -72,6 +83,7 @@ class ExpectedAppliance:
     emulator_path: str | None = None
     kernel: str | None = None
     initrd: str | None = None
+    root_backing_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,6 +583,87 @@ def _inspect_definition(
     return False
 
 
+def _validate_features(root: ET.Element, architecture: str) -> None:
+    """x86_64 needs exactly ``<features><acpi/></features>``; other architectures have none."""
+    nodes = root.findall("features")
+    if architecture != "x86_64":
+        if nodes:
+            raise _conflict("resumed appliance features mismatched")
+        return
+    if len(nodes) != 1 or nodes[0].attrib or nodes[0].text and nodes[0].text.strip():
+        raise _conflict("resumed appliance features mismatched")
+    children = list(nodes[0])
+    if len(children) != 1 or children[0].tag != "acpi" or children[0].attrib or list(children[0]):
+        raise _conflict("resumed appliance features mismatched")
+
+
+def _validate_disk_backing(
+    disk: ET.Element, dev: str | None, expected: ExpectedAttachmentState
+) -> None:
+    """Accept libvirt's empty terminator anywhere; the root's typed backing must be the base.
+
+    A qcow2 root is dumped with a typed ``<backingStore>`` naming the shared staged base. When the
+    domain was rendered with an explicit one, it must still carry the ``selinux`` ``relabel="no"``
+    seclabel that stops libvirt relabelling the base (ADR-0623); every other disk carries only the
+    empty terminator.
+    """
+    backings = disk.findall("backingStore")
+    wanted = expected.appliance.root_backing_path if expected.appliance.volume is None else None
+    is_root = dev == "vda"
+    if len(backings) > 1 or (not backings and is_root and wanted is not None):
+        raise _conflict("resumed appliance volume set mismatched")
+    if not backings:
+        return
+    backing = backings[0]
+    if not backing.attrib and not list(backing):
+        if is_root and wanted is not None:
+            raise _conflict("resumed appliance volume set mismatched")
+        return
+    if not is_root or wanted is None or not _is_staged_base_backing(backing, disk, wanted):
+        raise _conflict("resumed appliance volume set mismatched")
+
+
+def _is_staged_base_backing(backing: ET.Element, disk: ET.Element, path: str) -> bool:
+    source = backing.find("source")
+    format_node = backing.find("format")
+    terminator = backing.find("backingStore")
+    if source is None or format_node is None or terminator is None:
+        return False
+    seclabels = source.findall("seclabel")
+    return (
+        {child.tag for child in backing} == {"format", "source", "backingStore"}
+        and len(list(backing)) == 3
+        and set(backing.attrib) <= {"type", "index"}
+        and format_node.attrib == {"type": "qcow2"}
+        and not list(format_node)
+        and set(source.attrib) == {"file"}
+        and [child.tag for child in source] == ["seclabel"]
+        and len(seclabels) == 1
+        and seclabels[0].attrib == {"model": "selinux", "relabel": "no"}
+        and not list(seclabels[0])
+        and not terminator.attrib
+        and not list(terminator)
+        and backing_store_projection(disk) == ("file", "qcow2", path, (("selinux", "no", None),))
+    )
+
+
+_DIRECT_KERNEL_DISK_FORMATS = {"vda": "qcow2", "vdb": "raw", "vdc": "raw"}
+
+
+def _has_reference_driver(dev: str | None, driver: ET.Element | None) -> bool:
+    """Whether a direct-kernel disk carries the reference driver for its role.
+
+    The System root is a qcow2 overlay and the other two volumes are raw; a missing or different
+    driver hands the guest the wrong bytes (a qcow2 container read as a raw disk).
+    """
+    image_format = _DIRECT_KERNEL_DISK_FORMATS.get(dev or "")
+    return (
+        image_format is not None
+        and driver is not None
+        and driver.attrib == {"name": "qemu", "type": image_format, "cache": "none", "io": "native"}
+    )
+
+
 def _validate_appliance(
     root: ET.Element,
     active: bool,
@@ -609,7 +702,15 @@ def _validate_appliance(
         if disk.attrib != {"type": "volume", "device": "disk"}:
             raise _conflict("resumed appliance volume set mismatched")
         children = list(disk)
-        allowed_tags = {"driver", "source", "target", "readonly", "alias", "address"}
+        allowed_tags = {
+            "driver",
+            "source",
+            "backingStore",
+            "target",
+            "readonly",
+            "alias",
+            "address",
+        }
         if any(child.tag not in allowed_tags for child in children):
             raise _conflict("resumed appliance volume set mismatched")
         source_nodes = disk.findall("source")
@@ -631,6 +732,11 @@ def _validate_appliance(
         driver_attrs = {"name", "type", "cache", "io", "discard"}
         if driver is not None and (set(driver.attrib) - driver_attrs or list(driver)):
             raise _conflict("resumed appliance volume set mismatched")
+        if expected.appliance.volume is None and not _has_reference_driver(
+            target.get("dev"), driver
+        ):
+            raise _conflict("resumed appliance volume set mismatched")
+        _validate_disk_backing(disk, target.get("dev"), expected)
         alias = disk.find("alias")
         if alias is not None and (set(alias.attrib) - {"name"} or list(alias)):
             raise _conflict("resumed appliance volume set mismatched")
@@ -671,9 +777,18 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         return
     if root.get("type") != "kvm" or set(root.attrib) - {"type", "id"}:
         raise _conflict("resumed appliance domain type mismatched")
-    top_level = {"name", "uuid", "memory", "vcpu", "os", "metadata", "devices"}
+    lifecycle = ("on_poweroff", "on_reboot", "on_crash")
+    top_level = {"name", "uuid", "memory", "vcpu", "os", "metadata", "devices", "features"}
+    top_level.update(lifecycle)
     if any(child.tag not in top_level for child in root):
         raise _conflict("resumed appliance top-level shape mismatched")
+    _validate_features(root, expected.appliance.architecture)
+    for tag in lifecycle:
+        nodes = root.findall(tag)
+        if len(nodes) != 1 or any(
+            node.attrib or list(node) or (node.text or "").strip() != "destroy" for node in nodes
+        ):
+            raise _conflict("resumed appliance lifecycle action mismatched")
     required_once = {"name", "memory", "vcpu", "os", "metadata", "devices"}
     if any(len(root.findall(tag)) != 1 for tag in required_once):
         raise _conflict("resumed appliance top-level shape mismatched")
@@ -693,7 +808,9 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         raise _conflict("resumed appliance UUID normalization mismatched")
     os_nodes = root.findall("os")
     expected_os_children = (
-        ["type"] if expected.appliance.volume is not None else ["type", "kernel", "initrd"]
+        ["type"]
+        if expected.appliance.volume is not None
+        else ["type", "kernel", "initrd", "cmdline"]
     )
     if os_nodes[0].attrib or [child.tag for child in os_nodes[0]] != expected_os_children:
         raise _conflict("resumed appliance OS shape mismatched")
@@ -722,6 +839,14 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
             or (initrd.text or "") != expected.appliance.initrd
         ):
             raise _conflict("resumed appliance direct kernel mismatched")
+        cmdline = root.find("./os/cmdline")
+        if (
+            cmdline is None
+            or cmdline.attrib
+            or list(cmdline)
+            or (cmdline.text or "") != APPLIANCE_KERNEL_CMDLINE
+        ):
+            raise _conflict("resumed appliance kernel command line mismatched")
     if expected.appliance.memory_kib is not None:
         memory_nodes = root.findall("./memory")
         if (
@@ -748,11 +873,12 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
     devices = root.find("./devices")
     if devices is None:
         raise _conflict("resumed appliance devices are absent")
-    allowed = {"disk", "console", "controller", "input", "memballoon", "emulator"}
+    allowed = {"disk", "console", "controller", "input", "memballoon", "emulator", "rng"}
     if any(device.tag not in allowed for device in devices):
         raise _conflict("resumed appliance unexpectedly has a forbidden device")
+    _validate_rng(devices)
     for device in devices:
-        if device.tag not in {"disk", "console"}:
+        if device.tag not in {"disk", "console", "rng"}:
             _validate_normalized_device(device)
     normalized = [
         device for device in devices if device.tag in {"controller", "input", "memballoon"}
@@ -792,10 +918,8 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
     if len(sources) > 1 or any(set(source.attrib) - {"path"} for source in sources):
         raise _conflict("resumed appliance console set mismatched")
     targets = console.findall("target")
-    if len(targets) > 1:
-        raise _conflict("resumed appliance console set mismatched")
-    if targets and (
-        set(targets[0].attrib) - {"type", "port"} or targets[0].get("type") not in {None, "serial"}
+    if len(targets) != 1 or (
+        set(targets[0].attrib) - {"type", "port"} or targets[0].get("type") != "virtio"
     ):
         raise _conflict("resumed appliance console set mismatched")
     for alias in console.findall("alias"):
@@ -805,6 +929,38 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
     for address in console.findall("address"):
         if set(address.attrib) - address_attrs:
             raise _conflict("resumed appliance console set mismatched")
+
+
+def _validate_rng(devices: ET.Element) -> None:
+    """Require exactly the reference ``<rng model="virtio">`` backed by ``/dev/urandom``."""
+    nodes = devices.findall("rng")
+    if len(nodes) != 1 or nodes[0].attrib != {"model": "virtio"}:
+        raise _conflict("resumed appliance entropy device mismatched")
+    rng = nodes[0]
+    if nodes[0].text and nodes[0].text.strip():
+        raise _conflict("resumed appliance entropy device mismatched")
+    backends = rng.findall("backend")
+    if (
+        len(backends) != 1
+        or backends[0].attrib != {"model": "random"}
+        or list(backends[0])
+        or (backends[0].text or "").strip() != "/dev/urandom"
+    ):
+        raise _conflict("resumed appliance entropy device mismatched")
+    for tag, attributes in _RNG_CHILD_ATTRS.items():
+        nodes_by_tag = rng.findall(tag)
+        if len(nodes_by_tag) > 1 or any(
+            list(node) or set(node.attrib) - attributes for node in nodes_by_tag
+        ):
+            raise _conflict("resumed appliance entropy device mismatched")
+    if any(child.tag not in {"backend", *_RNG_CHILD_ATTRS} for child in rng):
+        raise _conflict("resumed appliance entropy device mismatched")
+
+
+_RNG_CHILD_ATTRS = {
+    "alias": {"name"},
+    "address": {"type", "domain", "bus", "slot", "function"},
+}
 
 
 def _validate_normalized_device(device: ET.Element) -> None:
