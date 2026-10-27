@@ -75,6 +75,7 @@ cli = true
 owner = 3098
 execution = "service"
 cli = true
+guest_observing = ["accounting.usage", "allocations.release", "reports.generate"]
 [groups.tools]
 "accounting.estimate" = "Compare the estimate with the configured coefficients and requested time window."
 "accounting.report" = "Compare granted-project and auditor-wide rollups with seeded ledger charges."

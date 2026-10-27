@@ -1036,6 +1036,9 @@ def bindings(
 ) -> InputBindings:
     """The expected ``Context`` of every bound service, native local and remote tool cell.
 
+    A guest-observing service cell (the contract marks it, and it has a ``guest_arch``) boots the
+    lane image like a native local cell.
+
     A native cell boots ``LANE_IMAGES[host_arch]``: its ``image_sha256`` is the staged bytes'
     digest, null when unstaged. With ``remote``, a remote cell of the provider host's
     architecture boots that architecture's remote representative there: its host is the provider
@@ -1051,9 +1054,12 @@ def bindings(
             {"host_os": host_os, "host_arch": host_arch, "accelerator": "none"}
         )
         for c in bound
-        if c.provider == "service" or (admission_refusal(c) and c.host_arch == host_arch)
+        if (c.provider == "service" and c.guest_arch is None)
+        or (admission_refusal(c) and c.host_arch == host_arch)
     }
-    native = [c for c in bound if c.provider == "local-libvirt" and c.guest_arch == host_arch]
+    native = [
+        c for c in bound if c.provider in {"local-libvirt", "service"} and c.guest_arch == host_arch
+    ]
     published = [c for c in native if c.operation == PUBLISH_TOOL and c.kind == "functional"]
     native = [c for c in native if c not in published]
     for cell in published:
