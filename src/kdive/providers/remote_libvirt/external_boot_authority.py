@@ -2356,7 +2356,7 @@ class RemoteExternalBootAuthorityAdapter:
         mutation: Callable[[RecoveryPoint, OpaqueProviderRef], None] | None
         if operation is AuthorityOperation.ACTIVATE:
             mutation = self._coordinator.activate
-        elif operation is AuthorityOperation.RECOVER and request.purpose == "release":
+        elif operation is AuthorityOperation.RECOVER and request.purpose in {"release", "recover"}:
             mutation = self._coordinator.recover
         elif operation in _BOOKKEEPING_COMMITS:
             mutation = None

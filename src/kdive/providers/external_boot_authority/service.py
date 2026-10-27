@@ -76,11 +76,13 @@ _URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
 _REFUSAL_OBSERVED_OPERATIONS = frozenset(
     {AuthorityOperation.ACTIVATE, AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
 )
-# Exactly the (purpose, operation) pairs read_authorized_remote_module_cleanup_evidence
-# (migration 0145) admits. A release RECOVER restores without deleting, so it commits directly.
+# The (purpose, operation) pairs that delete recovery objects and so need cleanup evidence.
+# read_authorized_remote_module_cleanup_evidence (migration 0145) also admits
+# ("recover", "recover"), but a RECOVER of either purpose only restores the source definition:
+# the module volumes are still present, so it commits directly and the later release CLEANUP
+# reaps them and deletes the boot artifacts (#3332).
 _CLEANUP_EVIDENCE_COMMITS = frozenset(
     {
-        ("recover", AuthorityOperation.RECOVER),
         ("release", AuthorityOperation.CLEANUP),
         ("teardown", AuthorityOperation.TEARDOWN),
         ("resolve-conflict", AuthorityOperation.RESOLVE_CONFLICT),
