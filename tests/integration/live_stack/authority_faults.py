@@ -8,7 +8,7 @@ caller it is handed, so a carrier chooses the exposure and role (#3186).
 
 - :func:`held_teardown_release` holds a teardown after its provider effect and proves
   ``ops.force_release`` refuses until the effect is quiescent, then releases.
-- :func:`quarantined_orphan` fails one cleanup finalization (ADR-0787) so the local authority
+- :func:`quarantined_orphan` fails one cleanup finalization (ADR-0787) so the authority
   publishes a real quarantine row, then resolves exactly that row.
 - :func:`recorded_conflict` changes the System's persistent definition out of band, as a host
   administrator would (ADR-0584), so the release refuses and the activation is recorded in
@@ -58,8 +58,8 @@ from tests.live_vm.installed_local_authority_support import (
 from tests.live_vm.installed_remote_authority_support import RemoteAuthorityProofConfig
 
 REMOTE_ORPHAN_BLOCKED = (
-    "the remote-libvirt authority publishes no cleanup quarantine: no finalizer, quarantine "
-    "inventory or remote recovery-object port"
+    "the remote-libvirt recovery-orphan arm needs an activated remote System, and remote "
+    "PREPARE is blocked (#3363)"
 )
 CONFLICT_RESTORE_BLOCKED = (
     "resolution cannot restore the recorded source over a third identity; the resolution job "
@@ -150,6 +150,46 @@ print(json.dumps({
     "operation_id": proof["operation_id"],
     "journal_digest": proof["journal_digest"],
 }))
+"""
+
+# Read-only, as the remote authority account; it scans the module store's fixed evidence
+# directory for the one cleanup receipt that names this System and activation (#3326).
+_REMOTE_RECEIPT = """
+import hashlib
+import json
+import os
+import sys
+from uuid import UUID
+
+if len(sys.argv) != 3:
+    raise SystemExit("receipt takes a System UUID and an activation UUID")
+system_id, activation_id = str(UUID(sys.argv[1])), str(UUID(sys.argv[2]))
+root = "/var/lib/kdive/provider-authority/remote-module-preparations/evidence"
+found = []
+for name in sorted(os.listdir(root)):
+    if not name.endswith(".cleanup-quarantine"):
+        continue
+    fd = os.open(os.path.join(root, name), os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        data = handle.read(1048577)
+    if len(data) > 1048576:
+        raise SystemExit("receipt exceeds its bound")
+    receipt = json.loads(data)
+    binding = receipt["binding"]
+    if binding["system_id"] == system_id and binding["activation_id"] == activation_id:
+        found.append((data, receipt))
+if len(found) > 1:
+    raise SystemExit("more than one cleanup receipt names the activation")
+if not found:
+    print(json.dumps({"present": False}))
+else:
+    data, receipt = found[0]
+    print(json.dumps({
+        "present": True,
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "operation_id": receipt["operation_identity"],
+        "journal_digest": receipt["journal_digest"],
+    }))
 """
 
 type ToolCall = Callable[[str, dict[str, object]], Awaitable[ToolResponse]]
@@ -344,6 +384,16 @@ def receipt_state(system_id: str, activation_id: str) -> Receipt:
     if len(result.stdout) > _MAX_RECEIPT_REPORT_BYTES:
         raise AssertionError("the receipt observer output exceeds its bound")
     return Receipt(**json.loads(result.stdout))
+
+
+def remote_receipt_state(config: RemoteAuthorityProofConfig, ids: tuple[str, str]) -> Receipt:
+    """Read the remote private cleanup receipt as the authority account over the operator's SSH."""
+    output = remote_support.run_as_authority(
+        config, _REMOTE_RECEIPT, str(UUID(ids[0])), str(UUID(ids[1]))
+    )
+    if len(output) > _MAX_RECEIPT_REPORT_BYTES:
+        raise AssertionError("the receipt observer output exceeds its bound")
+    return Receipt(**json.loads(output))
 
 
 def perturb_definition(system: AuthoritySystem) -> None:
@@ -558,9 +608,17 @@ async def quarantined_orphan(
     system: AuthoritySystem, db_url: str, resolve: ToolCall
 ) -> dict[str, object]:
     """Publish one real quarantine by an aborted finalize, then resolve exactly that row."""
-    if isinstance(system.config, RemoteAuthorityProofConfig):
-        raise ScenarioStop(Outcome.BLOCKED, REMOTE_ORPHAN_BLOCKED)
     op, system_id = system.op, system.system_id
+    config = system.config
+
+    def observe_receipt(activation_id: str) -> Receipt:
+        if isinstance(config, RemoteAuthorityProofConfig):
+            return remote_receipt_state(config, (system_id, activation_id))
+        return receipt_state(system_id, activation_id)
+
+    provider_kind = (
+        "remote-libvirt" if isinstance(config, RemoteAuthorityProofConfig) else ("local-libvirt")
+    )
     await require_evidence_read_access(db_url, FAULT_READ_TABLES)
     activation = await _activate(system)
     activation_id = await activation_of(db_url, activation.run_id)
@@ -576,7 +634,7 @@ async def quarantined_orphan(
             state, attempt = await job_claim(db_url, job)
             assert state == "running", f"the held release job is {state}"
             assert await journal_head(db_url, system_id) == ("terminal", "cleanup")
-            receipt = await asyncio.to_thread(receipt_state, system_id, activation_id)
+            receipt = await asyncio.to_thread(observe_receipt, activation_id)
             assert receipt.present, "the private cleanup receipt is absent before the abort"
             assert await quarantine_rows(db_url) == before, "a quarantine row preceded the abort"
             await require_hold_budget(db_url, job, attempt)
@@ -590,7 +648,7 @@ async def quarantined_orphan(
             row["object_kind"],
             row["provider_kind"],
             row["status"],
-        ) == (system_id, activation_id, "recovery-record", "local-libvirt", "quarantined")
+        ) == (system_id, activation_id, "recovery-record", provider_kind, "quarantined")
         assert (row["operation_identity"], row["mutation_journal_digest"]) == (
             receipt.operation_id,
             receipt.journal_digest,
@@ -602,7 +660,7 @@ async def quarantined_orphan(
             isinstance(context, dict) and context.get("authority_reason") == "provider-conflict"
             for context in contexts
         ), f"the aborted attempt carries no provider-conflict context: {contexts!r}"
-        assert not (await asyncio.to_thread(receipt_state, system_id, activation_id)).present
+        assert not (await asyncio.to_thread(observe_receipt, activation_id)).present
         quarantined = await quarantine_rows(db_url)
         assert quarantined[row_id]["status"] == "quarantined"
         resolved_by = await _resolve(system, resolve, [str(row["object_identity"])])

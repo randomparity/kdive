@@ -73,3 +73,26 @@ These ADR-0622 properties are unchanged:
 - **Saturate the provider offload pool.** verified: `_OFFLOAD_CAPACITY = 4` is a non-blocking
   admission (`src/kdive/providers/local_libvirt/external_boot_authority.py`, at `b2d93172e`).
   Filling it depends on timing, which ADR-0622 rejected.
+
+### Amendment (2026-10-27): the remote authority finalizes and quarantines cleanup (#3326)
+
+This amendment replaces the Consequences bullet "The remote authority has no finalizer, so this
+checkpoint never fires there". The remote-libvirt authority now fires the checkpoint and
+publishes a quarantine row like the local one.
+
+- After release cleanup, `commit_cleanup` records a private `cleanup-quarantine` receipt in the
+  module store, named by the activation's recovery key. It binds the operation identity, the
+  attempt and the anchored `mutation-started` journal sequence and digest.
+- `finalize` runs for `cleanup` only. It requires the receipt to equal the anchored proof, then
+  removes the recovery record, its indexes and, last, the receipt. It is repeatable until nothing
+  of the activation remains, and a missing receipt is a no-op.
+- `cleanup_quarantine_inventory` reports the one unmanaged `recovery-record` observation whose
+  operation identity and attempt equal the request's. Any other receipt is a conflict.
+- The remote adapter serves `observe`, `delete` and `adopt` for `recovery-record` under digest
+  fences. `delete` finalizes the record. Other object kinds are refused, not routed elsewhere.
+- The remote branch of the authority host builds the orphan service over the remote adapter, not
+  the local one.
+- Once finalization removes the recovery record, a later `observe` of that activation's cleanup
+  classifies `unreadable`, where it classified `absent` while the record remained. The release
+  state machine does not re-observe a finished release. System teardown already treats an absent
+  record as `recovery_absent`, so it is unaffected.
