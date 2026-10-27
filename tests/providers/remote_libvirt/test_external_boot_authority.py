@@ -33,6 +33,7 @@ from kdive.domain.remote_module_attempt_preparation import (
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
@@ -740,6 +741,7 @@ class _NativeOperations:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.cleanup_owners: list[OpaqueProviderRef] = []
+        self.acknowledged: list[tuple[str, str]] = []
         self.state = RemoteExternalBootObservedState(
             definition="target",
             preserved="sha256:" + "1" * 64,
@@ -754,6 +756,12 @@ class _NativeOperations:
 
     def recover(self, recovery: object, owner: object, deadline: float) -> None:
         self.calls.append("recover")
+
+    def recover_acknowledged(
+        self, recovery: object, owner: object, acknowledged: tuple[str, str], deadline: float
+    ) -> None:
+        self.calls.append("recover-acknowledged")
+        self.acknowledged.append(acknowledged)
 
     def cleanup(
         self, recovery: RemoteExternalBootRecoveryRecord, owner: OpaqueProviderRef, deadline: float
@@ -1033,6 +1041,101 @@ async def test_remote_release_cleanup_deletes_under_its_preparation_authority(
     assert operations.cleanup_owners == [preparation_authority]
     assert observed.category == "absent"
     adapter.close()
+
+
+def _mkdir(path: Path) -> Path:
+    path.mkdir()
+    return path
+
+
+async def _resolve_after_observing(
+    tmp_path: Path, *, definition: str, change_after_ack: bool = False
+) -> tuple[_NativeOperations, RemoteExternalBootAuthorityAdapter, Any]:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=True)
+    operations.state = replace(
+        operations.state, definition=definition, active=False, recovery_objects_absent=False
+    )
+    observing = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+    acknowledged = (await adapter.observe(observing)).composite_state
+    if change_after_ack:
+        operations.state = replace(operations.state, boot="sha256:" + "9" * 64)
+    request = AuthorityConflictResolutionRequestV1.model_validate(
+        {
+            **_native_request(
+                record,
+                point,
+                purpose="resolve-conflict",
+                operation=AuthorityOperation.RESOLVE_CONFLICT,
+            ).model_dump(mode="python", by_alias=True),
+            "expected_observed_composite": acknowledged,
+        }
+    )
+    evidence = AuthorityCleanupEvidenceContextV1(
+        operation_identity=request.operation_identity,
+        attempt_id=request.attempt_id,
+        operation_nonce=record.module_recovery.operation_nonce,
+        cleanup_state="discharged",
+        recovery_reference_json=record.module_recovery.model_dump_json(),
+    )
+    return operations, adapter, (request, _native_context(request), evidence)
+
+
+@pytest.mark.anyio
+async def test_remote_resolve_restores_the_acknowledged_third_definition(tmp_path: Path) -> None:
+    operations, adapter, args = await _resolve_after_observing(tmp_path, definition="other")
+
+    await adapter.commit_cleanup(*args)
+
+    assert operations.calls == ["recover-acknowledged", "cleanup"]
+    assert operations.acknowledged == [
+        (operations.state.preserved, operations.state.boot),
+    ]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_resolve_from_a_recorded_side_uses_ordinary_recovery(tmp_path: Path) -> None:
+    operations, adapter, args = await _resolve_after_observing(tmp_path, definition="target")
+
+    await adapter.commit_cleanup(*args)
+
+    assert operations.calls == ["recover", "cleanup"]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_resolve_refuses_a_definition_changed_since_the_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    operations, adapter, args = await _resolve_after_observing(
+        tmp_path, definition="other", change_after_ack=True
+    )
+
+    with pytest.raises(ValueError, match="changed before restore"):
+        await adapter.commit_cleanup(*args)
+
+    assert operations.calls == []
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_observation_composite_ignores_module_restore_evidence(
+    tmp_path: Path,
+) -> None:
+    """Resolution writes restore evidence before the authority rechecks the acknowledgement."""
+    adapter, operations, record, point, _ = _native_adapter(_mkdir(tmp_path / "a"), restored=False)
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+    unrestored = (await adapter.observe(request)).composite_state
+    adapter.close()
+    adapter, operations, record, point, _ = _native_adapter(_mkdir(tmp_path / "b"), restored=True)
+    restored = (await adapter.observe(request)).composite_state
+    adapter.close()
+
+    assert unrestored == restored
 
 
 @pytest.mark.anyio
@@ -1731,7 +1834,9 @@ async def test_durable_remote_preparation_reopens_before_and_after_mutation(tmp_
 
     second = RemoteModuleVolumePreparationStore(tmp_path)
     durable = DurableRemoteModuleVolumePreparationHost(second, cast(Any, Host()))
+    assert not durable.execution_started(request)
     expected = await durable.execute(request)
+    assert durable.execution_started(request)
     second.close()
 
     third = RemoteModuleVolumePreparationStore(tmp_path)

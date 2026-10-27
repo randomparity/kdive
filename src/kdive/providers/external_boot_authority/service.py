@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead
+from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead, PrestopHolders
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
@@ -171,6 +171,11 @@ class AuthorityPreparationAdapter(Protocol):
 
 
 @runtime_checkable
+class RemoteModuleExecutionProbe(Protocol):
+    def execution_started(self, request: RemoteModuleVolumePreparationRequestV1) -> bool: ...
+
+
+@runtime_checkable
 class AuthorityPreparationAdopter(Protocol):
     async def adopt_preparation(
         self,
@@ -262,6 +267,14 @@ class AuthorityPreparationRepository(Protocol):
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None: ...
+
+    async def prestop_system_holders(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> PrestopHolders | None: ...
 
 
 @runtime_checkable
@@ -397,6 +410,7 @@ class AuthorityServiceError(RuntimeError):
             "superseded",
             "journal_conflict",
             "provider_conflict",
+            "system_held",
             "configuration_error",
         ],
         *,
@@ -1020,6 +1034,37 @@ class ExternalBootAuthorityService:
         self.metrics.record_checkpoint(record, time.perf_counter() - started)
         records.append(record)
         return records
+
+    async def _prestop_refusal(
+        self,
+        authenticated: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        acknowledgement: JournalRecordV1,
+    ) -> AuthorityServiceError | None:
+        """ADR-0583: refuse a PREPARE while a session or another job holds the System.
+
+        Read through core's authority-bound snapshot immediately before the first stop. A held
+        System is ``system_held``; an unreadable answer is a ``provider_conflict`` (retried),
+        because neither may mutate the provider. The read and the stop are not one atomic step:
+        an attach that commits between them is not seen.
+        """
+        if not isinstance(request, AuthorityPreparationMutationRequestV1):
+            return None
+        if request.operation is not AuthorityOperation.PREPARE:
+            return None
+        if not isinstance(self._repository, AuthorityPreparationRepository):
+            return AuthorityServiceError("provider_conflict")
+        try:
+            holders = await self._repository.prestop_system_holders(
+                authenticated, request, acknowledgement.sequence, record_digest(acknowledgement)
+            )
+        except Exception as error:  # noqa: BLE001 - an unreadable answer must refuse, not raise
+            return self._provider_error(request, error)
+        if holders is None:
+            return AuthorityServiceError("superseded")
+        if holders != "clear":
+            return AuthorityServiceError("system_held")
+        return None
 
     def _provider_error(
         self,
@@ -1864,6 +1909,14 @@ class ExternalBootAuthorityService:
                                 "journal_conflict", reason="unresolved_binding_mismatch"
                             )
                         raise AuthorityServiceError("provider_conflict")
+                    # An adopted predecessor performs no stop, and a refusal here is answered
+                    # before any journal record so the same operation can be admitted again.
+                    if predecessor is None and (
+                        refusal := await self._prestop_refusal(
+                            authenticated, request, acknowledgement
+                        )
+                    ):
+                        raise refusal
                     records = await self._anchor(
                         binding,
                         journal,
@@ -2158,6 +2211,10 @@ class ExternalBootAuthorityService:
                     )
                     if unresolved is not None:
                         raise AuthorityServiceError("provider_conflict")
+                    if refusal := await self._prestop_refusal(
+                        authenticated, request, acknowledgement
+                    ):
+                        raise refusal
                     records = await self._anchor(
                         binding,
                         journal,
@@ -2303,6 +2360,15 @@ class ExternalBootAuthorityService:
                             "journal_conflict", reason="finish_mutation_started_missing"
                         )
                     context = AuthorityCommitContextV1.for_record(started)
+                # A resumed execute may already have stopped the System; refusing it now would
+                # report "refused-before-mutation" for a mutation that happened.
+                resumed = isinstance(host, RemoteModuleExecutionProbe) and host.execution_started(
+                    remote
+                )
+                if not resumed and (
+                    refusal := await self._prestop_refusal(authenticated, request, acknowledgement)
+                ):
+                    raise refusal
                 result = await host.execute(remote)
                 result.validate_terminal_for(remote.operation, request)
                 rechecked = await self._resolve_confirmed(authenticated, mutation, acknowledgement)

@@ -135,6 +135,175 @@ def test_would_block_keeps_stream_open_and_captures_later_data() -> None:
     assert store.artifact == b"booting\nemergency\n"
 
 
+class FakeClock:
+    """A settable monotonic clock so idle-flush tests need no wall time."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_idle_console_seals_a_small_burst_as_a_part() -> None:
+    # A SysRq dump is far below the size threshold and carries no crash marker; once the console
+    # goes quiet the burst must become a readable part rather than wait for finalize (ADR-0806).
+    clock = FakeClock()
+    store = FakePartStore()
+    stream = FakeNonBlockingStream([b"sysrq: Show Memory\nMem-Info:\n", None, None])
+    collector = _collector(
+        FakeOpenConsole([stream]), store, idle_flush_seconds=1.0, clock=clock, seam_overlap=4096
+    )
+    assert collector.pump_once() is True
+    assert collector.pump_once() is False  # quiet, but not yet idle long enough
+    assert store.parts == {}
+    clock.now = 1.5
+    assert collector.pump_once() is False
+    assert store.parts == {0: b"sysrq: Show Memory\nMem-Info:\n"}
+
+
+def test_repeated_idle_pumps_seal_one_part_and_never_an_empty_one() -> None:
+    clock = FakeClock()
+    store = FakePartStore()
+    stream = FakeNonBlockingStream([b"burst one\n", None, None, None, b"burst two\n", None, None])
+    collector = _collector(
+        FakeOpenConsole([stream]),
+        store,
+        idle_flush_seconds=1.0,
+        min_idle_seal_interval=0.0,
+        clock=clock,
+    )
+    collector.pump_once()
+    clock.now = 2.0
+    for _ in range(3):
+        collector.pump_once()  # idle three times: one part, not three
+    assert store.parts == {0: b"burst one\n"}
+    collector.pump_once()  # fresh bytes reset the idle clock
+    clock.now = 2.5
+    collector.pump_once()  # only 0.5 s idle: the second burst is not sealed yet
+    assert list(store.parts) == [0]
+    clock.now = 4.0
+    collector.pump_once()
+    collector.pump_once()
+    assert store.parts == {0: b"burst one\n", 1: b"burst two\n"}
+    collector.finalize()
+    assert store.artifact == b"burst one\nburst two\n"
+
+
+def test_idle_flush_redacts_a_secret_held_in_the_carry() -> None:
+    # The carry from an earlier rotation joins the idle-flushed part, so a secret straddling
+    # that rotation is still redacted as one contiguous run and never uploaded raw.
+    secret = "abcdefghijklmnop"  # pragma: allowlist secret - synthetic test redaction target
+    registry = SecretRegistry()
+    registry.register(secret, scope=None)
+    clock = FakeClock()
+    store = FakePartStore()
+    chunk0 = b"x" * 200 + secret[:8].encode()
+    chunk1 = secret[8:].encode() + b" tail\n"
+    stream = FakeNonBlockingStream([chunk0, chunk1, None])
+    collector = _collector(
+        FakeOpenConsole([stream]),
+        store,
+        registry=registry,
+        rotation_threshold=len(chunk0),
+        seam_overlap=16,
+        idle_flush_seconds=1.0,
+        clock=clock,
+    )
+    collector.pump_once()  # size rotation: part 0, 16 raw bytes held back in the carry
+    collector.pump_once()
+    clock.now = 2.0
+    collector.pump_once()  # idle flush seals the carry + buffer together
+    joined = b"".join(store.parts[i] for i in sorted(store.parts))
+    assert secret.encode() not in joined
+    assert secret[:8].encode() not in store.parts[0]
+    assert REDACTION.encode() in joined
+
+
+def test_failed_idle_upload_keeps_the_bytes_and_the_part_index() -> None:
+    class FlakyStore(FakePartStore):
+        failures = 1
+
+        def put_part(self, system_id, index: int, data: bytes) -> None:  # noqa: ANN001
+            if self.failures:
+                self.failures -= 1
+                raise OSError("store unavailable")
+            super().put_part(system_id, index, data)
+
+    clock = FakeClock()
+    store = FlakyStore()
+    stream = FakeNonBlockingStream([b"dump\n", None, None])
+    collector = _collector(FakeOpenConsole([stream]), store, idle_flush_seconds=1.0, clock=clock)
+    collector.pump_once()
+    clock.now = 2.0
+    with pytest.raises(OSError, match="store unavailable"):
+        collector.pump_once()
+    collector.pump_once()  # the retry uploads the same bytes at the same index
+    assert store.parts == {0: b"dump\n"}
+
+
+def test_idle_split_secret_is_redacted_in_the_finalized_artifact() -> None:
+    secret = "abcdefghijklmnop"  # pragma: allowlist secret - synthetic test redaction target
+    registry = SecretRegistry()
+    registry.register(secret, scope=None)
+    clock = FakeClock()
+    store = FakePartStore()
+    stream = FakeNonBlockingStream([secret[:8].encode(), None, secret[8:].encode(), None])
+    collector = _collector(
+        FakeOpenConsole([stream]), store, registry=registry, idle_flush_seconds=1.0, clock=clock
+    )
+    collector.pump_once()
+    clock.now = 2.0
+    collector.pump_once()  # idle seal uploads the head alone
+    collector.pump_once()  # (stream yields the tail next)
+    clock.now = 4.0
+    collector.pump_once()
+    collector.finalize()
+    assert store.artifact is not None
+    assert secret.encode() not in store.artifact
+
+
+def test_idle_seals_are_spaced_by_the_minimum_interval() -> None:
+    clock = FakeClock()
+    store = FakePartStore()
+    stream = FakeNonBlockingStream([b"one\n", None, b"two\n", None, None, None])
+    collector = _collector(
+        FakeOpenConsole([stream]),
+        store,
+        idle_flush_seconds=1.0,
+        min_idle_seal_interval=5.0,
+        clock=clock,
+    )
+    collector.pump_once()
+    clock.now = 2.0
+    collector.pump_once()  # first seal after a quiet spell is immediate
+    assert store.parts == {0: b"one\n"}
+    collector.pump_once()  # "two" arrives at t=2
+    clock.now = 4.0
+    collector.pump_once()  # idle for 2 s, but only 2 s since the last seal: held
+    assert list(store.parts) == [0]
+    clock.now = 7.5
+    collector.pump_once()
+    assert store.parts == {0: b"one\n", 1: b"two\n"}
+
+
+def test_failed_flush_bounds_the_retained_bytes() -> None:
+    class DownStore(FakePartStore):
+        def put_part(self, system_id, index: int, data: bytes) -> None:  # noqa: ANN001
+            raise OSError("store unavailable")
+
+    store = DownStore()
+    stream = FakeStream([b"Kernel panic " + b"x" * 40, b"y" * 40])
+    collector = _collector(
+        FakeOpenConsole([stream]), store, rotation_threshold=10_000, max_retained_bytes=64
+    )
+    for _ in range(2):
+        with pytest.raises(OSError, match="store unavailable"):
+            collector.pump_once()
+    assert len(collector._buffer) + len(collector._carry) <= 64  # noqa: SLF001
+    assert collector._buffer.endswith(b"y" * 40)  # noqa: SLF001 - the newest bytes survive
+
+
 def test_rotation_on_threshold_uploads_numbered_parts() -> None:
     store = FakePartStore()
     stream = FakeStream([b"a" * 100, b"b" * 100])
