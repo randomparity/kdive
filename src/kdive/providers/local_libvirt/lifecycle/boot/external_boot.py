@@ -4050,7 +4050,9 @@ class RecoveryMetadataStore:
                 source_state=metadata.source_state,
                 target_state=metadata.target_state,
             )
-            if metadata.phase != "recovered" or recovered != point:
+            # System teardown publishes the tombstone from any phase (#3341), so a crash between
+            # the publish and the intent unlink leaves the intent at that phase.
+            if recovered != point:
                 raise ValueError("cleanup intent does not match tombstone recovery point")
         if _PREPARATION_NAME not in entries:
             return

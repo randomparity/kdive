@@ -415,6 +415,37 @@ def test_system_teardown_discard_resumes_after_a_crash(
         assert store.exact_recovery_absence(_BINDING)
 
 
+def test_system_teardown_discard_finalizes_after_a_crash_before_the_intent_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("target-defined")
+    point = _point(metadata)
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    authority = OpaqueProviderRef(ref="authority/current")
+    proof = _cleanup_proof_for(point)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+    original = external_boot_module.os.unlink
+
+    def crash_on_intent(path: str, *, dir_fd: int | None = None) -> None:
+        if path == external_boot_module._INTENT_NAME:
+            raise OSError("crashed before the intent unlink")
+        original(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(external_boot_module.os, "unlink", crash_on_intent)
+    with pytest.raises(OSError, match="crashed before the intent unlink"):
+        io.discard_system_teardown_recovery(_teardown_intent(), point, proof, authority)
+    monkeypatch.setattr(external_boot_module.os, "unlink", original)
+
+    io.discard_system_teardown_recovery(_teardown_intent(), point, proof, authority)
+
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING)
+
+
 def test_system_teardown_discard_refuses_a_foreign_proof_before_deleting(
     tmp_path: Path,
 ) -> None:
