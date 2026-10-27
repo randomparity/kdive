@@ -822,8 +822,8 @@ async def test_system_that_survives_destroy_is_not_reported_as_refused_before_mu
         await stack.durable.execute(stack.request)
 
     assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert failed.value.details == {}
-    assert stack.prior_power() == "running"
+    assert failed.value.details == {"completion": "failed-after-mutation", "abandoned": True}
+    assert stack.prior_power() is None
     _assert_nothing_started(stack)
     stack.close()
 
@@ -834,7 +834,10 @@ async def test_missing_system_domain_is_refused_before_any_mutation(tmp_path: Pa
     with pytest.raises(CategorizedError, match="could not be read") as refused:
         await stack.durable.execute(stack.request)
 
-    assert refused.value.details == {"completion": "refused-before-mutation"}
+    assert refused.value.details == {
+        "completion": "refused-before-mutation",
+        "abandoned": True,
+    }
     assert stack.prior_power() is None
     _assert_nothing_started(stack)
     stack.close()
@@ -860,7 +863,10 @@ async def test_changed_appliance_identity_is_refused_before_the_stop(tmp_path: P
     with pytest.raises(CategorizedError, match="identity changed") as refused:
         await stack.durable.execute(stack.request)
 
-    assert refused.value.details == {"completion": "refused-before-mutation"}
+    assert refused.value.details == {
+        "completion": "refused-before-mutation",
+        "abandoned": True,
+    }
     assert system.active and not system.destroyed
     _assert_nothing_started(stack)
     stack.close()
@@ -871,9 +877,10 @@ async def test_expired_deadline_leaves_a_running_system_running(tmp_path: Path) 
     system = _SystemDomain(active=True)
     stack = _Quiesce(tmp_path, system, deadline=0.5)
     stack.clock.value = 1.0
-    with pytest.raises(TimeoutError):
+    with pytest.raises(CategorizedError) as expired:
         await stack.durable.execute(stack.request)
 
+    assert isinstance(expired.value.__cause__, TimeoutError)
     assert system.active and not system.destroyed
     _assert_nothing_started(stack)
     stack.close()
@@ -912,7 +919,7 @@ async def test_abandoned_preparation_may_be_executed_again(tmp_path: Path) -> No
         with pytest.raises(CategorizedError, match="durable result"):
             await stack.durable.execute(stack.request)
 
-    assert stack.prior_power() == "running"
+    assert stack.prior_power() is None
     assert system.active
     stack.close()
 

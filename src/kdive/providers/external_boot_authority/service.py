@@ -15,6 +15,7 @@ from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
@@ -2241,6 +2242,12 @@ class ExternalBootAuthorityService:
                             raise AuthorityServiceError(
                                 "journal_conflict", reason="terminal_operation_mismatch"
                             )
+                        if terminal.outcome == "source":
+                            raise CategorizedError(
+                                "remote module preparation was abandoned",
+                                category=ErrorCategory.CONFLICT,
+                                details={"completion": "failed-after-mutation"},
+                            )
                         result = await host.execute(remote)
                         result.validate_terminal_for(remote.operation, request)
                         return result
@@ -2305,7 +2312,10 @@ class ExternalBootAuthorityService:
                 try:
                     result = await host.execute(remote)
                 except Exception as failure:
-                    if getattr(failure, "details", {}).get(PREPARATION_ABANDONED) is True:
+                    if (
+                        isinstance(failure, CategorizedError)
+                        and failure.details.get(PREPARATION_ABANDONED) is True
+                    ):
                         await self._settle_abandoned_preparation(
                             mutation, records, journal, active.completion_binding or binding, lane
                         )
@@ -2488,10 +2498,14 @@ class ExternalBootAuthorityService:
                         outcome="source",
                     ),
                 )
-        except AuthorityServiceError as error:
+        except Exception as error:  # noqa: BLE001 -- the provider's failure is the one reported
             self._logger.error(
                 "abandoned remote module preparation could not be settled",
-                extra={"category": error.category, "reason": error.reason},
+                extra={
+                    "error": type(error).__qualname__,
+                    "category": getattr(error, "category", None),
+                    "reason": getattr(error, "reason", None),
+                },
             )
 
     async def execute_conflict_resolution(

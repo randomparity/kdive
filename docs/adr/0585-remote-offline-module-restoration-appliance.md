@@ -247,12 +247,17 @@ The authority host now settles the failure:
   nothing. The start requires the attachment inspection to show the appliance absent and the
   System shut off and exclusive, so a System is never started while an appliance may hold its
   root.
+- Every failure of PREPARE after admission is handled this way: a refusal before the stop (no
+  record exists, so there is nothing to restore), a stop that failed after `destroy`, and an
+  appliance failure. A successful restore clears the power record, so the next attempt observes the
+  System again instead of trusting a record the operator may have outlived.
 - A restored System leaves no completion behind, so the failure does not latch. The host raises the
   failure with `completion` unchanged (`failed-after-mutation` by default, `refused-before-mutation`
   when the appliance host said so) plus an `abandoned` detail. The wire reason is unchanged.
 - The authority service sees `abandoned` and closes the PREPARE operation through the existing
   anchors, `provider-returned`, `observed` and `terminal`, with a `source` observation and outcome:
-  nothing was adopted. A retry in a new generation then finds no unresolved operation, and the
+  nothing was adopted. A replay of the same operation reports `failed-after-mutation` again
+  without running the host. A retry in a new generation then finds no unresolved operation, and the
   module-attempt obligation keeps its nonce, so it resumes the same attempt.
 - When the restore fails, the failure stays latched, the journal operation stays unresolved, and
   the System is left stopped for the operator, as before. A settle that fails is logged and never

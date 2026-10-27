@@ -2289,6 +2289,29 @@ async def test_durable_remote_preparation_failure_restores_power_and_does_not_la
 
 
 @pytest.mark.anyio
+async def test_cancelled_abandon_keeps_the_failure_latched(tmp_path: Path) -> None:
+    request = _remote_preparation_request()
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            del request
+            raise RuntimeError("provider returned after mutation")
+
+        async def restore_system_power(self, admitted: object, prior: object) -> None:
+            raise asyncio.CancelledError
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(asyncio.CancelledError):
+        await durable.execute(request)
+
+    completion = store.reopen_completion(request)
+    assert completion is not None and completion.state == "failed-after-mutation"
+    store.close()
+
+
+@pytest.mark.anyio
 async def test_durable_remote_preparation_cancellation_waits_and_records_terminal(
     tmp_path: Path,
 ) -> None:

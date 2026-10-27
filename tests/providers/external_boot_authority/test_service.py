@@ -918,7 +918,7 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
 
 
 async def _failed_prepare_service(
-    tmp_path: Path, failure: Exception
+    tmp_path: Path, failure: Exception, calls: list[object] | None = None
 ) -> tuple[Any, Any, Any, AuthenticatedPeer, AuthorityPreparationMutationRequestV1, Any]:
     """A service whose PREPARE was begun and whose appliance run then raised ``failure``."""
     peer = AuthenticatedPeer(uuid4())
@@ -973,6 +973,8 @@ async def _failed_prepare_service(
             )
 
         async def execute(self, request: object) -> object:
+            if calls is not None:
+                calls.append(request)
             raise failure
 
     repository.remote_attempt = ModuleAttemptPreparationRequestV1(
@@ -1038,6 +1040,55 @@ async def test_abandoned_prepare_failure_is_settled_so_the_retry_proceeds(tmp_pa
     await service.open_remote_module_attempt(
         peer, RemoteModulePreparationBeginRequestV1(authority=retry, budget_seconds=30)
     )
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+
+@pytest.mark.anyio
+async def test_replay_of_an_abandoned_prepare_reports_the_failure_without_running_it(
+    tmp_path: Path,
+) -> None:
+    calls: list[object] = []
+    failure = CategorizedError(
+        "appliance failed",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"completion": "failed-after-mutation", "abandoned": True},
+    )
+
+    service, repository, remote, peer, _first, _prepare = await _failed_prepare_service(
+        tmp_path, failure, calls
+    )
+    with pytest.raises(CategorizedError):
+        await service.execute_remote_module_preparation(peer, remote)
+    assert len(calls) == 1
+    records = len(repository.records)
+
+    with pytest.raises(CategorizedError) as replay:
+        await service.execute_remote_module_preparation(peer, remote)
+
+    assert replay.value.details == {"completion": "failed-after-mutation"}
+    assert len(calls) == 1
+    assert len(repository.records) == records
+
+
+@pytest.mark.anyio
+async def test_unsettleable_abandon_reports_the_provider_failure(tmp_path: Path) -> None:
+    failure = CategorizedError(
+        "appliance failed",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"completion": "failed-after-mutation", "abandoned": True},
+    )
+    service, repository, remote, peer, _first, _prepare = await _failed_prepare_service(
+        tmp_path, failure
+    )
+
+    async def refuse(*_args: object) -> None:
+        raise OSError("journal unavailable")
+
+    service._anchor = refuse  # type: ignore[method-assign]
+    with pytest.raises(CategorizedError) as raised:
+        await service.execute_remote_module_preparation(peer, remote)
+
+    assert raised.value is failure
     assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
 
 

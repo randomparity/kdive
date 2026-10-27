@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal, Protocol, Self, cast
+from typing import Annotated, Literal, NoReturn, Protocol, Self, cast
 from uuid import UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -1120,6 +1120,15 @@ class RemoteModuleVolumePreparationStore:
             existing = self._read(name)
         return self._decode_prior_power(existing)
 
+    def clear_prior_power(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
+        """Forget the record once the System is back in that power, so the next stop re-observes."""
+        key = self._terminal_key(
+            binding.system_id, binding.activation_id, binding.run_id, plan_identity
+        )
+        with suppress(FileNotFoundError):
+            os.unlink(f"{key}.prior-power", dir_fd=self._root_fd)
+        os.fsync(self._root_fd)
+
     def prior_power(
         self, binding: ExternalBootActivationBinding, plan_identity: str
     ) -> PriorPower | None:
@@ -1589,7 +1598,10 @@ class DurableRemoteModuleVolumePreparationHost:
             )
         if result := self._store.reopen_result(request):
             result.validate_for(request.operation)
-        await self._quiesce_system(admitted)
+        try:
+            await self._quiesce_system(admitted)
+        except Exception as failure:
+            await self._raise_abandoned(admitted, failure)
         task = asyncio.create_task(self._host.execute(admitted))
         cancelled, consumed = await _wait_for_owned_child(task)
         if cancelled is not None:
@@ -1605,15 +1617,24 @@ class DurableRemoteModuleVolumePreparationHost:
         try:
             result = task.result()
         except Exception as failure:
-            settled = await self._abandon(admitted, failure)
-            if settled is failure:
-                raise
-            raise settled from failure
+            await self._raise_abandoned(admitted, failure)
         except BaseException:
             self._store.publish_failed_completion(request)
             raise
         self._store.publish_result(request, result)
         return result
+
+    async def _raise_abandoned(
+        self, admitted: AdmittedRemoteModulePreparation, failure: Exception
+    ) -> NoReturn:
+        try:
+            settled = await self._abandon(admitted, failure)
+        except BaseException:
+            self._store.publish_failed_completion(admitted.request)
+            raise
+        if settled is failure:
+            raise failure
+        raise settled from failure
 
     async def _abandon(
         self, admitted: AdmittedRemoteModulePreparation, failure: Exception
@@ -1635,11 +1656,12 @@ class DurableRemoteModuleVolumePreparationHost:
             prior = self._store.prior_power(binding, authority.plan_identity)
             if prior is not None:
                 await self._host.restore_system_power(admitted, prior)
+                self._store.clear_prior_power(binding, authority.plan_identity)
         except Exception as restore_failure:  # noqa: BLE001 -- any failure keeps the latch
             logger.error(
                 "remote module preparation abandon could not restore System power: %s: %s",
                 type(restore_failure).__qualname__,
-                restore_failure,
+                restore_failure if isinstance(restore_failure, CategorizedError) else "",
             )
             self._store.publish_failed_completion(request)
             return failure
