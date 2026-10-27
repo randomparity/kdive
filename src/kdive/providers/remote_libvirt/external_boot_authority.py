@@ -718,6 +718,10 @@ class RemoteModuleVolumePreparationHost:
         return response
 
 
+class RemoteCleanupFinalizedError(FileNotFoundError):
+    """A per-activation record is gone because its cleanup was finalized, not never written."""
+
+
 class RemoteCleanupQuarantineV1(BaseModel):
     """Provider-private proof that release cleanup ran, kept until authority finalization.
 

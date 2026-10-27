@@ -4261,3 +4261,177 @@ async def test_remote_delete_rechecks_the_receipt_it_finalizes(
         )
     assert store.read_cleanup_quarantine(record.binding, record.plan_identity) is not None
     adapter.close()
+
+
+def _seed_activation_residue(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> None:
+    """Every per-activation file a release leaves besides the recovery record (#3333)."""
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    lifecycle = _module_lifecycle_request(terminal.request, action="restore")
+    store.stage_lifecycle(lifecycle, 999.0)
+    store.publish_lifecycle_completion(lifecycle, _restored_response(terminal.request))
+    store.publish_materialization(_plan_for_record(record), record.materialization)
+    store.record_prior_power(terminal.request.authority, "inactive")
+    request = _preparation_request(record, "materialize")
+    store.publish_preparation(
+        request,
+        ExternalBootPreparationObservation(
+            state="materialized",
+            binding=request.binding,
+            plan_identity=request.plan.identity,
+            authority=request.authority,
+            operation_identity=request.operation_identity,
+            materialization=record.materialization,
+        ),
+    )
+
+
+def _seed_system_teardown_intent(store: RemoteModuleVolumePreparationStore, name: str) -> str:
+    key = store._system_teardown_key(_record().binding)
+    store._publish(f"{key}.teardown", name.encode())
+    return f"{key}.teardown"
+
+
+def _store_names(store: RemoteModuleVolumePreparationStore) -> set[str]:
+    return set(os.listdir(store._root_fd))
+
+
+async def _finalized_release_store(
+    tmp_path: Path,
+) -> tuple[
+    RemoteExternalBootAuthorityAdapter,
+    RemoteExternalBootRecoveryRecord,
+    AuthorityMutationRequestV1,
+    AuthorityCommitContextV1,
+    RemoteModuleVolumePreparationStore,
+]:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    _seed_activation_residue(store, record)
+    return adapter, record, request, context, store
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_deletes_the_activations_files_and_keeps_the_marker_and_teardown(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    teardown = _seed_system_teardown_intent(store, "intent")
+    other = record.model_copy(
+        update={
+            "binding": record.binding.model_copy(
+                update={"activation_id": "00000000-0000-4000-8000-0000000000aa"}
+            )
+        }
+    )
+    _publish_terminal(store, other)
+    before = _store_names(store)
+    await adapter.finalize(request, context)
+    after = _store_names(store)
+
+    marker = store._finalized_name(record.binding, record.plan_identity)
+    assert after - before == {marker}
+    assert {name.rsplit(".", 1)[1] for name in before - after} == {
+        "terminal",
+        "restored",
+        "request",
+        "result",
+        "completion",
+        "lifecycle-request",
+        "lifecycle-completion",
+        "materialization",
+        "materialization-index",
+        "preparation",
+        "prior-power",
+        "prior-power-owner",
+        "recovery",
+        "recovery-index",
+        "object-index",
+        "cleanup-quarantine",
+    }
+    assert teardown in after
+    other_key = store._terminal_key(
+        other.binding.system_id,
+        other.binding.activation_id,
+        other.binding.run_id,
+        other.plan_identity,
+    )
+    assert f"{other_key}.terminal" in after
+    assert sum(name.endswith((".request", ".result", ".completion")) for name in after) == 3
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_resumes_after_a_crash_at_any_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    adapter, _record, request, context, store = await _finalized_release_store(clean)
+    await adapter.finalize(request, context)
+    expected = _store_names(store)
+    adapter.close()
+    real_unlink = os.unlink
+    crashes = 0
+    for crash_at in range(1, 100):
+        root = tmp_path / f"crash-{crash_at}"
+        root.mkdir()
+        adapter, _record, request, context, store = await _finalized_release_store(root)
+        seen = 0
+
+        def failing(path: str, *args: Any, _at: int = crash_at, **kwargs: Any) -> None:
+            nonlocal seen
+            seen += 1
+            if seen == _at:
+                raise OSError("injected crash")
+            real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(external_boot_authority.os, "unlink", failing)
+        try:
+            await adapter.finalize(request, context)
+            crashed = False
+        except OSError:
+            crashed = True
+        finally:
+            monkeypatch.setattr(external_boot_authority.os, "unlink", real_unlink)
+        if crashed:
+            crashes += 1
+            await adapter.finalize(request, context)
+        assert _store_names(store) == expected
+        adapter.close()
+        if not crashed:
+            break
+    assert crashes >= 10
+
+
+@pytest.mark.anyio
+async def test_remote_reads_of_a_finalized_activation_say_finalized_not_unknown(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    teardown = _seed_system_teardown_intent(store, "intent")
+    await adapter.finalize(request, context)
+    finalized_error = external_boot_authority.RemoteCleanupFinalizedError
+
+    with pytest.raises(finalized_error):
+        store.reopen_terminal(record.binding, record.plan_identity)
+    with pytest.raises(finalized_error):
+        store.reopen_restored(record.binding, record.plan_identity)
+    assert issubclass(finalized_error, FileNotFoundError)
+    unknown = record.binding.model_copy(
+        update={"activation_id": "00000000-0000-4000-8000-0000000000bb"}
+    )
+    with pytest.raises(FileNotFoundError) as absent:
+        store.reopen_terminal(unknown, record.plan_identity)
+    assert not isinstance(absent.value, finalized_error)
+    assert store.reopen_restored(unknown, record.plan_identity) is None
+
+    assert (await adapter.observe(request)).category == "absent"
+    state = adapter._coordinator.system_teardown_state(record.binding, record.plan_identity)
+    assert state.terminal is None
+    assert state.preparation is None
+    assert state.materialization is None
+    assert state.recovery is None
+    assert teardown in _store_names(store)
+    adapter.close()
