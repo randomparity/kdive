@@ -760,7 +760,7 @@ class RemoteCleanupQuarantineV1(BaseModel):
 class RemoteFinalizedBootArtifactV1(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    ref: Annotated[str, Field(min_length=1, max_length=255)]
+    ref: Annotated[str, Field(min_length=1, max_length=1024)]
     kind: Literal["kernel", "initrd"]
     sha256: Annotated[str, Field(min_length=1, max_length=128)] | None
 
@@ -771,7 +771,7 @@ class RemoteFinalizedTeardownRefsV1(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     module_volumes: tuple[tuple[str, str], ...]
-    operation_nonce: Annotated[str, Field(min_length=1, max_length=255)] | None
+    operation_nonce: Annotated[str, Field(min_length=1, max_length=1024)] | None
     boot_artifacts: tuple[RemoteFinalizedBootArtifactV1, ...]
 
 
@@ -1717,8 +1717,14 @@ class RemoteModuleVolumePreparationStore:
         self,
         suffix: str,
         owns: Callable[[bytes], bool],
+        *,
+        strict: bool = False,
     ) -> list[str]:
-        """Names of this suffix whose bytes the activation owns, in no particular order."""
+        """Names of this suffix whose bytes the activation owns, in no particular order.
+
+        A file that does not parse cannot be proven foreign. The deleting scan leaves it in
+        place; a ``strict`` scan, which captures what teardown must still prove, refuses it.
+        """
         return [
             name
             for name in os.listdir(self._root_fd)
@@ -1726,12 +1732,11 @@ class RemoteModuleVolumePreparationStore:
             and name.endswith(suffix)
             and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
             and (data := self._read(name)) is not None
-            and self._owns(name, owns, data)
+            and (owns(data) if strict else self._owns(name, owns, data))
         ]
 
     @staticmethod
     def _owns(name: str, owns: Callable[[bytes], bool], data: bytes) -> bool:
-        """A file that does not parse is not provably this activation's, so it is not."""
         try:
             return owns(data)
         except ValueError:
@@ -1849,9 +1854,12 @@ class RemoteModuleVolumePreparationStore:
                 nonces.append(request.operation.operation_nonce)
             return owned
 
-        self._scan_owned(".request", collect)
+        self._scan_owned(".request", collect, strict=True)
         if len(set(nonces)) > 1:
-            raise ValueError("remote finalize found conflicting preparation attempts")
+            raise ValueError(
+                "remote finalize found preparation requests with different nonces for one "
+                "activation; resolve the duplicate .request records before finalizing"
+            )
         boot: list[RemoteFinalizedBootArtifactV1] = []
         if (record := self.teardown_materialization(binding, plan_identity)) is not None:
             materialization = record.materialization
@@ -2682,19 +2690,24 @@ class RemoteExternalBootCoordinator:
     def system_teardown_state(
         self, binding: ExternalBootActivationBinding, plan_identity: str
     ) -> RemoteSystemTeardownState:
-        preparation = self._store.teardown_preparation(binding, plan_identity)
+        finalized = self._store.finalized_teardown_refs(binding, plan_identity)
         try:
             terminal = self._store.reopen_terminal(binding, plan_identity)
         except FileNotFoundError:
             terminal = None
+        # A finalized activation's marker names what was removed or is mid-removal, so the
+        # records a partial removal may have left half-deleted are not read.
+        live = finalized is None
         return RemoteSystemTeardownState(
             binding=binding,
             plan_identity=plan_identity,
-            preparation=preparation,
+            preparation=self._store.teardown_preparation(binding, plan_identity) if live else None,
             terminal=terminal,
-            materialization=self._store.teardown_materialization(binding, plan_identity),
+            materialization=(
+                self._store.teardown_materialization(binding, plan_identity) if live else None
+            ),
             recovery=self._store.teardown_recovery(binding, plan_identity),
-            finalized=self._store.finalized_teardown_refs(binding, plan_identity),
+            finalized=finalized,
         )
 
     def begin_system_teardown(
@@ -3055,7 +3068,7 @@ class RemoteExternalBootAuthorityAdapter:
                 await host.execute_system_teardown(
                     RemoteModuleSystemTeardownRequestV1(authority=request, budget_seconds=300)
                 )
-            elif state.preparation is not None:
+            elif state.preparation is not None or state.finalized is not None:
                 absent = await self._executor.run(
                     lambda: self._coordinator.unfinished_preparation_absent(state)
                 )

@@ -4466,7 +4466,7 @@ async def test_remote_finalize_leaves_an_unparseable_foreign_file_and_still_fina
     tmp_path: Path,
 ) -> None:
     adapter, record, request, context, store = await _finalized_release_store(tmp_path)
-    foreign = "f" * 64 + ".request"
+    foreign = "f" * 64 + ".lifecycle-request"
     store._publish(foreign, b"not json")
 
     await adapter.finalize(request, context)
@@ -4600,3 +4600,142 @@ async def test_remote_finalize_upgrades_a_legacy_marker_with_the_refs(tmp_path: 
     assert store.finalized_teardown_refs(record.binding, record.plan_identity) == expected
     assert expected.module_volumes
     adapter.close()
+
+
+def _record_with_boot_names() -> RemoteExternalBootRecoveryRecord:
+    record = _record()
+    materialization = record.materialization
+    system, run = UUID(record.binding.system_id), UUID(record.binding.run_id)
+    artifacts = materialization.artifacts.model_copy(
+        update={
+            "kernel": OpaqueProviderRef(
+                ref=artifact_volume_name(
+                    "kernel", system, run, materialization.extracted_vmlinuz_sha256
+                )
+            ),
+            "initrd": OpaqueProviderRef(
+                ref=artifact_volume_name(
+                    "initrd", system, run, cast(str, materialization.verified_initrd_sha256)
+                )
+            ),
+        }
+    )
+    return record.model_copy(
+        update={"materialization": materialization.model_copy(update={"artifacts": artifacts})}
+    )
+
+
+def test_remote_finalized_teardown_proves_valid_boot_artifacts_like_the_live_records(
+    tmp_path: Path,
+) -> None:
+    record = _record_with_boot_names()
+    assert record.materialization.verified_initrd_sha256 is not None
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    store.publish_materialization(_plan_for_record(record), record.materialization)
+    coordinator = RemoteExternalBootCoordinator(cast(Any, object()), store, lambda: 1.0)
+    operations = _teardown_operations()
+    live = coordinator.system_teardown_state(record.binding, record.plan_identity)
+    boot = operations._teardown_boot_volumes(live)
+    assert len(boot) == 2
+
+    store._write_finalized_marker(
+        external_boot_authority.RemoteCleanupQuarantineV1(
+            binding=record.binding,
+            plan_identity=record.plan_identity,
+            recovery_ref=OpaqueProviderRef(ref="remote-external-boot/" + "a" * 64),
+            operation_identity="release-cleanup",
+            attempt_id=uuid4(),
+            journal_sequence=1,
+            journal_digest="sha256:" + "c" * 64,
+        )
+    )
+    finalized = coordinator.system_teardown_state(record.binding, record.plan_identity)
+
+    assert finalized.finalized is not None and finalized.materialization is None
+    assert operations._teardown_boot_volumes(finalized) == boot
+    assert operations._protected_teardown_volumes(finalized) == (
+        operations._protected_teardown_volumes(live)
+    )
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_refuses_a_corrupt_request_before_the_marker(tmp_path: Path) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    store._publish("e" * 64 + ".request", b"not json")
+    names = _store_names(store)
+
+    with pytest.raises(ValueError, match="not json|Invalid JSON"):
+        await adapter.finalize(request, context)
+
+    assert _store_names(store) == names
+    assert not store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_refuses_conflicting_preparation_nonces_before_the_marker(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    operation = terminal.request.operation.model_copy(update={"operation_nonce": "d" * 32})
+    authority = terminal.request.authority.model_copy(update={"attempt_id": uuid4()})
+    store.stage(
+        terminal.request.model_copy(update={"operation": operation, "authority": authority}), 999.0
+    )
+
+    with pytest.raises(ValueError, match="different nonces for one activation"):
+        await adapter.finalize(request, context)
+
+    assert not store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_teardown_state_ignores_a_half_removed_materialization_once_finalized(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    await adapter.finalize(request, context)
+    identity = record.materialization.identity.removeprefix("sha256:")
+    plan = record.plan_identity.removeprefix("sha256:")
+    store._publish(f"{plan}.materialization-index", identity.encode("ascii"))
+
+    state = adapter._coordinator.system_teardown_state(record.binding, record.plan_identity)
+
+    assert state.finalized is not None
+    assert state.materialization is None
+    adapter.close()
+
+
+class _FinalizedTeardownOperations(_CompletingTeardownOperations):
+    def __init__(self) -> None:
+        super().__init__()
+        self.finalized_nonce: object = "unset"
+
+    def unfinished_preparation_absent(self, state: Any) -> bool:
+        self.calls.append("unfinished-preparation")
+        self.finalized_nonce = state.finalized.operation_nonce
+        return False
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_of_a_finalized_activation_checks_unfinished_preparation(
+    tmp_path: Path,
+) -> None:
+    finalized, record, request, context, store = await _finalized_release_store(tmp_path)
+    await finalized.finalize(request, context)
+    operations = _FinalizedTeardownOperations()
+    adapter = _completing_teardown_adapter(store, operations)
+    teardown = _remote_teardown_request()
+
+    result = await adapter.execute_system_teardown(
+        teardown, _remote_teardown_context(teardown), _REMOTE_TEARDOWN_RESERVATION
+    )
+
+    assert "unfinished-preparation" in operations.calls
+    assert isinstance(operations.finalized_nonce, str)
+    assert not result.complete
+    finalized.close()
