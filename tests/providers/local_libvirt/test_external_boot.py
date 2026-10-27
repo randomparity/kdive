@@ -3639,6 +3639,30 @@ def test_resolution_restores_the_source_from_an_acknowledged_third_state(
     assert session.stops == (["destroy"] if third_xml and active else [])
 
 
+def test_resolution_replaces_a_third_tree_when_the_source_had_no_modules(
+    tmp_path: Path,
+) -> None:
+    ports, metadata, session, guest, _root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=False,
+        xml=_THIRD_XML,
+    )
+    live = f"/lib/modules/{metadata.release}"
+    guest.states[live] = _THIRD_TREE
+    session.inspection = replace(session.inspection, source_boot_identity=_THIRD_DEFINITION)
+    acknowledged = LocalObservedState(
+        definition=_THIRD_DEFINITION, modules=_THIRD_TREE, active=False
+    )
+
+    ports.recover(
+        _point(metadata), OpaqueProviderRef(ref="authority/current"), acknowledged=acknowledged
+    )
+
+    assert guest.states == {}
+    assert session.xml == metadata.source_xml
+
+
 def test_resolution_confirms_a_module_tree_that_is_already_the_source(tmp_path: Path) -> None:
     ports, metadata, session, guest, _ = _third_state_fixture(
         tmp_path, third_xml=True, third_tree=False

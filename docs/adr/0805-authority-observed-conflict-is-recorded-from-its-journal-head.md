@@ -104,7 +104,9 @@ compare-and-swap. This amendment records how the providers do that.
    because it is not the activated target. A component that differs from the acknowledged one
    ends the commit as `provider-conflict` with no further write, and the activation returns to
    `recovery_conflict` with the new evidence.
-3. **Remote.** The module restore runs first, as for `recover`. The domain definition is then
+3. **Remote.** The module restore runs first, as for `recover`, and is not compared against the
+   acknowledged state: the remote module half is durable evidence, never a live read, and the
+   restore target is the recorded source. The domain definition is then
    replaced by the recorded source when its `(preserved, boot)` digests are the acknowledged
    pair, compared again after the stop and before the define. The commit still ends with the
    same cleanup that `recover` runs.
@@ -112,11 +114,14 @@ compare-and-swap. This amendment records how the providers do that.
    evidence before the authority rechecks the acknowledged composite, so including it made the
    recheck answer `superseded` for any conflict recorded before the restore. Composites recorded
    before this change no longer match; the operator re-reads the conflict evidence.
-5. Ordinary `recover` is unchanged: a third identity is still refused.
+5. Ordinary `recover` is unchanged: a third identity is still refused. So is a local activation
+   whose recovery record is still at `pre-stop-intent`: that phase requires the recorded source
+   definition, and resolution does not restore from it.
 6. **Crash recovery is not automatic.** ADR-0583 says a crash after the transition resumes the
    same recovering operation. After the first component write the composite no longer equals the
    acknowledged one, so the authority's recheck answers `superseded` for a retry of the same
-   resolve. The journal's `mutation-started` record is settled by the next observation, which
+   resolve on the local authority. On the remote authority a module restore alone does not change
+   the composite, so a retry after only that step can succeed. The journal's `mutation-started` record is settled by the next observation, which
    classifies a part-restored state as a conflict and parks the activation again. The operator
    then resolves it again, and that state is handled by ordinary recovery. A resumable
    operation needs durable per-component evidence, which this change does not add.
