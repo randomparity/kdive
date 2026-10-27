@@ -365,7 +365,9 @@ class ConcreteRemoteModuleAuthorityHost:
             invocation_deadline=deadline,
         )
 
-    def _preflight(self, admitted: AdmittedRemoteModulePreparation) -> ExternalBootArtifactStager:
+    def _preflight(
+        self, admitted: AdmittedRemoteModulePreparation
+    ) -> tuple[ExternalBootArtifactStager, PreparedVolume]:
         """Refuse what can be known without touching the System, before it is stopped."""
         operation = admitted.request.operation
         appliance_config = self._configuration.appliance
@@ -386,7 +388,7 @@ class ConcreteRemoteModuleAuthorityHost:
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
         self._require_deadline(admitted.local_deadline)
-        return stager
+        return stager, root
 
     def _execute(
         self, admitted: AdmittedRemoteModulePreparation
@@ -395,9 +397,7 @@ class ConcreteRemoteModuleAuthorityHost:
         deadline = admitted.local_deadline
         operation = request.operation
         volumes_config = self._configuration.volumes
-        appliance_config = self._configuration.appliance
-        root = appliance_config.root(operation)
-        stager = self._preflight(admitted)
+        stager, root = self._preflight(admitted)
         with tempfile.TemporaryDirectory(
             prefix="kdive-remote-module-", dir=volumes_config.work_dir
         ) as raw:

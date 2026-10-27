@@ -1561,7 +1561,7 @@ class DurableRemoteModuleVolumePreparationHost:
 
         ADR-0585 starts the appliance only against a shut-off System. The record is written
         ahead of the stop so a retry that finds the domain already stopped keeps the power the
-        System had before this activation. A refusal here has mutated nothing.
+        System had before this activation. A refusal before the destroy has mutated nothing.
         """
         observed = await self._host.observe_system_power(admitted)
         self._store.record_prior_power(admitted.request.authority, observed)
