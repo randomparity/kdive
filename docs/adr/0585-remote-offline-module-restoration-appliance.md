@@ -267,8 +267,11 @@ A PREPARE the authority refuses at its pre-stop recheck (`system_held`, or `prov
 for an unreadable answer) is settled the same way before the refusal is raised, because the
 operation was already anchored; a `superseded` answer is not settled. The refusal reason on the
 wire is unchanged, and a replay of a refused operation is refused again without running the host.
-An execute the host had already started, including one whose stop was recorded before a crash,
-is never refused. A cancellation while the stop itself is in flight is not covered and behaves
+An execute the host had already started, including one whose stop that same request recorded
+before a crash, is never refused; the power record is per activation and survives a successful
+PREPARE, so a record written by another request does not count. A replay of a refused operation
+whose holders have since cleared is answered `provider_conflict`: the host is never run, and
+[ADR-0714](0714-repeated-provider-conflict-ends-the-external-boot-job.md) counts it as a repeat. A cancellation while the stop itself is in flight is not covered and behaves
 as before. A failure with no recorded power (nothing was stopped) is reported
 `refused-before-mutation`.
 
