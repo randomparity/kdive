@@ -162,9 +162,6 @@ async def prepare_remote_module_on_authority_host(
                 terminal_failure = (
                     exc.category is ErrorCategory.CONFLICT
                     and exc.details.get("completion") == "failed-after-mutation"
-                ) or (
-                    exc.category is ErrorCategory.TRANSPORT_CONFLICT
-                    and exc.details.get("completion") == "refused-before-mutation"
                 )
                 if terminal_failure or (
                     not indeterminate and exc.category is not ErrorCategory.INFRASTRUCTURE_FAILURE
