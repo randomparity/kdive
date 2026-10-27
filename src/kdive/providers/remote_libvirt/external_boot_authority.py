@@ -1121,6 +1121,10 @@ class RemoteModuleVolumePreparationStore:
         )
         name = f"{key}.prior-power"
         if (existing := self._read(name)) is None:
+            # An owner with no power file is the residue of a crash or a failed clear; it must
+            # not make a later request's differing owner bytes a conflict.
+            with suppress(FileNotFoundError):
+                os.unlink(f"{key}.prior-power-owner", dir_fd=self._root_fd)
             self._publish(
                 f"{key}.prior-power-owner", self._authority_key(authority).encode("ascii")
             )
@@ -1145,7 +1149,8 @@ class RemoteModuleVolumePreparationStore:
         key = self._terminal_key(
             binding.system_id, binding.activation_id, binding.run_id, plan_identity
         )
-        for suffix in ("prior-power", "prior-power-owner"):
+        # The owner goes first: a failure between the two leaves a power file, never an orphan.
+        for suffix in ("prior-power-owner", "prior-power"):
             with suppress(FileNotFoundError):
                 os.unlink(f"{key}.{suffix}", dir_fd=self._root_fd)
         os.fsync(self._root_fd)

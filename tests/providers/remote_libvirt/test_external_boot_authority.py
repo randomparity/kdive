@@ -2491,6 +2491,26 @@ async def test_a_record_another_request_wrote_is_not_a_started_execution(tmp_pat
 
 
 @pytest.mark.anyio
+async def test_an_orphan_owner_does_not_wedge_a_later_request(tmp_path: Path) -> None:
+    """A crash between the owner and the power record must not refuse every later PREPARE."""
+    first = _remote_preparation_request()
+    later = first.model_copy(
+        update={
+            "authority": first.authority.model_copy(update={"operation_identity": "prepare-later"})
+        }
+    )
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.record_prior_power(first.authority, "running")
+    (power,) = tmp_path.glob("*.prior-power")
+    power.unlink()
+
+    assert store.record_prior_power(later.authority, "inactive") == "inactive"
+    assert store.prior_power_started_by(later.authority) is True
+    assert store.prior_power_started_by(first.authority) is False
+    store.close()
+
+
+@pytest.mark.anyio
 async def test_a_restored_abandon_is_not_an_execution_that_started(tmp_path: Path) -> None:
     request = _remote_preparation_request()
 

@@ -269,7 +269,9 @@ operation was already anchored; a `superseded` answer is not settled. The refusa
 wire is unchanged, and a replay of a refused operation is refused again without running the host.
 An execute the host had already started, including one whose stop that same request recorded
 before a crash, is never refused; the power record is per activation and survives a successful
-PREPARE, so a record written by another request does not count. A replay of a refused operation
+PREPARE, so a record written by another request does not count. The record is written ahead of the stop, so a
+crash between the record and the `destroy` also counts as started, and a record left by a build
+that predates the owner file counts as not started. A replay of a refused operation
 whose holders have since cleared is answered `provider_conflict`: the host is never run, and
 [ADR-0714](0714-repeated-provider-conflict-ends-the-external-boot-job.md) counts it as a repeat. A cancellation while the stop itself is in flight is not covered and behaves
 as before. A failure with no recorded power (nothing was stopped) is reported
