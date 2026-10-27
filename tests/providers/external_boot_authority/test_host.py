@@ -1283,6 +1283,8 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
     assert cast(Any, service._adapter)._remote_module_host is remote_module_host  # noqa: SLF001
     # Remote external-boot mutations never route through the local adapter (#3328).
     assert local_adapter not in vars(service._adapter).values()  # noqa: SLF001
+    # Orphan disposition acts on the remote store, not the local recovery root (#3326).
+    assert cast(Any, service._recovery_orphans)._executor is service._adapter  # noqa: SLF001
     operations = cast(Any, service._adapter)._coordinator._operations  # noqa: SLF001
     assert operations._pool_name == "authority-systems"  # noqa: SLF001
     assert operations._materializer._pool_name == "authority-systems"  # noqa: SLF001
