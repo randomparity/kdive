@@ -56,6 +56,7 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    PREPARATION_ABANDONED,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
     RemoteModulePreparationBeginRequestV1,
@@ -2301,7 +2302,14 @@ class ExternalBootAuthorityService:
                             "journal_conflict", reason="finish_mutation_started_missing"
                         )
                     context = AuthorityCommitContextV1.for_record(started)
-                result = await host.execute(remote)
+                try:
+                    result = await host.execute(remote)
+                except Exception as failure:
+                    if getattr(failure, "details", {}).get(PREPARATION_ABANDONED) is True:
+                        await self._settle_abandoned_preparation(
+                            mutation, records, journal, active.completion_binding or binding, lane
+                        )
+                    raise
                 result.validate_terminal_for(remote.operation, request)
                 rechecked = await self._resolve_confirmed(authenticated, mutation, acknowledgement)
                 if rechecked is None or not self._binding_matches(rechecked, mutation):
@@ -2429,6 +2437,62 @@ class ExternalBootAuthorityService:
         except AuthorityServiceError as error:
             self._ensure_rejection(request, error)
             raise
+
+    async def _settle_abandoned_preparation(
+        self,
+        mutation: AuthorityMutationRequestV1,
+        records: list[JournalRecordV1],
+        journal: FileAuthorityJournal,
+        binding: AuthorityBinding,
+        lane: _Lane,
+    ) -> None:
+        """Close a PREPARE the provider abandoned, so a retry or teardown is not refused.
+
+        The provider restored the System before reporting the abandon, so nothing was adopted:
+        the op ends ``source`` through the same PROVIDER_RETURNED, OBSERVED, TERMINAL anchors a
+        recovered op uses. A failure here leaves the op unresolved, which is today's state, so it
+        is logged and never replaces the provider's failure.
+        """
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                b"kdive-prepare-abandoned-v1\0" + mutation.operation_identity.encode()
+            ).hexdigest()
+        )
+        observation = AuthorityObservationV1(
+            observation_id=uuid5(NAMESPACE_URL, digest), category="source", composite_state=digest
+        )
+        try:
+            async with lane.lock:
+                records = await self._anchor(
+                    binding,
+                    journal,
+                    records,
+                    self._record(mutation, records, JournalPhase.PROVIDER_RETURNED),
+                )
+                records = await self._anchor(
+                    binding,
+                    journal,
+                    records,
+                    self._record(mutation, records, JournalPhase.OBSERVED, observation=observation),
+                )
+                await self._anchor(
+                    binding,
+                    journal,
+                    records,
+                    self._record(
+                        mutation,
+                        records,
+                        JournalPhase.TERMINAL,
+                        observation=observation,
+                        outcome="source",
+                    ),
+                )
+        except AuthorityServiceError as error:
+            self._logger.error(
+                "abandoned remote module preparation could not be settled",
+                extra={"category": error.category, "reason": error.reason},
+            )
 
     async def execute_conflict_resolution(
         self, peer: AuthenticatedPeer | None, request: AuthorityConflictResolutionRequestV1

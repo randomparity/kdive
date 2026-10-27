@@ -542,6 +542,37 @@ class ConcreteRemoteModuleAuthorityHost:
 
         await self._executor.run(stop)
 
+    async def restore_system_power(
+        self, admitted: AdmittedRemoteModulePreparation, prior: PriorPower
+    ) -> None:
+        """Start a System that was running before PREPARE stopped it; nothing else.
+
+        Idempotent: an inactive record, or a System already running, changes nothing. The System
+        is started only once the inspection proves the appliance absent and the System shut off
+        and exclusive, because the appliance may still hold the root volume (ADR-0585). Any
+        other reading raises and the caller keeps the failure latched.
+        """
+
+        def restore() -> None:
+            if prior != "running":
+                return
+            domain = self._system_domain(admitted)
+            try:
+                if domain.isActive():
+                    return
+                inspection = self._inspect(admitted.request.operation, cleanup=True)
+                if inspection.appliance_present or not (
+                    inspection.system_shut_off and inspection.exclusive
+                ):
+                    raise _stop_failed("remote module appliance may still hold the System root")
+                domain.create()
+                if not domain.isActive():
+                    raise _stop_failed("remote System domain did not start")
+            except libvirt.libvirtError as exc:
+                raise _stop_failed("remote System domain could not be started") from exc
+
+        await self._executor.run(restore)
+
     @staticmethod
     def _restore_operation(
         capture: RemoteModuleOperationV1, installed: RemoteModuleResultV1
@@ -953,6 +984,12 @@ class FactoryRemoteModuleAuthorityHost:
     async def stop_system(self, admitted: AdmittedRemoteModulePreparation) -> None:
         architecture = admitted.request.authority.plan.architecture
         await self._factory.host(architecture).stop_system(admitted)
+
+    async def restore_system_power(
+        self, admitted: AdmittedRemoteModulePreparation, prior: PriorPower
+    ) -> None:
+        architecture = admitted.request.authority.plan.architecture
+        await self._factory.host(architecture).restore_system_power(admitted, prior)
 
     async def execute_lifecycle(
         self,

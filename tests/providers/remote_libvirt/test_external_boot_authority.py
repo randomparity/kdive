@@ -2228,6 +2228,9 @@ async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_p
             del request
             raise RuntimeError("provider returned after mutation")
 
+        async def restore_system_power(self, admitted: object, prior: object) -> None:
+            raise RuntimeError("System power could not be restored")
+
     store = RemoteModuleVolumePreparationStore(tmp_path)
     store.stage(request, 999.0)
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
@@ -2240,6 +2243,49 @@ async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_p
             request
         )
     restarted.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("raised", "completion"),
+    [
+        (RuntimeError("provider returned after mutation"), "failed-after-mutation"),
+        (
+            CategorizedError(
+                "inspection refused",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"completion": "refused-before-mutation"},
+            ),
+            "refused-before-mutation",
+        ),
+    ],
+)
+async def test_durable_remote_preparation_failure_restores_power_and_does_not_latch(
+    tmp_path: Path, raised: Exception, completion: str
+) -> None:
+    request = _remote_preparation_request()
+    restored: list[object] = []
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            del request
+            raise raised
+
+        async def restore_system_power(self, admitted: object, prior: object) -> None:
+            restored.append(prior)
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    for _ in range(2):
+        with pytest.raises(CategorizedError) as failed:
+            await durable.execute(request)
+        assert failed.value.details["completion"] == completion
+        assert failed.value.details["abandoned"] is True
+        assert failed.value.__cause__ is raised
+    assert restored == ["inactive", "inactive"]
+    assert store.reopen_completion(request) is None
+    store.close()
 
 
 @pytest.mark.anyio

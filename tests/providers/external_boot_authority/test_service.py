@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
@@ -914,6 +915,146 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
         JournalPhase.TERMINAL,
     ]
     assert adapter.calls == ["commit:prepare", "observe"]
+
+
+async def _failed_prepare_service(
+    tmp_path: Path, failure: Exception
+) -> tuple[Any, Any, Any, AuthenticatedPeer, AuthorityPreparationMutationRequestV1, Any]:
+    """A service whose PREPARE was begun and whose appliance run then raised ``failure``."""
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(update={"provider_kind": "remote-libvirt"})
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    takeover = takeover.model_copy(update={"plan_identity": plan.identity})
+    repository = _Repository(peer, takeover)
+
+    def prepare(identity: str, nonce: str) -> tuple[Any, Any]:
+        request = AuthorityPreparationMutationRequestV1(
+            **takeover.model_dump(
+                mode="python",
+                by_alias=True,
+                exclude={"operation", "operation_identity", "operation_digest", "plan_identity"},
+            ),
+            operation="prepare",
+            operation_identity=identity,
+            operation_digest="sha256:" + "c" * 64,
+            plan_identity=plan.identity,
+            attempt_id=uuid4(),
+            expected_source_identity="source-a",
+            intended_target_identity="target-a",
+            recovery_objects=(),
+            plan=plan,
+        )
+        remote = RemoteModuleVolumePreparationRequestV1(
+            authority=request,
+            operation=RemoteModuleOperationV1(
+                operation="capture_install",
+                system_id=str(request.system_id),
+                run_id=str(request.run_id),
+                plan_identity=request.plan_identity,
+                operation_nonce=nonce,
+                release=request.plan.module_obligation.release,
+                root_volume={"key": "root", "identity": "sha256:" + "d" * 64},
+                source_manifest=request.plan.module_obligation.source_manifest,
+                appliance_image_digest="sha256:" + "e" * 64,
+            ),
+        )
+        return request, remote
+
+    class Host:
+        async def begin(
+            self,
+            authority: AuthorityPreparationMutationRequestV1,
+            preparation: ModuleAttemptPreparationRequestV1,
+            budget_seconds: int,
+        ) -> RemoteModulePreparationBeginResponseV1:
+            return RemoteModulePreparationBeginResponseV1(
+                preparation=preparation,
+                operation=prepare(authority.operation_identity, "a" * 32)[1].operation,
+            )
+
+        async def execute(self, request: object) -> object:
+            raise failure
+
+    repository.remote_attempt = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=takeover.system_id, run_id=takeover.run_id, operation_nonce="a" * 32
+        )
+    )
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=_Adapter(),
+        remote_module_host=cast(Any, Host()),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    first, remote = prepare("prepare-op", "a" * 32)
+    await service.open_remote_module_attempt(
+        peer, RemoteModulePreparationBeginRequestV1(authority=first, budget_seconds=30)
+    )
+    return service, repository, remote, peer, first, prepare
+
+
+@pytest.mark.anyio
+async def test_unsettled_prepare_failure_rejects_the_next_prepare(tmp_path: Path) -> None:
+    """Pins the wedge: a raw failure leaves PREPARE unresolved and the retry is refused."""
+    service, repository, remote, peer, _first, prepare = await _failed_prepare_service(
+        tmp_path, RuntimeError("appliance failed")
+    )
+    with pytest.raises(RuntimeError, match="appliance failed"):
+        await service.execute_remote_module_preparation(peer, remote)
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+    retry, _ = prepare("prepare-op-2", "b" * 32)
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.open_remote_module_attempt(
+            peer, RemoteModulePreparationBeginRequestV1(authority=retry, budget_seconds=30)
+        )
+    assert refused.value.category == "provider_conflict"
+
+
+@pytest.mark.anyio
+async def test_abandoned_prepare_failure_is_settled_so_the_retry_proceeds(tmp_path: Path) -> None:
+    failure = CategorizedError(
+        "appliance failed",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"completion": "failed-after-mutation", "abandoned": True},
+    )
+    service, repository, remote, peer, _first, prepare = await _failed_prepare_service(
+        tmp_path, failure
+    )
+    with pytest.raises(CategorizedError) as raised:
+        await service.execute_remote_module_preparation(peer, remote)
+    assert raised.value is failure
+    assert [record.phase for record in repository.records][-3:] == [
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+    ]
+    assert repository.records[-1].outcome == "source"
+    assert repository.records[-1].observation.category == "source"
+
+    retry, _ = prepare("prepare-op-2", "b" * 32)
+    await service.open_remote_module_attempt(
+        peer, RemoteModulePreparationBeginRequestV1(authority=retry, budget_seconds=30)
+    )
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+
+@pytest.mark.anyio
+async def test_latched_prepare_failure_stays_unresolved(tmp_path: Path) -> None:
+    """A failure the provider did not abandon (power restore failed) keeps the op unresolved."""
+    failure = CategorizedError(
+        "appliance failed",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"completion": "failed-after-mutation"},
+    )
+    service, repository, remote, peer, _first, _prepare = await _failed_prepare_service(
+        tmp_path, failure
+    )
+    with pytest.raises(CategorizedError):
+        await service.execute_remote_module_preparation(peer, remote)
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
 
 
 @pytest.mark.anyio

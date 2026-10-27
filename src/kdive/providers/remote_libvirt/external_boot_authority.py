@@ -73,6 +73,8 @@ _MAX_RECORD_BYTES = 1_048_576
 _MAX_PREPARATION_BYTES = 1_048_576
 _OBSERVATION_NAMESPACE = UUID("9cf0fa94-f250-4e5f-a950-155e7860b692")
 type PriorPower = Literal["running", "inactive"]
+PREPARATION_ABANDONED = "abandoned"
+"""Detail on a PREPARE failure the provider settled: the System's power is restored."""
 type RemoteSystemTeardownPhase = Literal[
     "intent-recorded",
     "domain-validated",
@@ -1472,6 +1474,10 @@ class RemoteModulePreparationOperation(Protocol):
 
     async def stop_system(self, admitted: AdmittedRemoteModulePreparation) -> None: ...
 
+    async def restore_system_power(
+        self, admitted: AdmittedRemoteModulePreparation, prior: PriorPower
+    ) -> None: ...
+
     async def execute(
         self, admitted: AdmittedRemoteModulePreparation
     ) -> RemoteModuleTerminalPreparationResponseV1: ...
@@ -1598,11 +1604,56 @@ class DurableRemoteModuleVolumePreparationHost:
             raise cancelled from None
         try:
             result = task.result()
+        except Exception as failure:
+            settled = await self._abandon(admitted, failure)
+            if settled is failure:
+                raise
+            raise settled from failure
         except BaseException:
             self._store.publish_failed_completion(request)
             raise
         self._store.publish_result(request, result)
         return result
+
+    async def _abandon(
+        self, admitted: AdmittedRemoteModulePreparation, failure: Exception
+    ) -> Exception:
+        """Put the System back in its recorded power state, then report the failure as abandoned.
+
+        A restored System leaves no completion behind, so the failure does not latch: the
+        authority settles its journal and the retry derives a fresh attempt. When the restore
+        fails the System's power is unknown, so the latch is kept and the original failure stands.
+        """
+        request = admitted.request
+        authority = request.authority
+        binding = ExternalBootActivationBinding(
+            system_id=str(authority.system_id),
+            run_id=str(authority.run_id),
+            activation_id=str(authority.activation_id),
+        )
+        try:
+            prior = self._store.prior_power(binding, authority.plan_identity)
+            if prior is not None:
+                await self._host.restore_system_power(admitted, prior)
+        except Exception as restore_failure:  # noqa: BLE001 -- any failure keeps the latch
+            logger.error(
+                "remote module preparation abandon could not restore System power: %s: %s",
+                type(restore_failure).__qualname__,
+                restore_failure,
+            )
+            self._store.publish_failed_completion(request)
+            return failure
+        details = dict(failure.details) if isinstance(failure, CategorizedError) else {}
+        details.setdefault("completion", "failed-after-mutation")
+        details[PREPARATION_ABANDONED] = True
+        return CategorizedError(
+            str(failure) or "remote module preparation failed",
+            category=failure.category
+            if isinstance(failure, CategorizedError)
+            else ErrorCategory.CONFLICT,
+            details=details,
+            terminal=isinstance(failure, CategorizedError) and failure.terminal,
+        )
 
     async def observe_lifecycle(
         self, request: RemoteModuleLifecycleRequestV1

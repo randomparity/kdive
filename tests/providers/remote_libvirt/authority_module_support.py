@@ -156,3 +156,6 @@ class InactiveSystemHost:
 
     async def stop_system(self, admitted: object) -> None:
         return None
+
+    async def restore_system_power(self, admitted: object, prior: PriorPower) -> None:
+        return None
