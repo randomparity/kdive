@@ -230,6 +230,7 @@ class RemoteSystemTeardownState:
     terminal: RemoteModuleTerminalRecord | None
     materialization: RemoteExternalBootMaterializationRecord | None
     recovery: RemoteExternalBootRecoveryRecord | None
+    finalized: RemoteFinalizedTeardownRefsV1 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -756,6 +757,62 @@ class RemoteCleanupQuarantineV1(BaseModel):
         return value
 
 
+class RemoteFinalizedBootArtifactV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ref: Annotated[str, Field(min_length=1, max_length=255)]
+    kind: Literal["kernel", "initrd"]
+    sha256: Annotated[str, Field(min_length=1, max_length=128)] | None
+
+
+class RemoteFinalizedTeardownRefsV1(BaseModel):
+    """What System teardown must still prove absent once finalize removed the records naming it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    module_volumes: tuple[tuple[str, str], ...]
+    operation_nonce: Annotated[str, Field(min_length=1, max_length=255)] | None
+    boot_artifacts: tuple[RemoteFinalizedBootArtifactV1, ...]
+
+
+class RemoteCleanupFinalizedMarkerV1(BaseModel):
+    """The ``cleanup-finalized`` marker: the cleaned receipt plus the refs teardown still needs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_: Literal["remote-libvirt-cleanup-finalized-v1"] = Field(
+        "remote-libvirt-cleanup-finalized-v1", alias="schema"
+    )
+    receipt: RemoteCleanupQuarantineV1
+    teardown: RemoteFinalizedTeardownRefsV1
+
+    def to_canonical_json(self) -> bytes:
+        return _canonical_model_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        if len(data) > _MAX_RECORD_BYTES:
+            raise ValueError("remote cleanup finalized marker exceeds 1048576 bytes")
+        value = cls.model_validate_json(data)
+        if value.to_canonical_json() != data:
+            raise ValueError("remote cleanup finalized marker is not canonical JSON")
+        return value
+
+
+def _parse_finalized_marker(
+    data: bytes,
+) -> tuple[RemoteCleanupQuarantineV1, RemoteFinalizedTeardownRefsV1 | None]:
+    """Receipt and teardown refs; a marker from before the refs existed has none."""
+    try:
+        marker = RemoteCleanupFinalizedMarkerV1.from_canonical_json(data)
+    except ValueError:
+        try:
+            return RemoteCleanupQuarantineV1.from_canonical_json(data), None
+        except ValueError:
+            raise ValueError("remote cleanup finalized marker is malformed") from None
+    return marker.receipt, marker.teardown
+
+
 def _quarantine_observation(receipt: RemoteCleanupQuarantineV1) -> RecoveryObjectObservation:
     reference = receipt.recovery_ref
     binding = RecoveryObjectBinding(
@@ -804,6 +861,19 @@ def _authority_binding(
         run_id=str(authority.run_id),
         activation_id=str(authority.activation_id),
     )
+
+
+def _authority_owned(
+    authority: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+    binding: ExternalBootActivationBinding,
+    plan_identity: str,
+) -> bool:
+    return (
+        str(authority.system_id),
+        str(authority.activation_id),
+        str(authority.run_id),
+        authority.plan_identity,
+    ) == (binding.system_id, binding.activation_id, binding.run_id, plan_identity)
 
 
 def _object_index_name(reference: OpaqueProviderRef) -> str:
@@ -1623,7 +1693,7 @@ class RemoteModuleVolumePreparationStore:
         if index is not None:
             reference = OpaqueProviderRef(ref=f"remote-external-boot/{index.decode('ascii')}")
         elif marker is not None:
-            reference = RemoteCleanupQuarantineV1.from_canonical_json(marker).recovery_ref
+            reference = _parse_finalized_marker(marker)[0].recovery_ref
         else:
             return None
         receipt = self._receipt(reference)
@@ -1680,12 +1750,7 @@ class RemoteModuleVolumePreparationStore:
         def owned(
             authority: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
         ) -> bool:
-            return (
-                str(authority.system_id),
-                str(authority.activation_id),
-                str(authority.run_id),
-                authority.plan_identity,
-            ) == (binding.system_id, binding.activation_id, binding.run_id, plan_identity)
+            return _authority_owned(authority, binding, plan_identity)
 
         names: list[str] = []
         for suffix, dependents, parse in (
@@ -1743,6 +1808,94 @@ class RemoteModuleVolumePreparationStore:
                 raise ValueError("remote materialization differs from the finalized activation")
         return [f"{identity}.materialization", index_name]
 
+    def finalized_teardown_refs(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteFinalizedTeardownRefsV1 | None:
+        """The refs teardown proves absent for a finalized activation; ``None`` if not finalized.
+
+        A marker written before it carried refs is only usable while the activation's terminal
+        record still stands, because that earlier finalize removed nothing else. Without it
+        nothing says what to prove absent, so teardown is refused instead of passing vacuously.
+        """
+        data = self._read(self._finalized_name(binding, plan_identity))
+        if data is None:
+            return None
+        refs = _parse_finalized_marker(data)[1]
+        if refs is not None:
+            return refs
+        key = self._terminal_key(
+            binding.system_id, binding.activation_id, binding.run_id, plan_identity
+        )
+        if self._read(f"{key}.terminal") is not None:
+            return None
+        raise ValueError("remote cleanup finalized marker has no teardown refs; teardown refused")
+
+    def _teardown_refs(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> RemoteFinalizedTeardownRefsV1:
+        try:
+            module = self.reopen_terminal(binding, plan_identity).response.recovery
+            volumes = (
+                (module.pool.ref, module.source_volume.ref),
+                (module.pool.ref, module.scratch_volume.ref),
+            )
+        except FileNotFoundError:
+            volumes = ()
+        nonces: list[str] = []
+
+        def collect(data: bytes) -> bool:
+            request = _PersistedRemoteModulePreparationV1.from_canonical_json(data).request
+            if owned := _authority_owned(request.authority, binding, plan_identity):
+                nonces.append(request.operation.operation_nonce)
+            return owned
+
+        self._scan_owned(".request", collect)
+        if len(set(nonces)) > 1:
+            raise ValueError("remote finalize found conflicting preparation attempts")
+        boot: list[RemoteFinalizedBootArtifactV1] = []
+        if (record := self.teardown_materialization(binding, plan_identity)) is not None:
+            materialization = record.materialization
+            artifacts = materialization.artifacts
+            boot.append(
+                RemoteFinalizedBootArtifactV1(
+                    ref=artifacts.kernel.ref,
+                    kind="kernel",
+                    sha256=materialization.extracted_vmlinuz_sha256,
+                )
+            )
+            if artifacts.initrd is not None:
+                boot.append(
+                    RemoteFinalizedBootArtifactV1(
+                        ref=artifacts.initrd.ref,
+                        kind="initrd",
+                        sha256=materialization.verified_initrd_sha256,
+                    )
+                )
+        return RemoteFinalizedTeardownRefsV1(
+            module_volumes=volumes,
+            operation_nonce=nonces[0] if nonces else None,
+            boot_artifacts=tuple(boot),
+        )
+
+    def _write_finalized_marker(self, receipt: RemoteCleanupQuarantineV1) -> None:
+        """Publish the marker once; a retry keeps the refs captured before anything was removed."""
+        name = self._finalized_name(receipt.binding, receipt.plan_identity)
+        existing = self._read(name)
+        cleaned = receipt.model_copy(update={"managed": False})
+        if existing is not None:
+            held, refs = _parse_finalized_marker(existing)
+            if held != cleaned:
+                raise ValueError("remote cleanup finalized marker conflicts with durable bytes")
+            if refs is not None:
+                return
+        marker = RemoteCleanupFinalizedMarkerV1(
+            receipt=cleaned, teardown=self._teardown_refs(receipt.binding, receipt.plan_identity)
+        )
+        if existing is None:
+            self._publish(name, marker.to_canonical_json())
+        else:
+            self._replace(name, existing, marker.to_canonical_json())
+
     def _recovery_record(self, identity: str) -> RemoteExternalBootRecoveryRecord | None:
         data = self._read(f"{identity}.recovery")
         if data is None:
@@ -1779,10 +1932,7 @@ class RemoteModuleVolumePreparationStore:
             record.binding != receipt.binding or record.plan_identity != receipt.plan_identity
         ):
             raise ValueError("remote recovery record differs from the quarantine receipt")
-        self._publish(
-            self._finalized_name(receipt.binding, receipt.plan_identity),
-            receipt.model_copy(update={"managed": False}).to_canonical_json(),
-        )
+        self._write_finalized_marker(receipt)
         names = self._activation_files(receipt.binding, receipt.plan_identity)
         if record is not None:
             names += [
@@ -2544,6 +2694,7 @@ class RemoteExternalBootCoordinator:
             terminal=terminal,
             materialization=self._store.teardown_materialization(binding, plan_identity),
             recovery=self._store.teardown_recovery(binding, plan_identity),
+            finalized=self._store.finalized_teardown_refs(binding, plan_identity),
         )
 
     def begin_system_teardown(

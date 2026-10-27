@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 import libvirt
@@ -419,6 +419,44 @@ class ConcreteRemoteExternalBootOperations:
                 return None
             raise
 
+    def _module_volume_names(
+        self, operation_nonce: str, system_id: str, run_id: str
+    ) -> set[tuple[str, str]]:
+        return {
+            (
+                self._pool_name,
+                render_module_volume_name(system_id, run_id, operation_nonce, purpose),
+            )
+            for purpose in ("source.ext4", "scratch.ext4")
+        }
+
+    @staticmethod
+    def _boot_artifact_facts(
+        state: RemoteSystemTeardownState,
+    ) -> list[tuple[str, Literal["kernel", "initrd"], str | None]]:
+        """Boot artifacts to protect, from the live materialization or the finalized marker."""
+        if state.finalized is not None:
+            return [(item.ref, item.kind, item.sha256) for item in state.finalized.boot_artifacts]
+        if state.materialization is None:
+            return []
+        materialization = state.materialization.materialization
+        facts: list[tuple[str, Literal["kernel", "initrd"], str | None]] = [
+            (
+                materialization.artifacts.kernel.ref,
+                "kernel",
+                materialization.extracted_vmlinuz_sha256,
+            )
+        ]
+        if materialization.artifacts.initrd is not None:
+            facts.append(
+                (
+                    materialization.artifacts.initrd.ref,
+                    "initrd",
+                    materialization.verified_initrd_sha256,
+                )
+            )
+        return facts
+
     def _protected_teardown_volumes(
         self, state: RemoteSystemTeardownState
     ) -> frozenset[tuple[str, str]]:
@@ -426,14 +464,14 @@ class ConcreteRemoteExternalBootOperations:
             (self._pool_name, overlay_volume_name(state.binding.system_id)),
             (self._pool_name, supplied_base_volume_name(state.binding.system_id)),
         }
-        materialization = state.materialization
-        if materialization is not None:
-            artifacts = materialization.materialization.artifacts
-            protected.add((self._pool_name, artifacts.kernel.ref))
-            if artifacts.initrd is not None:
-                protected.add((self._pool_name, artifacts.initrd.ref))
+        protected.update(
+            (self._pool_name, ref) for ref, _kind, _digest in self._boot_artifact_facts(state)
+        )
+        finalized = state.finalized
         terminal = state.terminal
-        if terminal is not None:
+        if finalized is not None and finalized.module_volumes:
+            protected.update(finalized.module_volumes)
+        elif terminal is not None:
             module = terminal.response.recovery
             protected.update(
                 {
@@ -441,42 +479,27 @@ class ConcreteRemoteExternalBootOperations:
                     (module.pool.ref, module.scratch_volume.ref),
                 }
             )
+        elif finalized is not None and finalized.operation_nonce is not None:
+            protected.update(
+                self._module_volume_names(
+                    finalized.operation_nonce, state.binding.system_id, state.binding.run_id
+                )
+            )
         elif state.preparation is not None:
             operation = state.preparation.operation
             protected.update(
-                {
-                    (
-                        self._pool_name,
-                        render_module_volume_name(
-                            operation.system_id,
-                            operation.run_id,
-                            operation.operation_nonce,
-                            purpose,
-                        ),
-                    )
-                    for purpose in ("source.ext4", "scratch.ext4")
-                }
+                self._module_volume_names(
+                    operation.operation_nonce, operation.system_id, operation.run_id
+                )
             )
         return frozenset(protected)
 
     def _teardown_boot_volumes(
         self, state: RemoteSystemTeardownState
     ) -> frozenset[tuple[str, str]]:
-        materialization_record = state.materialization
-        if materialization_record is None:
-            return frozenset()
-        materialization = materialization_record.materialization
-        candidates = [(materialization.artifacts.kernel, "kernel")]
-        if materialization.artifacts.initrd is not None:
-            candidates.append((materialization.artifacts.initrd, "initrd"))
         boot: set[tuple[str, str]] = set()
-        for reference, kind in candidates:
-            parsed = parse_boot_artifact_name(reference.ref)
-            digest = (
-                materialization.extracted_vmlinuz_sha256
-                if kind == "kernel"
-                else materialization.verified_initrd_sha256
-            )
+        for ref, kind, digest in self._boot_artifact_facts(state):
+            parsed = parse_boot_artifact_name(ref)
             if (
                 parsed is None
                 or parsed.partial
@@ -486,7 +509,7 @@ class ConcreteRemoteExternalBootOperations:
                 or parsed.digest != digest
             ):
                 raise ValueError("remote teardown boot artifact identity differs")
-            boot.add((self._pool_name, reference.ref))
+            boot.add((self._pool_name, ref))
         return frozenset(boot)
 
     def _validate_teardown_domain(
@@ -596,24 +619,27 @@ class ConcreteRemoteExternalBootOperations:
             )
 
     def unfinished_preparation_absent(self, state: RemoteSystemTeardownState) -> bool:
-        preparation = state.preparation
-        if preparation is None:
-            return True
-        operation = preparation.operation
-        names = (
-            render_module_volume_name(
-                operation.system_id,
-                operation.run_id,
-                operation.operation_nonce,
-                "source.ext4",
-            ),
-            render_module_volume_name(
-                operation.system_id,
-                operation.run_id,
-                operation.operation_nonce,
-                "scratch.ext4",
-            ),
-        )
+        if state.finalized is not None:
+            nonce = state.finalized.operation_nonce
+            if nonce is None:
+                return True
+            names = {
+                name
+                for _pool, name in self._module_volume_names(
+                    nonce, state.binding.system_id, state.binding.run_id
+                )
+            }
+        else:
+            preparation = state.preparation
+            if preparation is None:
+                return True
+            operation = preparation.operation
+            names = {
+                name
+                for _pool, name in self._module_volume_names(
+                    operation.operation_nonce, operation.system_id, operation.run_id
+                )
+            }
         with self._connection() as connection:
             self._prove_teardown_graph(connection, state)
             return all(
