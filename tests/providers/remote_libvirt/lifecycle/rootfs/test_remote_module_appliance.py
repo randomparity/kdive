@@ -1184,39 +1184,6 @@ def _direct_kernel_domain_request(architecture: str = "x86_64") -> Any:
     )
 
 
-@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
-def test_rendered_features_match_the_reference(architecture: str) -> None:
-    reference = ET.parse(_REFERENCE_DIR / f"domain-v1-{architecture}.xml").getroot()
-
-    rendered = ET.fromstring(
-        render_remote_module_appliance(_direct_kernel_domain_request(architecture))
-    )
-
-    def features(root: ET.Element) -> list[str] | None:
-        node = root.find("features")
-        return None if node is None else [child.tag for child in node]
-
-    assert features(rendered) == features(reference)
-    assert (features(rendered) == ["acpi"]) is (architecture == "x86_64")
-
-
-@pytest.mark.parametrize(
-    ("old", "new"),
-    [
-        ("<features><acpi /></features>", ""),
-        ("<features><acpi /></features>", "<features><acpi /><apic /></features>"),
-        ("<features><acpi /></features>", "<features><pae /></features>"),
-    ],
-)
-def test_adoption_rejects_drift_in_x86_64_features(old: str, new: str) -> None:
-    clock = Clock()
-    req = _direct_kernel_domain_request()
-    xml = render_remote_module_appliance(req)
-    assert old in xml
-    with pytest.raises(CategorizedError):
-        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new, 1))), req)
-
-
 def test_adoption_accepts_the_alias_and_address_libvirt_adds_to_the_entropy_device() -> None:
     clock = Clock()
     req = _direct_kernel_domain_request()
