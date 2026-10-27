@@ -299,14 +299,18 @@ async def test_read_only_observation_rechecks_current_authority(tmp_path: Path) 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("evidence_present", [True, False])
+@pytest.mark.parametrize(
+    ("purpose", "operation"),
+    [("recover", AuthorityOperation.RECOVER), ("release", AuthorityOperation.CLEANUP)],
+)
 async def test_authenticated_cleanup_resolves_subject_evidence_before_commit(
-    tmp_path: Path, evidence_present: bool
+    tmp_path: Path, evidence_present: bool, purpose: str, operation: AuthorityOperation
 ) -> None:
     peer = AuthenticatedPeer(uuid4())
     takeover = _takeover().model_copy(
         update={
-            "purpose": "recover",
-            "operation": AuthorityOperation.RECOVER,
+            "purpose": purpose,
+            "operation": operation,
             "provider_kind": "remote-libvirt",
         }
     )
@@ -352,8 +356,49 @@ async def test_authenticated_cleanup_resolves_subject_evidence_before_commit(
     assert adapter.calls == (
         ["cleanup-subject", "commit-cleanup", "observe"]
         if evidence_present
+        # ADR-0805: a recover refusal is re-observed, and a non-conflict state keeps the refusal.
+        # A cleanup refusal is not re-observed.
+        else ["cleanup-subject", "observe"]
+        if operation is AuthorityOperation.RECOVER
         else ["cleanup-subject"]
     )
+
+
+@pytest.mark.anyio
+async def test_release_recover_commits_without_cleanup_evidence(tmp_path: Path) -> None:
+    """Migration 0145 admits no (release, recover) evidence; a release restore deletes nothing."""
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(
+        update={
+            "purpose": "release",
+            "operation": AuthorityOperation.RECOVER,
+            "provider_kind": "remote-libvirt",
+        }
+    )
+    repository = _Repository(peer, takeover)
+
+    class CleanupAdapter(_Adapter):
+        async def cleanup_subject(self, request: object) -> str:
+            raise AssertionError("release recover reached the cleanup-evidence gate")
+
+        async def commit_cleanup(
+            self, request: object, context: object, evidence: object
+        ) -> object:
+            raise AssertionError("release recover reached commit_cleanup")
+
+    adapter = CleanupAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    await service.execute_mutation(peer, _mutation(takeover))
+
+    assert repository.cleanup_nonces == []
+    assert adapter.calls == ["commit:recover", "observe"]
 
 
 @pytest.mark.anyio
@@ -1631,6 +1676,55 @@ async def test_takeover_waits_for_started_operation_positive_observation(tmp_pat
 
 
 @pytest.mark.anyio
+async def test_finalize_failure_after_a_refusal_conflict_publishes_the_quarantine(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = await _finalize_fault_service(
+        tmp_path, ProofBarrierAbort("aborted")
+    )
+    adapter.fail_commit = True
+    adapter.observe_category = "conflict"
+
+    with pytest.raises(AuthorityServiceError) as raised:
+        await service.execute_mutation(peer, request)
+
+    assert raised.value.category == "provider_conflict"
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert [args[-1] for args in repository.published_cleanup_quarantines] == [(adapter.receipt,)]
+
+
+@pytest.mark.anyio
+async def test_takeover_during_a_refusal_observation_completes_under_its_binding(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.fail_commit = True
+    adapter.observe_category = "conflict"
+    adapter.observe_release.clear()
+    mutation_task = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+    await adapter.observe_entered.wait()
+    successor = request.model_copy(
+        update={"authority_id": uuid4(), "generation": 2, "operation_identity": "takeover-b"}
+    )
+    repository.allocating_request = successor
+    takeover_task = asyncio.create_task(service.acknowledge_takeover(peer, successor))
+    await asyncio.sleep(0)
+    assert not takeover_task.done()
+    adapter.observe_release.set()
+    assert (await mutation_task).category == "conflict"
+    assert (await takeover_task).generation == 2
+    assert [record.phase for record in repository.records[-4:]] == [
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+    ]
+    assert {b.generation for b in repository.advance_bindings[-4:-1]} == {2}
+
+
+@pytest.mark.anyio
 async def test_newer_takeover_supersedes_unacknowledged_watermark(tmp_path: Path) -> None:
     service, repository, adapter, peer, first = _service(tmp_path)
     repository.pause_phase = JournalPhase.WATERMARK_INSTALLED
@@ -1915,7 +2009,8 @@ async def test_failed_commit_must_recover_before_later_same_generation_admission
     with pytest.raises(AuthorityServiceError, match="provider_conflict"):
         await service.execute_mutation(peer, second)
 
-    assert adapter.calls == [f"commit:{first.operation}", "observe"]
+    # The refusal's own re-observation (ADR-0805), then the recovery observation.
+    assert adapter.calls == [f"commit:{first.operation}", "observe", "observe"]
     assert [record.phase for record in repository.records[before_recovery:]] == [
         JournalPhase.PROVIDER_RETURNED,
         JournalPhase.OBSERVED,
@@ -2320,3 +2415,150 @@ async def test_retraction_failure_still_raises_the_refusal(tmp_path: Path) -> No
         await service.execute_mutation(peer, _mutation(takeover))
 
     assert len(lane.read_bytes().splitlines()) == len(anchored.splitlines()) + 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bounded", [False, True], ids=["unclassified", "bounded"])
+async def test_refusal_observed_as_conflict_is_journaled_and_answered(
+    tmp_path: Path, bounded: bool
+) -> None:
+    """ADR-0805: a refused activation whose provider state is a third identity is a conflict."""
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    if bounded:
+        adapter.commit_error = AuthorityServiceError("provider_conflict")
+    else:
+        adapter.fail_commit = True
+    adapter.observe_category = "conflict"
+
+    observation = await service.execute_mutation(peer, _mutation(request))
+
+    assert observation.category == "conflict"
+    assert adapter.calls == ["commit:activate", "observe"]
+    terminal = repository.records[-1]
+    assert [record.phase for record in repository.records][-4:] == [
+        JournalPhase.MUTATION_STARTED,
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+    ]
+    assert terminal.outcome == "conflict"
+    assert terminal.observation == observation
+
+
+@pytest.mark.anyio
+async def test_refusal_answered_as_conflict_finalizes_the_provider(tmp_path: Path) -> None:
+    """The refused mutation had started, so its finalize runs as it does after a commit."""
+    _unused, repository, _plain, peer, takeover = _service(tmp_path)
+    adapter = _FinalizingAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    adapter.fail_commit = True
+    adapter.observe_category = "conflict"
+
+    observation = await service.execute_mutation(peer, _mutation(takeover))
+
+    assert observation.category == "conflict"
+    assert adapter.calls == ["commit:activate", "observe", "finalize"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("category", ["source", "target", "mixed", "unreadable", None])
+async def test_refusal_observed_without_conflict_stays_the_refusal(
+    tmp_path: Path, category: Literal["source", "target", "mixed", "unreadable"] | None
+) -> None:
+    """Only a third identity parks; ``mixed`` may still resume from durable phase evidence."""
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.fail_commit = True
+    if category is None:
+        adapter.fail_observe = True
+    else:
+        adapter.observe_category = category
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, _mutation(request))
+
+    assert adapter.calls == ["commit:activate", "observe"]
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+
+@pytest.mark.anyio
+async def test_superseded_refusal_is_not_reobserved(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.commit_error = AuthorityServiceError("superseded")
+    adapter.observe_category = "conflict"
+
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_mutation(peer, _mutation(request))
+
+    assert adapter.calls == ["commit:activate"]
+
+
+@pytest.mark.anyio
+async def test_cleanup_refusal_is_not_reobserved(tmp_path: Path) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    root = _takeover().model_copy(
+        update={"purpose": "release", "operation": AuthorityOperation.RELEASE}
+    )
+    repository = _Repository(peer, root)
+    adapter = _Adapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, root)
+    repository.current = True
+    adapter.fail_commit = True
+    adapter.observe_category = "conflict"
+    cleanup = _mutation(root).model_copy(
+        update={"operation": AuthorityOperation.CLEANUP, "operation_identity": "release-cleanup"}
+    )
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, cleanup)
+
+    assert adapter.calls == ["commit:cleanup"]
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+
+class _ShutdownBeforeProvider(_RecordingProofCheckpoint):
+    async def checkpoint(
+        self,
+        system_id: UUID,
+        run_id: UUID,
+        operation: AuthorityOperation,
+        checkpoint: Literal["before-provider", "after-provider", "before-finalize"],
+    ) -> None:
+        await super().checkpoint(system_id, run_id, operation, checkpoint)
+        if checkpoint == "before-provider":
+            raise ProofBarrierShutdown("authority shutting down")
+
+
+@pytest.mark.anyio
+async def test_barrier_shutdown_before_provider_is_not_reobserved(tmp_path: Path) -> None:
+    _unused, repository, adapter, peer, takeover = _service(tmp_path)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+        proof_checkpoint=_ShutdownBeforeProvider(adapter.calls),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    adapter.observe_category = "conflict"
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, _mutation(takeover))
+
+    assert adapter.calls == ["before-provider"]

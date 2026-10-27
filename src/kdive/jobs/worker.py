@@ -42,6 +42,7 @@ from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs.capture_operations.supervisor import capture_authority_scope
 from kdive.jobs.models import (
+    ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthorityMarkerV1,
@@ -637,6 +638,10 @@ class Worker:
                 )
             elif isinstance(result, ExternalBootAuthorityFailureV1):
                 committed = await queue.fail_external_boot(
+                    conn, job, result, incarnation_credential=self._incarnation_credential
+                )
+            elif isinstance(result, ExternalBootAuthorityConflictV1):
+                committed = await queue.record_external_boot_conflict(
                     conn, job, result, incarnation_credential=self._incarnation_credential
                 )
             else:
