@@ -235,6 +235,14 @@ def _top_level_volume_references(root: ET.Element) -> list[tuple[str, str]]:
     return references
 
 
+def _top_level_path_references(root: ET.Element) -> list[str]:
+    """File- and block-backed top-level disk sources, one per disk, backing chains excluded."""
+    paths = (
+        source.get("file") or source.get("dev") for source in root.findall("./devices/disk/source")
+    )
+    return [path for path in paths if path is not None]
+
+
 def path_references(root: ET.Element) -> set[str]:
     """Return host paths from every source and legacy mirror in each disk graph."""
     paths = set()
@@ -516,7 +524,14 @@ def _inspect_definition(
         if domain_active:
             raise _conflict("owning System is active", domain=name)
         owning_root = (expected.pool, expected.root_volume)
-        if _top_level_volume_references(root).count(owning_root) != 1:
+        root_identity = protected_identities[expected.root_volume]
+        # A provisioned System's root is a file-backed overlay with no pool/volume source, so
+        # it counts by device identity; the same root named any other way still counts twice.
+        root_references = _top_level_volume_references(root).count(owning_root) + sum(
+            _device_identity(identity_port, path) == root_identity
+            for path in _top_level_path_references(root)
+        )
+        if root_references != 1:
             raise _conflict("owning System definition has a different root volume", domain=name)
         attempt_identities = {
             identity
@@ -527,7 +542,6 @@ def _inspect_definition(
             protected_references & attempt_identities
         ):
             raise _conflict("System references attempt-scoped appliance storage", domain=name)
-        root_identity = protected_identities[expected.root_volume]
         root_count = resolved_identities.count(root_identity) + list(direct_identities).count(
             root_identity
         )
