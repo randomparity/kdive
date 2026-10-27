@@ -426,6 +426,9 @@ def run_or_adopt_appliance(conn: ApplianceConn, request: ApplianceRequest) -> Ap
     )
     wait_deadline = min(invocation_deadline, request.monotonic() + WAIT_TIMEOUT_SECONDS)
     try:
+        # ADR-0585: the appliance never starts unless the System is proven shut off. The
+        # inspection raises while the owning System is active, so createXML is unreachable.
+        request.executor.call(request.inspect_attachments, wait_deadline)
         domain = _domain(conn, request, render_remote_module_appliance(request), wait_deadline)
     except TimeoutError:
         return ApplianceOutcome(None, "", True)
