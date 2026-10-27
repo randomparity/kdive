@@ -551,20 +551,6 @@ def _inspect_definition(
     return False
 
 
-def _validate_features(root: ET.Element, architecture: str) -> None:
-    """x86_64 needs exactly ``<features><acpi/></features>``; other architectures have none."""
-    nodes = root.findall("features")
-    if architecture != "x86_64":
-        if nodes:
-            raise _conflict("resumed appliance features mismatched")
-        return
-    if len(nodes) != 1 or nodes[0].attrib or nodes[0].text and nodes[0].text.strip():
-        raise _conflict("resumed appliance features mismatched")
-    children = list(nodes[0])
-    if len(children) != 1 or children[0].tag != "acpi" or children[0].attrib or list(children[0]):
-        raise _conflict("resumed appliance features mismatched")
-
-
 _DIRECT_KERNEL_DISK_FORMATS = {"vda": "qcow2", "vdb": "raw", "vdc": "raw"}
 
 
@@ -686,10 +672,9 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         return
     if root.get("type") != "kvm" or set(root.attrib) - {"type", "id"}:
         raise _conflict("resumed appliance domain type mismatched")
-    top_level = {"name", "uuid", "memory", "vcpu", "os", "metadata", "devices", "features"}
+    top_level = {"name", "uuid", "memory", "vcpu", "os", "metadata", "devices"}
     if any(child.tag not in top_level for child in root):
         raise _conflict("resumed appliance top-level shape mismatched")
-    _validate_features(root, expected.appliance.architecture)
     required_once = {"name", "memory", "vcpu", "os", "metadata", "devices"}
     if any(len(root.findall(tag)) != 1 for tag in required_once):
         raise _conflict("resumed appliance top-level shape mismatched")
