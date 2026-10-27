@@ -1194,3 +1194,311 @@ def test_adoption_accepts_the_alias_and_address_libvirt_adds_to_the_entropy_devi
     )
 
     run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def test_finished_domain_ends_the_console_wait_instead_of_timing_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FinishedConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = Domain(xml, active=False)
+            return self.domain
+
+    clock = Clock()
+    conn = FinishedConn([-2] * 50, clock)
+    delays: list[float] = []
+    monkeypatch.setattr(remote_module_appliance.time, "sleep", delays.append)
+
+    outcome = run_or_adopt_appliance(conn, request(clock, result=success_result()))
+
+    assert not outcome.timed_out
+    assert outcome.result is not None
+    assert delays == []
+    assert conn.domain is not None and not conn.domain.destroyed
+
+
+def test_console_bytes_written_just_before_the_domain_ended_are_kept() -> None:
+    class FinishedConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = Domain(xml, active=False)
+            return self.domain
+
+    clock = Clock()
+    conn = FinishedConn([-2, b"error_code=FILESYSTEM_FAILURE\n", -2, -2], clock)
+
+    outcome = run_or_adopt_appliance(conn, request(clock, result=success_result()))
+
+    assert outcome.console_tail == "error_code=FILESYSTEM_FAILURE\n"
+    assert not outcome.timed_out
+
+
+def test_a_domain_probe_failure_other_than_absence_is_a_console_failure() -> None:
+    class BrokenProbeDomain(Domain):
+        def isActive(self) -> int:  # noqa: N802
+            raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    class BrokenProbeConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = BrokenProbeDomain(xml)
+            return self.domain
+
+    clock = Clock()
+
+    outcome = run_or_adopt_appliance(BrokenProbeConn([-2] * 5, clock), request(clock))
+
+    assert outcome.timed_out
+    assert outcome.result is None
+
+
+def test_vanished_domain_also_ends_the_console_wait() -> None:
+    class VanishedDomain(Domain):
+        def isActive(self) -> int:  # noqa: N802
+            raise libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
+
+    class VanishedConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = VanishedDomain(xml)
+            return self.domain
+
+    clock = Clock()
+
+    outcome = run_or_adopt_appliance(
+        VanishedConn([-2] * 50, clock), request(clock, result=success_result())
+    )
+
+    assert not outcome.timed_out
+    assert outcome.result is not None
+
+
+def _disk_drivers(root: ET.Element) -> dict[str, dict[str, str]]:
+    drivers = {}
+    for disk in root.findall("./devices/disk"):
+        target = disk.find("target")
+        driver = disk.find("driver")
+        assert target is not None and driver is not None
+        drivers[str(target.get("dev"))] = dict(driver.attrib)
+    return drivers
+
+
+def _direct_kernel_request(architecture: str = "x86_64") -> Any:
+    return replace(
+        request(Clock()),
+        architecture=architecture,
+        appliance_volume=None,
+        appliance_kernel=f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/vmlinuz",
+        appliance_initrd=(
+            f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/initramfs.cpio"
+        ),
+    )
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_rendered_disk_drivers_match_the_reference(architecture: str) -> None:
+    reference_dir = Path(__file__).resolve().parents[5] / "deploy" / "remote_module_appliance"
+    reference = ET.parse(reference_dir / f"domain-v1-{architecture}.xml").getroot()
+
+    rendered = ET.fromstring(render_remote_module_appliance(_direct_kernel_request(architecture)))
+
+    assert _disk_drivers(rendered) == _disk_drivers(reference)
+    assert _disk_drivers(rendered)["vda"]["type"] == "qcow2"
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('<driver name="qemu" type="qcow2" cache="none" io="native" />', ""),
+        ('type="qcow2"', 'type="raw"'),
+        ('<driver name="qemu" type="raw" cache="none" io="native" />', ""),
+    ],
+)
+def test_adoption_rejects_a_missing_or_wrong_disk_driver(old: str, new: str) -> None:
+    clock = Clock()
+    req = _direct_kernel_request()
+    xml = render_remote_module_appliance(req)
+    assert old in xml
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new, 1))), req)
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_rendered_features_match_the_reference(architecture: str) -> None:
+    reference_dir = Path(__file__).resolve().parents[5] / "deploy" / "remote_module_appliance"
+    reference = ET.parse(reference_dir / f"domain-v1-{architecture}.xml").getroot()
+
+    rendered = ET.fromstring(render_remote_module_appliance(_direct_kernel_request(architecture)))
+
+    def features(root: ET.Element) -> list[str] | None:
+        node = root.find("features")
+        return None if node is None else [child.tag for child in node]
+
+    assert features(rendered) == features(reference)
+    assert (features(rendered) == ["acpi"]) is (architecture == "x86_64")
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("<features><acpi /></features>", ""),
+        ("<features><acpi /></features>", "<features><acpi /><apic /></features>"),
+        ("<features><acpi /></features>", "<features><pae /></features>"),
+    ],
+)
+def test_adoption_rejects_drift_in_x86_64_features(old: str, new: str) -> None:
+    clock = Clock()
+    req = _direct_kernel_request()
+    xml = render_remote_module_appliance(req)
+    assert old in xml
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new, 1))), req)
+
+
+_BASE = "/var/lib/kdive/provider-authority/remote-libvirt-pool/base.qcow2"
+
+
+_LIVE_ROOT_DISK = f"""<disk type="volume" device="disk">
+  <driver name="qemu" type="qcow2" cache="none" io="native"/>
+  <source pool="pool" volume="root" index="3"/>
+  <backingStore type="file" index="4">
+    <format type="qcow2"/>
+    <source file="{_BASE}"><seclabel model="selinux" relabel="no"/></source>
+    <backingStore/>
+  </backingStore>
+  <target dev="vda" bus="virtio"/>
+  <alias name="virtio-disk0"/>
+  <address type="pci" domain="0x0000" bus="0x02" slot="0x00" function="0x0"/>
+</disk>"""
+
+
+def _backed_request() -> Any:
+    return replace(_direct_kernel_request(), root_backing_path=_BASE)
+
+
+def _with_root_disk(xml: str, disk: str) -> str:
+    root = ET.fromstring(xml)
+    devices = root.find("devices")
+    assert devices is not None
+    first = devices.find("disk")
+    assert first is not None
+    position = list(devices).index(first)
+    devices.remove(first)
+    devices.insert(position, ET.fromstring(disk))
+    return ET.tostring(root, encoding="unicode")
+
+
+def test_root_disk_names_its_backing_file_with_the_relabel_free_seclabel() -> None:
+    root = ET.fromstring(render_remote_module_appliance(_backed_request()))
+
+    backing = root.find("./devices/disk/backingStore")
+
+    assert backing is not None and backing.get("type") == "file"
+    format_node = backing.find("format")
+    assert format_node is not None and format_node.get("type") == "qcow2"
+    source = backing.find("source")
+    assert source is not None and source.get("file") == _BASE
+    seclabel = source.find("seclabel")
+    assert seclabel is not None
+    assert seclabel.attrib == {"model": "selinux", "relabel": "no"}
+    assert len(root.findall("./devices/disk/backingStore")) == 1
+
+
+def test_root_disk_without_a_known_base_renders_no_backing_store() -> None:
+    root = ET.fromstring(render_remote_module_appliance(_direct_kernel_request()))
+
+    assert root.find("./devices/disk/backingStore") is None
+
+
+def test_adoption_accepts_the_root_disk_as_libvirt_dumps_it() -> None:
+    clock = Clock()
+    req = _backed_request()
+    xml = _with_root_disk(render_remote_module_appliance(req), _LIVE_ROOT_DISK)
+
+    run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def test_adoption_accepts_libvirts_empty_backing_terminator_on_every_disk() -> None:
+    clock = Clock()
+    req = _direct_kernel_request()
+    xml = render_remote_module_appliance(req).replace(
+        "<target dev=", "<backingStore /><target dev="
+    )
+
+    run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            f'<source file="{_BASE}"><seclabel model="selinux" relabel="no"/></source>',
+            f'<source file="{_BASE}"/>',
+        ),
+        ('relabel="no"', 'relabel="yes"'),
+        (f'file="{_BASE}"', 'file="/var/lib/other/base.qcow2"'),
+        ('<format type="qcow2"/>\n    <source', '<format type="raw"/>\n    <source'),
+        (
+            '<seclabel model="selinux" relabel="no"/>',
+            '<seclabel model="selinux" relabel="no"><label>x</label></seclabel>',
+        ),
+        (
+            '<seclabel model="selinux" relabel="no"/>',
+            '<seclabel model="selinux" relabel="no"/><seclabel model="dac" relabel="no"/>',
+        ),
+        ("<backingStore/>\n  </backingStore>", '<backingStore type="file"/>\n  </backingStore>'),
+    ],
+)
+def test_adoption_rejects_a_root_backing_that_drifts_from_the_staged_base(
+    old: str, new: str
+) -> None:
+    clock = Clock()
+    req = _backed_request()
+    disk = _LIVE_ROOT_DISK
+    assert old in disk
+    xml = _with_root_disk(render_remote_module_appliance(req), disk.replace(old, new, 1))
+
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def test_adoption_rejects_a_missing_or_empty_backing_when_the_base_is_known() -> None:
+    clock = Clock()
+    req = _backed_request()
+    rendered = render_remote_module_appliance(req)
+    without = _with_root_disk(
+        rendered,
+        _LIVE_ROOT_DISK.split("<backingStore")[0] + _LIVE_ROOT_DISK.split("</backingStore>")[1],
+    )
+    empty = _with_root_disk(
+        rendered,
+        _LIVE_ROOT_DISK.split("<backingStore")[0]
+        + "<backingStore/>"
+        + _LIVE_ROOT_DISK.split("</backingStore>")[1],
+    )
+
+    for xml in (without, empty):
+        with pytest.raises(CategorizedError):
+            run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def test_adoption_rejects_a_typed_backing_the_request_did_not_expect() -> None:
+    clock = Clock()
+    req = _direct_kernel_request()
+    xml = _with_root_disk(render_remote_module_appliance(req), _LIVE_ROOT_DISK)
+
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def test_adoption_rejects_a_typed_backing_on_a_non_root_disk() -> None:
+    clock = Clock()
+    req = _backed_request()
+    typed = _LIVE_ROOT_DISK.split("<backingStore", 1)[1].split("</backingStore>")[0]
+    xml = render_remote_module_appliance(req).replace(
+        '<target dev="vdb"', f'<backingStore{typed}</backingStore><target dev="vdb"'
+    )
+
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)

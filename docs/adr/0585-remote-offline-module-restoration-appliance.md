@@ -235,6 +235,67 @@ The stop is provider-private; no journal phase or wire field changes. Restoring 
 running System after a failed PREPARE is not part of this amendment (#3348): until it lands, a
 failed PREPARE leaves that System stopped.
 
+### Amendment (2026-10-27): the host formats scratch, the appliance finds a btrfs root, and failures reach the console (#3363)
+
+A live remote PREPARE ended with "did not produce a durable result" and no cause in the log. Three
+gaps in this record's own contract explained it:
+
+- **Scratch was never formatted.** The record said the host provides "a newly created
+  capacity-bounded scratch volume" and the appliance mounts it as ext4, but nothing made it ext4. The
+  host now formats it when it creates the volume: it builds a sparse ext4 image with `mkfs.ext4`
+  and uploads only the allocated extents, with the block that holds the superblock last. A retry
+  never rewrites a scratch whose first block carries the ext4 magic, because it may hold a durable
+  phase. A zero first block proves no phase was ever written (the superblock goes last), so the
+  retry finishes the format after the same detachment proof a volume delete needs; any other first
+  block is a conflict and nothing is written. The format assumes one live preparation per attempt, as
+  the source-volume upload and its repair already do. The filesystem is built without `orphan_file`,
+  so an appliance kernel older than 6.1 can mount it. The result reader is unchanged: a freshly formatted
+  scratch has no `result-v1.json`, which it already reports as absent.
+- **Root discovery missed btrfs subvolume layouts.** The appliance accepted a candidate only when
+  its top level held `lib/modules`. Fedora images keep the System root in a `root` subvolume under
+  an empty top level, so root discovery failed before scratch was mounted. For btrfs the appliance
+  now also tries the `root` subvolume of a candidate whose top level has no `lib/modules`, and the
+  exactly-one-match rule across all candidates is unchanged.
+- **The appliance wrote nothing to its console.** It now writes `phase=accepted` once the operation
+  document is read, and `error_code=<code>` for the failure it reports. These are the keys the host
+  console filter already keeps. When no result is read, the host logs the bounded, redacted,
+  filtered console tail.
+
+Live runs on the remote lane found five more gaps between what the provider rendered and what the
+appliance needs, all fixed here:
+
+- **The root overlay reached the guest as a raw disk.** The domain carried no `<driver>`, so the
+  System's qcow2 overlay was exposed unparsed. The direct-kernel domain now sets the driver as the
+  reference definition does (root `qcow2`, source and scratch `raw`, `cache=none`, `io=native`), and
+  adoption requires exactly that.
+- **The x86_64 domain had ACPI off.** libvirt then starts q35 with `acpi=off`, where the guest sees
+  no virtio devices behind the PCIe root ports and cannot power off. The x86_64 domain now carries
+  `<features><acpi/></features>`, as the reference does, and adoption requires exactly that; ppc64le
+  carries no features.
+- **A usr-merged root has `/lib` as the symlink `usr/lib`.** The appliance walks the module directory
+  with `O_NOFOLLOW`, so it refused such a root. It now resolves exactly the relative target `usr/lib`
+  to `usr/lib/modules`; every other symlink in the walk is still refused.
+- **The appliance start relabelled the shared base.** The System's qcow2 overlay is backed by the
+  authority's staged base, and libvirt relabels a backing file at every domain start, which moves
+  its ctime and trips the authority's staged-base check (ADR-0623). The appliance root disk now
+  names that base explicitly with the same `selinux` `relabel="no"` seclabel the System domain
+  uses; the host reads the base from the root volume's libvirt XML and refuses a path that is not
+  an absolute normalized qcow2 base. Adoption accepts libvirt's empty backing terminator on every
+  disk and, on the root only, exactly that typed backing.
+- **The console wait outlived the appliance.** The console stream of a finished domain keeps
+  answering "would block", so the host waited the full 30 s and then reported no result although the
+  durable result was on scratch. The wait now ends when the domain is gone, and the scratch result is
+  read as designed.
+
+These changes assume two domain settings that the appliance-console change (#3361) renders: a hash
+seed on the kernel command line and an entropy device. Without them the default guest cannot start
+the appliance's Python.
+
+The appliance image changes with `appliance.py`, so its installed manifest digest, which is the
+appliance identity in operation and result documents, changes too; it must be rebuilt and
+re-installed (`deploy/remote_module_appliance/README.md`, "Rebuilding the image"). No wire,
+document schema or journal phase changes.
+
 ## Consequences
 
 - Remote offline mutation gains one operator-provisioned appliance image per supported hypervisor
