@@ -1606,3 +1606,18 @@ def test_module_paths_resolve_the_usr_merged_root_under_usr_lib(
 
     assert destination.parent == root / "usr" / "lib" / "modules"
     assert staged.parent == destination.parent
+
+
+def test_module_paths_refuse_a_symlinked_usr_under_a_valid_usr_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    root = tmp_path / "root"
+    (tmp_path / "elsewhere" / "lib" / "modules").mkdir(parents=True)
+    root.mkdir()
+    (root / "usr").symlink_to(tmp_path / "elsewhere")
+    (root / "lib").symlink_to("usr/lib")
+    monkeypatch.setattr(appliance, "ROOT", root)
+
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance._module_paths(appliance._validate_operation(_operation()))
