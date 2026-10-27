@@ -86,6 +86,12 @@ No production path did this (#3327):
   `provider-conflict`, so that path still ends through ADR-0714.
 - Preparation (`preparing`, `prepared`) and teardown refusals are unchanged.
 
+### Amendment (2026-10-26): `systems.get` now exposes the conflict composite (#3331)
+
+The Consequences bullet saying that no MCP read exposes the conflict evidence's composite is out
+of date. [ADR-0807](0807-systems-get-shows-conflict-evidence-to-admins.md) adds it to
+`systems.get` for admins.
+
 ## Considered & rejected
 
 - **Call `record_conflict` from the worker.** verified: migration 0121 grants the worker role
