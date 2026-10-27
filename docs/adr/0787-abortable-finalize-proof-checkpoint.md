@@ -83,16 +83,17 @@ publishes a quarantine row like the local one.
 - After release cleanup, `commit_cleanup` records a private `cleanup-quarantine` receipt in the
   module store, named by the activation's recovery key. It binds the operation identity, the
   attempt and the anchored `mutation-started` journal sequence and digest.
-- `finalize` runs for `cleanup` only. It requires the receipt to equal the anchored proof, then
-  removes the recovery record, its indexes and, last, the receipt. It is repeatable until nothing
-  of the activation remains, and a missing receipt is a no-op.
+- `finalize` runs for `cleanup` only. It requires the receipt to equal the anchored proof, writes
+  a `cleanup-finalized` marker, then removes the recovery record, the indexes that name it and,
+  last, the receipt. It is repeatable until only the marker remains, and a missing receipt is a
+  no-op. A cleanup for another operation is refused before any provider call while an unfinalized
+  receipt stands.
 - `cleanup_quarantine_inventory` reports the one unmanaged `recovery-record` observation whose
   operation identity and attempt equal the request's. Any other receipt is a conflict.
 - The remote adapter serves `observe`, `delete` and `adopt` for `recovery-record` under digest
   fences. `delete` finalizes the record. Other object kinds are refused, not routed elsewhere.
 - The remote branch of the authority host builds the orphan service over the remote adapter, not
   the local one.
-- Once finalization removes the recovery record, a later `observe` of that activation's cleanup
-  classifies `unreadable`, where it classified `absent` while the record remained. The release
-  state machine does not re-observe a finished release. System teardown already treats an absent
-  record as `recovery_absent`, so it is unaffected.
+- The marker keeps a finalized cleanup distinguishable from a record that never existed, so a
+  later cleanup `observe` classifies `absent`, as it did while the record remained. System
+  teardown already treats an absent record as `recovery_absent`.
