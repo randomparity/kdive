@@ -286,6 +286,37 @@ async def test_remote_prepare_execute_rechecks_immediately_before_the_host_stops
     assert host.executed == 0
 
 
+@pytest.mark.anyio
+async def test_remote_prepare_refused_at_the_pre_stop_recheck_leaves_nothing_unsettled(
+    tmp_path: Path,
+) -> None:
+    service, repository, host, peer, request = await _remote_lane(tmp_path)
+    begun = await service.open_remote_module_attempt(
+        peer, RemoteModulePreparationBeginRequestV1(authority=request, budget_seconds=30)
+    )
+    remote = RemoteModuleVolumePreparationRequestV1(authority=request, operation=begun.operation)
+    repository.prestop_holders = "session_active"
+
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.execute_remote_module_preparation(peer, remote)
+
+    assert refused.value.category == "system_held"
+    assert [record.phase for record in repository.records][-3:] == [
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+    ]
+    assert repository.records[-1].outcome == "source"
+
+    repository.prestop_holders = "clear"
+    retry = request.model_copy(update={"operation_identity": "prepare-op-2"})
+    await service.open_remote_module_attempt(
+        peer, RemoteModulePreparationBeginRequestV1(authority=retry, budget_seconds=30)
+    )
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+    assert host.executed == 0
+
+
 class _AdoptingAdapter(_Adapter):
     async def adopt_preparation(self, *arguments: object) -> None:
         self.calls.append("adopt")

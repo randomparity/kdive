@@ -2387,6 +2387,9 @@ class ExternalBootAuthorityService:
                 if not resumed and (
                     refusal := await self._prestop_refusal(authenticated, request, acknowledgement)
                 ):
+                    await self._settle_abandoned_preparation(
+                        mutation, records, journal, active.completion_binding or binding, lane
+                    )
                     raise refusal
                 try:
                     result = await host.execute(remote)
@@ -2535,9 +2538,10 @@ class ExternalBootAuthorityService:
         binding: AuthorityBinding,
         lane: _Lane,
     ) -> None:
-        """Close a PREPARE the provider abandoned, so a retry or teardown is not refused.
+        """Close a PREPARE that was refused or abandoned, so a retry or teardown is not refused.
 
-        The provider restored the System before reporting the abandon, so nothing was adopted:
+        A pre-stop refusal mutated nothing, and the provider restored the System before reporting
+        an abandon, so nothing was adopted:
         the op ends ``source`` through the same PROVIDER_RETURNED, OBSERVED, TERMINAL anchors a
         recovered op uses. A failure here leaves the op unresolved, which is today's state, so it
         is logged and never replaces the provider's failure.
