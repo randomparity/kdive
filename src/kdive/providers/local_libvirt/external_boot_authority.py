@@ -541,14 +541,11 @@ class LocalExternalBootAuthorityAdapter:
         if point is not None:
             if point.binding != binding or point.plan_identity != intent.plan_identity:
                 raise AuthorityServiceError("provider_conflict")
-            # A tombstoned point already recovered and cleaned; recover() needs its intent.
-            if not self._ports.cleanup_is_accounted(point, authority):
-                self._ports.recover(point, authority, restore_power=False)
-                self._ports.cleanup(point, authority)
-                self._ports.record_cleanup_quarantine(
-                    point, _cleanup_proof(context, point), authority
-                )
-            self._ports.finalize_cleanup_tombstone(point, _cleanup_proof(context, point), authority)
+            # The domain is destroyed next, so the point is discarded rather than recovered:
+            # a conflicted activation cannot be recovered and its domain may be gone (#3341).
+            self._ports.discard_system_teardown_recovery(
+                intent, point, _cleanup_proof(context, point), authority
+            )
         else:
             result = self._ports.abort_system_teardown_preparation(intent, authority)
             if result == "not-partial" and not self._ports.system_teardown_recovery_is_absent(
