@@ -1253,8 +1253,13 @@ def test_cli_argv_follows_the_descriptor(
 
 
 def test_cli_argv_names_a_field_the_verb_cannot_carry() -> None:
-    with pytest.raises(tool_cells.CliTranslationGap, match="'limit'"):
-        tool_cells.cli_argv("allocations.list", {"request": {"limit": "many"}})
+    with pytest.raises(tool_cells.CliTranslationGap, match="'resource_id'"):
+        tool_cells.cli_argv("inventory.list", {"request": {"resource_id": "r"}})
+
+
+def test_cli_argv_carries_list_paging_options() -> None:
+    argv = tool_cells.cli_argv("allocations.list", {"request": {"project": "p", "limit": 5}})
+    assert argv == ["allocations", "list", "--project", "p", "--limit", "5", "--json"]
 
 
 def test_cli_exactness_compares_the_parsed_payload() -> None:
