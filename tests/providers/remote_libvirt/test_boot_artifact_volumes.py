@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
     MaterializedBootArtifacts,
     artifact_partial_volume_name,
+    artifact_volume_name,
     materialize_boot_artifacts,
     render_boot_artifact_volume_xml,
     require_boot_artifact_capacity,
@@ -122,9 +124,13 @@ def test_materializes_kernel_and_optional_initrd_with_opaque_deterministic_refs(
     )
 
     assert isinstance(result, MaterializedBootArtifacts)
-    assert result.kernel.ref == f"kernel/{SYSTEM}/{RUN}"
+    assert result.kernel.ref == artifact_volume_name(
+        "kernel", SYSTEM, RUN, "sha256:" + hashlib.sha256(b"kernel").hexdigest()
+    )
     assert result.initrd is not None
-    assert result.initrd.ref == f"initrd/{SYSTEM}/{RUN}"
+    assert result.initrd.ref == artifact_volume_name(
+        "initrd", SYSTEM, RUN, "sha256:" + hashlib.sha256(b"initrd").hexdigest()
+    )
     assert len(pool.created_xml) == 4
     assert "kdive-boot-v1-kernel" in pool.created_xml[0]
     assert "-partial-" in pool.created_xml[0]
@@ -146,7 +152,6 @@ def test_materialization_survives_metadata_free_dir_pool_readback() -> None:
         attempt_id=ATTEMPT,
     )
 
-    assert result.kernel.ref == f"kernel/{SYSTEM}/{RUN}"
     assert result.initrd is not None
     volumes = pool.listAllVolumes(0)
     assert len(volumes) == 2
@@ -261,3 +266,45 @@ def test_capacity_preflight_rejects_before_opening_or_mutating_the_pool() -> Non
 
 def test_capacity_preflight_accepts_exact_bound() -> None:
     require_boot_artifact_capacity(5, 1, max_bytes=6)
+
+
+def test_returned_references_are_the_names_of_the_volumes_that_exist() -> None:
+    """Consumers resolve a reference by storage-volume name; the pool knows only real names."""
+    pool = FakeStoragePool(name="images")
+
+    result = materialize_boot_artifacts(
+        FakeStorageConn(pool),
+        "images",
+        system_id=SYSTEM,
+        run_id=RUN,
+        kernel=b"kernel",
+        initrd=b"initrd",
+        attempt_id=ATTEMPT,
+    )
+
+    assert result.initrd is not None
+    for reference, kind, payload in (
+        (result.kernel, "kernel", b"kernel"),
+        (result.initrd, "initrd", b"initrd"),
+    ):
+        volume = pool.storageVolLookupByName(reference.ref)
+        assert volume.name() == reference.ref
+        parsed = parse_boot_artifact_name(reference.ref)
+        assert parsed is not None and not parsed.partial
+        assert (parsed.kind, parsed.system_id, parsed.run_id) == (kind, SYSTEM, RUN)
+        assert parsed.digest == "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def test_a_second_materialization_of_the_same_bytes_returns_the_same_references() -> None:
+    pool = FakeStoragePool(name="images")
+    conn = FakeStorageConn(pool)
+
+    first = materialize_boot_artifacts(
+        conn, "images", system_id=SYSTEM, run_id=RUN, kernel=b"kernel", initrd=b"initrd"
+    )
+    again = materialize_boot_artifacts(
+        conn, "images", system_id=SYSTEM, run_id=RUN, kernel=b"kernel", initrd=b"initrd"
+    )
+
+    assert again == first
+    assert len(pool.listAllVolumes(0)) == 2
