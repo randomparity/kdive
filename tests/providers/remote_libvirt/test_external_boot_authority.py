@@ -11,7 +11,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NoReturn, cast
 from uuid import UUID, uuid4
 
 import libvirt
@@ -625,6 +625,67 @@ async def test_remote_adapter_replays_materialize_and_prepare_without_repeating_
     store.close()
 
 
+@pytest.mark.anyio
+async def test_remote_adapter_adopts_a_new_generations_materialize(tmp_path: Path) -> None:
+    """A retry generation re-materializes by adopting the first generation's receipt (#3348)."""
+    record = _record()
+    plan = _plan_for_record(record)
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    terminal = store.reopen_terminal(record.binding, plan.identity)
+    calls: list[str] = []
+
+    class Operations:
+        def materialize(self, *args: object) -> object:
+            calls.append("materialize")
+            return record.materialization.model_copy(
+                update={"plan_identity": terminal.request.authority.plan_identity}
+            )
+
+    coordinator = RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 9.0)
+    executor = RemoteModulePreparationExecutor()
+    adapter = RemoteExternalBootAuthorityAdapter(coordinator, executor)
+    base = terminal.request.authority
+    first = base.model_copy(
+        update={
+            "operation": AuthorityOperation.MATERIALIZE,
+            "operation_identity": "materialize-gen-1",
+            "attempt_id": uuid4(),
+        }
+    )
+    retry = first.model_copy(
+        update={
+            "generation": first.generation + 1,
+            "operation_identity": "materialize-gen-2",
+            "attempt_id": uuid4(),
+        }
+    )
+
+    def context(request: AuthorityPreparationMutationRequestV1) -> AuthorityCommitContextV1:
+        return AuthorityCommitContextV1(
+            commit_point=request.operation,
+            operation_identity=request.operation_identity,
+            attempt_id=request.attempt_id,
+            journal_sequence=1,
+            journal_digest="sha256:" + "a" * 64,
+        )
+
+    original = await adapter.commit(first, context(first))
+    adopted = await adapter.adopt_preparation(
+        retry, first, original.composite_state, context(retry)
+    )
+
+    assert calls == ["materialize"]
+    assert adopted.composite_state != original.composite_state
+    assert (await adapter.preparation_receipt(retry)).operation_identity == "materialize-gen-2"
+    with pytest.raises(ValueError, match="predecessor cannot be adopted"):
+        await adapter.adopt_preparation(retry, first, "sha256:" + "0" * 64, context(retry))
+    with pytest.raises(ValueError, match="differs from request"):
+        await adapter.adopt_preparation(retry, first, original.composite_state, context(first))
+    executor.shutdown()
+    store.close()
+
+
 @pytest.mark.parametrize(
     ("recorded", "live", "expected"),
     [
@@ -899,12 +960,11 @@ async def test_remote_activate_commits_through_the_remote_coordinator(tmp_path: 
 
 
 @pytest.mark.anyio
-async def test_remote_release_recover_restores_without_deleting(tmp_path: Path) -> None:
+@pytest.mark.parametrize("purpose", ["release", "recover"])
+async def test_remote_recover_restores_without_deleting(tmp_path: Path, purpose: str) -> None:
     adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=True)
     operations.state = replace(operations.state, definition="source", active=False)
-    request = _native_request(
-        record, point, purpose="release", operation=AuthorityOperation.RECOVER
-    )
+    request = _native_request(record, point, purpose=purpose, operation=AuthorityOperation.RECOVER)
 
     observed = await adapter.commit(request, _native_context(request))
 
@@ -2335,6 +2395,9 @@ async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_p
             del request
             raise RuntimeError("provider returned after mutation")
 
+        async def restore_system_power(self, admitted: object, prior: object) -> None:
+            raise RuntimeError("System power could not be restored")
+
     store = RemoteModuleVolumePreparationStore(tmp_path)
     store.stage(request, 999.0)
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
@@ -2347,6 +2410,207 @@ async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_p
             request
         )
     restarted.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("raised", "completion"),
+    [
+        (RuntimeError("provider returned after mutation"), "failed-after-mutation"),
+        (
+            CategorizedError(
+                "inspection refused",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"completion": "refused-before-mutation"},
+            ),
+            "refused-before-mutation",
+        ),
+    ],
+)
+async def test_durable_remote_preparation_failure_restores_power_and_does_not_latch(
+    tmp_path: Path, raised: Exception, completion: str
+) -> None:
+    request = _remote_preparation_request()
+    restored: list[object] = []
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            del request
+            raise raised
+
+        async def restore_system_power(self, admitted: object, prior: object) -> None:
+            restored.append(prior)
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    for _ in range(2):
+        with pytest.raises(CategorizedError) as failed:
+            await durable.execute(request)
+        assert failed.value.details["completion"] == completion
+        assert failed.value.details["abandoned"] is True
+        assert failed.value.__cause__ is raised
+    assert restored == ["inactive", "inactive"]
+    assert store.reopen_completion(request) is None
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_failure_before_the_stop_is_reported_as_refused_before_mutation(
+    tmp_path: Path,
+) -> None:
+    request = _remote_preparation_request()
+
+    class UnreadableHost(InactiveSystemHost):
+        async def observe_system_power(self, admitted: object) -> NoReturn:
+            raise ValueError("power could not be read")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, UnreadableHost()))
+    with pytest.raises(CategorizedError) as failed:
+        await durable.execute(request)
+
+    assert failed.value.details == {"completion": "refused-before-mutation", "abandoned": True}
+    assert store.reopen_completion(request) is None
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_unclearable_prior_power_record_does_not_latch_a_restored_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _remote_preparation_request()
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            raise RuntimeError("provider returned after mutation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+
+    def refuse(*_args: object) -> None:
+        raise OSError("read-only store")
+
+    monkeypatch.setattr(store, "clear_prior_power", refuse)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(CategorizedError) as failed:
+        await durable.execute(request)
+
+    assert failed.value.details["abandoned"] is True
+    assert store.reopen_completion(request) is None
+    store.close()
+
+
+def _binding_for(request: RemoteModuleVolumePreparationRequestV1) -> ExternalBootActivationBinding:
+    authority = request.authority
+    return ExternalBootActivationBinding(
+        system_id=str(authority.system_id),
+        run_id=str(authority.run_id),
+        activation_id=str(authority.activation_id),
+    )
+
+
+@pytest.mark.anyio
+async def test_a_recorded_stop_counts_as_an_execution_that_started(tmp_path: Path) -> None:
+    """A crash after the stop leaves the System stopped, so a resume must not be refused."""
+    request = _remote_preparation_request()
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, InactiveSystemHost()))
+    assert durable.execution_started(request) is False
+
+    store.record_prior_power(request.authority, "running")
+    assert durable.execution_started(request) is True
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_a_record_another_request_wrote_is_not_a_started_execution(tmp_path: Path) -> None:
+    """The record outlives a successful PREPARE, so a later PREPARE must still be rechecked."""
+    first = _remote_preparation_request()
+    later = first.model_copy(
+        update={
+            "authority": first.authority.model_copy(update={"operation_identity": "prepare-later"})
+        }
+    )
+    expected = _terminal_response(first)
+
+    class SucceedingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            return expected
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(first, 999.0)
+    store.stage(later, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, SucceedingHost()))
+    await durable.execute(first)
+
+    assert store.prior_power(_binding_for(first), first.authority.plan_identity) == "inactive"
+    assert durable.execution_started(first) is True
+    assert durable.execution_started(later) is False
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_an_orphan_owner_does_not_wedge_a_later_request(tmp_path: Path) -> None:
+    """A crash between the owner and the power record must not refuse every later PREPARE."""
+    first = _remote_preparation_request()
+    later = first.model_copy(
+        update={
+            "authority": first.authority.model_copy(update={"operation_identity": "prepare-later"})
+        }
+    )
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.record_prior_power(first.authority, "running")
+    (power,) = tmp_path.glob("*.prior-power")
+    power.unlink()
+
+    assert store.record_prior_power(later.authority, "inactive") == "inactive"
+    assert store.prior_power_started_by(later.authority) is True
+    assert store.prior_power_started_by(first.authority) is False
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_a_restored_abandon_is_not_an_execution_that_started(tmp_path: Path) -> None:
+    request = _remote_preparation_request()
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            raise RuntimeError("provider returned after mutation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(CategorizedError):
+        await durable.execute(request)
+
+    assert durable.execution_started(request) is False
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_cancelled_abandon_keeps_the_failure_latched(tmp_path: Path) -> None:
+    request = _remote_preparation_request()
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            del request
+            raise RuntimeError("provider returned after mutation")
+
+        async def restore_system_power(self, admitted: object, prior: object) -> None:
+            raise asyncio.CancelledError
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(asyncio.CancelledError):
+        await durable.execute(request)
+
+    completion = store.reopen_completion(request)
+    assert completion is not None and completion.state == "failed-after-mutation"
+    store.close()
 
 
 @pytest.mark.anyio

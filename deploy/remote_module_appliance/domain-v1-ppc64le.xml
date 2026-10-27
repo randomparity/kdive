@@ -6,7 +6,7 @@
     <type arch="ppc64le" machine="pseries">hvm</type>
     <kernel>/var/lib/kdive/remote-module-appliance/v1/ppc64le/image/vmlinuz</kernel>
     <initrd>/var/lib/kdive/remote-module-appliance/v1/ppc64le/image/initramfs.cpio</initrd>
-    <cmdline>console=hvc0 panic=-1</cmdline>
+    <cmdline>console=hvc0 panic=-1 PYTHONHASHSEED=0</cmdline>
   </os>
   <clock offset="utc"/>
   <on_poweroff>destroy</on_poweroff>
@@ -31,5 +31,6 @@
     </disk>
     <console type="pty"><target type="virtio" port="0"/></console>
     <memballoon model="none"/>
+    <rng model="virtio"><backend model="random">/dev/urandom</backend></rng>
   </devices>
 </domain>

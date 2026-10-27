@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -307,10 +308,16 @@ class _SystemDomain(Domain):
 
     def __init__(self, *, active: bool) -> None:
         super().__init__("<domain/>", active=active, persistent=True)
+        self.started = False
 
     def destroy(self) -> int:
         self.destroyed = True
         self.active = False
+        return 0
+
+    def create(self) -> int:
+        self.started = True
+        self.active = True
         return 0
 
 
@@ -414,6 +421,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
         detached_volumes=frozenset({("systems", source_name), ("systems", scratch_name)}),
     )
     storage = StorageConn()
+    storage.seed_root(operation.root_volume.key)
     clock = Clock()
     appliance = _SystemConn([], clock, system=_SystemDomain(active=False))
     durable_result = _result(operation)
@@ -655,6 +663,8 @@ class _Quiesce:
         staging: bool = True,
         appliance_digest: str | None = None,
         deadline: float = 10_000.0,
+        fail: bool = False,
+        appliance_present: bool = False,
     ) -> None:
         self.request = _request()
         operation = self.request.operation
@@ -670,7 +680,9 @@ class _Quiesce:
             appliance_present=False,
             detached_volumes=frozenset(("systems", name) for name in names),
         )
+        after_failure = replace(detached, appliance_present=appliance_present)
         self.storage = StorageConn()
+        self.storage.seed_root(operation.root_volume.key)
         clock = self.clock = Clock()
         self.appliance = _SystemConn([], clock, system=system)
 
@@ -684,7 +696,9 @@ class _Quiesce:
             pool_name="systems",
             entries=(),
             writer=_Writer(tmp_path / "source.ext4"),
-            inspect_attachments=lambda identity_port, present_attempt_volumes=None: detached,
+            inspect_attachments=lambda identity_port, present_attempt_volumes=None: (
+                after_failure if fail else detached
+            ),
             work_dir=tmp_path,
             artifact_stager=_Stager() if staging else None,
         )
@@ -706,14 +720,16 @@ class _Quiesce:
                 operation.root_volume.identity,
                 4096,
             ),
-            read_scratch_result=lambda volume, deadline: _result(operation).to_wire_bytes(),
+            read_scratch_result=lambda volume, deadline: (
+                None if fail else _result(operation).to_wire_bytes()
+            ),
             inspect_attachments=inspect,
             secret_registry=SecretRegistry(),
             deadline_executor=Executor(),
             monotonic=clock,
         )
         self.executor = RemoteModulePreparationExecutor()
-        host = ConcreteRemoteModuleAuthorityHost(
+        host = self.host = ConcreteRemoteModuleAuthorityHost(
             RemoteModuleAuthorityHostConfiguration(volume_config, appliance_config, _Identity()),
             self.executor,
         )
@@ -808,8 +824,8 @@ async def test_system_that_survives_destroy_is_not_reported_as_refused_before_mu
         await stack.durable.execute(stack.request)
 
     assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert failed.value.details == {}
-    assert stack.prior_power() == "running"
+    assert failed.value.details == {"completion": "failed-after-mutation", "abandoned": True}
+    assert stack.prior_power() is None
     _assert_nothing_started(stack)
     stack.close()
 
@@ -820,7 +836,10 @@ async def test_missing_system_domain_is_refused_before_any_mutation(tmp_path: Pa
     with pytest.raises(CategorizedError, match="could not be read") as refused:
         await stack.durable.execute(stack.request)
 
-    assert refused.value.details == {"completion": "refused-before-mutation"}
+    assert refused.value.details == {
+        "completion": "refused-before-mutation",
+        "abandoned": True,
+    }
     assert stack.prior_power() is None
     _assert_nothing_started(stack)
     stack.close()
@@ -846,7 +865,10 @@ async def test_changed_appliance_identity_is_refused_before_the_stop(tmp_path: P
     with pytest.raises(CategorizedError, match="identity changed") as refused:
         await stack.durable.execute(stack.request)
 
-    assert refused.value.details == {"completion": "refused-before-mutation"}
+    assert refused.value.details == {
+        "completion": "refused-before-mutation",
+        "abandoned": True,
+    }
     assert system.active and not system.destroyed
     _assert_nothing_started(stack)
     stack.close()
@@ -857,9 +879,10 @@ async def test_expired_deadline_leaves_a_running_system_running(tmp_path: Path) 
     system = _SystemDomain(active=True)
     stack = _Quiesce(tmp_path, system, deadline=0.5)
     stack.clock.value = 1.0
-    with pytest.raises(TimeoutError):
+    with pytest.raises(CategorizedError) as expired:
         await stack.durable.execute(stack.request)
 
+    assert isinstance(expired.value.__cause__, TimeoutError)
     assert system.active and not system.destroyed
     _assert_nothing_started(stack)
     stack.close()
@@ -871,3 +894,155 @@ def test_prior_power_record_is_first_write_wins_and_validated(tmp_path: Path) ->
     assert store.record_prior_power(authority, "running") == "running"
     assert store.record_prior_power(authority, "inactive") == "running"
     store.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("active", "started"), [(True, True), (False, False)])
+async def test_failed_appliance_restores_the_prior_power_without_latching(
+    tmp_path: Path, active: bool, started: bool
+) -> None:
+    system = _SystemDomain(active=active)
+    stack = _Quiesce(tmp_path, system, fail=True)
+    with pytest.raises(CategorizedError, match="durable result") as failed:
+        await stack.durable.execute(stack.request)
+
+    assert failed.value.details["abandoned"] is True
+    assert failed.value.details["completion"] == "failed-after-mutation"
+    assert system.started is started and system.active is active
+    assert stack.store.reopen_completion(stack.request) is None
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_abandoned_preparation_may_be_executed_again(tmp_path: Path) -> None:
+    system = _SystemDomain(active=True)
+    stack = _Quiesce(tmp_path, system, fail=True)
+    for _ in range(2):
+        with pytest.raises(CategorizedError, match="durable result"):
+            await stack.durable.execute(stack.request)
+
+    assert stack.prior_power() is None
+    assert system.active
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_unrestorable_power_keeps_the_failure_latched(tmp_path: Path) -> None:
+    """The appliance may still hold the root, so the System is left stopped and the latch stays."""
+    system = _SystemDomain(active=True)
+    stack = _Quiesce(tmp_path, system, fail=True, appliance_present=True)
+    with pytest.raises(CategorizedError, match="durable result") as failed:
+        await stack.durable.execute(stack.request)
+
+    assert "abandoned" not in failed.value.details
+    assert not system.started and not system.active
+    completion = stack.store.reopen_completion(stack.request)
+    assert completion is not None and completion.state == "failed-after-mutation"
+    with pytest.raises(CategorizedError, match="requires recovery"):
+        await stack.durable.execute(stack.request)
+
+
+@pytest.mark.anyio
+async def test_missing_result_logs_the_bounded_console_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from kdive.providers.remote_libvirt import remote_module_authority_host as host_module
+    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+        ApplianceOutcome,
+    )
+
+    tail = "phase=accepted\nerror_code=FILESYSTEM_FAILURE\n"
+    monkeypatch.setattr(
+        host_module, "run_or_adopt_appliance", lambda *_args: ApplianceOutcome(None, tail, False)
+    )
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+
+    with (
+        caplog.at_level("WARNING", logger=host_module.__name__),
+        pytest.raises(CategorizedError, match="durable result"),
+    ):
+        await stack.durable.execute(stack.request)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("error_code=FILESYSTEM_FAILURE" in message for message in messages)
+    assert any(f"system={stack.request.operation.system_id}" in message for message in messages)
+    stack.close()
+
+
+def _root_volume_xml(backing: str | None, backing_format: str | None = "qcow2") -> str:
+    document = "<volume><name>root</name><capacity unit='bytes'>4096</capacity>"
+    if backing is not None:
+        document += f"<backingStore><path>{backing}</path>"
+        if backing_format is not None:
+            document += f"<format type='{backing_format}'/>"
+        document += "</backingStore>"
+    return document + "</volume>"
+
+
+def _seed_root(stack: _Quiesce, xml: str) -> str:
+    name = stack.request.operation.root_volume.key
+    stack.storage.pool.foreign[name] = Volume(xml, 4096, name)
+    return name
+
+
+@pytest.mark.parametrize("fixed_inspection_path", [False, True])
+def test_expected_attachments_carry_the_staged_base_for_every_inspection(
+    tmp_path: Path, fixed_inspection_path: bool
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    operation = stack.request.operation
+    _seed_root(stack, _root_volume_xml("/var/lib/kdive/pool/base.qcow2"))
+
+    if fixed_inspection_path:
+        wanted = stack.host._expected_attachments(operation).appliance.root_backing_path
+    else:
+        wanted = stack.host._root_backing_path("systems", operation.root_volume.key)
+
+    assert wanted == "/var/lib/kdive/pool/base.qcow2"
+    stack.close()
+
+
+@pytest.mark.parametrize(
+    ("xml", "message"),
+    [
+        (_root_volume_xml("base.qcow2"), "normalized absolute"),
+        (_root_volume_xml("/pool/../etc/base.qcow2"), "normalized absolute"),
+        (_root_volume_xml("/pool//base.qcow2"), "normalized absolute"),
+        (_root_volume_xml(" /pool/base.qcow2"), "normalized absolute"),
+        (_root_volume_xml("/pool/base.qcow2", "raw"), "not qcow2"),
+        (_root_volume_xml("/pool/base.qcow2", None), "not qcow2"),
+    ],
+)
+def test_a_root_backing_path_that_is_not_the_exact_qcow2_base_is_refused(
+    tmp_path: Path, xml: str, message: str
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    name = _seed_root(stack, xml)
+
+    with pytest.raises(CategorizedError, match=message) as refused:
+        stack.host._root_backing_path("systems", name)
+
+    assert refused.value.category is ErrorCategory.CONFLICT
+    stack.close()
+
+
+def test_a_root_volume_without_a_backing_store_renders_no_backing_path(tmp_path: Path) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    name = _seed_root(stack, _root_volume_xml(None))
+
+    assert stack.host._root_backing_path("systems", name) is None
+    stack.close()
+
+
+def test_an_absent_root_volume_is_an_error_for_a_run_but_not_for_a_cleanup_inspection(
+    tmp_path: Path,
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    stack.storage.pool.foreign.clear()
+    name = stack.request.operation.root_volume.key
+
+    with pytest.raises(CategorizedError, match="backing store") as refused:
+        stack.host._root_backing_path("systems", name)
+    assert refused.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert stack.host._root_backing_path("systems", name, absent_ok=True) is None
+    stack.close()
