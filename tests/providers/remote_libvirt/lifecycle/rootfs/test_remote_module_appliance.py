@@ -1285,7 +1285,9 @@ def test_adoption_accepts_the_root_disk_as_libvirt_dumps_it() -> None:
 def test_adoption_accepts_libvirts_empty_backing_terminator_on_every_disk() -> None:
     clock = Clock()
     req = _direct_kernel_request()
-    xml = render_remote_module_appliance(req).replace("<target ", "<backingStore /><target ")
+    xml = render_remote_module_appliance(req).replace(
+        "<target dev=", "<backingStore /><target dev="
+    )
 
     run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
 
