@@ -31,12 +31,17 @@ _RESOLVER = provider_resolver()
 _SEEDED_DIGEST = "sha256:" + "b" * 64
 
 
-def _ctx(role: Role = Role.ADMIN, *, projects: tuple[str, ...] = ("proj",)) -> RequestContext:
+def _ctx(
+    role: Role = Role.ADMIN,
+    *,
+    projects: tuple[str, ...] = ("proj",),
+    roles: dict[str, Role] | None = None,
+) -> RequestContext:
     return RequestContext(
         principal="alice",
         agent_session="s",
         projects=projects,
-        roles={project: role for project in projects},
+        roles={project: role for project in projects} if roles is None else roles,
     )
 
 
@@ -127,6 +132,17 @@ def test_lower_roles_see_no_block_and_no_resolve_hint(migrated_url: str) -> None
 
         assert _BLOCK not in response.data, role
         assert "systems.resolve_external_boot_conflict" not in response.suggested_next_actions
+
+
+def test_admin_elsewhere_or_no_recorded_role_sees_no_block(migrated_url: str) -> None:
+    held_elsewhere = _ctx(
+        projects=("proj", "other"), roles={"proj": Role.VIEWER, "other": Role.ADMIN}
+    )
+    unrecorded = _ctx(roles={})
+    for ctx in (held_elsewhere, unrecorded):
+        response = _read(migrated_url, _STATE.RECOVERY_CONFLICT, ctx, objects=1)
+
+        assert _BLOCK not in response.data
 
 
 def test_a_foreign_project_caller_gets_not_found(migrated_url: str) -> None:

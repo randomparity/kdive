@@ -39,6 +39,8 @@ references that name storage the provider holds, and resolution needs admin.
   worker still rechecks the identity against a fresh observation before acting.
 - `systems.get` is now a viewer tool whose payload depends on the caller's role. The conditional
   is confined to this one block, which is the reason for recording it here.
+- A stored attempt row that fails validation fails the admin's read as a server fault, as other
+  stored-row rebuilds do. Lower roles never reach that read.
 - The tool catalog, exposure matrix and per-tool obligation cells are unchanged. The generated
   CLI help for `observed_identity` and the toolset guide describe where the value comes from.
 - ADR-0805's note that no MCP read exposes the composite is now out of date.

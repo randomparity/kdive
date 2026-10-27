@@ -11,7 +11,7 @@ from kdive.mcp.tools.lifecycle._recovery import iso
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, role_satisfies
 
-#: ``systems.resolve_external_boot_conflict`` bounds the objects it reports the same way.
+#: The most observed objects one response lists; the rest are flagged by ``objects_truncated``.
 MAX_CONFLICT_OBJECTS = 64
 RESOLVE_CONFLICT_ACTION = "systems.resolve_external_boot_conflict"
 
