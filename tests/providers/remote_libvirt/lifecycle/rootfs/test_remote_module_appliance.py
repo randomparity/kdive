@@ -144,6 +144,33 @@ def test_launch_uses_auto_destroy_and_only_scratch_proves_completion() -> None:
     assert outcome.result is not None and outcome.result.phase == "installed"
 
 
+def _after_start_guard(
+    inspect: Callable[[], AttachmentInspection],
+) -> Callable[[], AttachmentInspection]:
+    """Let the pre-start shut-off guard pass, then delegate to the inspection under test."""
+    calls = 0
+
+    def wrapped() -> AttachmentInspection:
+        nonlocal calls
+        calls += 1
+        return request(Clock()).inspect_attachments() if calls == 1 else inspect()
+
+    return wrapped
+
+
+def test_active_system_blocks_appliance_before_create_xml() -> None:
+    clock = Clock()
+    conn = Conn([], clock)
+
+    def inspect() -> AttachmentInspection:
+        raise CategorizedError("owning System is active", category=ErrorCategory.CONFLICT)
+
+    with pytest.raises(CategorizedError, match="owning System is active"):
+        run_or_adopt_appliance(conn, replace(request(clock), inspect_attachments=inspect))
+    assert conn.created_flags is None
+    assert conn.domain is None
+
+
 def test_console_gets_fresh_wait_after_domain_setup_with_shared_cap() -> None:
     clock = Clock()
     req = request(clock)
@@ -157,8 +184,8 @@ def test_console_gets_fresh_wait_after_domain_setup_with_shared_cap() -> None:
     conn = SlowLookupConn([], clock, existing=Domain(render_remote_module_appliance(req)))
     outcome = run_or_adopt_appliance(conn, replace(req, executor=executor))
     assert outcome.timed_out is False
-    assert executor.deadlines[:4] == [30.0, 30.0, 30.0, 30.0]
-    assert executor.deadlines[4] == 50.0
+    assert executor.deadlines[:5] == [30.0, 30.0, 30.0, 30.0, 30.0]
+    assert executor.deadlines[5] == 50.0
     assert outcome.result is None
 
 
@@ -860,7 +887,9 @@ def test_genuinely_blocking_evidence_call_never_promotes_success(stage: str) -> 
         request(clock, result=valid_result),
         read_scratch_result=blocking_result if stage == "scratch" else lambda: valid_result,
         inspect_attachments=(
-            blocking_inspection if stage == "inspection" else request(clock).inspect_attachments
+            _after_start_guard(blocking_inspection)
+            if stage == "inspection"
+            else request(clock).inspect_attachments
         ),
         executor=ThreadDeadlineExecutor(),
     )
@@ -923,7 +952,7 @@ def test_teardown_inspection_failure_does_not_mask_malformed_result() -> None:
 
     req = replace(
         request(clock, result=b"not-json"),
-        inspect_attachments=failed_inspection,
+        inspect_attachments=_after_start_guard(failed_inspection),
     )
     with pytest.raises(ValueError):
         run_or_adopt_appliance(conn, req)
@@ -945,7 +974,9 @@ def test_resolved_supervision_exception_attempts_teardown(stage: str) -> None:
         request(clock, result=success_result()),
         read_scratch_result=(failed_result if stage == "scratch" else lambda: success_result()),
         inspect_attachments=(
-            failed_inspection if stage == "inspection" else request(clock).inspect_attachments
+            _after_start_guard(failed_inspection)
+            if stage == "inspection"
+            else request(clock).inspect_attachments
         ),
     )
     expected = RuntimeError if stage == "console" else LookupError
@@ -966,7 +997,7 @@ def test_resolved_destroy_failure_still_inspects_and_preserves_primary_failure()
     conn = FailingDestroyConn([1], clock)
     with pytest.raises(RuntimeError, match="invalid appliance console"):
         run_or_adopt_appliance(conn, replace(request(clock), inspect_attachments=inspect))
-    assert inspections == 1
+    assert inspections == 2
 
 
 def test_rendered_appliance_passes_attachment_inspector() -> None:

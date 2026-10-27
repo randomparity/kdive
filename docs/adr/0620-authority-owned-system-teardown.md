@@ -412,6 +412,32 @@ Rejected for this amendment:
 - **Do nothing.** verified: see the ADR-0584 amendment of 2026-10-01; the allocator refused the
   teardown, so the System stayed stranded after lease expiry.
 
+### Amendment (2026-10-26): local teardown discards retained recovery (#3341)
+
+The local authority no longer recovers an activation's retained recovery point before it
+destroys the System. It discards the point under the pinned teardown lane:
+`discard_system_teardown_recovery` removes the activation's payloads, publishes the cleanup
+tombstone from any recovery phase, records the quarantine receipt and finalizes the tombstone,
+each step idempotent across a crash. Neither a domain nor a domain definition matching the
+recovery metadata is needed. The pinned lane's ownership check still runs first, so a foreign
+definition refuses with `provider_conflict` and nothing is discarded.
+
+Before, the authority called `recover` (without a power restore, #2898), then `cleanup`. A
+`recovery_conflict` activation could never pass that: its domain matches neither the source nor
+the target XML, so `recover` refused, and an absent domain failed to open the recovery session.
+The teardown mutation stayed at `mutation-started` and the System stayed `ready`. A teardown now
+completes from `recovery_conflict`, with the domain present or already absent. Migration 0147
+already admitted that state, so no schema, request or MCP change is needed. The remote provider
+is unchanged.
+
+Rejected for this amendment:
+
+- **Discard only for `recovery_conflict` and `recovery_failed`.** judgment: it needs the
+  activation state in the authority request, which moves the lifecycle identity hash, for a
+  restore whose result the same teardown destroys.
+- **Try `recover` and fall back to a discard on refusal.** judgment: it hides recovery defects
+  behind a second path that runs on exactly the states nobody exercises.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.

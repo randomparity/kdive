@@ -8,6 +8,27 @@ Debug-detach restrictions superseded by [ADR-0617](0617-external-boot-detach-rem
 
 > **Amended by [ADR-0681](0681-external-boot-clean-power-off.md) (#2780):** on local-libvirt KVM,
 > recovery stops a `target-defined` target with a bounded clean shutdown; otherwise it destroys.
+>
+> **Amended (#3353):** the pre-stop recheck is implemented for PREPARE on both providers by the
+> authority-bound SQL function `external_boot_prestop_system_holders` (migration 0179). It applies
+> the preparation resolver's binding conditions, then answers `session_active` when a debug session
+> is `attach` or `live` on any Run of the System, or `job_active` when a queued or running job
+> other than the activation's own names the System or one of its Runs. Passive housekeeping jobs
+> (`console_rotate`, `check_ssh_reachable`) recur and hold nothing, so they are not counted. It is
+> a separate function because the preparation resolver is also the post-mutation recheck, where a
+> late attach must not turn a completed power change into `superseded`. Local PREPARE reads it
+> before the `admitted` anchor, so a refusal writes no journal record and the same operation can be
+> admitted again; an adopted predecessor performs no stop and is not rechecked. Remote PREPARE reads
+> it before the attempt is journaled and again immediately before the host executes, unless the host
+> already holds a result or completion for the request (a resume, which refuses nothing). A refusal at
+> that second read leaves the already-anchored `mutation-started` for takeover to recover. A held System
+> is `system_held` on the wire (`system-held`), which the worker raises as a `transport_conflict`
+> with completion `refused-before-mutation`; an unreadable answer is a `provider_conflict`. Both
+> perform no provider mutation. PREPARE runs outside the bound-failure wrapper, so no `fail` result
+> is committed for either: the job stays running, is reclaimed at lease lapse (ADR-0593) and
+> retried up to `max_attempts`, as for every preparation-phase refusal. The read and the stop are
+> not one atomic step, so a session that commits between them is not seen; the lane lock
+> serializes authority operations, not attaches.
 
 ## Context
 

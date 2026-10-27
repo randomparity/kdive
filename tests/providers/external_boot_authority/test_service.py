@@ -301,7 +301,7 @@ async def test_read_only_observation_rechecks_current_authority(tmp_path: Path) 
 @pytest.mark.parametrize("evidence_present", [True, False])
 @pytest.mark.parametrize(
     ("purpose", "operation"),
-    [("recover", AuthorityOperation.RECOVER), ("release", AuthorityOperation.CLEANUP)],
+    [("release", AuthorityOperation.CLEANUP)],
 )
 async def test_authenticated_cleanup_resolves_subject_evidence_before_commit(
     tmp_path: Path, evidence_present: bool, purpose: str, operation: AuthorityOperation
@@ -356,21 +356,19 @@ async def test_authenticated_cleanup_resolves_subject_evidence_before_commit(
     assert adapter.calls == (
         ["cleanup-subject", "commit-cleanup", "observe"]
         if evidence_present
-        # ADR-0805: a recover refusal is re-observed, and a non-conflict state keeps the refusal.
         # A cleanup refusal is not re-observed.
-        else ["cleanup-subject", "observe"]
-        if operation is AuthorityOperation.RECOVER
         else ["cleanup-subject"]
     )
 
 
 @pytest.mark.anyio
-async def test_release_recover_commits_without_cleanup_evidence(tmp_path: Path) -> None:
-    """Migration 0145 admits no (release, recover) evidence; a release restore deletes nothing."""
+@pytest.mark.parametrize("purpose", ["release", "recover"])
+async def test_recover_commits_without_cleanup_evidence(tmp_path: Path, purpose: str) -> None:
+    """A RECOVER restores the definition and deletes nothing, so it needs no cleanup evidence."""
     peer = AuthenticatedPeer(uuid4())
     takeover = _takeover().model_copy(
         update={
-            "purpose": "release",
+            "purpose": purpose,
             "operation": AuthorityOperation.RECOVER,
             "provider_kind": "remote-libvirt",
         }
