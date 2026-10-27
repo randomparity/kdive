@@ -89,11 +89,6 @@ def artifact_partial_volume_name(
     return render_boot_artifact_name(kind, system_id, run_id, digest, attempt_id=attempt_id)
 
 
-def artifact_volume_ref(kind: BootArtifactKind, system_id: UUID, run_id: UUID) -> OpaqueProviderRef:
-    """Return the opaque provider reference for one deterministic final volume."""
-    return OpaqueProviderRef(ref=f"{kind}/{system_id}/{run_id}")
-
-
 def render_boot_artifact_volume_xml(
     name: str,
     *,
@@ -231,7 +226,9 @@ def _materialize_one(
 ) -> tuple[OpaqueProviderRef, bool]:
     payload_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
     name = artifact_volume_name(kind, system_id, run_id, payload_digest)
-    ref = artifact_volume_ref(kind, system_id, run_id)
+    # Consumers resolve a reference with a storage lookup by name and parse it back to the owning
+    # System, Run and digest, so the reference is the final volume name itself.
+    ref = OpaqueProviderRef(ref=name)
     try:
         pool = conn.storagePoolLookupByName(pool_name)
         existing = _lookup(pool, name)
