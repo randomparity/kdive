@@ -17,7 +17,9 @@ from kdive.db.external_boot_authority_journal import (
     AdvanceStatus,
     AuthorityBinding,
     JournalHead,
+    PrestopHolders,
     advance_journal_head,
+    external_boot_prestop_system_holders,
     read_journal_head,
     resolve_allocating_authority_binding,
     resolve_current_authority_binding,
@@ -130,6 +132,23 @@ class DatabaseAuthorityRepository:
                 acknowledgement_sequence=acknowledgement_sequence,
                 acknowledgement_digest=acknowledgement_digest,
                 operation=operation,
+            )
+
+    async def prestop_system_holders(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> PrestopHolders | None:
+        async with self._connections() as conn, conn.transaction():
+            return await external_boot_prestop_system_holders(
+                conn,
+                peer_incarnation_id=str(peer.incarnation_id),
+                authority_id=request.authority_id,
+                generation=request.generation,
+                acknowledgement_sequence=acknowledgement_sequence,
+                acknowledgement_digest=acknowledgement_digest,
             )
 
     async def open_remote_module_attempt(

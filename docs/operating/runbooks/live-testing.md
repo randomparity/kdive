@@ -2164,10 +2164,11 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   the activation in `recovery_conflict`. The frame's project admin then calls
   `systems.resolve_external_boot_conflict` with the head's composite. Restoring over a third
   identity is #3330, so the arm requires that job to end with `conflict` too and the activation
-  back in `recovery_conflict`. The arm then stops `blocked` (#3341): teardown from
-  `recovery_conflict` does not complete, so the frame's cleanup fails after its 600 s wait and the
-  System stays `ready` with its allocation held. Run the killed-run cleanup above, or roll the lane
-  host back.
+  back in `recovery_conflict`. The frame's cleanup then tears the System down from
+  `recovery_conflict`, which the local authority settles by discarding the retained recovery point
+  ([ADR-0620](../../adr/0620-authority-owned-system-teardown.md), #3341). The remote arm still
+  stops `blocked` there: that fix changed the local provider only, so the remote cleanup is
+  unproven, and the killed-run cleanup above or a lane-host rollback clears a stranded System.
 - **Blocked arm.** The remote orphan passes the lane gates and skips with `blocked:` and its
   reason before any mutation: the remote-libvirt authority publishes no cleanup quarantine. It is a
   narrower blocker, not a pass.

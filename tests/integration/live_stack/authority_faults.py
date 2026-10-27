@@ -66,8 +66,8 @@ CONFLICT_RESTORE_BLOCKED = (
     "re-records the conflict (#3330)"
 )
 CONFLICT_TEARDOWN_BLOCKED = (
-    "teardown from recovery_conflict does not complete: the teardown mutation is refused as "
-    "provider-conflict and the System stays ready (#3341)"
+    "teardown from recovery_conflict is unproven on the remote-libvirt authority: #3341 changed "
+    "the local provider only"
 )
 LOCAL_PRESENT_ORPHAN_BLOCKED = (
     "a quarantined receipt survives to resolution only if the release job ends terminally "

@@ -67,6 +67,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     owned_system_semantic_identity,
     prove_no_foreign_system_storage_references,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalArtifactRoot
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,
@@ -287,6 +288,39 @@ def test_teardown_session_rejects_xml_ownership_mismatch_before_mutation(
     assert not any(event.startswith("domain.undefine") for event in events)
     assert overlay.exists()
     assert baseline.exists()
+
+
+def test_teardown_session_cleans_payloads_under_the_activation_root_without_a_domain(
+    tmp_path: Path,
+) -> None:
+    """#3341: discarding a conflicted activation must not need its domain."""
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    domain.defined = False
+    factory, _overlay, _baseline = _teardown_factory(tmp_path, events, domain)
+    recovery_root = tmp_path / "recovery"
+    recovery_root.mkdir(mode=0o700)
+    factory._open_artifact_root = LocalArtifactRoot(recovery_root).open
+    cleaned: list[tuple[str, int]] = []
+
+    def record(fd: int, _metadata: object) -> None:
+        cleaned.append((os.readlink(f"/proc/self/fd/{fd}"), fd))
+
+    factory._cleanup_payloads = record
+    session = factory.open_teardown(_lease(), _expected())
+    mismatched = cast(Any, type("M", (), {"binding": object()})())
+
+    with pytest.raises(ValueError, match="does not match session ownership"):
+        session.cleanup_payloads(mismatched)
+    assert not cleaned
+
+    session.cleanup_payloads(cast(Any, type("M", (), {"binding": BINDING})()))
+    session.close()
+
+    [(root, fd)] = cleaned
+    assert root == str(recovery_root / BINDING.system_id / BINDING.run_id / BINDING.activation_id)
+    with pytest.raises(OSError):
+        os.fstat(fd)
 
 
 def test_teardown_session_absent_replay_is_read_only_and_creates_nothing(tmp_path: Path) -> None:
