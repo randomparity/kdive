@@ -386,6 +386,15 @@ def _remote_domain(value: object) -> RemoteDomain | None:
     return RemoteDomain(active, kind)
 
 
+def run_as_authority(config: RemoteAuthorityProofConfig, script: str, *args: str) -> bytes:
+    """Run one fixed proof script as the remote authority account, over the operator's SSH."""
+    return _ssh(
+        config,
+        ("sudo", "-n", "-u", _AUTHORITY_ACCOUNT, _AUTHORITY_VENV_PYTHON, "-I", "-c", script, *args),
+        timeout=120,
+    )
+
+
 def remote_authority_inventory(
     config: RemoteAuthorityProofConfig, system_id: str | None = None
 ) -> RemoteAuthorityInventory:

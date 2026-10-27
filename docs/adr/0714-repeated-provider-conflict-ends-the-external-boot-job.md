@@ -58,6 +58,15 @@ records only `result_requeued`.
 - A worker running this code before the migration has its marked `fail` refused (`22023`). The
   job then stays `running` until reclaim, which is no worse than the churn before this change.
 
+### Amendment (2026-10-21): a refusal the authority proves is a conflict skips the repeat check (#3327)
+
+This qualifies the first consequence, which counts every provider-call refusal toward the two
+identical failures. Under [ADR-0805](0805-authority-observed-conflict-is-recorded-from-its-journal-head.md)
+the authority re-observes a refused `activate`, `recover` or `resolve-conflict` call. When that
+observation is a `conflict`, it answers with the observation instead of `provider-conflict`, and
+the worker records `recovery_conflict` after that one generation. Refusals over any other observed
+state still reach this ADR's repeat check unchanged.
+
 ## Considered & rejected
 
 - **Do nothing; rely on #2898's provider fixes.** judgment: the next deterministic provider defect

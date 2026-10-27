@@ -101,7 +101,8 @@ async def test_unresolved_mutation_is_fenced_before_successor_takeover(
 
     acknowledgement = await service.acknowledge_takeover(peer, successor)
     assert acknowledgement.generation == 2
-    assert adapter.calls == ["commit:activate", "observe"]
+    # The refusal is re-observed for a conflict (ADR-0805), then the takeover settles it.
+    assert adapter.calls == ["commit:activate", "observe", "observe"]
     assert repository.records[-1].phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
     assert repository.records[-2].phase is JournalPhase.TERMINAL
 
