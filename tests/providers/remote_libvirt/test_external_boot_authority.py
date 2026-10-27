@@ -2441,6 +2441,38 @@ async def test_unclearable_prior_power_record_does_not_latch_a_restored_system(
 
 
 @pytest.mark.anyio
+async def test_a_recorded_stop_counts_as_an_execution_that_started(tmp_path: Path) -> None:
+    """A crash after the stop leaves the System stopped, so a resume must not be refused."""
+    request = _remote_preparation_request()
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, InactiveSystemHost()))
+    assert durable.execution_started(request) is False
+
+    store.record_prior_power(request.authority, "running")
+    assert durable.execution_started(request) is True
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_a_restored_abandon_is_not_an_execution_that_started(tmp_path: Path) -> None:
+    request = _remote_preparation_request()
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            raise RuntimeError("provider returned after mutation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(CategorizedError):
+        await durable.execute(request)
+
+    assert durable.execution_started(request) is False
+    store.close()
+
+
+@pytest.mark.anyio
 async def test_cancelled_abandon_keeps_the_failure_latched(tmp_path: Path) -> None:
     request = _remote_preparation_request()
 

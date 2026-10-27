@@ -1574,11 +1574,22 @@ class DurableRemoteModuleVolumePreparationHost:
         )
 
     def execution_started(self, request: RemoteModuleVolumePreparationRequestV1) -> bool:
-        """Whether an earlier execute already reached the provider for this request."""
+        """Whether an earlier execute already reached the provider for this request.
+
+        A recorded prior power counts: it is written ahead of the stop, and a successful abandon
+        clears it, so a crash after the stop leaves a System that must not be refused.
+        """
         self._store.reopen_request(request)
+        authority = request.authority
+        binding = ExternalBootActivationBinding(
+            system_id=str(authority.system_id),
+            run_id=str(authority.run_id),
+            activation_id=str(authority.activation_id),
+        )
         return (
             self._store.reopen_completion(request) is not None
             or self._store.reopen_result(request) is not None
+            or self._store.prior_power(binding, authority.plan_identity) is not None
         )
 
     async def _quiesce_system(self, admitted: AdmittedRemoteModulePreparation) -> None:
