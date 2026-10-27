@@ -277,6 +277,16 @@ whose holders have since cleared is answered `provider_conflict`: the host is ne
 as before. A failure with no recorded power (nothing was stopped) is reported
 `refused-before-mutation`.
 
+Two further refusals left the same unresolved operation and are closed the same way. A PREPARE the
+authority itself refuses after anchoring it, because the attempt-receipt gate answers `superseded`
+or the host's `begin` fails, is settled before the refusal is raised. The remote adapter also
+implements `adopt_preparation`, delegating to the coordinator, so a retry generation adopts the
+first generation's MATERIALIZE receipt instead of being refused `provider-conflict`. A retry
+generation after the first still cannot open its module attempt: the receipt gate requires a
+`materialize`/`result_committed` audit row for the current generation, which an adopted
+materialization does not write. That gate is tracked as #3370; until it lands a failed PREPARE is
+not retried, and the job exhausts with nothing left unresolved.
+
 No journal phase, wire field or schema changes.
 
 ## Consequences
