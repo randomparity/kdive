@@ -5,7 +5,6 @@ from __future__ import annotations
 from psycopg import AsyncConnection
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
-from kdive.domain.external_boot_activation import ExternalBootRecoveryAttemptState
 from kdive.domain.lifecycle.records import System
 from kdive.mcp.responses import JsonValue
 from kdive.mcp.tools.lifecycle._recovery import iso
@@ -35,11 +34,8 @@ async def read_conflict_evidence(
     if activation is None:
         return None
     attempt = await _REPOSITORY.get_current_recovery_attempt(conn, activation.id)
-    if (
-        attempt is None
-        or attempt.state is not ExternalBootRecoveryAttemptState.CONFLICT
-        or attempt.conflict_evidence is None
-    ):
+    # The attempt model holds conflict evidence exactly while the attempt is in conflict.
+    if attempt is None or attempt.conflict_evidence is None:
         return None
     evidence = attempt.conflict_evidence
     refs = [ref.ref for ref in evidence.objects]
