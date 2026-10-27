@@ -715,7 +715,7 @@ class _Quiesce:
             monotonic=clock,
         )
         self.executor = RemoteModulePreparationExecutor()
-        host = ConcreteRemoteModuleAuthorityHost(
+        host = self.host = ConcreteRemoteModuleAuthorityHost(
             RemoteModuleAuthorityHostConfiguration(volume_config, appliance_config, _Identity()),
             self.executor,
         )
@@ -899,4 +899,83 @@ async def test_missing_result_logs_the_bounded_console_tail(
     messages = [record.getMessage() for record in caplog.records]
     assert any("error_code=FILESYSTEM_FAILURE" in message for message in messages)
     assert any(f"system={stack.request.operation.system_id}" in message for message in messages)
+    stack.close()
+
+
+def _root_volume_xml(backing: str | None, backing_format: str | None = "qcow2") -> str:
+    document = "<volume><name>root</name><capacity unit='bytes'>4096</capacity>"
+    if backing is not None:
+        document += f"<backingStore><path>{backing}</path>"
+        if backing_format is not None:
+            document += f"<format type='{backing_format}'/>"
+        document += "</backingStore>"
+    return document + "</volume>"
+
+
+def _seed_root(stack: _Quiesce, xml: str) -> str:
+    name = stack.request.operation.root_volume.key
+    stack.storage.pool.foreign[name] = Volume(xml, 4096, name)
+    return name
+
+
+@pytest.mark.parametrize("fixed_inspection_path", [False, True])
+def test_expected_attachments_carry_the_staged_base_for_every_inspection(
+    tmp_path: Path, fixed_inspection_path: bool
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    operation = stack.request.operation
+    _seed_root(stack, _root_volume_xml("/var/lib/kdive/pool/base.qcow2"))
+
+    if fixed_inspection_path:
+        wanted = stack.host._expected_attachments(operation).appliance.root_backing_path
+    else:
+        wanted = stack.host._root_backing_path("systems", operation.root_volume.key)
+
+    assert wanted == "/var/lib/kdive/pool/base.qcow2"
+    stack.close()
+
+
+@pytest.mark.parametrize(
+    ("xml", "message"),
+    [
+        (_root_volume_xml("base.qcow2"), "normalized absolute"),
+        (_root_volume_xml("/pool/../etc/base.qcow2"), "normalized absolute"),
+        (_root_volume_xml("/pool//base.qcow2"), "normalized absolute"),
+        (_root_volume_xml(" /pool/base.qcow2"), "normalized absolute"),
+        (_root_volume_xml("/pool/base.qcow2", "raw"), "not qcow2"),
+        (_root_volume_xml("/pool/base.qcow2", None), "not qcow2"),
+    ],
+)
+def test_a_root_backing_path_that_is_not_the_exact_qcow2_base_is_refused(
+    tmp_path: Path, xml: str, message: str
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    name = _seed_root(stack, xml)
+
+    with pytest.raises(CategorizedError, match=message) as refused:
+        stack.host._root_backing_path("systems", name)
+
+    assert refused.value.category is ErrorCategory.CONFLICT
+    stack.close()
+
+
+def test_a_root_volume_without_a_backing_store_renders_no_backing_path(tmp_path: Path) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    name = _seed_root(stack, _root_volume_xml(None))
+
+    assert stack.host._root_backing_path("systems", name) is None
+    stack.close()
+
+
+def test_an_absent_root_volume_is_an_error_for_a_run_but_not_for_a_cleanup_inspection(
+    tmp_path: Path,
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    stack.storage.pool.foreign.clear()
+    name = stack.request.operation.root_volume.key
+
+    with pytest.raises(CategorizedError, match="backing store") as refused:
+        stack.host._root_backing_path("systems", name)
+    assert refused.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert stack.host._root_backing_path("systems", name, absent_ok=True) is None
     stack.close()

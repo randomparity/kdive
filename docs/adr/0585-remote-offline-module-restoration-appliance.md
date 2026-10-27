@@ -261,7 +261,7 @@ gaps in this record's own contract explained it:
   console filter already keeps. When no result is read, the host logs the bounded, redacted,
   filtered console tail.
 
-Live runs on the remote lane found four more gaps between what the provider rendered and what the
+Live runs on the remote lane found five more gaps between what the provider rendered and what the
 appliance needs, all fixed here:
 
 - **The root overlay reached the guest as a raw disk.** The domain carried no `<driver>`, so the
@@ -275,6 +275,13 @@ appliance needs, all fixed here:
 - **A usr-merged root has `/lib` as the symlink `usr/lib`.** The appliance walks the module directory
   with `O_NOFOLLOW`, so it refused such a root. It now resolves exactly the relative target `usr/lib`
   to `usr/lib/modules`; every other symlink in the walk is still refused.
+- **The appliance start relabelled the shared base.** The System's qcow2 overlay is backed by the
+  authority's staged base, and libvirt relabels a backing file at every domain start, which moves
+  its ctime and trips the authority's staged-base check (ADR-0623). The appliance root disk now
+  names that base explicitly with the same `selinux` `relabel="no"` seclabel the System domain
+  uses; the host reads the base from the root volume's libvirt XML and refuses a path that is not
+  an absolute normalized qcow2 base. Adoption accepts libvirt's empty backing terminator on every
+  disk and, on the root only, exactly that typed backing.
 - **The console wait outlived the appliance.** The console stream of a finished domain keeps
   answering "would block", so the host waited the full 30 s and then reported no result although the
   durable result was on scratch. The wait now ends when the domain is gone, and the scratch result is
