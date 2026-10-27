@@ -289,6 +289,36 @@ def test_teardown_session_rejects_xml_ownership_mismatch_before_mutation(
     assert baseline.exists()
 
 
+def test_teardown_session_cleans_payloads_without_a_domain(tmp_path: Path) -> None:
+    """#3341: discarding a conflicted activation must not need its domain."""
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    domain.defined = False
+    factory, overlay, baseline = _teardown_factory(tmp_path, events, domain)
+    cleaned: list[tuple[int, object]] = []
+    opened: list[int] = []
+
+    def open_root(_ownership: object) -> int:
+        opened.append(os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY))
+        return opened[-1]
+
+    factory._open_artifact_root = open_root
+    factory._cleanup_payloads = lambda fd, metadata: cleaned.append((fd, metadata))
+    session = factory.open_teardown(_lease(), _expected())
+    mismatched = cast(Any, type("M", (), {"binding": object()})())
+
+    with pytest.raises(ValueError, match="does not match session ownership"):
+        session.cleanup_payloads(mismatched)
+    assert not cleaned
+
+    session.cleanup_payloads(cast(Any, type("M", (), {"binding": BINDING})()))
+    session.close()
+
+    assert len(cleaned) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
 def test_teardown_session_absent_replay_is_read_only_and_creates_nothing(tmp_path: Path) -> None:
     events: list[str] = []
     domain = _TeardownDomain(events)

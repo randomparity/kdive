@@ -1101,6 +1101,13 @@ class LocalSystemTeardownIO(Protocol):
     def system_teardown_recovery_is_absent(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
     ) -> bool: ...
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None: ...
 
 
 class LocalExternalBootMaterializer(Protocol):
@@ -1841,6 +1848,43 @@ class RealLocalExternalBootIO:
         ):
             return store.exact_recovery_absence(intent.binding)
 
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        """Settle a retained recovery point without recovering it (#3341).
+
+        The domain is destroyed next, so restoring the guest is pointless, and a conflicted
+        activation cannot be restored: its definition matches neither source nor target. This
+        needs the pinned teardown lane (so a foreign definition still refuses in the ownership
+        check) but not a domain, and it accepts any recovery phase.
+        """
+        with (
+            self._open_system_teardown(intent, authority) as session,
+            RecoveryMetadataStore(self._recovery_root) as store,
+        ):
+            session.inspect()
+            reference = recovery.recovery_ref
+            if not store.cleanup_complete(reference, recovery):
+                metadata = store.reopen(reference, recovery.binding)
+                if _recovery_point_of(metadata, reference) != recovery:
+                    raise ValueError(
+                        "external-boot recovery metadata does not match recovery point"
+                    )
+                session.cleanup_payloads(metadata)
+                store.publish_tombstone(
+                    reference,
+                    recovery.binding,
+                    metadata,
+                    LocalLibvirtExternalBoot.point_digest(recovery),
+                    require_recovered=False,
+                )
+                store.record_cleanup_quarantine(recovery, proof)
+            store.finalize_tombstone(reference, recovery, proof)
+
     def teardown_system(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
     ) -> AuthoritySystemTeardownFacts:
@@ -1901,6 +1945,19 @@ class RealLocalExternalBootIO:
             raise
         else:
             session.close()
+
+
+def _recovery_point_of(
+    metadata: LocalRecoveryMetadataV1, reference: OpaqueProviderRef
+) -> RecoveryPoint:
+    return RecoveryPoint(
+        binding=metadata.binding,
+        plan_identity=metadata.plan_identity,
+        materialization_identity=metadata.materialization_identity,
+        recovery_ref=reference,
+        source_state=metadata.source_state,
+        target_state=metadata.target_state,
+    )
 
 
 def _system_teardown_facts(
@@ -2681,6 +2738,17 @@ class LocalLibvirtExternalBoot:
     ) -> bool:
         return cast(LocalSystemTeardownIO, self._io).system_teardown_recovery_is_absent(
             intent, authority
+        )
+
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        cast(LocalSystemTeardownIO, self._io).discard_system_teardown_recovery(
+            intent, recovery, proof, authority
         )
 
     @staticmethod
@@ -3767,8 +3835,14 @@ class RecoveryMetadataStore:
         binding: ExternalBootActivationBinding,
         expected: LocalRecoveryMetadataV1,
         point_digest: Digest,
+        *,
+        require_recovered: bool = True,
     ) -> CleanupTombstoneV1:
-        """Atomically replace recovered metadata with accounted cleanup evidence."""
+        """Atomically replace recovered metadata with accounted cleanup evidence.
+
+        System teardown discards a conflicted activation unrecovered (#3341), so it passes
+        ``require_recovered=False``.
+        """
         self._require_open()
         name = recovery_directory_name(reference, binding)
         directory_fd = _open_private_directory(self._root_fd, name)
@@ -3788,7 +3862,7 @@ class RecoveryMetadataStore:
         try:
             if expected.binding != binding or self._read(directory_fd) != expected:
                 raise ValueError("recovery metadata changed before cleanup")
-            if expected.phase != "recovered":
+            if require_recovered and expected.phase != "recovered":
                 raise ValueError("recovery must complete before cleanup")
             temporary = ".tombstone.next"
             _replace_private_file(

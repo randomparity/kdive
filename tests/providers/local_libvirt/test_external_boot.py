@@ -254,6 +254,7 @@ class _SystemTeardownSession:
         self.overlay_present = True
         self.baseline_present = True
         self.domain_was_validated = True
+        self.foreign_definition = False
         self.actions: list[str] = []
         self.destroy_mutations = 0
         self.undefine_mutations = 0
@@ -261,6 +262,8 @@ class _SystemTeardownSession:
 
     def inspect(self) -> LocalSystemTeardownInspection:
         self.actions.append("inspect")
+        if self.foreign_definition:
+            raise ValueError("domain definition is not owned by this System")
         return LocalSystemTeardownInspection(
             domain_absent=not self.domain_present,
             domain_validated=self.domain_present and self.domain_was_validated,
@@ -290,6 +293,10 @@ class _SystemTeardownSession:
         self.actions.append("remove-baseline")
         self.baseline_present = False
 
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
+        del metadata
+        self.actions.append("cleanup-payloads")
+
     def close(self) -> None:
         self.actions.append("close")
 
@@ -312,6 +319,88 @@ def _system_teardown_io(root: Path, session: _SystemTeardownSession) -> RealLoca
         1024,
         lambda: datetime(2026, 9, 6, tzinfo=UTC),
     )
+
+
+@pytest.mark.parametrize("domain_present", [True, False])
+@pytest.mark.parametrize("phase", ["pre-stop-intent", "target-defined", "new-live", "recovered"])
+def test_system_teardown_discards_unrecovered_point_without_a_domain_match(
+    tmp_path: Path, phase: RecoveryPhase, domain_present: bool
+) -> None:
+    """#3341: a conflicted activation cannot be recovered, so teardown discards it instead."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata(phase)
+    point = _point(metadata)
+    session = _SystemTeardownSession()
+    session.domain_present = session.domain_active = domain_present
+    session.overlay_present = session.baseline_present = domain_present
+    io = _system_teardown_io(root, session)
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
+    result = io.teardown_system(intent, authority)
+
+    assert session.actions.count("cleanup-payloads") == 1
+    assert result.complete
+    assert result.recovery_absent
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING)
+
+
+def test_system_teardown_discard_refuses_foreign_definition_and_keeps_recovery(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("target-defined")
+    point = _point(metadata)
+    session = _SystemTeardownSession()
+    session.foreign_definition = True
+    io = _system_teardown_io(root, session)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    with pytest.raises(ValueError, match="not owned"):
+        io.discard_system_teardown_recovery(
+            _teardown_intent(), point, _cleanup_proof_for(point), OpaqueProviderRef(ref="a")
+        )
+
+    assert "cleanup-payloads" not in session.actions
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(point.recovery_ref, point.binding) == metadata
+
+
+def test_system_teardown_discard_resumes_after_a_crash_before_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("target-defined")
+    point = _point(metadata)
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    authority = OpaqueProviderRef(ref="authority/current")
+    proof = _cleanup_proof_for(point)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+    original = RecoveryMetadataStore.finalize_tombstone
+
+    def crash(*_args: object, **_kwargs: object) -> None:
+        raise OSError("crashed before finalization")
+
+    monkeypatch.setattr(RecoveryMetadataStore, "finalize_tombstone", crash)
+    with pytest.raises(OSError, match="crashed before finalization"):
+        io.discard_system_teardown_recovery(_teardown_intent(), point, proof, authority)
+    monkeypatch.setattr(RecoveryMetadataStore, "finalize_tombstone", original)
+
+    io.discard_system_teardown_recovery(_teardown_intent(), point, proof, authority)
+
+    assert session.actions.count("cleanup-payloads") == 1
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING)
 
 
 @pytest.mark.parametrize(
