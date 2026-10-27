@@ -2163,6 +2163,7 @@ class ExternalBootAuthorityService:
         if trusted is None or not self._root_candidate_matches_preparation(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
+        anchored_here = False
         try:
             async with lane.lock:
                 if lane.failed:
@@ -2235,24 +2236,23 @@ class ExternalBootAuthorityService:
                         records,
                         self._record(mutation, records, JournalPhase.MUTATION_STARTED),
                     )
-                try:
-                    receipt = await self._repository.open_remote_module_attempt(
-                        authenticated,
-                        request,
-                        acknowledgement.sequence,
-                        record_digest(acknowledgement),
-                    )
-                    if receipt is None:
-                        raise AuthorityServiceError("superseded")
-                    return await self._remote_module_host.begin(
-                        request, receipt, begin.budget_seconds
-                    )
-                except Exception:
-                    # The operation is anchored; a refusal now would leave it unresolved.
-                    await self._settle_abandoned_preparation(
-                        mutation, records, journal, binding, lane, "refused", lane_locked=True
-                    )
-                    raise
+                    anchored_here = True
+                receipt = await self._repository.open_remote_module_attempt(
+                    authenticated,
+                    request,
+                    acknowledgement.sequence,
+                    record_digest(acknowledgement),
+                )
+                if receipt is None:
+                    if anchored_here:
+                        # A definitive refusal of an operation this call anchored; a re-begin
+                        # of an earlier operation may belong to a live execute, and a transient
+                        # host failure must stay retryable, so neither is settled.
+                        await self._settle_abandoned_preparation(
+                            mutation, records, journal, binding, lane, "refused", lane_locked=True
+                        )
+                    raise AuthorityServiceError("superseded")
+                return await self._remote_module_host.begin(request, receipt, begin.budget_seconds)
         except AuthorityServiceError as error:
             self._ensure_rejection(mutation, error)
             raise
@@ -2614,7 +2614,8 @@ class ExternalBootAuthorityService:
                     ),
                 )
         except Exception as error:  # noqa: BLE001 -- the provider's failure is the one reported
-            self._logger.error(
+            superseded = getattr(error, "category", None) == "superseded"
+            (self._logger.warning if superseded else self._logger.error)(
                 "abandoned remote module preparation could not be settled",
                 extra={
                     "error": type(error).__qualname__,

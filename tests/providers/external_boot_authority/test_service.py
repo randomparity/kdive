@@ -1127,6 +1127,43 @@ async def test_begin_refused_after_anchoring_is_settled_so_the_retry_proceeds(
 
 
 @pytest.mark.anyio
+async def test_rebegin_of_an_earlier_operation_is_never_settled(tmp_path: Path) -> None:
+    """An idempotent re-begin may belong to a live execute, so its refusal leaves it open."""
+    service, repository, _remote, peer, first, _prepare = await _failed_prepare_service(
+        tmp_path, RuntimeError("unused")
+    )
+    repository.remote_attempt = None
+
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.open_remote_module_attempt(
+            peer, RemoteModulePreparationBeginRequestV1(authority=first, budget_seconds=30)
+        )
+
+    assert refused.value.category == "superseded"
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+
+@pytest.mark.anyio
+async def test_transient_host_begin_failure_is_not_settled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, repository, _remote, peer, first, _prepare = await _failed_prepare_service(
+        tmp_path, RuntimeError("unused"), begun=False
+    )
+
+    async def derive_failed(*_args: object) -> None:
+        raise TimeoutError("derive")
+
+    monkeypatch.setattr(service._remote_module_host, "begin", derive_failed)
+    with pytest.raises(TimeoutError):
+        await service.open_remote_module_attempt(
+            peer, RemoteModulePreparationBeginRequestV1(authority=first, budget_seconds=30)
+        )
+
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+
+@pytest.mark.anyio
 async def test_execute_refused_after_anchoring_is_settled(tmp_path: Path) -> None:
     service, repository, remote, peer, _first, _prepare = await _failed_prepare_service(
         tmp_path, RuntimeError("unused")
