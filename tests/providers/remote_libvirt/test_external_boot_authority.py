@@ -4378,7 +4378,8 @@ async def test_remote_finalize_resumes_after_a_crash_at_any_deletion(
     for crash_at in range(1, 100):
         root = tmp_path / f"crash-{crash_at}"
         root.mkdir()
-        adapter, _record, request, context, store = await _finalized_release_store(root)
+        adapter, record, request, context, store = await _finalized_release_store(root)
+        refs = store._teardown_refs(record.binding, record.plan_identity)
         seen = 0
 
         def failing(path: str, *args: Any, _at: int = crash_at, **kwargs: Any) -> None:
@@ -4400,6 +4401,7 @@ async def test_remote_finalize_resumes_after_a_crash_at_any_deletion(
             crashes += 1
             await adapter.finalize(request, context)
         assert _store_names(store) == expected
+        assert store.finalized_teardown_refs(record.binding, record.plan_identity) == refs
         adapter.close()
         if not crashed:
             break
@@ -4473,4 +4475,128 @@ async def test_remote_finalize_leaves_an_unparseable_foreign_file_and_still_fina
     assert store.cleanup_finalized(record.binding, record.plan_identity)
     with pytest.raises(FileNotFoundError):
         store.recovery_point(record.binding, record.plan_identity)
+    adapter.close()
+
+
+def _teardown_operations() -> ConcreteRemoteExternalBootOperations:
+    return ConcreteRemoteExternalBootOperations(
+        cast(Any, object()),
+        cast(Any, object()),
+        "modules",
+        lambda: 1.0,
+        cast(Any, object()),
+        cast(Any, object()),
+    )
+
+
+@pytest.mark.anyio
+async def test_remote_teardown_after_finalize_protects_the_same_volumes_as_before(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    coordinator = adapter._coordinator
+    operations = _teardown_operations()
+    before = coordinator.system_teardown_state(record.binding, record.plan_identity)
+    assert before.finalized is None and before.terminal is not None
+    protected = operations._protected_teardown_volumes(before)
+    assert ("modules", "kernel/abc") in protected
+    assert len(protected) == 6
+
+    await adapter.finalize(request, context)
+
+    after = coordinator.system_teardown_state(record.binding, record.plan_identity)
+    assert after.terminal is None and after.finalized is not None
+    assert operations._protected_teardown_volumes(after) == protected
+    with pytest.raises(ValueError, match="boot artifact identity differs"):
+        operations._teardown_boot_volumes(before)
+    with pytest.raises(ValueError, match="boot artifact identity differs"):
+        operations._teardown_boot_volumes(after)
+    adapter.close()
+
+
+def test_remote_finalized_refs_without_a_terminal_protect_the_nonce_volumes() -> None:
+    binding = _record().binding
+    refs = external_boot_authority.RemoteFinalizedTeardownRefsV1(
+        module_volumes=(), operation_nonce="c" * 32, boot_artifacts=()
+    )
+    state = RemoteSystemTeardownState(
+        binding=binding,
+        plan_identity=_record().plan_identity,
+        preparation=None,
+        terminal=None,
+        materialization=None,
+        recovery=None,
+        finalized=refs,
+    )
+    operations = _teardown_operations()
+
+    protected = operations._protected_teardown_volumes(state)
+
+    assert {name for _pool, name in protected if name.endswith(("source.ext4", "scratch.ext4"))}
+    assert len(protected) == 4
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("damage", ["garbage", "not-canonical", "unknown-field"])
+async def test_remote_malformed_finalized_marker_fails_closed(tmp_path: Path, damage: str) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    await adapter.finalize(request, context)
+    name = store._finalized_name(record.binding, record.plan_identity)
+    good = cast(bytes, store._read(name))
+    bad = {
+        "garbage": b"{",
+        "not-canonical": b" " + good,
+        "unknown-field": good.replace(b'{"receipt"', b'{"extra":1,"receipt"', 1),
+    }[damage]
+    os.unlink(name, dir_fd=store._root_fd)
+    store._publish(name, bad)
+
+    with pytest.raises(ValueError, match="malformed"):
+        store.finalized_teardown_refs(record.binding, record.plan_identity)
+    with pytest.raises(ValueError, match="malformed"):
+        adapter._coordinator.system_teardown_state(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_legacy_finalized_marker_serves_teardown_only_while_files_remain(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    store._publish(
+        store._finalized_name(record.binding, record.plan_identity),
+        receipt.model_copy(update={"managed": False}).to_canonical_json(),
+    )
+
+    assert store.finalized_teardown_refs(record.binding, record.plan_identity) is None
+    key = store._terminal_key(
+        record.binding.system_id,
+        record.binding.activation_id,
+        record.binding.run_id,
+        record.plan_identity,
+    )
+    os.unlink(f"{key}.terminal", dir_fd=store._root_fd)
+    with pytest.raises(ValueError, match="no teardown refs"):
+        store.finalized_teardown_refs(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_upgrades_a_legacy_marker_with_the_refs(tmp_path: Path) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    expected = store._teardown_refs(record.binding, record.plan_identity)
+    store._publish(
+        store._finalized_name(record.binding, record.plan_identity),
+        receipt.model_copy(update={"managed": False}).to_canonical_json(),
+    )
+
+    await adapter.finalize(request, context)
+
+    assert store.finalized_teardown_refs(record.binding, record.plan_identity) == expected
+    assert expected.module_volumes
     adapter.close()
