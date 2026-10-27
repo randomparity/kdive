@@ -373,8 +373,9 @@ def test_system_teardown_discard_refuses_foreign_definition_and_keeps_recovery(
         assert store.reopen(point.recovery_ref, point.binding) == metadata
 
 
-def test_system_teardown_discard_resumes_after_a_crash_before_finalization(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("crash_at", ["record_cleanup_quarantine", "finalize_tombstone"])
+def test_system_teardown_discard_resumes_after_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash_at: str
 ) -> None:
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
@@ -386,21 +387,53 @@ def test_system_teardown_discard_resumes_after_a_crash_before_finalization(
     proof = _cleanup_proof_for(point)
     with RecoveryMetadataStore(root) as store:
         store.publish(metadata)
-    original = RecoveryMetadataStore.finalize_tombstone
+    original = getattr(RecoveryMetadataStore, crash_at)
 
     def crash(*_args: object, **_kwargs: object) -> None:
-        raise OSError("crashed before finalization")
+        raise OSError("crashed mid-discard")
 
-    monkeypatch.setattr(RecoveryMetadataStore, "finalize_tombstone", crash)
-    with pytest.raises(OSError, match="crashed before finalization"):
+    monkeypatch.setattr(RecoveryMetadataStore, crash_at, crash)
+    with pytest.raises(OSError, match="crashed mid-discard"):
         io.discard_system_teardown_recovery(_teardown_intent(), point, proof, authority)
-    monkeypatch.setattr(RecoveryMetadataStore, "finalize_tombstone", original)
+    monkeypatch.setattr(RecoveryMetadataStore, crash_at, original)
+    recorded: list[str] = []
+    original_record = RecoveryMetadataStore.record_cleanup_quarantine
+
+    def record(
+        self: RecoveryMetadataStore, recovery: RecoveryPoint, proof: FinalizeCleanupProof
+    ) -> None:
+        recorded.append("record")
+        original_record(self, recovery, proof)
+
+    monkeypatch.setattr(RecoveryMetadataStore, "record_cleanup_quarantine", record)
 
     io.discard_system_teardown_recovery(_teardown_intent(), point, proof, authority)
 
     assert session.actions.count("cleanup-payloads") == 1
+    assert recorded == (["record"] if crash_at == "record_cleanup_quarantine" else [])
     with RecoveryMetadataStore(root) as store:
         assert store.exact_recovery_absence(_BINDING)
+
+
+def test_system_teardown_discard_refuses_a_foreign_proof_before_deleting(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("target-defined")
+    point = _point(metadata)
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    proof = _cleanup_proof_for(point).model_copy(update={"point_digest": "sha256:" + "0" * 64})
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    with pytest.raises(ValueError, match="proof does not match"):
+        io.discard_system_teardown_recovery(
+            _teardown_intent(), point, proof, OpaqueProviderRef(ref="a")
+        )
+
+    assert "cleanup-payloads" not in session.actions
 
 
 @pytest.mark.parametrize(

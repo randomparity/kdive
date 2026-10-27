@@ -1868,6 +1868,11 @@ class RealLocalExternalBootIO:
         ):
             session.inspect()
             reference = recovery.recovery_ref
+            if (
+                proof.binding != recovery.binding
+                or proof.point_digest != LocalLibvirtExternalBoot.point_digest(recovery)
+            ):
+                raise ValueError("external-boot cleanup proof does not match recovery point")
             if not store.cleanup_complete(reference, recovery):
                 metadata = store.reopen(reference, recovery.binding)
                 if _recovery_point_of(metadata, reference) != recovery:
@@ -1882,6 +1887,7 @@ class RealLocalExternalBootIO:
                     LocalLibvirtExternalBoot.point_digest(recovery),
                     require_recovered=False,
                 )
+            if store.read_cleanup_quarantine(recovery.binding) is None:
                 store.record_cleanup_quarantine(recovery, proof)
             store.finalize_tombstone(reference, recovery, proof)
 
