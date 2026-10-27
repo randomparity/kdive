@@ -1107,7 +1107,7 @@ class RemoteModuleVolumePreparationStore:
         """Durably fix the System's power from before the first stop; the first record wins.
 
         A retry after the stop landed observes ``inactive``, so it must read this record
-        rather than the domain.
+        rather than the domain. The key is the activation, so a later activation records anew.
         """
         key = self._terminal_key(
             authority.system_id, authority.activation_id, authority.run_id, authority.plan_identity

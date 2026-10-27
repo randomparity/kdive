@@ -217,10 +217,17 @@ overlay. The authority-host PREPARE now owns the stop, as ADR-0583 describes for
 - Before any other provider mutation, PREPARE reads the System's power and records it in the
   provider-host store, then destroys a running domain and requires it inactive. The record is
   written ahead of the destroy and the first record wins, so a retry that finds the domain already
-  stopped keeps the power the System had. The remote recovery record takes `prior_power` from this
-  record, falling back to a live read when none exists.
-- A domain that cannot be read or stopped is refused with `refused-before-mutation`, which the
-  preparation operation now maps to `remote-module-refused` as the lifecycle operation already did.
+  stopped keeps the power the System had. The record is scoped to the activation, so it is not
+  re-read for a later activation. The remote recovery record takes `prior_power` from this record,
+  falling back to a live read when none exists.
+- The stop is a `destroy`, as the external-boot stop is: verified inactivity, not guest
+  cooperation, is the precondition. A bounded clean shutdown first would spare the guest an unclean
+  stop and is left as a follow-up.
+- Preconditions that need no libvirt write (fixed appliance and root identity, staging, deadline)
+  are checked before the stop. A domain that cannot be read is refused with
+  `refused-before-mutation`, which the preparation operation now maps to `remote-module-refused` as
+  the lifecycle operation already did. A failure after `destroy` was issued is an infrastructure
+  failure instead, because the System's power may have changed.
 - `run_or_adopt_appliance` runs the attachment inspection before `createXML`, so the appliance
   is unreachable while the owning System is active, whichever caller reaches it.
 

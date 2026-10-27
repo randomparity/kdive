@@ -326,6 +326,12 @@ class _StuckDomain(_SystemDomain):
         raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
 
 
+class _IgnoredDestroyDomain(_SystemDomain):
+    def destroy(self) -> int:
+        self.destroyed = True
+        return 0
+
+
 class _SystemConn(ApplianceConn):
     """Appliance connection that also serves the System domain and notes when it is created."""
 
@@ -641,7 +647,14 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
 class _Quiesce:
     """A concrete host over fakes whose attachment inspection tracks the System's power."""
 
-    def __init__(self, tmp_path: Path, system: _SystemDomain | None) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        system: _SystemDomain | None,
+        *,
+        staging: bool = True,
+        deadline: float = 10_000.0,
+    ) -> None:
         self.request = _request()
         operation = self.request.operation
         names = [
@@ -657,7 +670,7 @@ class _Quiesce:
             detached_volumes=frozenset(("systems", name) for name in names),
         )
         self.storage = StorageConn()
-        clock = Clock()
+        clock = self.clock = Clock()
         self.appliance = _SystemConn([], clock, system=system)
 
         def inspect() -> AttachmentInspection:
@@ -672,7 +685,7 @@ class _Quiesce:
             writer=_Writer(tmp_path / "source.ext4"),
             inspect_attachments=lambda identity_port, present_attempt_volumes=None: detached,
             work_dir=tmp_path,
-            artifact_stager=_Stager(),
+            artifact_stager=_Stager() if staging else None,
         )
         appliance_config = RemoteModuleApplianceExecution(
             appliance=self.appliance,
@@ -706,7 +719,7 @@ class _Quiesce:
         evidence_root = tmp_path / "evidence"
         evidence_root.mkdir(mode=0o700)
         self.store = RemoteModuleVolumePreparationStore(evidence_root)
-        self.store.stage(self.request, 10_000.0)
+        self.store.stage(self.request, deadline)
         self.durable = DurableRemoteModuleVolumePreparationHost(self.store, host)
 
     def prior_power(self) -> str | None:
@@ -776,24 +789,27 @@ async def test_destroy_whose_response_was_lost_is_accepted_when_the_domain_is_in
     stack.close()
 
 
-def _assert_refused_before_any_mutation(stack: _Quiesce) -> None:
+def _assert_nothing_started(stack: _Quiesce) -> None:
     assert stack.appliance.created_flags is None
     assert stack.storage.pool.volumes == {}
     assert stack.store.reopen_completion(stack.request) is None
 
 
 @pytest.mark.anyio
-async def test_system_that_survives_destroy_is_refused_before_any_mutation(
-    tmp_path: Path,
+@pytest.mark.parametrize("domain_type", [_StuckDomain, _IgnoredDestroyDomain])
+async def test_system_that_survives_destroy_is_not_reported_as_refused_before_mutation(
+    tmp_path: Path, domain_type: type[_SystemDomain]
 ) -> None:
-    system = _StuckDomain(active=True)
+    """Once destroy was issued the System's power may have changed, so it is no refusal."""
+    system = domain_type(active=True)
     stack = _Quiesce(tmp_path, system)
-    with pytest.raises(CategorizedError, match="could not be stopped") as refused:
+    with pytest.raises(CategorizedError, match="System domain") as failed:
         await stack.durable.execute(stack.request)
 
-    assert refused.value.details == {"completion": "refused-before-mutation"}
+    assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert failed.value.details == {}
     assert stack.prior_power() == "running"
-    _assert_refused_before_any_mutation(stack)
+    _assert_nothing_started(stack)
     stack.close()
 
 
@@ -805,7 +821,33 @@ async def test_missing_system_domain_is_refused_before_any_mutation(tmp_path: Pa
 
     assert refused.value.details == {"completion": "refused-before-mutation"}
     assert stack.prior_power() is None
-    _assert_refused_before_any_mutation(stack)
+    _assert_nothing_started(stack)
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_preflight_refusal_leaves_a_running_system_running(tmp_path: Path) -> None:
+    system = _SystemDomain(active=True)
+    stack = _Quiesce(tmp_path, system, staging=False)
+    with pytest.raises(CategorizedError, match="staging is not configured"):
+        await stack.durable.execute(stack.request)
+
+    assert system.active and not system.destroyed
+    assert stack.prior_power() is None
+    _assert_nothing_started(stack)
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_expired_deadline_leaves_a_running_system_running(tmp_path: Path) -> None:
+    system = _SystemDomain(active=True)
+    stack = _Quiesce(tmp_path, system, deadline=0.5)
+    stack.clock.value = 1.0
+    with pytest.raises(TimeoutError):
+        await stack.durable.execute(stack.request)
+
+    assert system.active and not system.destroyed
+    _assert_nothing_started(stack)
     stack.close()
 
 

@@ -86,6 +86,10 @@ def _refused(message: str) -> CategorizedError:
     )
 
 
+def _stop_failed(message: str) -> CategorizedError:
+    return CategorizedError(message, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+
 @dataclass(frozen=True, slots=True)
 class RemoteModuleAuthorityHostConfiguration:
     """Fixed provider-host resources; no caller-selected connection, path, or executable."""
@@ -361,13 +365,9 @@ class ConcreteRemoteModuleAuthorityHost:
             invocation_deadline=deadline,
         )
 
-    def _execute(
-        self, admitted: AdmittedRemoteModulePreparation
-    ) -> RemoteModuleTerminalPreparationResponseV1:
-        request = admitted.request
-        deadline = admitted.local_deadline
-        operation = request.operation
-        volumes_config = self._configuration.volumes
+    def _preflight(self, admitted: AdmittedRemoteModulePreparation) -> ExternalBootArtifactStager:
+        """Refuse what can be known without touching the System, before it is stopped."""
+        operation = admitted.request.operation
         appliance_config = self._configuration.appliance
         root = appliance_config.root(operation)
         if (
@@ -379,12 +379,25 @@ class ConcreteRemoteModuleAuthorityHost:
                 "remote module fixed appliance or root identity changed",
                 category=ErrorCategory.CONFLICT,
             )
-        stager = volumes_config.artifact_stager
+        stager = self._configuration.volumes.artifact_stager
         if stager is None:
             raise CategorizedError(
                 "remote module artifact staging is not configured",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
+        self._require_deadline(admitted.local_deadline)
+        return stager
+
+    def _execute(
+        self, admitted: AdmittedRemoteModulePreparation
+    ) -> RemoteModuleTerminalPreparationResponseV1:
+        request = admitted.request
+        deadline = admitted.local_deadline
+        operation = request.operation
+        volumes_config = self._configuration.volumes
+        appliance_config = self._configuration.appliance
+        root = appliance_config.root(operation)
+        stager = self._preflight(admitted)
         with tempfile.TemporaryDirectory(
             prefix="kdive-remote-module-", dir=volumes_config.work_dir
         ) as raw:
@@ -491,6 +504,7 @@ class ConcreteRemoteModuleAuthorityHost:
 
     async def observe_system_power(self, admitted: AdmittedRemoteModulePreparation) -> PriorPower:
         def observe() -> PriorPower:
+            self._preflight(admitted)
             domain = self._system_domain(admitted)
             try:
                 return "running" if domain.isActive() else "inactive"
@@ -504,23 +518,30 @@ class ConcreteRemoteModuleAuthorityHost:
 
         ``destroy`` follows the external-boot stop: verified inactivity, not guest cooperation,
         is the precondition for the appliance. A destroy whose response was lost but whose
-        effect landed is accepted when the domain reads back inactive.
+        effect landed is accepted when the domain reads back inactive. Once ``destroy`` has been
+        issued the System's power is no longer known to be unchanged, so a failure after that is
+        an infrastructure failure, not a refusal before mutation.
         """
 
         def stop() -> None:
             domain = self._system_domain(admitted)
             try:
-                if domain.isActive():
-                    self._require_deadline(admitted.local_deadline)
-                    try:
-                        domain.destroy()
-                    except libvirt.libvirtError:
-                        if domain.isActive():
-                            raise
-                if domain.isActive():
-                    raise _refused("remote System domain remained active after destroy")
+                active = bool(domain.isActive())
             except libvirt.libvirtError as exc:
-                raise _refused("remote System domain could not be stopped") from exc
+                raise _refused("remote System power could not be read") from exc
+            if not active:
+                return
+            self._require_deadline(admitted.local_deadline)
+            try:
+                try:
+                    domain.destroy()
+                except libvirt.libvirtError:
+                    if domain.isActive():
+                        raise
+                if domain.isActive():
+                    raise _stop_failed("remote System domain remained active after destroy")
+            except libvirt.libvirtError as exc:
+                raise _stop_failed("remote System domain could not be stopped") from exc
 
         await self._executor.run(stop)
 
