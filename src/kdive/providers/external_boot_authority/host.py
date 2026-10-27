@@ -770,6 +770,8 @@ async def check_database_role(connection: Any) -> None:
                     ::regprocedure,
                 'public.resolve_current_external_boot_preparation_authority(text,uuid,bigint,'
                     'bigint,text,text)'::regprocedure,
+                'public.external_boot_prestop_system_holders(text,uuid,bigint,bigint,text)'
+                    ::regprocedure,
                 'public.open_external_boot_remote_module_attempt(text,uuid,bigint,bigint,'
                     'text,uuid,text,text)'::regprocedure,
                 'public.read_authorized_remote_module_cleanup_evidence(text,uuid,bigint,bigint,'

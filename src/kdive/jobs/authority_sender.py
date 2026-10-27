@@ -54,6 +54,7 @@ _PEER_REASONS = frozenset(
         "provider-failure",
         "remote-module-failed",
         "remote-module-refused",
+        "system-held",
         "configuration-error",
     }
 )
@@ -67,12 +68,13 @@ def _failure(reason: str) -> CategorizedError:
     category = {
         "remote-module-failed": ErrorCategory.CONFLICT,
         "remote-module-refused": ErrorCategory.CONFIGURATION_ERROR,
+        "system-held": ErrorCategory.TRANSPORT_CONFLICT,
         "configuration-error": ErrorCategory.CONFIGURATION_ERROR,
     }.get(reason, ErrorCategory.INFRASTRUCTURE_FAILURE)
     details: dict[str, object] | None = None
     if reason == "remote-module-failed":
         details = {"completion": "failed-after-mutation"}
-    elif reason == "remote-module-refused":
+    elif reason in {"remote-module-refused", "system-held"}:
         details = {"completion": "refused-before-mutation"}
     elif reason == "provider-conflict":
         # ADR-0714: the bound failure carries this mark so a repeat can end the job.
@@ -81,7 +83,7 @@ def _failure(reason: str) -> CategorizedError:
         f"authority: {reason}",
         category=category,
         details=details,
-        terminal=reason == "configuration-error",
+        terminal=reason in {"configuration-error", "system-held"},
     )
 
 

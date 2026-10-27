@@ -1327,3 +1327,11 @@ def test_session_still_bounds_a_peer_that_never_sends_a_frame(
 
     assert writer.written == bytearray()
     assert writer.closed
+
+
+@pytest.mark.parametrize(
+    ("category", "wire"),
+    [("system_held", "system-held"), ("provider_conflict", "provider-conflict")],
+)
+def test_service_categories_cross_the_wire_as_closed_reasons(category: str, wire: str) -> None:
+    assert transport._service_category(category) == wire
