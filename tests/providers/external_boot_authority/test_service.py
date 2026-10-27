@@ -916,7 +916,11 @@ async def test_remote_prepare_execute_finishes_only_the_begun_prepare_phase(tmp_
 
 
 async def _failed_prepare_service(
-    tmp_path: Path, failure: Exception, calls: list[object] | None = None
+    tmp_path: Path,
+    failure: Exception,
+    calls: list[object] | None = None,
+    *,
+    begun: bool = True,
 ) -> tuple[Any, Any, Any, AuthenticatedPeer, AuthorityPreparationMutationRequestV1, Any]:
     """A service whose PREPARE was begun and whose appliance run then raised ``failure``."""
     peer = AuthenticatedPeer(uuid4())
@@ -989,9 +993,10 @@ async def _failed_prepare_service(
     await service.acknowledge_takeover(peer, takeover)
     repository.current = True
     first, remote = prepare("prepare-op", "a" * 32)
-    await service.open_remote_module_attempt(
-        peer, RemoteModulePreparationBeginRequestV1(authority=first, budget_seconds=30)
-    )
+    if begun:
+        await service.open_remote_module_attempt(
+            peer, RemoteModulePreparationBeginRequestV1(authority=first, budget_seconds=30)
+        )
     return service, repository, remote, peer, first, prepare
 
 
@@ -1088,6 +1093,52 @@ async def test_unsettleable_abandon_reports_the_provider_failure(tmp_path: Path)
 
     assert raised.value is failure
     assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+
+@pytest.mark.anyio
+async def test_begin_refused_after_anchoring_is_settled_so_the_retry_proceeds(
+    tmp_path: Path,
+) -> None:
+    """The receipt gate refusing (superseded) must not leave the anchored PREPARE open."""
+    service, repository, _remote, peer, _first, prepare = await _failed_prepare_service(
+        tmp_path, RuntimeError("unused"), begun=False
+    )
+    receipt = repository.remote_attempt
+    repository.remote_attempt = None
+    retry, _ = prepare("prepare-op-2", "b" * 32)
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.open_remote_module_attempt(
+            peer, RemoteModulePreparationBeginRequestV1(authority=retry, budget_seconds=30)
+        )
+    assert refused.value.category == "superseded"
+    assert [record.phase for record in repository.records][-3:] == [
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+    ]
+    assert repository.records[-1].operation_identity == retry.operation_identity
+
+    repository.remote_attempt = receipt
+    third, _ = prepare("prepare-op-3", "c" * 32)
+    await service.open_remote_module_attempt(
+        peer, RemoteModulePreparationBeginRequestV1(authority=third, budget_seconds=30)
+    )
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+
+@pytest.mark.anyio
+async def test_execute_refused_after_anchoring_is_settled(tmp_path: Path) -> None:
+    service, repository, remote, peer, _first, _prepare = await _failed_prepare_service(
+        tmp_path, RuntimeError("unused")
+    )
+    repository.remote_attempt = None
+    service._lanes.clear()  # type: ignore[attr-defined]
+
+    with pytest.raises(AuthorityServiceError) as refused:
+        await service.execute_remote_module_preparation(peer, remote)
+
+    assert refused.value.category == "superseded"
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
 
 
 @pytest.mark.anyio

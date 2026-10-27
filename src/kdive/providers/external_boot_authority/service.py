@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -2235,15 +2235,24 @@ class ExternalBootAuthorityService:
                         records,
                         self._record(mutation, records, JournalPhase.MUTATION_STARTED),
                     )
-                receipt = await self._repository.open_remote_module_attempt(
-                    authenticated,
-                    request,
-                    acknowledgement.sequence,
-                    record_digest(acknowledgement),
-                )
-                if receipt is None:
-                    raise AuthorityServiceError("superseded")
-                return await self._remote_module_host.begin(request, receipt, begin.budget_seconds)
+                try:
+                    receipt = await self._repository.open_remote_module_attempt(
+                        authenticated,
+                        request,
+                        acknowledgement.sequence,
+                        record_digest(acknowledgement),
+                    )
+                    if receipt is None:
+                        raise AuthorityServiceError("superseded")
+                    return await self._remote_module_host.begin(
+                        request, receipt, begin.budget_seconds
+                    )
+                except Exception:
+                    # The operation is anchored; a refusal now would leave it unresolved.
+                    await self._settle_abandoned_preparation(
+                        mutation, records, journal, binding, lane, "refused", lane_locked=True
+                    )
+                    raise
         except AuthorityServiceError as error:
             self._ensure_rejection(mutation, error)
             raise
@@ -2350,6 +2359,15 @@ class ExternalBootAuthorityService:
                             record_digest(acknowledgement),
                         )
                         if receipt is None:
+                            await self._settle_abandoned_preparation(
+                                mutation,
+                                records,
+                                journal,
+                                binding,
+                                lane,
+                                "refused",
+                                lane_locked=True,
+                            )
                             raise AuthorityServiceError("superseded")
                         active = _ActiveOperation(
                             request.generation,
@@ -2554,6 +2572,8 @@ class ExternalBootAuthorityService:
         binding: AuthorityBinding,
         lane: _Lane,
         kind: Literal["abandoned", "refused"],
+        *,
+        lane_locked: bool = False,
     ) -> None:
         """Close a PREPARE that was refused or abandoned, so a retry or teardown is not refused.
 
@@ -2568,7 +2588,7 @@ class ExternalBootAuthorityService:
             observation_id=uuid5(NAMESPACE_URL, digest), category="source", composite_state=digest
         )
         try:
-            async with lane.lock:
+            async with nullcontext() if lane_locked else lane.lock:
                 records = await self._anchor(
                     binding,
                     journal,
