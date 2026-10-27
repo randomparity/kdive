@@ -186,6 +186,9 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
         assert request.appliance_kernel is not None and request.appliance_initrd is not None
         ET.SubElement(os_node, "kernel").text = request.appliance_kernel
         ET.SubElement(os_node, "initrd").text = request.appliance_initrd
+    if request.architecture == "x86_64":
+        # Without ACPI q35 exposes no PCI devices beyond the root complex and cannot power off.
+        ET.SubElement(ET.SubElement(domain, "features"), "acpi")
     metadata = ET.SubElement(domain, "metadata")
     ET.SubElement(
         metadata,
