@@ -121,10 +121,11 @@ compare-and-swap. This amendment records how the providers do that.
    same recovering operation. After the first component write the composite no longer equals the
    acknowledged one, so the authority's recheck answers `superseded` for a retry of the same
    resolve on the local authority. On the remote authority a module restore alone does not change
-   the composite, so a retry after only that step can succeed. The journal's `mutation-started` record is settled by the next observation, which
-   classifies a part-restored state as a conflict and parks the activation again. The operator
-   then resolves it again, and that state is handled by ordinary recovery. A resumable
-   operation needs durable per-component evidence, which this change does not add.
+   the composite, so a retry after only that step can succeed. The journal's `mutation-started`
+   record is settled by the next observation, which classifies a part-restored state as a
+   conflict and parks the activation again. The operator then resolves it again, and that state
+   is handled by ordinary recovery. A resumable operation needs durable per-component evidence,
+   which this change does not add.
 7. The acknowledgement covers the definition's boot identity, the module manifest and power,
    not the whole domain XML. Resolving to the recorded source replaces the whole definition
    after the boot identity matches.
