@@ -734,7 +734,10 @@ class RemoteModuleVolumePreparationStore:
 
     @staticmethod
     def _key(request: RemoteModuleVolumePreparationRequestV1) -> str:
-        authority = request.authority
+        return RemoteModuleVolumePreparationStore._authority_key(request.authority)
+
+    @staticmethod
+    def _authority_key(authority: AuthorityPreparationMutationRequestV1) -> str:
         bound = "\0".join(
             (
                 str(authority.system_id),
@@ -1118,17 +1121,33 @@ class RemoteModuleVolumePreparationStore:
         )
         name = f"{key}.prior-power"
         if (existing := self._read(name)) is None:
+            self._publish(
+                f"{key}.prior-power-owner", self._authority_key(authority).encode("ascii")
+            )
             self._publish(name, observed.encode("ascii"))
             existing = self._read(name)
         return self._decode_prior_power(existing)
+
+    def prior_power_started_by(self, authority: AuthorityPreparationMutationRequestV1) -> bool:
+        """Whether this exact request wrote the activation's prior-power record.
+
+        The record is per activation and outlives a successful PREPARE, so only the request
+        that wrote it may treat it as proof that its own stop was reached.
+        """
+        key = self._terminal_key(
+            authority.system_id, authority.activation_id, authority.run_id, authority.plan_identity
+        )
+        owner = self._read(f"{key}.prior-power-owner")
+        return owner is not None and owner == self._authority_key(authority).encode("ascii")
 
     def clear_prior_power(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
         """Forget the record once the System is back in that power, so the next stop re-observes."""
         key = self._terminal_key(
             binding.system_id, binding.activation_id, binding.run_id, plan_identity
         )
-        with suppress(FileNotFoundError):
-            os.unlink(f"{key}.prior-power", dir_fd=self._root_fd)
+        for suffix in ("prior-power", "prior-power-owner"):
+            with suppress(FileNotFoundError):
+                os.unlink(f"{key}.{suffix}", dir_fd=self._root_fd)
         os.fsync(self._root_fd)
 
     def prior_power(
@@ -1576,20 +1595,17 @@ class DurableRemoteModuleVolumePreparationHost:
     def execution_started(self, request: RemoteModuleVolumePreparationRequestV1) -> bool:
         """Whether an earlier execute already reached the provider for this request.
 
-        A recorded prior power counts: it is written ahead of the stop, and a successful abandon
-        clears it, so a crash after the stop leaves a System that must not be refused.
+        A prior power this request recorded counts: it is written ahead of the stop, and a
+        successful abandon clears it, so a crash after the stop leaves a System that must not be
+        refused. A record another request wrote does not count, or a later PREPARE would skip the
+        held-System recheck. A replay of a refused operation whose holders have since cleared is
+        answered ``provider_conflict``, which the host never runs and ADR-0714 counts as a repeat.
         """
         self._store.reopen_request(request)
-        authority = request.authority
-        binding = ExternalBootActivationBinding(
-            system_id=str(authority.system_id),
-            run_id=str(authority.run_id),
-            activation_id=str(authority.activation_id),
-        )
         return (
             self._store.reopen_completion(request) is not None
             or self._store.reopen_result(request) is not None
-            or self._store.prior_power(binding, authority.plan_identity) is not None
+            or self._store.prior_power_started_by(request.authority)
         )
 
     async def _quiesce_system(self, admitted: AdmittedRemoteModulePreparation) -> None:

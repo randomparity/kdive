@@ -2440,6 +2440,15 @@ async def test_unclearable_prior_power_record_does_not_latch_a_restored_system(
     store.close()
 
 
+def _binding_for(request: RemoteModuleVolumePreparationRequestV1) -> ExternalBootActivationBinding:
+    authority = request.authority
+    return ExternalBootActivationBinding(
+        system_id=str(authority.system_id),
+        run_id=str(authority.run_id),
+        activation_id=str(authority.activation_id),
+    )
+
+
 @pytest.mark.anyio
 async def test_a_recorded_stop_counts_as_an_execution_that_started(tmp_path: Path) -> None:
     """A crash after the stop leaves the System stopped, so a resume must not be refused."""
@@ -2451,6 +2460,33 @@ async def test_a_recorded_stop_counts_as_an_execution_that_started(tmp_path: Pat
 
     store.record_prior_power(request.authority, "running")
     assert durable.execution_started(request) is True
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_a_record_another_request_wrote_is_not_a_started_execution(tmp_path: Path) -> None:
+    """The record outlives a successful PREPARE, so a later PREPARE must still be rechecked."""
+    first = _remote_preparation_request()
+    later = first.model_copy(
+        update={
+            "authority": first.authority.model_copy(update={"operation_identity": "prepare-later"})
+        }
+    )
+    expected = _terminal_response(first)
+
+    class SucceedingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            return expected
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(first, 999.0)
+    store.stage(later, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, SucceedingHost()))
+    await durable.execute(first)
+
+    assert store.prior_power(_binding_for(first), first.authority.plan_identity) == "inactive"
+    assert durable.execution_started(first) is True
+    assert durable.execution_started(later) is False
     store.close()
 
 
