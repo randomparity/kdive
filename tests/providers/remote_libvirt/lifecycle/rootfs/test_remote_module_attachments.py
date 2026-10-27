@@ -876,6 +876,16 @@ def test_block_backed_owning_root_satisfies_the_root_proof() -> None:
             FILE_ROOT + "<disk type='file'><source file='/pool/root-alias'/></disk>",
             "root volume",
         ),
+        (
+            "<disk type='file'><source file='/pool/root'/><backingStore type='file'>"
+            "<source file='/pool/root-alias'/></backingStore></disk>",
+            "duplicate root volume",
+        ),
+        (
+            "<disk type='file'><source file='/pool/root'/><backingStore type='file'>"
+            "<source file='/pool/root'/></backingStore></disk>",
+            "duplicate root volume",
+        ),
     ],
 )
 def test_file_backed_root_keeps_foreign_and_extra_references_refused(

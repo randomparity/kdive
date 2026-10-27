@@ -245,16 +245,21 @@ def _top_level_path_references(root: ET.Element) -> list[str]:
 
 def path_references(root: ET.Element) -> set[str]:
     """Return host paths from every source and legacy mirror in each disk graph."""
-    paths = set()
+    return set(_path_reference_list(root))
+
+
+def _path_reference_list(root: ET.Element) -> list[str]:
+    """Every path in each disk graph, repeats kept so a duplicate reference stays countable."""
+    paths = []
     for disk in root.findall("./devices/disk"):
         for source in disk.iter("source"):
             path = source.get("file") or source.get("dev")
             if path is not None:
-                paths.add(path)
+                paths.append(path)
         for mirror in disk.iter("mirror"):
             path = mirror.get("file") or mirror.get("dev")
             if path is not None:
-                paths.add(path)
+                paths.append(path)
     return paths
 
 
@@ -542,8 +547,9 @@ def _inspect_definition(
             protected_references & attempt_identities
         ):
             raise _conflict("System references attempt-scoped appliance storage", domain=name)
-        root_count = resolved_identities.count(root_identity) + list(direct_identities).count(
-            root_identity
+        root_count = resolved_identities.count(root_identity) + sum(
+            _device_identity(identity_port, path) == root_identity
+            for path in _path_reference_list(root)
         )
         if root_count != 1:
             raise _conflict("owning System has duplicate root volume references", domain=name)
