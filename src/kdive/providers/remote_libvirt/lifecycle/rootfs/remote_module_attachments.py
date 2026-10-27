@@ -33,6 +33,9 @@ _MAX_STORAGE_PATH_BYTES = 4096
 _MAX_IDENTITY_COMPONENT = (1 << 64) - 1
 _MAX_PATH_IDENTITIES = 4096
 
+# Kernel command line of the direct-boot appliance; domain-v1-<arch>.xml carries the same value.
+APPLIANCE_KERNEL_CMDLINE = "console=hvc0 panic=-1"
+
 _NORMALIZED_APPLIANCE_DEVICES = {
     "x86_64": (
         ("controller", (("index", "0"), ("model", "qemu-xhci"), ("ports", "15"), ("type", "usb"))),
@@ -40,14 +43,14 @@ _NORMALIZED_APPLIANCE_DEVICES = {
         ("controller", (("index", "0"), ("type", "sata"))),
         ("input", (("bus", "ps2"), ("type", "mouse"))),
         ("input", (("bus", "ps2"), ("type", "keyboard"))),
-        ("memballoon", (("model", "virtio"),)),
+        ("memballoon", (("model", "none"),)),
     ),
     "ppc64le": (
         ("controller", (("index", "0"), ("model", "qemu-xhci"), ("ports", "15"), ("type", "usb"))),
         ("controller", (("index", "0"), ("model", "pci-root"), ("type", "pci"))),
         ("input", (("bus", "usb"), ("type", "mouse"))),
         ("input", (("bus", "usb"), ("type", "keyboard"))),
-        ("memballoon", (("model", "virtio"),)),
+        ("memballoon", (("model", "none"),)),
     ),
 }
 
@@ -651,9 +654,16 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         return
     if root.get("type") != "kvm" or set(root.attrib) - {"type", "id"}:
         raise _conflict("resumed appliance domain type mismatched")
-    top_level = {"name", "uuid", "memory", "vcpu", "os", "metadata", "devices"}
+    lifecycle = ("on_poweroff", "on_reboot", "on_crash")
+    top_level = {"name", "uuid", "memory", "vcpu", "os", "metadata", "devices", *lifecycle}
     if any(child.tag not in top_level for child in root):
         raise _conflict("resumed appliance top-level shape mismatched")
+    for tag in lifecycle:
+        nodes = root.findall(tag)
+        if len(nodes) > 1 or any(
+            node.attrib or list(node) or (node.text or "").strip() != "destroy" for node in nodes
+        ):
+            raise _conflict("resumed appliance lifecycle action mismatched")
     required_once = {"name", "memory", "vcpu", "os", "metadata", "devices"}
     if any(len(root.findall(tag)) != 1 for tag in required_once):
         raise _conflict("resumed appliance top-level shape mismatched")
@@ -673,7 +683,9 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         raise _conflict("resumed appliance UUID normalization mismatched")
     os_nodes = root.findall("os")
     expected_os_children = (
-        ["type"] if expected.appliance.volume is not None else ["type", "kernel", "initrd"]
+        ["type"]
+        if expected.appliance.volume is not None
+        else ["type", "kernel", "initrd", "cmdline"]
     )
     if os_nodes[0].attrib or [child.tag for child in os_nodes[0]] != expected_os_children:
         raise _conflict("resumed appliance OS shape mismatched")
@@ -702,6 +714,14 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
             or (initrd.text or "") != expected.appliance.initrd
         ):
             raise _conflict("resumed appliance direct kernel mismatched")
+        cmdline = root.find("./os/cmdline")
+        if (
+            cmdline is None
+            or cmdline.attrib
+            or list(cmdline)
+            or (cmdline.text or "") != APPLIANCE_KERNEL_CMDLINE
+        ):
+            raise _conflict("resumed appliance kernel command line mismatched")
     if expected.appliance.memory_kib is not None:
         memory_nodes = root.findall("./memory")
         if (
@@ -772,10 +792,8 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
     if len(sources) > 1 or any(set(source.attrib) - {"path"} for source in sources):
         raise _conflict("resumed appliance console set mismatched")
     targets = console.findall("target")
-    if len(targets) > 1:
-        raise _conflict("resumed appliance console set mismatched")
-    if targets and (
-        set(targets[0].attrib) - {"type", "port"} or targets[0].get("type") not in {None, "serial"}
+    if len(targets) != 1 or (
+        set(targets[0].attrib) - {"type", "port"} or targets[0].get("type") != "virtio"
     ):
         raise _conflict("resumed appliance console set mismatched")
     for alias in console.findall("alias"):

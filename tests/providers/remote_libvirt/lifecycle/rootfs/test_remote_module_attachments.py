@@ -203,7 +203,7 @@ def appliance_xml(state: ExpectedAttachmentState, **metadata: str) -> str:
         f"<domain><name>{state.appliance.name}</name><os><type "
         f"arch='{state.appliance.architecture}'>hvm</type></os><metadata>"
         f"<remote-module-appliance {attrs}/></metadata><devices>{disks}"
-        "<console type='pty'/></devices></domain>"
+        "<console type='pty'><target type='virtio' port='0'/></console></devices></domain>"
     )
 
 

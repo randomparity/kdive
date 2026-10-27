@@ -466,7 +466,7 @@ def test_adoption_rejects_unlisted_attributes_on_normalized_devices() -> None:
         "<emulator>/usr/bin/qemu-system-x86_64</emulator>" * 2,
         '<controller type="pci" index="0" />' * 2,
         '<input type="mouse" bus="ps2" />' * 2,
-        '<memballoon model="virtio" />' * 2,
+        '<memballoon model="none" />' * 2,
     ],
 )
 def test_adoption_rejects_altered_or_duplicate_normalized_devices(normalized: str) -> None:
@@ -533,7 +533,7 @@ def test_adoption_uses_exact_configured_native_ppc64le_emulator() -> None:
             </controller>
             <input type="mouse" bus="ps2"><alias name="input0"/></input>
             <input type="keyboard" bus="ps2"><alias name="input1"/></input>
-            <memballoon model="virtio"><alias name="balloon0"/></memballoon>
+            <memballoon model="none"><alias name="balloon0"/></memballoon>
             """,
         ),
         (
@@ -549,7 +549,7 @@ def test_adoption_uses_exact_configured_native_ppc64le_emulator() -> None:
             </controller>
             <input type="mouse" bus="usb"><alias name="input0"/></input>
             <input type="keyboard" bus="usb"><alias name="input1"/></input>
-            <memballoon model="virtio"><alias name="balloon0"/></memballoon>
+            <memballoon model="none"><alias name="balloon0"/></memballoon>
             """,
         ),
     ],
@@ -601,7 +601,9 @@ def test_adoption_rejects_extra_normalized_device_for_each_architecture(
 def test_adoption_requires_one_allowlisted_pty_console(console: str) -> None:
     clock = Clock()
     xml = render_remote_module_appliance(request(clock))
-    xml = xml.replace('<console type="pty" />', console)
+    rendered_console = '<console type="pty"><target type="virtio" port="0" /></console>'
+    assert rendered_console in xml
+    xml = xml.replace(rendered_console, console)
     with pytest.raises(CategorizedError):
         run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), request(clock))
 
@@ -1093,3 +1095,41 @@ def test_teardown_requires_absence_and_all_detach_proofs() -> None:
     assert observed.absent and observed.source_detached and observed.scratch_detached
     unresolved = replace(proof, appliance_present=True)
     assert not observe_appliance_absent_and_detached(expected, lambda: unresolved).complete
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("<cmdline>console=hvc0 panic=-1</cmdline>", "<cmdline>console=ttyS0</cmdline>"),
+        ("<on_poweroff>destroy</on_poweroff>", "<on_poweroff>restart</on_poweroff>"),
+        ("<on_crash>destroy</on_crash>", "<on_crash>preserve</on_crash>"),
+        ('<target type="virtio" port="0" />', '<target type="serial" port="0" />'),
+    ],
+)
+def test_adoption_rejects_drift_from_the_reference_boot_console_and_lifecycle(
+    old: str, new: str
+) -> None:
+    clock = Clock()
+    req = replace(
+        request(clock),
+        appliance_volume=None,
+        appliance_kernel="/var/lib/kdive/remote-module-appliance/v1/x86_64/image/vmlinuz",
+        appliance_initrd="/var/lib/kdive/remote-module-appliance/v1/x86_64/image/initramfs.cpio",
+    )
+    xml = render_remote_module_appliance(req)
+    assert old in xml
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new))), req)
+
+
+def test_rendered_direct_kernel_appliance_is_adopted() -> None:
+    clock = Clock()
+    req = replace(
+        request(clock),
+        appliance_volume=None,
+        appliance_kernel="/var/lib/kdive/remote-module-appliance/v1/x86_64/image/vmlinuz",
+        appliance_initrd="/var/lib/kdive/remote-module-appliance/v1/x86_64/image/initramfs.cpio",
+    )
+    xml = render_remote_module_appliance(req)
+
+    run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)

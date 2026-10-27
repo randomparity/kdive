@@ -14,6 +14,7 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+    APPLIANCE_KERNEL_CMDLINE,
     AttachmentInspection,
     ExpectedAppliance,
     ExpectedAttachmentState,
@@ -171,6 +172,7 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
         assert request.appliance_kernel is not None and request.appliance_initrd is not None
         ET.SubElement(os_node, "kernel").text = request.appliance_kernel
         ET.SubElement(os_node, "initrd").text = request.appliance_initrd
+        ET.SubElement(os_node, "cmdline").text = APPLIANCE_KERNEL_CMDLINE
     metadata = ET.SubElement(domain, "metadata")
     ET.SubElement(
         metadata,
@@ -181,6 +183,8 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
             "nonce": request.operation.operation_nonce,
         },
     )
+    for action in ("on_poweroff", "on_reboot", "on_crash"):
+        ET.SubElement(domain, action).text = "destroy"
     devices = ET.SubElement(domain, "devices")
     if request.appliance_volume is None:
         _disk(devices, request.pool, request.root.name, "vda", readonly=False)
@@ -194,7 +198,8 @@ def render_remote_module_appliance(request: ApplianceRequest) -> str:
     for tag, attributes in normalized_appliance_devices(request.architecture):
         ET.SubElement(devices, tag, attributes)
     ET.SubElement(devices, "emulator").text = request.emulator_path
-    ET.SubElement(devices, "console", {"type": "pty"})
+    console = ET.SubElement(devices, "console", {"type": "pty"})
+    ET.SubElement(console, "target", {"type": "virtio", "port": "0"})
     return ET.tostring(domain, encoding="unicode", short_empty_elements=True)
 
 
