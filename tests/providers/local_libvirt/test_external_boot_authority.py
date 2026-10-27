@@ -27,6 +27,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
@@ -237,6 +238,8 @@ class _FakeIO:
         self.partial_abort_result: Literal["removed", "absent", "not-partial"] = "not-partial"
         self.recovery_absent = False
         self.begun_teardown_intent: LocalSystemTeardownIntentV1 | None = None
+        self.acknowledged: LocalObservedState | None = None
+        self.discard_error: BaseException | None = None
 
     # -- LocalExternalBootIO -------------------------------------------------------
     def open(self, authority: OpaqueProviderRef, expected: object) -> _FakeContext:
@@ -342,11 +345,17 @@ class _FakeIO:
             expected_cmdline=b"root=UUID=x",
         )
 
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        self.acknowledged = acknowledged
         self.actions.append("recover-modules")
         self.record_phase(metadata, "module-restored")
 
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.actions.append("define-source")
         self.record_phase(metadata, "source-restored")
 
@@ -434,6 +443,19 @@ class _FakeIO:
         del intent, authority
         self.actions.append("system-teardown-recovery-absence")
         return self.recovery_absent
+
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        del intent
+        self.actions.append("discard-system-teardown-recovery")
+        if self.discard_error is not None:
+            raise self.discard_error
+        self.finalize_tombstone(recovery, proof)
 
     def abort_system_teardown_preparation(
         self,
@@ -567,19 +589,22 @@ async def test_system_teardown_settles_pre_stop_intent_activation() -> None:
     result = await adapter.execute_system_teardown(request, context, _TEARDOWN_RESERVATION)
 
     assert result.complete
-    assert io.actions.index("recover-modules") < io.actions.index("cleanup")
-    assert io.actions.index("cleanup") < io.actions.index("finalize")
-    assert io.actions.index("finalize") < io.actions.index("teardown-system")
+    assert "recover-modules" not in io.actions
+    assert io.actions.index("discard-system-teardown-recovery") < io.actions.index(
+        "teardown-system"
+    )
     adapter.close()
 
 
 @pytest.mark.parametrize(
-    "phase", ["pre-stop-intent", "target-defined", "module-restored", "source-restored"]
+    "phase",
+    ["pre-stop-intent", "target-defined", "new-live", "module-restored", "source-restored"],
 )
-async def test_system_teardown_takeover_recovery_never_restores_power(
+@pytest.mark.anyio
+async def test_system_teardown_discards_retained_recovery_without_recovering_it(
     phase: RecoveryPhase,
 ) -> None:
-    """#2898: a retained activation whose guest ran before is recovered without a start."""
+    """#3341: a conflicted activation cannot be recovered, and teardown destroys it anyway."""
     io = _FakeIO(_metadata(phase))
     adapter = _adapter(io)
 
@@ -588,9 +613,30 @@ async def test_system_teardown_takeover_recovery_never_restores_power(
     )
 
     assert result.complete
-    assert "restore-power" not in io.actions
-    assert io.actions.index("phase:recovered") < io.actions.index("cleanup")
+    recovery_steps = {"recover-modules", "define-source", "restore-power", "phase:recovered"}
+    assert not recovery_steps & set(io.actions)
+    assert "cleanup" not in io.actions
+    assert io.actions.index("discard-system-teardown-recovery") < io.actions.index(
+        "teardown-system"
+    )
     assert io.actions[-1] == "teardown-system"
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_discard_refusal_leaves_the_host_untouched() -> None:
+    io = _FakeIO(_metadata("target-defined"))
+    io.discard_error = ValueError("foreign definition")
+    adapter = _adapter(io)
+
+    with pytest.raises(ValueError, match="foreign definition"):
+        await adapter.execute_system_teardown(
+            _system_teardown_request(),
+            _context(AuthorityOperation.TEARDOWN),
+            _TEARDOWN_RESERVATION,
+        )
+
+    assert "teardown-system" not in io.actions
     adapter.close()
 
 
@@ -1204,6 +1250,63 @@ async def test_recover_drives_the_named_recovery_primitives() -> None:
     assert "recover-modules" in io.actions
     assert "define-source" in io.actions
     assert "restore-power" in io.actions
+
+
+def _resolution_request(composite: str) -> AuthorityConflictResolutionRequestV1:
+    base = _request(purpose="resolve-conflict", operation=AuthorityOperation.RESOLVE_CONFLICT)
+    return AuthorityConflictResolutionRequestV1.model_validate(
+        {**base.model_dump(mode="python", by_alias=True), "expected_observed_composite": composite}
+    )
+
+
+async def test_resolve_conflict_restores_from_the_acknowledged_observation() -> None:
+    third = _observed("sha256:" + "7" * 64, SOURCE_MODULES)
+    io = _FakeIO(_metadata("target-defined"), observed=third)
+    adapter = _adapter(io)
+    acknowledged = (
+        await adapter.observe(_resolution_request("sha256:" + "0" * 64))
+    ).composite_state
+    request = _resolution_request(acknowledged)
+
+    await adapter.commit(request, _context(AuthorityOperation.RESOLVE_CONFLICT))
+
+    assert io.acknowledged == third
+    assert "define-source" in io.actions
+    assert "restore-power" in io.actions
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [_observed(None, SOURCE_MODULES), _observed(SOURCE_IDENTITY, None)],
+    ids=["unreadable-definition", "unreadable-modules"],
+)
+async def test_resolve_conflict_refuses_an_unreadable_state(observed: LocalObservedState) -> None:
+    io = _FakeIO(_metadata("target-defined"), observed=observed)
+    adapter = _adapter(io)
+    composite = (await adapter.observe(_resolution_request("sha256:" + "0" * 64))).composite_state
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await adapter.commit(
+            _resolution_request(composite), _context(AuthorityOperation.RESOLVE_CONFLICT)
+        )
+
+    assert caught.value.category == "provider_conflict"
+    assert "recover-modules" not in io.actions
+
+
+async def test_resolve_conflict_refuses_a_state_other_than_the_acknowledged_one() -> None:
+    io = _FakeIO(
+        _metadata("target-defined"), observed=_observed("sha256:" + "7" * 64, SOURCE_MODULES)
+    )
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).commit(
+            _resolution_request("sha256:" + "0" * 64),
+            _context(AuthorityOperation.RESOLVE_CONFLICT),
+        )
+
+    assert caught.value.category == "provider_conflict"
+    assert not {"recover-modules", "define-source", "restore-power"} & set(io.actions)
 
 
 async def test_bookkeeping_operations_mutate_nothing() -> None:

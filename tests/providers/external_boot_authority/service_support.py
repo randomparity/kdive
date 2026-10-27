@@ -14,6 +14,7 @@ from kdive.db.external_boot_authority_journal import (
     AuthorityBinding,
     JournalHead,
     PendingTakeover,
+    PrestopHolders,
     SuspendedOperation,
 )
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
@@ -132,6 +133,9 @@ class _Repository:
         self.remote_attempt: ModuleAttemptPreparationRequestV1 | None = None
         self.remote_attempt_calls: list[tuple[int, str, str]] = []
         self.published_cleanup_quarantines: list[tuple[object, ...]] = []
+        self.prestop_holders: PrestopHolders | None = "clear"
+        self.prestop_error: Exception | None = None
+        self.prestop_calls: list[tuple[int, str]] = []
 
     async def open_remote_module_attempt(
         self,
@@ -293,6 +297,18 @@ class _Repository:
             acknowledgement_digest,
         )
         return replace(resolved, preparation_plan=request.plan) if resolved is not None else None
+
+    async def prestop_system_holders(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> PrestopHolders | None:
+        self.prestop_calls.append((acknowledgement_sequence, acknowledgement_digest))
+        if self.prestop_error is not None:
+            raise self.prestop_error
+        return self.prestop_holders
 
     async def read_head(self, binding: AuthorityBinding) -> JournalHead | None:
         if self.head is None or not self._head_override_armed:

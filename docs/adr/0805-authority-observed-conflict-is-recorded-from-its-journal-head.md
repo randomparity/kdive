@@ -4,6 +4,11 @@
 
 Accepted (2026-10-21)
 
+> **Amended by [ADR-0620](0620-authority-owned-system-teardown.md) (#3341):** the Consequences
+> below say `systems.teardown` and `ops.force_teardown` do not yet complete from
+> `recovery_conflict`. They now do on the local authority lane: teardown discards the retained
+> recovery point instead of recovering it.
+
 ## Context
 
 [ADR-0583](0583-external-run-boot-uses-prepared-recovery-points.md) parks an external-boot
@@ -91,6 +96,51 @@ No production path did this (#3327):
 The Consequences bullet saying that no MCP read exposes the conflict evidence's composite is out
 of date. [ADR-0807](0807-systems-get-shows-conflict-evidence-to-admins.md) adds it to
 `systems.get` for admins.
+
+### Amendment (2026-10-26): resolution restores from the acknowledged identity (#3330)
+
+This qualifies the consequence above that resolution restores only through ordinary recovery.
+ADR-0583 describes resolution as restoration from the acknowledged identity by per-component
+compare-and-swap, and the providers now do that. This amendment records how.
+
+1. **The acknowledged identity is a digest, so its components come from a fresh observation.**
+   Before a `resolve-conflict` commit writes, the adapter observes the provider again and
+   requires the observation's composite to equal the request's `expected_observed_composite`.
+   That read is then the acknowledged state, and each write compares its own component with it
+   immediately before writing.
+2. **Local.** The commit runs the ordinary recovery with the acknowledged state. A third domain
+   definition is accepted only when its boot identity is the acknowledged one. The live module
+   tree is replaced by the recorded source through the existing publication machine, with the
+   acknowledged tree as the tree being replaced. A tree that is already the recorded source is
+   confirmed instead of rewritten. A running third domain is destroyed, not stopped cleanly,
+   because it is not the activated target. A component that differs from the acknowledged one
+   ends the commit as `provider-conflict` with no further write, and the activation returns to
+   `recovery_conflict` with the new evidence.
+3. **Remote.** The module restore runs first, as for `recover`, and is not compared against the
+   acknowledged state: the remote module half is durable evidence, never a live read, and the
+   restore target is the recorded source. The domain definition is then
+   replaced by the recorded source when its `(preserved, boot)` digests are the acknowledged
+   pair, compared again after the stop and before the define. The commit still ends with the
+   same cleanup that `recover` runs.
+4. **The remote composite no longer covers module restore evidence.** Resolution writes that
+   evidence before the authority rechecks the acknowledged composite, so including it made the
+   recheck answer `superseded` for any conflict recorded before the restore. Composites recorded
+   before this change no longer match; the operator re-reads the conflict evidence.
+5. Ordinary `recover` is unchanged: a third identity is still refused. So is a local activation
+   whose recovery record is still at `pre-stop-intent`: that phase requires the recorded source
+   definition, and resolution does not restore from it.
+6. **Crash recovery is not automatic.** ADR-0583 says a crash after the transition resumes the
+   same recovering operation. After the first component write the composite no longer equals the
+   acknowledged one, so the authority's recheck answers `superseded` for a retry of the same
+   resolve on the local authority. On the remote authority a module restore alone does not change
+   the composite, so a retry after only that step can succeed. The journal's `mutation-started`
+   record is settled by the next observation, which classifies a part-restored state as a
+   conflict and parks the activation again. The operator then resolves it again, and that state
+   is handled by ordinary recovery. A resumable operation needs durable per-component evidence,
+   which this change does not add.
+7. The acknowledgement covers the definition's boot identity, the module manifest and power,
+   not the whole domain XML. Resolving to the recorded source replaces the whole definition
+   after the boot identity matches.
 
 ## Considered & rejected
 

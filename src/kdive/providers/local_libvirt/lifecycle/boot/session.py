@@ -267,6 +267,7 @@ class LocalSystemTeardownSession(Protocol):
     def undefine(self) -> None: ...
     def remove_overlay(self) -> None: ...
     def remove_baseline(self) -> None: ...
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def close(self) -> None: ...
 
 
@@ -1524,6 +1525,9 @@ class LocalExternalBootSessionFactory:
             connection=connection,
             overlay=self._teardown_overlay_path(facts.system_id),
             baseline=self._teardown_baseline_path(facts.system_id),
+            binding=facts.binding,
+            open_artifact_root=lambda: self._open_artifact_root(facts),
+            cleanup_payloads=self._cleanup_payloads,
         )
 
 
@@ -1538,12 +1542,18 @@ class _ConcreteSystemTeardownSession:
         connection: _Connection,
         overlay: str,
         baseline: str,
+        binding: ExternalBootActivationBinding | None = None,
+        open_artifact_root: Callable[[], int] | None = None,
+        cleanup_payloads: CleanupPayloads | None = None,
     ) -> None:
         self._system_id = system_id
         self._pin: LocalExternalBootOperationPin | None = pin
         self._connection: _Connection | None = connection
         self._overlay = overlay
         self._baseline = baseline
+        self._binding = binding
+        self._open_artifact_root = open_artifact_root
+        self._cleanup_payloads = cleanup_payloads
 
     def inspect(self) -> LocalSystemTeardownInspection:
         domain = self._lookup_owned()
@@ -1600,6 +1610,18 @@ class _ConcreteSystemTeardownSession:
         if _path_kind(self._baseline, "directory") == "absent":
             return
         shutil.rmtree(self._baseline)
+
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
+        """Remove the activation's payloads without needing its domain (#3341)."""
+        if self._open_artifact_root is None or self._cleanup_payloads is None:
+            raise ValueError("System teardown session has no activation to clean")
+        if metadata.binding != self._binding:
+            raise ValueError("cleanup metadata does not match session ownership")
+        artifact_fd = self._open_artifact_root()
+        try:
+            self._cleanup_payloads(artifact_fd, metadata)
+        finally:
+            os.close(artifact_fd)
 
     def close(self) -> None:
         connection, self._connection = self._connection, None
