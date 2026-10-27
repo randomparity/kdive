@@ -261,6 +261,25 @@ gaps in this record's own contract explained it:
   console filter already keeps. When no result is read, the host logs the bounded, redacted,
   filtered console tail.
 
+Live runs on the remote lane found four more gaps between what the provider rendered and what the
+appliance needs, all fixed here:
+
+- **The root overlay reached the guest as a raw disk.** The domain carried no `<driver>`, so the
+  System's qcow2 overlay was exposed unparsed. The direct-kernel domain now sets the driver as the
+  reference definition does (root `qcow2`, source and scratch `raw`, `cache=none`, `io=native`), and
+  adoption requires exactly that.
+- **The x86_64 domain had ACPI off.** libvirt then starts q35 with `acpi=off`, where the guest sees
+  no virtio devices behind the PCIe root ports and cannot power off. The x86_64 domain now carries
+  `<features><acpi/></features>`, as the reference does, and adoption requires exactly that; ppc64le
+  carries no features.
+- **A usr-merged root has `/lib` as the symlink `usr/lib`.** The appliance walks the module directory
+  with `O_NOFOLLOW`, so it refused such a root. It now resolves exactly the relative target `usr/lib`
+  to `usr/lib/modules`; every other symlink in the walk is still refused.
+- **The console wait outlived the appliance.** The console stream of a finished domain keeps
+  answering "would block", so the host waited the full 30 s and then reported no result although the
+  durable result was on scratch. The wait now ends when the domain is gone, and the scratch result is
+  read as designed.
+
 The appliance image changes with `appliance.py`, so its installed manifest digest, which is the
 appliance identity in operation and result documents, changes too; it must be rebuilt and
 re-installed (`deploy/remote_module_appliance/README.md`, "Rebuilding the image"). No wire,
