@@ -218,7 +218,7 @@ _BTRFS_VOLUME_PREFIX = "btrfsvol:"
 # libguestfs names a subvolume root ``btrfsvol:<device>/<subvolume>``. The appliance attaches an
 # image's disks as sd*, so only that device form is split unambiguously; any other fails closed.
 _BTRFS_VOLUME = re.compile(r"btrfsvol:/dev/(?:sd|vd)[a-z]+[0-9]*/(?P<subvolume>.+)")
-_SUBVOLUME_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]*")
+_SUBVOLUME_SEGMENT = re.compile(r"[A-Za-z0-9._@+-]+")
 _SUBVOLUME_MAX_CHARS = 128
 
 
@@ -228,12 +228,14 @@ class UnsupportedBtrfsRootError(ValueError):
 
 def _btrfs_root_subvolume(device: str) -> str:
     match = _BTRFS_VOLUME.fullmatch(device)
-    subvolume = match.group("subvolume") if match else ""
+    if match is None:
+        raise UnsupportedBtrfsRootError("the btrfs root subvolume is not a supported name")
+    subvolume = match.group("subvolume")
     segments = subvolume.split("/")
     if (
-        not subvolume
-        or len(subvolume) > _SUBVOLUME_MAX_CHARS
+        len(subvolume) > _SUBVOLUME_MAX_CHARS
         or not all(_SUBVOLUME_SEGMENT.fullmatch(segment) for segment in segments)
+        or {".", ".."} & set(segments)
     ):
         raise UnsupportedBtrfsRootError("the btrfs root subvolume is not a supported name")
     return subvolume

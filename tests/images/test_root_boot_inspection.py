@@ -165,6 +165,13 @@ def test_a_non_btrfs_root_has_no_rootflags() -> None:
         "btrfsvol:/dev/sda3/a=b",
         "btrfsvol:/dev/sda3/a,b",
         "btrfsvol:/dev/sda3/../x",
+        "btrfsvol:/dev/sda3/./x",
+        "btrfsvol:/dev/sda3/a//b",
+        "btrfsvol:/dev/sda3/a/",
+        'btrfsvol:/dev/sda3/a"b',
+        "btrfsvol:/dev/sda3/a\tb",
+        "btrfsvol:/dev/sda3/r\u00f6ot",
+        "btrfsvol:/dev/sda3/" + "x" * 129,
         "btrfsvol:/dev/mapper/vg-root/root",
         "btrfsvol:/dev/sda3/" + "x" * 200,
     ],
@@ -205,3 +212,12 @@ def test_an_unsupported_subvolume_is_reported_as_an_actionable_failure(
         inspect_root_boot(tmp_path / "root.qcow2", "x86_64", _DIGEST)
     assert exc.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert exc.value.details["reason"] == "unsupported_btrfs_root"
+
+
+@pytest.mark.parametrize("subvolume", ["@", "@/.snapshots/1/snapshot", "x" * 128, "root-1.2_a+b"])
+def test_supported_subvolume_names_are_carried(subvolume: str) -> None:
+    device = f"btrfsvol:/dev/vda3/{subvolume}"
+
+    result = _parse_root_boot(_inspector_xml(device, (device,)), "x86_64", _DIGEST)
+
+    assert f"rootflags=subvol={subvolume}" in result.arguments

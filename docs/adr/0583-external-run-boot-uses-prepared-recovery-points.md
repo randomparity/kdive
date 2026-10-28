@@ -843,9 +843,13 @@ the initramfs emergency shell and the guest agent never connected (#3379). libgu
 root `btrfsvol:<device>/<subvolume>`. The inspected root spec now appends
 `rootflags=subvol=<subvolume>` after `rootfstype`, the same rule the in-guest install helpers
 follow. The device is split only for the `sd*` and `vd*` forms libguestfs attaches, and the
-subvolume must be plain path segments of at most 128 characters; anything else fails inspection
-with `unsupported_btrfs_root`. Non-btrfs and top-level btrfs roots are unchanged, and the root
-spec contract and its validation need no change.
+subvolume must be at most 128 characters of path segments drawn from letters, digits and `._@+-`
+(`.` and `..` excluded); anything else fails inspection with `unsupported_btrfs_root`. That check
+runs wherever the root is inspected, so an image with a subvolume outside those forms cannot be
+staged or built even for a disk boot that never reads the argument; this is a deliberate
+tradeoff, since silently omitting the flag would produce an external boot that cannot reach
+userspace. Non-btrfs and top-level btrfs roots are unchanged, and the root spec contract and its
+validation need no change.
 
 Root specs are stored with the image at stage time, so an image staged before this change keeps
 its old spec. A btrfs-subvolume image staged earlier must be re-staged to gain the argument; no
