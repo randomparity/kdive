@@ -2533,7 +2533,7 @@ class ExternalBootAuthorityService:
         request = remote.authority
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        if trusted is None or not self._binding_matches(trusted, request):
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
@@ -2795,7 +2795,7 @@ class ExternalBootAuthorityService:
     ) -> T:
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        if trusted is None or not self._binding_matches(trusted, request):
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 

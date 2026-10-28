@@ -110,6 +110,7 @@ async def test_authenticated_read_admits_a_derived_release_phase(
     tmp_path: Path, operation: AuthorityOperation, _action: str
 ) -> None:
     service, peer, root, adapter = await _acknowledged_release(tmp_path)
+    adapter.observe_category = "source"
     observation = await service.observe_authority(peer, _derived(root, operation))
     assert observation.category == "source"
     assert "observe" in adapter.calls
