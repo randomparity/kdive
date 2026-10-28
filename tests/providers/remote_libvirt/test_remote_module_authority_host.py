@@ -668,6 +668,7 @@ class _Quiesce:
     ) -> None:
         self.request = _request()
         operation = self.request.operation
+        self.scratch = _result(operation)
         names = [
             render_module_volume_name(
                 operation.system_id, operation.run_id, operation.operation_nonce, purpose
@@ -721,7 +722,7 @@ class _Quiesce:
                 4096,
             ),
             read_scratch_result=lambda volume, deadline: (
-                None if fail else _result(operation).to_wire_bytes()
+                None if fail else self.scratch.to_wire_bytes()
             ),
             inspect_attachments=inspect,
             secret_registry=SecretRegistry(),
@@ -747,6 +748,21 @@ class _Quiesce:
             activation_id=str(authority.activation_id),
         )
         return self.store.prior_power(binding, authority.plan_identity)
+
+    async def restore(self) -> RemoteModuleLifecycleResponseV1:
+        """Run the release RECOVER module restore after a completed PREPARE."""
+        self.scratch = self.scratch.model_copy(
+            update={"phase": "restored", "entry_count": None, "content_bytes": None}
+        )
+        return await self.durable.execute_lifecycle(
+            RemoteModuleLifecycleRequestV1(
+                authority=_lifecycle_authority(
+                    self.request, purpose="release", operation="recover"
+                ),
+                action="restore",
+                budget_seconds=300,
+            )
+        )
 
     def close(self) -> None:
         self.store.close()
@@ -803,6 +819,66 @@ async def test_destroy_whose_response_was_lost_is_accepted_when_the_domain_is_in
 
     assert isinstance(response, RemoteModuleTerminalPreparationResponseV1)
     assert stack.appliance.created_while_system_active == [False]
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_stops_the_activated_system_before_the_appliance(tmp_path: Path) -> None:
+    """A release restores modules offline, so the running activated guest is stopped first."""
+    system = _SystemDomain(active=False)
+    stack = _Quiesce(tmp_path, system)
+    await stack.durable.execute(stack.request)
+    system.active = True
+
+    restored = await stack.restore()
+
+    assert restored.result.phase == "restored"
+    assert system.destroyed and not system.active
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_never_destroys_a_stopped_system(tmp_path: Path) -> None:
+    system = _SystemDomain(active=False)
+    stack = _Quiesce(tmp_path, system)
+    await stack.durable.execute(stack.request)
+
+    restored = await stack.restore()
+
+    assert restored.result.phase == "restored"
+    assert not system.destroyed
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_accepts_a_destroy_whose_response_was_lost(tmp_path: Path) -> None:
+    system = _LostResponseDomain(active=False)
+    stack = _Quiesce(tmp_path, system)
+    await stack.durable.execute(stack.request)
+    system.active = True
+
+    restored = await stack.restore()
+
+    assert restored.result.phase == "restored"
+    assert not system.active
+    stack.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("domain_type", [_StuckDomain, _IgnoredDestroyDomain])
+async def test_restore_refuses_a_system_that_cannot_be_stopped(
+    tmp_path: Path, domain_type: type[_SystemDomain]
+) -> None:
+    system = domain_type(active=False)
+    stack = _Quiesce(tmp_path, system)
+    await stack.durable.execute(stack.request)
+    system.active = True
+
+    with pytest.raises(CategorizedError, match="System domain") as failed:
+        await stack.restore()
+
+    assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert system.active
     stack.close()
 
 
