@@ -124,7 +124,13 @@ A failure in the window before a retry's own begin, after it has taken over but 
 attempt is still its predecessor's, is still refused, and the job is recovered by the lease lapse as
 before.
 
-After the last attempt fails, the job is `failed` and the activation stays `recovering`: a release
-has no `deadline` operation to close it. The System is torn down from `recovering`, which is always
-admitted. Closing the attempt and activation as `recovery_failed` on a terminal release failure is
-not done here.
+A terminal release failure that finds its recovery in flight (the final attempt, or a terminal
+category) also closes the recovery, as the recover readiness branch does: the current attempt
+becomes `failed` and the activation `recovery_failed`, both with terminal evidence, and the
+System's open module obligations are discharged as a `terminal_escape`. `recovery_failed` claims only that this
+release's recovery did not complete and will not be resumed. It does not claim the host is at the
+source or the target state, because the restore may have stopped part way, and the evidence's
+composite is the authority's quiescence digest from its takeover acknowledgement, not an
+observation made after the failure. The release is not retried from `recovery_failed`. The System
+is torn down from it, which is always admitted. A non-terminal failure still requeues the job and
+leaves the activation `recovering` for the next attempt to adopt.
