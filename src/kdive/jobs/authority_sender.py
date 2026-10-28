@@ -14,6 +14,10 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityResponseV1,
     decode_device_identity_response,
 )
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepRequestV1,
+    ModuleVolumeSweepResponseV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityConflictResolutionRequestV1,
@@ -182,6 +186,11 @@ class AuthorityRequestSender:
         raise CategorizedError(
             "remote device identity is invalid", category=ErrorCategory.CONFLICT
         ) from None
+
+    async def sweep_module_volumes(
+        self, request: ModuleVolumeSweepRequestV1, *, deadline: float
+    ) -> ModuleVolumeSweepResponseV1:
+        raise NotImplementedError
 
     async def acknowledge_takeover(
         self, request: AuthorityTakeoverRequestV1, *, deadline: float

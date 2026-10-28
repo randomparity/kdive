@@ -90,6 +90,7 @@ type Operation = Literal[
     "execute-remote-module-lifecycle",
     "health",
     "resolve-device-identity",
+    "sweep-module-volumes",
     "resolve-recovery-orphan",
     "acknowledge-system-takeover",
     "execute-system-operation",
