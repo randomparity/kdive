@@ -8,38 +8,38 @@ import posixpath
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable, Collection, Sequence
-from typing import Protocol
+from typing import Protocol, cast
+from uuid import UUID
 
 import libvirt
 from defusedxml.common import DefusedXmlException
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.external_boot_authority.device_identity import (
-    build_remote_device_identity_port,
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    MAX_RETAINED_KEYS,
+    MAX_SWEEP_CANDIDATES,
+    ModuleVolumeKeyV1,
+    ModuleVolumeKind,
+    ModuleVolumeSweepRequestV1,
 )
 from kdive.providers.infra.reaping import ModuleVolumeKey
 from kdive.providers.ports.authority import AuthorityRequestSender
-from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding, RemoteLibvirtConfig
+from kdive.providers.remote_libvirt.config import (
+    RemoteAuthorityBinding,
+    RemoteLibvirtConfig,
+    all_remote_configs,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     RemoteDeviceIdentity,
     RemoteDeviceIdentityPort,
     path_references,
     volume_references,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
-    RemoteModulePreparationExecutor,
-)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
     ModuleVolumeOwner,
     parse_module_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import XmlEnumerationBudget
-from kdive.providers.remote_libvirt.reaping.connections import (
-    FleetConnections,
-    map_over_fleet,
-    open_libvirt_reaper,
-    remote_libvirt_reaper_connections,
-)
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _MAX_STORAGE_PATH_BYTES = 4096
@@ -217,12 +217,20 @@ def reap_orphaned_module_volumes(
     retained_owners: Callable[[], Collection[ModuleVolumeOwner]],
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    only: Collection[ModuleVolumeOwner] | None = None,
 ) -> int:
-    """Delete unretained owned volumes only after a complete host attachment preflight."""
+    """Delete unretained owned volumes only after a complete host attachment preflight.
+
+    ``only`` limits deletion to volumes the caller already listed, so a volume created after that
+    listing is never a candidate (#3386).
+    """
     pool = _open_pool(conn, pool_name)
     owned = _enumerate_owned(pool, pool_name)
     retained = set(retained_owners())
-    candidates = [item for item in owned if item[1] not in retained]
+    listed = None if only is None else set(only)
+    candidates = [
+        item for item in owned if item[1] not in retained and (listed is None or item[1] in listed)
+    ]
     if not candidates:
         return 0
 
@@ -279,18 +287,16 @@ def reap_orphaned_module_volumes(
 
 
 class RemoteLibvirtModuleVolumeReaper:
-    """Completion-owned fleet adapter for synchronous host module-volume sweeps."""
+    """Sweep every authority-owned host's module pool through its authority (#3386)."""
 
     def __init__(
         self,
-        connections: FleetConnections[ModuleVolumeReaperConn],
-        executor: RemoteModulePreparationExecutor,
+        configs: Callable[[], list[RemoteLibvirtConfig]],
         authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender] | None,
         *,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._connections = connections
-        self._executor = executor
+        self._configs = configs
         self._authority_sender_factory = authority_sender_factory
         self._clock = clock
 
@@ -302,60 +308,94 @@ class RemoteLibvirtModuleVolumeReaper:
         authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender] | None,
     ) -> RemoteLibvirtModuleVolumeReaper:
         """Construct without opening a host connection or resolving authority credentials."""
-        return cls(
-            remote_libvirt_reaper_connections(
-                secret_registry=secret_registry,
-                open_connection=open_libvirt_reaper,
-            ),
-            RemoteModulePreparationExecutor(),
-            authority_sender_factory,
-        )
+        del secret_registry
+        return cls(all_remote_configs, authority_sender_factory)
 
     async def reap_module_volumes(
         self,
         retained_owners: Callable[[], Awaitable[Collection[ModuleVolumeKey]]],
     ) -> int:
-        loop = asyncio.get_running_loop()
+        """Ask each authority host to sweep its own pool; any host that cannot fails the sweep.
 
-        def retained_sync() -> Collection[ModuleVolumeOwner]:
-            async def read_retained() -> Collection[ModuleVolumeKey]:
-                return await retained_owners()
-
-            keys = asyncio.run_coroutine_threadsafe(read_retained(), loop).result()
-            return [ModuleVolumeOwner(*key) for key in keys]
-
-        def sweep() -> int:
-            def reap_host(conn: ModuleVolumeReaperConn, config: RemoteLibvirtConfig) -> int:
-                if config.authority is None or self._authority_sender_factory is None:
-                    raise _conflict("remote module provider authority is unavailable")
-                sender = self._authority_sender_factory(config.authority)
-                deadline = self._clock() + _HOST_SWEEP_SECONDS
-                identity = build_remote_device_identity_port(sender, deadline)
-                if identity is None:
-                    raise _conflict("remote module provider authority is unavailable")
-                return reap_orphaned_module_volumes(
-                    conn,
-                    config.storage_pool,
-                    identity,
-                    retained_owners=retained_sync,
-                    deadline=deadline,
-                    clock=self._clock,
+        Module volumes live only in the authority's private pool, so there is nothing to sweep
+        through the host's system daemon. Each host is listed first and the retained set is read
+        afterwards, so every listed volume is older than the retained snapshot and a volume created
+        in between is never a candidate. A host whose authority is unreachable, refuses the
+        operation or answers an error fails the job (the next cycle retries), and a retained set
+        over the wire bound is refused whole: deleting around a truncated set would destroy a
+        live attempt's recovery point.
+        """
+        authority_configs = [config for config in self._configs() if config.authority is not None]
+        if not authority_configs:
+            return 0
+        factory = self._authority_sender_factory
+        if factory is None:
+            raise _conflict("remote module provider authority is unavailable")
+        failed = 0
+        listed: list[tuple[AuthorityRequestSender, tuple[ModuleVolumeKeyV1, ...]]] = []
+        for config in authority_configs:
+            assert config.authority is not None
+            try:
+                sender = factory(config.authority)
+                response = await sender.sweep_module_volumes(
+                    ModuleVolumeSweepRequestV1(phase="list"), deadline=self._deadline()
                 )
+            except _HOST_FAILURES as exc:
+                failed += 1
+                _log_host_failure("listing", exc)
+                continue
+            if response.owned:
+                listed.append((sender, response.owned))
+        removed = 0
+        if listed:
+            retained = await self._retained(retained_owners)
+            for sender, owned in listed:
+                try:
+                    for start in range(0, len(owned), MAX_SWEEP_CANDIDATES):
+                        response = await sender.sweep_module_volumes(
+                            ModuleVolumeSweepRequestV1(
+                                phase="sweep",
+                                retained=retained,
+                                candidates=owned[start : start + MAX_SWEEP_CANDIDATES],
+                            ),
+                            deadline=self._deadline(),
+                        )
+                        removed += response.removed
+                except _HOST_FAILURES as exc:
+                    failed += 1
+                    _log_host_failure("sweeping", exc)
+        if failed:
+            raise _infra("remote module-volume sweep failed", hosts=failed)
+        return removed
 
-            configs = [
-                config for config in self._connections.configs() if config.authority is not None
-            ]
-            results = map_over_fleet(
-                self._connections,
-                reap_host,
-                operation="module-volume reaping",
-                configs=configs,
+    def _deadline(self) -> float:
+        return asyncio.get_running_loop().time() + _HOST_SWEEP_SECONDS
+
+    @staticmethod
+    async def _retained(
+        retained_owners: Callable[[], Awaitable[Collection[ModuleVolumeKey]]],
+    ) -> tuple[ModuleVolumeKeyV1, ...]:
+        keys = list(await retained_owners())
+        if len(keys) > MAX_RETAINED_KEYS:
+            raise _infra("retained module volume set exceeds the sweep bound", keys=len(keys))
+        return tuple(
+            ModuleVolumeKeyV1(
+                system_id=UUID(key.system_id),
+                run_id=UUID(key.run_id),
+                operation_nonce=key.operation_nonce,
+                kind=cast(ModuleVolumeKind, key.kind),
             )
-            if configs and not results:
-                raise _infra("no remote module-volume host was reachable")
-            return sum(results)
+            for key in keys
+        )
 
-        return await self._executor.run(sweep)
+
+_HOST_FAILURES = (CategorizedError, OSError, TimeoutError, ValueError)
+
+
+def _log_host_failure(stage: str, exc: Exception) -> None:
+    _LOG.warning(
+        "remote module-volume %s failed for an authority host: %s", stage, type(exc).__qualname__
+    )
 
 
 __all__ = [

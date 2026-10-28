@@ -18,6 +18,10 @@ from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepRequestV1,
+    ModuleVolumeSweepResponseV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     _TAKEOVER_PHASES,
     GENESIS_DIGEST,
@@ -301,6 +305,12 @@ class AuthorityRemoteModuleAttemptRepository(Protocol):
     ) -> ModuleAttemptPreparationRequestV1 | None: ...
 
 
+class ModuleVolumeSweepPort(Protocol):
+    """The authority-owned sweep of the authority's own module pool (#3386)."""
+
+    async def sweep(self, request: ModuleVolumeSweepRequestV1) -> ModuleVolumeSweepResponseV1: ...
+
+
 class RemoteModulePreparationHost(Protocol):
     async def begin(
         self,
@@ -564,7 +574,9 @@ class ExternalBootAuthorityService:
         recovery_orphans: AuthorityRecoveryOrphanResolver | None = None,
         proof_checkpoint: AuthorityProofCheckpoint | None = None,
         system_service: AuthoritySystemService | None = None,
+        module_volume_sweeper: ModuleVolumeSweepPort | None = None,
     ) -> None:
+        self._module_volume_sweeper = module_volume_sweeper
         self._repository = repository
         self._journal_factory = journal_factory
         self._adapter = adapter
@@ -2156,6 +2168,14 @@ class ExternalBootAuthorityService:
         except AuthorityServiceError as error:
             self._ensure_rejection(request, error)
             raise
+
+    async def sweep_module_volumes(
+        self, peer: AuthenticatedPeer | None, request: ModuleVolumeSweepRequestV1
+    ) -> ModuleVolumeSweepResponseV1:
+        """Sweep the authority's own module pool for an authenticated peer (#3386)."""
+        if peer is None or self._module_volume_sweeper is None:
+            raise AuthorityServiceError("provider_conflict")
+        return await self._module_volume_sweeper.sweep(request)
 
     async def open_remote_module_attempt(
         self,

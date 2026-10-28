@@ -1740,8 +1740,14 @@ def _build_mutation_service(
         ConcreteRemoteExternalBootOperations,
     )
     from kdive.providers.remote_libvirt.lifecycle.external_boot import OBSERVATION_PROGRAMS
+    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+        HostStatDeviceIdentity,
+    )
     from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
         RemoteModulePreparationExecutor,
+    )
+    from kdive.providers.remote_libvirt.reaping.module_volume_sweep import (
+        ModuleVolumeSweepService,
     )
     from kdive.providers.remote_libvirt.remote_module_authority_host import (
         FactoryRemoteModuleAuthorityHost,
@@ -1845,6 +1851,12 @@ def _build_mutation_service(
         recovery_orphans=recovery_orphans,
         proof_checkpoint=proof_checkpoint,
         system_service=system_service,
+        module_volume_sweeper=ModuleVolumeSweepService(
+            connection,
+            config.remote_libvirt_storage_pool,
+            module_executor,
+            HostStatDeviceIdentity(),
+        ),
     )
 
 

@@ -11,7 +11,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -22,6 +22,10 @@ from kdive.providers.external_boot_authority import protocol, transport
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityInodeV1,
     DeviceIdentityRequestV1,
+)
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepRequestV1,
+    ModuleVolumeSweepResponseV1,
 )
 from kdive.providers.external_boot_authority.network_client import _AuthorityNetworkTransport
 from kdive.providers.external_boot_authority.protocol import (
@@ -306,6 +310,7 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "observe_authority",
         "observe_running",
         "resolve_device_identity",
+        "sweep_module_volumes",
         "resolve_recovery_orphan",
     }
     assert all(not isinstance(getattr(sender, slot), SecretStr) for slot in sender.__slots__)
@@ -638,3 +643,43 @@ async def test_invalid_credential_is_redacted_before_io(credential: str) -> None
     sender = _sender(Backend(), lambda: SecretStr(credential))
     with pytest.raises(CategorizedError, match="^authority: invalid-request$"):
         await sender.health(deadline=123.0)
+
+
+async def test_sender_sweeps_module_volumes_and_rejects_a_malformed_answer() -> None:
+    class Sweeper:
+        async def sweep_module_volumes(
+            self, peer: AuthenticatedPeer, request: ModuleVolumeSweepRequestV1
+        ) -> ModuleVolumeSweepResponseV1:
+            assert request.retained == () and request.phase == "sweep"
+            return ModuleVolumeSweepResponseV1(removed=2)
+
+    class Backend:
+        mode = "ok"
+
+        async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+            assert deadline == 123.0
+            if self.mode == "malformed":
+                return b'{"status":"ok","value":{"removed":"two"}}'
+            if self.mode == "refused":
+                return b'{"category":"provider-not-configured","status":"error"}'
+
+            async def authenticate(_value: SecretStr) -> AuthenticatedPeer:
+                return AuthenticatedPeer("worker")
+
+            return await transport._dispatch(
+                envelope, authenticate, None, None, cast(Any, Sweeper())
+            )
+
+    backend = Backend()
+    sender = _sender(backend, lambda: SecretStr("credential"))
+    request = ModuleVolumeSweepRequestV1()
+
+    assert await sender.sweep_module_volumes(request, deadline=123.0) == (
+        ModuleVolumeSweepResponseV1(removed=2)
+    )
+    backend.mode = "malformed"
+    with pytest.raises(CategorizedError):
+        await sender.sweep_module_volumes(request, deadline=123.0)
+    backend.mode = "refused"
+    with pytest.raises(CategorizedError):
+        await sender.sweep_module_volumes(request, deadline=123.0)
