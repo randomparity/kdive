@@ -83,6 +83,7 @@ async def _begin_release_recovery(
     authority_id: object,
     generation: object,
     attempt_id: object,
+    deadline: datetime | None = None,
 ) -> str:
     return str(
         await _scalar(
@@ -96,7 +97,7 @@ async def _begin_release_recovery(
                 authority_id,
                 generation,
                 attempt_id,
-                datetime.now(UTC) + timedelta(minutes=5),
+                deadline or datetime.now(UTC) + timedelta(minutes=5),
             ),
         )
     )
@@ -920,5 +921,66 @@ def test_worker_cannot_read_release_receipts_directly(
         ) as worker:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 await worker.execute("SELECT * FROM external_boot_release_cleanup_receipts")
+
+    asyncio.run(run())
+
+
+def test_derived_release_begin_needs_a_future_readiness_deadline(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """The begin guard refuses an elapsed deadline, so a retry must carry its own (#3395)."""
+
+    async def run() -> None:
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as admin:
+            case = await seed_case(
+                admin,
+                vehicle,
+                purpose="release",
+                operation="release",
+                activation_state="active",
+                with_reservation=True,
+            )
+            async with await psycopg.AsyncConnection.connect(
+                authority_role_dsns("kdive_worker"), autocommit=True
+            ) as worker:
+                authority = await _allocate_release_root(
+                    worker, case, credential=case.credential, attempt=case.attempt
+                )
+            async with await psycopg.AsyncConnection.connect(
+                authority_role_dsns("kdive_provider_authority"), autocommit=True
+            ) as provider_authority:
+                await _acknowledge_release_root(
+                    provider_authority,
+                    case,
+                    authority,
+                    worker_incarnation=case.worker_incarnation,
+                )
+            async with await psycopg.AsyncConnection.connect(
+                authority_role_dsns("kdive_worker"), autocommit=True
+            ) as worker:
+                for deadline, expected in (
+                    (datetime.now(UTC) - timedelta(seconds=1), "superseded"),
+                    (datetime.now(UTC) + timedelta(minutes=5), "applied"),
+                ):
+                    assert (
+                        await _begin_release_recovery(
+                            worker,
+                            credential=case.credential,
+                            job_id=case.job_id,
+                            attempt=case.attempt,
+                            authority_id=authority["authority_id"],
+                            generation=authority["generation"],
+                            attempt_id=uuid4(),
+                            deadline=deadline,
+                        )
+                        == expected
+                    )
+                    state = await _scalar(
+                        admin,
+                        "SELECT state FROM external_boot_activations WHERE id = %s",
+                        (vehicle.activation_id,),
+                    )
+                    assert state == ("active" if expected == "superseded" else "recovering")
 
     asyncio.run(run())
