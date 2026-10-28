@@ -128,7 +128,9 @@ class _Lane:
                 attempt_id=uuid4(),
             )
 
-    async def fail(self, authority: dict[str, Any]) -> Job | queue.ExternalBootCommitStatus:
+    async def fail(
+        self, authority: dict[str, Any], *, terminal: bool = False
+    ) -> Job | queue.ExternalBootCommitStatus:
         case = self.case
         head = await (
             await self.admin.execute(
@@ -160,7 +162,7 @@ class _Lane:
                     "operation": "fail",
                     "error_category": "infrastructure_failure",
                     "failure_context": {"phase": "commit"},
-                    "terminal": False,
+                    "terminal": terminal,
                 },
             }
         )
@@ -356,7 +358,7 @@ def test_another_jobs_retired_authority_is_not_adopted_by_allocation(
     _drive(migrated_url, authority_role_dsns, tmp_path, body)
 
 
-def test_the_final_failed_attempt_ends_the_job_and_leaves_the_activation_recovering(
+def test_the_final_failed_attempt_closes_the_recovery_as_failed(
     migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
 ) -> None:
     async def body(lane: _Lane) -> None:
@@ -365,10 +367,34 @@ def test_the_final_failed_attempt_ends_the_job_and_leaves_the_activation_recover
         assert isinstance(failed, Job) and failed.state.value == "failed"
         assert await lane.states() == {
             "authorities": [(first["generation"], "retired")],
-            "attempts": [(1, first["generation"], "recovering")],
-            "activation": "recovering",
+            "attempts": [(1, first["generation"], "failed")],
+            "activation": "recovery_failed",
             "job": "failed",
             "job_attempt": 1,
         }
+        evidence = await (
+            await lane.admin.execute(
+                "SELECT a.terminal_evidence ->> 'outcome', t.terminal_evidence ->> 'outcome' "
+                "FROM external_boot_activations AS a "
+                "JOIN external_boot_recovery_attempts AS t ON t.activation_id = a.id "
+                "WHERE a.id = %s",
+                (lane.case.vehicle.activation_id,),
+            )
+        ).fetchone()
+        assert evidence == ("recovery_failed", "recovery_failed")
 
     _drive(migrated_url, authority_role_dsns, tmp_path, body, max_attempts=1)
+
+
+def test_a_terminal_failure_closes_the_recovery_even_with_attempts_left(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
+) -> None:
+    async def body(lane: _Lane) -> None:
+        first = await _first_attempt_begun(lane)
+        failed = await lane.fail(first, terminal=True)
+        assert isinstance(failed, Job) and failed.state.value == "failed"
+        states = await lane.states()
+        assert states["activation"] == "recovery_failed"
+        assert states["attempts"] == [(1, first["generation"], "failed")]
+
+    _drive(migrated_url, authority_role_dsns, tmp_path, body)
