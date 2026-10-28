@@ -457,3 +457,17 @@ teardown completion constraints.
 - **Make recovery observation resume destruction.** **verified:** observation
   is a read-only classification boundary. Resuming a mutation there would give
   a recovery read capability destructive semantics.
+
+## Amendment (2026-10-28): System teardown discharges the module reap obligation
+
+The authority's System teardown reaps the module volumes from its own records, creating the
+`reaping.journal` and `reaped.journal` markers, but nothing recorded that reap on the module
+attempt's reap obligation. The obligation stayed open, so the sweep retained both marker volumes
+for ever and every torn-down activated System leaked them (#3383). The teardown job already
+carries the PREP receipt when a reap obligation was open at admission. After the authority's
+teardown returns, and unless its disposition is `retained_quarantine`, the teardown handler now
+discharges the reap obligation through the worker evidence function with that receipt, before it
+reclaims the System's core rows and finalizes the teardown receipt. A teardown with no receipt has
+nothing to discharge. A discharge the function refuses fails the job as stale, as the module
+lifecycle path does, so a leaked obligation is never reported as a clean teardown. The discharge
+is idempotent, so a retried teardown repeats it harmlessly. No schema change.
