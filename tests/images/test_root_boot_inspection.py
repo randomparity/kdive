@@ -97,6 +97,83 @@ def test_parser_builds_digest_bound_root_spec() -> None:
     assert result.source.identity == "sha256:" + "a" * 64
 
 
+_DIGEST = "sha256:" + "a" * 64
+_FS_UUID = "00000000-0000-4000-8000-0000000000aa"
+
+
+def _inspector_xml(
+    root_device: str, filesystem_devices: tuple[str, ...], fs: str = "btrfs"
+) -> bytes:
+    """virt-inspector's mountpoint and filesystem shape for a Fedora Cloud style image."""
+    filesystems = "".join(
+        f"<filesystem dev='{device}'><type>{fs}</type><uuid>{_FS_UUID}</uuid></filesystem>"
+        for device in filesystem_devices
+    )
+    return (
+        "<operatingsystems><operatingsystem><mountpoints>"
+        f"<mountpoint dev='{root_device}'>/</mountpoint>"
+        "<mountpoint dev='btrfsvol:/dev/sda3/var'>/var</mountpoint>"
+        "<mountpoint dev='/dev/sda2'>/boot/efi</mountpoint>"
+        f"</mountpoints><filesystems>{filesystems}"
+        "<filesystem dev='/dev/sda2'><type>vfat</type><uuid>5BCC-12A9</uuid></filesystem>"
+        "</filesystems></operatingsystem></operatingsystems>"
+    ).encode()
+
+
+def test_a_btrfs_subvolume_root_carries_its_subvolume() -> None:
+    xml = _inspector_xml(
+        "btrfsvol:/dev/sda3/root", ("btrfsvol:/dev/sda3/root", "btrfsvol:/dev/sda3/var")
+    )
+
+    result = _parse_root_boot(xml, "x86_64", _DIGEST)
+
+    assert result.arguments == (
+        f"root=UUID={_FS_UUID}",
+        "rootfstype=btrfs",
+        "rootflags=subvol=root",
+    )
+
+
+def test_a_nested_btrfs_subvolume_is_kept_whole() -> None:
+    xml = _inspector_xml("btrfsvol:/dev/sda3/os/root", ("btrfsvol:/dev/sda3/os/root",))
+
+    result = _parse_root_boot(xml, "x86_64", _DIGEST)
+
+    assert "rootflags=subvol=os/root" in result.arguments
+
+
+def test_a_top_level_btrfs_root_has_no_rootflags() -> None:
+    result = _parse_root_boot(_inspector_xml("/dev/sda3", ("/dev/sda3",)), "x86_64", _DIGEST)
+
+    assert result.arguments == (f"root=UUID={_FS_UUID}", "rootfstype=btrfs")
+
+
+def test_a_non_btrfs_root_has_no_rootflags() -> None:
+    result = _parse_root_boot(
+        _inspector_xml("/dev/sda3", ("/dev/sda3",), fs="xfs"), "x86_64", _DIGEST
+    )
+
+    assert result.arguments == (f"root=UUID={_FS_UUID}", "rootfstype=xfs")
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "btrfsvol:/dev/sda3/",
+        "btrfsvol:/dev/sda3",
+        "btrfsvol:/dev/sda3/a b",
+        "btrfsvol:/dev/sda3/a=b",
+        "btrfsvol:/dev/sda3/a,b",
+        "btrfsvol:/dev/sda3/../x",
+        "btrfsvol:/dev/mapper/vg-root/root",
+        "btrfsvol:/dev/sda3/" + "x" * 200,
+    ],
+)
+def test_an_unusable_subvolume_fails_closed(device: str) -> None:
+    with pytest.raises(ValueError, match="subvolume"):
+        _parse_root_boot(_inspector_xml(device, (device,)), "x86_64", _DIGEST)
+
+
 @pytest.mark.parametrize("xml", [b"not xml", b"<x/>", b"<!DOCTYPE x><x/>"])
 def test_parser_rejects_malformed_or_incomplete_output(xml: bytes) -> None:
     with pytest.raises((ValueError, ParseError)):
