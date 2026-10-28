@@ -564,7 +564,9 @@ class ConcreteRemoteModuleAuthorityHost:
         return await self._executor.run(lambda: self._execute(admitted))
 
     def _system_domain(self, admitted: AdmittedRemoteModulePreparation) -> Any:
-        system_id = UUID(admitted.request.operation.system_id)
+        return self._domain_of(UUID(admitted.request.operation.system_id))
+
+    def _domain_of(self, system_id: UUID) -> Any:
         try:
             return self._configuration.appliance.appliance.lookupByName(domain_name_for(system_id))
         except libvirt.libvirtError as exc:
@@ -591,27 +593,31 @@ class ConcreteRemoteModuleAuthorityHost:
         an infrastructure failure, not a refusal before mutation.
         """
 
-        def stop() -> None:
-            domain = self._system_domain(admitted)
-            try:
-                active = bool(domain.isActive())
-            except libvirt.libvirtError as exc:
-                raise _refused("remote System power could not be read") from exc
-            if not active:
-                return
-            self._require_deadline(admitted.local_deadline)
-            try:
-                try:
-                    domain.destroy()
-                except libvirt.libvirtError:
-                    if domain.isActive():
-                        raise
-                if domain.isActive():
-                    raise _stop_failed("remote System domain remained active after destroy")
-            except libvirt.libvirtError as exc:
-                raise _stop_failed("remote System domain could not be stopped") from exc
+        system_id = UUID(admitted.request.operation.system_id)
+        await self._executor.run(
+            lambda: self._stop_system_domain(system_id, admitted.local_deadline)
+        )
 
-        await self._executor.run(stop)
+    def _stop_system_domain(self, system_id: UUID, deadline: float) -> None:
+        """Destroy the System's domain if it is running and prove it inactive (synchronous)."""
+        domain = self._domain_of(system_id)
+        try:
+            active = bool(domain.isActive())
+        except libvirt.libvirtError as exc:
+            raise _refused("remote System power could not be read") from exc
+        if not active:
+            return
+        self._require_deadline(deadline)
+        try:
+            try:
+                domain.destroy()
+            except libvirt.libvirtError:
+                if domain.isActive():
+                    raise
+            if domain.isActive():
+                raise _stop_failed("remote System domain remained active after destroy")
+        except libvirt.libvirtError as exc:
+            raise _stop_failed("remote System domain could not be stopped") from exc
 
     async def restore_system_power(
         self, admitted: AdmittedRemoteModulePreparation, prior: PriorPower
@@ -717,6 +723,10 @@ class ConcreteRemoteModuleAuthorityHost:
                 os.close(descriptor)
             if evidence.get("module_source_manifest") != restore.source_manifest:
                 raise ValueError("remote module restore source differs from baseline")
+            # ADR-0585: the appliance never starts unless the System is shut off. A release
+            # restores after ACTIVATE, so the activated guest is stopped here; the provider
+            # RECOVER that follows restores the power PREPARE recorded.
+            self._stop_system_domain(UUID(restore.system_id), deadline)
             volumes = prepare_attempt_volumes(
                 configured.storage,
                 self._volume_request(terminal.request.authority, restore, directory / "modules"),
