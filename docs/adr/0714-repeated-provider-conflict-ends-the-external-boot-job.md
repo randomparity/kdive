@@ -120,6 +120,10 @@ the current recovering attempt by generation, as they already adopted a `current
 one. Retiring rather than superseding keeps the commit's one behaviour for failures; a superseded
 authority has a successor, and a failed attempt has none yet.
 
+A failure in the window before a retry's own begin, after it has taken over but while the current
+attempt is still its predecessor's, is still refused, and the job is recovered by the lease lapse as
+before.
+
 After the last attempt fails, the job is `failed` and the activation stays `recovering`: a release
 has no `deadline` operation to close it. The System is torn down from `recovering`, which is always
 admitted. Closing the attempt and activation as `recovery_failed` on a terminal release failure is
