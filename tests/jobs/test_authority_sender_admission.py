@@ -29,13 +29,14 @@ def _raised(category: str) -> CategorizedError:
 def test_a_pre_admission_rejection_is_marked_refused_and_stays_retryable(reason: str) -> None:
     error = _raised(reason)
     assert error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert error.details == {"admission": "refused", "authority_reason": reason}
+    assert error.details == {"admission": "refused"}
+    assert str(error) == f"authority: {reason}"
 
 
 def test_a_journal_conflict_is_terminal_for_the_wait_but_not_proven_unadmitted() -> None:
     error = _raised("journal-conflict")
     assert error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert error.details == {"admission": "unknown", "authority_reason": "journal-conflict"}
+    assert error.details == {"admission": "unknown"}
 
 
 def test_a_provider_conflict_keeps_only_its_adr_0714_mark() -> None:
