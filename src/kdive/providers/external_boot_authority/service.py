@@ -796,6 +796,28 @@ class ExternalBootAuthorityService:
             and binding.operation_digest == request.operation_digest
         )
 
+    @classmethod
+    def _candidate_matches(
+        cls,
+        binding: AuthorityBinding,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+    ) -> bool:
+        """Whether ``binding`` is the current candidate this request runs under.
+
+        A preparation phase runs under its root activate candidate, and a derived release
+        RECOVER or CLEANUP under its root release candidate; every other request must equal
+        its binding exactly.
+        """
+        if isinstance(request, AuthorityPreparationMutationRequestV1):
+            return cls._root_candidate_matches_preparation(binding, request)
+        if (
+            binding.operation is AuthorityOperation.RELEASE
+            and request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+        ):
+            return cls._root_candidate_matches_release_phase(binding, request)
+        return cls._binding_matches(binding, request)
+
     @staticmethod
     def _root_candidate_matches_preparation(
         binding: AuthorityBinding, request: AuthorityPreparationMutationRequestV1
@@ -1728,16 +1750,7 @@ class ExternalBootAuthorityService:
             raise AuthorityServiceError("superseded")
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        candidate_matches = trusted is not None and (
-            self._root_candidate_matches_preparation(trusted, request)
-            if isinstance(request, AuthorityPreparationMutationRequestV1)
-            else self._root_candidate_matches_release_phase(trusted, request)
-            if trusted.operation is AuthorityOperation.RELEASE
-            and request.purpose == "release"
-            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
-            else self._binding_matches(trusted, request)
-        )
-        if not candidate_matches:
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
@@ -2540,7 +2553,7 @@ class ExternalBootAuthorityService:
         request = remote.authority
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        if trusted is None or not self._binding_matches(trusted, request):
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
@@ -2802,7 +2815,7 @@ class ExternalBootAuthorityService:
     ) -> T:
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        if trusted is None or not self._binding_matches(trusted, request):
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
