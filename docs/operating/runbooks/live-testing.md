@@ -2162,13 +2162,14 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   authority account. It then calls `runs.release_external_boot` and requires the job `failed`
   with category `conflict`, the journal head `terminal` for `recover` with outcome `conflict`, and
   the activation in `recovery_conflict`. The frame's project admin then calls
-  `systems.resolve_external_boot_conflict` with the head's composite. Restoring over a third
-  identity is #3330, so the arm requires that job to end with `conflict` too and the activation
-  back in `recovery_conflict`. The frame's cleanup then tears the System down from
-  `recovery_conflict`, which the local authority settles by discarding the retained recovery point
-  ([ADR-0620](../../adr/0620-authority-owned-system-teardown.md), #3341). The remote arm still
-  stops `blocked` there: that fix changed the local provider only, so the remote cleanup is
-  unproven, and the killed-run cleanup above or a lane-host rollback clears a stranded System.
+  `systems.resolve_external_boot_conflict` with the head's composite. The added token is a third
+  identity the resolution acknowledges, so it restores the recorded source
+  ([ADR-0805](../../adr/0805-authority-observed-conflict-is-recorded-from-its-journal-head.md),
+  #3330): the arm requires that job to succeed, the journal head `terminal` for `resolve-conflict`
+  with outcome `source`, and the activation `recovered`. The frame's teardown then runs from
+  `recovered`. Teardown straight from an unresolved remote conflict is not covered: the remote
+  provider refuses a definition that is neither the recorded source nor target
+  ([ADR-0620](../../adr/0620-authority-owned-system-teardown.md)).
 - **Blocked arm.** The remote orphan passes the lane gates and skips with `blocked:` and its
   reason before any mutation: the arm needs an activated remote System, and remote PREPARE is
   blocked (#3363). The remote authority now publishes and resolves the quarantine (#3326), and the
