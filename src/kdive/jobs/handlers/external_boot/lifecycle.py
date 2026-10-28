@@ -82,9 +82,14 @@ def _request_deadline(context: OperationContext, fallback: datetime) -> datetime
 
 
 def _starts_fresh_readiness_budget(context: OperationContext) -> bool:
-    """Skeleton: a re-entered derived release recovery restarts its budget (#3395)."""
-    del context
-    return False
+    """Whether a release is re-entering a recovery that an earlier job attempt began.
+
+    A request's readiness deadline is stamped once at admission, five minutes ahead, and a later
+    job attempt only starts after the lease (also five minutes) has lapsed. Beginning the derived
+    RECOVER against that deadline is always refused, so a re-entered release gets its own budget
+    (ADR-0684 amendment, #3395).
+    """
+    return context.job.attempt > 1 or context.activation.state is State.RECOVERING
 
 
 _ACTIVATION_EVIDENCE: Final = frozenset({"materialization", "recovery_point"})
@@ -970,13 +975,18 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     async def complete(
         context: OperationContext,
     ) -> ExternalBootDerivedReleaseCompletion | ExternalBootAuthorityConflictV1:
+        fresh = ports.clock() + ports.recovery_readiness_timeout
         prerequisites = dict(context.prerequisites)
         prerequisites.update(
             connection=context.prerequisites["connection"],
             incarnation_credential=hashlib.sha256(
                 ports.incarnation_credential.get_secret_value().encode("utf-8")
             ).digest(),
-            deadline=_request_deadline(context, ports.clock() + ports.recovery_readiness_timeout),
+            deadline=(
+                fresh
+                if _starts_fresh_readiness_budget(context)
+                else _request_deadline(context, fresh)
+            ),
         )
         return await _run_active_release(replace(context, prerequisites=prerequisites))
 
