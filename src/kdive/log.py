@@ -33,6 +33,8 @@ _CONTEXT: dict[str, ContextVar[str | None]] = {
 
 _CTX_RECORD_ATTR = "_kdive_ctx"
 
+LOG_EXTRA_FIELDS: frozenset[str] = frozenset()
+
 
 @contextlib.contextmanager
 def bind_context(**fields: str) -> Generator[None]:

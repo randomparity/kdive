@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 from uuid import UUID
@@ -219,6 +219,19 @@ async def prepare_remote_module_on_authority_host(
         commit_result=commit_result,
         allow_terminal_replay=True,
     )
+
+
+async def await_authority_dispatch[Value](
+    dispatch: Callable[[float], Awaitable[Value]],
+    *,
+    deadline: float,
+    what: str,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+    jitter: Callable[[], float] | None = None,
+) -> Value:
+    """Skeleton: the shared wait of ADR-0808 (implemented in the next commit)."""
+    raise NotImplementedError("ADR-0808")
 
 
 async def execute_remote_module_lifecycle_on_authority_host(

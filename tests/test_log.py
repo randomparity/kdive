@@ -290,3 +290,68 @@ def test_context_is_isolated_between_concurrent_tasks() -> None:
     }
     assert records["from-A"]["request_id"] == "task-A"
     assert "request_id" not in records["from-B"]
+
+
+def _extra_record(**extra: object) -> logging.LogRecord:
+    record = logging.LogRecord("kdive.test.extra", logging.WARNING, __file__, 0, "rej", None, None)
+    for name, value in extra.items():
+        setattr(record, name, value)
+    return record
+
+
+def test_allowlisted_extras_are_emitted_and_others_are_not() -> None:
+    record = _extra_record(
+        category="superseded",
+        reason="lane_failed_lifecycle",
+        provider_kind="remote-libvirt",
+        authority_instance="lab",
+        digest="sha256:abc",
+        query="caller supplied text",
+        mcp_session_id="session",
+    )
+    payload = json.loads(klog.JsonFormatter().format(record))
+    assert payload["category"] == "superseded"
+    assert payload["reason"] == "lane_failed_lifecycle"
+    assert payload["provider_kind"] == "remote-libvirt"
+    assert payload["authority_instance"] == "lab"
+    assert payload["digest"] == "sha256:abc"
+    assert "query" not in payload and "mcp_session_id" not in payload
+
+
+def test_allowlisted_extras_drop_none_and_non_scalars_and_truncate() -> None:
+    record = _extra_record(
+        category=None, reason={"nested": "value"}, digest="d" * 1000, authority_instance=7
+    )
+    payload = json.loads(klog.JsonFormatter().format(record))
+    assert "category" not in payload and "reason" not in payload
+    assert payload["digest"] == "d" * 256
+    assert payload["authority_instance"] == 7
+
+
+def test_an_extra_never_overrides_a_core_or_context_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(klog, "LOG_EXTRA_FIELDS", frozenset({"level", "msg", "job_id"}))
+    record = _extra_record(level="forged", msg_extra="x")
+    record.__dict__["level"] = "forged"
+    setattr(record, klog._CTX_RECORD_ATTR, {"job_id": "real"})
+    record.__dict__["job_id"] = "forged"
+    payload = json.loads(klog.JsonFormatter().format(record))
+    assert payload["level"] == "WARNING"
+    assert payload["msg"] == "rej"
+    assert payload["job_id"] == "real"
+
+
+def test_allowlisted_string_extras_are_redacted_by_the_filter() -> None:
+    registry = SecretRegistry()
+    registry.register("hunter2-token", scope=None)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(klog.JsonFormatter())
+    handler.addFilter(SecretRedactionFilter(registry))
+    logger = logging.getLogger("kdive.test.extra.redaction")
+    logger.handlers = [handler]
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.warning("rejected", extra={"reason": "bad hunter2-token here", "category": "x"})
+    payload = _last_record(stream)
+    assert "hunter2-token" not in stream.getvalue()
+    assert payload["reason"] == f"bad {REDACTION} here"
