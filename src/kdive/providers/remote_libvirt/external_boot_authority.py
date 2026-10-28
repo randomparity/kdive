@@ -1992,6 +1992,7 @@ class RemoteModulePreparationOperation(Protocol):
         self,
         request: RemoteModuleSystemTeardownRequestV1,
         terminal: RemoteModuleTerminalRecord,
+        restored: RemoteModuleLifecycleResponseV1 | None,
         deadline: float,
     ) -> RemoteModuleLifecycleResponseV1: ...
 
@@ -2267,9 +2268,12 @@ class DurableRemoteModuleVolumePreparationHost:
             activation_id=str(request.authority.activation_id),
         )
         terminal = self._store.reopen_terminal(binding, request.authority.plan_identity)
+        # A restore that completed before a failed release leaves the restored result in the
+        # scratch volume, so the reap is checked against it rather than the installed result.
+        restored = self._store.reopen_restored(binding, request.authority.plan_identity)
         task = asyncio.create_task(
             self._host.execute_system_teardown(
-                request, terminal, self._monotonic() + request.budget_seconds
+                request, terminal, restored, self._monotonic() + request.budget_seconds
             )
         )
         cancelled, consumed = await _wait_for_owned_child(task)
