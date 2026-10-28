@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, LiteralString
+from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import psycopg
@@ -28,6 +28,15 @@ from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     ExternalBootAuthorityService,
 )
+from tests.db.release_phase_support import (
+    SourceAuthorityAdapter,
+    acknowledge_release_root,
+    allocate_release_root,
+    begin_release_recovery,
+    release_phase,
+    release_takeover,
+    scalar,
+)
 from tests.db_waits import wait_until_backend_waiting
 from tests.jobs.handlers.external_boot.seeding import (
     AUTHORITY_INSTANCE,
@@ -37,138 +46,6 @@ from tests.jobs.handlers.external_boot.seeding import (
     store_identity,
 )
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
-
-
-async def _scalar(
-    conn: psycopg.AsyncConnection, sql: LiteralString, args: tuple[object, ...]
-) -> object:
-    row = await (await conn.execute(sql, args)).fetchone()
-    assert row is not None
-    return row[0]
-
-
-async def _allocate_release_root(
-    conn: psycopg.AsyncConnection, case: Any, *, credential: str, attempt: int
-) -> dict[str, Any]:
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT * FROM allocate_external_boot_authority("
-            "sha256(convert_to(%s,'UTF8')),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (
-                credential,
-                case.job_id,
-                attempt,
-                case.vehicle.activation_id,
-                case.vehicle.run_id,
-                case.vehicle.system_id,
-                case.vehicle.plan_identity,
-                "release",
-                "local-libvirt",
-                AUTHORITY_INSTANCE,
-                case.marker["operation_identity"],
-            ),
-        )
-        allocated = await cur.fetchone()
-    assert allocated is not None
-    assert allocated["status"] == "allocated"
-    return allocated
-
-
-async def _begin_release_recovery(
-    conn: psycopg.AsyncConnection,
-    *,
-    credential: str,
-    job_id: object,
-    attempt: int,
-    authority_id: object,
-    generation: object,
-    attempt_id: object,
-    deadline: datetime | None = None,
-) -> str:
-    return str(
-        await _scalar(
-            conn,
-            "SELECT begin_external_boot_derived_release_recovery("
-            "sha256(convert_to(%s,'UTF8')),%s,%s,%s,%s,%s,%s)",
-            (
-                credential,
-                job_id,
-                attempt,
-                authority_id,
-                generation,
-                attempt_id,
-                deadline or datetime.now(UTC) + timedelta(minutes=5),
-            ),
-        )
-    )
-
-
-async def _acknowledge_release_root(
-    conn: psycopg.AsyncConnection,
-    case: Any,
-    authority: dict[str, Any],
-    *,
-    worker_incarnation: str,
-) -> None:
-    assert (
-        await _scalar(
-            conn,
-            "SELECT status FROM acknowledge_external_boot_authority("
-            "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (
-                authority["authority_id"],
-                authority["generation"],
-                case.allocation_id,
-                case.vehicle.activation_id,
-                case.vehicle.run_id,
-                case.vehicle.system_id,
-                case.vehicle.plan_identity,
-                case.job_id,
-                authority["generation"],
-                "release",
-                "local-libvirt",
-                AUTHORITY_INSTANCE,
-                worker_incarnation,
-                "release",
-                case.marker["operation_identity"],
-                authority["operation_digest"],
-                1,
-                "sha256:" + "b" * 64,
-                "sha256:" + "c" * 64,
-            ),
-        )
-        == "applied"
-    )
-
-
-async def _release_phase(
-    conn: psycopg.AsyncConnection,
-    case: Any,
-    authority: dict[str, Any],
-    worker_incarnation: str,
-    operation: str,
-) -> dict[str, Any]:
-    root = {
-        "authority_id": str(authority["authority_id"]),
-        "generation": authority["generation"],
-        "system_id": str(case.vehicle.system_id),
-        "activation_id": str(case.vehicle.activation_id),
-        "run_id": str(case.vehicle.run_id),
-        "plan_identity": case.vehicle.plan_identity,
-        "provider_kind": "local-libvirt",
-        "authority_instance": AUTHORITY_INSTANCE,
-        "worker_incarnation": worker_incarnation,
-        "root_operation_identity": case.marker["operation_identity"],
-        "root_operation_digest": authority["operation_digest"],
-    }
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT * FROM derive_external_boot_release_phase_binding(%s::jsonb,%s)",
-            (json.dumps(root), operation),
-        )
-        phase = await cur.fetchone()
-    assert phase is not None
-    return phase
 
 
 async def _call_release_function_while_holding_system_lock(
@@ -181,7 +58,7 @@ async def _call_release_function_while_holding_system_lock(
     credential_hash = "sha256(convert_to(%s,'UTF8'))"
     args: tuple[object, ...]
     if function == "begin":
-        return await _begin_release_recovery(
+        return await begin_release_recovery(
             conn,
             credential=case.credential,
             job_id=case.job_id,
@@ -252,39 +129,7 @@ async def _call_release_function_while_holding_system_lock(
         )
     else:
         raise AssertionError(f"unknown release function {function}")
-    return str(await _scalar(conn, sql, args))
-
-
-class _SourceAuthorityAdapter:
-    async def commit(
-        self, request: AuthorityMutationRequestV1, context: object
-    ) -> AuthorityObservationV1:
-        del context
-        return await self.observe(request)
-
-    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
-        return AuthorityObservationV1(
-            observation_id=request.attempt_id,
-            category="source",
-            composite_state="sha256:" + "a" * 64,
-        )
-
-
-def _release_takeover(case: Any, authority: dict[str, Any]) -> AuthorityTakeoverRequestV1:
-    return AuthorityTakeoverRequestV1(
-        authority_id=authority["authority_id"],
-        generation=authority["generation"],
-        system_id=case.vehicle.system_id,
-        activation_id=case.vehicle.activation_id,
-        run_id=case.vehicle.run_id,
-        plan_identity=case.vehicle.plan_identity,
-        purpose="release",
-        operation="release",
-        provider_kind="local-libvirt",
-        authority_instance=AUTHORITY_INSTANCE,
-        operation_identity=case.marker["operation_identity"],
-        operation_digest=authority["operation_digest"],
-    )
+    return str(await scalar(conn, sql, args))
 
 
 @pytest.mark.parametrize("function", ["begin", "finalize", "commit", "receipt", "adopt"])
@@ -312,13 +157,13 @@ def test_release_functions_wait_for_system_before_locking_the_authority_row(
         async with await psycopg.AsyncConnection.connect(
             authority_role_dsns("kdive_worker"), autocommit=True
         ) as worker:
-            authority = await _allocate_release_root(
+            authority = await allocate_release_root(
                 worker, case, credential=case.credential, attempt=case.attempt
             )
         async with await psycopg.AsyncConnection.connect(
             authority_role_dsns("kdive_provider_authority"), autocommit=True
         ) as provider_authority:
-            await _acknowledge_release_root(
+            await acknowledge_release_root(
                 provider_authority,
                 case,
                 authority,
@@ -387,7 +232,7 @@ def test_recovering_release_takeover_refuses_wrong_job_stale_worker_and_bad_term
     service = ExternalBootAuthorityService(
         repository=DatabaseAuthorityRepository(authority_connection),
         journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
-        adapter=_SourceAuthorityAdapter(),
+        adapter=SourceAuthorityAdapter(),
     )
 
     async def run() -> None:
@@ -406,17 +251,17 @@ def test_recovering_release_takeover_refuses_wrong_job_stale_worker_and_bad_term
             async with await psycopg.AsyncConnection.connect(
                 authority_role_dsns("kdive_worker"), autocommit=True
             ) as original_worker:
-                original = await _allocate_release_root(
+                original = await allocate_release_root(
                     original_worker, case, credential=case.credential, attempt=case.attempt
                 )
             await service.acknowledge_takeover(
-                AuthenticatedPeer(case.worker_incarnation), _release_takeover(case, original)
+                AuthenticatedPeer(case.worker_incarnation), release_takeover(case, original)
             )
             async with await psycopg.AsyncConnection.connect(
                 authority_role_dsns("kdive_worker"), autocommit=True
             ) as original_worker:
                 assert (
-                    await _begin_release_recovery(
+                    await begin_release_recovery(
                         original_worker,
                         credential=case.credential,
                         job_id=case.job_id,
@@ -427,7 +272,7 @@ def test_recovering_release_takeover_refuses_wrong_job_stale_worker_and_bad_term
                     )
                     == "applied"
                 )
-            original_phase = await _release_phase(
+            original_phase = await release_phase(
                 admin, case, original, case.worker_incarnation, "recover"
             )
             await service.execute_mutation(
@@ -465,11 +310,11 @@ def test_recovering_release_takeover_refuses_wrong_job_stale_worker_and_bad_term
             async with await psycopg.AsyncConnection.connect(
                 authority_role_dsns("kdive_worker"), autocommit=True
             ) as retry_worker:
-                replacement = await _allocate_release_root(
+                replacement = await allocate_release_root(
                     retry_worker, case, credential=retry_credential, attempt=2
                 )
             acknowledgement = await service.acknowledge_takeover(
-                AuthenticatedPeer(retry_incarnation), _release_takeover(case, replacement)
+                AuthenticatedPeer(retry_incarnation), release_takeover(case, replacement)
             )
             async with await psycopg.AsyncConnection.connect(
                 authority_role_dsns("kdive_worker"), autocommit=True
@@ -483,7 +328,7 @@ def test_recovering_release_takeover_refuses_wrong_job_stale_worker_and_bad_term
                     (wrong_job, retry_incarnation, f"external-boot-{wrong_job}", case.job_id),
                 )
                 assert (
-                    await _begin_release_recovery(
+                    await begin_release_recovery(
                         retry_worker,
                         credential=retry_credential,
                         job_id=wrong_job,
@@ -495,7 +340,7 @@ def test_recovering_release_takeover_refuses_wrong_job_stale_worker_and_bad_term
                     == "superseded"
                 )
                 assert (
-                    await _begin_release_recovery(
+                    await begin_release_recovery(
                         retry_worker,
                         credential=case.credential,
                         job_id=case.job_id,
@@ -515,7 +360,7 @@ def test_recovering_release_takeover_refuses_wrong_job_stale_worker_and_bad_term
                 ).fetchall()
                 assert attempts == [(original["generation"], "recovering")]
                 assert (
-                    await _begin_release_recovery(
+                    await begin_release_recovery(
                         retry_worker,
                         credential=retry_credential,
                         job_id=case.job_id,
@@ -528,7 +373,7 @@ def test_recovering_release_takeover_refuses_wrong_job_stale_worker_and_bad_term
                 )
 
             peer = AuthenticatedPeer(retry_incarnation)
-            phase = await _release_phase(admin, case, replacement, retry_incarnation, "recover")
+            phase = await release_phase(admin, case, replacement, retry_incarnation, "recover")
             await service.execute_mutation(
                 peer,
                 AuthorityMutationRequestV1(
@@ -570,7 +415,7 @@ def test_recovering_release_takeover_refuses_wrong_job_stale_worker_and_bad_term
                 authority_role_dsns("kdive_worker"), autocommit=True
             ) as commit_worker:
                 assert (
-                    await _scalar(
+                    await scalar(
                         commit_worker,
                         "SELECT commit_external_boot_derived_release_recovery("
                         "sha256(convert_to(%s,'UTF8')),%s,%s,%s,%s,%s,%s,%s::jsonb)",
@@ -749,7 +594,7 @@ def test_cleanup_receipt_is_exact_and_final_credit_is_idempotent(
                 migrated_url, autocommit=True
             ) as worker:
                 assert (
-                    await _scalar(
+                    await scalar(
                         worker,
                         "SELECT begin_external_boot_derived_release_recovery("
                         "sha256(convert_to(%s,'UTF8')),%s,%s,%s,%s,%s,%s)",
@@ -803,8 +648,8 @@ def test_cleanup_receipt_is_exact_and_final_credit_is_idempotent(
                     "SELECT commit_external_boot_derived_release_recovery("
                     "sha256(convert_to(%s,'UTF8')),%s,%s,%s,%s,%s,%s,%s::jsonb)"
                 )
-                assert await _scalar(worker, recovery_sql, recovery_args) == "applied"
-                assert await _scalar(worker, recovery_sql, recovery_args) == "applied"
+                assert await scalar(worker, recovery_sql, recovery_args) == "applied"
+                assert await scalar(worker, recovery_sql, recovery_args) == "applied"
             cleanup_request = AuthorityMutationRequestV1.model_validate(
                 common
                 | {
@@ -850,9 +695,9 @@ def test_cleanup_receipt_is_exact_and_final_credit_is_idempotent(
                     "SELECT record_external_boot_release_cleanup_receipt("
                     "sha256(convert_to(%s,'UTF8')),%s,%s,%s,%s,%s,%s,%s,%s,%s)"
                 )
-                assert await _scalar(worker, receipt_sql, args) == "applied"
+                assert await scalar(worker, receipt_sql, args) == "applied"
                 wrong = (*args[:-1], "sha256:" + "c" * 64)
-                assert await _scalar(worker, receipt_sql, wrong) == "superseded"
+                assert await scalar(worker, receipt_sql, wrong) == "superseded"
                 release_identity = "sha256:" + "d" * 64
                 release = {
                     "schema": "external-boot-release-evidence-v1",
@@ -887,8 +732,8 @@ def test_cleanup_receipt_is_exact_and_final_credit_is_idempotent(
                     "SELECT finalize_external_boot_derived_release("
                     "sha256(convert_to(%s,'UTF8')),%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)"
                 )
-                assert await _scalar(worker, sql, final_args) == "applied"
-                assert await _scalar(worker, sql, final_args) == "applied"
+                assert await scalar(worker, sql, final_args) == "applied"
+                assert await scalar(worker, sql, final_args) == "applied"
             row = await (
                 await admin.execute(
                     "SELECT cleanup_complete,(SELECT count(*) FROM "
@@ -944,13 +789,13 @@ def test_derived_release_begin_needs_a_future_readiness_deadline(
             async with await psycopg.AsyncConnection.connect(
                 authority_role_dsns("kdive_worker"), autocommit=True
             ) as worker:
-                authority = await _allocate_release_root(
+                authority = await allocate_release_root(
                     worker, case, credential=case.credential, attempt=case.attempt
                 )
             async with await psycopg.AsyncConnection.connect(
                 authority_role_dsns("kdive_provider_authority"), autocommit=True
             ) as provider_authority:
-                await _acknowledge_release_root(
+                await acknowledge_release_root(
                     provider_authority,
                     case,
                     authority,
@@ -964,7 +809,7 @@ def test_derived_release_begin_needs_a_future_readiness_deadline(
                     (datetime.now(UTC) + timedelta(minutes=5), "applied"),
                 ):
                     assert (
-                        await _begin_release_recovery(
+                        await begin_release_recovery(
                             worker,
                             credential=case.credential,
                             job_id=case.job_id,
@@ -976,7 +821,7 @@ def test_derived_release_begin_needs_a_future_readiness_deadline(
                         )
                         == expected
                     )
-                    state = await _scalar(
+                    state = await scalar(
                         admin,
                         "SELECT state FROM external_boot_activations WHERE id = %s",
                         (vehicle.activation_id,),
