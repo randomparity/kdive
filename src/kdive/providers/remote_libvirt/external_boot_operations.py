@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Literal, Protocol
@@ -9,6 +10,7 @@ from uuid import UUID
 
 import libvirt
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -58,7 +60,14 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     overlay_volume_name,
     supplied_base_volume_name,
 )
+from kdive.providers.shared.guest_agent import GuestDomain
 from kdive.providers.shared.runtime_paths import domain_name_for
+
+# Pause between identity reads while the guest agent is not yet answering, and the most one
+# observation waits: the worker's own deadline spans the whole job, so a longer server-side wait
+# would outlive the caller and hold the System's lane.
+_OBSERVE_POLL_S = 1.0
+_OBSERVE_WAIT_S = 90.0
 
 
 class _Volume(Protocol):
@@ -110,7 +119,9 @@ class ConcreteRemoteExternalBootOperations:
         monotonic: Callable[[], float],
         agent_exec: _AgentRunner,
         identity_port: RemoteDeviceIdentityPort | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        self._sleep = sleep
         self._materializer = materializer
         self._connection = connection
         self._pool_name = pool_name
@@ -286,7 +297,36 @@ class ConcreteRemoteExternalBootOperations:
         with self._connection() as connection:
             self._validate_owned_artifacts(connection, recovery)
             domain = connection.lookupByName(domain_name_for(UUID(recovery.binding.system_id)))
-            return observe_guest_identity(self._agent_exec, domain, recovery.definition)
+            return self._observe_when_ready(domain, recovery, deadline)
+
+    def _observe_when_ready(
+        self,
+        domain: GuestDomain,
+        recovery: RemoteExternalBootRecoveryRecord,
+        deadline: float,
+    ) -> RunningKernelObservation:
+        """Retry the one-shot identity read while the guest agent is not yet answering (#3376).
+
+        ``observe_guest_identity`` leaves the wait to its caller. Only ``TRANSPORT_FAILURE`` is
+        waited out; any other category is a real answer and propagates. The wait ends at the call's
+        own deadline, capped at ``_OBSERVE_WAIT_S``, with ``READINESS_FAILURE``, chained to the last
+        transport failure.
+        """
+        deadline = min(deadline, self._monotonic() + _OBSERVE_WAIT_S)
+        while True:
+            try:
+                return observe_guest_identity(self._agent_exec, domain, recovery.definition)
+            except CategorizedError as exc:
+                if exc.category is not ErrorCategory.TRANSPORT_FAILURE:
+                    raise
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    raise CategorizedError(
+                        "the guest agent did not answer before the observation deadline",
+                        category=ErrorCategory.READINESS_FAILURE,
+                        details={"system_id": recovery.binding.system_id},
+                    ) from exc
+                self._sleep(min(_OBSERVE_POLL_S, remaining))
 
     def recover(
         self,
