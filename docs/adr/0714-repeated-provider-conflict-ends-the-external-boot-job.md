@@ -131,6 +131,10 @@ open module obligations are discharged as a `terminal_escape`. `recovery_failed`
 this release's recovery did not complete and will not be resumed. It does not claim the host is at
 the source or the target state, because the restore may have stopped part way, and the evidence's
 composite is the authority's quiescence digest from its takeover acknowledgement, not an observation
-made after the failure. The release is not retried from `recovery_failed`. The System is torn down
-from it, which is always admitted. A non-terminal failure still requeues the job and leaves the
-activation `recovering` for the next attempt to adopt.
+made after the failure. The discharge also lets the module-volume sweep reclaim the attempt's
+storage before the System is torn down, as the recover readiness branch does. The release job is not
+retried from `recovery_failed`; the reconciler's release lane still selects a `recovery_failed`
+activation that holds a ready reservation, as it already did for one a recover produced, and its
+handler refuses that state. The System is torn down from it, which is always admitted. A
+non-terminal failure still requeues the job and leaves the activation `recovering` for the next
+attempt to adopt.
