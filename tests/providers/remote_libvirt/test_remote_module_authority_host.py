@@ -28,6 +28,7 @@ from kdive.domain.remote_module_attempt_preparation import (
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityPreparationMutationRequestV1,
+    AuthorityTeardownMutationRequestV1,
 )
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
 from kdive.providers.remote_libvirt.authority_client import (
@@ -39,6 +40,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
     RemoteModulePreparationBeginResponseV1,
+    RemoteModuleSystemTeardownRequestV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
     RemoteModuleVolumePreparationStore,
@@ -778,6 +780,30 @@ class _Quiesce:
             )
         )
 
+    async def system_teardown(self) -> RemoteModuleLifecycleResponseV1:
+        """Run the System teardown's module reap, as the authority does after destroying it."""
+        values = self.request.authority.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={
+                "schema_",
+                "plan",
+                "purpose",
+                "operation",
+                "operation_identity",
+                "expected_source_identity",
+                "intended_target_identity",
+                "recovery_objects",
+                "local_timing",
+            },
+        )
+        authority = AuthorityTeardownMutationRequestV1.model_validate(
+            values | {"purpose": "teardown", "operation": "teardown", "operation_identity": "td"}
+        )
+        return await self.durable.execute_system_teardown(
+            RemoteModuleSystemTeardownRequestV1(authority=authority, budget_seconds=300)
+        )
+
     def close(self) -> None:
         self.store.close()
         self.executor.shutdown()
@@ -893,6 +919,58 @@ async def test_restore_refuses_a_system_that_cannot_be_stopped(
 
     assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert system.active
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_after_a_restore_reaps_against_the_restored_result(
+    tmp_path: Path,
+) -> None:
+    """A release that failed after RECOVER leaves the restored result in the scratch volume."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    await stack.restore()
+
+    reaped = await stack.system_teardown()
+
+    assert reaped.volumes_absent
+    assert reaped.result.phase == "restored"
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_without_a_restore_reaps_against_the_installed_result(
+    tmp_path: Path,
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+
+    reaped = await stack.system_teardown()
+
+    assert reaped.volumes_absent
+    assert reaped.result.phase == "installed"
+    stack.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("restore_first", [True, False])
+async def test_system_teardown_refuses_a_scratch_result_that_is_not_the_stored_evidence(
+    tmp_path: Path, restore_first: bool
+) -> None:
+    """With a stored restore only the restored result is acceptable; without, the installed one."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    installed = stack.scratch
+    await stack.durable.execute(stack.request)
+    if restore_first:
+        await stack.restore()
+        stack.scratch = installed
+    else:
+        stack.scratch = installed.model_copy(update={"entry_count": 99, "content_bytes": 99})
+
+    with pytest.raises(ValueError, match="differs before reap"):
+        await stack.system_teardown()
+
+    assert stack.storage.pool.volumes
     stack.close()
 
 
