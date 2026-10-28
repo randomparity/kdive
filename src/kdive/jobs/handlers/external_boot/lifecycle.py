@@ -1076,6 +1076,49 @@ def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     )
 
 
+async def _discharge_module_reap_after_teardown(context: OperationContext) -> None:
+    """Discharge the module reap obligation once the System teardown has reaped the host (#3383).
+
+    The authority's teardown reaps the module volumes from its own records; this records that on
+    the obligation so the retained journal volumes can be reclaimed. The job carries the PREP
+    receipt only when a reap obligation was open at admission; without one there is nothing to
+    discharge. A refused discharge fails the job, as the lifecycle path does.
+    """
+    raw_preparation = context.job.payload.get("remote_module_attempt_v1")
+    if raw_preparation is None:
+        return
+    from kdive.db.remote_module_attempt_obligations import (
+        ModuleAttempt,
+        ModuleAttemptWorkerWriteContext,
+        RemoteModuleAttemptObligationRepository,
+    )
+    from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+
+    # The closed model is strict: UUIDs parse from JSON text, not from a dict of strings.
+    preparation = ModuleAttemptPreparationRequestV1.model_validate_json(json.dumps(raw_preparation))
+    receipt = preparation.module_attempt_obligation
+    attempt = ModuleAttempt(
+        system_id=receipt.system_id,
+        run_id=receipt.run_id,
+        operation_nonce=receipt.operation_nonce,
+    )
+    discharged = await RemoteModuleAttemptObligationRepository().worker_discharge_reap_obligation(
+        context.prerequisites["connection"],
+        ModuleAttemptWorkerWriteContext(
+            job_id=context.job.id,
+            job_attempt=context.job.attempt,
+            incarnation_credential=context.incarnation_credential,
+            preparation=preparation,
+        ),
+        attempt,
+    )
+    if not discharged:
+        raise CategorizedError(
+            "remote module reap evidence authority is stale",
+            category=ErrorCategory.STALE_HANDLE,
+        )
+
+
 def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
     """Route full System teardown through the authority's terminal proof receipt."""
 
@@ -1103,6 +1146,7 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
         )
         response = await executor.execute_teardown(request)
         if response.proof.disposition != "retained_quarantine":
+            await _discharge_module_reap_after_teardown(context)
             await reclaim_system_core_after_provider_teardown(
                 context.prerequisites["connection"],
                 artifact_store,
