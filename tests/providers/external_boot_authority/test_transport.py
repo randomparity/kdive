@@ -34,6 +34,9 @@ from kdive.providers.external_boot_authority.host import (
     HostReadinessError,
     check_tls_health,
 )
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepResponseV1,
+)
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     AuthorityServiceError,
@@ -1335,3 +1338,113 @@ def test_session_still_bounds_a_peer_that_never_sends_a_frame(
 )
 def test_service_categories_cross_the_wire_as_closed_reasons(category: str, wire: str) -> None:
     assert transport._service_category(category) == wire
+
+
+def _sweep_envelope(retained: list[dict[str, str]] | None = None) -> bytes:
+    return encode_request_envelope(
+        "sweep-module-volumes",
+        {
+            "candidates": [],
+            "phase": "sweep",
+            "retained": retained or [],
+            "version": "module-volume-sweep-v1",
+        },
+        "credential",
+    )
+
+
+def test_sweep_dispatch_authenticates_before_the_sweep_runs() -> None:
+    called = False
+
+    async def reject(_credential: SecretStr) -> AuthenticatedPeer:
+        raise ValueError
+
+    class Sweeper:
+        async def sweep_module_volumes(self, peer: object, request: object) -> object:
+            nonlocal called
+            called = True
+            raise AssertionError
+
+    async def exercise() -> None:
+        response = await transport._dispatch(
+            _sweep_envelope(), reject, None, None, cast(Any, Sweeper())
+        )
+        assert json.loads(response) == {"category": "unauthenticated", "status": "error"}
+
+    asyncio.run(exercise())
+    assert called is False
+
+
+def test_sweep_dispatch_hands_the_closed_request_to_the_sweeper() -> None:
+    seen: list[Any] = []
+
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class Sweeper:
+        async def sweep_module_volumes(self, peer: AuthenticatedPeer, request: Any) -> Any:
+            seen.append((peer, request))
+            return ModuleVolumeSweepResponseV1(removed=4)
+
+    key = {
+        "kind": "source.ext4",
+        "operation_nonce": "3" * 32,
+        "run_id": "00000000-0000-4000-8000-000000000002",
+        "system_id": "00000000-0000-4000-8000-000000000001",
+    }
+
+    async def exercise() -> bytes:
+        return await transport._dispatch(
+            _sweep_envelope([key]), authenticate, None, None, cast(Any, Sweeper())
+        )
+
+    response = asyncio.run(exercise())
+
+    assert json.loads(response) == {
+        "status": "ok",
+        "value": {"owned": [], "removed": 4, "version": "module-volume-sweep-v1"},
+    }
+    assert [item.model_dump(mode="json") for item in seen[0][1].retained] == [key]
+
+
+def test_sweep_dispatch_without_a_sweeper_is_not_configured() -> None:
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class NotASweeper:
+        pass
+
+    async def exercise() -> list[bytes]:
+        return [
+            await transport._dispatch(_sweep_envelope(), authenticate, None, None, None),
+            await transport._dispatch(
+                _sweep_envelope(), authenticate, None, None, cast(Any, NotASweeper())
+            ),
+        ]
+
+    for response in asyncio.run(exercise()):
+        assert json.loads(response) == {"category": "provider-not-configured", "status": "error"}
+
+
+def test_sweep_dispatch_hides_provider_failure_details() -> None:
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class Sweeper:
+        async def sweep_module_volumes(self, peer: object, request: object) -> object:
+            raise RuntimeError("/private/path leaked")
+
+    async def exercise() -> bytes:
+        return await transport._dispatch(
+            _sweep_envelope(), authenticate, None, None, cast(Any, Sweeper())
+        )
+
+    response = asyncio.run(exercise())
+
+    assert json.loads(response) == {"category": "provider-failure", "status": "error"}
+    assert b"private" not in response
+
+
+def test_sweep_envelope_rejects_a_malformed_request() -> None:
+    with pytest.raises(ValueError):
+        encode_request_envelope("sweep-module-volumes", {"retained": "x"}, "credential")

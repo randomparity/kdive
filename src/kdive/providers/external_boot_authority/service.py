@@ -18,6 +18,10 @@ from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepRequestV1,
+    ModuleVolumeSweepResponseV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     _TAKEOVER_PHASES,
     GENESIS_DIGEST,
@@ -301,6 +305,12 @@ class AuthorityRemoteModuleAttemptRepository(Protocol):
     ) -> ModuleAttemptPreparationRequestV1 | None: ...
 
 
+class ModuleVolumeSweepPort(Protocol):
+    """The authority-owned sweep of the authority's own module pool (#3386)."""
+
+    async def sweep(self, request: ModuleVolumeSweepRequestV1) -> ModuleVolumeSweepResponseV1: ...
+
+
 class RemoteModulePreparationHost(Protocol):
     async def begin(
         self,
@@ -564,7 +574,9 @@ class ExternalBootAuthorityService:
         recovery_orphans: AuthorityRecoveryOrphanResolver | None = None,
         proof_checkpoint: AuthorityProofCheckpoint | None = None,
         system_service: AuthoritySystemService | None = None,
+        module_volume_sweeper: ModuleVolumeSweepPort | None = None,
     ) -> None:
+        self._module_volume_sweeper = module_volume_sweeper
         self._repository = repository
         self._journal_factory = journal_factory
         self._adapter = adapter
@@ -783,6 +795,28 @@ class ExternalBootAuthorityService:
             and binding.operation_identity == request.operation_identity
             and binding.operation_digest == request.operation_digest
         )
+
+    @classmethod
+    def _candidate_matches(
+        cls,
+        binding: AuthorityBinding,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+    ) -> bool:
+        """Whether ``binding`` is the current candidate this request runs under.
+
+        A preparation phase runs under its root activate candidate, and a derived release
+        RECOVER or CLEANUP under its root release candidate; every other request must equal
+        its binding exactly.
+        """
+        if isinstance(request, AuthorityPreparationMutationRequestV1):
+            return cls._root_candidate_matches_preparation(binding, request)
+        if (
+            binding.operation is AuthorityOperation.RELEASE
+            and request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+        ):
+            return cls._root_candidate_matches_release_phase(binding, request)
+        return cls._binding_matches(binding, request)
 
     @staticmethod
     def _root_candidate_matches_preparation(
@@ -1716,16 +1750,7 @@ class ExternalBootAuthorityService:
             raise AuthorityServiceError("superseded")
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        candidate_matches = trusted is not None and (
-            self._root_candidate_matches_preparation(trusted, request)
-            if isinstance(request, AuthorityPreparationMutationRequestV1)
-            else self._root_candidate_matches_release_phase(trusted, request)
-            if trusted.operation is AuthorityOperation.RELEASE
-            and request.purpose == "release"
-            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
-            else self._binding_matches(trusted, request)
-        )
-        if not candidate_matches:
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
@@ -2144,6 +2169,14 @@ class ExternalBootAuthorityService:
             self._ensure_rejection(request, error)
             raise
 
+    async def sweep_module_volumes(
+        self, peer: AuthenticatedPeer | None, request: ModuleVolumeSweepRequestV1
+    ) -> ModuleVolumeSweepResponseV1:
+        """Sweep the authority's own module pool for an authenticated peer (#3386)."""
+        if peer is None or self._module_volume_sweeper is None:
+            raise AuthorityServiceError("provider_conflict")
+        return await self._module_volume_sweeper.sweep(request)
+
     async def open_remote_module_attempt(
         self,
         peer: AuthenticatedPeer | None,
@@ -2520,7 +2553,7 @@ class ExternalBootAuthorityService:
         request = remote.authority
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        if trusted is None or not self._binding_matches(trusted, request):
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
@@ -2782,7 +2815,7 @@ class ExternalBootAuthorityService:
     ) -> T:
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        if trusted is None or not self._binding_matches(trusted, request):
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
