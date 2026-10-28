@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.db.external_boot_authority_journal import AuthorityBinding
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
@@ -25,6 +26,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
 )
 from tests.providers.external_boot_authority.service_support import (
     _DIGEST_A,
+    _DIGEST_B,
     _Adapter,
     _binding,
     _mutation,
@@ -66,8 +68,24 @@ class _Host:
         return self.response
 
 
+class _ForgingRepository(_Repository):
+    """Confirms a release phase under a digest the derived request does not carry."""
+
+    async def resolve_current_release_phase(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None:
+        confirmed = await super().resolve_current_release_phase(
+            peer, request, acknowledgement_sequence, acknowledgement_digest
+        )
+        return replace(confirmed, operation_digest=_DIGEST_B) if confirmed is not None else None
+
+
 async def _acknowledged_release(
-    tmp_path: Path, host: _Host | None = None
+    tmp_path: Path, host: _Host | None = None, repository_type: type[_Repository] = _Repository
 ) -> tuple[ExternalBootAuthorityService, AuthenticatedPeer, Any, _Adapter]:
     peer = AuthenticatedPeer(uuid4())
     root = _takeover().model_copy(
@@ -77,7 +95,7 @@ async def _acknowledged_release(
             "operation": AuthorityOperation.RELEASE,
         }
     )
-    repository = _Repository(peer, root)
+    repository = repository_type(peer, root)
     adapter = _Adapter()
     service = ExternalBootAuthorityService(
         repository=repository,
@@ -129,7 +147,18 @@ async def test_remote_lifecycle_rejects_a_derived_phase_of_another_system(
     assert host.executed == []
 
 
-@pytest.mark.parametrize("field", ["authority_id", "generation", "system_id", "run_id"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "authority_id",
+        "generation",
+        "system_id",
+        "run_id",
+        "activation_id",
+        "plan_identity",
+        "authority_instance",
+    ],
+)
 def test_candidate_predicate_refuses_a_derived_phase_of_another_root(field: str) -> None:
     peer = AuthenticatedPeer(uuid4())
     root = _takeover().model_copy(
@@ -141,6 +170,9 @@ def test_candidate_predicate_refuses_a_derived_phase_of_another_root(field: str)
         "generation": root.generation + 1,
         "system_id": uuid4(),
         "run_id": uuid4(),
+        "activation_id": uuid4(),
+        "plan_identity": _DIGEST_B,
+        "authority_instance": "host-b",
     }
     derived = _derived(root, AuthorityOperation.RECOVER, **{field: other[field]})
     assert not ExternalBootAuthorityService._candidate_matches(candidate, derived)
@@ -167,3 +199,29 @@ def test_candidate_predicate_keeps_exact_match_for_non_release_operations() -> N
     assert not ExternalBootAuthorityService._candidate_matches(
         _binding(peer, root, "current"), shifted
     )
+
+
+@pytest.mark.anyio
+async def test_derived_phase_with_an_unconfirmed_digest_is_refused_on_both_paths(
+    tmp_path: Path,
+) -> None:
+    host = _Host()
+    service, peer, root, _adapter = await _acknowledged_release(tmp_path, host, _ForgingRepository)
+    derived = _derived(root, AuthorityOperation.RECOVER)
+    remote = RemoteModuleLifecycleRequestV1(authority=derived, action="restore", budget_seconds=30)
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_remote_module_lifecycle(peer, remote)
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.observe_authority(peer, derived)
+    assert host.executed == []
+
+
+@pytest.mark.anyio
+async def test_authenticated_read_rejects_a_derived_phase_of_another_system(
+    tmp_path: Path,
+) -> None:
+    service, peer, root, adapter = await _acknowledged_release(tmp_path)
+    foreign = _derived(root, AuthorityOperation.RECOVER, system_id=uuid4())
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.observe_authority(peer, foreign)
+    assert "observe" not in adapter.calls
