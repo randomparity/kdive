@@ -38,7 +38,7 @@ def _scalar(dsn: str, query: LiteralString, params: tuple[object, ...]) -> objec
     return row[0]
 
 
-def _torn_down_owner(dsn: str, *, activated: bool) -> _AuthorityCase:
+def _torn_down_owner(dsn: str, *, activated: bool, state: str = "torn-down") -> _AuthorityCase:
     """An authority owner whose System was torn down, with or without a first activation."""
     with psycopg.connect(dsn) as seed:
         case = _seed_case(seed, purpose="teardown")
@@ -51,7 +51,7 @@ def _torn_down_owner(dsn: str, *, activated: bool) -> _AuthorityCase:
             "INSERT INTO authority_system_ownership "
             "(system_id,allocation_id,resource_id,provider_kind,resource_name,authority_instance,"
             "profile_identity,root_identity,state,first_activation_id) VALUES "
-            "(%s,%s,%s,%s,'host-owned',%s,%s,%s,'torn-down',%s)",
+            "(%s,%s,%s,%s,'host-owned',%s,%s,%s,%s,%s)",
             (
                 case.system_id,
                 case.allocation_id,
@@ -60,7 +60,8 @@ def _torn_down_owner(dsn: str, *, activated: bool) -> _AuthorityCase:
                 case.authority_instance,
                 _PROFILE,
                 _ROOT,
-                case.activation_id if activated else None,
+                state,
+                case.activation_id if activated and state == "torn-down" else None,
             ),
         )
         seed.execute("UPDATE systems SET state='torn_down' WHERE id=%s", (case.system_id,))
@@ -144,6 +145,22 @@ def test_a_never_activated_torn_down_owner_without_a_receipt_stays_fenced(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
     case = _torn_down_owner(migrated_url, activated=False)
+
+    with pytest.raises(ExternalBootDenied) as denied:
+        _admit(
+            authority_role_dsns("kdive_server"),
+            case.system_id,
+            ExternalBootOperation.ALLOCATION_RELEASE,
+        )
+
+    assert denied.value.details["reason"] == AUTHORITY_PREACTIVATION_DENIAL_REASON
+
+
+@pytest.mark.parametrize("state", ["ready", "teardown-requested", "repair-required"])
+def test_an_owner_that_is_not_torn_down_stays_fenced_even_with_an_activation_row(
+    migrated_url: str, authority_role_dsns: _RoleDsns, state: str
+) -> None:
+    case = _torn_down_owner(migrated_url, activated=True, state=state)
 
     with pytest.raises(ExternalBootDenied) as denied:
         _admit(

@@ -20,6 +20,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.services.systems.authority_owned import (
     ordinary_mutation_is_fenced,
     preactivation_absence_is_proven,
+    torn_down_after_activation,
 )
 
 
@@ -194,7 +195,10 @@ async def check_external_boot_admission(
         and await ordinary_mutation_is_fenced(conn, system_id)
         and not (
             operation is ExternalBootOperation.ALLOCATION_RELEASE
-            and await preactivation_absence_is_proven(conn, system_id)
+            and (
+                await preactivation_absence_is_proven(conn, system_id)
+                or await torn_down_after_activation(conn, system_id)
+            )
         )
     ):
         raise ExternalBootDenied(

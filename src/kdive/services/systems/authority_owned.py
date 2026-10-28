@@ -104,6 +104,24 @@ async def ordinary_mutation_is_fenced(conn: AsyncConnection, system_id: UUID) ->
     return binding is not None and binding.ownership_state != "activated"
 
 
+async def torn_down_after_activation(conn: AsyncConnection, system_id: UUID) -> bool:
+    """Whether an activated authority System has been torn down.
+
+    The owner ends ``torn-down`` and, unlike a never-activated one, has an activation row: the
+    first activation is claimed in the transaction that creates it. The pre-activation fence does
+    not apply to it (#3382), so its allocation can be released.
+    """
+    binding = await authority_system_binding(conn, system_id)
+    if binding is None or binding.ownership_state != "torn-down":
+        return False
+    cursor = await conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM external_boot_activations WHERE system_id = %s)",
+        (system_id,),
+    )
+    row = await cursor.fetchone()
+    return row is not None and row[0] is True
+
+
 async def preactivation_absence_is_proven(conn: AsyncConnection, system_id: UUID) -> bool:
     """Whether the authority's consumed absence receipt proves a never-activated System gone.
 
