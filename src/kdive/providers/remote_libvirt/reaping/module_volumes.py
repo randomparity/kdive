@@ -17,6 +17,7 @@ from defusedxml.common import DefusedXmlException
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     MAX_RETAINED_KEYS,
+    MAX_SWEEP_CANDIDATES,
     ModuleVolumeKeyV1,
     ModuleVolumeKind,
     ModuleVolumeSweepRequestV1,
@@ -350,17 +351,19 @@ class RemoteLibvirtModuleVolumeReaper:
             retained = await self._retained(retained_owners)
             for sender, owned in listed:
                 try:
-                    response = await sender.sweep_module_volumes(
-                        ModuleVolumeSweepRequestV1(
-                            phase="sweep", retained=retained, candidates=owned
-                        ),
-                        deadline=self._deadline(),
-                    )
+                    for start in range(0, len(owned), MAX_SWEEP_CANDIDATES):
+                        response = await sender.sweep_module_volumes(
+                            ModuleVolumeSweepRequestV1(
+                                phase="sweep",
+                                retained=retained,
+                                candidates=owned[start : start + MAX_SWEEP_CANDIDATES],
+                            ),
+                            deadline=self._deadline(),
+                        )
+                        removed += response.removed
                 except _HOST_FAILURES as exc:
                     failed += 1
                     _log_host_failure("sweeping", exc)
-                    continue
-                removed += response.removed
         if failed:
             raise _infra("remote module-volume sweep failed", hosts=failed)
         return removed
