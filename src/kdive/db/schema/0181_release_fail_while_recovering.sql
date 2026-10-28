@@ -37,6 +37,8 @@ DECLARE
                    AND v_attempt.authority_generation IS DISTINCT FROM p_generation)
            ))$new$;
     -- The terminal arm of the `fail` branch: a release that ends here has abandoned its recovery.
+    -- An activation is `recovering` exactly while its current attempt is, so the attempt UPDATE
+    -- below always matches; the admission above has already tied that attempt to this authority.
     v_old_close constant text := $old$        IF v_terminal THEN
             UPDATE public.runs$old$;
     v_new_close constant text := $new$        IF v_terminal AND p_purpose = 'release'
