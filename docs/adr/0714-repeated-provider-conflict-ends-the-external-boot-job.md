@@ -101,3 +101,10 @@ unresolved and churns as described above.
 - **Remember failures in the authority service process.** judgment: the memory would be lost on a
   restart and not shared across authority instances. Sending its verdict would also add a new wire
   reason.
+
+### Amendment (2026-10-28): only `provider-conflict` carries `authority_reason` (#3391)
+
+[ADR-0808](0808-a-definite-authority-rejection-ends-the-lifecycle-wait.md) adds `details["admission"]`
+to other authority rejections. It does not add `authority_reason` to them, and it leaves
+`failure_context` and the repeat check unchanged. A `provider-conflict` is still ambiguous to the
+lifecycle wait, which ends at its deadline.

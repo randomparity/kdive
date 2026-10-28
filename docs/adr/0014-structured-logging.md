@@ -82,3 +82,14 @@ What becomes harder / new obligations:
   forces every emit site to assemble and pass the context dict — the precise
   boilerplate this seam exists to remove — and a forgotten `extra=` silently drops
   context with no error.
+
+### Amendment (2026-10-28): a closed allowlist of `extra` fields (#3391)
+
+`JsonFormatter` still builds a fixed schema, and it now also emits the `extra` names in
+`LOG_EXTRA_FIELDS` (`kdive.security.secrets.redaction`): `category`, `reason`, `provider_kind`,
+`authority_instance` and `digest`. Each value must be a scalar, strings are cut to 256 characters,
+a name already in the record is never overwritten, and `SecretRedactionFilter` masks the string
+values. Every other `extra` stays out, because some carry caller strings or session identifiers. A
+name joins the set when its call site is audited. This covers the stdlib floor only: with
+observability on, the OTel handler replaces it and passes attributes to the collector.
+See [ADR-0808](0808-a-definite-authority-rejection-ends-the-lifecycle-wait.md).
