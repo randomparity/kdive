@@ -121,9 +121,10 @@ async def build_external_boot_payload(
             )
         except ModuleAttemptObligationError:
             raise _refuse("remote module lifecycle PREP evidence is ambiguous") from None
-        # A preparing activation's teardown may predate its module attempt. Nothing on the
-        # teardown path reads the receipt; the authority host reaps or quarantines module
-        # volumes from its own records (ADR-0620, #3016 amendment).
+        # A preparing activation's teardown may predate its module attempt, so it carries no
+        # receipt. The authority host reaps or quarantines module volumes from its own records;
+        # a teardown that does carry the receipt discharges the reap obligation once that reap
+        # is done (ADR-0620 amendment, #3383).
         if remote_module_attempt is None and not (
             purpose == "teardown" and activation.state.value == "preparing"
         ):

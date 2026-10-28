@@ -23,6 +23,7 @@ import psycopg
 import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.db.remote_module_attempt_obligations import (
@@ -246,9 +247,12 @@ async def _bind_remote(
     await repository.open_reap_obligation(seed, attempt)
     preparation = await repository.read_reap_preparation(seed, vehicle.system_id, vehicle.run_id)
     assert preparation is not None
-    return resolver, {
-        "remote_module_attempt_v1": preparation.model_dump(mode="json", by_alias=True)
-    }
+    carried = {"remote_module_attempt_v1": preparation.model_dump(mode="json", by_alias=True)}
+    await seed.execute(
+        "UPDATE jobs SET payload = payload || %s::jsonb WHERE id = %s",
+        (Jsonb(carried), case.job_id),
+    )
+    return resolver, carried
 
 
 @pytest.mark.parametrize("provider", ["local", "remote", "remote-receipt"])
@@ -303,6 +307,14 @@ def test_teardown_of_a_preparing_activation_skips_preparation(
         )
 
         assert vehicle.port.calls == ["authority-teardown"]
+        async with seed.cursor() as cur:
+            await cur.execute(
+                "SELECT reap_discharged_at IS NOT NULL FROM remote_module_attempt_obligations "
+                "WHERE system_id = %s",
+                (vehicle.system_id,),
+            )
+            discharged = await cur.fetchone()
+        assert discharged == ((True,) if provider == "remote-receipt" else None)
         async with seed.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT a.state, a.materialization, a.cleanup_evidence->>'mode' AS mode, "
