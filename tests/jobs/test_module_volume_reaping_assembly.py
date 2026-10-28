@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
@@ -15,9 +14,13 @@ from kdive.db.repositories import JOBS
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import JobKind, dispatch_lane_for_kind
 from kdive.jobs.assembly import build_worker_handler_assembly, register_all_handlers
+from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.worker import Worker
 from kdive.providers.assembly.composition import ProviderComposition
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepResponseV1,
+)
 from kdive.providers.remote_libvirt.config import all_remote_configs
 from kdive.reconciler.cleanup.provider_resources.module_volume_reaping import (
     enqueue_remote_module_volume_reap,
@@ -83,7 +86,7 @@ authority_recovery_max_bytes = 8192
         (tmp_path / name).write_text("fixture-" + name)
     config.load()
     assert len(all_remote_configs()) == (2 if mixed else 1)
-    opened, reads, pools = [], [], []
+    reads, sweeps = [], []
     original = FileRefBackend.resolve
 
     def resolve(self, ref):
@@ -92,28 +95,11 @@ authority_recovery_max_bytes = 8192
 
     monkeypatch.setattr(FileRefBackend, "resolve", resolve)
 
-    class Connection:
-        def storagePoolLookupByName(self, name):
-            pools.append(name)
-            return self
+    async def sweep(self, request, *, deadline):
+        sweeps.append(request)
+        return ModuleVolumeSweepResponseV1(removed=0)
 
-        def refresh(self, flags=0):
-            return None
-
-        def listAllVolumes(self, flags=0):
-            return []
-
-        def close(self):
-            return None
-
-    def open_connection(uri):
-        assert urlsplit(uri).hostname == "eligible.example"
-        opened.append(uri)
-        return Connection()
-
-    monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.reaping.module_volumes.open_libvirt_reaper", open_connection
-    )
+    monkeypatch.setattr(AuthorityRequestSender, "sweep_module_volumes", sweep)
 
     async def scenario():
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
@@ -149,5 +135,6 @@ authority_recovery_max_bytes = 8192
                 assert final is not None and final.state is JobState.SUCCEEDED
 
     asyncio.run(scenario())
-    assert len(opened) == len(pools) == (2 if mixed else 0)
-    assert reads == (["clientcert.pem", "clientkey.pem", "cacert.pem"] * 2 if mixed else [])
+    assert len(sweeps) == (2 if mixed else 0)
+    assert all(request.retained == () for request in sweeps)
+    assert reads == []
