@@ -935,6 +935,7 @@ async def test_system_teardown_after_a_restore_reaps_against_the_restored_result
 
     assert reaped.volumes_absent
     assert reaped.result.phase == "restored"
+    assert await stack.system_teardown() == reaped
     stack.close()
 
 
