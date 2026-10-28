@@ -274,3 +274,21 @@ headroom.
 - **Do nothing and let reap stay inert.** judgment: it leaves #2129's 80 commits unmergeable and
   leaves every remote module attempt's storage unreclaimable, which is the outcome #2157 was filed
   to prevent.
+
+## Amendment (2026-10-28): the sweep runs in the authority, over the authority's own pool
+
+The module-volume sweep listed `config.storage_pool` through the worker's inventory connection,
+which reaches the host's system libvirt daemon. The authority materializes, prepares and reaps
+module volumes in its private session daemon, a different pool, so the sweep never saw an
+authority-owned volume and reported success with nothing removed; the reap markers of every
+torn-down System stayed for ever (#3386). The sweep now runs in the authority. The worker sends
+the retained attempts (the same retained-owner read as before) over the authenticated lane, and
+the authority lists its own pool, applies the unchanged guards (a parseable kdive module name, not
+retained, not referenced by any domain by host-stat identity), deletes, and returns a count. The
+worker no longer opens a libvirt connection for module volumes.
+
+The sweep fails closed. A retained set over the wire bound is refused whole and never truncated,
+since deleting around a truncated set would destroy a live attempt's recovery point. An authority
+that is unreachable, restarting, errors or does not know the operation fails the job, and the
+next cycle retries; the sweep never reports "success, nothing removed" for a host it could not
+reach. No schema change.

@@ -487,3 +487,15 @@ authority answered `provider_conflict`, the job replayed about a second later an
 real answer and propagates unchanged. At the deadline the observation fails with `readiness_failure`,
 chained to the last transport failure. The wait does not touch the journal: the observation is read-only
 and follows an already terminal activate record. No schema or protocol change.
+
+## Amendment (2026-10-28): the module-volume sweep operation
+
+The authenticated lane gains one closed operation, `sweep-module-volumes`, with request and
+response value `module-volume-sweep-v1`. The request names the module attempts to keep (system,
+run, nonce and volume kind, at most 2048, unique, canonical JSON); the response carries the number
+of volumes removed. It is bound to no authority generation: it reads and deletes only module
+volumes in the authority's own pool that no retained attempt and no domain references. The
+authority answers `provider-not-configured` when it has no sweeper, and every provider failure
+crosses the boundary only as `provider-failure`. An authority that predates the operation refuses
+it as an invalid request, which the worker treats as a failed sweep; worker and authority deploy
+together. The existing v1 values are unchanged.
