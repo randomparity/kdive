@@ -128,7 +128,7 @@ async def _execute_remote_module_lifecycle(
     raw_preparation = context.job.payload.get("remote_module_attempt_v1")
     if raw_preparation is None:
         raise _refuse("remote module lifecycle authority inputs are incomplete")
-    preparation = ModuleAttemptPreparationRequestV1.model_validate(raw_preparation)
+    preparation = ModuleAttemptPreparationRequestV1.from_payload(raw_preparation)
     action: Literal["restore", "reap"] = (
         "restore"
         if request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
@@ -1094,8 +1094,7 @@ async def _discharge_module_reap_after_teardown(context: OperationContext) -> No
     )
     from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 
-    # The closed model is strict: UUIDs parse from JSON text, not from a dict of strings.
-    preparation = ModuleAttemptPreparationRequestV1.model_validate_json(json.dumps(raw_preparation))
+    preparation = ModuleAttemptPreparationRequestV1.from_payload(raw_preparation)
     receipt = preparation.module_attempt_obligation
     attempt = ModuleAttempt(
         system_id=receipt.system_id,
