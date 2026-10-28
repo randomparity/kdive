@@ -69,5 +69,8 @@ applied to it, so `allocations.release` was refused with
 `authority_system_preactivation_mutation_fenced` after a clean teardown and the allocation's
 capacity stayed held (#3382). Allocation release is now also admitted for a `torn-down` owner that
 has an activation row; the first activation is claimed in the transaction that creates the
-activation, so that row is the activation history. Every other operation keeps the fence, and a
+activation, so that row is the activation history. A claim blocked by a requested teardown can leave an unclaimed activation row
+behind; while that row is not cleaned the activation policy already denies release, so the
+proxy does not admit it. Reading `first_activation_id` directly would need a function that
+exposes it, and is left to a later change. Every other operation keeps the fence, and a
 never-activated `torn-down` owner still needs the receipt. No schema change.

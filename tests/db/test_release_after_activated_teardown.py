@@ -38,7 +38,9 @@ def _scalar(dsn: str, query: LiteralString, params: tuple[object, ...]) -> objec
     return row[0]
 
 
-def _torn_down_owner(dsn: str, *, activated: bool, state: str = "torn-down") -> _AuthorityCase:
+def _torn_down_owner(
+    dsn: str, *, activated: bool, state: str = "torn-down", orphan_row: bool = False
+) -> _AuthorityCase:
     """An authority owner whose System was torn down, with or without a first activation."""
     with psycopg.connect(dsn) as seed:
         case = _seed_case(seed, purpose="teardown")
@@ -65,17 +67,24 @@ def _torn_down_owner(dsn: str, *, activated: bool, state: str = "torn-down") -> 
             ),
         )
         seed.execute("UPDATE systems SET state='torn_down' WHERE id=%s", (case.system_id,))
-        seed.execute(
-            "UPDATE external_boot_activations SET state='abandoned', cleanup_complete=true, "
-            "materialization=NULL, recovery_point=NULL, pre_recovery_evidence=NULL, "
-            "terminal_evidence=jsonb_build_object('schema','external-boot-terminal-evidence-v1',"
-            "'outcome','abandoned','activation_id',id::text,'system_id',system_id::text), "
-            "cleanup_evidence=jsonb_build_object('schema','external-boot-cleanup-evidence-v1',"
-            "'mode','ordinary','activation_id',id::text,'system_id',system_id::text) "
-            "WHERE id=%s",
-            (case.activation_id,),
-        )
-        if not activated:
+        if orphan_row:
+            seed.execute(
+                "UPDATE external_boot_activations SET state='preparing', materialization=NULL, "
+                "pre_recovery_evidence=NULL, recovery_point=NULL WHERE id=%s",
+                (case.activation_id,),
+            )
+        else:
+            seed.execute(
+                "UPDATE external_boot_activations SET state='abandoned', cleanup_complete=true, "
+                "materialization=NULL, recovery_point=NULL, pre_recovery_evidence=NULL, "
+                "terminal_evidence=jsonb_build_object('schema','external-boot-terminal-evidence-v1',"
+                "'outcome','abandoned','activation_id',id::text,'system_id',system_id::text), "
+                "cleanup_evidence=jsonb_build_object('schema','external-boot-cleanup-evidence-v1',"
+                "'mode','ordinary','activation_id',id::text,'system_id',system_id::text) "
+                "WHERE id=%s",
+                (case.activation_id,),
+            )
+        if not activated and not orphan_row:
             seed.execute("DELETE FROM external_boot_activations WHERE id=%s", (case.activation_id,))
     return case
 
@@ -118,7 +127,7 @@ def test_release_releases_the_allocation_of_a_torn_down_activated_system(
     assert getattr(result, "status", None) != "error", result
     assert (
         _scalar(migrated_url, "SELECT state FROM allocations WHERE id=%s", (case.allocation_id,))
-        != "active"
+        == "released"
     )
 
 
@@ -170,3 +179,21 @@ def test_an_owner_that_is_not_torn_down_stays_fenced_even_with_an_activation_row
         )
 
     assert denied.value.details["reason"] == AUTHORITY_PREACTIVATION_DENIAL_REASON
+
+
+def test_an_unclaimed_activation_row_left_by_a_blocked_claim_still_denies_release(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """A claim blocked by a requested teardown can leave a live activation row behind.
+
+    The row is not a first activation, but while it is not cleaned the activation policy denies
+    release, so the activation-row proxy for activation history never admits it.
+    """
+    case = _torn_down_owner(migrated_url, activated=False, orphan_row=True)
+
+    with pytest.raises(ExternalBootDenied):
+        _admit(
+            authority_role_dsns("kdive_server"),
+            case.system_id,
+            ExternalBootOperation.ALLOCATION_RELEASE,
+        )
