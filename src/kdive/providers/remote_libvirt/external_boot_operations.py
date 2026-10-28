@@ -539,10 +539,9 @@ class ConcreteRemoteExternalBootOperations:
         # libvirt expands a running domain's XML (host-model CPU, ids, aliases, tty paths), so
         # its preserved digest never equals the recorded one: the persistent document carries the
         # full identity and the live one only the boot projection (ADR-0583 amendment, #3377).
+        allowed_boots = {boot for _definition, boot in allowed}
         observed = (preserved_definition_identity(inactive), boot_projection_identity(inactive))
-        if observed not in allowed or boot_projection_identity(live) not in {
-            boot for _definition, boot in allowed
-        }:
+        if observed not in allowed or boot_projection_identity(live) not in allowed_boots:
             raise ValueError("remote teardown domain identity differs from durable recovery")
 
     def _prove_teardown_graph(

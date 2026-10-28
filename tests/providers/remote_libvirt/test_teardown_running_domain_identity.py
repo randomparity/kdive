@@ -51,14 +51,14 @@ class _Connection:
         return _Pool()
 
 
-def _state(inactive: str = _INACTIVE) -> Any:
-    boot = boot_projection_identity(inactive)
-    preserved = preserved_definition_identity(inactive)
+def _state(*, source_boot: str | None = None, target_boot: str | None = None) -> Any:
+    boot = boot_projection_identity(_INACTIVE)
+    preserved = preserved_definition_identity(_INACTIVE)
     definition = SimpleNamespace(
         source_definition=preserved,
-        source_boot=boot,
+        source_boot=source_boot or boot,
         target_definition=preserved,
-        target_boot=boot,
+        target_boot=target_boot or boot,
     )
     return SimpleNamespace(
         binding=SimpleNamespace(system_id=_SYSTEM), recovery=SimpleNamespace(definition=definition)
@@ -104,3 +104,18 @@ def test_a_persistent_boot_projection_that_differs_is_refused() -> None:
 
     with pytest.raises(ValueError, match="domain identity differs from durable recovery"):
         _validate(_Domain(_LIVE, retargeted), _state())
+
+
+def test_a_live_boot_matching_the_other_recorded_side_is_validated() -> None:
+    other = "sha256:" + "b" * 64
+    recorded = boot_projection_identity(_INACTIVE)
+
+    _validate(_Domain(_LIVE, _INACTIVE), _state(source_boot=other, target_boot=recorded))
+    _validate(_Domain(_LIVE, _INACTIVE), _state(source_boot=recorded, target_boot=other))
+
+
+def test_a_live_boot_matching_neither_recorded_side_is_refused() -> None:
+    one, two = "sha256:" + "b" * 64, "sha256:" + "c" * 64
+
+    with pytest.raises(ValueError, match="domain identity differs from durable recovery"):
+        _validate(_Domain(_LIVE, _INACTIVE), _state(source_boot=one, target_boot=two))
