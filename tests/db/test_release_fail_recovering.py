@@ -86,6 +86,22 @@ class _Lane:
         await admin.execute(
             "UPDATE jobs SET max_attempts = %s WHERE id = %s", (max_attempts, self.case.job_id)
         )
+        await admin.execute(
+            "INSERT INTO remote_module_attempt_obligations (system_id, run_id, operation_nonce) "
+            "VALUES (%s, %s, %s)",
+            (self.case.vehicle.system_id, self.case.vehicle.run_id, uuid4().hex),
+        )
+
+    async def obligation_discharge(self) -> object:
+        row = await (
+            await self.admin.execute(
+                "SELECT mutation_discharge_reason FROM remote_module_attempt_obligations "
+                "WHERE system_id = %s",
+                (self.case.vehicle.system_id,),
+            )
+        ).fetchone()
+        assert row is not None
+        return row[0]
 
     async def allocate(self, attempt: int) -> tuple[str, dict[str, Any]]:
         async with self.worker() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -263,6 +279,7 @@ def test_a_failed_attempt_commits_and_the_retry_adopts_its_recovery(
             "job": "queued",
             "job_attempt": 1,
         }
+        assert await lane.obligation_discharge() is None
         assert await lane.reclaim() == 2
         status, second = await lane.allocate(2)
         assert status == "allocated"
@@ -382,6 +399,7 @@ def test_the_final_failed_attempt_closes_the_recovery_as_failed(
             )
         ).fetchone()
         assert evidence == ("recovery_failed", "recovery_failed")
+        assert await lane.obligation_discharge() == "terminal_escape"
 
     _drive(migrated_url, authority_role_dsns, tmp_path, body, max_attempts=1)
 
@@ -396,5 +414,22 @@ def test_a_terminal_failure_closes_the_recovery_even_with_attempts_left(
         states = await lane.states()
         assert states["activation"] == "recovery_failed"
         assert states["attempts"] == [(1, first["generation"], "failed")]
+        assert await lane.obligation_discharge() == "terminal_escape"
+
+    _drive(migrated_url, authority_role_dsns, tmp_path, body)
+
+
+def test_a_terminal_failure_before_the_recovery_began_closes_nothing(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
+) -> None:
+    async def body(lane: _Lane) -> None:
+        first = (await lane.allocate(1))[1]
+        await lane.acknowledge(first)
+        failed = await lane.fail(first, terminal=True)
+        assert isinstance(failed, Job) and failed.state.value == "failed"
+        states = await lane.states()
+        assert states["activation"] == "active"
+        assert states["attempts"] == []
+        assert await lane.obligation_discharge() is None
 
     _drive(migrated_url, authority_role_dsns, tmp_path, body)
