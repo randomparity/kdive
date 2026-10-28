@@ -59,3 +59,15 @@ teardown operation is required. Native POWER qualification remains separate.
   expired lease nor operator-edited rows prove absence.
 - **Allow every mutation after torn-down ownership.** judgment: only allocation
   release is necessary; a general admission change would widen unrelated behavior.
+
+## Amendment (2026-10-28): release after an activated System's teardown
+
+The release exemption above covers a never-activated System, whose consumed absence receipt proves
+it gone. An activated System ends its teardown with the ownership row `torn-down` and its first
+activation recorded, and the pre-activation fence (`ownership_state != "activated"`) still
+applied to it, so `allocations.release` was refused with
+`authority_system_preactivation_mutation_fenced` after a clean teardown and the allocation's
+capacity stayed held (#3382). Allocation release is now also admitted for a `torn-down` owner that
+has an activation row; the first activation is claimed in the transaction that creates the
+activation, so that row is the activation history. Every other operation keeps the fence, and a
+never-activated `torn-down` owner still needs the receipt. No schema change.
