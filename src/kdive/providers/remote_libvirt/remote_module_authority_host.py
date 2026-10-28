@@ -272,6 +272,7 @@ class ConcreteRemoteModuleAuthorityHost:
         present_attempt_volumes: frozenset[str] | None = None,
         *,
         cleanup: bool = False,
+        allow_active_system: bool = False,
     ) -> AttachmentInspection:
         if not self._configuration.fixed_inspection:
             return self._configuration.volumes.inspect_attachments(
@@ -283,6 +284,7 @@ class ConcreteRemoteModuleAuthorityHost:
             self._expected_attachments(operation),
             present_attempt_volumes,
             allow_cleanup_partial=cleanup,
+            allow_active_system=allow_active_system,
         )
 
     async def derive_operation(
@@ -352,6 +354,8 @@ class ConcreteRemoteModuleAuthorityHost:
         volumes: PreparedModuleVolumes,
         root: PreparedVolume,
         deadline: float,
+        *,
+        allow_active_system: bool = False,
     ) -> ApplianceRequest:
         configured = self._configuration.appliance
         pool_name = self._configuration.volumes.pool_name
@@ -379,7 +383,7 @@ class ConcreteRemoteModuleAuthorityHost:
             read_scratch_result=lambda: configured.read_scratch_result(volumes.scratch, deadline),
             inspect_attachments=(
                 lambda: (
-                    self._inspect(operation)
+                    self._inspect(operation, allow_active_system=allow_active_system)
                     if self._configuration.fixed_inspection
                     else configured.inspect_attachments()
                 )
@@ -795,30 +799,40 @@ class ConcreteRemoteModuleAuthorityHost:
             raw = self._configuration.appliance.read_scratch_result(volumes.scratch, deadline)
             if raw is None or RemoteModuleResultV1.from_wire_bytes(raw) != result:
                 raise ValueError("remote module restored result differs before reap")
+        # A release CLEANUP follows a RECOVER that restored the System's power, so the System may
+        # be running. The reap deletes only attempt volumes it has proven attached to no domain,
+        # which does not need the System off; a teardown still requires it.
+        active_ok = request.authority.operation is AuthorityOperation.CLEANUP
         root = self._configuration.appliance.root(restore)
-        appliance_request = self._appliance_request(restore, volumes, root, deadline)
+        appliance_request = self._appliance_request(
+            restore, volumes, root, deadline, allow_active_system=active_ok
+        )
         teardown = teardown_remote_module_appliance(
-            self._configuration.appliance.appliance, appliance_request
+            self._configuration.appliance.appliance,
+            appliance_request,
+            allow_active_system=active_ok,
         )
         if not teardown.complete:
             raise RuntimeError("remote module reap teardown is incomplete")
         if state == "absent":
             self._record_reap_marker(recovery, "reaping", deadline)
         present = self._present_attempt_volumes(volumes)
-        inspection = self._inspect(restore, present, cleanup=True)
+        inspection = self._inspect(restore, present, cleanup=True, allow_active_system=active_ok)
         delete_owned_attempt_volume(
             self._configuration.volumes.storage,
             volumes.source,
             inspection=inspection,
             admit_mutation=lambda: self._require_deadline(deadline),
+            allow_active_system=active_ok,
         )
         present = self._present_attempt_volumes(volumes)
-        inspection = self._inspect(restore, present, cleanup=True)
+        inspection = self._inspect(restore, present, cleanup=True, allow_active_system=active_ok)
         delete_owned_attempt_volume(
             self._configuration.volumes.storage,
             volumes.scratch,
             inspection=inspection,
             admit_mutation=lambda: self._require_deadline(deadline),
+            allow_active_system=active_ok,
         )
         self._record_reap_marker(recovery, "reaped", deadline)
         return RemoteModuleLifecycleResponseV1(
