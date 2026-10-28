@@ -351,7 +351,7 @@ def test_another_jobs_retired_authority_is_not_adopted_by_allocation(
                 ),
             )
             row = await cur.fetchone()
-        assert row is not None and row["status"] != "allocated"
+        assert row is not None and row["status"] == "superseded"
 
     _drive(migrated_url, authority_role_dsns, tmp_path, body)
 
