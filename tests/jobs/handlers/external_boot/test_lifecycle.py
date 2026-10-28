@@ -36,6 +36,7 @@ from kdive.db.remote_module_attempt_obligations import (
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.capacity.state import ExternalBootActivationState, SystemState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import (
     ExternalBootReleaseEvidenceV1,
@@ -61,6 +62,7 @@ from kdive.jobs.models import (
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityConflictResolutionRequestV1,
@@ -73,6 +75,7 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_teardown_proof_bytes,
     teardown_proof_digest,
 )
+from kdive.providers.ports.authority import AuthorityCapability
 from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     RecoveryPoint,
@@ -1642,3 +1645,46 @@ def test_a_receipt_that_differs_from_the_job_row_is_refused_as_stale(
         assert not await _reap_discharged(seed, attempt)
 
     _drive(migrated_url, authority_role_dsns, "teardown", body)
+
+
+def test_a_cleanup_job_parses_a_plain_json_receipt_for_the_module_lifecycle(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The job payload's receipt is a dict of string UUIDs, which the strict model must accept."""
+    seen: list[Any] = []
+
+    async def record(**values: Any) -> None:
+        seen.append(values["preparation"])
+
+    monkeypatch.setattr(
+        lifecycle_module, "execute_remote_module_lifecycle_on_authority_host", record
+    )
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        attempt = _module_attempt(case.vehicle.system_id, case.vehicle.run_id)
+        local = resolver_for(case.vehicle).resolve(ResourceKind.LOCAL_LIBVIRT)
+        modules = AuthorityCapability(
+            authority_instance=case.marker["authority_instance"], modules=cast(Any, object())
+        )
+        ports = replace(
+            _ports(case, case.vehicle, authority_role_dsns),
+            resolver=ProviderResolver(
+                {ResourceKind.LOCAL_LIBVIRT: replace(local, authority=modules)}
+            ),
+        )
+        job = _job(case)
+        job = job.model_copy(
+            update={"payload": {**job.payload, "remote_module_attempt_v1": _receipt(attempt)}}
+        )
+        handler = build_operations(ports).get("cleanup")
+        assert handler is not None
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            await handler(worker, job, ExternalBootAuthorityMarkerV1.model_validate(case.marker))
+
+        assert [item.module_attempt_obligation.operation_nonce for item in seen] == [
+            attempt.operation_nonce
+        ]
+
+    _drive(migrated_url, authority_role_dsns, "cleanup", body)
