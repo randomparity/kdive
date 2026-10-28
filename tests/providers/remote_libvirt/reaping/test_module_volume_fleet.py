@@ -11,6 +11,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     MAX_RETAINED_KEYS,
+    MAX_SWEEP_CANDIDATES,
     ModuleVolumeKeyV1,
     ModuleVolumeSweepRequestV1,
     ModuleVolumeSweepResponseV1,
@@ -313,3 +314,22 @@ def test_a_sender_that_cannot_be_built_fails_that_host_only() -> None:
         asyncio.run(reaper.reap_module_volumes(retained))
 
     assert len(healthy.sweeps) == 1
+
+
+def test_a_large_listing_is_swept_in_slices_with_the_whole_retained_set() -> None:
+    owned = tuple(_key(index) for index in range(MAX_SWEEP_CANDIDATES * 2 + 452))
+    sender = _Sender(removed=1, owned=owned)
+    retained = [_key(10_000), _key(10_001)]
+
+    removed = _reap(_reaper([_config("host")], {"host": sender}), retained)
+
+    assert removed == 3
+    assert [len(request.candidates) for request in sender.sweeps] == [
+        MAX_SWEEP_CANDIDATES,
+        MAX_SWEEP_CANDIDATES,
+        452,
+    ]
+    assert all(len(request.retained) == len(retained) for request in sender.sweeps)
+    assert [item.operation_nonce for request in sender.sweeps for item in request.candidates] == [
+        key.operation_nonce for key in owned
+    ]

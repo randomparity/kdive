@@ -11,12 +11,16 @@ import pytest
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     MAX_OWNED_KEYS,
     MAX_RETAINED_KEYS,
+    MAX_SWEEP_CANDIDATES,
     ModuleVolumeKeyV1,
     ModuleVolumeKind,
     ModuleVolumeSweepRequestV1,
+    ModuleVolumeSweepResponseV1,
     decode_module_volume_sweep_request,
     decode_module_volume_sweep_response,
 )
+from kdive.providers.external_boot_authority.protocol import MAX_ENVELOPE_BYTES
+from kdive.providers.external_boot_authority.transport import encode_request_envelope
 
 _SYSTEM = "00000000-0000-4000-8000-000000000001"
 _RUN = "00000000-0000-4000-8000-000000000002"
@@ -134,11 +138,51 @@ def test_candidate_bound_is_exact() -> None:
     def keys(count: int) -> list[dict[str, str]]:
         return [_key(nonce=f"{index:032x}") for index in range(count)]
 
-    decoded = decode_module_volume_sweep_request(_request([], candidates=keys(MAX_OWNED_KEYS)))
-    assert len(decoded.candidates) == MAX_OWNED_KEYS
+    decoded = decode_module_volume_sweep_request(
+        _request([], candidates=keys(MAX_SWEEP_CANDIDATES))
+    )
+    assert len(decoded.candidates) == MAX_SWEEP_CANDIDATES
 
     with pytest.raises(ValueError, match="invalid module volume sweep request"):
-        decode_module_volume_sweep_request(_request([], candidates=keys(MAX_OWNED_KEYS + 1)))
+        decode_module_volume_sweep_request(_request([], candidates=keys(MAX_SWEEP_CANDIDATES + 1)))
+
+
+def test_a_request_with_both_sets_at_their_bounds_fits_the_wire() -> None:
+    def keys(start: int, count: int) -> list[dict[str, str]]:
+        return [_key("reaping.journal", f"{index:032x}") for index in range(start, start + count)]
+
+    request = {
+        "candidates": keys(MAX_RETAINED_KEYS, MAX_SWEEP_CANDIDATES),
+        "phase": "sweep",
+        "retained": keys(0, MAX_RETAINED_KEYS),
+        "version": "module-volume-sweep-v1",
+    }
+
+    envelope = encode_request_envelope("sweep-module-volumes", request, "c" * 4096)
+
+    assert len(envelope) <= MAX_ENVELOPE_BYTES
+
+
+def test_a_listing_at_the_owned_bound_fits_the_response_wire() -> None:
+    owned = tuple(
+        ModuleVolumeKeyV1(
+            system_id=UUID(_SYSTEM),
+            run_id=UUID(_RUN),
+            operation_nonce=f"{index:032x}",
+            kind="reaping.journal",
+        )
+        for index in range(MAX_OWNED_KEYS)
+    )
+    response = ModuleVolumeSweepResponseV1(removed=0, owned=owned)
+
+    assert (
+        decode_module_volume_sweep_response(
+            json.dumps(
+                response.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+            ).encode()
+        )
+        == response
+    )
 
 
 def test_request_bound_is_exact() -> None:

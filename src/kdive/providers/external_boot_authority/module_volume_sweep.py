@@ -3,9 +3,9 @@
 The exchange has two phases so the retained set is always read after the volumes are listed,
 which is what makes a listed volume older than the retained snapshot: ``list`` returns the
 authority's owned module volumes; the worker then reads the retained attempts and sends ``sweep``
-with the volumes it saw (the candidates) and the retained set. The authority deletes only a
-candidate that is not retained and not referenced by a domain, so a volume created after the
-listing is never a candidate. Every set is bounded and never truncated: a set over the bound is
+with the volumes it saw (the candidates, in slices) and the retained set. The authority deletes
+only a candidate that is not retained and not referenced by a domain, so a volume created after
+the listing is never a candidate. Every set is bounded and never truncated: a set over the bound is
 refused rather than reduced, because deleting around a truncated set would destroy a live
 attempt's recovery point.
 """
@@ -22,6 +22,9 @@ from kdive.providers.external_boot_authority.protocol import MAX_MESSAGE_BYTES
 
 MAX_RETAINED_KEYS = 4096
 MAX_OWNED_KEYS = MAX_RETAINED_KEYS
+# One sweep request carries the whole retained set, so its candidates are sent in slices that keep
+# a full request under the wire limit (4096 + 1024 keys of at most 178 bytes each).
+MAX_SWEEP_CANDIDATES = 1024
 
 type ModuleVolumeKind = Literal["source.ext4", "scratch.ext4", "reaping.journal", "reaped.journal"]
 type OperationNonce = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$", strict=True)]
@@ -44,7 +47,9 @@ class ModuleVolumeSweepRequestV1(_ClosedValue):
     version: Literal["module-volume-sweep-v1"] = "module-volume-sweep-v1"
     phase: Literal["list", "sweep"] = "sweep"
     retained: Annotated[tuple[ModuleVolumeKeyV1, ...], Field(max_length=MAX_RETAINED_KEYS)] = ()
-    candidates: Annotated[tuple[ModuleVolumeKeyV1, ...], Field(max_length=MAX_OWNED_KEYS)] = ()
+    candidates: Annotated[
+        tuple[ModuleVolumeKeyV1, ...], Field(max_length=MAX_SWEEP_CANDIDATES)
+    ] = ()
 
     @model_validator(mode="after")
     def _shape_matches_the_phase(self) -> ModuleVolumeSweepRequestV1:

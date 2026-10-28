@@ -495,7 +495,8 @@ response value `module-volume-sweep-v1`, in two phases. A `list` request (no key
 module volumes the authority owns as system, run, nonce and volume-kind keys. A `sweep` request
 carries the retained keys and the candidates the worker saw in the listing; it deletes only a
 candidate that is not retained and not referenced by a domain, and returns the number removed.
-Each key set is at most 4096, unique and canonical JSON. The operation is bound to no authority
+The retained set and the listing are at most 4096 keys and the candidates in one request at most
+1024, each unique and canonical JSON, so a full request stays under the 1 MiB message limit. The operation is bound to no authority
 generation and touches only module volumes in the authority's own pool. The authority answers
 `provider-not-configured` when it has no sweeper, and every provider failure crosses the boundary
 only as `provider-failure`. An authority that predates the operation refuses it as an invalid

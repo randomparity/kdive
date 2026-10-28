@@ -284,15 +284,16 @@ authority-owned volume and reported success with nothing removed; the reap marke
 torn-down System stayed for ever (#3386). The sweep now runs in the authority in two phases, so
 the retained set is still read after the listing: the worker asks each host to list the module
 volumes it owns, then reads the retained attempts, then sends each host the retained set and the
-volumes that host listed. The authority deletes only a listed volume that is not retained and
+volumes that host listed, in slices of at most 1024 so a request stays under the wire limit. The
+authority deletes only a listed volume that is not retained and
 that no domain references (a parseable kdive module name, host-stat identity), so a volume
 created after the listing is never a candidate. The worker no longer opens a libvirt connection
 for module volumes.
 
-The sweep fails closed. A listing, a retained set or an owned set over the wire bound (4096 keys,
-about 1000 attempts at four volumes each) is refused whole and never truncated, since deleting
-around a truncated set would destroy a live attempt's recovery point; a pool or backlog that
-large needs a chunked exchange. An authority that is unreachable, restarting, errors or does not
+The sweep fails closed. A retained set or an owned listing over the wire bound (4096 keys, about
+1000 attempts at four volumes each) is refused whole and never truncated, since deleting around a
+truncated set would destroy a live attempt's recovery point; a backlog that large needs a chunked
+retained set. An authority that is unreachable, restarting, errors or does not
 know the operation fails the job, and the next cycle retries; the sweep never reports "success,
 nothing removed" for a host it could not reach. The authority trusts the worker's retained set,
 as the previous sweep trusted the reconciler's: the peer is an authenticated worker that owns the
