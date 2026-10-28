@@ -61,14 +61,6 @@ REMOTE_ORPHAN_BLOCKED = (
     "the remote-libvirt recovery-orphan arm needs an activated remote System, and remote "
     "PREPARE is blocked (#3363)"
 )
-CONFLICT_RESTORE_BLOCKED = (
-    "resolution cannot restore the recorded source over a third identity; the resolution job "
-    "re-records the conflict (#3330)"
-)
-CONFLICT_TEARDOWN_BLOCKED = (
-    "teardown from recovery_conflict is unproven on the remote-libvirt authority: #3341 changed "
-    "the local provider only"
-)
 LOCAL_PRESENT_ORPHAN_BLOCKED = (
     "a quarantined receipt survives to resolution only if the release job ends terminally "
     "(ADR-0714), whose recovery is #3143"
@@ -708,30 +700,19 @@ async def recorded_conflict(system: AuthoritySystem, db_url: str) -> dict[str, o
         ),
         "resolve-conflict",
     )
-    await _drain_conflict(system, "resolve-conflict", resolution.object_id)
+    await drain_job(op, "resolve-conflict", resolution.object_id)
     head = await conflict_head(db_url, system_id)
-    assert head is not None and head[:4] == (
-        "terminal",
-        "resolve-conflict",
-        "conflict",
-        "conflict",
-    ), head
-    assert await _activation_state(db_url, activation_id) == "recovery_conflict"
+    assert head is not None and head[:4] == ("terminal", "resolve-conflict", "source", "source"), (
+        head
+    )
+    assert await _activation_state(db_url, activation_id) == "recovered"
     return {
         "recorded": "recovery_conflict",
         "release": "failed: conflict",
         "resolution_admitted": resolution.object_id,
-        "resolution": "failed: conflict",
-        "restore_from_third_identity": CONFLICT_RESTORE_BLOCKED,
+        "resolution": "succeeded: restored the recorded source",
+        "activation": "recovered",
     }
-
-
-def blocked_primary(failure: BaseExceptionGroup[BaseException]) -> ScenarioStop | None:
-    """The blocked stop a frame cleanup failure joined, which the frame lists first."""
-    primary = failure.exceptions[0]
-    if isinstance(primary, ScenarioStop) and primary.outcome is Outcome.BLOCKED:
-        return primary
-    return None
 
 
 def blocked_after_gates(run: CellRun, base_url: str, reason: str) -> NoReturn:
