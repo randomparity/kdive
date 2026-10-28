@@ -101,3 +101,26 @@ unresolved and churns as described above.
 - **Remember failures in the authority service process.** judgment: the memory would be lost on a
   restart and not shared across authority instances. Sending its verdict would also add a new wire
   reason.
+
+### Amendment (2026-10-28): a release failure while recovering commits, and the retry adopts (#3396)
+
+This closes a gap in the bound-failure path for a release, not in the repeat rule itself.
+
+[ADR-0614](0614-derived-external-boot-release-phases.md)'s derived RECOVER moves a release's
+activation to `recovering` before its restore. The release `fail` admission named no such state, so
+every failure after that point was refused: the job kept `running` until its lease lapsed, on every
+attempt, and the repeat check never ran.
+
+Migration 0181 admits a release `fail` while the activation is `recovering` when the current
+recovery attempt belongs to the failing authority's generation. The commit behaves as it does for
+every other failure: the job is requeued, or fails when terminal or out of attempts, and the
+authority is retired. A retired authority proves its job's attempt ended, so allocation and the
+derived-release begin now adopt a retired prior authority of the same job and release, joined to
+the current recovering attempt by generation, as they already adopted a `current` or `superseded`
+one. Retiring rather than superseding keeps the commit's one behaviour for failures; a superseded
+authority has a successor, and a failed attempt has none yet.
+
+After the last attempt fails, the job is `failed` and the activation stays `recovering`: a release
+has no `deadline` operation to close it. The System is torn down from `recovering`, which is always
+admitted. Closing the attempt and activation as `recovery_failed` on a terminal release failure is
+not done here.
