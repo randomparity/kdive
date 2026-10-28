@@ -29,7 +29,8 @@ worker.
    retryable and the job queue reads that one table (ADR-0483), so a stale-authority attempt still
    retries on a fresh authority. `details["admission"]` is `refused` for `unauthenticated`,
    `superseded`, `provider-not-configured` and `invalid-request`: the authority, or the sender
-   itself, answered before it admitted the request. It is `unknown` for `journal-conflict`, whose
+   itself, answered before it dispatched the request to the provider host. The mark describes
+   this dispatch only; it says nothing about an earlier job attempt. It is `unknown` for `journal-conflict`, whose
    reasons mix pre-mutation and post-mutation checks. Only `provider-conflict` carries
    `authority_reason` ([ADR-0714](0714-repeated-provider-conflict-ends-the-external-boot-job.md)).
 2. **One shared wait serves both paths, with three exits.**
@@ -48,6 +49,12 @@ worker.
 
 ## Consequences
 
+- `refused-before-mutation` on first sight is per wait, not per operation. If a job attempt ends as
+  `unknown` and a takeover then moves the authority on, the next attempt's first dispatch can be
+  rejected `superseded` before the authority reads the stored completion, and reads as refused.
+  Nothing consumes the mark yet; a consumer that did would have to read it with that limit.
+- The final retry may outlive the deadline by up to the transport floor (5 s), because the
+  sleep is clamped to the time left but the dispatch keeps its own transport deadline.
 - A definite rejection fails the job visibly instead of leaving it `running`, and the job's
   ordinary retry policy decides what happens next.
 - An ambiguous dispatch is bounded by its deadline instead of looping for ever. Ending it
