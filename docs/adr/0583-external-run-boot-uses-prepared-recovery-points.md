@@ -833,3 +833,15 @@ not change.
 - **Add a standalone System-profile INITRD input.** verified: closed PR #2104 demonstrates that
   shape and rejects it for remote-libvirt; issue #2105 and epic #1423 explicitly exclude the surface
   in favor of the existing external Run-build lane.
+
+## Amendment (2026-10-28): the teardown identity check reads the persistent definition
+
+The remote System teardown validated both the live and the inactive domain document against the
+recorded source and target (preserved, boot) identity pairs. libvirt expands a running domain's
+live XML (the host-model CPU, ids, aliases, tty and source paths), so its preserved digest never
+equals the one recorded at define time, and the teardown of any activated System was refused with
+`remote teardown domain identity differs from durable recovery` (#3377). The preserved digest is
+defined over the persistent definition. The teardown check now compares the inactive document's
+(preserved, boot) pair to the recorded pairs, and holds the live document to the boot projection
+alone, which must be one of the recorded boot identities. A differing persistent definition or a
+differing live boot projection is still refused. No schema change.
