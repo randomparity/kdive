@@ -64,6 +64,14 @@ _PEER_REASONS = frozenset(
 )
 
 
+# Rejections raised before the authority dispatches the request to the provider host (service.py
+# ``_reject`` and the ``superseded`` checks ahead of ``host.execute_*``; ``provider-not-configured``
+# and ``invalid-request`` at the transport). They say nothing about an earlier attempt's dispatch.
+_NOT_ADMITTED_REASONS = frozenset(
+    {"unauthenticated", "superseded", "provider-not-configured", "invalid-request"}
+)
+
+
 class _AuthorityTransport(Protocol):
     def _request_frame(self, envelope: bytes, *, deadline: float) -> Awaitable[bytes]: ...
 
@@ -83,6 +91,14 @@ def _failure(reason: str) -> CategorizedError:
     elif reason == "provider-conflict":
         # ADR-0714: the bound failure carries this mark so a repeat can end the job.
         details = {"authority_reason": reason}
+    elif reason in _NOT_ADMITTED_REASONS:
+        # ADR-0808: the authority answered before it admitted the request, so this request
+        # cannot have mutated. The category stays retryable; the mark ends a lifecycle wait. Only
+        # provider-conflict carries ``authority_reason`` (ADR-0714).
+        details = {"admission": "refused"}
+    elif reason == "journal-conflict":
+        # The wire carries no reason for a journal conflict, and some of them follow a mutation.
+        details = {"admission": "unknown"}
     return CategorizedError(
         f"authority: {reason}",
         category=category,

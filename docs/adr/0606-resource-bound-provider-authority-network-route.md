@@ -82,3 +82,10 @@ contract exists.
 - **Support IPv4 and IPv6 in the first route.** verified: the existing cross-distribution firewall
   owner emits IPv4 firewalld rules and has one IPv4 worker CIDR; dual-stack support would require a
   separate address-family and stale-rule lifecycle rather than a transport-only field extension.
+
+### Amendment (2026-10-28): the sender marks rejections that prove non-admission (#3391)
+
+`authority_sender._failure` keeps `INFRASTRUCTURE_FAILURE` for every rejection reason and adds
+`details["admission"]`: `refused` for `unauthenticated`, `superseded`, `provider-not-configured` and
+`invalid-request`, `unknown` for `journal-conflict`. [ADR-0808](0808-a-definite-authority-rejection-ends-the-lifecycle-wait.md)
+records why the category stays and how the lifecycle wait reads the mark.
