@@ -249,6 +249,18 @@ class RemoteModuleAttemptObligationRepository:
             and state["reap_discharged_at"] is None
         )
 
+    async def reap_obligation_is_discharged(
+        self, conn: AsyncConnection, attempt: ModuleAttempt
+    ) -> bool:
+        """Return whether exact terminal evidence shows this attempt's reap already discharged."""
+        state = await self._state(conn, attempt)
+        return (
+            state is not None
+            and state["has_evidence"]
+            and state["reap_opened_at"] is not None
+            and state["reap_discharged_at"] is not None
+        )
+
     async def read_reap_preparation(
         self, conn: AsyncConnection, system_id: UUID, run_id: UUID
     ) -> ModuleAttemptPreparationRequestV1 | None:

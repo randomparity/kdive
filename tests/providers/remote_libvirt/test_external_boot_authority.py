@@ -2207,7 +2207,7 @@ async def _worker_cleanup_retry(
     class Sender:
         async def execute_remote_module_lifecycle(self, *_args: object, **_kwargs: object) -> Any:
             calls.append("dispatch")
-            return reaped
+            return module_completion(reaped.operation, reaped)
 
     response = await execute_remote_module_lifecycle_on_authority_host(
         connection=cast(Any, object()),
