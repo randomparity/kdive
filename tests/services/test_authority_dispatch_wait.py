@@ -57,14 +57,14 @@ class _Harness:
         self.sleeps.append(seconds)
         self.now += seconds
 
-    def run(self, *, deadline: float = 600.0) -> Awaitable[str]:
+    def run(self, *, deadline: float = 600.0, jitter: float = 0.0) -> Awaitable[str]:
         return await_authority_dispatch(
             self.dispatch,
             deadline=deadline,
             what="remote module reap",
             clock=lambda: self.now,
             sleep=self.sleep,
-            jitter=lambda: 0.0,
+            jitter=lambda: jitter,
         )
 
 
@@ -177,3 +177,9 @@ def test_waiting_logs_are_throttled(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING, logger=_LOGGER), pytest.raises(CategorizedError):
         _run(harness.run(deadline=600.0))
     assert 1 <= len([r for r in caplog.records if r.name == _LOGGER]) <= 25
+
+
+def test_the_backoff_is_jittered() -> None:
+    harness = _Harness([TimeoutError(), "done"])
+    assert _run(harness.run(jitter=1.0)) == "done"
+    assert harness.sleeps == [pytest.approx(0.1 * 1.25)]
