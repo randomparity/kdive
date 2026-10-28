@@ -245,6 +245,7 @@ async def await_authority_dispatch[Value](
     async def wait_before_retry() -> None:
         delay = min(_WAIT_MAX_S, _WAIT_MIN_S * _WAIT_GROWTH ** (attempts - 1))
         delay *= 1 + _WAIT_JITTER * jitter()
+        delay = min(delay, max(0.0, deadline - now()))
         while True:
             try:
                 await sleep(delay)

@@ -60,8 +60,9 @@ _PEER_REASONS = frozenset(
 )
 
 
-# Rejections the authority raises before it admits the request (service.py ``_reject`` before the
-# lane lock, ``provider-not-configured`` and ``invalid-request`` at the transport).
+# Rejections raised before the authority dispatches the request to the provider host (service.py
+# ``_reject`` and the ``superseded`` checks ahead of ``host.execute_*``; ``provider-not-configured``
+# and ``invalid-request`` at the transport). They say nothing about an earlier attempt's dispatch.
 _NOT_ADMITTED_REASONS = frozenset(
     {"unauthenticated", "superseded", "provider-not-configured", "invalid-request"}
 )

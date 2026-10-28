@@ -121,9 +121,9 @@ def test_an_ambiguous_dispatch_backs_off_and_ends_at_the_deadline() -> None:
     assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert raised.value.details["completion"] == "unknown"
     assert harness.sleeps[0] == pytest.approx(0.1)
-    assert harness.sleeps == sorted(harness.sleeps)
+    assert harness.sleeps[:-1] == sorted(harness.sleeps[:-1])
     assert max(harness.sleeps) == pytest.approx(2.0)
-    assert harness.now >= 60.0
+    assert harness.now == pytest.approx(60.0)
     assert harness.calls < 60
 
 
@@ -176,10 +176,35 @@ def test_waiting_logs_are_throttled(caplog: pytest.LogCaptureFixture) -> None:
     harness = _Harness([])
     with caplog.at_level(logging.WARNING, logger=_LOGGER), pytest.raises(CategorizedError):
         _run(harness.run(deadline=600.0))
-    assert 1 <= len([r for r in caplog.records if r.name == _LOGGER]) <= 25
+    assert 15 <= len([r for r in caplog.records if r.name == _LOGGER]) <= 22
 
 
 def test_the_backoff_is_jittered() -> None:
     harness = _Harness([TimeoutError(), "done"])
     assert _run(harness.run(jitter=1.0)) == "done"
     assert harness.sleeps == [pytest.approx(0.1 * 1.25)]
+
+
+def test_a_cancellation_during_the_backoff_does_not_abandon_the_wait() -> None:
+    harness = _Harness([TimeoutError(), "done"])
+    cancelled = False
+
+    async def sleep(seconds: float) -> None:
+        nonlocal cancelled
+        if not cancelled:
+            cancelled = True
+            raise asyncio.CancelledError
+        await harness.sleep(seconds)
+
+    async def main() -> str:
+        return await await_authority_dispatch(
+            harness.dispatch,
+            deadline=600.0,
+            what="remote module reap",
+            clock=lambda: harness.now,
+            sleep=sleep,
+            jitter=lambda: 0.0,
+        )
+
+    assert asyncio.run(main()) == "done"
+    assert cancelled and harness.calls == 2

@@ -86,7 +86,7 @@ class JsonFormatter(logging.Formatter):
         payload.update(getattr(record, _CTX_RECORD_ATTR, {}))
         for name in sorted(LOG_EXTRA_FIELDS):
             value = getattr(record, name, None)
-            if name not in payload and isinstance(value, str | int | float | bool):
+            if name not in payload and isinstance(value, str | int):
                 payload[name] = value[:_EXTRA_MAX] if isinstance(value, str) else value
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
