@@ -191,3 +191,17 @@ def test_inspector_maps_malformed_xml_to_provisioning_failure(
         inspect_root_boot(tmp_path / "root.qcow2", "x86_64", "sha256:" + "a" * 64)
     assert exc.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert exc.value.details["reason"] == "malformed_output"
+
+
+def test_an_unsupported_subvolume_is_reported_as_an_actionable_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = "btrfsvol:/dev/mapper/vg-root/root"
+    monkeypatch.setattr(
+        "kdive.images.planes.provenance_probes._run_bounded_inspector",
+        lambda *_args, **_kwargs: (_inspector_xml(device, (device,)), b""),
+    )
+    with pytest.raises(CategorizedError) as exc:
+        inspect_root_boot(tmp_path / "root.qcow2", "x86_64", _DIGEST)
+    assert exc.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert exc.value.details["reason"] == "unsupported_btrfs_root"

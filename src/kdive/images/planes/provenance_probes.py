@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import selectors
 import signal
 import subprocess  # noqa: S404 - libguestfs tools use fixed argv, no shell  # nosec B404
@@ -213,6 +214,32 @@ def _run_bounded_inspector(
     return stdout, stderr
 
 
+_BTRFS_VOLUME_PREFIX = "btrfsvol:"
+# libguestfs names a subvolume root ``btrfsvol:<device>/<subvolume>``. The appliance attaches an
+# image's disks as sd*, so only that device form is split unambiguously; any other fails closed.
+_BTRFS_VOLUME = re.compile(r"btrfsvol:/dev/(?:sd|vd)[a-z]+[0-9]*/(?P<subvolume>.+)")
+_SUBVOLUME_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]*")
+_SUBVOLUME_MAX_CHARS = 128
+
+
+class UnsupportedBtrfsRootError(ValueError):
+    """A btrfs root whose subvolume cannot be carried as a ``rootflags=subvol=`` argument."""
+
+
+def _btrfs_root_subvolume(device: str) -> str:
+    match = _BTRFS_VOLUME.fullmatch(device)
+    subvolume = match.group("subvolume") if match else ""
+    segments = subvolume.split("/")
+    if (
+        not subvolume
+        or len(subvolume) > _SUBVOLUME_MAX_CHARS
+        or not all(_SUBVOLUME_SEGMENT.fullmatch(segment) for segment in segments)
+        or ".." in segments
+    ):
+        raise UnsupportedBtrfsRootError("the btrfs root subvolume is not a supported name")
+    return subvolume
+
+
 def _parse_root_boot(xml: bytes, architecture: Architecture, image_digest: str) -> RootSpecV1:
     """Parse one root mount from bounded virt-inspector XML into #2115's closed value."""
     if b"<!DOCTYPE" in xml:
@@ -229,10 +256,13 @@ def _parse_root_boot(xml: bytes, architecture: Architecture, image_digest: str) 
     if not uuid or not filesystem_type:
         raise ValueError("root filesystem UUID and type are required")
     root = f"UUID={uuid}"
+    arguments = (f"root={root}", f"rootfstype={filesystem_type}")
+    if roots[0].startswith(_BTRFS_VOLUME_PREFIX):
+        arguments += (f"rootflags=subvol={_btrfs_root_subvolume(roots[0])}",)
     return RootSpecV1(
         architecture=architecture,
         root=root,
-        arguments=(f"root={root}", f"rootfstype={filesystem_type}"),
+        arguments=arguments,
         authority="stage-inspection",
         source=RootSource(kind="staged-image", identity=image_digest),
     )
@@ -248,6 +278,13 @@ def inspect_root_boot(
     )
     try:
         return _parse_root_boot(stdout, architecture, image_digest)
+    except UnsupportedBtrfsRootError as exc:
+        raise CategorizedError(
+            "the image's btrfs root subvolume cannot be expressed as a boot argument; "
+            "use an image whose root subvolume has a plain name on an sd or vd disk",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"stage": "root-inspection", "reason": "unsupported_btrfs_root"},
+        ) from exc
     except (ParseError, ValueError, TypeError) as exc:
         raise CategorizedError(
             "root boot inspection output is malformed; rebuild and retry",
