@@ -57,9 +57,10 @@ resolution of a derived phase and follows the same rule: a release `cleanup` req
 against the root `release` authority row, never against a row of its own. Migration 0182 admits
 the derived pair only when the request's identity and digest equal what the phase derivation
 yields from that root row; the other admitted pairs, and a standalone `release`/`cleanup` root,
-keep their exact match. A CLEANUP retried after its module reap discharged the obligation is
-answered by the host's completed `reaped` state, and only then, so the retry reaches the gate
-rather than stopping at an obligation that was deliberately closed.
+keep their exact match. A CLEANUP retried after its module reap discharged the obligation reaches the
+host, whose reap is idempotent, and proceeds only if the host reports the volumes reaped and the
+response matches the retained restored evidence; the retry therefore reaches the gate instead of
+stopping at an obligation that was deliberately closed.
 
 ## Consequences
 

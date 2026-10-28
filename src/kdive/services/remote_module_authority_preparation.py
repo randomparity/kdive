@@ -249,8 +249,8 @@ async def execute_remote_module_lifecycle_on_authority_host(
     retry_after_discharge = False
     if action == "reap" and not await repository.reap_obligation_is_open(connection, attempt):
         # A CLEANUP retried after its reap already discharged the obligation (the worker's
-        # commit_cleanup failed afterwards) may be answered by the host's completed ``reaped``
-        # state; no other reap may proceed without a retained obligation.
+        # commit_cleanup failed afterwards) reaches the host, whose reap is idempotent, and must
+        # come back with the volumes reaped; no other reap proceeds without a retained obligation.
         if (
             authority.operation.value != "cleanup"
             or not await repository.reap_obligation_is_discharged(connection, attempt)
