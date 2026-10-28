@@ -15,8 +15,8 @@ DECLARE
         'public.allocate_external_boot_authority(bytea,uuid,integer,uuid,uuid,uuid,text,text,text,text,text)'::regprocedure;
     v_begin constant regprocedure :=
         'public.begin_external_boot_derived_release_recovery(bytea,uuid,integer,uuid,bigint,uuid,timestamptz)'::regprocedure;
-    -- The release arm of the `fail` admission.  A recovering activation is admitted only when the
-    -- recovering attempt is the failing authority's own.
+    -- The release arm of the `fail` admission.  A recovering activation is admitted only when its
+    -- current recovery attempt is the failing authority's own.
     v_old_fail constant text := $old$           OR (p_purpose = 'release' AND (
                v_run.state IS DISTINCT FROM 'succeeded'
                OR v_activation.state NOT IN (
@@ -30,10 +30,8 @@ DECLARE
                    'active', 'recovered', 'abandoned',
                    'recovery_conflict', 'recovery_failed', 'recovering'
                )
-               OR (v_activation.state = 'recovering' AND (
-                   v_attempt.authority_generation IS DISTINCT FROM p_generation
-                   OR v_attempt.state IS DISTINCT FROM 'recovering'
-               ))
+               OR (v_activation.state = 'recovering'
+                   AND v_attempt.authority_generation IS DISTINCT FROM p_generation)
            ))$new$;
     v_old_allocate constant text := $old$prior.state = 'current'$old$;
     v_new_allocate constant text := $new$prior.state IN ('current', 'retired')$new$;
