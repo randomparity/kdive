@@ -665,6 +665,7 @@ class _Quiesce:
         deadline: float = 10_000.0,
         fail: bool = False,
         appliance_present: bool = False,
+        fixed_inspection: bool = False,
     ) -> None:
         self.request = _request()
         operation = self.request.operation
@@ -731,7 +732,9 @@ class _Quiesce:
         )
         self.executor = RemoteModulePreparationExecutor()
         host = self.host = ConcreteRemoteModuleAuthorityHost(
-            RemoteModuleAuthorityHostConfiguration(volume_config, appliance_config, _Identity()),
+            RemoteModuleAuthorityHostConfiguration(
+                volume_config, appliance_config, _Identity(), fixed_inspection=fixed_inspection
+            ),
             self.executor,
         )
         evidence_root = tmp_path / "evidence"
@@ -760,6 +763,17 @@ class _Quiesce:
                     self.request, purpose="release", operation="recover"
                 ),
                 action="restore",
+                budget_seconds=300,
+            )
+        )
+
+    async def reap(self, operation: str) -> RemoteModuleLifecycleResponseV1:
+        """Run a module reap with the purpose and operation of a release CLEANUP or a teardown."""
+        purpose = "release" if operation == "cleanup" else operation
+        return await self.durable.execute_lifecycle(
+            RemoteModuleLifecycleRequestV1(
+                authority=_lifecycle_authority(self.request, purpose=purpose, operation=operation),
+                action="reap",
                 budget_seconds=300,
             )
         )
@@ -878,6 +892,84 @@ async def test_restore_refuses_a_system_that_cannot_be_stopped(
         await stack.restore()
 
     assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert system.active
+    stack.close()
+
+
+class _PowerAwareInspection:
+    """Fixed attachment inspection over a fake System; an active owner needs the allow flag."""
+
+    def __init__(self, stack: _Quiesce, system: _SystemDomain) -> None:
+        operation = stack.request.operation
+        self.detached = frozenset(
+            (
+                "systems",
+                render_module_volume_name(
+                    operation.system_id, operation.run_id, operation.operation_nonce, purpose
+                ),
+            )
+            for purpose in ("source.ext4", "scratch.ext4")
+        )
+        self.system = system
+        self.allowed: list[bool] = []
+
+    def __call__(
+        self,
+        conn: object,
+        identity: object,
+        expected: object,
+        present: object = None,
+        *,
+        allow_cleanup_partial: bool = False,
+        allow_active_system: bool = False,
+    ) -> AttachmentInspection:
+        del conn, identity, expected, present, allow_cleanup_partial
+        self.allowed.append(allow_active_system)
+        active = bool(self.system.active)
+        if active and not allow_active_system:
+            raise CategorizedError("owning System is active", category=ErrorCategory.CONFLICT)
+        return AttachmentInspection(not active, True, False, self.detached)
+
+
+async def _restored_stack_with_a_running_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[_Quiesce, _SystemDomain, _PowerAwareInspection]:
+    from kdive.providers.remote_libvirt import remote_module_authority_host as host_module
+
+    system = _SystemDomain(active=False)
+    stack = _Quiesce(tmp_path, system, fixed_inspection=True)
+    _seed_root(stack, _root_volume_xml("/pool/base.qcow2"))
+    inspection = _PowerAwareInspection(stack, system)
+    monkeypatch.setattr(host_module, "inspect_module_attachments", inspection)
+    await stack.durable.execute(stack.request)
+    await stack.restore()
+    system.active = True
+    return stack, system, inspection
+
+
+@pytest.mark.anyio
+async def test_release_cleanup_reap_proceeds_while_the_recovered_system_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RECOVER restores the System's power, so the reap that follows meets a running System."""
+    stack, system, _inspection = await _restored_stack_with_a_running_system(tmp_path, monkeypatch)
+
+    reaped = await stack.reap("cleanup")
+
+    assert reaped.volumes_absent
+    assert system.active and not system.destroyed
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_teardown_reap_still_refuses_a_running_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack, system, _inspection = await _restored_stack_with_a_running_system(tmp_path, monkeypatch)
+
+    with pytest.raises(CategorizedError, match="owning System is active"):
+        await stack.reap("teardown")
+
     assert system.active
     stack.close()
 
