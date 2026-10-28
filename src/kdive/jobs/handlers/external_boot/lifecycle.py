@@ -81,6 +81,12 @@ def _request_deadline(context: OperationContext, fallback: datetime) -> datetime
     return RecoveryRequestV1.model_validate(raw).readiness_deadline
 
 
+def _starts_fresh_readiness_budget(context: OperationContext) -> bool:
+    """Skeleton: a re-entered derived release recovery restarts its budget (#3395)."""
+    del context
+    return False
+
+
 _ACTIVATION_EVIDENCE: Final = frozenset({"materialization", "recovery_point"})
 _RECOVERY_STATES: Final = frozenset(
     {State.ACTIVE, State.RECOVERED, State.ABANDONED, State.RECOVERY_CONFLICT, State.RECOVERY_FAILED}
