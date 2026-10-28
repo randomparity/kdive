@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import UUID
 
 import pytest
 
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     MAX_RETAINED_KEYS,
     ModuleVolumeKeyV1,
+    ModuleVolumeKind,
     ModuleVolumeSweepRequestV1,
     ModuleVolumeSweepResponseV1,
     decode_module_volume_sweep_request,
@@ -29,6 +31,15 @@ def _key(kind: str = "source.ext4", nonce: str = _NONCE) -> dict[str, str]:
     return {"kind": kind, "operation_nonce": nonce, "run_id": _RUN, "system_id": _SYSTEM}
 
 
+def _key_value(kind: ModuleVolumeKind) -> ModuleVolumeKeyV1:
+    return ModuleVolumeKeyV1(
+        system_id=UUID(_SYSTEM),
+        run_id=UUID(_RUN),
+        operation_nonce=_NONCE,
+        kind=kind,
+    )
+
+
 def _request(keys: list[dict[str, str]]) -> bytes:
     return _wire({"retained": keys, "version": "module-volume-sweep-v1"})
 
@@ -39,10 +50,16 @@ def test_request_has_one_canonical_shape() -> None:
     assert decoded == ModuleVolumeSweepRequestV1(
         retained=(
             ModuleVolumeKeyV1(
-                system_id=_SYSTEM, run_id=_RUN, operation_nonce=_NONCE, kind="source.ext4"
+                system_id=UUID(_SYSTEM),
+                run_id=UUID(_RUN),
+                operation_nonce=_NONCE,
+                kind="source.ext4",
             ),
             ModuleVolumeKeyV1(
-                system_id=_SYSTEM, run_id=_RUN, operation_nonce=_NONCE, kind="reaped.journal"
+                system_id=UUID(_SYSTEM),
+                run_id=UUID(_RUN),
+                operation_nonce=_NONCE,
+                kind="reaped.journal",
             ),
         )
     )

@@ -102,7 +102,7 @@ def test_each_authority_host_sweeps_its_own_pool_with_the_whole_retained_set() -
     assert removed == 5
     for sender in (first, second):
         assert [
-            (item.system_id, item.run_id, item.operation_nonce, item.kind)
+            (str(item.system_id), str(item.run_id), item.operation_nonce, item.kind)
             for request in sender.requests
             for item in request.retained
         ] == [tuple(key) for key in keys]

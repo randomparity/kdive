@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, cast
+from uuid import UUID
 
 import libvirt
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeKeyV1,
+    ModuleVolumeKind,
     ModuleVolumeSweepRequestV1,
     ModuleVolumeSweepResponseV1,
 )
@@ -104,8 +106,10 @@ def _service(conn: _Conn) -> ModuleVolumeSweepService:
     )
 
 
-def _key(nonce: str, kind: str = "source.ext4") -> ModuleVolumeKeyV1:
-    return ModuleVolumeKeyV1(system_id=SYSTEM, run_id=RUN, operation_nonce=nonce, kind=kind)
+def _key(nonce: str, kind: ModuleVolumeKind = "source.ext4") -> ModuleVolumeKeyV1:
+    return ModuleVolumeKeyV1(
+        system_id=UUID(SYSTEM), run_id=UUID(RUN), operation_nonce=nonce, kind=kind
+    )
 
 
 def _sweep(service: ModuleVolumeSweepService, *retained: ModuleVolumeKeyV1) -> Any:

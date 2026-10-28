@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import posixpath
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable, Collection, Sequence
-from typing import Protocol
+from typing import Protocol, cast
+from uuid import UUID
 
 import libvirt
 from defusedxml.common import DefusedXmlException
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    MAX_RETAINED_KEYS,
+    ModuleVolumeKeyV1,
+    ModuleVolumeKind,
+    ModuleVolumeSweepRequestV1,
+)
 from kdive.providers.infra.reaping import ModuleVolumeKey
 from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.remote_libvirt.config import (
@@ -298,7 +306,53 @@ class RemoteLibvirtModuleVolumeReaper:
         self,
         retained_owners: Callable[[], Awaitable[Collection[ModuleVolumeKey]]],
     ) -> int:
-        raise NotImplementedError
+        """Ask each authority host to sweep its own pool; any host that cannot fails the sweep.
+
+        Module volumes live only in the authority's private pool, so there is nothing to sweep
+        through the host's system daemon. A host whose authority is unreachable, refuses the
+        operation or answers an error fails the job (the next cycle retries), and a retained set
+        over the wire bound is refused whole: deleting around a truncated set would destroy a
+        live attempt's recovery point.
+        """
+        authority_configs = [config for config in self._configs() if config.authority is not None]
+        if not authority_configs:
+            return 0
+        factory = self._authority_sender_factory
+        if factory is None:
+            raise _conflict("remote module provider authority is unavailable")
+        keys = list(await retained_owners())
+        if len(keys) > MAX_RETAINED_KEYS:
+            raise _infra("retained module volume set exceeds the sweep bound", keys=len(keys))
+        request = ModuleVolumeSweepRequestV1(
+            retained=tuple(
+                ModuleVolumeKeyV1(
+                    system_id=UUID(key.system_id),
+                    run_id=UUID(key.run_id),
+                    operation_nonce=key.operation_nonce,
+                    kind=cast(ModuleVolumeKind, key.kind),
+                )
+                for key in keys
+            )
+        )
+        removed = 0
+        failed = 0
+        for config in authority_configs:
+            assert config.authority is not None
+            try:
+                response = await factory(config.authority).sweep_module_volumes(
+                    request, deadline=asyncio.get_running_loop().time() + _HOST_SWEEP_SECONDS
+                )
+            except (CategorizedError, OSError, TimeoutError, ValueError) as exc:
+                failed += 1
+                _LOG.warning(
+                    "remote module-volume sweep failed for an authority host: %s",
+                    type(exc).__qualname__,
+                )
+                continue
+            removed += response.removed
+        if failed:
+            raise _infra("remote module-volume sweep failed", hosts=failed)
+        return removed
 
 
 __all__ = [

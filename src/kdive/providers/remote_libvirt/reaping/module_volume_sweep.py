@@ -15,7 +15,15 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
-from kdive.providers.remote_libvirt.reaping.module_volumes import ModuleVolumeReaperConn
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+    ModuleVolumeOwner,
+)
+from kdive.providers.remote_libvirt.reaping.module_volumes import (
+    ModuleVolumeReaperConn,
+    reap_orphaned_module_volumes,
+)
+
+_SWEEP_SECONDS = 300.0
 
 
 class ModuleVolumeSweepService:
@@ -37,4 +45,23 @@ class ModuleVolumeSweepService:
         self._clock = clock
 
     async def sweep(self, request: ModuleVolumeSweepRequestV1) -> ModuleVolumeSweepResponseV1:
-        raise NotImplementedError
+        """Delete owned module volumes the request does not retain and no domain references."""
+        retained = [
+            ModuleVolumeOwner(
+                str(item.system_id), str(item.run_id), item.operation_nonce, item.kind
+            )
+            for item in request.retained
+        ]
+        deadline = self._clock() + _SWEEP_SECONDS
+
+        def sweep() -> int:
+            return reap_orphaned_module_volumes(
+                self._connection,
+                self._pool_name,
+                self._identity_port,
+                retained_owners=lambda: retained,
+                deadline=deadline,
+                clock=self._clock,
+            )
+
+        return ModuleVolumeSweepResponseV1(removed=await self._executor.run(sweep))

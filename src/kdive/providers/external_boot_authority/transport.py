@@ -25,6 +25,11 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityResponseV1,
     decode_device_identity_request,
 )
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepRequestV1,
+    ModuleVolumeSweepResponseV1,
+    decode_module_volume_sweep_request,
+)
 from kdive.providers.external_boot_authority.protocol import (
     MAX_ENVELOPE_BYTES,
     AuthorityAcknowledgementV1,
@@ -171,6 +176,15 @@ class DeviceIdentityService(Protocol):
     async def resolve(self, request: DeviceIdentityRequestV1) -> DeviceIdentityResponseV1: ...
 
 
+@runtime_checkable
+class ModuleVolumeSweeper(Protocol):
+    """Sweep unretained module volumes from the authority's own pool (#3386)."""
+
+    async def sweep_module_volumes(
+        self, peer: AuthenticatedPeer, request: ModuleVolumeSweepRequestV1
+    ) -> ModuleVolumeSweepResponseV1: ...
+
+
 class AuthoritySystemTransportService(Protocol):
     async def begin(
         self, peer_incarnation: str, request: AuthoritySystemTakeoverRequestV1
@@ -208,6 +222,8 @@ def _decode_operation_request(operation: Operation, payload: bytes) -> object:
         return AuthoritySystemExecutionV1.model_validate_json(payload)
     if operation == "resolve-device-identity":
         return decode_device_identity_request(payload)
+    if operation == "sweep-module-volumes":
+        return decode_module_volume_sweep_request(payload)
     if operation == "execute-remote-module-lifecycle":
         return RemoteModuleLifecycleRequestV1.from_canonical_json(payload)
     if operation == "execute-remote-module-preparation":
@@ -263,6 +279,8 @@ def encode_request_envelope(
     if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
         raise ValueError("invalid-request")
     if operation == "resolve-device-identity" and not isinstance(decoded, DeviceIdentityRequestV1):
+        raise ValueError("invalid-request")
+    if operation == "sweep-module-volumes" and not isinstance(decoded, ModuleVolumeSweepRequestV1):
         raise ValueError("invalid-request")
     if operation == "acknowledge-system-takeover" and not isinstance(
         decoded, AuthoritySystemTakeoverRequestV1
@@ -329,6 +347,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             "execute-remote-module-lifecycle",
             "health",
             "resolve-device-identity",
+            "sweep-module-volumes",
             "resolve-recovery-orphan",
             "acknowledge-system-takeover",
             "execute-system-operation",
@@ -385,6 +404,10 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             request, DeviceIdentityRequestV1
         ):
             raise ValueError
+        if operation == "sweep-module-volumes" and not isinstance(
+            request, ModuleVolumeSweepRequestV1
+        ):
+            raise ValueError
         if operation == "acknowledge-system-takeover" and not isinstance(
             request, AuthoritySystemTakeoverRequestV1
         ):
@@ -406,6 +429,7 @@ def _success(
     | AuthorityRunningObservationV1
     | AuthorityHealthAcknowledgementV1
     | DeviceIdentityResponseV1
+    | ModuleVolumeSweepResponseV1
     | RemoteModulePreparationBeginResponseV1
     | RemoteModuleLifecycleResponseV1
     | RemoteModuleTerminalPreparationResponseV1
@@ -468,6 +492,16 @@ async def _dispatch(
         try:
             return _success(await identity_service.resolve(request))
         except Exception:  # noqa: BLE001 -- filesystem details never cross the boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
+            return _error("provider-failure")
+    if operation == "sweep-module-volumes":
+        if not isinstance(remote_module_service, ModuleVolumeSweeper):
+            return _error("provider-not-configured")
+        if not isinstance(request, ModuleVolumeSweepRequestV1):
+            raise _TransportError("invalid-request")
+        try:
+            return _success(await remote_module_service.sweep_module_volumes(peer, request))
+        except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
             _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-failure")
     if operation in {"acknowledge-system-takeover", "execute-system-operation"}:

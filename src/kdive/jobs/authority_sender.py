@@ -190,7 +190,10 @@ class AuthorityRequestSender:
     async def sweep_module_volumes(
         self, request: ModuleVolumeSweepRequestV1, *, deadline: float
     ) -> ModuleVolumeSweepResponseV1:
-        raise NotImplementedError
+        response = await self._transport_factory()._request_frame(
+            self._encode("sweep-module-volumes", request), deadline=deadline
+        )
+        return _decode_response(response, ModuleVolumeSweepResponseV1)
 
     async def acknowledge_takeover(
         self, request: AuthorityTakeoverRequestV1, *, deadline: float
