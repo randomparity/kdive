@@ -650,7 +650,7 @@ async def test_sender_sweeps_module_volumes_and_rejects_a_malformed_answer() -> 
         async def sweep_module_volumes(
             self, peer: AuthenticatedPeer, request: ModuleVolumeSweepRequestV1
         ) -> ModuleVolumeSweepResponseV1:
-            assert request.retained == ()
+            assert request.retained == () and request.phase == "sweep"
             return ModuleVolumeSweepResponseV1(removed=2)
 
     class Backend:

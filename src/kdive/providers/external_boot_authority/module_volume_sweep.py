@@ -1,9 +1,13 @@
 """Closed wire values for the authority-side module-volume sweep (ADR-0588, ADR-0603).
 
-The worker names the module attempts whose volumes must be kept; the authority sweeps its own
-pool and reports how many volumes it removed. The retained set is bounded and never truncated:
-a set over the bound is refused rather than reduced, because deleting around a truncated set
-would destroy a live attempt's recovery point.
+The exchange has two phases so the retained set is always read after the volumes are listed,
+which is what makes a listed volume older than the retained snapshot: ``list`` returns the
+authority's owned module volumes; the worker then reads the retained attempts and sends ``sweep``
+with the volumes it saw (the candidates) and the retained set. The authority deletes only a
+candidate that is not retained and not referenced by a domain, so a volume created after the
+listing is never a candidate. Every set is bounded and never truncated: a set over the bound is
+refused rather than reduced, because deleting around a truncated set would destroy a live
+attempt's recovery point.
 """
 
 from __future__ import annotations
@@ -16,7 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from kdive.providers.external_boot_authority.protocol import MAX_MESSAGE_BYTES
 
-MAX_RETAINED_KEYS = 2048
+MAX_RETAINED_KEYS = 4096
+MAX_OWNED_KEYS = MAX_RETAINED_KEYS
 
 type ModuleVolumeKind = Literal["source.ext4", "scratch.ext4", "reaping.journal", "reaped.journal"]
 type OperationNonce = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$", strict=True)]
@@ -37,18 +42,24 @@ class ModuleVolumeKeyV1(_ClosedValue):
 
 class ModuleVolumeSweepRequestV1(_ClosedValue):
     version: Literal["module-volume-sweep-v1"] = "module-volume-sweep-v1"
+    phase: Literal["list", "sweep"] = "sweep"
     retained: Annotated[tuple[ModuleVolumeKeyV1, ...], Field(max_length=MAX_RETAINED_KEYS)] = ()
+    candidates: Annotated[tuple[ModuleVolumeKeyV1, ...], Field(max_length=MAX_OWNED_KEYS)] = ()
 
     @model_validator(mode="after")
-    def _keys_are_unique(self) -> ModuleVolumeSweepRequestV1:
-        if len(set(self.retained)) != len(self.retained):
-            raise ValueError("retained module volume keys must be unique")
+    def _shape_matches_the_phase(self) -> ModuleVolumeSweepRequestV1:
+        if self.phase == "list" and (self.retained or self.candidates):
+            raise ValueError("a list request carries no retained or candidate keys")
+        for keys in (self.retained, self.candidates):
+            if len(set(keys)) != len(keys):
+                raise ValueError("module volume keys must be unique")
         return self
 
 
 class ModuleVolumeSweepResponseV1(_ClosedValue):
     version: Literal["module-volume-sweep-v1"] = "module-volume-sweep-v1"
     removed: Annotated[int, Field(strict=True, ge=0)]
+    owned: Annotated[tuple[ModuleVolumeKeyV1, ...], Field(max_length=MAX_OWNED_KEYS)] = ()
 
 
 def _canonical_bytes(value: BaseModel) -> bytes:

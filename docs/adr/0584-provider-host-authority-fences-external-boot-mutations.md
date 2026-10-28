@@ -491,11 +491,13 @@ and follows an already terminal activate record. No schema or protocol change.
 ## Amendment (2026-10-28): the module-volume sweep operation
 
 The authenticated lane gains one closed operation, `sweep-module-volumes`, with request and
-response value `module-volume-sweep-v1`. The request names the module attempts to keep (system,
-run, nonce and volume kind, at most 2048, unique, canonical JSON); the response carries the number
-of volumes removed. It is bound to no authority generation: it reads and deletes only module
-volumes in the authority's own pool that no retained attempt and no domain references. The
-authority answers `provider-not-configured` when it has no sweeper, and every provider failure
-crosses the boundary only as `provider-failure`. An authority that predates the operation refuses
-it as an invalid request, which the worker treats as a failed sweep; worker and authority deploy
-together. The existing v1 values are unchanged.
+response value `module-volume-sweep-v1`, in two phases. A `list` request (no keys) returns the
+module volumes the authority owns as system, run, nonce and volume-kind keys. A `sweep` request
+carries the retained keys and the candidates the worker saw in the listing; it deletes only a
+candidate that is not retained and not referenced by a domain, and returns the number removed.
+Each key set is at most 4096, unique and canonical JSON. The operation is bound to no authority
+generation and touches only module volumes in the authority's own pool. The authority answers
+`provider-not-configured` when it has no sweeper, and every provider failure crosses the boundary
+only as `provider-failure`. An authority that predates the operation refuses it as an invalid
+request, which the worker treats as a failed sweep; worker and authority deploy together. The
+existing v1 values are unchanged.

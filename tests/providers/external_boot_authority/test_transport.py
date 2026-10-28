@@ -1343,7 +1343,12 @@ def test_service_categories_cross_the_wire_as_closed_reasons(category: str, wire
 def _sweep_envelope(retained: list[dict[str, str]] | None = None) -> bytes:
     return encode_request_envelope(
         "sweep-module-volumes",
-        {"retained": retained or [], "version": "module-volume-sweep-v1"},
+        {
+            "candidates": [],
+            "phase": "sweep",
+            "retained": retained or [],
+            "version": "module-volume-sweep-v1",
+        },
         "credential",
     )
 
@@ -1397,7 +1402,7 @@ def test_sweep_dispatch_hands_the_closed_request_to_the_sweeper() -> None:
 
     assert json.loads(response) == {
         "status": "ok",
-        "value": {"removed": 4, "version": "module-volume-sweep-v1"},
+        "value": {"owned": [], "removed": 4, "version": "module-volume-sweep-v1"},
     }
     assert [item.model_dump(mode="json") for item in seen[0][1].retained] == [key]
 

@@ -11,6 +11,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.module_volume_sweep import (
+    MAX_OWNED_KEYS,
     ModuleVolumeKeyV1,
     ModuleVolumeKind,
     ModuleVolumeSweepRequestV1,
@@ -112,8 +113,74 @@ def _key(nonce: str, kind: ModuleVolumeKind = "source.ext4") -> ModuleVolumeKeyV
     )
 
 
-def _sweep(service: ModuleVolumeSweepService, *retained: ModuleVolumeKeyV1) -> Any:
-    return asyncio.run(service.sweep(ModuleVolumeSweepRequestV1(retained=tuple(retained))))
+def _sweep(
+    service: ModuleVolumeSweepService,
+    *retained: ModuleVolumeKeyV1,
+    candidates: tuple[ModuleVolumeKeyV1, ...] | None = None,
+) -> Any:
+    """Run a sweep over the volumes the pool lists now, as a worker would after a listing."""
+    listed = (
+        candidates
+        if candidates is not None
+        else asyncio.run(service.sweep(ModuleVolumeSweepRequestV1(phase="list"))).owned
+    )
+    return asyncio.run(
+        service.sweep(
+            ModuleVolumeSweepRequestV1(phase="sweep", retained=tuple(retained), candidates=listed)
+        )
+    )
+
+
+def test_the_list_phase_names_only_module_volumes() -> None:
+    deleted: list[str] = []
+    volumes = [
+        _Volume(_name("1" * 32), "/pool/a", deleted),
+        _Volume(_name("1" * 32, "reaped.journal"), "/pool/b", deleted),
+        _Volume("kdive-someone-elses-overlay.qcow2", "/pool/overlay", deleted),
+    ]
+
+    response = asyncio.run(
+        _service(_Conn(_Pool(volumes))).sweep(ModuleVolumeSweepRequestV1(phase="list"))
+    )
+
+    assert response.removed == 0
+    assert sorted(item.kind for item in response.owned) == ["reaped.journal", "source.ext4"]
+    assert deleted == []
+
+
+def test_a_volume_created_after_the_listing_is_never_deleted() -> None:
+    deleted: list[str] = []
+    seen, created_later = "1" * 32, "2" * 32
+    pool = _Pool([_Volume(_name(seen), "/pool/seen", deleted)])
+    service = _service(_Conn(pool))
+    listed = asyncio.run(service.sweep(ModuleVolumeSweepRequestV1(phase="list"))).owned
+    pool._volumes.append(_Volume(_name(created_later), "/pool/new", deleted))
+
+    response = _sweep(service, candidates=listed)
+
+    assert response.removed == 1
+    assert deleted == [_name(seen)]
+
+
+def test_an_unreadable_pool_fails_the_list_phase() -> None:
+    with pytest.raises(CategorizedError) as failed:
+        asyncio.run(
+            _service(_Conn(_Pool([], fail=True))).sweep(ModuleVolumeSweepRequestV1(phase="list"))
+        )
+
+    assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_a_pool_holding_more_volumes_than_the_bound_fails_the_list_phase() -> None:
+    deleted: list[str] = []
+    volumes = [
+        _Volume(_name(f"{i:032x}"), f"/pool/{i}", deleted) for i in range(MAX_OWNED_KEYS + 1)
+    ]
+
+    with pytest.raises(CategorizedError) as failed:
+        asyncio.run(_service(_Conn(_Pool(volumes))).sweep(ModuleVolumeSweepRequestV1(phase="list")))
+
+    assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_unretained_owned_volumes_are_deleted_and_counted() -> None:
@@ -164,10 +231,3 @@ def test_volumes_that_are_not_module_volumes_are_never_deleted() -> None:
 
     assert response.removed == 0
     assert deleted == []
-
-
-def test_an_unreadable_pool_fails_instead_of_reporting_nothing_removed() -> None:
-    with pytest.raises(CategorizedError) as failed:
-        _sweep(_service(_Conn(_Pool([], fail=True))))
-
-    assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE

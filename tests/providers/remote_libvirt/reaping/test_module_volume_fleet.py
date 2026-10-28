@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     MAX_RETAINED_KEYS,
+    ModuleVolumeKeyV1,
     ModuleVolumeSweepRequestV1,
     ModuleVolumeSweepResponseV1,
 )
@@ -44,12 +46,23 @@ def _key(index: int = 0, kind: str = "source.ext4") -> ModuleVolumeKey:
     return ModuleVolumeKey(_SYSTEM, _RUN, f"{index:032x}", kind)
 
 
-class _Sender:
-    """One host's authority; records every sweep request and answers or fails as told."""
+_KEY0 = _key(0)
 
-    def __init__(self, removed: int = 0, failure: Exception | None = None) -> None:
+
+class _Sender:
+    """One host's authority: lists the volumes it owns, then sweeps what the worker names."""
+
+    def __init__(
+        self,
+        removed: int = 0,
+        failure: Exception | None = None,
+        owned: tuple[ModuleVolumeKey, ...] = (_KEY0,),
+        events: list[str] | None = None,
+    ) -> None:
         self.removed = removed
         self.failure = failure
+        self.owned = owned
+        self.events = events if events is not None else []
         self.requests: list[ModuleVolumeSweepRequestV1] = []
 
     async def sweep_module_volumes(
@@ -57,9 +70,27 @@ class _Sender:
     ) -> ModuleVolumeSweepResponseV1:
         del deadline
         self.requests.append(request)
+        self.events.append(f"{request.phase}")
         if self.failure is not None:
             raise self.failure
+        if request.phase == "list":
+            return ModuleVolumeSweepResponseV1(
+                removed=0,
+                owned=tuple(
+                    ModuleVolumeKeyV1(
+                        system_id=UUID(key.system_id),
+                        run_id=UUID(key.run_id),
+                        operation_nonce=key.operation_nonce,
+                        kind=cast(Any, key.kind),
+                    )
+                    for key in self.owned
+                ),
+            )
         return ModuleVolumeSweepResponseV1(removed=self.removed)
+
+    @property
+    def sweeps(self) -> list[ModuleVolumeSweepRequestV1]:
+        return [request for request in self.requests if request.phase == "sweep"]
 
 
 def _reaper(
@@ -103,9 +134,41 @@ def test_each_authority_host_sweeps_its_own_pool_with_the_whole_retained_set() -
     for sender in (first, second):
         assert [
             (str(item.system_id), str(item.run_id), item.operation_nonce, item.kind)
-            for request in sender.requests
+            for request in sender.sweeps
             for item in request.retained
         ] == [tuple(key) for key in keys]
+
+
+def test_retention_is_read_after_every_host_is_listed_and_candidates_are_the_listing() -> None:
+    events: list[str] = []
+    first = _Sender(owned=(_key(7),), events=events)
+    second = _Sender(owned=(_key(8), _key(9)), events=events)
+
+    async def retained() -> list[ModuleVolumeKey]:
+        events.append("retention")
+        return []
+
+    reaper = _reaper([_config("first"), _config("second")], {"first": first, "second": second})
+    asyncio.run(reaper.reap_module_volumes(retained))
+
+    assert events == ["list", "list", "retention", "sweep", "sweep"]
+    assert [item.operation_nonce for item in first.sweeps[0].candidates] == [f"{7:032x}"]
+    assert [item.operation_nonce for item in second.sweeps[0].candidates] == [
+        f"{8:032x}",
+        f"{9:032x}",
+    ]
+
+
+def test_a_host_with_no_owned_volumes_is_not_swept_and_retention_is_not_read() -> None:
+    sender = _Sender(owned=())
+
+    async def retained() -> list[ModuleVolumeKey]:
+        pytest.fail("nothing is listed, so there is nothing to protect")
+
+    reaper = _reaper([_config("host")], {"host": sender})
+
+    assert asyncio.run(reaper.reap_module_volumes(retained)) == 0
+    assert sender.sweeps == []
 
 
 def test_a_fleet_without_authority_hosts_does_no_io() -> None:
@@ -130,7 +193,7 @@ def test_hosts_without_an_authority_are_skipped() -> None:
     )
 
     assert removed == 3
-    assert len(sender.requests) == 1
+    assert len(sender.sweeps) == 1
 
 
 def test_a_configured_authority_host_without_a_sender_factory_fails() -> None:
@@ -174,7 +237,7 @@ def test_one_failing_host_does_not_stop_the_others_but_still_fails_the_sweep() -
         )
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert len(healthy.requests) == 1
+    assert len(healthy.sweeps) == 1
 
 
 def test_a_retained_set_over_the_bound_fails_without_truncating_or_sending() -> None:
@@ -185,7 +248,7 @@ def test_a_retained_set_over_the_bound_fails_without_truncating_or_sending() -> 
         _reap(_reaper([_config("host")], {"host": sender}), keys)
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert sender.requests == []
+    assert sender.sweeps == []
 
 
 def test_a_retained_set_at_the_bound_is_sent_whole() -> None:
@@ -194,7 +257,7 @@ def test_a_retained_set_at_the_bound_is_sent_whole() -> None:
 
     _reap(_reaper([_config("host")], {"host": sender}), keys)
 
-    assert len(sender.requests[0].retained) == MAX_RETAINED_KEYS
+    assert len(sender.sweeps[0].retained) == MAX_RETAINED_KEYS
 
 
 def test_the_fleet_configuration_is_read_once_per_sweep() -> None:
@@ -213,4 +276,40 @@ def test_the_fleet_configuration_is_read_once_per_sweep() -> None:
     asyncio.run(reaper.reap_module_volumes(retained))
 
     assert reads == 1
-    assert len(sender.requests) == 1
+    assert [request.phase for request in sender.requests] == ["list", "sweep"]
+
+
+def test_a_list_failure_on_one_host_still_sweeps_the_others() -> None:
+    healthy = _Sender(removed=4)
+
+    with pytest.raises(CategorizedError):
+        _reap(
+            _reaper(
+                [_config("down"), _config("up")],
+                {"down": _Sender(failure=TimeoutError()), "up": healthy},
+            ),
+            [],
+        )
+
+    assert len(healthy.sweeps) == 1
+
+
+def test_a_sender_that_cannot_be_built_fails_that_host_only() -> None:
+    healthy = _Sender(removed=1)
+
+    def factory(binding: RemoteAuthorityBinding) -> Any:
+        if binding.authority_instance == "broken":
+            raise CategorizedError("no credential", category=ErrorCategory.CONFIGURATION_ERROR)
+        return healthy
+
+    reaper = RemoteLibvirtModuleVolumeReaper(
+        lambda: [_config("broken"), _config("fine")], cast(Any, factory)
+    )
+
+    async def retained() -> list[ModuleVolumeKey]:
+        return []
+
+    with pytest.raises(CategorizedError):
+        asyncio.run(reaper.reap_module_volumes(retained))
+
+    assert len(healthy.sweeps) == 1
