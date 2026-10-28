@@ -10,6 +10,7 @@ from uuid import UUID
 
 import libvirt
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -59,7 +60,11 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     overlay_volume_name,
     supplied_base_volume_name,
 )
+from kdive.providers.shared.guest_agent import GuestDomain
 from kdive.providers.shared.runtime_paths import domain_name_for
+
+# Pause between identity reads while the guest agent is not yet answering.
+OBSERVE_POLL_S = 1.0
 
 
 class _Volume(Protocol):
@@ -289,7 +294,34 @@ class ConcreteRemoteExternalBootOperations:
         with self._connection() as connection:
             self._validate_owned_artifacts(connection, recovery)
             domain = connection.lookupByName(domain_name_for(UUID(recovery.binding.system_id)))
-            return observe_guest_identity(self._agent_exec, domain, recovery.definition)
+            return self._observe_when_ready(domain, recovery, deadline)
+
+    def _observe_when_ready(
+        self,
+        domain: GuestDomain,
+        recovery: RemoteExternalBootRecoveryRecord,
+        deadline: float,
+    ) -> RunningKernelObservation:
+        """Retry the one-shot identity read while the guest agent is not yet answering (#3376).
+
+        ``observe_guest_identity`` leaves the wait to its caller. Only ``TRANSPORT_FAILURE`` is
+        waited out; any other category is a real answer and propagates. The wait ends at the call's
+        own deadline with ``READINESS_FAILURE``, chained to the last transport failure.
+        """
+        while True:
+            try:
+                return observe_guest_identity(self._agent_exec, domain, recovery.definition)
+            except CategorizedError as exc:
+                if exc.category is not ErrorCategory.TRANSPORT_FAILURE:
+                    raise
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    raise CategorizedError(
+                        "the guest agent did not answer before the observation deadline",
+                        category=ErrorCategory.READINESS_FAILURE,
+                        details={"system_id": recovery.binding.system_id},
+                    ) from exc
+                self._sleep(min(OBSERVE_POLL_S, remaining))
 
     def recover(
         self,
