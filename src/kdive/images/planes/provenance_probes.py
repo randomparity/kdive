@@ -234,7 +234,6 @@ def _btrfs_root_subvolume(device: str) -> str:
         not subvolume
         or len(subvolume) > _SUBVOLUME_MAX_CHARS
         or not all(_SUBVOLUME_SEGMENT.fullmatch(segment) for segment in segments)
-        or ".." in segments
     ):
         raise UnsupportedBtrfsRootError("the btrfs root subvolume is not a supported name")
     return subvolume

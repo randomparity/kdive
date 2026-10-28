@@ -833,3 +833,20 @@ not change.
 - **Add a standalone System-profile INITRD input.** verified: closed PR #2104 demonstrates that
   shape and rejects it for remote-libvirt; issue #2105 and epic #1423 explicitly exclude the surface
   in favor of the existing external Run-build lane.
+
+## Amendment (2026-10-28): a btrfs subvolume root carries `rootflags=subvol`
+
+Stage inspection built the root spec from the root filesystem's UUID and type only. For an image
+whose root is a btrfs subvolume (a Fedora Cloud base keeps `/` in subvolume `root`, with `boot`,
+`home` and `var` beside it) the mounted top level has no init tree, so an external boot dropped to
+the initramfs emergency shell and the guest agent never connected (#3379). libguestfs names such a
+root `btrfsvol:<device>/<subvolume>`. The inspected root spec now appends
+`rootflags=subvol=<subvolume>` after `rootfstype`, the same rule the in-guest install helpers
+follow. The device is split only for the `sd*` and `vd*` forms libguestfs attaches, and the
+subvolume must be plain path segments of at most 128 characters; anything else fails inspection
+with `unsupported_btrfs_root`. Non-btrfs and top-level btrfs roots are unchanged, and the root
+spec contract and its validation need no change.
+
+Root specs are stored with the image at stage time, so an image staged before this change keeps
+its old spec. A btrfs-subvolume image staged earlier must be re-staged to gain the argument; no
+migration rewrites stored specs.
