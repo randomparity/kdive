@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import UUID
 
 import pytest
 
@@ -79,7 +78,6 @@ def _owned_artifacts_are_not_under_test(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(
         ConcreteRemoteExternalBootOperations, "_validate_owned_artifacts", lambda *_: None
     )
-    assert UUID(_SYSTEM)
 
 
 def _identity_reads(monkeypatch: pytest.MonkeyPatch, failures: list[CategorizedError]) -> list[int]:
@@ -107,7 +105,7 @@ def test_an_agent_that_connects_after_some_failures_is_observed(
 
     assert _observe(clock, deadline=300.0) is _OBSERVED
     assert len(calls) == 4
-    assert len(clock.sleeps) == 3
+    assert clock.sleeps == [1.0, 1.0, 1.0]
 
 
 def test_a_permanent_category_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,3 +156,14 @@ def test_an_expired_deadline_is_refused_before_any_read(monkeypatch: pytest.Monk
         _observe(clock, deadline=5.0)
 
     assert calls == []
+
+
+def test_the_wait_is_capped_below_a_distant_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock()
+    _identity_reads(monkeypatch, [_failure(ErrorCategory.TRANSPORT_FAILURE)] * 10_000)
+
+    with pytest.raises(CategorizedError) as expired:
+        _observe(clock, deadline=3600.0)
+
+    assert expired.value.category is ErrorCategory.READINESS_FAILURE
+    assert clock.now == pytest.approx(90.0)

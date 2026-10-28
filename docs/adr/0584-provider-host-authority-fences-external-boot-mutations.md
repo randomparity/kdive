@@ -476,14 +476,14 @@ Implementation is deliberately excluded from this ADR change. PR-sized sub-issue
 own database authority and result fencing, the provider-host authority protocol and journal, and
 deployment ACL plus adversarial/live proofs.
 
-## Amendment (2026-10-28): the remote running observation waits for the guest agent
+## Amendment (2026-10-27): the remote running observation waits for the guest agent
 
 The running-kernel observation that follows a committed activate reads the guest once through the
 guest agent. A guest that has just started has no connected agent for a short while, and the read
 reports that as a retryable `TRANSPORT_FAILURE`. Nothing on the remote authority path waited, so the
 authority answered `provider_conflict`, the job replayed about a second later and failed the same way
 (#3376). The remote adapter's observation now repeats the read while the category is
-`TRANSPORT_FAILURE`, pausing between reads, until the call's own deadline. Any other category is a
+`TRANSPORT_FAILURE`, pausing between reads, until the call's own deadline, which is capped at 90 seconds because the worker's deadline spans the whole job and a longer wait would outlive its caller while holding the System's lane. Any other category is a
 real answer and propagates unchanged. At the deadline the observation fails with `readiness_failure`,
 chained to the last transport failure. The wait does not touch the journal: the observation is read-only
 and follows an already terminal activate record. No schema or protocol change.

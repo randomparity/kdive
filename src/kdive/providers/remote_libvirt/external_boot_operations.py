@@ -63,8 +63,11 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
 from kdive.providers.shared.guest_agent import GuestDomain
 from kdive.providers.shared.runtime_paths import domain_name_for
 
-# Pause between identity reads while the guest agent is not yet answering.
-OBSERVE_POLL_S = 1.0
+# Pause between identity reads while the guest agent is not yet answering, and the most one
+# observation waits: the worker's own deadline spans the whole job, so a longer server-side wait
+# would outlive the caller and hold the System's lane.
+_OBSERVE_POLL_S = 1.0
+_OBSERVE_WAIT_S = 90.0
 
 
 class _Volume(Protocol):
@@ -306,8 +309,10 @@ class ConcreteRemoteExternalBootOperations:
 
         ``observe_guest_identity`` leaves the wait to its caller. Only ``TRANSPORT_FAILURE`` is
         waited out; any other category is a real answer and propagates. The wait ends at the call's
-        own deadline with ``READINESS_FAILURE``, chained to the last transport failure.
+        own deadline, capped at ``_OBSERVE_WAIT_S``, with ``READINESS_FAILURE``, chained to the last
+        transport failure.
         """
+        deadline = min(deadline, self._monotonic() + _OBSERVE_WAIT_S)
         while True:
             try:
                 return observe_guest_identity(self._agent_exec, domain, recovery.definition)
@@ -321,7 +326,7 @@ class ConcreteRemoteExternalBootOperations:
                         category=ErrorCategory.READINESS_FAILURE,
                         details={"system_id": recovery.binding.system_id},
                     ) from exc
-                self._sleep(min(OBSERVE_POLL_S, remaining))
+                self._sleep(min(_OBSERVE_POLL_S, remaining))
 
     def recover(
         self,
