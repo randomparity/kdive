@@ -544,10 +544,23 @@ def run_or_adopt_appliance(conn: ApplianceConn, request: ApplianceRequest) -> Ap
 def observe_appliance_absent_and_detached(
     expected: ExpectedAttachmentState,
     inspect: Callable[[], AttachmentInspection],
+    *,
+    allow_active_system: bool = False,
 ) -> TeardownObservation:
-    """Translate one completed attachment inspection into terminal teardown proof."""
+    """Translate one completed attachment inspection into terminal teardown proof.
+
+    ``allow_active_system`` is for a cleanup reap, which never starts the appliance: the System
+    may be running, so detachment means attached to no domain rather than a shut-off System.
+    """
     observation = inspect()
     absent = not observation.appliance_present
+    if allow_active_system:
+        return TeardownObservation(
+            absent,
+            absent and observation.exclusive,
+            observation.proves_unattached(expected.pool, expected.source_volume),
+            observation.proves_unattached(expected.pool, expected.scratch_volume),
+        )
     root_detached = absent and observation.system_shut_off and observation.exclusive
     return TeardownObservation(
         absent,
@@ -558,7 +571,7 @@ def observe_appliance_absent_and_detached(
 
 
 def teardown_remote_module_appliance(
-    conn: ApplianceConn, request: ApplianceRequest
+    conn: ApplianceConn, request: ApplianceRequest, *, allow_active_system: bool = False
 ) -> TeardownObservation:
     """Destroy only an identity-matching transient appliance, then prove detachment."""
     deadline = request.invocation_deadline or request.monotonic() + INVOCATION_TIMEOUT_SECONDS
@@ -573,4 +586,6 @@ def teardown_remote_module_appliance(
         validate_appliance_xml(actual, expected)
         _call_mutation(request, deadline, domain.destroy)
     inspection = request.executor.call(request.inspect_attachments, deadline)
-    return observe_appliance_absent_and_detached(expected, lambda: inspection)
+    return observe_appliance_absent_and_detached(
+        expected, lambda: inspection, allow_active_system=allow_active_system
+    )
